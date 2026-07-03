@@ -15,6 +15,7 @@
 mod camera;
 mod dungeon;
 mod fog;
+mod occlusion;
 mod player;
 mod wfc;
 mod world;
@@ -38,6 +39,7 @@ fn main() {
             camera::CameraPlugin,
             player::PlayerPlugin,
             fog::FogPlugin,
+            occlusion::OcclusionPlugin,
         ))
         .run();
 }

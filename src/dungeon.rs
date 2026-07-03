@@ -1,17 +1,31 @@
 //! Builds the playable dungeon: a coarse WFC room graph, expanded into rooms + corridors
-//! on a fine tile grid, instantiated with Kenney floor/wall/corner models. The [`Dungeon`]
-//! resource is the single source of truth for walkability (used by player collision and fog).
+//! on a fine tile grid, rendered as textured primitives (Backrooms wallpaper walls + carpet
+//! floor). The [`Dungeon`] resource is the single source of truth for walkability (used by
+//! player collision and fog).
 
 use bevy::prelude::*;
 
+use crate::occlusion::WallMaterials;
 use crate::wfc::{self, CellKind, Rng, E, N, S, W};
 
-/// World size of one fine grid cell (Kenney `floor-square` is 1×1 in X/Z).
+/// World size of one fine grid cell.
 pub const TILE_SIZE: f32 = 1.0;
+/// Half the wall cuboid's thickness (walls are 0.2 thick) — used to inset walls flush
+/// with the tile edge.
+const WALL_HALF_THICKNESS: f32 = 0.1;
+/// Full wall thickness. Walls sit flush inside the tile edge, so a walled cell's
+/// walkable area is inset by this much — the collision uses it as the barrier plane.
+const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
+/// Max distance the player box may move per collision sub-step. Kept below
+/// [`WALL_THICKNESS`] so a fast (large-dt) step can't overshoot a wall and tunnel through.
+const MAX_STEP: f32 = WALL_THICKNESS * 0.5;
+/// Wall height (full, for the enclosed Backrooms look).
+const WALL_HEIGHT: f32 = 1.0;
 
 // Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles.
-const COARSE_W: usize = 7;
-const COARSE_H: usize = 7;
+// 21×21 slots → a dungeon 3× larger per side than the original 7×7 (≈9× the floor area).
+const COARSE_W: usize = 21;
+const COARSE_H: usize = 21;
 const BLOCK: usize = 7;
 /// Room side length range (kept ≤ BLOCK-2 so every room has a ≥1-tile rock margin).
 const ROOM_MIN: usize = 4;
@@ -20,9 +34,10 @@ const ROOM_MAX: usize = 5;
 const DUNGEON_SEED: u64 = 0x5C0_9191; // nods to SCP-9191, the slop generator
 const MAX_ATTEMPTS: u32 = 20;
 
-const FLOOR_GLB: &str = "kenney_prototype-kit/Models/GLB format/floor-square.glb";
-const WALL_GLB: &str = "kenney_prototype-kit/Models/GLB format/wall.glb";
-const CORNER_GLB: &str = "kenney_prototype-kit/Models/GLB format/wall-corner.glb";
+// CC0 Backrooms textures (see assets/textures/CREDITS.md). Seamless 1024² diffuse maps;
+// mapped onto textured primitives because the Kenney GLB UVs are palette-atlas points.
+const WALL_TEXTURE: &str = "textures/backrooms-wall-diffuse.png";
+const FLOOR_TEXTURE: &str = "textures/backrooms-carpet-diffuse.png";
 
 /// Tags every spawned tile entity (floor or wall) with the fine grid cell it belongs to,
 /// so fog of war can reveal/hide a cell's geometry as a unit.
@@ -30,6 +45,11 @@ const CORNER_GLB: &str = "kenney_prototype-kit/Models/GLB format/wall-corner.glb
 pub struct Tile {
     pub cell: IVec2,
 }
+
+/// Marks a tile entity as a wall (not a floor). Both carry [`Tile`], so the camera-side
+/// cutaway in `occlusion` needs this to target walls only.
+#[derive(Component)]
+pub struct Wall;
 
 /// The realized dungeon on the fine grid: a walkability mask plus the player spawn.
 #[derive(Resource)]
@@ -85,7 +105,8 @@ impl Dungeon {
             }
         }
 
-        // Carve a 1-wide corridor along each Link edge, between the two block centres.
+        // Carve a 2-wide corridor along each Link edge, between the two block centres,
+        // so the (0.7-wide) hero fits with room to spare.
         for cy in 0..COARSE_H {
             for cx in 0..COARSE_W {
                 if !kept[cy * COARSE_W + cx] {
@@ -96,12 +117,14 @@ impl Dungeon {
                     let (nx, _) = block_center(cx + 1, cy);
                     for x in bx..=nx {
                         walkable[by * width + x] = true;
+                        walkable[(by + 1) * width + x] = true;
                     }
                 }
                 if cy + 1 < COARSE_H && kept[(cy + 1) * COARSE_W + cx] && coarse_open(cx, cy, S) {
                     let (_, ny) = block_center(cx, cy + 1);
                     for y in by..=ny {
                         walkable[y * width + bx] = true;
+                        walkable[y * width + bx + 1] = true;
                     }
                 }
             }
@@ -155,16 +178,27 @@ impl Dungeon {
         }
     }
 
-    /// Can the player move from `c` into its `dir` neighbour? Walls sit only on
-    /// floor↔rock boundaries, so this is simply "the neighbour is floor".
-    fn can_cross(&self, c: IVec2, dir: usize) -> bool {
-        self.is_floor(c) && self.is_floor(Self::neighbor(c, dir))
-    }
-
     /// Does floor cell `c` need a wall on edge `dir`? True when the neighbour is rock
     /// or off-grid — the room perimeter.
     fn walled(&self, c: IVec2, dir: usize) -> bool {
         self.is_floor(c) && !self.is_floor(Self::neighbor(c, dir))
+    }
+
+    /// Is the world point `(x, z)` inside solid geometry — rock, off-grid, or a wall
+    /// slab? Walls sit flush inside the tile edge, so a walled cell's walkable area is
+    /// inset by [`WALL_THICKNESS`]. This is the ground truth the collision samples.
+    fn is_solid(&self, x: f32, z: f32) -> bool {
+        let cell = self.world_to_cell(Vec3::new(x, 0.0, z));
+        if !self.is_floor(cell) {
+            return true;
+        }
+        let lx = x - cell.x as f32 * TILE_SIZE; // offset within the tile, [-0.5, 0.5]·T
+        let lz = z - cell.y as f32 * TILE_SIZE;
+        let inner = 0.5 * TILE_SIZE - WALL_THICKNESS;
+        (self.walled(cell, E) && lx > inner)
+            || (self.walled(cell, W) && lx < -inner)
+            || (self.walled(cell, N) && lz < -inner)
+            || (self.walled(cell, S) && lz > inner)
     }
 
     pub fn cell_center(&self, c: IVec2) -> Vec3 {
@@ -182,28 +216,51 @@ impl Dungeon {
         self.cell_center(self.spawn)
     }
 
-    /// Resolve continuous movement against walls, one axis at a time so the player
-    /// slides along walls instead of stopping dead. Walls sit on the grid lines
-    /// between a floor cell and rock, so each axis clamps to the wall it would cross.
-    pub fn resolve_move(&self, pos: Vec3, delta: Vec3, radius: f32) -> Vec3 {
-        let mut p = pos;
-
-        let cell = self.world_to_cell(p);
-        if delta.x > 0.0 && !self.can_cross(cell, E) {
-            p.x = (p.x + delta.x).min((cell.x as f32 + 0.5) * TILE_SIZE - radius);
-        } else if delta.x < 0.0 && !self.can_cross(cell, W) {
-            p.x = (p.x + delta.x).max((cell.x as f32 - 0.5) * TILE_SIZE + radius);
-        } else {
-            p.x += delta.x;
+    /// Slide the box one axis by `step` (X if `axis_x`, else Z), snapping the leading edge
+    /// to a wall's inner face if it would enter solid. Sub-stepping in [`Self::resolve_move`]
+    /// keeps `|step|` below a wall's thickness so the edge can't skip past a wall. The edge
+    /// is sampled at three points across the box's perpendicular span (low / mid / high).
+    fn slide_axis(&self, p: &mut Vec3, step: f32, half_along: f32, half_perp: f32, axis_x: bool) {
+        if step == 0.0 {
+            return;
         }
-
-        let cell = self.world_to_cell(p);
-        if delta.z > 0.0 && !self.can_cross(cell, S) {
-            p.z = (p.z + delta.z).min((cell.y as f32 + 0.5) * TILE_SIZE - radius);
-        } else if delta.z < 0.0 && !self.can_cross(cell, N) {
-            p.z = (p.z + delta.z).max((cell.y as f32 - 0.5) * TILE_SIZE + radius);
+        let dir = step.signum();
+        let moved = (if axis_x { p.x } else { p.z }) + step;
+        let perp = if axis_x { p.z } else { p.x };
+        let edge = moved + dir * half_along;
+        let e = 0.001;
+        let solid = |q: f32| {
+            if axis_x {
+                self.is_solid(edge, q)
+            } else {
+                self.is_solid(q, edge)
+            }
+        };
+        let resolved = if solid(perp - half_perp + e) || solid(perp) || solid(perp + half_perp - e)
+        {
+            let c = (edge / TILE_SIZE).round();
+            (c + 0.5 * dir) * TILE_SIZE - dir * WALL_THICKNESS - dir * half_along
         } else {
-            p.z += delta.z;
+            moved
+        };
+        if axis_x {
+            p.x = resolved;
+        } else {
+            p.z = resolved;
+        }
+    }
+
+    /// Resolve continuous movement against walls, one axis at a time so the player slides
+    /// along walls instead of stopping dead. `half` is the player's box half-extents (X, Z).
+    /// The move is sub-stepped so no single step exceeds a wall's thickness — a large-dt
+    /// step would otherwise overshoot the thin wall slab and snap the player through it.
+    pub fn resolve_move(&self, pos: Vec3, delta: Vec3, half: Vec2) -> Vec3 {
+        let mut p = pos;
+        let steps = (delta.length() / MAX_STEP).ceil().max(1.0) as u32;
+        let d = delta / steps as f32;
+        for _ in 0..steps {
+            self.slide_axis(&mut p, d.x, half.x, half.y, true);
+            self.slide_axis(&mut p, d.z, half.y, half.x, false);
         }
 
         p
@@ -254,49 +311,114 @@ fn largest_room_component(coarse: &wfc::WfcResult) -> Vec<bool> {
     kept
 }
 
-/// Transform for a straight wall panel on edge `dir` of cell `c`.
+/// Transform for a full-length straight wall cuboid on edge `dir` of cell `c`. The cuboid
+/// is inset by its half-thickness to sit *flush* with the tile edge (outer face on ±0.5),
+/// and lifted by half its height (Bevy cuboids are origin-centred) so it rests on the floor.
 fn straight_wall(c: IVec2, dir: usize) -> Transform {
     let (i, j) = (c.x as f32, c.y as f32);
     let quarter = std::f32::consts::FRAC_PI_2;
+    let h = WALL_HALF_THICKNESS;
+    let y = WALL_HEIGHT * 0.5;
     match dir {
-        // Vertical wall lines run along Z (the wall's default orientation).
-        E => Transform::from_xyz((i + 0.5) * TILE_SIZE, 0.0, j * TILE_SIZE),
-        W => Transform::from_xyz((i - 0.5) * TILE_SIZE, 0.0, j * TILE_SIZE),
-        // Horizontal wall lines run along X → rotate the panel 90°.
-        S => Transform::from_xyz(i * TILE_SIZE, 0.0, (j + 0.5) * TILE_SIZE)
+        // Vertical wall lines run along Z (the cuboid's long axis).
+        E => Transform::from_xyz((i + 0.5) * TILE_SIZE - h, y, j * TILE_SIZE),
+        W => Transform::from_xyz((i - 0.5) * TILE_SIZE + h, y, j * TILE_SIZE),
+        // Horizontal wall lines run along X → rotate the cuboid 90°.
+        S => Transform::from_xyz(i * TILE_SIZE, y, (j + 0.5) * TILE_SIZE - h)
             .with_rotation(Quat::from_rotation_y(quarter)),
-        N => Transform::from_xyz(i * TILE_SIZE, 0.0, (j - 0.5) * TILE_SIZE)
+        N => Transform::from_xyz(i * TILE_SIZE, y, (j - 0.5) * TILE_SIZE + h)
             .with_rotation(Quat::from_rotation_y(quarter)),
         _ => unreachable!(),
     }
 }
 
-/// Transform for an L-corner piece at cell `c`. The model covers the N+E edges; each
-/// quarter-turn about Y rotates it to the next corner (NE→NW→SW→SE).
-fn corner_piece(c: IVec2, quarter_turns: u32) -> Transform {
+/// Transforms for the two arms of a convex corner: a full-length arm plus a shortened arm
+/// that stops at the full arm's inner face, so the two cuboids meet without overlapping
+/// (no coincident tops → no z-fighting on textured corners). Built as an NE template, then
+/// rotated by `quarter_turns` about the cell centre (NE→NW→SW→SE) — the `(full, short)` pair.
+fn corner_arms(c: IVec2, quarter_turns: u32) -> (Transform, Transform) {
     let center = Vec3::new(c.x as f32 * TILE_SIZE, 0.0, c.y as f32 * TILE_SIZE);
-    Transform::from_translation(center)
-        .with_rotation(Quat::from_rotation_y(quarter_turns as f32 * std::f32::consts::FRAC_PI_2))
+    let rot = Quat::from_rotation_y(quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
+    let flush = 0.5 * TILE_SIZE - WALL_HALF_THICKNESS; // arm inset so the outer face is on ±0.5
+    let y = WALL_HEIGHT * 0.5;
+    // Full arm on the east edge; short arm on the north edge (spans x −0.5 → +0.3).
+    let full_local = Vec3::new(flush, y, 0.0);
+    let short_local = Vec3::new(-WALL_HALF_THICKNESS, y, -flush);
+    let full = Transform {
+        translation: center + rot * full_local,
+        rotation: rot,
+        ..default()
+    };
+    let short = Transform {
+        translation: center + rot * short_local,
+        rotation: rot,
+        ..default()
+    };
+    (full, short)
 }
 
-/// The four convex corners as `(edge_a, edge_b, quarter_turns)` for the corner model.
+/// The four convex corners as `(edge_a, edge_b, quarter_turns)`.
 const CORNERS: [(usize, usize, u32); 4] = [(N, E, 0), (N, W, 1), (S, W, 2), (S, E, 3)];
 
-/// Instantiate one floor scene per floor cell, and perimeter walls using corner pieces
-/// for convex corners plus straight panels for the rest. Tiles start hidden so fog of
-/// war reveals them as the player explores.
-fn spawn_tiles(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>) {
-    let floor_scene = assets.load(GltfAssetLabel::Scene(0).from_asset(FLOOR_GLB));
-    let wall_scene = assets.load(GltfAssetLabel::Scene(0).from_asset(WALL_GLB));
-    let corner_scene = assets.load(GltfAssetLabel::Scene(0).from_asset(CORNER_GLB));
+/// Instantiate the dungeon as textured primitives: a Backrooms-carpet floor quad per floor
+/// cell, wallpaper cuboid walls on perimeter edges (corner pairs as clean two-cuboid Ls,
+/// remaining single edges as straight walls). Tiles start hidden so fog reveals them.
+fn spawn_tiles(
+    mut commands: Commands,
+    dungeon: Res<Dungeon>,
+    assets: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // Shared materials + meshes (built once, reused for every tile). Both textures are
+    // seamless, so the default sampler + [0,1] cuboid/plane UVs tile cleanly across cells.
+    let wall_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(assets.load(WALL_TEXTURE)),
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        ..default()
+    });
+    // Translucent twin of `wall_mat`, used by the cutaway to ghost walls that sit between the
+    // camera and the hero (see `occlusion`). Only two wall material handles ever exist, so the
+    // cutaway swaps between them per wall without cloning a material per entity.
+    let wall_mat_faded = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.28),
+        base_color_texture: Some(assets.load(WALL_TEXTURE)),
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    commands.insert_resource(WallMaterials {
+        opaque: wall_mat.clone(),
+        faded: wall_mat_faded,
+    });
+    let floor_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        ..default()
+    });
 
-    let spawn_piece = |commands: &mut Commands, cell: IVec2, scene: Handle<_>, transform: Transform| {
-        commands.spawn((
+    let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
+    let wall_full = meshes.add(Cuboid::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE));
+    let wall_short = meshes.add(Cuboid::new(TILE_SIZE - WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS));
+
+    let mut spawn_tile = |cell: IVec2,
+                          mesh: Handle<Mesh>,
+                          material: Handle<StandardMaterial>,
+                          transform: Transform,
+                          is_wall: bool| {
+        let mut entity = commands.spawn((
             Tile { cell },
-            WorldAssetRoot(scene),
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
             transform,
             Visibility::Hidden,
         ));
+        if is_wall {
+            entity.insert(Wall);
+        }
     };
 
     for y in 0..dungeon.height as i32 {
@@ -306,11 +428,12 @@ fn spawn_tiles(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 continue;
             }
 
-            spawn_piece(
-                &mut commands,
+            spawn_tile(
                 cell,
-                floor_scene.clone(),
+                floor_mesh.clone(),
+                floor_mat.clone(),
                 Transform::from_translation(dungeon.cell_center(cell)),
+                false,
             );
 
             // Which of this cell's edges border rock / off-grid → need a wall.
@@ -319,18 +442,26 @@ fn spawn_tiles(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 walled[dir] = dungeon.walled(cell, dir);
             }
 
-            // Greedily consume adjacent walled pairs as clean L-corner pieces...
+            // Greedily consume adjacent walled pairs as clean L-corners (full + short arm)...
             for (a, b, turns) in CORNERS {
                 if walled[a] && walled[b] {
-                    spawn_piece(&mut commands, cell, corner_scene.clone(), corner_piece(cell, turns));
+                    let (full, short) = corner_arms(cell, turns);
+                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, true);
+                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, true);
                     walled[a] = false;
                     walled[b] = false;
                 }
             }
-            // ...then straight panels for any remaining single edges.
+            // ...then straight walls for any remaining single edges.
             for dir in [N, E, S, W] {
                 if walled[dir] {
-                    spawn_piece(&mut commands, cell, wall_scene.clone(), straight_wall(cell, dir));
+                    spawn_tile(
+                        cell,
+                        wall_full.clone(),
+                        wall_mat.clone(),
+                        straight_wall(cell, dir),
+                        true,
+                    );
                 }
             }
         }

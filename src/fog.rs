@@ -1,7 +1,9 @@
-//! Fog of war. Every dungeon tile starts hidden; cells within a radius of the player
-//! are revealed permanently as the agent explores. Combined with the player's torch
-//! (low global ambient), revealed-but-distant areas stay dim while the immediate
-//! surroundings are brightly lit — the classic explored/visible gradient.
+//! Fog of war. Every dungeon tile starts hidden; cells within a radius of the player are
+//! revealed permanently as the agent explores. Reveal is one-way, so the system only ever
+//! flips *newly*-revealed cells' tiles to visible — it never rescans the whole grid, so its
+//! per-frame cost is proportional to what was just discovered, not the dungeon size.
+
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 
@@ -11,11 +13,13 @@ use crate::player::Player;
 /// How many cells out from the player get revealed (roughly a torch's reach).
 const REVEAL_RADIUS: i32 = 5;
 
-/// Per-cell reveal memory. `true` = the player has seen this cell at least once.
+/// Per-cell reveal memory plus a cell → tile-entities index for cheap reveals.
 #[derive(Resource)]
 struct FogGrid {
     width: usize,
     revealed: Vec<bool>,
+    /// Tile entities (floor + walls) keyed by their grid cell. Built once, lazily.
+    cell_tiles: HashMap<IVec2, Vec<Entity>>,
 }
 
 impl FogGrid {
@@ -23,6 +27,7 @@ impl FogGrid {
         FogGrid {
             width,
             revealed: vec![false; width * height],
+            cell_tiles: HashMap::new(),
         }
     }
 
@@ -51,12 +56,22 @@ fn update_fog(
     dungeon: Res<Dungeon>,
     mut fog: ResMut<FogGrid>,
     player: Single<&Transform, With<Player>>,
-    mut tiles: Query<(&Tile, &mut Visibility)>,
+    tiles: Query<(Entity, &Tile)>,
+    mut visibility: Query<&mut Visibility>,
 ) {
+    let fog = &mut *fog;
+
+    // Build the cell → entities index once, after the tiles have spawned.
+    if fog.cell_tiles.is_empty() {
+        for (entity, tile) in &tiles {
+            fog.cell_tiles.entry(tile.cell).or_default().push(entity);
+        }
+    }
+
     let center = dungeon.world_to_cell(player.translation);
 
-    // Reveal the disc of cells around the player; track whether anything new appeared.
-    let mut newly_revealed = false;
+    // Reveal the disc of cells around the player; make each newly-revealed cell's tiles
+    // visible immediately (reveal is permanent, so tiles are never hidden again).
     for dy in -REVEAL_RADIUS..=REVEAL_RADIUS {
         for dx in -REVEAL_RADIUS..=REVEAL_RADIUS {
             if dx * dx + dy * dy > REVEAL_RADIUS * REVEAL_RADIUS {
@@ -67,23 +82,16 @@ fn update_fog(
                 continue;
             }
             let i = fog.index(cell);
-            if !fog.revealed[i] {
-                fog.revealed[i] = true;
-                newly_revealed = true;
+            if fog.revealed[i] {
+                continue;
             }
-        }
-    }
-
-    // Only touch the tile entities when the revealed set actually grew.
-    if newly_revealed {
-        for (tile, mut visibility) in &mut tiles {
-            let want = if fog.revealed[fog.index(tile.cell)] {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            };
-            if *visibility != want {
-                *visibility = want;
+            fog.revealed[i] = true;
+            if let Some(entities) = fog.cell_tiles.get(&cell) {
+                for &entity in entities {
+                    if let Ok(mut vis) = visibility.get_mut(entity) {
+                        *vis = Visibility::Visible;
+                    }
+                }
             }
         }
     }

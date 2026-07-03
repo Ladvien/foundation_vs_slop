@@ -19,8 +19,6 @@ const MAX_ZOOM: f32 = 40.0;
 const ZOOM_STEP: f32 = 2.0;
 const PAN_SPEED: f32 = 14.0;
 const DRAG_SCALE: f32 = 0.03;
-/// Higher = snappier follow; used as an exponential smoothing rate.
-const FOLLOW_RATE: f32 = 10.0;
 
 /// Screen-aligned "into the scene" ground direction (camera forward flattened).
 /// Movement and panning use this so "up" is away from the camera, not a world axis.
@@ -52,7 +50,9 @@ impl Plugin for CameraPlugin {
             height: VIEWPORT_HEIGHT,
         })
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, drive_camera);
+        // Run after the player has moved this frame so the follow camera never reads a
+        // stale position (which would jitter the world relative to the hero).
+        .add_systems(Update, drive_camera.after(crate::player::player_movement));
     }
 }
 
@@ -96,9 +96,9 @@ fn drive_camera(
     let dt = time.delta_secs();
     match rig.mode {
         CameraMode::Follow => {
-            // Frame-rate-independent exponential smoothing toward the player.
-            let t = 1.0 - (-FOLLOW_RATE * dt).exp();
-            rig.focus = rig.focus.lerp(player.translation, t);
+            // Lock the focus exactly on the player so it stays centred every frame — no
+            // rubber-banding lead/lag between the hero and the scrolling walls.
+            rig.focus = player.translation;
         }
         CameraMode::FreePan => {
             let mut pan = Vec3::ZERO;
