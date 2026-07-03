@@ -1,0 +1,3 @@
+- Use home still and lookup research on whatever you are implementing BEFORE you implement it.  We want SOTA and best practices.
+- Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
+- Leave academic paper references in comments, if a paper was used in writing the code.
