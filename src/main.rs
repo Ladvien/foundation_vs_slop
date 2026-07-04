@@ -12,16 +12,21 @@
 // idiomatic ECS code, so it's disabled crate-wide (the standard Bevy convention).
 #![allow(clippy::type_complexity)]
 
+mod audio;
 mod camera;
 mod devshot;
 mod dungeon;
+mod enemy;
+mod flowfield;
 mod fog;
+mod health;
 mod impact_fx;
 mod laser;
 mod occlusion;
-mod pathfinding;
+mod orca;
 mod selection;
 mod squad;
+mod vhs;
 mod wfc;
 mod world;
 
@@ -53,8 +58,12 @@ fn main() {
             selection::SelectionPlugin,
             fog::FogPlugin,
             occlusion::OcclusionPlugin,
+            health::HealthPlugin,
+            enemy::EnemyPlugin,
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
+            audio::GameAudioPlugin,
+            vhs::VhsPlugin,
             devshot::DevShotPlugin,
         ))
         .run();

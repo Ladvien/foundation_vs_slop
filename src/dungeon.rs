@@ -16,7 +16,7 @@ pub const TILE_SIZE: f32 = 1.0;
 const WALL_HALF_THICKNESS: f32 = 0.1;
 /// Full wall thickness. Walls sit flush inside the tile edge, so a walled cell's
 /// walkable area is inset by this much — the collision uses it as the barrier plane.
-const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
+pub const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
 /// Max distance the player box may move per collision sub-step. Kept below
 /// [`WALL_THICKNESS`] so a fast (large-dt) step can't overshoot a wall and tunnel through.
 const MAX_STEP: f32 = WALL_THICKNESS * 0.5;
@@ -333,18 +333,43 @@ impl Dungeon {
         let steps = (delta.length() / MAX_STEP).ceil().max(1.0) as u32;
         let d = delta / steps as f32;
         for _ in 0..steps {
-            // Slide each axis, then reject that axis if it cut a corner into the void. Reverting
-            // per-axis still lets the box slide flush along walls (which sit inside floor cells).
-            let before_x = p.x;
-            self.slide_axis(&mut p, d.x, half.x, half.y, true);
-            if self.box_over_void(p, half) {
-                p.x = before_x;
+            let start = p;
+
+            // Preferred: slide both axes. If that keeps the box on floor, take it (the common case,
+            // including flush wall-sliding since walls sit inside floor cells).
+            let mut both = start;
+            self.slide_axis(&mut both, d.x, half.x, half.y, true);
+            self.slide_axis(&mut both, d.z, half.y, half.x, false);
+            if !self.box_over_void(both, half) {
+                p = both;
+                continue;
             }
-            let before_z = p.z;
-            self.slide_axis(&mut p, d.z, half.y, half.x, false);
-            if self.box_over_void(p, half) {
-                p.z = before_z;
-            }
+
+            // The combined slide cut a corner into the void (the thin diagonal slit between inset
+            // walls). Slide along whichever single axis stays on floor instead of stalling dead —
+            // this is what keeps a unit moving along a wall at an inside corner rather than freezing.
+            let mut only_x = start;
+            self.slide_axis(&mut only_x, d.x, half.x, half.y, true);
+            let x_ok = !self.box_over_void(only_x, half);
+
+            let mut only_z = start;
+            self.slide_axis(&mut only_z, d.z, half.y, half.x, false);
+            let z_ok = !self.box_over_void(only_z, half);
+
+            p = match (x_ok, z_ok) {
+                // Both valid alone but not together → keep the axis that advances further (the one
+                // parallel to the wall), never squeezing diagonally through the slit into void.
+                (true, true) => {
+                    if (only_x - start).length_squared() >= (only_z - start).length_squared() {
+                        only_x
+                    } else {
+                        only_z
+                    }
+                }
+                (true, false) => only_x,
+                (false, true) => only_z,
+                (false, false) => start, // genuinely boxed in for this sub-step
+            };
         }
 
         p

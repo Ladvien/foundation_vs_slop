@@ -2,6 +2,9 @@
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
 - Leave academic paper references in comments, if a paper was used in writing the code.
 
+## Additional Game Assets
+- Additional games assets are cataloged at /mnt/codex_fs/game_assets/CATALOG.md, feel free to use any of these.
+
 ## Taking screenshots (do NOT use the macOS `screencapture` tool)
 
 The game screenshots **itself** from inside the render pipeline via the `devshot` dev module

@@ -12,8 +12,11 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
 
+use std::sync::Arc;
+
+use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
-use crate::pathfinding::{find_path, smooth_path};
+use crate::flowfield::FlowField;
 use crate::squad::{MoveOrder, Selected, Unit, UnitIndex};
 
 /// Click within this ground distance of a unit to select it.
@@ -21,22 +24,9 @@ const SELECT_RADIUS: f32 = 0.6;
 /// Radius of the green selection ring.
 const RING_RADIUS: f32 = 0.6;
 
-/// Cells to try (in order) around a move target so a group fans into a small formation.
-const FORMATION_SPIRAL: [(i32, i32); 13] = [
-    (0, 0),
-    (1, 0),
-    (-1, 0),
-    (0, 1),
-    (0, -1),
-    (1, 1),
-    (-1, -1),
-    (1, -1),
-    (-1, 1),
-    (2, 0),
-    (-2, 0),
-    (0, 2),
-    (0, -2),
-];
+/// Outward ring search bound (in cells) for snapping a click on void/wall to the nearest floor so
+/// the group still has a reachable goal. Beyond this a click is treated as "nowhere to go".
+const SNAP_MAX_RING: i32 = 8;
 
 pub struct SelectionPlugin;
 
@@ -63,7 +53,7 @@ fn cursor_ground_point(window: &Window, camera: &Camera, cam_tf: &GlobalTransfor
 }
 
 #[allow(clippy::too_many_arguments)]
-fn command_input(
+pub fn command_input(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -72,9 +62,13 @@ fn command_input(
     camera: Single<(&Camera, &GlobalTransform)>,
     units: Query<(Entity, &Transform), With<Unit>>,
     selected: Query<(Entity, &Transform), With<Selected>>,
+    mut sfx: MessageWriter<Sfx>,
 ) {
     // Esc clears the whole selection.
     if keys.just_pressed(KeyCode::Escape) {
+        if !selected.is_empty() {
+            sfx.write(Sfx::Deselect);
+        }
         for (e, _) in &selected {
             commands.entity(e).remove::<Selected>();
         }
@@ -103,38 +97,68 @@ fn command_input(
             commands.entity(e).remove::<Selected>();
         }
         commands.entity(unit).insert(Selected);
+        sfx.write(Sfx::Select);
         return;
     }
 
-    // Empty ground: if units are selected, order a move into a formation around the target.
+    // Empty ground: if units are selected, order the whole group toward one shared destination.
     if selected.is_empty() {
         return;
     }
-    let target = dungeon.world_to_cell(point);
-    let goals = formation_cells(&dungeon, target, selected.iter().count());
-    for ((entity, tf), goal) in selected.iter().zip(goals) {
+    // Snap the click to a floor cell, then build ONE flow field the whole selection shares. Units
+    // flow to the same goal and ORCA packs them into a blob — no per-unit goal cells to fight over.
+    let raw = dungeon.world_to_cell(point);
+    let Some(goal) = nearest_floor(&dungeon, raw) else {
+        warn!("move order ignored: no floor within {SNAP_MAX_RING} cells of the click");
+        sfx.write(Sfx::Invalid);
+        return;
+    };
+    let Some(field) = FlowField::build(&dungeon, goal) else {
+        warn!("move order ignored: could not build a flow field to {goal:?}");
+        sfx.write(Sfx::Invalid);
+        return;
+    };
+    let field = Arc::new(field);
+    let mut ordered_any = false;
+    for (entity, tf) in &selected {
+        // Skip a unit that can't reach the goal at all (different connected component) — loud, not
+        // a silent stall.
         let start = dungeon.world_to_cell(tf.translation);
-        if let Some(path) = find_path(&dungeon, start, goal) {
-            commands.entity(entity).insert(MoveOrder {
-                path: smooth_path(&dungeon, &path),
-            });
+        if !field.reachable(start) {
+            warn!("unit at {start:?} cannot reach goal {goal:?}; order skipped for it");
+            continue;
         }
+        commands
+            .entity(entity)
+            .insert(MoveOrder::new(field.clone()));
+        ordered_any = true;
+    }
+    // One acknowledgement for the whole order (not one per unit).
+    if ordered_any {
+        sfx.write(Sfx::MoveOrder);
     }
 }
 
-/// Pick `n` distinct floor cells around `center` for a group's arrival formation.
-fn formation_cells(dungeon: &Dungeon, center: IVec2, n: usize) -> Vec<IVec2> {
-    let mut cells: Vec<IVec2> = FORMATION_SPIRAL
-        .iter()
-        .map(|&(dx, dy)| center + IVec2::new(dx, dy))
-        .filter(|&c| dungeon.is_floor(c))
-        .take(n)
-        .collect();
-    // If the area is cramped, pad with the center so every unit still gets a goal.
-    while cells.len() < n {
-        cells.push(center);
+/// Nearest floor cell to `c` by an outward ring search, so a click on a wall/void still yields a
+/// reachable goal. Bounded by [`SNAP_MAX_RING`] so a click deep in the void fails loudly.
+fn nearest_floor(dungeon: &Dungeon, c: IVec2) -> Option<IVec2> {
+    if dungeon.is_floor(c) {
+        return Some(c);
     }
-    cells
+    for r in 1..=SNAP_MAX_RING {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
+                    continue; // ring perimeter only
+                }
+                let cell = IVec2::new(c.x + dx, c.y + dy);
+                if dungeon.is_floor(cell) {
+                    return Some(cell);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn hotkey_select(
@@ -142,6 +166,7 @@ fn hotkey_select(
     keys: Res<ButtonInput<KeyCode>>,
     units: Query<(Entity, &UnitIndex), With<Unit>>,
     selected: Query<Entity, With<Selected>>,
+    mut sfx: MessageWriter<Sfx>,
 ) {
     const DIGITS: [KeyCode; 5] = [
         KeyCode::Digit1,
@@ -156,6 +181,11 @@ fn hotkey_select(
     if single.is_none() && !select_all {
         return;
     }
+    sfx.write(if select_all {
+        Sfx::SelectAll
+    } else {
+        Sfx::Select
+    });
 
     // Any select command clears the current selection first.
     for e in &selected {

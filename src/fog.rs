@@ -25,7 +25,7 @@ enum CellVis {
 
 /// Per-cell visibility memory plus a cell → tile-entities index for cheap reveals.
 #[derive(Resource)]
-struct FogGrid {
+pub struct FogGrid {
     width: usize,
     vis: Vec<CellVis>,
     /// Tile entities (floor + walls) keyed by grid cell. Built once, lazily.
@@ -50,6 +50,19 @@ impl FogGrid {
     #[inline]
     fn index(&self, c: IVec2) -> usize {
         c.y as usize * self.width + c.x as usize
+    }
+
+    /// Is cell `c` in a unit's *live* line of sight right now? (Not merely explored-and-remembered.)
+    /// This is the partial-observability query other systems use to hide/target enemies — hidden
+    /// units outside current LOS are the defining property of an RTS fog-of-war (Yang, Xie & Peng,
+    /// "Fuzzy Theory Based Single Belief State Generation for Partially Observable Real-Time Strategy
+    /// Games", IEEE Access 2019, DOI 10.1109/access.2019.2923419).
+    pub fn visible_at(&self, c: IVec2) -> bool {
+        if c.x < 0 || c.y < 0 || c.x as usize >= self.width {
+            return false;
+        }
+        let idx = self.index(c);
+        idx < self.vis.len() && self.vis[idx] == CellVis::Visible
     }
 }
 

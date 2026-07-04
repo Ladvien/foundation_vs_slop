@@ -1,14 +1,23 @@
-//! The player's squad: five controllable `Unit` characters (replacing the old single `Player`).
-//! Units are selected/commanded by the mouse (see `selection`), path via A\* (see `pathfinding`),
-//! and follow their waypoints with **Reynolds separation steering** so they fan out instead of
-//! stacking — the pragmatic local-avoidance layer over a global planner, exactly the split Pettré
-//! et al. ("Synthetic-Vision Based Steering", SIGGRAPH 2010, DOI 10.1145/1778765.1778860) and
-//! Menge (Curtis/Best/Manocha 2016, DOI 10.17815/cd.2016.1) describe (path planner → waypoints →
-//! local collision avoidance; Reynolds, "Steering Behaviors for Autonomous Characters", 1999).
+//! The player's squad: controllable `Unit` characters commanded by the mouse (see `selection`).
+//! Movement is the SOTA split of a **flow-field global navigator** (see `flowfield`) feeding a
+//! **hand-rolled ORCA local-avoidance** layer (see `orca`): the flow field decides each unit's
+//! preferred velocity toward the shared goal, ORCA turns that into a collision-free velocity around
+//! the other units, and `Dungeon::resolve_move` keeps it out of walls. This is the planner →
+//! preferred-velocity → reciprocal-avoidance pipeline of Treuille et al. (Continuum Crowds,
+//! SIGGRAPH 2006, DOI 10.1145/1141911.1142008) and van den Berg et al. (ORCA, 2011,
+//! DOI 10.1109/TRO.2011.2120810), and it replaces the earlier summed-force separation that let
+//! units cancel to a standstill.
+
+use std::sync::Arc;
 
 use bevy::prelude::*;
 
+use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
+use crate::flowfield::FlowField;
+use crate::health::Health;
+use crate::impact_fx::ImpactQueue;
+use crate::orca::{self, Agent};
 
 /// Marker for a squad member (the RTS unit; replaces the old single-agent `Player`).
 #[derive(Component)]
@@ -30,11 +39,33 @@ pub struct Outfit(pub Color);
 #[derive(Component)]
 pub struct Selected;
 
-/// An active move order: remaining waypoints (grid cells) the unit walks through in order.
+/// An active move order: the shared flow field the unit follows toward the group's goal, plus a
+/// small amount of follower state. One `FlowField` is built per command and shared (`Arc`) by every
+/// unit in the selection, so hundreds of units cost one field build, not one A\* per unit.
 #[derive(Component)]
 pub struct MoveOrder {
-    pub path: Vec<IVec2>,
+    pub field: Arc<FlowField>,
+    /// Closest the unit has ever gotten to the goal on this order (world distance).
+    best_dist: f32,
+    /// Seconds since `best_dist` last improved — a *progress*-based stall measure (a unit milling in
+    /// place at non-zero speed still counts as stalled), driving packed-in and give-up arrival.
+    no_progress_time: f32,
 }
+
+impl MoveOrder {
+    pub fn new(field: Arc<FlowField>) -> Self {
+        MoveOrder {
+            field,
+            best_dist: f32::MAX,
+            no_progress_time: 0.0,
+        }
+    }
+}
+
+/// A unit's current planar velocity (xz), advertised to ORCA so neighbors can reciprocate. Held on
+/// every unit (zero while idle) since idle units are still avoided.
+#[derive(Component)]
+pub struct Velocity(pub Vec2);
 
 /// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors).
 #[derive(Component)]
@@ -46,20 +77,50 @@ struct Recolored;
 
 /// Scale the figurine so a unit reads clearly (0.7 × 1.4 ≈ 1.0 ≈ wall height).
 const FIGURINE_SCALE: f32 = 1.4;
-const COLLISION_MARGIN: f32 = 0.08;
-/// Square collision footprint (arm span + margin), unchanged from the single-agent tuning.
-const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.25 * FIGURINE_SCALE + COLLISION_MARGIN);
+/// Square collision half-extent. Sized so a unit (0.54 wide) fits the narrowest walkable channel:
+/// a corridor cell walled on both sides has only `TILE - 2·WALL_THICKNESS = 0.6` of clear width, so
+/// a wider box would physically wedge in 1-wide passages regardless of steering. Deliberately a
+/// touch under the figurine's visual radius — a unit reaching its goal reliably matters more than
+/// pixel-exact wall contact.
+const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.27);
 /// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
-const UNIT_SPEED: f32 = 6.0;
+/// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
+pub const UNIT_SPEED: f32 = 6.0;
+/// Squad member hit points (drives the floating health bar; units take no damage yet).
+const UNIT_HP: f32 = 100.0;
 /// How fast a unit turns to face its travel direction (per-second slerp rate, clamped per frame).
 const TURN_SPEED: f32 = 14.0;
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
-/// A waypoint is "reached" within this ground distance.
-const ARRIVE_EPS: f32 = 0.18;
-/// Separation steering: units within this radius repel each other so a group fans out.
-const SEPARATION_RADIUS: f32 = 0.95;
-/// Weight of the separation push relative to the goal-seeking direction.
-const SEPARATION_WEIGHT: f32 = 0.7;
+
+/// ORCA personal-space disc radius. Slightly larger than the collision half-extent so units keep
+/// their AABBs from overlapping, while still small enough for two to pass abreast in a 2-wide
+/// corridor (2·0.30 = 0.60 centre spacing fits the 1.6 clear width).
+const ORCA_RADIUS: f32 = 0.30;
+/// Seconds ahead unit↔unit collisions are anticipated. Larger = earlier, gentler avoidance but more
+/// anticipatory braking (which gridlocks dense junctions); kept low so units squeeze through crowds.
+const ORCA_TIME_HORIZON: f32 = 1.0;
+/// Only units within this centre distance are fed to a unit's ORCA solve (the rest can't interact
+/// within the horizon). Bounds the per-frame neighbor work.
+const ORCA_QUERY_RADIUS: f32 = 4.0;
+
+/// Arrived once this close to the goal cell centre.
+const ARRIVE_RADIUS: f32 = 0.6;
+/// Within this distance of the goal, a unit that can no longer make progress is "packed in" and
+/// treated as arrived (others fill the exact goal cell), instead of jittering forever.
+const PACK_RADIUS: f32 = 2.5;
+/// A stuck unit also arrives if an already-settled unit sits within this distance *between it and
+/// the goal* — the settled blob then grows outward from the goal so a large crowd all packs in
+/// rather than piling up short of a single goal cell.
+const BLOB_RADIUS: f32 = 1.3;
+/// A unit counts as "progressing" when it gets at least this much closer to the goal; smaller
+/// improvements are treated as a stall (avoids float jitter resetting the stall timer forever).
+const PROGRESS_EPS: f32 = 0.05;
+/// No-progress duration that ends a packed-in order when the unit is near the goal or wedged behind
+/// the settled goal blob. There is deliberately no plain time-based give-up: initial spawn
+/// congestion always stalls the back of the crowd for seconds, so a timer alone would settle units
+/// at the spawn. Settling is gated on *what* blocks a unit — a settled neighbor between it and the
+/// goal (permanent) vs. moving neighbors (transient) — see `blocked_by_settled`.
+const PACK_STUCK_TIME: f32 = 0.5;
 
 const FIGURINE_GLB: &str = "kenney_prototype-kit/Models/GLB format/figurine.glb";
 
@@ -101,8 +162,16 @@ pub struct SquadPlugin;
 
 impl Plugin for SquadPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_squad)
-            .add_systems(Update, (recolor_units, unit_movement));
+        // `unit_movement` runs after `command_input` so a move order issued this frame is followed
+        // the same frame (Bevy inserts a command sync point for the ordering), not one frame late.
+        app.add_systems(Startup, spawn_squad).add_systems(
+            Update,
+            (
+                recolor_units,
+                unit_movement.after(crate::selection::command_input),
+                despawn_dead_units,
+            ),
+        );
     }
 }
 
@@ -123,6 +192,8 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 Unit,
                 UnitIndex(i as u8),
                 MoveSpeed(UNIT_SPEED),
+                Velocity(Vec2::ZERO),
+                Health::new(UNIT_HP),
                 Outfit(outfit),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
                 Transform::from_translation(dungeon.cell_center(cell))
@@ -136,6 +207,39 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     .with_scale(Vec3::splat(GUN_SCALE))
                     .with_rotation(Quat::from_rotation_y(GUN_YAW)),
             ));
+    }
+}
+
+/// Debug safeguard: never let the whole squad wipe. At least [`MIN_LIVING_UNITS`] member always
+/// survives — so of five units, four can die but the last cannot. (Remove this floor for real
+/// lose conditions.)
+const MIN_LIVING_UNITS: usize = 1;
+
+/// Remove squad members whose health has run out (enemies gnaw them down — see `enemy`). Despawning
+/// a unit takes its figurine + carried gun with it; its floating health bar is cleaned up as an
+/// orphan by `health::update_health_bars`. A small burst at chest height marks the death. The last
+/// [`MIN_LIVING_UNITS`] can't be despawned: a protected survivor has its health floored so it lingers
+/// (bar shows a sliver) instead of dying.
+fn despawn_dead_units(
+    mut commands: Commands,
+    mut impacts: ResMut<ImpactQueue>,
+    mut sfx: MessageWriter<Sfx>,
+    mut units: Query<(Entity, &mut Health, &Transform), With<Unit>>,
+) {
+    // How many dead units we may actually remove this frame while keeping the living floor.
+    let mut removable = units.iter().count().saturating_sub(MIN_LIVING_UNITS);
+    for (entity, mut hp, transform) in &mut units {
+        if hp.current <= 0.0 {
+            if removable > 0 {
+                impacts.0.push(transform.translation + Vec3::Y * 0.5);
+                sfx.write(Sfx::UnitDeath);
+                commands.entity(entity).despawn();
+                removable -= 1;
+            } else {
+                // Protected survivor — clamp so it can't die and its bar keeps a sliver.
+                hp.current = hp.current.max(1.0);
+            }
+        }
     }
 }
 
@@ -180,68 +284,148 @@ fn recolor_units(
     }
 }
 
-/// Advance each unit along its `MoveOrder` waypoints, steering around fellow units (separation).
+/// Advance each commanded unit: preferred velocity from the shared flow field → ORCA around the
+/// other units → wall collision. Idle units hold position but are still avoided.
 fn unit_movement(
     mut commands: Commands,
     time: Res<Time>,
     dungeon: Res<Dungeon>,
-    mut units: Query<(Entity, &mut Transform, &MoveSpeed, Option<&mut MoveOrder>), With<Unit>>,
+    mut units: Query<
+        (
+            Entity,
+            &mut Transform,
+            &MoveSpeed,
+            &mut Velocity,
+            Option<&mut MoveOrder>,
+        ),
+        With<Unit>,
+    >,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
+    if dt <= 0.0 {
+        return;
+    }
 
-    // Snapshot every unit's position first (idle units must still be avoided).
-    let positions: Vec<(Entity, Vec3)> = units.iter().map(|(e, t, _, _)| (e, t.translation)).collect();
+    // Snapshot every unit as an ORCA agent using last frame's velocity (synchronous update: all
+    // solves see the same prior state). A unit with an order `avoids` — it reciprocates; an idle
+    // unit does not, so movers take full responsibility going around it.
+    let agents: Vec<(Entity, Agent)> = units
+        .iter()
+        .map(|(e, t, _, v, order)| {
+            (
+                e,
+                Agent {
+                    pos: t.translation.xz(),
+                    vel: v.0,
+                    radius: ORCA_RADIUS,
+                    avoids: order.is_some(),
+                },
+            )
+        })
+        .collect();
 
-    for (entity, mut transform, speed, order) in &mut units {
+    for (entity, mut transform, speed, mut velocity, order) in &mut units {
         let Some(mut order) = order else {
-            continue; // no active order → hold position
-        };
-        // Drop reached waypoints; finish the order when the path is empty.
-        while let Some(&next) = order.path.first() {
-            let target = dungeon.cell_center(next);
-            let mut to = target - transform.translation;
-            to.y = 0.0;
-            if to.length() < ARRIVE_EPS {
-                order.path.remove(0);
-                continue;
-            }
-            break;
-        }
-        let Some(&next) = order.path.first() else {
-            commands.entity(entity).remove::<MoveOrder>();
+            velocity.0 = Vec2::ZERO; // idle → at rest (still advertised to ORCA next frame)
             continue;
         };
 
-        // Goal-seeking direction toward the next waypoint.
-        let mut to = dungeon.cell_center(next) - transform.translation;
-        to.y = 0.0;
-        let seek = to.normalize_or_zero();
+        let pos = transform.translation;
+        let self_pos = pos.xz();
+        let goal_xz = dungeon.cell_center(order.field.goal()).xz();
+        let goal_dist = (goal_xz - self_pos).length();
 
-        // Reynolds separation: sum of pushes away from nearby units.
-        let mut separation = Vec3::ZERO;
-        for (other, opos) in &positions {
+        // Preferred velocity: steer toward the flow-field look-ahead point on the cell centerline
+        // (keeps the unit centered in corridors so its body fits through), at full speed.
+        let pref = order.field.steer(&dungeon, pos) * speed.0;
+
+        // ORCA neighbors, plus: is a *settled* unit (no order) sitting just ahead of me toward the
+        // goal? If so and I can't progress, I've reached the back of the arrived blob and pack in.
+        // Direction-based (settled unit within the goalward cone) so it propagates cleanly back from
+        // the goal even across a room, and never fires at spawn where all neighbors still have orders.
+        let to_goal = (goal_xz - self_pos).normalize_or_zero();
+        let mut neighbors: Vec<Agent> = Vec::new();
+        let mut blocked_by_settled = false;
+        for (other, ag) in &agents {
             if *other == entity {
                 continue;
             }
-            let mut away = transform.translation - *opos;
-            away.y = 0.0;
-            let dist = away.length();
-            if dist > 1e-3 && dist < SEPARATION_RADIUS {
-                separation += away / dist * (SEPARATION_RADIUS - dist) / SEPARATION_RADIUS;
+            let off = ag.pos - self_pos;
+            if off.length_squared() <= ORCA_QUERY_RADIUS * ORCA_QUERY_RADIUS {
+                neighbors.push(*ag);
+            }
+            if !ag.avoids
+                && off.length_squared() <= BLOB_RADIUS * BLOB_RADIUS
+                && off.normalize_or_zero().dot(to_goal) > 0.2
+            {
+                blocked_by_settled = true;
             }
         }
 
-        let steer = (seek + separation * SEPARATION_WEIGHT).normalize_or_zero();
-        if steer == Vec3::ZERO {
+        // Nearby solid cells become hard ORCA wall constraints, so a unit dodging a neighbor is never
+        // steered into a wall (where it would stall). Only walls the unit is actually *close* to bind
+        // (gap < WALL_GATE); the allowed approach speed is the remaining gap ÷ dt, shrinking to zero at
+        // contact. WALK_HALF is the walkable half-width of a walled cell (centre to wall face).
+        const WALK_HALF: f32 = 0.5 * crate::dungeon::TILE_SIZE - crate::dungeon::WALL_THICKNESS;
+        const WALL_GATE: f32 = 0.4;
+        let cell = dungeon.world_to_cell(pos);
+        let local = Vec2::new(pos.x - cell.x as f32, pos.z - cell.y as f32);
+        let mut walls: Vec<(Vec2, f32)> = Vec::new();
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if dungeon.is_floor(cell + IVec2::new(dx, dy)) {
+                continue;
+            }
+            let b = Vec2::new(dx as f32, dy as f32);
+            let gap = WALK_HALF - (local.dot(b) + UNIT_HALF_EXTENTS.x);
+            if gap < WALL_GATE {
+                walls.push((b, (gap.max(0.0)) / dt));
+            }
+        }
+
+        let me = Agent {
+            pos: self_pos,
+            vel: velocity.0,
+            radius: ORCA_RADIUS,
+            avoids: true,
+        };
+        let new_vel =
+            orca::new_velocity(&me, pref, &neighbors, &walls, ORCA_TIME_HORIZON, dt, speed.0);
+        velocity.0 = new_vel;
+
+        // Integrate the ORCA velocity against walls (unit↔wall is the resolver's job, not ORCA's).
+        let delta = Vec3::new(new_vel.x, 0.0, new_vel.y) * dt;
+        transform.translation = dungeon.resolve_move(pos, delta, UNIT_HALF_EXTENTS);
+
+        // Progress-based stall: the timer only resets when the unit gets genuinely closer to the
+        // goal, so a unit shoved in circles at non-zero speed still eventually counts as stalled.
+        let new_goal_dist = (goal_xz - transform.translation.xz()).length();
+        if new_goal_dist < order.best_dist - PROGRESS_EPS {
+            order.best_dist = new_goal_dist;
+            order.no_progress_time = 0.0;
+        } else {
+            order.no_progress_time += dt;
+        }
+
+        // Arrival: reached the goal, or packed in — stalled *and* either right at the goal or wedged
+        // behind the settled blob. Because settled units exist only at the goal (no mid-route give-up),
+        // `blocked_by_settled` can only become true once a unit reaches the back of that blob, so the
+        // blob grows outward from the goal and never nucleates a stall in the middle of a hallway.
+        let packed = order.no_progress_time >= PACK_STUCK_TIME
+            && (goal_dist < PACK_RADIUS || blocked_by_settled);
+        let arrived = goal_dist < ARRIVE_RADIUS || packed;
+        if arrived {
+            commands.entity(entity).remove::<MoveOrder>();
+            velocity.0 = Vec2::ZERO;
             continue;
         }
-        let delta = steer * speed.0 * dt;
-        transform.translation = dungeon.resolve_move(transform.translation, delta, UNIT_HALF_EXTENTS);
 
         // Face travel direction (local -Z toward the step), slerped for a smooth turn.
-        let facing = Transform::from_translation(transform.translation)
-            .looking_at(transform.translation + steer, Vec3::Y)
-            .rotation;
-        transform.rotation = transform.rotation.slerp(facing, (TURN_SPEED * dt).min(1.0));
+        let step = Vec3::new(new_vel.x, 0.0, new_vel.y);
+        if step.length_squared() > 1e-6 {
+            let facing = Transform::from_translation(transform.translation)
+                .looking_at(transform.translation + step, Vec3::Y)
+                .rotation;
+            transform.rotation = transform.rotation.slerp(facing, (TURN_SPEED * dt).min(1.0));
+        }
     }
 }

@@ -10,7 +10,6 @@ use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use serde::{Deserialize, Serialize};
 
 const CONFIG_PATH: &str = "impact_fx.ron";
@@ -119,15 +118,11 @@ pub struct ImpactFxPlugin;
 
 impl Plugin for ImpactFxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            EguiPlugin::default(),
-            MaterialPlugin::<ImpactMaterial>::default(),
-        ))
-        .init_resource::<ImpactQueue>()
-        .insert_resource(ImpactFxSettings::default())
-        .add_systems(Startup, (setup_impact_assets, load_settings_at_startup))
-        .add_systems(Update, (drain_impacts, despawn_impacts))
-        .add_systems(EguiPrimaryContextPass, settings_panel);
+        app.add_plugins(MaterialPlugin::<ImpactMaterial>::default())
+            .init_resource::<ImpactQueue>()
+            .insert_resource(ImpactFxSettings::default())
+            .add_systems(Startup, (setup_impact_assets, load_settings_at_startup))
+            .add_systems(Update, (drain_impacts, despawn_impacts));
     }
 }
 
@@ -188,57 +183,6 @@ fn despawn_impacts(mut commands: Commands, time: Res<Time>, bursts: Query<(Entit
         if now >= fx.despawn_at {
             commands.entity(entity).despawn();
         }
-    }
-}
-
-fn settings_panel(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<ImpactFxSettings>,
-    mut queue: ResMut<ImpactQueue>,
-    camera: Single<&GlobalTransform, With<Camera3d>>,
-) -> Result {
-    // A point in front of the camera (≈ the focus) for the Test button.
-    let test_pos = camera.translation() + camera.forward() * 20.0;
-    let ctx = contexts.ctx_mut()?;
-    egui::Window::new("Impact FX").show(ctx, |ui| {
-        ui.add(egui::Slider::new(&mut settings.particle_count, 1..=64).text("particles"));
-        ui.add(egui::Slider::new(&mut settings.intensity, 0.0..=3.0).text("intensity"));
-        ui.add(egui::Slider::new(&mut settings.spread, 0.0..=1.5).text("spread"));
-        ui.add(egui::Slider::new(&mut settings.speed, 0.0..=3.0).text("speed"));
-        ui.add(egui::Slider::new(&mut settings.particle_size, 10.0..=150.0).text("particle size"));
-        ui.add(egui::Slider::new(&mut settings.gravity, 0.0..=1.5).text("gravity"));
-        ui.add(egui::Slider::new(&mut settings.duration, 0.1..=3.0).text("duration (s)"));
-        ui.add(egui::Slider::new(&mut settings.quad_size, 0.5..=10.0).text("quad size"));
-        ui.horizontal(|ui| {
-            ui.label("color A");
-            ui.color_edit_button_rgb(&mut settings.color_a);
-        });
-        ui.horizontal(|ui| {
-            ui.label("color B");
-            ui.color_edit_button_rgb(&mut settings.color_b);
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Test").clicked() {
-                queue.0.push(test_pos);
-            }
-            if ui.button("Save").clicked() {
-                write_settings(&settings);
-            }
-            if ui.button("Load").clicked() && let Some(loaded) = read_settings() {
-                *settings = loaded;
-            }
-        });
-    });
-    Ok(())
-}
-
-fn write_settings(settings: &ImpactFxSettings) {
-    match ron::ser::to_string_pretty(settings, ron::ser::PrettyConfig::default()) {
-        Ok(text) => match std::fs::write(CONFIG_PATH, text) {
-            Ok(()) => info!("impact_fx: saved {CONFIG_PATH}"),
-            Err(e) => warn!("impact_fx: failed to write {CONFIG_PATH}: {e}"),
-        },
-        Err(e) => warn!("impact_fx: failed to serialize settings: {e}"),
     }
 }
 
