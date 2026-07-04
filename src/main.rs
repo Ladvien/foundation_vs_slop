@@ -13,17 +13,29 @@
 #![allow(clippy::type_complexity)]
 
 mod camera;
+mod devshot;
 mod dungeon;
 mod fog;
+mod impact_fx;
+mod laser;
 mod occlusion;
-mod player;
+mod pathfinding;
+mod selection;
+mod squad;
 mod wfc;
 mod world;
 
 use bevy::prelude::*;
+use bevy::winit::{UpdateMode, WinitSettings};
 
 fn main() {
     App::new()
+        // Keep rendering at full rate even when the window is unfocused/occluded, so the game
+        // stays live in the background (and the `devshot` in-process screenshots aren't black).
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Foundation vs. Slop".into(),
@@ -37,9 +49,13 @@ fn main() {
             dungeon::DungeonPlugin,
             world::WorldPlugin,
             camera::CameraPlugin,
-            player::PlayerPlugin,
+            squad::SquadPlugin,
+            selection::SelectionPlugin,
             fog::FogPlugin,
             occlusion::OcclusionPlugin,
+            laser::LaserPlugin,
+            impact_fx::ImpactFxPlugin,
+            devshot::DevShotPlugin,
         ))
         .run();
 }

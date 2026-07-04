@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.19.0"
+bevy_egui = "0.41.0"
+ron = "0.12.2"
+serde = { version = "1.0.228", features = ["derive"] }
 
 # Bevy's recommended dev compile-speed profile: keep our own crate light so
 # iteration is fast, but optimize dependencies so the engine runs at speed.

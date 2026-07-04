@@ -1,33 +1,49 @@
-//! Fog of war. Every dungeon tile starts hidden; cells within a radius of the player are
-//! revealed permanently as the agent explores. Reveal is one-way, so the system only ever
-//! flips *newly*-revealed cells' tiles to visible — it never rescans the whole grid, so its
-//! per-frame cost is proportional to what was just discovered, not the dungeon size.
+//! Line-of-sight fog of war (3-state). Every dungeon cell is `Unseen` (black), `Explored` (seen
+//! before, remembered dim), or `Visible` (in a unit's live line of sight, fully lit). Each time
+//! the squad crosses cell boundaries we recompute the visible set as the union of every unit's
+//! LOS disc (walls block sight — see `Dungeon::line_of_sight`); cells that leave LOS fall back to
+//! `Explored`. Reveal of a cell's tiles (`Visibility::Hidden`→`Visible`) is one-way; the
+//! bright/dim distinction is a floor-material swap (walls stay lit once seen, so they never fight
+//! the occlusion system's ownership of wall materials).
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::dungeon::{Dungeon, Tile};
-use crate::player::Player;
+use crate::dungeon::{Dungeon, FloorMaterials, Tile, Wall};
+use crate::squad::Unit;
 
-/// How many cells out from the player get revealed (roughly a torch's reach).
-const REVEAL_RADIUS: i32 = 5;
+/// How many cells out from a unit can be seen (subject to line of sight).
+const VISION_RADIUS: i32 = 8;
 
-/// Per-cell reveal memory plus a cell → tile-entities index for cheap reveals.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellVis {
+    Unseen,
+    Explored,
+    Visible,
+}
+
+/// Per-cell visibility memory plus a cell → tile-entities index for cheap reveals.
 #[derive(Resource)]
 struct FogGrid {
     width: usize,
-    revealed: Vec<bool>,
-    /// Tile entities (floor + walls) keyed by their grid cell. Built once, lazily.
+    vis: Vec<CellVis>,
+    /// Tile entities (floor + walls) keyed by grid cell. Built once, lazily.
     cell_tiles: HashMap<IVec2, Vec<Entity>>,
+    /// Sorted unit cells from last recompute — skip work when nothing crossed a boundary.
+    last_cells: Vec<IVec2>,
+    /// Set the frame the visible set changed, so the floor-material pass only runs then.
+    dirty: bool,
 }
 
 impl FogGrid {
     fn new(width: usize, height: usize) -> Self {
         FogGrid {
             width,
-            revealed: vec![false; width * height],
+            vis: vec![CellVis::Unseen; width * height],
             cell_tiles: HashMap::new(),
+            last_cells: Vec::new(),
+            dirty: false,
         }
     }
 
@@ -41,21 +57,21 @@ pub struct FogPlugin;
 
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
-        // Dungeon is inserted in DungeonPlugin::build, so its dimensions are available
-        // here as long as DungeonPlugin is registered first.
         let dungeon = app
             .world()
             .get_resource::<Dungeon>()
             .expect("FogPlugin requires DungeonPlugin to be registered first");
         let fog = FogGrid::new(dungeon.width, dungeon.height);
-        app.insert_resource(fog).add_systems(Update, update_fog);
+        app.insert_resource(fog)
+            .add_systems(Update, (update_los, apply_floor_fog).chain());
     }
 }
 
-fn update_fog(
+/// Recompute the visible set from every unit's LOS disc when the squad has moved between cells.
+fn update_los(
     dungeon: Res<Dungeon>,
     mut fog: ResMut<FogGrid>,
-    player: Single<&Transform, With<Player>>,
+    units: Query<&Transform, With<Unit>>,
     tiles: Query<(Entity, &Tile)>,
     mut visibility: Query<&mut Visibility>,
 ) {
@@ -68,31 +84,70 @@ fn update_fog(
         }
     }
 
-    let center = dungeon.world_to_cell(player.translation);
+    // Current unit cells (sorted for a stable comparison against last frame).
+    let mut cells: Vec<IVec2> = units
+        .iter()
+        .map(|t| dungeon.world_to_cell(t.translation))
+        .collect();
+    cells.sort_unstable_by_key(|c| (c.x, c.y));
+    if cells == fog.last_cells {
+        fog.dirty = false;
+        return;
+    }
+    fog.last_cells = cells.clone();
+    fog.dirty = true;
 
-    // Reveal the disc of cells around the player; make each newly-revealed cell's tiles
-    // visible immediately (reveal is permanent, so tiles are never hidden again).
-    for dy in -REVEAL_RADIUS..=REVEAL_RADIUS {
-        for dx in -REVEAL_RADIUS..=REVEAL_RADIUS {
-            if dx * dx + dy * dy > REVEAL_RADIUS * REVEAL_RADIUS {
-                continue;
-            }
-            let cell = center + IVec2::new(dx, dy);
-            if !dungeon.in_bounds(cell) {
-                continue;
-            }
-            let i = fog.index(cell);
-            if fog.revealed[i] {
-                continue;
-            }
-            fog.revealed[i] = true;
-            if let Some(entities) = fog.cell_tiles.get(&cell) {
-                for &entity in entities {
-                    if let Ok(mut vis) = visibility.get_mut(entity) {
-                        *vis = Visibility::Visible;
+    // Everything currently visible falls back to explored; LOS below re-lights what still shows.
+    for v in fog.vis.iter_mut() {
+        if *v == CellVis::Visible {
+            *v = CellVis::Explored;
+        }
+    }
+
+    for &uc in &cells {
+        for dy in -VISION_RADIUS..=VISION_RADIUS {
+            for dx in -VISION_RADIUS..=VISION_RADIUS {
+                if dx * dx + dy * dy > VISION_RADIUS * VISION_RADIUS {
+                    continue;
+                }
+                let c = uc + IVec2::new(dx, dy);
+                if !dungeon.is_floor(c) || !dungeon.line_of_sight(uc, c) {
+                    continue;
+                }
+                let i = fog.index(c);
+                let was = fog.vis[i];
+                fog.vis[i] = CellVis::Visible;
+                // First sighting: reveal this cell's tiles (floor + walls) permanently.
+                if was == CellVis::Unseen && let Some(entities) = fog.cell_tiles.get(&c) {
+                    for &entity in entities {
+                        if let Ok(mut vis) = visibility.get_mut(entity) {
+                            *vis = Visibility::Visible;
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/// After a visibility change, tint floor tiles: bright where a unit currently sees them, dim where
+/// only explored. Walls are left to the occlusion system (they stay lit once revealed).
+fn apply_floor_fog(
+    mut fog: ResMut<FogGrid>,
+    mats: Res<FloorMaterials>,
+    mut floors: Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>), (With<Tile>, Without<Wall>)>,
+) {
+    if !fog.dirty {
+        return;
+    }
+    fog.dirty = false;
+    for (tile, mut material) in &mut floors {
+        let want = match fog.vis[fog.index(tile.cell)] {
+            CellVis::Visible => &mats.bright,
+            CellVis::Explored | CellVis::Unseen => &mats.dim,
+        };
+        if material.0.id() != want.id() {
+            material.0 = want.clone();
         }
     }
 }

@@ -3,6 +3,7 @@
 //! floor). The [`Dungeon`] resource is the single source of truth for walkability (used by
 //! player collision and fog).
 
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 use crate::occlusion::WallMaterials;
@@ -50,6 +51,15 @@ pub struct Tile {
 /// cutaway in `occlusion` needs this to target walls only.
 #[derive(Component)]
 pub struct Wall;
+
+/// The two shared floor materials the line-of-sight fog swaps between per cell: `bright` when a
+/// unit currently sees the cell, `dim` when it has only been explored before (see `fog`). Only
+/// two handles exist, so fog swaps a handle rather than cloning a material per tile.
+#[derive(Resource)]
+pub struct FloorMaterials {
+    pub bright: Handle<StandardMaterial>,
+    pub dim: Handle<StandardMaterial>,
+}
 
 /// The realized dungeon on the fine grid: a walkability mask plus the player spawn.
 #[derive(Resource)]
@@ -216,6 +226,52 @@ impl Dungeon {
         self.cell_center(self.spawn)
     }
 
+    /// Grid line-of-sight from cell `a` to cell `b`: true iff every cell the straight segment
+    /// crosses is floor. Walls only ever sit on floor↔non-floor edges (see [`Self::walled`]), so
+    /// a sightline is blocked exactly when it enters a non-floor cell. Uses an integer supercover
+    /// (Bresenham-family) walk so the returned visibility is symmetric. Reused by path smoothing
+    /// (`pathfinding`) and the fog-of-war LOS (`fog`).
+    pub fn line_of_sight(&self, a: IVec2, b: IVec2) -> bool {
+        let (mut x, mut y) = (a.x, a.y);
+        let (dx, dy) = ((b.x - a.x).abs(), (b.y - a.y).abs());
+        let (sx, sy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
+        // Endpoints must themselves be floor to be visible at all.
+        if !self.is_floor(a) || !self.is_floor(b) {
+            return false;
+        }
+        // Step cell-by-cell; when the line passes exactly through a corner, require *both*
+        // diagonally-shared cells to be floor (no peeking through a diagonal wall slit).
+        let mut err = dx - dy;
+        while x != b.x || y != b.y {
+            let e2 = 2 * err;
+            let (mut step_x, mut step_y) = (false, false);
+            if e2 > -dy {
+                err -= dy;
+                step_x = true;
+            }
+            if e2 < dx {
+                err += dx;
+                step_y = true;
+            }
+            if step_x && step_y {
+                // Diagonal step: both orthogonal neighbours must be floor, else sight is blocked.
+                if !self.is_floor(IVec2::new(x + sx, y)) || !self.is_floor(IVec2::new(x, y + sy)) {
+                    return false;
+                }
+                x += sx;
+                y += sy;
+            } else if step_x {
+                x += sx;
+            } else {
+                y += sy;
+            }
+            if !self.is_floor(IVec2::new(x, y)) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Slide the box one axis by `step` (X if `axis_x`, else Z), snapping the leading edge
     /// to a wall's inner face if it would enter solid. Sub-stepping in [`Self::resolve_move`]
     /// keeps `|step|` below a wall's thickness so the edge can't skip past a wall. The edge
@@ -250,6 +306,24 @@ impl Dungeon {
         }
     }
 
+    /// True if the axis-aligned box centered at `p` (half-extents `half`) overlaps any
+    /// non-floor cell — i.e. it has cut a corner into the void. Walls *within* floor cells are
+    /// handled by the inset snap in [`Self::slide_axis`]; this guards only against entering
+    /// void/rock cells, which per-axis edge sampling can leak through at a diagonal notch
+    /// corner (the inset walls leave a thin diagonal slit the box can squeeze through).
+    fn box_over_void(&self, p: Vec3, half: Vec2) -> bool {
+        let min = self.world_to_cell(Vec3::new(p.x - half.x, 0.0, p.z - half.y));
+        let max = self.world_to_cell(Vec3::new(p.x + half.x, 0.0, p.z + half.y));
+        for cy in min.y..=max.y {
+            for cx in min.x..=max.x {
+                if !self.is_floor(IVec2::new(cx, cy)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve continuous movement against walls, one axis at a time so the player slides
     /// along walls instead of stopping dead. `half` is the player's box half-extents (X, Z).
     /// The move is sub-stepped so no single step exceeds a wall's thickness — a large-dt
@@ -259,8 +333,18 @@ impl Dungeon {
         let steps = (delta.length() / MAX_STEP).ceil().max(1.0) as u32;
         let d = delta / steps as f32;
         for _ in 0..steps {
+            // Slide each axis, then reject that axis if it cut a corner into the void. Reverting
+            // per-axis still lets the box slide flush along walls (which sit inside floor cells).
+            let before_x = p.x;
             self.slide_axis(&mut p, d.x, half.x, half.y, true);
+            if self.box_over_void(p, half) {
+                p.x = before_x;
+            }
+            let before_z = p.z;
             self.slide_axis(&mut p, d.z, half.y, half.x, false);
+            if self.box_over_void(p, half) {
+                p.z = before_z;
+            }
         }
 
         p
@@ -360,6 +444,49 @@ fn corner_arms(c: IVec2, quarter_turns: u32) -> (Transform, Transform) {
 /// The four convex corners as `(edge_a, edge_b, quarter_turns)`.
 const CORNERS: [(usize, usize, u32); 4] = [(N, E, 0), (N, W, 1), (S, W, 2), (S, E, 3)];
 
+/// Build a wall cuboid whose wallpaper stands upright on every side face. Bevy's default
+/// `Cuboid` UVs lay the texture on its side on the ±X faces, so straight walls and full corner
+/// arms (which show their ±X faces) render the Backrooms stripes/chevrons running horizontally.
+/// Here every side face maps the texture's V axis to world +Y, so the pattern is vertical
+/// regardless of which way the wall faces (Y-axis rotations keep "up" as up).
+fn wall_mesh(size: Vec3) -> Mesh {
+    let mut mesh = Mesh::from(Cuboid::new(size.x, size.y, size.z));
+    let (
+        Some(VertexAttributeValues::Float32x3(positions)),
+        Some(VertexAttributeValues::Float32x3(normals)),
+    ) = (
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned(),
+        mesh.attribute(Mesh::ATTRIBUTE_NORMAL).cloned(),
+    ) else {
+        return mesh;
+    };
+    let half = size * 0.5;
+    let uvs: Vec<[f32; 2]> = positions
+        .iter()
+        .zip(normals.iter())
+        .map(|(p, n)| {
+            let p = Vec3::from_array(*p);
+            let n = Vec3::from_array(*n);
+            if n.y.abs() > 0.5 {
+                // Top / bottom faces: floor-plane mapping (their orientation is barely seen).
+                [(p.x + half.x) / size.x, (p.z + half.z) / size.z]
+            } else {
+                // Side face: V climbs with world height so the wallpaper is upright; U runs
+                // along the face's horizontal edge (Z for the ±X faces, X for the ±Z faces).
+                let u = if n.x.abs() > 0.5 {
+                    (p.z + half.z) / size.z
+                } else {
+                    (p.x + half.x) / size.x
+                };
+                let v = (half.y - p.y) / size.y; // V=0 at the top → texture right-way-up
+                [u, v]
+            }
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh
+}
+
 /// Instantiate the dungeon as textured primitives: a Backrooms-carpet floor quad per floor
 /// cell, wallpaper cuboid walls on perimeter edges (corner pairs as clean two-cuboid Ls,
 /// remaining single edges as straight walls). Tiles start hidden so fog reveals them.
@@ -378,15 +505,17 @@ fn spawn_tiles(
         metallic: 0.0,
         ..default()
     });
-    // Translucent twin of `wall_mat`, used by the cutaway to ghost walls that sit between the
-    // camera and the hero (see `occlusion`). Only two wall material handles ever exist, so the
-    // cutaway swaps between them per wall without cloning a material per entity.
+    // Ghosted twin of `wall_mat`, used by the cutaway for walls between the camera and the hero
+    // (see `occlusion`). Only two wall material handles ever exist, so the cutaway swaps between
+    // them per wall without cloning a material per entity. Alpha-to-coverage gives a *dithered*
+    // (screen-door) transparency via MSAA sample coverage — no depth-sort artifacts, and the
+    // hero reads through the stipple holes.
     let wall_mat_faded = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.28),
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.5),
         base_color_texture: Some(assets.load(WALL_TEXTURE)),
         perceptual_roughness: 0.95,
         metallic: 0.0,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::AlphaToCoverage,
         ..default()
     });
     commands.insert_resource(WallMaterials {
@@ -399,10 +528,28 @@ fn spawn_tiles(
         metallic: 0.0,
         ..default()
     });
+    // Dimmed twin of `floor_mat` — the "explored but not currently in a unit's line of sight"
+    // fog state. `base_color` tints the texture, so a dark cool grey remembers the terrain
+    // without lighting it up. The fog swaps floor tiles between these two (see `fog`).
+    let floor_mat_dim = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.28, 0.36),
+        base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        ..default()
+    });
+    commands.insert_resource(FloorMaterials {
+        bright: floor_mat.clone(),
+        dim: floor_mat_dim,
+    });
 
     let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
-    let wall_full = meshes.add(Cuboid::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE));
-    let wall_short = meshes.add(Cuboid::new(TILE_SIZE - WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS));
+    let wall_full = meshes.add(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE)));
+    let wall_short = meshes.add(wall_mesh(Vec3::new(
+        TILE_SIZE - WALL_THICKNESS,
+        WALL_HEIGHT,
+        WALL_THICKNESS,
+    )));
 
     let mut spawn_tile = |cell: IVec2,
                           mesh: Handle<Mesh>,

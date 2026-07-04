@@ -20,7 +20,7 @@
 use bevy::prelude::*;
 
 use crate::dungeon::Wall;
-use crate::player::Player;
+use crate::squad::Unit;
 
 /// The two shared wall material handles the cutaway swaps between (built in `dungeon`'s tile
 /// spawn). Only these two ever exist, so per-wall fading costs a handle swap, not a new
@@ -31,47 +31,46 @@ pub struct WallMaterials {
     pub faded: Handle<StandardMaterial>,
 }
 
+// The bounds below are deliberately tight: fade *only* the walls actually between the camera
+// and the hero (the ones it is "walking behind"). Anything wider ghosts walls the hero is not
+// behind — which, where unexplored void lies beyond them, reads as the hero standing in void.
+
 /// Below this (world units, along the camera axis) a wall is behind/level with the hero and
-/// must stay opaque so it keeps occluding correctly. Slightly negative to also fade the wall
-/// the hero is pressed right up against.
-const CAMERA_SIDE_EPS: f32 = -0.1;
-/// How far camera-side (world units along the (+X,+Z) axis) to keep fading. A 1.0-tall wall
-/// at a 45° ortho tilt occludes a ~1.0-tall hero for a little under two tiles, so ~2.5 covers
-/// the pair that embeds the hero without ghosting distant walls.
-const CUTAWAY_DEPTH: f32 = 2.5;
-/// Screen-horizontal half-width (world units along the (+X,−Z) axis) the fade spans, so it
-/// only touches walls actually over the hero's silhouette plus the adjacent corner arm.
-const CUTAWAY_WIDTH: f32 = 1.2;
+/// stays opaque. Slightly negative so the wall the hero is pressed right up against still fades.
+const CAMERA_SIDE_EPS: f32 = -0.05;
+/// How far camera-side (world units along the (+X,+Z) axis) a wall may be and still count as
+/// occluding. The hero's own front (E/S) walls sit at ≈0.4 and the SE corner arm at ≈0.8; 1.4
+/// also catches the one-tile-ahead wall that clips the hero's head, and no further.
+const CUTAWAY_DEPTH: f32 = 1.4;
+/// Screen-horizontal half-width (world units along the (+X,−Z) axis). ≈ the figurine's own
+/// half-width, so only walls truly over the hero's silhouette fade — not the ones flanking it
+/// along the same room edge (those sit at |lateral| ≳ 1).
+const CUTAWAY_WIDTH: f32 = 0.6;
 
 pub struct OcclusionPlugin;
 
 impl Plugin for OcclusionPlugin {
     fn build(&self, app: &mut App) {
-        // After the hero has moved this frame so the occluder classification reads its current
-        // position (matches how the follow camera is ordered in `camera`).
-        app.add_systems(
-            Update,
-            wall_cutaway.after(crate::player::player_movement),
-        );
+        app.add_systems(Update, wall_cutaway);
     }
 }
 
-/// Each frame, ghost the walls between the camera and the hero and restore all others.
+/// Each frame, ghost the walls between the camera and **any** unit and restore all others.
 fn wall_cutaway(
-    hero: Single<&Transform, With<Player>>,
+    units: Query<&Transform, With<Unit>>,
     mats: Res<WallMaterials>,
     mut walls: Query<(&Transform, &mut MeshMaterial3d<StandardMaterial>), With<Wall>>,
 ) {
-    let h = hero.translation;
     for (wall_transform, mut material) in &mut walls {
-        // Grid X = world X, grid Y = world Z; the camera looks from (+X,+Y,+Z) toward the
-        // focus, so its ground-plane "toward" axis is (+X,+Z) and screen-horizontal is (+X,−Z).
-        let rel = wall_transform.translation - h;
-        let along = rel.x + rel.z; // > 0 ⇒ the wall is on the camera side of the hero
-        let lateral = rel.x - rel.z; // screen-horizontal offset from the hero
-        let occludes = along > CAMERA_SIDE_EPS
-            && along < CUTAWAY_DEPTH
-            && lateral.abs() < CUTAWAY_WIDTH;
+        // Grid X = world X, grid Y = world Z; the camera looks from (+X,+Y,+Z) toward the focus,
+        // so its ground-plane "toward" axis is (+X,+Z) and screen-horizontal is (+X,−Z). A wall
+        // ghosts if it occludes any squad member.
+        let occludes = units.iter().any(|unit| {
+            let rel = wall_transform.translation - unit.translation;
+            let along = rel.x + rel.z; // > 0 ⇒ camera-side of the unit
+            let lateral = rel.x - rel.z; // screen-horizontal offset
+            along > CAMERA_SIDE_EPS && along < CUTAWAY_DEPTH && lateral.abs() < CUTAWAY_WIDTH
+        });
 
         let want = if occludes { &mats.faded } else { &mats.opaque };
         // Change-detection guard: only write when the handle actually differs, so Bevy doesn't
