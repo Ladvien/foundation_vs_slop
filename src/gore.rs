@@ -233,6 +233,13 @@ pub enum CarryPhase {
 /// Density used to turn a chunk's mesh volume into a carry weight (`weight = density × volume`). Tuned
 /// against `crab::CRAB_CARRY_CAPACITY` so small chunks go solo and big ones need a crew.
 const MEAT_DENSITY: f32 = 900.0;
+/// Fill fraction applied to an autogib fragment's *bounding-box* volume when pricing it as a carry
+/// weight (the severed mesh fills only part of its box). Chosen so a body part lands in the same
+/// haulable range as a meat chunk — light bits go solo, a torso needs a few crabs.
+const FRAG_FILL: f32 = 0.12;
+/// Carry-weight bounds for a scavengable body part (kept haulable so a crew always forms).
+const FRAG_WEIGHT_MIN: f32 = 0.08;
+const FRAG_WEIGHT_MAX: f32 = 1.5;
 
 /// Shared meshes/materials for every gore entity.
 #[derive(Resource)]
@@ -557,12 +564,13 @@ fn drain_gore(
     dungeon: Res<Dungeon>,
     real: Res<Time<Real>>,
     // Grouped into one tuple param to stay under Bevy's 16-param-per-system cap.
-    (mut trauma, mut hitstop, mut blood_lens, cache, volumes): (
+    (mut trauma, mut hitstop, mut blood_lens, cache, volumes, fog): (
         ResMut<Trauma>,
         ResMut<Hitstop>,
         ResMut<BloodLens>,
         Res<AutogibCache>,
         Res<MeatVolumes>,
+        Res<crate::fog::FogGrid>,
     ),
     camera: Single<&GlobalTransform, With<Camera3d>>,
     mut seed: Local<u32>,
@@ -576,6 +584,16 @@ fn drain_gore(
     let cam_pos = camera.translation();
 
     for ev in queue.0.drain(..) {
+        // Fog of war extends to death feedback (from the squad's POV): a kill the squad can't currently
+        // see leaves NO trace — no blood spray/pool/splatter, no gibs, no screen-shake/hitstop/lens.
+        // `FleshHit` is never gated (the laser only fires at fog-visible enemies), and squad deaths
+        // always happen in view, so a player's remains still spawn for the crabs to haul.
+        if matches!(ev.kind, GoreKind::UnitCrunch | GoreKind::EnemySplat)
+            && !fog.visible_at(dungeon.world_to_cell(ev.pos))
+        {
+            continue;
+        }
+
         *seed = seed.wrapping_add(1);
         let fseed = *seed as f32 * 0.618;
 
@@ -806,6 +824,19 @@ fn spawn_fragments(
         let pos = origin + frag.center_local * scale;
 
         let id = spawn_gib_body(commands, gib_ring, settings, pos, half, velocity, spin);
+        // A severed body part is scavengable: crabs sense it via the MEAT field (see
+        // `crab::deposit_meat_scent`, which keys on `Carryable`), crew up, and haul it back to their
+        // nest exactly like a meat chunk — so the swarm carries off the player's remains instead of
+        // milling around them. Weight ∝ the piece's (fractionally-filled) box volume, clamped haulable.
+        let vol = 2.0 * half.x * 2.0 * half.y * 2.0 * half.z;
+        let weight = (MEAT_DENSITY * vol * FRAG_FILL).clamp(FRAG_WEIGHT_MIN, FRAG_WEIGHT_MAX);
+        commands.entity(id).insert(Carryable {
+            weight,
+            carriers: Vec::new(),
+            phase: CarryPhase::Resting,
+            nest: None,
+            crew_timer: 0.0,
+        });
         commands.entity(id).with_children(|parent| {
             let child_scale = Transform::from_scale(Vec3::splat(scale));
             if let Some(outer) = &frag.outer_mesh {

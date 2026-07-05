@@ -322,7 +322,9 @@ fn update_music(
     assets: Res<AudioAssets>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
-    enemies: Query<&Transform, With<Hostile>>,
+    // A cleared-but-standing Nest is `Hostile` (siege-killable) yet not a live threat, so exclude it —
+    // otherwise the combat track latches on forever whenever an inert nest sits in the squad's LOS.
+    enemies: Query<&Transform, (With<Hostile>, Without<crate::nest::Nest>)>,
     mut state: ResMut<MusicState>,
 ) {
     let combat = enemies

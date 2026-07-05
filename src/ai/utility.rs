@@ -28,11 +28,11 @@ pub enum Mode {
     SeekMeat,
     /// Haul a grabbed gib home to the nest.
     Carry,
-    /// Scout roam: range far and fast across floor + walls, hunting for prey to report.
+    /// Scout roam: range far and fast across floor + walls, hunting for prey.
     Scout,
-    /// A scout that spotted prey runs back to its home nest to raise the alarm.
-    Report,
-    /// Mass on a scout's rally beacon (the reported sighting) — the swarm's recruited attack.
+    /// A scout that spotted prey tracks it, laying the vectorial rally pheromone toward its live position.
+    Mark,
+    /// Mass on the local rally pheromone (the scout-marked prey) — the swarm's recruited attack.
     Rally,
 }
 
@@ -54,10 +54,11 @@ pub enum Fact {
     CarryingMeat,
     /// 1.0 while a nest is under attack — the swarm goes berserk and ignores fear.
     Berserk,
-    /// 1.0 while this scout has a prey sighting it still needs to carry home (latches Report).
+    /// 1.0 while this scout is holding a live prey sighting (latches Mark, so it tracks + marks the prey).
     PreySpotted,
-    /// Peak value of the RALLY field anywhere (is there an active rally beacon to mass on).
-    RallyHotspot,
+    /// Magnitude of the vectorial rally pheromone sampled at the agent's OWN cell — a *local* read (not a
+    /// global peak), so only crabs actually near a scout-marked sighting rally / suppress their flight.
+    RallyHere,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -124,10 +125,9 @@ pub enum TargetKind {
     MeatHotspot,
     /// The crab's home nest (Carry destination; resolved from the carried gib, not from `decide`).
     Nest,
-    /// A reporting scout's home nest (resolved from its stored sighting, not from the field).
-    Home,
-    /// The peak of the RALLY field (the massing swarm's aim point).
-    RallyHotspot,
+    /// A marking scout's live prey sighting — it approaches this to keep the rally pheromone fresh
+    /// (resolved from the scout's stored sighting, not from the field).
+    TrackedPrey,
 }
 
 /// A complete behaviour: a small data literal.
@@ -173,7 +173,8 @@ pub struct Perception {
     pub berserk: f32,
     /// 1.0 while this scout has a sighting to report (drives Report over roam).
     pub prey_spotted: f32,
-    /// Peak RALLY value (an active rally beacon to mass on).
+    /// Magnitude of the vectorial rally pheromone at the agent's own cell (a local read — see
+    /// [`Fact::RallyHere`]; gates Rally on and Flee off only for crabs actually near a marked sighting).
     pub rally_val: f32,
 }
 
@@ -190,7 +191,7 @@ impl Perception {
             Input::Perc(Fact::CarryingMeat) => self.carrying,
             Input::Perc(Fact::Berserk) => self.berserk,
             Input::Perc(Fact::PreySpotted) => self.prey_spotted,
-            Input::Perc(Fact::RallyHotspot) => self.rally_val,
+            Input::Perc(Fact::RallyHere) => self.rally_val,
         }
     }
 }
@@ -215,16 +216,21 @@ pub fn decide(behaviors: &[Behavior], perc: &Perception, rng: &mut u32) -> usize
     let Some(max_rank) = max_rank else {
         return 0; // nothing scored — caller's first behaviour is the safety default
     };
+    // Weight only the behaviours that BOTH sit in the winning bucket AND clear MIN_SCORE. Re-applying
+    // the screen here (not just when picking max_rank) matters when a strong behaviour lifts a shared
+    // rank: a sub-threshold sibling in that bucket (e.g. a faint SeekMeat trace beside a 0.9 Latch)
+    // must not sneak into the weighted-random draw. Same predicate in the sum and the pick loop.
+    let eligible = |b: &Behavior, s: f32| b.rank == max_rank && s >= MIN_SCORE;
     let total: f32 = behaviors
         .iter()
         .zip(&scores)
-        .filter(|(b, _)| b.rank == max_rank)
+        .filter(|(b, s)| eligible(b, **s))
         .map(|(_, s)| *s)
         .sum();
     let mut r = rand01(rng) * total;
     let mut last = 0;
     for (i, (b, s)) in behaviors.iter().zip(&scores).enumerate() {
-        if b.rank != max_rank {
+        if !eligible(b, *s) {
             continue;
         }
         last = i;

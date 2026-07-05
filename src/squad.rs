@@ -8,11 +8,13 @@
 //! DOI 10.1109/TRO.2011.2120810), and it replaces the earlier summed-force separation that let
 //! units cancel to a standstill.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
 
 use crate::audio::Sfx;
+use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
@@ -92,6 +94,12 @@ const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.27);
 /// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
 /// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
 pub const UNIT_SPEED: f32 = 6.0;
+/// Encumbrance: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
+/// movement down. Effective speed = `UNIT_SPEED / (1 + crabs * CRAB_DRAG)`, floored at `MIN_ENCUMBER`
+/// so a heavily-swarmed unit crawls (piranha weight) but is never frozen solid. Diminishing per crab:
+/// 3 ≈ 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×.
+const CRAB_DRAG: f32 = 0.15;
+const MIN_ENCUMBER: f32 = 0.15;
 /// Squad member hit points (drives the floating health bar; units take no damage yet).
 const UNIT_HP: f32 = 100.0;
 /// How fast a unit turns to face its travel direction (per-second slerp rate, clamped per frame).
@@ -320,10 +328,20 @@ fn unit_movement(
         ),
         With<Unit>,
     >,
+    // Crabs clinging to units, for the encumbrance slowdown (a piranha pile bogs a unit down).
+    attached: Query<&CrabAttached>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     if dt <= 0.0 {
         return;
+    }
+
+    // Count crabs latched onto each unit this frame → an encumbrance multiplier per host.
+    let mut crab_load: HashMap<Entity, u32> = HashMap::new();
+    for a in &attached {
+        if let Some(host) = a.host {
+            *crab_load.entry(host).or_default() += 1;
+        }
     }
 
     // Snapshot every unit as an ORCA agent using last frame's velocity (synchronous update: all
@@ -355,9 +373,13 @@ fn unit_movement(
         let goal_xz = dungeon.cell_center(order.field.goal()).xz();
         let goal_dist = (goal_xz - self_pos).length();
 
+        // Encumbrance: crabs clinging to this unit drag its top speed down (never to a dead stop).
+        let crabs = crab_load.get(&entity).copied().unwrap_or(0);
+        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * CRAB_DRAG)).max(MIN_ENCUMBER);
+
         // Preferred velocity: steer toward the flow-field look-ahead point on the cell centerline
-        // (keeps the unit centered in corridors so its body fits through), at full speed.
-        let pref = order.field.steer(&dungeon, pos) * speed.0;
+        // (keeps the unit centered in corridors so its body fits through), at full (encumbered) speed.
+        let pref = order.field.steer(&dungeon, pos) * max_speed;
 
         // ORCA neighbors, plus: is a *settled* unit (no order) sitting just ahead of me toward the
         // goal? If so and I can't progress, I've reached the back of the arrived blob and pack in.
@@ -409,7 +431,7 @@ fn unit_movement(
             avoids: true,
         };
         let new_vel =
-            orca::new_velocity(&me, pref, &neighbors, &walls, ORCA_TIME_HORIZON, dt, speed.0);
+            orca::new_velocity(&me, pref, &neighbors, &walls, ORCA_TIME_HORIZON, dt, max_speed);
         velocity.0 = new_vel;
 
         // Integrate the ORCA velocity against walls (unit↔wall is the resolver's job, not ORCA's).

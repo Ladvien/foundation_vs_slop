@@ -28,23 +28,15 @@ impl FieldId {
     pub const CRAB_DENSITY: FieldId = FieldId(2);
     /// Meat trail — carryable gibs emit it; foraging crabs climb its gradient toward food.
     pub const MEAT: FieldId = FieldId(3);
-    /// Rally beacon — a scout that spotted prey plants a burst here (at the prey's last-seen cell)
-    /// on returning home; the swarm climbs its gradient to mass on the sighting. A decaying
-    /// vectorial-pheromone target signal (Tang, Xu, Yu, Zhang & Zhang, "Dynamic target searching and
-    /// tracking with swarm robots based on stigmergy", Robotics & Autonomous Systems 2019) —
-    /// evaporation is the automatic "call off the attack".
-    pub const RALLY: FieldId = FieldId(4);
+    // NOTE: the rally beacon is NOT a scalar channel — it's a *vectorial* pheromone (see [`RallyField`]
+    // below), which stores a direction toward the moving prey rather than a scalar concentration.
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 5;
+pub const CHANNEL_COUNT: usize = 4;
 
 /// SCENT deposited by a death — a strong, lingering feeding-site marker the swarm and boss home on.
 pub const BLOOD_SCENT: f32 = 4.0;
-
-/// RALLY deposited by a reporting scout — a strong burst that seeds a follow gradient toward the
-/// prey's last-seen cell (mirrors [`BLOOD_SCENT`]).
-pub const RALLY_SIGNAL: f32 = 4.0;
 
 /// Per-channel behaviour, filled from `ai_tuning.ron` at startup.
 #[derive(Clone, Copy)]
@@ -235,4 +227,141 @@ pub fn drain_deposits(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, mut deposit
 pub fn evaporate_diffuse(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, time: Res<Time>) {
     let dt = time.delta_secs();
     stig.evaporate_diffuse(&dungeon, dt);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Vectorial rally pheromone — Tang, Xu, Yu, Zhang & Zhang, "Dynamic target searching and tracking with
+// swarm robots based on stigmergy", Robotics & Autonomous Systems 2019 (DOI 10.1016/j.robot.2019.103251).
+// ---------------------------------------------------------------------------------------------------
+
+/// Per-field tuning for the vectorial rally pheromone (mirrors [`ChannelDef`], but for the vector store).
+#[derive(Clone, Copy)]
+pub struct RallyDef {
+    /// Decay coefficient `c_d` (fraction lost per second). Drives both per-frame evaporation and the
+    /// `(1 - c_d)` term of the accumulation recurrence — evaporation is the automatic "call off the attack".
+    pub decay: f32,
+    /// Accumulation gain `c_a` applied to each deposited intermediate-vector.
+    pub accumulate: f32,
+    /// World-unit radius a single deposit smears over (placement kernel, linear falloff).
+    pub deposit_radius: f32,
+}
+
+impl Default for RallyDef {
+    fn default() -> Self {
+        Self {
+            decay: 0.3,
+            accumulate: 0.5,
+            deposit_radius: 2.0,
+        }
+    }
+}
+
+/// One vectorial-pheromone deposit request (a scout's intermediate-vector `s`, pointing toward the prey).
+pub struct RallyDeposit {
+    pub pos: Vec3,
+    pub vec: Vec2,
+}
+
+/// Decoupling queue for rally writes (mirrors [`StigDeposits`]). Drained by `drain_rally_deposits`.
+#[derive(Resource, Default)]
+pub struct RallyDeposits(pub Vec<RallyDeposit>);
+
+/// The vectorial rally pheromone map (Tang et al. 2019). Each floor cell stores a 2D **direction vector**
+/// — the bearing toward the (moving) prey — not a scalar concentration like the [`Stig`] channels. A
+/// scout that senses prey deposits an intermediate-vector `s` pointing at it; the map accumulates
+/// deposits with decay (`pher = (1 - c_d)·pher + c_a·s`, the paper's `pher_N^m` recurrence) and
+/// evaporates each frame. Crabs read the vector **locally** and steer straight along it, so the swarm
+/// tracks the prey's live motion — and a crab far from any arrow reads ≈0, so it never has its flight
+/// suppressed by a distant beacon (the locality the old global-peak scalar lacked).
+#[derive(Resource)]
+pub struct RallyField {
+    width: usize,
+    height: usize,
+    grid: Vec<Vec2>,
+    decay: f32,
+    accumulate: f32,
+    deposit_radius: f32,
+}
+
+impl RallyField {
+    /// Allocate an empty vector grid sized to the dungeon. `def` comes from tuning.
+    pub fn new(dungeon: &Dungeon, def: RallyDef) -> Self {
+        let cells = dungeon.width * dungeon.height;
+        Self {
+            width: dungeon.width,
+            height: dungeon.height,
+            grid: vec![Vec2::ZERO; cells],
+            decay: def.decay,
+            accumulate: def.accumulate,
+            deposit_radius: def.deposit_radius,
+        }
+    }
+
+    #[inline]
+    fn index(&self, c: IVec2) -> usize {
+        c.y as usize * self.width + c.x as usize
+    }
+
+    #[inline]
+    fn in_grid(&self, c: IVec2) -> bool {
+        c.x >= 0 && c.y >= 0 && (c.x as usize) < self.width && (c.y as usize) < self.height
+    }
+
+    /// Local vectorial read at a world position (query). Off-grid reads as `Vec2::ZERO`. Magnitude ≈ the
+    /// local beacon strength (gate on it); direction ≈ the bearing to the prey (steer along it).
+    pub fn sample(&self, dungeon: &Dungeon, pos: Vec3) -> Vec2 {
+        let c = dungeon.world_to_cell(pos);
+        if self.in_grid(c) {
+            self.grid[self.index(c)]
+        } else {
+            Vec2::ZERO
+        }
+    }
+
+    /// Accumulate a deposited intermediate-vector `s` (Tang's `c_a·s` term), smeared over `deposit_radius`
+    /// with linear falloff. Only floor cells receive value (deposits don't bleed into rock).
+    fn deposit(&mut self, dungeon: &Dungeon, pos: Vec3, s: Vec2) {
+        let radius = self.deposit_radius.max(0.0);
+        let center = dungeon.world_to_cell(pos);
+        let r = radius.ceil() as i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let cell = center + IVec2::new(dx, dy);
+                if !self.in_grid(cell) || !dungeon.is_floor(cell) {
+                    continue;
+                }
+                let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                if dist > radius {
+                    continue;
+                }
+                let falloff = if radius > 0.0 { 1.0 - dist / radius } else { 1.0 };
+                let i = self.index(cell);
+                self.grid[i] += s * (self.accumulate * falloff);
+            }
+        }
+    }
+
+    /// One evaporation step: decay every cell toward zero (the `(1 - c_d)` term / the automatic call-off).
+    fn evaporate(&mut self, dt: f32) {
+        let retain = (1.0 - self.decay * dt).clamp(0.0, 1.0);
+        for v in self.grid.iter_mut() {
+            *v *= retain;
+        }
+    }
+}
+
+/// Drain queued rally deposits into the vector map (placement).
+pub fn drain_rally_deposits(
+    mut rally: ResMut<RallyField>,
+    dungeon: Res<Dungeon>,
+    mut deposits: ResMut<RallyDeposits>,
+) {
+    for d in deposits.0.drain(..) {
+        rally.deposit(&dungeon, d.pos, d.vec);
+    }
+}
+
+/// Evaporate the rally map once per frame.
+pub fn evaporate_rally(mut rally: ResMut<RallyField>, time: Res<Time>) {
+    rally.evaporate(time.delta_secs());
 }

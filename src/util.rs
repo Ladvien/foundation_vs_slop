@@ -1,8 +1,6 @@
 //! Small shared numeric helpers — the project's hand-rolled RNG/hash surface, kept in one place so the
 //! same generators aren't copy-pasted across modules (there is deliberately **no RNG crate**).
 
-use bevy::math::Vec3;
-
 /// Advance a linear congruential generator (Numerical Recipes constants) and return the new state.
 #[inline]
 pub fn next_u32(state: &mut u32) -> u32 {
@@ -18,10 +16,17 @@ pub fn rand01(state: &mut u32) -> f32 {
     (next_u32(state) >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// Stateless deterministic hash of a world position → `[0, 1)` (classic sine hash). Gives each entity
-/// a stable, varied per-spawn value (e.g. a crab's climb/angle bias) without carrying RNG state.
+/// Stateless integer avalanche hash of a `u32` seed → `[0, 1)` (Wang-style mix). Use this for per-spawn
+/// randomization that must NOT be keyed on a spawn *position*: nest-bred crabs all seat on the one
+/// delivery cell, so a position hash would make every sibling identical — an integer spawn counter fed
+/// here gives each newborn an independent draw. Distinct `salt`s decorrelate multiple draws per crab.
 #[inline]
-pub fn hash01(v: Vec3) -> f32 {
-    let n = (v.x * 12.9898 + v.z * 78.233 + v.y * 37.719).sin() * 43758.547;
-    n - n.floor()
+pub fn hash01_u32(seed: u32) -> f32 {
+    let mut h = seed;
+    h = (h ^ 61) ^ (h >> 16);
+    h = h.wrapping_add(h << 3);
+    h ^= h >> 4;
+    h = h.wrapping_mul(0x27d4_eb2d);
+    h ^= h >> 15;
+    (h >> 8) as f32 / (1u32 << 24) as f32
 }

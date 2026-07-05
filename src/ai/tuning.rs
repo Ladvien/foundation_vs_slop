@@ -9,7 +9,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::field::{ChannelDef, CHANNEL_COUNT, FieldId};
+use super::field::{ChannelDef, RallyDef, CHANNEL_COUNT, FieldId};
 
 const TUNING_PATH: &str = "ai_tuning.ron";
 
@@ -37,7 +37,6 @@ pub struct FieldsTuning {
     pub threat: ChannelTuning,
     pub crab_density: ChannelTuning,
     pub meat: ChannelTuning,
-    pub rally: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -48,8 +47,26 @@ impl FieldsTuning {
         defs[FieldId::THREAT.0] = self.threat.into();
         defs[FieldId::CRAB_DENSITY.0] = self.crab_density.into();
         defs[FieldId::MEAT.0] = self.meat.into();
-        defs[FieldId::RALLY.0] = self.rally.into();
         defs
+    }
+}
+
+/// Tuning for the vectorial rally pheromone (mirrors [`RallyDef`]). Not a scalar channel — it has its
+/// own decay/accumulate model (Tang et al. 2019), so it lives outside [`FieldsTuning`].
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct RallyTuning {
+    pub decay: f32,
+    pub accumulate: f32,
+    pub deposit_radius: f32,
+}
+
+impl From<RallyTuning> for RallyDef {
+    fn from(t: RallyTuning) -> Self {
+        RallyDef {
+            decay: t.decay,
+            accumulate: t.accumulate,
+            deposit_radius: t.deposit_radius,
+        }
     }
 }
 
@@ -57,6 +74,7 @@ impl FieldsTuning {
 #[derive(Resource, Clone, Copy, Serialize, Deserialize)]
 pub struct AiTuning {
     pub fields: FieldsTuning,
+    pub rally: RallyTuning,
 }
 
 impl Default for AiTuning {
@@ -85,13 +103,13 @@ impl Default for AiTuning {
                     diffuse: 0.12,
                     deposit_radius: 2.0,
                 },
-                // Rally lingers a few seconds and spreads a follow gradient so the massing swarm
-                // paths onto the scout's reported cell, then fades to auto-call-off the attack.
-                rally: ChannelTuning {
-                    evaporate: 0.3,
-                    diffuse: 0.15,
-                    deposit_radius: 2.0,
-                },
+            },
+            // Rally vectors decay over a few seconds (call-off), accumulate scout deposits, and smear a
+            // couple of cells so the massing swarm reads a smooth bearing toward the prey.
+            rally: RallyTuning {
+                decay: 0.3,
+                accumulate: 0.5,
+                deposit_radius: 2.0,
             },
         }
     }

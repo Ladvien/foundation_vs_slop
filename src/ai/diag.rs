@@ -38,14 +38,13 @@ pub fn log_fields(
     let (th_pos, th) = stig.hotspot(FieldId::THREAT, &dungeon);
     let (cd_pos, cd) = stig.hotspot(FieldId::CRAB_DENSITY, &dungeon);
     let (mt_pos, mt) = stig.hotspot(FieldId::MEAT, &dungeon);
-    let (rl_pos, rl) = stig.hotspot(FieldId::RALLY, &dungeon);
+    // RALLY is a vectorial pheromone read locally per-crab (no scalar global peak), so it isn't logged here.
     info!(
-        "ai-fields: scent={sc:.2}@{:?} threat={th:.2}@{:?} density={cd:.2}@{:?} meat={mt:.2}@{:?} rally={rl:.2}@{:?}",
+        "ai-fields: scent={sc:.2}@{:?} threat={th:.2}@{:?} density={cd:.2}@{:?} meat={mt:.2}@{:?}",
         sc_pos.xz(),
         th_pos.xz(),
         cd_pos.xz(),
-        mt_pos.xz(),
-        rl_pos.xz()
+        mt_pos.xz()
     );
 }
 
@@ -131,7 +130,7 @@ pub fn log_crab_modes(
     let mut seek = 0;
     let mut carry = 0;
     let mut scout = 0;
-    let mut report = 0;
+    let mut mark = 0;
     let mut rally = 0;
     let mut other = 0;
     let mut mean = Vec2::ZERO;
@@ -144,7 +143,7 @@ pub fn log_crab_modes(
             Mode::SeekMeat => seek += 1,
             Mode::Carry => carry += 1,
             Mode::Scout => scout += 1,
-            Mode::Report => report += 1,
+            Mode::Mark => mark += 1,
             Mode::Rally => rally += 1,
             _ => other += 1,
         }
@@ -161,7 +160,7 @@ pub fn log_crab_modes(
     }
     let spread = (var / n).sqrt();
     info!(
-        "ai-crabs: forage={forage} latch={latch} flee={flee} seek={seek} carry={carry} scout={scout} report={report} rally={rally} other={other} spread={spread:.1}"
+        "ai-crabs: forage={forage} latch={latch} flee={flee} seek={seek} carry={carry} scout={scout} mark={mark} rally={rally} other={other} spread={spread:.1}"
     );
 }
 

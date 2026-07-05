@@ -291,8 +291,10 @@ fn spawn_enemies(
                 Health::new(START_HP),
                 crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
                 crate::ai::brain::BrainId::Smiley,
-                crate::ai::brain::ActiveBehavior::new(pos),
-                crate::ai::brain::ThinkTimer::staggered(pos),
+                // Single boss → a stable per-spawn seed from its position bits (the seed just needs to be
+                // deterministic and distinct; only the swarm needs the monotonic `CrabSpawnSeq`).
+                crate::ai::brain::ActiveBehavior::new(pos.x.to_bits() ^ pos.z.to_bits()),
+                crate::ai::brain::ThinkTimer::staggered(pos.x.to_bits() ^ pos.z.to_bits()),
                 EnemyMotion {
                     speed: MIN_SPEED,
                     heading: Vec3::ZERO,

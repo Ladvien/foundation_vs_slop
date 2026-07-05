@@ -20,13 +20,14 @@ use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::health::Health;
 use crate::squad::Unit;
-use crate::util::hash01;
+use crate::util::hash01_u32;
 
 /// A blood frenzy must reach this SCENT strength before the boss paths to it (matches the HuntBlood gate).
 const HUNT_SCENT_MIN: f32 = 1.0;
 
-/// A rally beacon must reach this RALLY strength before the swarm masses on it (gates the Rally
-/// behaviour, mirroring `HUNT_SCENT_MIN`). A fresh `RALLY_SIGNAL` burst clears it; an evaporated one won't.
+/// The local vectorial-rally magnitude a crab must be standing in before it masses on the sighting (gates
+/// the Rally behaviour, and gates Flee off, mirroring `HUNT_SCENT_MIN`). A cell a scout is actively
+/// marking clears it; an evaporated / distant cell won't, so only crabs near the sighting are recruited.
 const RALLY_MIN: f32 = 0.5;
 
 /// Seconds between decisions for one agent (steering still runs every frame). RON-tunable later.
@@ -67,12 +68,15 @@ pub struct ActiveBehavior {
 }
 
 impl ActiveBehavior {
-    /// Seed the per-agent decision RNG + stagger the first think from a stable per-spawn hash.
-    pub fn new(pos: Vec3) -> Self {
+    /// Seed the per-agent decision RNG from the unique spawn seed (NOT the spawn position — bred crabs
+    /// share a cell, so a position hash would make every sibling decide identically). `| 1` keeps the
+    /// LCG state odd/non-zero.
+    pub fn new(rand_seed: u32) -> Self {
         Self {
             mode: Mode::Wander,
             target: None,
-            rng: (hash01(pos) * 4_000_000.0) as u32 | 1,
+            rng: (hash01_u32(rand_seed.wrapping_mul(0x9E37_79B1).wrapping_add(7)) * 4_000_000.0) as u32
+                | 1,
         }
     }
 }
@@ -82,8 +86,10 @@ impl ActiveBehavior {
 pub struct ThinkTimer(pub f32);
 
 impl ThinkTimer {
-    pub fn staggered(pos: Vec3) -> Self {
-        ThinkTimer(hash01(pos + Vec3::splat(3.0)) * THINK_INTERVAL)
+    /// Stagger the first think across a fresh cluster so siblings don't all think on the same frame —
+    /// derived from the spawn seed (a distinct salt from the decision RNG).
+    pub fn staggered(rand_seed: u32) -> Self {
+        ThinkTimer(hash01_u32(rand_seed.wrapping_mul(0x9E37_79B1).wrapping_add(9)) * THINK_INTERVAL)
     }
 }
 
@@ -93,16 +99,14 @@ impl ThinkTimer {
 pub struct FieldHotspots {
     pub scent: (Vec3, f32),
     pub meat: (Vec3, f32),
-    /// Peak of the RALLY field — the scout-reported sighting the swarm masses on.
-    pub rally: (Vec3, f32),
 }
 
-/// Recompute the field hotspots once per frame (runs in `AiSet::FieldUpdate`).
+/// Recompute the field hotspots once per frame (runs in `AiSet::FieldUpdate`). RALLY has no global peak
+/// — it is a vectorial pheromone read locally per-crab (see [`crate::ai::field::RallyField`]).
 pub fn update_hotspots(mut hot: ResMut<FieldHotspots>, stig: Option<Res<Stig>>, dungeon: Res<Dungeon>) {
     if let Some(stig) = stig {
         hot.scent = stig.hotspot(FieldId::SCENT, &dungeon);
         hot.meat = stig.hotspot(FieldId::MEAT, &dungeon);
-        hot.rally = stig.hotspot(FieldId::RALLY, &dungeon);
     }
 }
 
@@ -138,6 +142,7 @@ pub fn rebuild_scent_nav(mut nav: ResMut<ScentNav>, hot: Res<FieldHotspots>, dun
 pub fn think(
     time: Res<Time>,
     stig: Res<Stig>,
+    rally: Res<crate::ai::field::RallyField>,
     dungeon: Res<Dungeon>,
     hotspots: Res<FieldHotspots>,
     brains: Res<AiBrains>,
@@ -223,7 +228,9 @@ pub fn think(
             } else {
                 0.0
             },
-            rally_val: hotspots.rally.1,
+            // LOCAL magnitude of the vectorial rally pheromone at this crab's cell (not a global peak):
+            // only crabs actually near a scout-marked sighting rally / have their flight suppressed.
+            rally_val: rally.sample(&dungeon, pos).length(),
         };
 
         let brain = match brain_id {
@@ -242,9 +249,10 @@ pub fn think(
             // The Carry destination (the nest) is resolved per-crab by `carry_gibs` from the lifted
             // gib, not from the global hotspot — decide() only picks the mode here.
             TargetKind::Nest => None,
-            // A reporting scout aims at the home nest it recorded when it spotted the prey.
-            TargetKind::Home => scout.and_then(|s| s.report_home()),
-            TargetKind::RallyHotspot => Some(hotspots.rally.0),
+            // A marking scout aims at the live prey it is tracking (to keep laying the rally pheromone
+            // toward its current position). Rally movement itself reads the local vector in `crab_rally`,
+            // so the Rally behaviour needs no aim point here.
+            TargetKind::TrackedPrey => scout.and_then(|s| s.tracked_prey()),
         };
     }
 }
@@ -377,19 +385,21 @@ fn crab_brain() -> Brain {
                     },
                 }],
             },
-            // Recruited surge: a scout planted a RALLY beacon at a prey sighting. Rank 1 sits just above
-            // plain Forage, so it redirects a far/idle crab toward the reported sighting (a "warning-cry"
-            // recruitment; Heylighen, "Stigmergy as a universal coordination mechanism", Cognitive
-            // Systems Research 2016) — but it yields to Latch/SeekMeat/Carry/Flee, so a crab that reaches
-            // a unit bites (and pounces) instead of milling on the beacon cell. Self-limiting: RALLY
+            // Recruited surge: a scout is marking a prey sighting with the vectorial rally pheromone. Rank
+            // 1 sits just above plain Forage, so it redirects a nearby crab up the rally vector toward the
+            // sighting (a "warning-cry" recruitment; Heylighen, "Stigmergy as a universal coordination
+            // mechanism", Cognitive Systems Research 2016) — but it yields to Latch/SeekMeat/Carry/Flee, so
+            // a crab that reaches a unit bites (and pounces) instead of milling. Gated on the LOCAL rally
+            // magnitude, so only crabs actually near a marked sighting rally; steering reads the local
+            // vector in `crab_rally`, so no aim point is needed here. Self-limiting: the pheromone
             // evaporates, the Step falls below MIN_SCORE, and the crab drops back to plain foraging.
             Behavior {
                 mode: Mode::Rally,
                 rank: 1,
-                target: TargetKind::RallyHotspot,
+                target: TargetKind::None,
                 considerations: vec![Consideration {
-                    input: Input::Perc(Fact::RallyHotspot),
-                    // Gate on a real beacon — a faded/absent rally must NOT win over flee/forage.
+                    input: Input::Perc(Fact::RallyHere),
+                    // Gate on a real local beacon — a faded/absent rally must NOT win over flee/forage.
                     curve: Curve::Step {
                         threshold: RALLY_MIN,
                         below: 0.0,
@@ -418,10 +428,11 @@ fn crab_brain() -> Brain {
                         },
                     },
                     Consideration {
-                        // Rally live → 0: a recruited swarm presses through gunfire to reach the
-                        // sighting (the "commit" the scout report triggers), mirroring the berserk gate.
-                        // As the beacon evaporates below RALLY_MIN this returns to 1 and fear resumes.
-                        input: Input::Perc(Fact::RallyHotspot),
+                        // Local rally live → 0: a recruited crab standing in a marked sighting presses
+                        // through gunfire to reach it, mirroring the berserk gate. Because this reads the
+                        // LOCAL magnitude, a crab fleeing a firefight far from any beacon still flees (the
+                        // old global-peak read suppressed flight mapwide). Fades below RALLY_MIN → fear resumes.
+                        input: Input::Perc(Fact::RallyHere),
                         curve: Curve::Step {
                             threshold: RALLY_MIN,
                             below: 1.0,
@@ -435,11 +446,12 @@ fn crab_brain() -> Brain {
 }
 
 /// The scout brain — the swarm's recon arm (~20% of crabs). A tiny data-literal repertoire that models
-/// ant scout-recruitment foraging (Talamali, Saha, Marshall & Reina, "When less is more: robot swarms
-/// adapt better to changes with constrained communication", Science Robotics 2021): **roam** far and
-/// fast hunting for prey; on a sighting, **report** back to the nest to raise the alarm (the actual
-/// RALLY deposit is planted by `crab::scout_sense_and_report` on arrival); still **flee** gunfire.
-/// Scouts don't latch/forage/carry — the 80% assault swarm (see `crab_brain`) does the killing.
+/// ant scout-recruitment foraging by minimalist agents (Talamali, Bose, Haire, Xu, Marshall & Reina,
+/// "Sophisticated collective foraging with minimalist agents: a swarm robotics test", Swarm Intelligence
+/// 2019, DOI 10.1007/s11721-019-00176-9): **roam** far and fast hunting for prey; on a sighting, **mark** it —
+/// track its live position and lay the vectorial rally pheromone toward it (Tang et al. 2019, deposited by
+/// `crab::scout_mark_prey`) so the assault swarm converges; still **flee** gunfire. Scouts don't
+/// latch/forage/carry — the 80% assault swarm (see `crab_brain`) does the killing.
 fn scout_brain() -> Brain {
     Brain {
         behaviors: vec![
@@ -454,12 +466,12 @@ fn scout_brain() -> Brain {
                     curve: Curve::Linear { m: 0.0, b: 0.15 },
                 }],
             },
-            // Carry the sighting home: latches on `prey_spotted` (set while the scout holds a report),
-            // outranks roam so it commits to the return trip until it arrives and plants the beacon.
+            // Mark the sighting: latches on `prey_spotted`, outranks roam so the scout stays with the prey
+            // (approaching its tracked position) and keeps the rally pheromone fresh toward its live cell.
             Behavior {
-                mode: Mode::Report,
+                mode: Mode::Mark,
                 rank: 2,
-                target: TargetKind::Home,
+                target: TargetKind::TrackedPrey,
                 considerations: vec![Consideration {
                     input: Input::Perc(Fact::PreySpotted),
                     curve: Curve::Step {

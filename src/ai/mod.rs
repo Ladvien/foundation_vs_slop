@@ -25,7 +25,7 @@ pub mod utility;
 
 use brain::{FieldHotspots, ScentNav};
 use drives::{DriveDef, DriveId, DriveRegistry, DriveRule};
-use field::{FieldId, Stig, StigDeposits};
+use field::{FieldId, RallyDeposits, RallyField, Stig, StigDeposits};
 use tuning::AiTuning;
 
 /// Ordering of the AI pipeline within `Update`, so downstream creature decision systems (in other
@@ -48,6 +48,7 @@ impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AiTuning>()
             .init_resource::<StigDeposits>()
+            .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()
             .init_resource::<ScentNav>()
             .configure_sets(
@@ -69,7 +70,9 @@ impl Plugin for AiPlugin {
                 Update,
                 (
                     field::drain_deposits.in_set(AiSet::Deposits),
+                    field::drain_rally_deposits.in_set(AiSet::Deposits),
                     field::evaporate_diffuse.in_set(AiSet::FieldUpdate),
+                    field::evaporate_rally.in_set(AiSet::FieldUpdate),
                     brain::update_hotspots.in_set(AiSet::FieldUpdate),
                     brain::rebuild_scent_nav
                         .in_set(AiSet::FieldUpdate)
@@ -86,9 +89,11 @@ impl Plugin for AiPlugin {
     }
 }
 
-/// Allocate the stigmergy grids sized to the dungeon, with per-channel behaviour from tuning.
+/// Allocate the stigmergy grids sized to the dungeon, with per-channel behaviour from tuning, plus the
+/// vectorial rally pheromone map (Tang et al. 2019) with its own decay/accumulate tuning.
 fn init_fields(mut commands: Commands, dungeon: Res<Dungeon>, tuning: Res<AiTuning>) {
     commands.insert_resource(Stig::new(&dungeon, tuning.fields.channel_defs()));
+    commands.insert_resource(RallyField::new(&dungeon, tuning.rally.into()));
 }
 
 /// Build the active drive set. **This is the drive extension point** — add a `DriveDef` literal here

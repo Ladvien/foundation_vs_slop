@@ -194,6 +194,9 @@ fn update_lasers(
     mut sfx: MessageWriter<Sfx>,
     mut ray_cast: MeshRayCast,
     enemy_ids: Query<Entity, With<Hostile>>,
+    // Nests are `Hostile` (siege-killable) but are stone structures, not flesh — used to suppress the
+    // blood/squelch/THREAT reactions on a nest hit while still letting the bolt damage it.
+    nests: Query<Entity, With<crate::nest::Nest>>,
     mut healths: Query<&mut Health, With<Hostile>>,
     attached: Query<&CrabAttached>,
     mut unit_healths: Query<&mut Health, (With<Unit>, Without<Hostile>)>,
@@ -227,8 +230,12 @@ fn update_lasers(
                 if let Ok(mut hp) = healths.get_mut(*hit_entity) {
                     hp.current -= LASER_DAMAGE;
                 }
+                // A nest is a stone structure, not flesh: it takes the damage above but must NOT emit the
+                // blood spray, fleshy squelch, or a MEAT/THREAT feeding scent. The flesh reactions below
+                // are gated on this so only a real creature bleeds.
+                let is_nest = nests.contains(*hit_entity);
                 // Friendly fire: shooting a crab that's latched onto a squad member risks putting the
-                // round through it into your own guy (rule 4). Rolls per hit.
+                // round through it into your own guy (rule 4). Rolls per hit. (A nest has no host.)
                 if let Ok(att) = attached.get(*hit_entity)
                     && let Some(host) = att.host
                     && rand01(&mut rng) < FRIENDLY_FIRE_CHANCE
@@ -236,22 +243,24 @@ fn update_lasers(
                 {
                     host_hp.current -= FRIENDLY_FIRE_DAMAGE;
                 }
-                // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the
-                // spark burst via `ImpactQueue` below — one job per queue, see `gore`).
-                gore.0.push(GoreEvent {
-                    pos: hit.point,
-                    kind: GoreKind::FleshHit,
-                    tint: Color::srgb(0.7, 0.05, 0.05),
-                    gib: None,
-                    intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
-                });
-                sfx.write(Sfx::ImpactFlesh);
-                // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
-                deposits.0.push(Deposit {
-                    pos: hit.point,
-                    field: FieldId::THREAT,
-                    amount: THREAT_PER_SHOT,
-                });
+                if !is_nest {
+                    // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the
+                    // spark burst via `ImpactQueue` below — one job per queue, see `gore`).
+                    gore.0.push(GoreEvent {
+                        pos: hit.point,
+                        kind: GoreKind::FleshHit,
+                        tint: Color::srgb(0.7, 0.05, 0.05),
+                        gib: None,
+                        intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
+                    });
+                    sfx.write(Sfx::ImpactFlesh);
+                    // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
+                    deposits.0.push(Deposit {
+                        pos: hit.point,
+                        field: FieldId::THREAT,
+                        amount: THREAT_PER_SHOT,
+                    });
+                }
                 commands.entity(entity).despawn();
                 continue;
             }
