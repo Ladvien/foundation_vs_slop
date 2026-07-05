@@ -191,7 +191,38 @@ struct BloodPool;
 /// linear + angular velocity, that tumbles, bounces off the floor/walls/other chunks, and settles.
 /// All chunks are registered in [`GibRing`] so the total count stays bounded.
 #[derive(Component)]
-struct GibChunk;
+pub struct GibChunk;
+
+/// A meat chunk the crabs can scavenge and haul to their nest. `weight = density × mesh_volume`; a crab
+/// has a finite carry capacity, so a heavy chunk needs several crabs (Σ capacities ≥ weight) to lift it
+/// (cooperative transport). The carry state machine (see `crab::carry_gibs`) owns `carriers`/`phase`.
+#[derive(Component)]
+pub struct Carryable {
+    pub weight: f32,
+    /// Crabs committed to carrying this chunk (may exceed the minimum once a crew completes).
+    pub carriers: Vec<Entity>,
+    pub phase: CarryPhase,
+    /// The nest chosen as the destination once the chunk is lifted.
+    pub nest: Option<Entity>,
+    /// Seconds spent in `Crewing` without managing to lift — releases a stuck crew after a timeout so
+    /// its crabs disband and forage elsewhere (prevents a too-heavy chunk deadlocking its haulers).
+    pub crew_timer: f32,
+}
+
+/// Lifecycle of a carryable chunk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CarryPhase {
+    /// On the ground, no committed crabs.
+    Resting,
+    /// Crabs are gathering but the crew can't lift it yet (Σ capacity < weight).
+    Crewing,
+    /// Lifted and moving to the nest (kinematic, gib-led).
+    Hauling,
+}
+
+/// Density used to turn a chunk's mesh volume into a carry weight (`weight = density × volume`). Tuned
+/// against `crab::CRAB_CARRY_CAPACITY` so small chunks go solo and big ones need a crew.
+const MEAT_DENSITY: f32 = 900.0;
 
 /// Shared meshes/materials for every gore entity.
 #[derive(Resource)]
@@ -227,6 +258,13 @@ struct Droplet {
     despawn_at: f32,
 }
 
+/// Precomputed unit volumes of the meat-chunk meshes (parallel to `GoreAssets.meat_meshes`), so a
+/// chunk's carry weight can be computed at spawn without re-reading the mesh. Empty until the GLB loads.
+#[derive(Resource, Default)]
+struct MeatVolumes {
+    unit: Vec<f32>,
+}
+
 /// FIFO of live blood-pool entities so the oldest can be recycled once the cap is exceeded.
 #[derive(Resource, Default)]
 struct PoolRing(VecDeque<Entity>);
@@ -234,7 +272,18 @@ struct PoolRing(VecDeque<Entity>);
 /// FIFO of live physics gib chunks (fragments, guns, meat) so the oldest can be recycled once the
 /// total exceeds the cap — bounds how many rigid bodies the solver ever tracks.
 #[derive(Resource, Default)]
-struct GibRing(VecDeque<Entity>);
+pub struct GibRing(pub VecDeque<Entity>);
+
+impl GibRing {
+    /// The ONE path that removes a live gib early (a crab carrying it home to the nest). It drops the
+    /// id from the ring *first*, so `cap_gib_chunks` — which despawns ring entries unconditionally —
+    /// can never double-despawn a consumed chunk. No other code may despawn a gib. (Used by `carry_gibs`
+    /// when a crew delivers a chunk to the nest.)
+    pub fn consume(&mut self, commands: &mut Commands, e: Entity) {
+        self.0.retain(|&x| x != e);
+        commands.entity(e).despawn();
+    }
+}
 
 /// Human-facing, serializable knobs saved to / loaded from `gore.ron`.
 #[derive(Resource, Serialize, Deserialize, Clone)]
@@ -384,11 +433,13 @@ impl Plugin for GorePlugin {
             .init_resource::<GoreQueue>()
             .init_resource::<PoolRing>()
             .init_resource::<GibRing>()
+            .init_resource::<MeatVolumes>()
             .insert_resource(GoreSettings::default())
             .add_systems(Startup, (setup_gore_assets, load_settings_at_startup))
             .add_systems(
                 Update,
                 (
+                    compute_meat_volumes,
                     drain_gore,
                     update_droplets,
                     cap_blood_pools,
@@ -397,6 +448,32 @@ impl Plugin for GorePlugin {
                 ),
             );
     }
+}
+
+/// Once the meat-chunk GLB meshes have loaded, compute each one's unit volume (signed-tetrahedron sum)
+/// so meat chunks can be weighed at spawn. Runs each frame until filled, then is a cheap no-op.
+fn compute_meat_volumes(
+    assets: Option<Res<GoreAssets>>,
+    meshes: Res<Assets<Mesh>>,
+    mut volumes: ResMut<MeatVolumes>,
+) {
+    let Some(assets) = assets else { return };
+    if !volumes.unit.is_empty() || assets.meat_meshes.is_empty() {
+        return;
+    }
+    // Only fill once every mesh has resolved (they load a few frames after startup, before any death).
+    let mut unit = Vec::with_capacity(assets.meat_meshes.len());
+    for handle in &assets.meat_meshes {
+        let Some(mesh) = meshes.get(handle) else { return };
+        let Some(v) = crate::autogib::mesh_signed_volume(mesh) else {
+            return;
+        };
+        unit.push(v);
+    }
+    if crate::ai::diag::AI_DIAG {
+        info!("gore: meat unit volumes = {unit:?}");
+    }
+    volumes.unit = unit;
 }
 
 fn setup_gore_assets(
@@ -469,11 +546,12 @@ fn drain_gore(
     dungeon: Res<Dungeon>,
     real: Res<Time<Real>>,
     // Grouped into one tuple param to stay under Bevy's 16-param-per-system cap.
-    (mut trauma, mut hitstop, mut blood_lens, cache): (
+    (mut trauma, mut hitstop, mut blood_lens, cache, volumes): (
         ResMut<Trauma>,
         ResMut<Hitstop>,
         ResMut<BloodLens>,
         Res<AutogibCache>,
+        Res<MeatVolumes>,
     ),
     camera: Single<&GlobalTransform, With<Camera3d>>,
     mut seed: Local<u32>,
@@ -584,7 +662,7 @@ fn drain_gore(
 
         // --- Meat chunks + wall splatter (any death): permanent viscera + blood on nearby walls.
         if let GoreKind::UnitCrunch | GoreKind::EnemySplat = ev.kind {
-            spawn_meat_chunks(&mut commands, &assets, &settings, &mut gib_ring, ev.pos, *seed);
+            spawn_meat_chunks(&mut commands, &assets, &settings, &mut gib_ring, &volumes, ev.pos, *seed);
             spawn_wall_splatters(
                 &mut commands,
                 &assets,
@@ -742,6 +820,7 @@ fn spawn_meat_chunks(
     assets: &GoreAssets,
     settings: &GoreSettings,
     gib_ring: &mut GibRing,
+    volumes: &MeatVolumes,
     origin: Vec3,
     seed: u32,
 ) {
@@ -767,13 +846,33 @@ fn spawn_meat_chunks(
         let half = 0.5 * settings.meat_size * (0.6 + 0.8 * h5);
 
         // Pick one of the meat-chunk shapes (guard the index in case the list is ever empty).
+        let idx = if assets.meat_meshes.is_empty() {
+            0
+        } else {
+            (base as usize) % assets.meat_meshes.len()
+        };
         let mesh = if assets.meat_meshes.is_empty() {
             assets.gib.clone()
         } else {
-            assets.meat_meshes[(base as usize) % assets.meat_meshes.len()].clone()
+            assets.meat_meshes[idx].clone()
         };
+        // Carry weight = density × world mesh volume. The chunk mesh is the unit mesh scaled by 2*half,
+        // so volume = unit_volume × (2*half)³. Falls back to the box volume until the GLB volumes load.
+        let side = (2.0 * half).powi(3);
+        let unit_vol = volumes.unit.get(idx).copied().unwrap_or(1.0);
+        let weight = MEAT_DENSITY * unit_vol * side;
+        if crate::ai::diag::AI_DIAG {
+            info!("gore: meat chunk idx={idx} half={half:.3} weight={weight:.2}");
+        }
         let pos = origin + Vec3::Y * 0.2;
         let id = spawn_gib_body(commands, gib_ring, settings, pos, Vec3::splat(half), velocity, spin);
+        commands.entity(id).insert(Carryable {
+            weight,
+            carriers: Vec::new(),
+            phase: CarryPhase::Resting,
+            nest: None,
+            crew_timer: 0.0,
+        });
         commands.entity(id).with_children(|parent| {
             parent.spawn((
                 Mesh3d(mesh),

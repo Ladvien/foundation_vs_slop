@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use avian3d::prelude::{AngularVelocity, LinearVelocity, RigidBody};
 use bevy::prelude::*;
 
 use crate::audio::Sfx;
@@ -33,6 +34,7 @@ use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::{Health, NoHealthBar};
 use crate::squad::Unit;
 use crate::surface_nav::{SurfaceField, SurfaceGraph};
+use crate::util::hash01;
 
 /// Total crabs across the level, split into `CRAB_CLUSTERS` nests in far rooms.
 const CRAB_COUNT: usize = 40;
@@ -47,12 +49,12 @@ const CRAB_CLUSTER_SEP: f32 = 5.0;
 /// Weak individually: 1–2 laser hits (see `laser::LASER_DAMAGE`).
 const CRAB_HP: f32 = 25.0;
 /// Base bite DPS, scaled up **super-linearly** by how many crabs pile on one unit (see
-/// `crab_contact_damage`): total = `CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`. One crab barely
-/// scratches (~17 s) but a swarm becomes a feeding frenzy that shreds a unit in a blink.
-const CRAB_CONTACT_DPS: f32 = 6.0;
-/// Growth curve for stacked bites — >1 makes a pile hurt disproportionately more than its members
-/// would linearly (5 crabs ≈ 78 DPS, 10 ≈ 240 DPS).
-const DAMAGE_EXPONENT: f32 = 1.6;
+/// `crab_contact_damage`): total = `CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`. One crab is a nuisance
+/// (~3 DPS, ~33 s to kill), but a pile becomes a feeding frenzy — the more crabs, the faster it climbs.
+const CRAB_CONTACT_DPS: f32 = 3.0;
+/// Growth curve for stacked bites — >1 makes a pile hurt disproportionately more than linear stacking
+/// (≈33 DPS at 5 crabs, ≈95 at 10, ≈270 at 20). Tune this to taste.
+const DAMAGE_EXPONENT: f32 = 1.5;
 /// Planar bite margin beyond the unit's body radius — a crab this close (in XZ) to a unit is feeding.
 const CRAB_CONTACT_RADIUS: f32 = 0.2;
 
@@ -77,9 +79,6 @@ const CRAB_COLLIDER_R: f32 = 0.2;
 const CRAB_SEP_RADIUS: f32 = 0.24;
 const CRAB_SEP_STRENGTH: f32 = 6.0;
 
-/// Piranha latch: within this planar distance of a unit a crab leaves the floor/wall field and climbs
-/// onto the unit itself to feed.
-const LATCH_RANGE: f32 = 1.1;
 /// The unit's body approximated as a vertical cylinder the crabs cling to (radius, climbable height).
 const UNIT_BODY_RADIUS: f32 = 0.33;
 const UNIT_BODY_HEIGHT: f32 = 1.0;
@@ -142,6 +141,15 @@ pub struct CrabAttached {
     pub host: Option<Entity>,
 }
 
+/// A crab's foraging/carrying state: how much it can lift, the specific gib it's committed to (a
+/// `Vec3`-only `ActiveBehavior.target` can't hold an entity), and whether its gib is currently lifted.
+#[derive(Component)]
+pub struct CrabCarry {
+    pub capacity: f32,
+    pub target: Option<Entity>,
+    pub hauling: bool,
+}
+
 /// Animation state, chosen from movement/contact each frame.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum CrabState {
@@ -186,11 +194,29 @@ impl Plugin for CrabPlugin {
                 Update,
                 (
                     rebuild_crab_field,
-                    crab_locomotion.after(rebuild_crab_field),
+                    // Enlist foraging crabs onto specific gibs before locomotion reads their targets.
+                    assign_meat_targets
+                        .after(crate::ai::AiSet::Think)
+                        .before(crab_locomotion),
+                    // A fleeing crab drops its load before the carry machine re-evaluates the crew.
+                    release_on_flee
+                        .after(crate::ai::AiSet::Think)
+                        .before(carry_gibs),
+                    // Move after the brain has chosen this frame's mode (see `crate::ai`).
+                    crab_locomotion
+                        .after(rebuild_crab_field)
+                        .after(crate::ai::AiSet::Think),
+                    // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
+                    carry_gibs
+                        .after(crab_locomotion)
+                        .after(assign_meat_targets),
                     attach_crab_animation,
                     drive_crab_animation,
                     crab_contact_damage,
                     crab_despawn_dead,
+                    deposit_crab_density,
+                    deposit_meat_scent,
+                    nest_reproduce,
                 ),
             );
     }
@@ -236,9 +262,16 @@ fn spawn_crabs(
     graph: Res<SurfaceGraph>,
     assets: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut nest_mats: ResMut<Assets<crate::nest::NestMaterial>>,
 ) {
     let collider = meshes.add(Sphere::new(CRAB_COLLIDER_R));
     let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(CRAB_GLB));
+    let dome = meshes.add(Sphere::new(1.0)); // shared unit sphere → floor-buried dome per nest
+    // Keep the shared handles so the reproduction system can birth new crabs at runtime.
+    commands.insert_resource(CrabAssets {
+        collider: collider.clone(),
+        scene: scene.clone(),
+    });
 
     // Greedily pick far, spread-apart nest seeds (deterministic, like `enemy::spawn_enemies`).
     let mut seeds: Vec<IVec2> = Vec::new();
@@ -266,6 +299,16 @@ fn spawn_crabs(
     if seeds.is_empty() {
         warn!("crab: no floor cell far enough from spawn to place a nest");
         return;
+    }
+
+    // A dimensional nest portal at each cluster seed — the crabs' home + meat-delivery + birth anchor.
+    for &seed in &seeds {
+        crate::nest::spawn_nest(
+            &mut commands,
+            &mut nest_mats,
+            dome.clone(),
+            dungeon.cell_center(seed),
+        );
     }
 
     let per_cluster = CRAB_COUNT.div_ceil(seeds.len());
@@ -333,7 +376,16 @@ fn spawn_crab_on_patch(
             Hostile,
             Health::new(CRAB_HP),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)
+            crate::ai::drives::Drives::new(), // needs the utility brain weighs (hunger/fear/…)
+            crate::ai::brain::BrainId::Crab,
+            crate::ai::brain::ActiveBehavior::new(pos),
+            crate::ai::brain::ThinkTimer::staggered(pos),
             CrabAttached { host: None },
+            CrabCarry {
+                capacity: CRAB_CARRY_CAPACITY * (0.8 + 0.4 * hash01(pos)),
+                target: None,
+                hauling: false,
+            },
             CrabMotion {
                 patch,
                 pos,
@@ -405,13 +457,18 @@ fn crab_locomotion(
     graph: Option<Res<SurfaceGraph>>,
     crab_field: Res<CrabField>,
     dungeon: Res<Dungeon>,
+    stig: Res<crate::ai::field::Stig>,
     units: Query<(Entity, &Transform), (With<Unit>, Without<Crab>)>,
+    // Gib transforms, for a `SeekMeat`/`Carry` crab to steer to the specific chunk it's committed to.
+    gibs: Query<&Transform, (With<crate::gore::GibChunk>, Without<Crab>, Without<Unit>)>,
     mut crabs: Query<
         (
             &mut CrabMotion,
             &mut CrabState,
             &mut CrabAttached,
             &mut Transform,
+            &crate::ai::brain::ActiveBehavior,
+            Option<&CrabCarry>,
         ),
         With<Crab>,
     >,
@@ -433,13 +490,13 @@ fn crab_locomotion(
 
     // Spatial hash of crab positions (3D) keyed by floor cell, for O(n·k) separation.
     let mut hash: HashMap<IVec2, Vec<Vec3>> = HashMap::new();
-    for (motion, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
     }
 
-    for (mut motion, mut state, mut attached, mut transform) in &mut crabs {
+    for (mut motion, mut state, mut attached, mut transform, active, carry) in &mut crabs {
         // Reynolds separation: raw 3D push away from nearby crabs (bounding-box spacing). Self is
         // skipped by the `d > eps` test; the per-cell hash keeps this O(n·k).
         let cell = dungeon.world_to_cell(motion.pos);
@@ -458,8 +515,8 @@ fn crab_locomotion(
             }
         }
 
-        // Nearest unit on the ground plane.
-        let (ndist, nunit) = unit_data.iter().fold((f32::MAX, None), |(bd, bu), &(e, up, fwd)| {
+        // Nearest unit on the ground plane (the brain decides *whether* to latch; this is *which* unit).
+        let (_ndist, nunit) = unit_data.iter().fold((f32::MAX, None), |(bd, bu), &(e, up, fwd)| {
             let d = (up.xz() - motion.pos.xz()).length();
             if d < bd {
                 (d, Some((e, up, fwd)))
@@ -469,9 +526,23 @@ fn crab_locomotion(
         });
         let t = (NORMAL_EASE * dt).min(1.0);
 
-        let want = match nunit {
+        // The brain (see `crate::ai`) chose the mode; the surface/piranha *mechanics* below are
+        // unchanged — Latch runs the piranha block, Flee is the new panic, everything else forages.
+        let latching = matches!(active.mode, crate::ai::utility::Mode::Latch);
+        let fleeing = matches!(active.mode, crate::ai::utility::Mode::Flee);
+        // SeekMeat and Carry both steer to the crab's committed gib (Carry keeps formation while
+        // `carry_gibs` drives the actual haul). The specific chunk lives in `CrabCarry.target`.
+        let seeking = matches!(
+            active.mode,
+            crate::ai::utility::Mode::SeekMeat | crate::ai::utility::Mode::Carry
+        );
+        let gib_pos = carry
+            .and_then(|c| c.target)
+            .and_then(|e| gibs.get(e).ok())
+            .map(|t| t.translation);
+        let want = if latching && let Some((host, u, fwd)) = nunit {
             // --- PIRANHA MODE: climb onto the unit and cover its body, biting from a free slot. ---
-            Some((host, u, fwd)) if ndist < LATCH_RANGE => {
+            {
                 // On first latching, claim a body-relative slot: fanned across the unit's REAR (where
                 // the host's own forward-firing gun can't reach), spread by this crab's `angle_bias`.
                 // Held thereafter, so the crab clings to that spot and rides along as the host walks.
@@ -510,8 +581,19 @@ fn crab_locomotion(
                     CrabState::Walk
                 }
             }
+        } else if fleeing {
+            // --- FLEE: panic away from the THREAT gradient (the frenzy→scatter payoff). ---
+            motion.latched = false;
+            attached.host = None;
+            crab_flee(&mut motion, &stig, &dungeon, &graph, sep, dt, t)
+        } else if seeking {
+            // --- SEEK MEAT: steer to the committed gib, or climb the MEAT gradient toward a pile. ---
+            motion.latched = false;
+            attached.host = None;
+            crab_seek_meat(&mut motion, &stig, &dungeon, &graph, gib_pos, sep, dt, t)
+        } else {
             // --- SURFACE MODE: shared flow-field pursuit across floor + walls. ---
-            _ => {
+            {
                 motion.latched = false;
                 attached.host = None;
                 let p = graph.patch(motion.patch);
@@ -559,12 +641,6 @@ fn crab_locomotion(
     }
 }
 
-/// Cheap deterministic hash of a position to `[0, 1)` (classic sine hash) — gives each crab a stable,
-/// varied preferred climb height so a swarm spreads over a unit's body instead of stacking at one spot.
-fn hash01(v: Vec3) -> f32 {
-    let n = (v.x * 12.9898 + v.z * 78.233 + v.y * 37.719).sin() * 43758.547;
-    n - n.floor()
-}
 
 /// Wire the crab's asynchronously-spawned `AnimationPlayer` to the shared graph. Skips players that
 /// don't belong to a crab (e.g. squad figurines) and tolerates the player not existing yet.
@@ -652,6 +728,7 @@ fn crab_despawn_dead(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
     crabs: Query<(Entity, &Health, &Transform), With<Crab>>,
 ) {
     for (entity, hp, tf) in &crabs {
@@ -665,8 +742,498 @@ fn crab_despawn_dead(
                 // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
                 intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
             });
+            // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
+            deposits.0.push(crate::ai::field::Deposit {
+                pos: tf.translation,
+                field: crate::ai::field::FieldId::SCENT,
+                amount: crate::ai::field::BLOOD_SCENT,
+            });
             sfx.write(Sfx::EnemyDeath);
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Crabs flee a little faster than they forage — panic overrides the leisurely scuttle.
+const FLEE_SPEED_MUL: f32 = 1.3;
+
+/// Reproduction (positive feedback) + crowding cap. New crabs are born at a nest, paid for out of the
+/// meat its crews have hauled in — never if the nest cell is already crowded or the global cap is hit.
+const CRAB_COUNT_MAX: usize = 90;
+/// Delivered meat (hoard units) consumed to birth one crab at a nest — the forage→carry→breed payoff.
+/// Sized against measured delivery (chunks weigh ~0.1–1.5), so a nest births a crab every few hauls.
+const MEAT_PER_CRAB: f32 = 3.0;
+const CROWD_CAP: f32 = 5.0; // local CRAB_DENSITY above this suppresses breeding (territorial)
+/// Per-second density each crab lays into the CRAB_DENSITY field (≈ evaporation rate, so the field's
+/// value at a cell tracks the local crab count).
+const DENSITY_RATE: f32 = 0.4;
+/// Per-second MEAT a gib lays into the field (≈ evaporation, so the field tracks current meat presence).
+const MEAT_RATE: f32 = 0.5;
+/// One crab's carry capacity (weight units). Measured meat weights (density × real GLB mesh volume) span
+/// ~0.10–1.5, median ~0.45, so at 0.4 a light chunk goes solo, a mid chunk needs 2, and the heaviest
+/// need 3–4 crabs cooperating (Σ capacity ≥ weight). Per-crab ±20% variance. Also self-limits pile-ups:
+/// a gib stops accepting crew once full, so overflow foragers move on to uncrewed chunks.
+const CRAB_CARRY_CAPACITY: f32 = 0.4;
+/// How close a crab must get to a gib to grab it, and to the nest to deliver.
+const GRAB_RANGE: f32 = 0.6;
+/// Speed a lifted chunk travels toward the nest — slower than a free crab (it's dragging a load).
+const CARRY_SPEED: f32 = 1.6;
+/// Height a hauled chunk floats at so it reads as carried (the crew scuttles beneath it).
+const LIFT_HEIGHT: f32 = 0.3;
+/// Horizontal distance from the nest at which a hauled chunk is delivered (nest dome radius + margin).
+const DELIVER_RANGE: f32 = 1.2;
+/// Seconds a crew may gather without lifting before it disbands (frees crabs stuck on a too-heavy chunk).
+const CREW_TIMEOUT: f32 = 6.0;
+/// A crab only enlists on a gib within this range — its `SeekMeat` steering is straight-line, so a
+/// far chunk (likely behind a wall) can't be reached; those crabs keep climbing the MEAT gradient
+/// (which routes around walls) until a chunk comes within reach, then commit.
+const MAX_COMMIT_DIST: f32 = 9.0;
+
+/// Shared handles kept so `nest_reproduce` can spawn new crabs at runtime.
+#[derive(Resource)]
+struct CrabAssets {
+    collider: Handle<Mesh>,
+    scene: Handle<WorldAsset>,
+}
+
+/// Panic locomotion: crawl *down* the THREAT gradient (away from danger) across the floor, with free
+/// cell-by-cell transfer (unlike surface pursuit, flight isn't along the field's gate). Returns the
+/// animation state. This is the movement half of the emergent frenzy→scatter.
+fn crab_flee(
+    motion: &mut CrabMotion,
+    stig: &crate::ai::field::Stig,
+    dungeon: &Dungeon,
+    graph: &crate::surface_nav::SurfaceGraph,
+    sep: Vec3,
+    dt: f32,
+    t: f32,
+) -> CrabState {
+    let p = graph.patch(motion.patch);
+    // Gradient points toward higher THREAT; flee down it. If the field is flat here, keep heading so
+    // the crab keeps moving away rather than freezing.
+    let g = stig.gradient(crate::ai::field::FieldId::THREAT, dungeon, motion.pos);
+    let away = project_tangent(Vec3::new(-g.x, 0.0, -g.y), p.normal).normalize_or_zero();
+    let dir = if away.length_squared() > 1.0e-6 {
+        away
+    } else {
+        project_tangent(motion.heading, p.normal).normalize_or_zero()
+    };
+    let move_vec = dir * (CRAB_SPEED * FLEE_SPEED_MUL) + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
+    motion.pos += move_vec * dt;
+
+    // Free floor transfer: flight can head any direction, so re-home onto the floor cell under the crab.
+    if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(motion.pos)) {
+        motion.patch = fp;
+        let np = graph.patch(fp);
+        motion.pos = clamp_to_patch(motion.pos, np);
+        motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
+    } else {
+        // Fled toward a wall/void — clamp back onto the current patch (can't flee through walls).
+        motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
+    }
+    if move_vec.length_squared() > 1.0e-6 {
+        let h = project_tangent(move_vec, motion.normal).normalize_or(motion.heading);
+        motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
+    }
+    CrabState::Walk
+}
+
+/// Foraging locomotion: crawl *up* toward meat. With a committed gib the crab steers straight to it and
+/// holds within `GRAB_RANGE` (so `carry_gibs` can lift once the crew has gathered); without one it climbs
+/// the MEAT gradient toward the nearest pile (ACO-style trail ascent; Dorigo). Free cell-by-cell floor
+/// transfer, like `crab_flee`. Returns the animation state.
+fn crab_seek_meat(
+    motion: &mut CrabMotion,
+    stig: &crate::ai::field::Stig,
+    dungeon: &Dungeon,
+    graph: &crate::surface_nav::SurfaceGraph,
+    target: Option<Vec3>,
+    sep: Vec3,
+    dt: f32,
+    t: f32,
+) -> CrabState {
+    let p = graph.patch(motion.patch);
+    let dir = match target {
+        // Committed to a specific chunk: bee-line to it, but stop once within grabbing range so the
+        // crew can converge and lift (the crab holds its ground rather than jostling the gib).
+        Some(gp) => {
+            let to = gp - motion.pos;
+            if to.length() < GRAB_RANGE {
+                Vec3::ZERO
+            } else {
+                project_tangent(to, p.normal).normalize_or_zero()
+            }
+        }
+        // No committed chunk yet: ascend the MEAT field toward higher concentration.
+        None => {
+            let g = stig.gradient(crate::ai::field::FieldId::MEAT, dungeon, motion.pos);
+            project_tangent(Vec3::new(g.x, 0.0, g.y), p.normal).normalize_or_zero()
+        }
+    };
+    let move_vec = dir * CRAB_SPEED + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
+    motion.pos += move_vec * dt;
+
+    // Free floor transfer (foraging can head any direction; re-home onto the floor cell beneath).
+    if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(motion.pos)) {
+        motion.patch = fp;
+        let np = graph.patch(fp);
+        motion.pos = clamp_to_patch(motion.pos, np);
+        motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
+    } else {
+        motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
+    }
+    if move_vec.length_squared() > 1.0e-6 {
+        let h = project_tangent(move_vec, motion.normal).normalize_or(motion.heading);
+        motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
+        CrabState::Walk
+    } else {
+        CrabState::Idle
+    }
+}
+
+/// Commit foraging crabs to specific gibs (the "recruitment" step of cooperative transport). For each
+/// `SeekMeat` crab without a live target, pick the nearest chunk that still needs crew (Σ committed
+/// carrier capacity < weight, not yet being hauled) and enlist it: push the crab into the gib's
+/// `carriers`, point `CrabCarry.target` at the gib, and move the gib to `Crewing`. This and `carry_gibs`
+/// are the ONLY mutators of `Carryable.carriers` (one-path ownership). Holland & Melhuish 1999
+/// (stigmergic clustering); Dorigo ACO (recruitment by trail).
+fn assign_meat_targets(
+    mut crabs: Query<(Entity, &CrabMotion, &mut CrabCarry, &crate::ai::brain::ActiveBehavior), With<Crab>>,
+    mut gibs: Query<(Entity, &Transform, &mut crate::gore::Carryable)>,
+) {
+    // Drop targets whose gib no longer exists (e.g. capped out of the ring) so the crab re-forages.
+    for (_, _, mut cc, _) in &mut crabs {
+        if let Some(g) = cc.target {
+            if gibs.get(g).is_err() {
+                cc.target = None;
+            }
+        }
+    }
+
+    // Snapshot per-crab capacity — summing a gib's committed crew capacity needs every carrier's value.
+    let caps: HashMap<Entity, f32> = crabs.iter().map(|(e, _, c, _)| (e, c.capacity)).collect();
+
+    // Snapshot each gib: position, weight, whether it's already being hauled, and its current committed
+    // capacity. `committed` is mutated as we enlist crabs this tick so several seekers don't over-crew.
+    let mut committed: HashMap<Entity, f32> = HashMap::new();
+    let gib_snap: Vec<(Entity, Vec3, f32, bool)> = gibs
+        .iter()
+        .map(|(e, tf, c)| {
+            let sum: f32 = c.carriers.iter().filter_map(|x| caps.get(x)).sum();
+            committed.insert(e, sum);
+            (e, tf.translation, c.weight, c.phase == crate::gore::CarryPhase::Hauling)
+        })
+        .collect();
+
+    // Seeking crabs that still need a chunk.
+    let seekers: Vec<(Entity, Vec3)> = crabs
+        .iter()
+        .filter(|(_, _, c, ab)| {
+            matches!(ab.mode, crate::ai::utility::Mode::SeekMeat) && c.target.is_none()
+        })
+        .map(|(e, m, _, _)| (e, m.pos))
+        .collect();
+
+    for (crab_e, cpos) in seekers {
+        let mut best: Option<(Entity, f32)> = None;
+        for &(ge, gpos, weight, hauling) in &gib_snap {
+            if hauling {
+                continue;
+            }
+            if committed.get(&ge).copied().unwrap_or(0.0) >= weight {
+                continue; // already has enough crew to lift
+            }
+            let d = gpos.distance(cpos);
+            if d > MAX_COMMIT_DIST {
+                continue; // too far to reach by straight-line steering — gradient-forage toward it first
+            }
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((ge, d));
+            }
+        }
+        let Some((ge, _)) = best else { continue };
+
+        // Commit: enlist on the gib and record the target on the crab.
+        if let Ok((_, _, mut carry)) = gibs.get_mut(ge) {
+            if !carry.carriers.contains(&crab_e) {
+                carry.carriers.push(crab_e);
+            }
+            if carry.phase == crate::gore::CarryPhase::Resting {
+                carry.phase = crate::gore::CarryPhase::Crewing;
+            }
+        }
+        if let Ok((_, _, mut cc, _)) = crabs.get_mut(crab_e) {
+            cc.target = Some(ge);
+        }
+        // Count this crab's capacity so later seekers this tick see the fuller crew.
+        if let Some(c) = committed.get_mut(&ge) {
+            *c += caps.get(&crab_e).copied().unwrap_or(0.0);
+        }
+    }
+}
+
+/// A crab that panics (or dies) mid-carry drops its load: clearing its target makes `carry_gibs` prune
+/// it from the gib's crew next frame, so a fleeing hauler removes its capacity and can tip the chunk
+/// back to the ground (the emergent "gunfire scatters the crew, the chunk thuds down"). Touches only
+/// `CrabCarry` — the sole system besides the two carrier-mutators, and it never edits `carriers`.
+fn release_on_flee(mut crabs: Query<(&crate::ai::brain::ActiveBehavior, &mut CrabCarry), With<Crab>>) {
+    for (active, mut cc) in &mut crabs {
+        if matches!(active.mode, crate::ai::utility::Mode::Flee) && cc.target.is_some() {
+            cc.target = None;
+            cc.hauling = false;
+        }
+    }
+}
+
+/// The cooperative-transport state machine — the SOLE authority over a lifted chunk's transform and
+/// rigid-body mode. Each frame, per gib: prune dead/reassigned carriers, sum the live crew's capacity,
+/// then take exactly one transition:
+///   Resting/Crewing → Hauling   when Σ capacity ≥ weight AND the whole crew is within `GRAB_RANGE`
+///                                (switch Dynamic→Kinematic, zero velocities, pick the nearest nest);
+///   Crewing → Resting            after `CREW_TIMEOUT` (disband a crew that can't lift);
+///   Hauling → delivered          within `DELIVER_RANGE` of the nest (hoard += weight, consume the gib);
+///   Hauling → Crewing (drop)     if the crew's capacity falls below weight (Kinematic→Dynamic).
+/// The three rigid-body switches are mutually exclusive (never two in one frame) — the "kinematic
+/// hand-off guard". During Hauling the gib LEADS (its transform advances toward the nest); the crabs
+/// just chase it via the `Carry` locomotion branch, so there's no circular follow.
+/// Holland & Melhuish 1999 (stigmergic cooperative transport); avian3d kinematic bodies are moved by
+/// transform, so zeroing Lin/Ang velocity on the switch prevents a residual-impulse launch.
+#[allow(clippy::type_complexity)]
+fn carry_gibs(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut gib_ring: ResMut<crate::gore::GibRing>,
+    // `RigidBody` is an immutable component in avian3d — switch a body's type by re-inserting it via
+    // `Commands`, not by mutating it in place. Velocities are mutable and zeroed on the switch.
+    mut gibs: Query<
+        (
+            Entity,
+            &mut crate::gore::Carryable,
+            &mut Transform,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        With<crate::gore::GibChunk>,
+    >,
+    mut crabs: Query<
+        (&Transform, &mut CrabCarry),
+        (With<Crab>, Without<crate::gore::GibChunk>, Without<crate::nest::Nest>),
+    >,
+    mut nests: Query<
+        (Entity, &Transform, &mut crate::nest::Nest),
+        (Without<crate::gore::GibChunk>, Without<Crab>),
+    >,
+) {
+    let dt = time.delta_secs();
+
+    for (ge, mut carry, mut gtf, mut lv, mut av) in &mut gibs {
+        // 1. Prune carriers down to crabs that still exist AND still point at this gib.
+        carry
+            .carriers
+            .retain(|&c| crabs.get(c).map(|(_, cc)| cc.target == Some(ge)).unwrap_or(false));
+
+        // 2. Sum crew capacity two ways: `cap_here` counts only carriers that have actually gathered at
+        // the chunk (within `GRAB_RANGE`) — that's what can lift it; `cap_total` counts every committed
+        // carrier — that's what sustains an in-progress haul (a chaser lagging a little mustn't drop it).
+        // Requiring the gathered capacity (not the whole roster) to lift avoids a deadlock where one
+        // straggler that can't path to the chunk keeps a full-strength crew from ever lifting.
+        let mut cap_here = 0.0;
+        let mut cap_total = 0.0;
+        for &c in &carry.carriers {
+            if let Ok((ctf, cc)) = crabs.get(c) {
+                cap_total += cc.capacity;
+                if ctf.translation.xz().distance(gtf.translation.xz()) <= GRAB_RANGE {
+                    cap_here += cc.capacity;
+                }
+            }
+        }
+        let has_crew = !carry.carriers.is_empty();
+
+        match carry.phase {
+            crate::gore::CarryPhase::Resting | crate::gore::CarryPhase::Crewing => {
+                if !has_crew {
+                    carry.phase = crate::gore::CarryPhase::Resting;
+                    carry.crew_timer = 0.0;
+                } else if cap_here >= carry.weight {
+                    // --- LIFT (Dynamic → Kinematic) ---
+                    if crate::ai::diag::AI_DIAG {
+                        let crew = carry
+                            .carriers
+                            .iter()
+                            .filter(|&&c| {
+                                crabs
+                                    .get(c)
+                                    .map(|(ctf, _)| {
+                                        ctf.translation.xz().distance(gtf.translation.xz())
+                                            <= GRAB_RANGE
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .count();
+                        info!(
+                            "carry: LIFT weight={:.2} crew={crew} cap_here={cap_here:.2}",
+                            carry.weight
+                        );
+                    }
+                    carry.phase = crate::gore::CarryPhase::Hauling;
+                    carry.crew_timer = 0.0;
+                    commands.entity(ge).insert(RigidBody::Kinematic);
+                    lv.0 = Vec3::ZERO;
+                    av.0 = Vec3::ZERO;
+                    // Nearest nest becomes the destination.
+                    let mut best: Option<(Entity, f32)> = None;
+                    for (ne, ntf, _) in nests.iter() {
+                        let d = ntf.translation.distance(gtf.translation);
+                        if best.is_none_or(|(_, bd)| d < bd) {
+                            best = Some((ne, d));
+                        }
+                    }
+                    carry.nest = best.map(|(e, _)| e);
+                    for &c in &carry.carriers {
+                        if let Ok((_, mut cc)) = crabs.get_mut(c) {
+                            cc.hauling = true;
+                        }
+                    }
+                } else {
+                    carry.phase = crate::gore::CarryPhase::Crewing;
+                    carry.crew_timer += dt;
+                    if carry.crew_timer >= CREW_TIMEOUT {
+                        // Disband a crew that has waited too long without lifting.
+                        for &c in &carry.carriers {
+                            if let Ok((_, mut cc)) = crabs.get_mut(c) {
+                                cc.target = None;
+                                cc.hauling = false;
+                            }
+                        }
+                        carry.carriers.clear();
+                        carry.phase = crate::gore::CarryPhase::Resting;
+                        carry.crew_timer = 0.0;
+                    }
+                }
+            }
+            crate::gore::CarryPhase::Hauling => {
+                // Destination nest position (if it still exists).
+                let nest_pos = carry
+                    .nest
+                    .and_then(|n| nests.get(n).ok())
+                    .map(|(_, t, _)| t.translation);
+
+                if cap_total < carry.weight || nest_pos.is_none() {
+                    // --- ABORT / DROP (Kinematic → Dynamic) ---
+                    commands.entity(ge).insert(RigidBody::Dynamic);
+                    carry.phase = crate::gore::CarryPhase::Crewing;
+                    carry.crew_timer = 0.0;
+                    for &c in &carry.carriers {
+                        if let Ok((_, mut cc)) = crabs.get_mut(c) {
+                            cc.hauling = false;
+                        }
+                    }
+                } else if let Some(np) = nest_pos {
+                    let horiz = (np - gtf.translation).with_y(0.0);
+                    if horiz.length() <= DELIVER_RANGE {
+                        // --- DELIVER (Kinematic → despawn) ---
+                        if let Some(n) = carry.nest {
+                            if let Ok((_, _, mut nest)) = nests.get_mut(n) {
+                                nest.hoard += carry.weight;
+                            }
+                        }
+                        for &c in &carry.carriers {
+                            if let Ok((_, mut cc)) = crabs.get_mut(c) {
+                                cc.target = None;
+                                cc.hauling = false;
+                            }
+                        }
+                        // The ONE early-removal path (drops the id from the ring, then despawns).
+                        gib_ring.consume(&mut commands, ge);
+                    } else {
+                        // Haul: the gib leads, gliding toward the nest at carry speed; crew chases it.
+                        gtf.translation += horiz.normalize_or_zero() * (CARRY_SPEED * dt);
+                        gtf.translation.y = LIFT_HEIGHT;
+                        lv.0 = Vec3::ZERO;
+                        av.0 = Vec3::ZERO;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Each crab lays into the CRAB_DENSITY field (a stigmergic crowding/recruitment substrate). With the
+/// per-second rate ≈ the field's evaporation, the value at a cell tracks the local crab count.
+fn deposit_crab_density(
+    time: Res<Time>,
+    crabs: Query<&Transform, With<Crab>>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    let amount = DENSITY_RATE * time.delta_secs();
+    for tf in &crabs {
+        deposits.0.push(crate::ai::field::Deposit {
+            pos: tf.translation,
+            field: crate::ai::field::FieldId::CRAB_DENSITY,
+            amount,
+        });
+    }
+}
+
+/// Each carryable meat gib lays into the MEAT field, so foraging crabs sense a pile from a distance and
+/// climb its gradient (ACO-style trail-following; Dorigo). The field fades as gibs are hauled off.
+fn deposit_meat_scent(
+    time: Res<Time>,
+    gibs: Query<&Transform, With<crate::gore::Carryable>>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    let amount = MEAT_RATE * time.delta_secs();
+    for tf in &gibs {
+        deposits.0.push(crate::ai::field::Deposit {
+            pos: tf.translation,
+            field: crate::ai::field::FieldId::MEAT,
+            amount,
+        });
+    }
+}
+
+/// Positive-feedback breeding — the ONE reproduction path (there is no latched-crab breeding). A nest
+/// spends the meat its crews have hauled in (`hoard`) to birth new crabs at its mouth: while the hoard
+/// covers another crab and the global cap allows it, deduct `MEAT_PER_CRAB` and spawn one on a floor
+/// patch at the nest. A crowded nest cell (local CRAB_DENSITY high) holds its hoard until the area
+/// thins — territorial self-limiting. This closes the forage→carry→deliver→breed loop (Holland &
+/// Melhuish 1999, stigmergic foraging; Dorigo, ACO positive feedback with a population ceiling).
+fn nest_reproduce(
+    mut commands: Commands,
+    graph: Option<Res<SurfaceGraph>>,
+    dungeon: Res<Dungeon>,
+    stig: Res<crate::ai::field::Stig>,
+    crab_assets: Option<Res<CrabAssets>>,
+    mut nests: Query<(&Transform, &mut crate::nest::Nest)>,
+    crabs: Query<(), With<Crab>>,
+) {
+    let (Some(graph), Some(crab_assets)) = (graph, crab_assets) else {
+        return;
+    };
+    let mut total = crabs.iter().count();
+    for (tf, mut nest) in &mut nests {
+        // Hold the hoard while the nest cell is crowded (don't pile births onto births).
+        let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, tf.translation);
+        if density >= CROWD_CAP {
+            continue;
+        }
+        let cell = dungeon.world_to_cell(tf.translation);
+        let Some(patch) = graph.floor_patch_cell(cell) else {
+            continue; // nest not over a floor patch — can't seat a newborn here
+        };
+        while nest.hoard >= MEAT_PER_CRAB && total < CRAB_COUNT_MAX {
+            nest.hoard -= MEAT_PER_CRAB;
+            spawn_crab_on_patch(
+                &mut commands,
+                &graph,
+                patch,
+                &crab_assets.collider,
+                &crab_assets.scene,
+            );
+            total += 1;
+            if crate::ai::diag::AI_DIAG {
+                info!("nest: BIRTH total={total} hoard_left={:.1}", nest.hoard);
+            }
         }
     }
 }

@@ -5,6 +5,7 @@
 - https://www.shadertoy.com/view/lsKyWV
 - https://www.shadertoy.com/view/XljGDz
 - https://www.shadertoy.com/view/4slXW7
+- https://www.shadertoy.com/view/WXyczK
 - https://www.shadertoy.com/view/MdG3Dd
 - https://www.shadertoy.com/view/4ldGDB
 - https://www.shadertoy.com/view/MsVcRy
@@ -51,6 +52,64 @@
 - https://www.shadertoy.com/view/ldjGzV
 - https://www.shadertoy.com/view/sltBWM
 - https://www.shadertoy.com/view/XsfGDl
+- https://www.shadertoy.com/view/ltf3WB
 
 ## Glitch
 - https://www.shadertoy.com/view/MltBzf
+
+## Blood
+- https://www.shadertoy.com/view/4ttXzj (blood cells)
+
+## Scanner
+- https://www.shadertoy.com/view/fdBfD1
+
+## Liquid in Glass
+- https://www.shadertoy.com/view/3tfcRS
+
+## Water Element
+- https://www.shadertoy.com/view/NdS3zK
+
+## Glass
+- https://www.shadertoy.com/view/4s2Gz3
+
+## Copper Flesh
+- https://www.shadertoy.com/view/WljSWz
+
+## Drippy
+- https://www.shadertoy.com/view/MstGWX
+
+## Monster Skin
+- https://www.shadertoy.com/view/7tjSWy (eyeballs)
+
+
+## "Grass"
+- https://www.shadertoy.com/view/XtyGzh
+
+## Mandelbrot Portal
+- https://www.shadertoy.com/view/4dXGDX
+
+
+## Lava Shooter
+- https://www.shadertoy.com/view/WdtXzs
+
+## Cloudy Explosion
+- https://www.shadertoy.com/view/4lfSzs
+
+## Lens Distortion
+- https://www.shadertoy.com/view/WfS3Dd
+
+## Coolest Skin Ever
+- https://www.shadertoy.com/view/Xs2cRD
+
+## Smoke Rings
+- https://www.shadertoy.com/view/4dVXDt
+
+
+## Rift
+- https://www.shadertoy.com/view/dsByWy
+- https://www.shadertoy.com/view/lXfXWS
+- https://www.shadertoy.com/view/WsGfWw
+
+
+## Noodle Shape Fill
+- https://www.shadertoy.com/view/ssjyWc

@@ -1,0 +1,11 @@
+// Hot-tunable AI knobs — edit and relaunch (no recompile). See src/ai/tuning.rs.
+// Structure is code; only these numbers are data. Missing file → built-in defaults.
+(
+    fields: (
+        // evaporate: fraction lost per second. diffuse: 0..1 blur to neighbours. deposit_radius: world units.
+        scent:        ( evaporate: 0.25, diffuse: 0.15, deposit_radius: 1.5 ),
+        threat:       ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
+        crab_density: ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
+        meat:         ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
+    ),
+)

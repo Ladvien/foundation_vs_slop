@@ -28,7 +28,10 @@ use crate::flowfield::FlowField;
 use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
+use crate::ai::brain::ActiveBehavior;
+use crate::ai::utility::Mode;
 use crate::squad::Unit;
+use crate::util::rand01;
 
 /// How many enemies to place at startup. Exactly one — a single boss smiley that is as strong as a
 /// whole pack combined (see `START_HP` / `CONTACT_DPS`). There is no respawn, so this is one for the
@@ -89,9 +92,6 @@ const ENEMY_MENACE: f32 = 0.3;
 /// Clamp per-frame dt so a hitch can't tunnel an enemy through a wall (mirrors squad movement).
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 /// Aggro leash: an enemy actively pursues while its nearest unit is within this planar distance
-/// (world units; `TILE_SIZE = 1`) **or** while the enemy itself stands in the squad's live line of
-/// sight. Beyond both it loses the scent and wanders.
-const CHASE_TILES: f32 = 20.0;
 /// Seconds a wandering enemy holds a random heading before re-rolling a new one.
 const WANDER_INTERVAL: f32 = 2.5;
 /// Enemies closer than this (centre distance) push apart, so a crowd chasing one unit never
@@ -179,7 +179,10 @@ impl Plugin for EnemyPlugin {
                 (
                     // Rebuild the pursuit field before enemies read it this frame.
                     rebuild_enemy_field,
-                    enemy_seek.after(rebuild_enemy_field),
+                    // Move after the brain has chosen this frame's mode (see `crate::ai`).
+                    enemy_seek
+                        .after(rebuild_enemy_field)
+                        .after(crate::ai::AiSet::Think),
                     enemy_contact_damage,
                     hide_enemies_in_fog,
                     update_smiley_faces,
@@ -243,6 +246,10 @@ fn spawn_enemies(
                 Enemy,
                 Hostile,
                 Health::new(START_HP),
+                crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
+                crate::ai::brain::BrainId::Smiley,
+                crate::ai::brain::ActiveBehavior::new(pos),
+                crate::ai::brain::ThinkTimer::staggered(pos),
                 EnemyMotion {
                     speed: MIN_SPEED,
                     heading: Vec3::ZERO,
@@ -301,10 +308,10 @@ fn rebuild_enemy_field(
 fn enemy_seek(
     time: Res<Time>,
     dungeon: Res<Dungeon>,
-    fog: Res<FogGrid>,
     enemy_field: Res<EnemyField>,
+    scent_nav: Res<crate::ai::brain::ScentNav>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
-    mut enemies: Query<(Entity, &mut Transform, &mut EnemyMotion), With<Enemy>>,
+    mut enemies: Query<(Entity, &mut Transform, &mut EnemyMotion, &ActiveBehavior), With<Enemy>>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
 
@@ -312,37 +319,43 @@ fn enemy_seek(
     // then moves each enemy. One frame of staleness is fine for a gentle push-apart.
     let positions: Vec<(Entity, Vec2)> = enemies
         .iter()
-        .map(|(e, tf, _)| (e, tf.translation.xz()))
+        .map(|(e, tf, _, _)| (e, tf.translation.xz()))
         .collect();
 
-    for (entity, mut tf, mut motion) in &mut enemies {
+    for (entity, mut tf, mut motion, active) in &mut enemies {
         let pos = tf.translation;
         let nearest = nearest_unit(pos, &units);
+        let nearest_dist = nearest.map(|t| (t.xz() - pos.xz()).length());
 
-        // Engaged while a unit is within CHASE_TILES, OR the enemy sits in the squad's live LOS.
-        let (engaged, nearest_dist) = match nearest {
-            Some(target) => {
-                let d = (target.xz() - pos.xz()).length();
-                (d <= CHASE_TILES || fog.visible_at(dungeon.world_to_cell(pos)), Some(d))
-            }
-            None => (false, None),
-        };
-
-        // Base desired direction: flow-field pursuit while engaged, else a slow wandering heading.
-        let base = if engaged {
-            enemy_field
+        // The brain (see `crate::ai`) chose the mode; the momentum/charge/wall-slide mechanics below
+        // are unchanged — only the *desired direction* comes from the decision now.
+        let engaged = matches!(active.mode, Mode::Chase | Mode::HuntBlood);
+        let base = match active.mode {
+            // Drawn to the biggest blood frenzy — path there around walls via the scent pursuit field
+            // (falls back to a straight line at the source cell where the flow is zero).
+            Mode::HuntBlood => scent_nav
                 .field
                 .as_ref()
                 .map(|f| f.steer(&dungeon, pos))
-                .unwrap_or(Vec2::ZERO)
-        } else {
-            motion.wander_timer -= dt;
-            if motion.wander_timer <= 0.0 || motion.wander_dir == Vec3::ZERO {
-                motion.wander_timer = WANDER_INTERVAL;
-                let angle = rand01(&mut motion.rng) * std::f32::consts::TAU;
-                motion.wander_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+                .filter(|d| *d != Vec2::ZERO)
+                .or_else(|| active.target.map(|t| (t.xz() - pos.xz()).normalize_or_zero()))
+                .unwrap_or(Vec2::ZERO),
+            // Pursue the nearest unit around walls via the shared flow field.
+            Mode::Chase => enemy_field
+                .field
+                .as_ref()
+                .map(|f| f.steer(&dungeon, pos))
+                .unwrap_or(Vec2::ZERO),
+            // Wander / anything else: slow drifting heading (re-rolled on a timer).
+            _ => {
+                motion.wander_timer -= dt;
+                if motion.wander_timer <= 0.0 || motion.wander_dir == Vec3::ZERO {
+                    motion.wander_timer = WANDER_INTERVAL;
+                    let angle = rand01(&mut motion.rng) * std::f32::consts::TAU;
+                    motion.wander_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+                }
+                motion.wander_dir.xz()
             }
-            motion.wander_dir.xz()
         };
 
         // Separation: push away from every nearby enemy, stronger the closer it is.
@@ -490,12 +503,6 @@ fn update_smiley_faces(
     }
 }
 
-/// Cheap LCG (Numerical Recipes constants) → float in [0, 1), matching the project's hand-rolled RNG
-/// in `laser.rs` / `audio.rs` (no RNG crate). Drives per-enemy wander headings.
-fn rand01(state: &mut u32) -> f32 {
-    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-    (*state >> 8) as f32 / (1u32 << 24) as f32
-}
 
 /// GLSL-style `smoothstep` (Hermite ramp), clamped. When `edge0 > edge1` the ramp is reversed, so
 /// `smoothstep(FAR, NEAR, d)` rises from 0 at `d = FAR` to 1 at `d = NEAR` — closer ⇒ bigger grin.
@@ -509,6 +516,7 @@ fn despawn_dead(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
     enemies: Query<(Entity, &Health, &Transform), With<Enemy>>,
 ) {
     for (entity, hp, tf) in &enemies {
@@ -521,6 +529,12 @@ fn despawn_dead(
                 gib: None,
                 // The boss is the heaviest thing in the level: full camera kick on its death.
                 intensity: crate::gore::death_intensity(START_HP, CONTACT_DPS),
+            });
+            // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
+            deposits.0.push(crate::ai::field::Deposit {
+                pos: tf.translation,
+                field: crate::ai::field::FieldId::SCENT,
+                amount: crate::ai::field::BLOOD_SCENT,
             });
             sfx.write(Sfx::EnemyDeath);
             commands.entity(entity).despawn();

@@ -14,6 +14,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, Ra
 use bevy::prelude::*;
 use std::collections::HashSet;
 
+use crate::ai::field::{Deposit, FieldId, StigDeposits};
 use crate::audio::Sfx;
 use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
@@ -23,6 +24,7 @@ use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
 use crate::squad::{Unit, Velocity, UNIT_SPEED};
+use crate::util::rand01;
 
 /// Seconds between shots while Space is held (fixed fire rate).
 const FIRE_INTERVAL: f32 = 0.15;
@@ -31,7 +33,7 @@ const LASER_SPEED: f32 = 22.0;
 /// Bolt lifetime in seconds (a fallback despawn if it never meets a wall).
 const LASER_LIFE: f32 = 1.2;
 /// Hit points removed from an enemy per bolt.
-const LASER_DAMAGE: f32 = 0.2; // TEMP: 1/50 power to watch the crab swarm instead of mowing it down (was 10.0)
+const LASER_DAMAGE: f32 = 0.2; // 1/50 power so the swarm survives to be watched (restore 10.0 for real combat)
 /// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
 /// for hits against the small enemy hitbox.
 const BASE_SPREAD: f32 = 0.06;
@@ -46,6 +48,9 @@ const FRONT_ARC_COS: f32 = 0.26;
 /// the host (a stray round through the crab into your own guy) and how much it hurts.
 const FRIENDLY_FIRE_CHANCE: f32 = 0.2;
 const FRIENDLY_FIRE_DAMAGE: f32 = 5.0;
+/// THREAT deposited into the stigmergy field per shot fired / per bolt landed — the swarm reads this
+/// as danger and (once it has a fear drive) scatters from sustained fire.
+const THREAT_PER_SHOT: f32 = 0.6;
 
 /// A live laser bolt: its constant velocity and remaining lifetime (seconds).
 #[derive(Component)]
@@ -106,6 +111,7 @@ fn fire_laser(
     mut rng: Local<u32>,
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
+    mut deposits: ResMut<StigDeposits>,
     shooters: Query<(&Transform, &Velocity), (With<Unit>, Without<Hostile>)>,
     enemies: Query<&Transform, (With<Hostile>, Without<Unit>)>,
 ) {
@@ -161,6 +167,12 @@ fn fire_laser(
             Transform::from_translation(muzzle).looking_to(forward, Vec3::Y),
         ));
         sfx.write(Sfx::Fire);
+        // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
+        deposits.0.push(Deposit {
+            pos: unit.translation,
+            field: FieldId::THREAT,
+            amount: THREAT_PER_SHOT,
+        });
     }
 }
 
@@ -177,6 +189,7 @@ fn update_lasers(
     attached: Query<&CrabAttached>,
     mut unit_healths: Query<&mut Health, (With<Unit>, Without<Hostile>)>,
     mut lasers: Query<(Entity, &mut Transform, &mut Laser)>,
+    mut deposits: ResMut<StigDeposits>,
     mut rng: Local<u32>,
 ) {
     let dt = time.delta_secs();
@@ -224,6 +237,12 @@ fn update_lasers(
                     intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
                 });
                 sfx.write(Sfx::ImpactFlesh);
+                // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
+                deposits.0.push(Deposit {
+                    pos: hit.point,
+                    field: FieldId::THREAT,
+                    amount: THREAT_PER_SHOT,
+                });
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -263,9 +282,3 @@ fn scatter(dir: Vec3, spread: f32, rng: &mut u32) -> Vec3 {
     }
 }
 
-/// Cheap LCG (Numerical Recipes constants) producing a float in [0, 1). Full-period from any seed,
-/// including the `Local<u32>` default of 0 — no RNG crate, matching the project's hand-rolled `Rng`.
-fn rand01(state: &mut u32) -> f32 {
-    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-    (*state >> 8) as f32 / (1u32 << 24) as f32
-}

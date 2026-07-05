@@ -15,6 +15,7 @@
 mod audio;
 mod autogib;
 mod blood_lens;
+mod ai;
 mod camera;
 mod crab;
 mod devshot;
@@ -27,11 +28,13 @@ mod health;
 mod juice;
 mod impact_fx;
 mod laser;
+mod nest;
 mod occlusion;
 mod orca;
 mod selection;
 mod squad;
 mod surface_nav;
+mod util;
 mod vhs;
 mod wfc;
 mod world;
@@ -76,7 +79,12 @@ fn main() {
             fog::FogPlugin,
             occlusion::OcclusionPlugin,
             health::HealthPlugin,
-            (enemy::EnemyPlugin, crab::CrabPlugin),
+            (
+                ai::AiPlugin,
+                enemy::EnemyPlugin,
+                crab::CrabPlugin,
+                nest::NestPlugin,
+            ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
             (juice::JuicePlugin, gore::GorePlugin, autogib::AutogibPlugin),
