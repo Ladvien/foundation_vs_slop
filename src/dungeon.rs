@@ -3,6 +3,7 @@
 //! floor). The [`Dungeon`] resource is the single source of truth for walkability (used by
 //! player collision and fog).
 
+use avian3d::prelude::*;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
@@ -20,13 +21,14 @@ pub const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
 /// Max distance the player box may move per collision sub-step. Kept below
 /// [`WALL_THICKNESS`] so a fast (large-dt) step can't overshoot a wall and tunnel through.
 const MAX_STEP: f32 = WALL_THICKNESS * 0.5;
-/// Wall height (full, for the enclosed Backrooms look).
-const WALL_HEIGHT: f32 = 1.0;
+/// Wall height (full, for the enclosed Backrooms look). Public so the crab surface-nav graph
+/// (`surface_nav`) knows the vertical extent of each climbable wall face (Y 0→`WALL_HEIGHT`).
+pub const WALL_HEIGHT: f32 = 1.0;
 
 // Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles.
-// 21×21 slots → a dungeon 3× larger per side than the original 7×7 (≈9× the floor area).
-const COARSE_W: usize = 21;
-const COARSE_H: usize = 21;
+// 9×9 slots → a compact dungeon (63×63 tiles) so the squad runs into enemies quickly.
+const COARSE_W: usize = 9;
+const COARSE_H: usize = 9;
 const BLOCK: usize = 7;
 /// Room side length range (kept ≤ BLOCK-2 so every room has a ≥1-tile rock margin).
 const ROOM_MIN: usize = 4;
@@ -189,8 +191,9 @@ impl Dungeon {
     }
 
     /// Does floor cell `c` need a wall on edge `dir`? True when the neighbour is rock
-    /// or off-grid — the room perimeter.
-    fn walled(&self, c: IVec2, dir: usize) -> bool {
+    /// or off-grid — the room perimeter. Public so `surface_nav` can enumerate the four
+    /// climbable wall faces of every floor cell when building the crab navigation graph.
+    pub fn walled(&self, c: IVec2, dir: usize) -> bool {
         self.is_floor(c) && !self.is_floor(Self::neighbor(c, dir))
     }
 
@@ -209,6 +212,63 @@ impl Dungeon {
             || (self.walled(cell, W) && lx < -inner)
             || (self.walled(cell, N) && lz < -inner)
             || (self.walled(cell, S) && lz > inner)
+    }
+
+    /// The inner faces of any walls bounding the cell that contains `pos`, as
+    /// `(face_point, inward_normal)` pairs. `face_point` lies on the wall's inner plane at `pos`'s
+    /// lateral projection (clamped within the cell) with `y = 0`; `inward_normal` points into the
+    /// room. Used to splatter blood on nearby walls at a death (see `gore`). Same inset/`walled`
+    /// math as [`Self::is_solid`].
+    pub fn wall_faces_near(&self, pos: Vec3) -> Vec<(Vec3, Vec3)> {
+        let cell = self.world_to_cell(pos);
+        let cx = cell.x as f32 * TILE_SIZE;
+        let cz = cell.y as f32 * TILE_SIZE;
+        let inner = 0.5 * TILE_SIZE - WALL_THICKNESS;
+        // Lateral position within the cell, so the splat lands next to where the death happened.
+        let lx = (pos.x - cx).clamp(-inner, inner);
+        let lz = (pos.z - cz).clamp(-inner, inner);
+        let mut faces = Vec::new();
+        if self.walled(cell, E) {
+            faces.push((Vec3::new(cx + inner, 0.0, cz + lz), Vec3::NEG_X));
+        }
+        if self.walled(cell, W) {
+            faces.push((Vec3::new(cx - inner, 0.0, cz + lz), Vec3::X));
+        }
+        if self.walled(cell, N) {
+            faces.push((Vec3::new(cx + lx, 0.0, cz - inner), Vec3::Z));
+        }
+        if self.walled(cell, S) {
+            faces.push((Vec3::new(cx + lx, 0.0, cz + inner), Vec3::NEG_Z));
+        }
+        faces
+    }
+
+    /// Clear (non-solid) distance from `pos` in eight directions, up to `max`. Returns
+    /// `(axis, diag)` where `axis = (+X, -X, +Z, -Z)` and `diag = (+X+Z, -X+Z, +X-Z, -X-Z)` (each a
+    /// unit-length diagonal). Marches out until it hits a wall slab / void (see [`Self::is_solid`]);
+    /// used to clip a floor blood pool to an 8-sided region so it stops at the walls around it
+    /// instead of seeping through (see `gore`).
+    pub fn open_extents(&self, pos: Vec3, max: f32) -> (Vec4, Vec4) {
+        let step = 0.04;
+        let cast = |dx: f32, dz: f32| -> f32 {
+            let mut d = step;
+            while d <= max {
+                if self.is_solid(pos.x + dx * d, pos.z + dz * d) {
+                    return d;
+                }
+                d += step;
+            }
+            max
+        };
+        let axis = Vec4::new(cast(1.0, 0.0), cast(-1.0, 0.0), cast(0.0, 1.0), cast(0.0, -1.0));
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let diag = Vec4::new(
+            cast(r, r),
+            cast(-r, r),
+            cast(r, -r),
+            cast(-r, -r),
+        );
+        (axis, diag)
     }
 
     pub fn cell_center(&self, c: IVec2) -> Vec3 {
@@ -569,18 +629,26 @@ fn spawn_tiles(
     });
 
     let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
-    let wall_full = meshes.add(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE)));
-    let wall_short = meshes.add(wall_mesh(Vec3::new(
-        TILE_SIZE - WALL_THICKNESS,
-        WALL_HEIGHT,
-        WALL_THICKNESS,
-    )));
+    let full_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE);
+    let short_size = Vec3::new(TILE_SIZE - WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
+    let wall_full = meshes.add(wall_mesh(full_size));
+    let wall_short = meshes.add(wall_mesh(short_size));
 
+    // One static half-space at y=0 catches every gib chunk (the whole floor is at y=0), so we don't
+    // need a physics collider per floor tile — only the gib-chunk physics world uses these (see `gore`).
+    commands.spawn((
+        RigidBody::Static,
+        Collider::half_space(Vec3::Y),
+        Transform::default(),
+    ));
+
+    // Walls get a static cuboid collider matching their mesh box, so gib chunks bounce off them and
+    // stay in the room. `wall_size` is the box for walls, `None` for floor tiles (which need none).
     let mut spawn_tile = |cell: IVec2,
                           mesh: Handle<Mesh>,
                           material: Handle<StandardMaterial>,
                           transform: Transform,
-                          is_wall: bool| {
+                          wall_size: Option<Vec3>| {
         let mut entity = commands.spawn((
             Tile { cell },
             Mesh3d(mesh),
@@ -588,8 +656,10 @@ fn spawn_tiles(
             transform,
             Visibility::Hidden,
         ));
-        if is_wall {
-            entity.insert(Wall);
+        if let Some(size) = wall_size {
+            // avian `Collider::cuboid` takes FULL side lengths; the wall mesh is an origin-centred
+            // `Cuboid` of the same size, so the collider lines up exactly under the transform.
+            entity.insert((Wall, RigidBody::Static, Collider::cuboid(size.x, size.y, size.z)));
         }
     };
 
@@ -605,7 +675,7 @@ fn spawn_tiles(
                 floor_mesh.clone(),
                 floor_mat.clone(),
                 Transform::from_translation(dungeon.cell_center(cell)),
-                false,
+                None,
             );
 
             // Which of this cell's edges border rock / off-grid → need a wall.
@@ -618,8 +688,8 @@ fn spawn_tiles(
             for (a, b, turns) in CORNERS {
                 if walled[a] && walled[b] {
                     let (full, short) = corner_arms(cell, turns);
-                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, true);
-                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, true);
+                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, Some(full_size));
+                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, Some(short_size));
                     walled[a] = false;
                     walled[b] = false;
                 }
@@ -632,7 +702,7 @@ fn spawn_tiles(
                         wall_full.clone(),
                         wall_mat.clone(),
                         straight_wall(cell, dir),
-                        true,
+                        Some(full_size),
                     );
                 }
             }

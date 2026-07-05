@@ -17,11 +17,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bevy::audio::Volume;
+use bevy::audio::{GlobalVolume, Volume};
 use bevy::prelude::*;
 
+use crate::crab::Crab;
 use crate::dungeon::Dungeon;
-use crate::enemy::Enemy;
+use crate::enemy::{Enemy, Hostile};
 use crate::fog::FogGrid;
 use crate::squad::{Unit, Velocity};
 
@@ -29,20 +30,35 @@ use crate::squad::{Unit, Velocity};
 /// the foreground (weapons, gore, growls) reads clearly over them.
 const WIND_VOL: f32 = 0.22;
 const MUSIC_VOL: f32 = 0.32;
-const FOOT_VOL: f32 = 0.30;
+const FOOT_VOL: f32 = 0.08;
 /// UI / command blips (select, deselect, move order…). Deliberately way under the world sounds — a
 /// faint tick you feel more than hear, so a fidgety player isn't machine-gunned with pings.
 const UI_VOL: f32 = 0.12;
+
+/// Master volume — every sound in the game is multiplied by this (bevy `GlobalVolume`). 1.0 = full;
+/// drop it (e.g. 0.15) to keep the game quiet in the background when something else is playing.
+const MASTER_VOLUME: f32 = 1.0;
 
 /// Seconds between footfalls with a *single* unit walking. The interval scales down linearly with
 /// the number of movers (see `footsteps`), so a full squad patters ~5× faster and the sound
 /// audibly thins as members die.
 const STRIDE: f32 = 0.5;
-/// Floor on the footfall interval, so even a full squad's patter never machine-guns.
-const MIN_STRIDE: f32 = 0.12;
+/// Floor on the footfall interval, so even a full squad's patter never machine-guns into a crowd —
+/// caps a full five at ~4.5 steps/s (was 0.12 → ~8/s, which read as a mob).
+const MIN_STRIDE: f32 = 0.22;
 /// A unit is "walking" (and so contributes a footfall) once its planar speed clears this. Well
 /// under the `UNIT_SPEED = 6.0` cruise, but above ORCA jitter so a settled blob stays quiet.
 const FOOT_MIN_SPEED: f32 = 0.6;
+
+/// Crab-swarm "squitter": ONE shared throttled voice whose cadence scales with how many crabs are
+/// visibly near the squad — same density-throttle discipline as `footsteps` (never one voice per crab,
+/// which is what turned the squad's footfalls into a phantom crowd). Volume sits low, under the action.
+const SQUITTER_VOL: f32 = 0.30;
+/// Seconds between skitters with a single near crab; divided by the near-crab count and floored.
+const SQUITTER_STRIDE: f32 = 0.45;
+const SQUITTER_MIN_STRIDE: f32 = 0.09;
+/// A crab counts toward the squitter density only within this planar distance of some unit.
+const SQUITTER_RANGE: f32 = 10.0;
 /// Per-frame cap on muzzle blasts: a five-unit squad on full-auto must not stack into a solid wall
 /// of identical shots. Extra triggers in the same frame are dropped (pitch jitter hides it).
 const MAX_FIRE_VOICES: usize = 4;
@@ -88,9 +104,17 @@ struct AudioAssets {
     invalid: Handle<AudioSource>,
     fire: Handle<AudioSource>,
     wall: Handle<AudioSource>,
-    flesh: Handle<AudioSource>,
-    enemy_death: Handle<AudioSource>,
+    /// Wet splat for a bolt biting flesh (per hit).
+    splat: Handle<AudioSource>,
+    /// Squelch for an enemy bursting.
+    squelch: Handle<AudioSource>,
+    /// Wet crunch for a squad unit being crushed to gibs.
+    crunch: Handle<AudioSource>,
+    /// Bone snap layered over the crunch for extra juice.
+    bone_snap: Handle<AudioSource>,
     growl: Handle<AudioSource>,
+    /// Dry insectoid chitter for the crab swarm (shared throttled voice, see `crab_squitter`).
+    squitter: Handle<AudioSource>,
     footsteps: [Handle<AudioSource>; 4],
     wind: Handle<AudioSource>,
     music_calm: Handle<AudioSource>,
@@ -109,8 +133,12 @@ pub struct GameAudioPlugin;
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<Sfx>()
+            .insert_resource(GlobalVolume::new(Volume::Linear(MASTER_VOLUME)))
             .add_systems(Startup, load_audio)
-            .add_systems(Update, (play_sfx, footsteps, growl_stinger, update_music));
+            .add_systems(
+                Update,
+                (play_sfx, footsteps, crab_squitter, growl_stinger, update_music),
+            );
     }
 }
 
@@ -124,9 +152,12 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         invalid: assets.load("audio/ui/invalid.ogg"),
         fire: assets.load("audio/weapon/fire.ogg"),
         wall: assets.load("audio/impact/wall.ogg"),
-        flesh: assets.load("audio/impact/flesh.ogg"),
-        enemy_death: assets.load("audio/impact/enemy_death.ogg"),
+        splat: assets.load("audio/impact/splat.ogg"),
+        squelch: assets.load("audio/impact/squelch.ogg"),
+        crunch: assets.load("audio/impact/crunch.ogg"),
+        bone_snap: assets.load("audio/impact/bone_snap.ogg"),
         growl: assets.load("audio/enemy/growl.ogg"),
+        squitter: assets.load("audio/enemy/squitter.ogg"),
         footsteps: [
             assets.load("audio/foot/carpet_1.ogg"),
             assets.load("audio/foot/carpet_2.ogg"),
@@ -177,12 +208,19 @@ fn play_sfx(
                 (assets.fire.clone(), 0.32, jitter(&mut rng, 0.15))
             }
             Sfx::ImpactWall => (assets.wall.clone(), 0.4, jitter(&mut rng, 0.12)),
-            Sfx::ImpactFlesh => (assets.flesh.clone(), 0.55, jitter(&mut rng, 0.12)),
-            Sfx::EnemyDeath => (assets.enemy_death.clone(), 0.7, jitter(&mut rng, 0.08)),
-            // A unit going down reuses the heavy wall thud, pitched down so it reads as a body drop.
-            Sfx::UnitDeath => (assets.wall.clone(), 0.7, 0.7 * jitter(&mut rng, 0.05)),
+            // Flesh hits, enemy bursts, and unit crunches are gory now (see `gore`).
+            Sfx::ImpactFlesh => (assets.splat.clone(), 0.55, jitter(&mut rng, 0.12)),
+            Sfx::EnemyDeath => (assets.squelch.clone(), 0.7, jitter(&mut rng, 0.08)),
+            Sfx::UnitDeath => (assets.crunch.clone(), 0.85, jitter(&mut rng, 0.06)),
         };
         commands.spawn((AudioPlayer::new(handle), one_shot(vol, speed)));
+        // A crunched unit layers a bone snap over the wet crunch.
+        if matches!(sfx, Sfx::UnitDeath) {
+            commands.spawn((
+                AudioPlayer::new(assets.bone_snap.clone()),
+                one_shot(0.7, jitter(&mut rng, 0.1)),
+            ));
+        }
     }
 }
 
@@ -207,7 +245,7 @@ fn footsteps(
         return;
     }
     // More boots on the ground ⇒ proportionally shorter gap between steps, floored so it never
-    // machine-guns. ~0.5s/step for one survivor down to ~0.12s for a full five.
+    // machine-guns. ~0.5s/step for one survivor down to ~0.22s for a full five.
     let interval = (STRIDE / movers as f32).max(MIN_STRIDE);
     *timer += time.delta_secs();
     if *timer >= interval {
@@ -216,6 +254,43 @@ fn footsteps(
         commands.spawn((
             AudioPlayer::new(assets.footsteps[idx].clone()),
             one_shot(FOOT_VOL, jitter(&mut rng, 0.08)),
+        ));
+    }
+}
+
+/// Crab-swarm skitter from a single shared voice (never overlapping per-crab — the same fix as
+/// `footsteps`). Density scales with the number of crabs currently near the squad, so a fresh
+/// infestation chitters densely and the sound thins as the swarm is culled; silent when none are near.
+fn crab_squitter(
+    mut commands: Commands,
+    assets: Res<AudioAssets>,
+    time: Res<Time>,
+    crabs: Query<&Transform, With<Crab>>,
+    units: Query<&Transform, (With<Unit>, Without<Crab>)>,
+    mut timer: Local<f32>,
+    mut rng: Local<u32>,
+) {
+    // Count crabs within SQUITTER_RANGE (planar) of any unit — the audible swarm.
+    let near = crabs
+        .iter()
+        .filter(|c| {
+            units
+                .iter()
+                .any(|u| (c.translation.xz() - u.translation.xz()).length() <= SQUITTER_RANGE)
+        })
+        .count();
+    if near == 0 {
+        *timer = SQUITTER_STRIDE; // armed, so the next crab that closes in skitters immediately
+        return;
+    }
+    // More crabs ⇒ denser skittering, floored so it never machine-guns into mush (as with footsteps).
+    let interval = (SQUITTER_STRIDE / near as f32).max(SQUITTER_MIN_STRIDE);
+    *timer += time.delta_secs();
+    if *timer >= interval {
+        *timer = 0.0;
+        commands.spawn((
+            AudioPlayer::new(assets.squitter.clone()),
+            one_shot(SQUITTER_VOL, jitter(&mut rng, 0.12)),
         ));
     }
 }
@@ -262,7 +337,7 @@ fn update_music(
     assets: Res<AudioAssets>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
-    enemies: Query<&Transform, With<Enemy>>,
+    enemies: Query<&Transform, With<Hostile>>,
     mut state: ResMut<MusicState>,
 ) {
     let combat = enemies

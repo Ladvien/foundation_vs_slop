@@ -2,6 +2,7 @@
 ## Favorite Shaders
 - https://www.shadertoy.com/view/lsXcWn
 - https://www.shadertoy.com/view/4lfXRf
+- https://www.shadertoy.com/view/lsKyWV
 - https://www.shadertoy.com/view/XljGDz
 - https://www.shadertoy.com/view/4slXW7
 - https://www.shadertoy.com/view/MdG3Dd
@@ -34,6 +35,12 @@
 - https://www.shadertoy.com/view/ldd3DB (boid)
 - https://www.shadertoy.com/view/MstXWS
 - https://www.shadertoy.com/view/XsjXRm
+- https://www.shadertoy.com/view/Mss3WN
+- https://www.shadertoy.com/view/3tXXRn
+- https://www.shadertoy.com/view/4tySDW
+- https://www.shadertoy.com/view/4t2SWW
+- https://www.shadertoy.com/view/flfyRS
+- https://www.shadertoy.com/view/XsG3z1
 
 ### TV Distortion
 - https://www.shadertoy.com/view/XtBXDt
@@ -42,3 +49,8 @@
 - https://www.shadertoy.com/view/cdG3Wd
 - https://www.shadertoy.com/view/4dsGD7
 - https://www.shadertoy.com/view/ldjGzV
+- https://www.shadertoy.com/view/sltBWM
+- https://www.shadertoy.com/view/XsfGDl
+
+## Glitch
+- https://www.shadertoy.com/view/MltBzf

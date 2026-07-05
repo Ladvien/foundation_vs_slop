@@ -52,6 +52,11 @@ struct HealthBar {
 #[derive(Component)]
 struct HasHealthBar;
 
+/// Opt-out marker: a `Health` entity carrying this gets NO floating bar. For swarm chaff (the crab
+/// infestation) where 40 bars would bury the screen — they still take damage and die, just silently.
+#[derive(Component)]
+pub struct NoHealthBar;
+
 /// GPU uniform — mirrors `HealthBarSettings` in `health_bar.wgsl` (field order + types).
 #[derive(Clone, ShaderType)]
 struct HealthBarUniform {
@@ -105,7 +110,7 @@ fn attach_health_bars(
     mut commands: Commands,
     assets: Res<HealthBarAssets>,
     mut materials: ResMut<Assets<HealthBarMaterial>>,
-    owners: Query<(Entity, &Health), Without<HasHealthBar>>,
+    owners: Query<(Entity, &Health), (Without<HasHealthBar>, Without<NoHealthBar>)>,
 ) {
     for (owner, health) in &owners {
         let material = materials.add(HealthBarMaterial {

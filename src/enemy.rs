@@ -26,28 +26,33 @@ use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::fog::FogGrid;
+use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
-use crate::impact_fx::ImpactQueue;
 use crate::squad::Unit;
 
-/// How many enemies to place at startup.
-const ENEMY_COUNT: usize = 6;
+/// How many enemies to place at startup. Exactly one — a single boss smiley that is as strong as a
+/// whole pack combined (see `START_HP` / `CONTACT_DPS`). There is no respawn, so this is one for the
+/// whole run.
+const ENEMY_COUNT: usize = 1;
 /// Momentum charge (steering with acceleration + heading persistence; Wang, Kearney, Cremer &
 /// Willemsen, "Steering Behaviors for Autonomous Vehicles in Virtual Environments", IEEE VR 2006,
 /// DOI 10.1109/vr.2005.69). An enemy crawls at `MIN_SPEED`, and while it holds a roughly-straight
 /// heading it accelerates by `ACCEL` toward `MAX_SPEED`; any heading change beyond `TURN_COS` drops
 /// it back to a crawl — so a committed straight-line pursuer becomes fast and dangerous, a wanderer
 /// stays slow.
-const MIN_SPEED: f32 = 0.8;
-const MAX_SPEED: f32 = 7.0; // faster than a unit's 6.0 so a full charge can run one down
-const ACCEL: f32 = 1.5; // world units / s² — a slow ramp
+const MIN_SPEED: f32 = 0.4; // a slow crawl — the boss lumbers
+const MAX_SPEED: f32 = 2.5; // deliberately well under a unit's 6.0 cruise: a lumbering boss you can
+                            // kite, but that flattens anything it corners (see `CONTACT_DPS`)
+const ACCEL: f32 = 0.4; // world units / s² — a long, low ramp so it never lunges
 /// Heading is "unchanged" while the new desired direction is within ~30° of the current one.
 const TURN_COS: f32 = 0.87;
-/// Centre distance at which an enemy is "in contact" with a unit and starts gnawing on it.
-const CONTACT_RADIUS: f32 = 0.9;
-/// Damage per second an in-contact enemy deals to a unit (a unit has 100 HP → ~8 s to kill; slow
-/// enough that the squad can shoot the enemy off or retreat, but contact has real stakes).
-const CONTACT_DPS: f32 = 12.0;
+/// Centre distance at which an enemy is "in contact" with a unit and starts gnawing on it. A little
+/// longer than a unit's so the slow boss can still land hits before it's kited out of reach.
+const CONTACT_RADIUS: f32 = 1.2;
+/// Damage per second an in-contact enemy deals to a unit (a unit has 100 HP → ~1.4 s to kill). This
+/// is the whole pack's bite on one body: being cornered by the boss is near-instant death, so the
+/// squad must keep it at range and never let it close.
+const CONTACT_DPS: f32 = 72.0;
 /// Collision box half-extents for wall-sliding ([`Dungeon::resolve_move`]). Matched to the squad's
 /// `0.27` so an enemy fits every corridor a unit fits (a 1-wide walled cell has only
 /// `TILE - 2·WALL_THICKNESS = 0.6` clear width) — otherwise a wider enemy wedges at corridor mouths
@@ -64,14 +69,15 @@ const CAPSULE_LENGTH: f32 = 0.9;
 const ENEMY_Y: f32 = CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
 /// Billboard face size (world units) and its local offset up the capsule toward the "head".
 const FACE_SIZE: f32 = 1.6;
-const FACE_LOCAL: Vec3 = Vec3::new(0.0, 0.2, 0.0);
-/// Starting hit points — a bullet sponge. With per-shot spread making most bolts miss, this is a
-/// real fight, not a 3-shot kill (enemy strength as a difficulty variable, McKay et al. 2018).
-const START_HP: f32 = 400.0;
+const FACE_LOCAL: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+/// Starting hit points — a serious bullet sponge. This lone boss carries a whole pack's health on one
+/// body (6 × the old 400), so with per-shot spread making most bolts miss it is a long, real fight —
+/// not a 3-shot kill (enemy strength as a difficulty variable, McKay et al. 2018).
+const START_HP: f32 = 2400.0;
 /// Only floor cells at least this far (tiles) from the squad spawn are candidate enemy positions,
 /// and accepted enemies are kept at least `SPAWN_SEP` apart so they don't stack.
-const MIN_SPAWN_DIST: f32 = 8.0;
-const SPAWN_SEP: f32 = 5.0;
+const MIN_SPAWN_DIST: f32 = 4.0;
+const SPAWN_SEP: f32 = 3.0;
 /// Glance strength: how far the eyes/head lean toward the tracked unit (shader `look` range ≈ 0.4).
 const LOOK_AMOUNT: f32 = 0.35;
 /// Grin-on-sight: `smile` ramps to a big toothy grin (≈1) as the nearest unit closes inside
@@ -100,6 +106,13 @@ const SEP_STRENGTH: f32 = 2.5;
 /// Marker for an enemy root entity (also the raycast collider — carries the capsule mesh).
 #[derive(Component)]
 pub struct Enemy;
+
+/// Shared marker for anything the squad can shoot and the fog conceals — the smiley boss *and* the
+/// crab swarm (`crate::crab`). Cross-cutting systems (laser hit-scan, fog hiding, combat-music trigger)
+/// key on `Hostile` so they treat every threat uniformly through one code path, while type-specific AI
+/// stays on `Enemy` / `Crab`.
+#[derive(Component)]
+pub struct Hostile;
 
 /// An enemy's momentum: its current ground speed and heading. Speed builds while `heading` is held
 /// (see the `MIN_SPEED`/`MAX_SPEED`/`ACCEL`/`TURN_COS` charge model) and resets on a turn. Also
@@ -228,6 +241,7 @@ fn spawn_enemies(
         commands
             .spawn((
                 Enemy,
+                Hostile,
                 Health::new(START_HP),
                 EnemyMotion {
                     speed: MIN_SPEED,
@@ -418,7 +432,7 @@ fn enemy_contact_damage(
 fn hide_enemies_in_fog(
     fog: Res<FogGrid>,
     dungeon: Res<Dungeon>,
-    mut enemies: Query<(&Transform, &mut Visibility), With<Enemy>>,
+    mut enemies: Query<(&Transform, &mut Visibility), With<Hostile>>,
 ) {
     for (tf, mut vis) in &mut enemies {
         let cell = dungeon.world_to_cell(tf.translation);
@@ -493,13 +507,21 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// Despawn enemies whose health has run out, with a parting impact burst (reuses the laser VFX).
 fn despawn_dead(
     mut commands: Commands,
-    mut impacts: ResMut<ImpactQueue>,
+    mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
     enemies: Query<(Entity, &Health, &Transform), With<Enemy>>,
 ) {
     for (entity, hp, tf) in &enemies {
         if hp.current <= 0.0 {
-            impacts.0.push(tf.translation);
+            // Billboard smiley — no mesh to shatter, so a red blood burst + floor pool, no gibs.
+            gore.0.push(GoreEvent {
+                pos: tf.translation,
+                kind: GoreKind::EnemySplat,
+                tint: Color::srgb(0.7, 0.05, 0.05),
+                gib: None,
+                // The boss is the heaviest thing in the level: full camera kick on its death.
+                intensity: crate::gore::death_intensity(START_HP, CONTACT_DPS),
+            });
             sfx.write(Sfx::EnemyDeath);
             commands.entity(entity).despawn();
         }

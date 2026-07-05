@@ -15,8 +15,8 @@ use bevy::prelude::*;
 use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
+use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
-use crate::impact_fx::ImpactQueue;
 use crate::orca::{self, Agent};
 
 /// Marker for a squad member (the RTS unit; replaces the old single-agent `Player`).
@@ -67,16 +67,20 @@ impl MoveOrder {
 #[derive(Component)]
 pub struct Velocity(pub Vec2);
 
-/// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors).
+/// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors) and so
+/// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture.
 #[derive(Component)]
-struct GunModel;
+pub struct GunModel;
 
 /// Marks a unit whose figurine has already been recolored (so the one-shot recolor runs once).
 #[derive(Component)]
 struct Recolored;
 
-/// Scale the figurine so a unit reads clearly (0.7 × 1.4 ≈ 1.0 ≈ wall height).
-const FIGURINE_SCALE: f32 = 1.4;
+/// Scale the figurine so a unit stands a bit taller than the 1.0 walls and reads at the enemies'
+/// scale (0.7 × 1.8 ≈ 1.3, vs the smiley's ~1.26 capsule). Uniform, so the carried gun and the
+/// autogib fragments stay proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the
+/// visual on purpose — see below.
+const FIGURINE_SCALE: f32 = 1.8;
 /// Square collision half-extent. Sized so a unit (0.54 wide) fits the narrowest walkable channel:
 /// a corridor cell walled on both sides has only `TILE - 2·WALL_THICKNESS = 0.6` of clear width, so
 /// a wider box would physically wedge in 1-wide passages regardless of steering. Deliberately a
@@ -222,16 +226,30 @@ const MIN_LIVING_UNITS: usize = 1;
 /// (bar shows a sliver) instead of dying.
 fn despawn_dead_units(
     mut commands: Commands,
-    mut impacts: ResMut<ImpactQueue>,
+    mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut units: Query<(Entity, &mut Health, &Transform), With<Unit>>,
+    mut units: Query<(Entity, &mut Health, &Transform, &Outfit, &WorldAssetRoot), With<Unit>>,
 ) {
     // How many dead units we may actually remove this frame while keeping the living floor.
     let mut removable = units.iter().count().saturating_sub(MIN_LIVING_UNITS);
-    for (entity, mut hp, transform) in &mut units {
+    for (entity, mut hp, transform, outfit, root) in &mut units {
         if hp.current <= 0.0 {
             if removable > 0 {
-                impacts.0.push(transform.translation + Vec3::Y * 0.5);
+                // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
+                // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
+                gore.0.push(GoreEvent {
+                    pos: transform.translation + Vec3::Y * 0.5,
+                    kind: GoreKind::UnitCrunch,
+                    tint: outfit.0,
+                    // The figurine's baked fracture set: spawn from its foot origin at its render scale.
+                    gib: Some(GibSource {
+                        source: root.0.id(),
+                        origin: transform.translation,
+                        scale: transform.scale.x,
+                    }),
+                    // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
+                    intensity: 0.6,
+                });
                 sfx.write(Sfx::UnitDeath);
                 commands.entity(entity).despawn();
                 removable -= 1;

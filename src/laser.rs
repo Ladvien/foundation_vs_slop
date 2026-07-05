@@ -15,9 +15,11 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use crate::audio::Sfx;
+use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
-use crate::enemy::Enemy;
+use crate::enemy::Hostile;
 use crate::fog::FogGrid;
+use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
 use crate::squad::{Unit, Velocity, UNIT_SPEED};
@@ -29,13 +31,21 @@ const LASER_SPEED: f32 = 22.0;
 /// Bolt lifetime in seconds (a fallback despawn if it never meets a wall).
 const LASER_LIFE: f32 = 1.2;
 /// Hit points removed from an enemy per bolt.
-const LASER_DAMAGE: f32 = 10.0;
+const LASER_DAMAGE: f32 = 0.2; // TEMP: 1/50 power to watch the crab swarm instead of mowing it down (was 10.0)
 /// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
 /// for hits against the small enemy hitbox.
 const BASE_SPREAD: f32 = 0.06;
 /// Extra aim-cone half-angle added at full movement speed — dominates `BASE_SPREAD`, so a moving unit
 /// sprays. Scaled by (unit speed / `UNIT_SPEED`).
 const MOVE_SPREAD: f32 = 0.40;
+/// A unit only shoots things in its FRONT arc (it faces its travel direction). Targets whose bearing is
+/// more than this half-angle off the unit's forward are ignored — so a crab on a unit's back is safe
+/// from that unit's own gun (only a teammate facing it can shoot it off). cos(75°) ≈ 0.26.
+const FRONT_ARC_COS: f32 = 0.26;
+/// When a bolt shoots a crab that's latched onto a squad member, this is the chance it *also* wounds
+/// the host (a stray round through the crab into your own guy) and how much it hurts.
+const FRIENDLY_FIRE_CHANCE: f32 = 0.2;
+const FRIENDLY_FIRE_DAMAGE: f32 = 5.0;
 
 /// A live laser bolt: its constant velocity and remaining lifetime (seconds).
 #[derive(Component)]
@@ -89,7 +99,6 @@ fn setup_laser_assets(
 #[allow(clippy::too_many_arguments)]
 fn fire_laser(
     mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
@@ -97,11 +106,13 @@ fn fire_laser(
     mut rng: Local<u32>,
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
-    shooters: Query<(&Transform, &Velocity), (With<Unit>, Without<Enemy>)>,
-    enemies: Query<&Transform, (With<Enemy>, Without<Unit>)>,
+    shooters: Query<(&Transform, &Velocity), (With<Unit>, Without<Hostile>)>,
+    enemies: Query<&Transform, (With<Hostile>, Without<Unit>)>,
 ) {
+    // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. A unit with no
+    // visible enemy still holds fire (see the per-unit loop below).
     cooldown.0.tick(time.delta());
-    if !keys.pressed(KeyCode::Space) || !cooldown.0.just_finished() {
+    if !cooldown.0.just_finished() {
         return;
     }
 
@@ -110,11 +121,19 @@ fn fire_laser(
     // that widens with the unit's speed. A unit with no visible enemy holds fire — one path.
     for (unit, velocity) in &shooters {
         let muzzle = unit.transform_point(crate::squad::MUZZLE_LOCAL);
+        // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
+        let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let mut best = f32::MAX;
         let mut target = None;
         for enemy in &enemies {
             if !fog.visible_at(dungeon.world_to_cell(enemy.translation)) {
                 continue; // can't shoot what the squad can't see
+            }
+            // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
+            // by itself; a teammate whose front arc covers it can still pick it off).
+            let bearing = (enemy.translation - unit.translation).with_y(0.0);
+            if bearing.normalize_or(forward).dot(forward) < FRONT_ARC_COS {
+                continue;
             }
             let d = enemy.translation.distance_squared(muzzle);
             if d < best {
@@ -150,11 +169,15 @@ fn update_lasers(
     time: Res<Time>,
     dungeon: Res<Dungeon>,
     mut impacts: ResMut<ImpactQueue>,
+    mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
     mut ray_cast: MeshRayCast,
-    enemy_ids: Query<Entity, With<Enemy>>,
-    mut healths: Query<&mut Health, With<Enemy>>,
+    enemy_ids: Query<Entity, With<Hostile>>,
+    mut healths: Query<&mut Health, With<Hostile>>,
+    attached: Query<&CrabAttached>,
+    mut unit_healths: Query<&mut Health, (With<Unit>, Without<Hostile>)>,
     mut lasers: Query<(Entity, &mut Transform, &mut Laser)>,
+    mut rng: Local<u32>,
 ) {
     let dt = time.delta_secs();
     // Restrict ray hits to enemy collider meshes (the material-less capsules on enemy roots).
@@ -182,7 +205,24 @@ fn update_lasers(
                 if let Ok(mut hp) = healths.get_mut(*hit_entity) {
                     hp.current -= LASER_DAMAGE;
                 }
-                impacts.0.push(hit.point);
+                // Friendly fire: shooting a crab that's latched onto a squad member risks putting the
+                // round through it into your own guy (rule 4). Rolls per hit.
+                if let Ok(att) = attached.get(*hit_entity)
+                    && let Some(host) = att.host
+                    && rand01(&mut rng) < FRIENDLY_FIRE_CHANCE
+                    && let Ok(mut host_hp) = unit_healths.get_mut(host)
+                {
+                    host_hp.current -= FRIENDLY_FIRE_DAMAGE;
+                }
+                // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the
+                // spark burst via `ImpactQueue` below — one job per queue, see `gore`).
+                gore.0.push(GoreEvent {
+                    pos: hit.point,
+                    kind: GoreKind::FleshHit,
+                    tint: Color::srgb(0.7, 0.05, 0.05),
+                    gib: None,
+                    intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
+                });
                 sfx.write(Sfx::ImpactFlesh);
                 commands.entity(entity).despawn();
                 continue;

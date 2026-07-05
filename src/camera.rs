@@ -8,13 +8,18 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
 use crate::dungeon::Dungeon;
+use crate::juice::Trauma;
 
 /// World-space camera offset from the focus point. Equal-ish axes give the iso tilt.
 const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
+/// Peak screen-shake offset (world units) at full trauma. Applied as `SHAKE_MAX * trauma²`.
+const SHAKE_MAX: f32 = 0.85;
+/// Peak shake roll (radians) at full trauma — a small camera twist for extra kick.
+const SHAKE_ROLL: f32 = 0.035;
 /// Initial vertical world units shown.
 const VIEWPORT_HEIGHT: f32 = 12.0;
 const MIN_ZOOM: f32 = 5.0;
-const MAX_ZOOM: f32 = 40.0;
+const MAX_ZOOM: f32 = 34.0;
 const ZOOM_STEP: f32 = 2.0;
 const PAN_SPEED: f32 = 16.0;
 const DRAG_SCALE: f32 = 0.03;
@@ -45,6 +50,12 @@ impl Plugin for CameraPlugin {
     }
 }
 
+/// Smooth pseudo-noise in `[-1, 1]` from two detuned sines — a cheap Perlin stand-in for shake so the
+/// motion shudders smoothly instead of jittering per frame. `seed` decorrelates the axes.
+fn shake_noise(t: f32, seed: f32) -> f32 {
+    (t * 37.0 + seed).sin() * 0.6 + (t * 91.0 + seed * 2.3).sin() * 0.4
+}
+
 fn setup_camera(mut commands: Commands, dungeon: Res<Dungeon>, mut rig: ResMut<CameraRig>) {
     // Start focused on the squad's spawn so there is no opening lurch.
     rig.focus = dungeon.spawn_world();
@@ -66,6 +77,7 @@ fn drive_camera(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     mouse_motion: Res<AccumulatedMouseMotion>,
+    trauma: Res<Trauma>,
     mut rig: ResMut<CameraRig>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
@@ -97,8 +109,23 @@ fn drive_camera(
         rig.focus += (-d.x * SCREEN_RIGHT + d.y * SCREEN_FORWARD) * DRAG_SCALE;
     }
 
+    // Trauma² screen shake (Eiserloh, GDC 2016): offset the whole view so the iso angle is kept,
+    // plus a small roll for kick. The transform is rebuilt from `rig` each frame, so this is purely
+    // additive and never accumulates drift.
+    let shake_t = trauma.0 * trauma.0;
     let (mut transform, mut projection) = camera.into_inner();
-    *transform = Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y);
+    if shake_t > 0.0 {
+        let t = time.elapsed_secs();
+        let offset = Vec3::new(shake_noise(t, 0.0), shake_noise(t, 7.3), shake_noise(t, 13.7))
+            * (SHAKE_MAX * shake_t);
+        let roll = shake_noise(t, 21.1) * (SHAKE_ROLL * shake_t);
+        *transform = Transform::from_translation(rig.focus + ISO_OFFSET + offset)
+            .looking_at(rig.focus + offset, Vec3::Y);
+        transform.rotate_local_z(roll);
+    } else {
+        *transform =
+            Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y);
+    }
     if let Projection::Orthographic(ortho) = projection.as_mut() {
         ortho.scaling_mode = ScalingMode::FixedVertical {
             viewport_height: rig.height,
