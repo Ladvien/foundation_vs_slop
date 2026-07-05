@@ -103,9 +103,41 @@ const SEP_RADIUS: f32 = 1.2;
 /// target without stalling forward progress through corridors.
 const SEP_STRENGTH: f32 = 2.5;
 
+/// Crab-swarm predation tuning. Once this many crabs are riding the boss it panics; after a short
+/// wind-up it whirls and devours the crabs on it, healing per crab eaten.
+const PANIC_CRABS: usize = 3;
+const PANIC_WINDUP: f32 = 0.8; // seconds of visible dread before it spins
+const SPIN_TIME: f32 = 1.0; // seconds of whirling (and eating)
+const SPIN_RATE: f32 = 22.0; // rad/s the face rolls while spinning — a fast blur
+const EAT_RADIUS: f32 = 1.4; // crabs within this of the boss centre are devoured in the chomp
+const EAT_MAX: usize = 6; // most crabs one chomp can devour — bounds the swarm hit so it can't wipe it
+const HEAL_PER_CRAB: f32 = 30.0; // HP regained per crab eaten (its whole-pack health tops up)
+const PANIC_COOLDOWN: f32 = 4.0; // seconds it must stay calm before it can panic again
+
 /// Marker for an enemy root entity (also the raycast collider — carries the capsule mesh).
 #[derive(Component)]
 pub struct Enemy;
+
+/// The boss's anti-swarm behaviour. Crabs pile on (they treat it as prey); at `PANIC_CRABS` it panics,
+/// then spins and eats them. A tiny state machine owned by `smiley_predation`; the face visuals
+/// (`update_smiley_faces`) read `mood`/`spin` to show dread and whirl.
+#[derive(Component)]
+struct SmileyPredator {
+    mood: SmileyMood,
+    /// Time left in the current `Panic`/`Spin` phase.
+    timer: f32,
+    /// Cooldown before it may panic again (post-spin).
+    cooldown: f32,
+    /// Accumulated roll angle for the spinning face.
+    spin: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SmileyMood {
+    Calm,
+    Panic,
+    Spin,
+}
 
 /// Shared marker for anything the squad can shoot and the fog conceals — the smiley boss *and* the
 /// crab swarm (`crate::crab`). Cross-cutting systems (laser hit-scan, fog hiding, combat-music trigger)
@@ -148,6 +180,8 @@ struct SmileyUniform {
     look: Vec2,
     smile: f32,
     menace: f32,
+    /// 0 = normal, 1 = full panic (pin-prick pupils + cold pallor) while the swarm overwhelms it.
+    panic: f32,
 }
 
 /// The custom face material (fragment-only; uses Bevy's default mesh vertex pipeline).
@@ -184,6 +218,7 @@ impl Plugin for EnemyPlugin {
                         .after(rebuild_enemy_field)
                         .after(crate::ai::AiSet::Think),
                     enemy_contact_damage,
+                    smiley_predation,
                     hide_enemies_in_fog,
                     update_smiley_faces,
                     despawn_dead,
@@ -239,12 +274,20 @@ fn spawn_enemies(
                 look: Vec2::ZERO,
                 smile: 0.0, // updated each frame by `update_smiley_faces` (grin-on-sight)
                 menace: ENEMY_MENACE,
+                panic: 0.0,
             },
         });
         commands
             .spawn((
                 Enemy,
                 Hostile,
+                crate::squad::Prey, // crabs swarm the boss too (nearest-prey targeting)
+                SmileyPredator {
+                    mood: SmileyMood::Calm,
+                    timer: 0.0,
+                    cooldown: 0.0,
+                    spin: 0.0,
+                },
                 Health::new(START_HP),
                 crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
                 crate::ai::brain::BrainId::Smiley,
@@ -311,7 +354,16 @@ fn enemy_seek(
     enemy_field: Res<EnemyField>,
     scent_nav: Res<crate::ai::brain::ScentNav>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
-    mut enemies: Query<(Entity, &mut Transform, &mut EnemyMotion, &ActiveBehavior), With<Enemy>>,
+    mut enemies: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut EnemyMotion,
+            &ActiveBehavior,
+            Option<&SmileyPredator>,
+        ),
+        With<Enemy>,
+    >,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
 
@@ -319,10 +371,15 @@ fn enemy_seek(
     // then moves each enemy. One frame of staleness is fine for a gentle push-apart.
     let positions: Vec<(Entity, Vec2)> = enemies
         .iter()
-        .map(|(e, tf, _, _)| (e, tf.translation.xz()))
+        .map(|(e, tf, _, _, _)| (e, tf.translation.xz()))
         .collect();
 
-    for (entity, mut tf, mut motion, active) in &mut enemies {
+    for (entity, mut tf, mut motion, active, predator) in &mut enemies {
+        // Rooted while panicking/spinning: it plants itself to whirl and eat the swarm.
+        if predator.is_some_and(|p| p.mood != SmileyMood::Calm) {
+            motion.speed = MIN_SPEED;
+            continue;
+        }
         let pos = tf.translation;
         let nearest = nearest_unit(pos, &units);
         let nearest_dist = nearest.map(|t| (t.xz() - pos.xz()).length());
@@ -463,7 +520,7 @@ fn hide_enemies_in_fog(
 /// Billboard the face toward the (fixed) iso camera and point the eyes at the nearest unit.
 fn update_smiley_faces(
     camera: Single<&GlobalTransform, With<Camera3d>>,
-    enemies: Query<(&Transform, &Children), (With<Enemy>, Without<SmileyFace>)>,
+    enemies: Query<(&Transform, &Children, Option<&SmileyPredator>), (With<Enemy>, Without<SmileyFace>)>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>, Without<SmileyFace>)>,
     mut faces: Query<
         (&mut Transform, &MeshMaterial3d<SmileyMaterial>),
@@ -477,9 +534,9 @@ fn update_smiley_faces(
     let right = camera.right();
     let up = camera.up();
 
-    for (etf, children) in &enemies {
+    for (etf, children, predator) in &enemies {
         // Watch the nearest unit: eyes glance toward it, and the face grins wider the closer it is.
-        let (look, smile) = match nearest_unit(etf.translation, &units) {
+        let (look, mut smile) = match nearest_unit(etf.translation, &units) {
             Some(target) => {
                 let mut to = target - etf.translation;
                 let glance = Vec2::new(to.dot(*right), to.dot(*up)).normalize_or_zero() * LOOK_AMOUNT;
@@ -490,14 +547,26 @@ fn update_smiley_faces(
             }
             None => (Vec2::ZERO, 0.0),
         };
+        // Panic dread + spin whirl from the predation state machine.
+        let (panic, spin_angle) = match predator.map(|p| (p.mood, p.timer, p.spin)) {
+            Some((SmileyMood::Panic, timer, _)) => {
+                // Dread ramps up over the wind-up (timer counts down from PANIC_WINDUP).
+                (1.0 - (timer / PANIC_WINDUP).clamp(0.0, 1.0), 0.0)
+            }
+            Some((SmileyMood::Spin, _, spin)) => (1.0, spin),
+            _ => (0.0, 0.0),
+        };
+        smile *= 1.0 - panic; // panicking overrides the grin into a frown
+        let face_rot = cam_rot * Quat::from_rotation_z(spin_angle);
         for &child in children {
             let Ok((mut ftf, mat_handle)) = faces.get_mut(child) else {
                 continue;
             };
-            ftf.rotation = cam_rot;
+            ftf.rotation = face_rot;
             if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
                 mat.settings.look = look;
                 mat.settings.smile = smile;
+                mat.settings.panic = panic;
             }
         }
     }
@@ -538,6 +607,83 @@ fn despawn_dead(
             });
             sfx.write(Sfx::EnemyDeath);
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Anti-swarm behaviour: when enough crabs pile onto the boss it panics, then whirls and devours the
+/// crabs clinging to it, healing per crab eaten. A small Calm→Panic→Spin→Calm state machine. Crabs count
+/// as "on it" via `CrabAttached.host` (the crab swarm now treats the boss as prey and latches on).
+/// Emergent predator/prey reversal — the hunted swarm becomes food when it overcommits.
+fn smiley_predation(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut gore: ResMut<GoreQueue>,
+    mut sfx: MessageWriter<Sfx>,
+    mut smileys: Query<(Entity, &Transform, &mut Health, &mut SmileyPredator), With<Enemy>>,
+    crabs: Query<(Entity, &Transform, &crate::crab::CrabAttached), With<crate::crab::Crab>>,
+) {
+    let dt = time.delta_secs();
+    for (se, stf, mut hp, mut pred) in &mut smileys {
+        pred.cooldown = (pred.cooldown - dt).max(0.0);
+        let riders = crabs.iter().filter(|(_, _, a)| a.host == Some(se)).count();
+
+        match pred.mood {
+            SmileyMood::Calm => {
+                if riders >= PANIC_CRABS && pred.cooldown <= 0.0 {
+                    pred.mood = SmileyMood::Panic;
+                    pred.timer = PANIC_WINDUP;
+                    if crate::ai::diag::AI_DIAG {
+                        info!("smiley: PANIC — {riders} crabs on it");
+                    }
+                }
+            }
+            SmileyMood::Panic => {
+                pred.timer -= dt;
+                if pred.timer <= 0.0 {
+                    // --- CHOMP (once): devour up to `EAT_MAX` crabs riding it, healing per crab. A
+                    // single discrete bite of the swarm on it — not a continuous vacuum — so it punishes
+                    // over-swarming without wiping the whole population in one spin.
+                    let mut eaten = 0u32;
+                    for (ce, ctf, a) in &crabs {
+                        if eaten as usize >= EAT_MAX {
+                            break;
+                        }
+                        if a.host == Some(se)
+                            && ctf.translation.distance(stf.translation) <= EAT_RADIUS
+                        {
+                            commands.entity(ce).despawn();
+                            gore.0.push(GoreEvent {
+                                pos: ctf.translation,
+                                kind: GoreKind::EnemySplat,
+                                tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
+                                gib: None,
+                                intensity: 0.2,
+                            });
+                            eaten += 1;
+                        }
+                    }
+                    if eaten > 0 {
+                        hp.current = (hp.current + eaten as f32 * HEAL_PER_CRAB).min(hp.max);
+                        sfx.write(Sfx::ImpactFlesh);
+                        if crate::ai::diag::AI_DIAG {
+                            info!("smiley: chomped {eaten} crabs, hp now {:.0}", hp.current);
+                        }
+                    }
+                    pred.mood = SmileyMood::Spin;
+                    pred.timer = SPIN_TIME;
+                    pred.spin = 0.0;
+                }
+            }
+            SmileyMood::Spin => {
+                // Whirl (visual only — the bite already happened on entry); then settle to a cooldown.
+                pred.timer -= dt;
+                pred.spin += SPIN_RATE * dt;
+                if pred.timer <= 0.0 {
+                    pred.mood = SmileyMood::Calm;
+                    pred.cooldown = PANIC_COOLDOWN;
+                }
+            }
         }
     }
 }

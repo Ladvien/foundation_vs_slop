@@ -37,6 +37,7 @@ pub struct FieldsTuning {
     pub threat: ChannelTuning,
     pub crab_density: ChannelTuning,
     pub meat: ChannelTuning,
+    pub rally: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -47,6 +48,7 @@ impl FieldsTuning {
         defs[FieldId::THREAT.0] = self.threat.into();
         defs[FieldId::CRAB_DENSITY.0] = self.crab_density.into();
         defs[FieldId::MEAT.0] = self.meat.into();
+        defs[FieldId::RALLY.0] = self.rally.into();
         defs
     }
 }
@@ -81,6 +83,13 @@ impl Default for AiTuning {
                 meat: ChannelTuning {
                     evaporate: 0.3,
                     diffuse: 0.12,
+                    deposit_radius: 2.0,
+                },
+                // Rally lingers a few seconds and spreads a follow gradient so the massing swarm
+                // paths onto the scout's reported cell, then fades to auto-call-off the attack.
+                rally: ChannelTuning {
+                    evaporate: 0.3,
+                    diffuse: 0.15,
                     deposit_radius: 2.0,
                 },
             },

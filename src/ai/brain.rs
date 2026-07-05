@@ -25,6 +25,10 @@ use crate::util::hash01;
 /// A blood frenzy must reach this SCENT strength before the boss paths to it (matches the HuntBlood gate).
 const HUNT_SCENT_MIN: f32 = 1.0;
 
+/// A rally beacon must reach this RALLY strength before the swarm masses on it (gates the Rally
+/// behaviour, mirroring `HUNT_SCENT_MIN`). A fresh `RALLY_SIGNAL` burst clears it; an evaporated one won't.
+const RALLY_MIN: f32 = 0.5;
+
 /// Seconds between decisions for one agent (steering still runs every frame). RON-tunable later.
 const THINK_INTERVAL: f32 = 0.3;
 /// Boss "chase falls off" range, in tiles (mirrors `enemy::CHASE_TILES`).
@@ -40,6 +44,7 @@ pub struct Brain {
 pub struct AiBrains {
     pub smiley: Brain,
     pub crab: Brain,
+    pub scout: Brain,
 }
 
 /// Which brain an agent uses.
@@ -49,6 +54,8 @@ pub enum BrainId {
     /// Attached to crabs in Phase 4.
     #[allow(dead_code)]
     Crab,
+    /// Attached to the ~20% of crabs that are scouts (roam/report recon).
+    Scout,
 }
 
 /// The current decision, written by `think`, read by the locomotion systems each frame.
@@ -86,6 +93,8 @@ impl ThinkTimer {
 pub struct FieldHotspots {
     pub scent: (Vec3, f32),
     pub meat: (Vec3, f32),
+    /// Peak of the RALLY field — the scout-reported sighting the swarm masses on.
+    pub rally: (Vec3, f32),
 }
 
 /// Recompute the field hotspots once per frame (runs in `AiSet::FieldUpdate`).
@@ -93,6 +102,7 @@ pub fn update_hotspots(mut hot: ResMut<FieldHotspots>, stig: Option<Res<Stig>>, 
     if let Some(stig) = stig {
         hot.scent = stig.hotspot(FieldId::SCENT, &dungeon);
         hot.meat = stig.hotspot(FieldId::MEAT, &dungeon);
+        hot.rally = stig.hotspot(FieldId::RALLY, &dungeon);
     }
 }
 
@@ -131,7 +141,11 @@ pub fn think(
     dungeon: Res<Dungeon>,
     hotspots: Res<FieldHotspots>,
     brains: Res<AiBrains>,
+    alarm: Res<crate::nest::NestAlarm>,
     units: Query<&Transform, With<Unit>>,
+    // Prey = units + the smiley boss. Crabs hunt any prey (nearest wins); the boss hunts only units
+    // (it is Prey itself, so scanning Prey would make it target its own position).
+    prey: Query<&Transform, With<crate::squad::Prey>>,
     mut agents: Query<
         (
             &Transform,
@@ -141,12 +155,13 @@ pub fn think(
             &mut ActiveBehavior,
             &mut ThinkTimer,
             Option<&crate::crab::CrabCarry>,
+            Option<&crate::crab::Scout>,
         ),
         Without<Unit>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (tf, brain_id, drives, health, mut active, mut timer, carry) in &mut agents {
+    for (tf, brain_id, drives, health, mut active, mut timer, carry, scout) in &mut agents {
         timer.0 -= dt;
         if timer.0 > 0.0 {
             continue;
@@ -156,11 +171,25 @@ pub fn think(
         let pos = tf.translation;
         let mut nearest_dist = f32::MAX;
         let mut nearest_unit = None;
-        for u in &units {
-            let d = (u.translation.xz() - pos.xz()).length();
+        // Crabs scan all prey (units + boss); the boss scans only units (never itself).
+        let mut scan = |t: &Transform| {
+            let d = (t.translation.xz() - pos.xz()).length();
             if d < nearest_dist {
                 nearest_dist = d;
-                nearest_unit = Some(u.translation);
+                nearest_unit = Some(t.translation);
+            }
+        };
+        match brain_id {
+            // Crabs and scouts both scan all prey (units + boss); the boss scans only units.
+            BrainId::Crab | BrainId::Scout => {
+                for t in &prey {
+                    scan(t);
+                }
+            }
+            BrainId::Smiley => {
+                for t in &units {
+                    scan(t);
+                }
             }
         }
 
@@ -188,11 +217,19 @@ pub fn think(
             } else {
                 0.0
             },
+            berserk: if alarm.0 > 0.0 { 1.0 } else { 0.0 },
+            prey_spotted: if scout.is_some_and(|s| s.prey_spotted()) {
+                1.0
+            } else {
+                0.0
+            },
+            rally_val: hotspots.rally.1,
         };
 
         let brain = match brain_id {
             BrainId::Smiley => &brains.smiley,
             BrainId::Crab => &brains.crab,
+            BrainId::Scout => &brains.scout,
         };
         let idx = decide(&brain.behaviors, &perc, &mut active.rng);
         let chosen = &brain.behaviors[idx];
@@ -205,6 +242,9 @@ pub fn think(
             // The Carry destination (the nest) is resolved per-crab by `carry_gibs` from the lifted
             // gib, not from the global hotspot — decide() only picks the mode here.
             TargetKind::Nest => None,
+            // A reporting scout aims at the home nest it recorded when it spotted the prey.
+            TargetKind::Home => scout.and_then(|s| s.report_home()),
+            TargetKind::RallyHotspot => Some(hotspots.rally.0),
         };
     }
 }
@@ -214,6 +254,7 @@ pub fn init_brains(mut commands: Commands) {
     commands.insert_resource(AiBrains {
         smiley: smiley_brain(),
         crab: crab_brain(),
+        scout: scout_brain(),
     });
 }
 
@@ -262,9 +303,14 @@ fn smiley_brain() -> Brain {
 }
 
 /// The crab swarm brain — the emergent **frenzy → scatter** story lives in the rank ordering:
-/// Flee(2) > Latch(1) > Forage(0). A pursuing crab latches onto a unit and feeds; but when the shared
-/// THREAT field spikes (gunfire), its FEAR climbs and the rank-2 Flee outranks everything, so the swarm
-/// scatters — then FEAR decays as THREAT evaporates and foraging resumes. Nobody scripted "scatter".
+/// Flee(4) > Carry(3) > Latch/SeekMeat(2) > Rally(1) > Forage(0). A pursuing crab latches onto a unit
+/// and feeds; but when the shared THREAT field spikes (gunfire), its FEAR climbs and the top-rank Flee
+/// outranks everything, so the swarm scatters — then FEAR decays as THREAT evaporates and foraging
+/// resumes. Nobody scripted "scatter". Rally sits *below* the attack: a scout's beacon redirects a
+/// far/idle crab toward the sighting (beats plain Forage), but the moment it reaches a unit, Latch (and
+/// the pounce) take over — so the recruited swarm actually *bites* instead of milling on the beacon cell.
+/// A live rally *also* gates Flee off (like the nest-berserk gate), so a recruited swarm presses through
+/// gunfire to the sighting; fear resumes once the beacon evaporates.
 fn crab_brain() -> Brain {
     Brain {
         behaviors: vec![
@@ -281,7 +327,7 @@ fn crab_brain() -> Brain {
             // Climb onto and feed on a unit once close AND hungry.
             Behavior {
                 mode: Mode::Latch,
-                rank: 1,
+                rank: 2,
                 target: TargetKind::NearestUnit,
                 considerations: vec![
                     Consideration {
@@ -302,7 +348,7 @@ fn crab_brain() -> Brain {
             // Latch — the crab does whichever its perception + drives weight higher this tick.
             Behavior {
                 mode: Mode::SeekMeat,
-                rank: 1,
+                rank: 2,
                 target: TargetKind::MeatHotspot,
                 considerations: vec![
                     Consideration {
@@ -320,7 +366,7 @@ fn crab_brain() -> Brain {
             // foraging/feeding so a laden crab commits to delivery until it drops or arrives.
             Behavior {
                 mode: Mode::Carry,
-                rank: 2,
+                rank: 3,
                 target: TargetKind::Nest,
                 considerations: vec![Consideration {
                     input: Input::Perc(Fact::CarryingMeat),
@@ -331,14 +377,107 @@ fn crab_brain() -> Brain {
                     },
                 }],
             },
+            // Recruited surge: a scout planted a RALLY beacon at a prey sighting. Rank 1 sits just above
+            // plain Forage, so it redirects a far/idle crab toward the reported sighting (a "warning-cry"
+            // recruitment; Heylighen, "Stigmergy as a universal coordination mechanism", Cognitive
+            // Systems Research 2016) — but it yields to Latch/SeekMeat/Carry/Flee, so a crab that reaches
+            // a unit bites (and pounces) instead of milling on the beacon cell. Self-limiting: RALLY
+            // evaporates, the Step falls below MIN_SCORE, and the crab drops back to plain foraging.
+            Behavior {
+                mode: Mode::Rally,
+                rank: 1,
+                target: TargetKind::RallyHotspot,
+                considerations: vec![Consideration {
+                    input: Input::Perc(Fact::RallyHotspot),
+                    // Gate on a real beacon — a faded/absent rally must NOT win over flee/forage.
+                    curve: Curve::Step {
+                        threshold: RALLY_MIN,
+                        below: 0.0,
+                        above: 1.0,
+                    },
+                }],
+            },
             // Panic: flee down the THREAT gradient when afraid — outranks everything (drops the load).
+            // Suppressed while berserk (a nest under attack): the swarm ignores fear and presses the squad.
+            Behavior {
+                mode: Mode::Flee,
+                rank: 4,
+                target: TargetKind::None,
+                considerations: vec![
+                    Consideration {
+                        input: Input::Drive(DriveId::FEAR),
+                        curve: Curve::Logistic { k: 10.0, x0: 0.45 }, // soft threshold ~0.45
+                    },
+                    Consideration {
+                        // Berserk → 0, calm → 1: a nest under attack turns off flight entirely.
+                        input: Input::Perc(Fact::Berserk),
+                        curve: Curve::Step {
+                            threshold: 0.5,
+                            below: 1.0,
+                            above: 0.0,
+                        },
+                    },
+                    Consideration {
+                        // Rally live → 0: a recruited swarm presses through gunfire to reach the
+                        // sighting (the "commit" the scout report triggers), mirroring the berserk gate.
+                        // As the beacon evaporates below RALLY_MIN this returns to 1 and fear resumes.
+                        input: Input::Perc(Fact::RallyHotspot),
+                        curve: Curve::Step {
+                            threshold: RALLY_MIN,
+                            below: 1.0,
+                            above: 0.0,
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// The scout brain — the swarm's recon arm (~20% of crabs). A tiny data-literal repertoire that models
+/// ant scout-recruitment foraging (Talamali, Saha, Marshall & Reina, "When less is more: robot swarms
+/// adapt better to changes with constrained communication", Science Robotics 2021): **roam** far and
+/// fast hunting for prey; on a sighting, **report** back to the nest to raise the alarm (the actual
+/// RALLY deposit is planted by `crab::scout_sense_and_report` on arrival); still **flee** gunfire.
+/// Scouts don't latch/forage/carry — the 80% assault swarm (see `crab_brain`) does the killing.
+fn scout_brain() -> Brain {
+    Brain {
+        behaviors: vec![
+            // Default: range the map hunting for prey. Unconditional low constant (like Wander) so a
+            // roaming choice always exists when nothing else fires.
+            Behavior {
+                mode: Mode::Scout,
+                rank: 0,
+                target: TargetKind::None,
+                considerations: vec![Consideration {
+                    input: Input::Perc(Fact::SelfHealthFrac),
+                    curve: Curve::Linear { m: 0.0, b: 0.15 },
+                }],
+            },
+            // Carry the sighting home: latches on `prey_spotted` (set while the scout holds a report),
+            // outranks roam so it commits to the return trip until it arrives and plants the beacon.
+            Behavior {
+                mode: Mode::Report,
+                rank: 2,
+                target: TargetKind::Home,
+                considerations: vec![Consideration {
+                    input: Input::Perc(Fact::PreySpotted),
+                    curve: Curve::Step {
+                        threshold: 0.5,
+                        below: 0.0,
+                        above: 1.0,
+                    },
+                }],
+            },
+            // Scouts panic too: flee down the THREAT gradient when afraid (no berserk gate — a scout's
+            // job is recon, not a fearless press).
             Behavior {
                 mode: Mode::Flee,
                 rank: 3,
                 target: TargetKind::None,
                 considerations: vec![Consideration {
                     input: Input::Drive(DriveId::FEAR),
-                    curve: Curve::Logistic { k: 10.0, x0: 0.45 }, // soft threshold ~0.45
+                    curve: Curve::Logistic { k: 10.0, x0: 0.45 },
                 }],
             },
         ],

@@ -32,9 +32,9 @@ use crate::dungeon::Dungeon;
 use crate::enemy::Hostile;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::{Health, NoHealthBar};
-use crate::squad::Unit;
+use crate::squad::{Prey, Unit};
 use crate::surface_nav::{SurfaceField, SurfaceGraph};
-use crate::util::hash01;
+use crate::util::{hash01, rand01};
 
 /// Total crabs across the level, split into `CRAB_CLUSTERS` nests in far rooms.
 const CRAB_COUNT: usize = 40;
@@ -57,9 +57,28 @@ const CRAB_CONTACT_DPS: f32 = 3.0;
 const DAMAGE_EXPONENT: f32 = 1.5;
 /// Planar bite margin beyond the unit's body radius — a crab this close (in XZ) to a unit is feeding.
 const CRAB_CONTACT_RADIUS: f32 = 0.2;
+/// Critical mass: this many crabs must be biting one target before the swarm deals ANY damage. Below it
+/// the swarm is milling/building up (it can't overcome the squad); at/above it the super-linear bite
+/// kicks in. A nest under attack (berserk) waives this. Playtest dial for how big a swarm must gather.
+const MASS_MIN: usize = 5;
+/// Pounce tuning. A crab lunges at a unit within `JUMP_LEN` (≈10 body lengths; a crab renders ~0.19 wide,
+/// so ~1.9 world units) but not one already in its face (`JUMP_MIN`). It hunkers for `JUMP_HUNKER`s, then
+/// arcs over `JUMP_AIR`s to `JUMP_ARC` peak height, biting `JUMP_DAMAGE` on landing, then waits out
+/// `JUMP_COOLDOWN` before pouncing again.
+const JUMP_LEN: f32 = 1.9;
+/// Don't pounce at a unit already in biting range — only commit to a real leap (~6–10 body lengths),
+/// so the jump reads as a dramatic lunge rather than a tiny hop.
+const JUMP_MIN: f32 = 1.15;
+const JUMP_HUNKER: f32 = 0.3;
+const JUMP_AIR: f32 = 0.35;
+const JUMP_ARC: f32 = 0.9;
+const JUMP_COOLDOWN: f32 = 2.5;
+const JUMP_DAMAGE: f32 = 8.0;
 
-/// Scuttle speed along the surface (world units/s).
-const CRAB_SPEED: f32 = 2.8; // 1.75× the earlier 1.6 — faster, more frantic vermin
+/// Scuttle speed along the surface (world units/s). The base pace every crab movement mode scales off
+/// (scout roam ×`SCOUT_SPEED_MUL`, flee ×`FLEE_SPEED_MUL`, rally/seek at 1×), so tuning it slows the
+/// whole swarm uniformly.
+const CRAB_SPEED: f32 = 2.1; // 3/4 of the earlier 2.8 — a calmer, less frantic scuttle
 /// Uniform render scale for the child model (native span ~3.2 → ~0.19 m). Small scuttling vermin —
 /// ~1/2.5 the earlier size, which read as too big. Seat constants below scale down with it.
 const CRAB_RENDER_SCALE: f32 = 0.06;
@@ -69,8 +88,9 @@ const CRAB_BODY_CENTER: f32 = 0.05;
 /// sits near the model's top). Calibrated by eye via devshot, scaled with `CRAB_RENDER_SCALE`.
 const CRAB_MODEL_Y: f32 = 0.11;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
-/// unscaled. Kept a touch generous so the now-small crabs stay hittable by the jittered auto-fire.
-const CRAB_COLLIDER_R: f32 = 0.2;
+/// unscaled. Sized to hug the *visible* crab (rendered span ≈0.19 → radius ≈0.1) so a bolt only draws
+/// blood on a real hit — a near-miss now passes cleanly instead of registering on an oversized hitbox.
+const CRAB_COLLIDER_R: f32 = 0.12;
 
 /// Reynolds separation: crabs within this centre distance push apart (≈1.2× the crab footprint, so
 /// they space out to roughly touching but *may* still overlap when crowded). Applied as a real
@@ -79,11 +99,28 @@ const CRAB_COLLIDER_R: f32 = 0.2;
 const CRAB_SEP_RADIUS: f32 = 0.24;
 const CRAB_SEP_STRENGTH: f32 = 6.0;
 
+/// Scout recon tuning (the swarm's ~20% roaming recruiters; see [`Scout`] / `scout_sense_and_report`).
+/// Fraction of crabs tagged as scouts at spawn (deterministic by spatial hash, so newborns split the
+/// same way). ~1 in 5 gives recon coverage while leaving ~80% as the assault mass (`MASS_MIN`).
+const SCOUT_FRACTION: f32 = 0.20;
+/// A roaming scout "spots" any prey within this planar range (world units) — it then reports home.
+const SCOUT_SIGHT: f32 = 5.0;
+/// Scouts roam faster than the swarm forages (aggressive ranging to cover ground).
+const SCOUT_SPEED_MUL: f32 = 1.35;
+/// Seconds a roaming scout holds a wander heading before re-rolling it (mirrors `enemy::WANDER_INTERVAL`,
+/// but longer — a scout commits to a direction to actually cover distance rather than jitter in place).
+const SCOUT_WANDER_INTERVAL: f32 = 3.0;
+/// A reporting scout counts as "home" (and plants its rally beacon) within this distance of the nest.
+const RALLY_ARRIVE: f32 = 1.0;
+/// Minimum seconds between a scout's rally beacons. Keeps a fresh beacon tracking moving prey (a
+/// vectorial pheromone; Tang et al. 2019) without saturating the field frame-by-frame.
+const REPORT_COOLDOWN: f32 = 1.5;
+
 /// The unit's body approximated as a vertical cylinder the crabs cling to (radius, climbable height).
 const UNIT_BODY_RADIUS: f32 = 0.33;
 const UNIT_BODY_HEIGHT: f32 = 1.0;
 /// Speed while climbing onto / crawling over a unit's body.
-const CRAB_CLIMB_SPEED: f32 = 3.85; // 1.75× the earlier 2.2
+const CRAB_CLIMB_SPEED: f32 = 2.89; // 3/4 of the earlier 3.85 — matches the slower scuttle
 /// Distance to its chosen body slot at which a latched crab counts as "on" and biting (a bit generous
 /// so it plays the attack animation while feeding, not just at the exact point).
 const EAT_RANGE: f32 = 0.3;
@@ -158,6 +195,80 @@ enum CrabState {
     Attack,
 }
 
+/// A crab's pounce state: crabs lunge ~`JUMP_LEN` (≈10 body lengths) at a nearby unit, hunkering down
+/// briefly before launching on a ballistic arc that bites on landing. `Ready` = grounded (normal
+/// locomotion runs); `Hunker`/`Air` = the jump owns the crab's transform, so `crab_locomotion` skips it.
+#[derive(Component)]
+struct CrabJump {
+    phase: JumpPhase,
+    /// Time left in the current `Hunker`/`Air` phase.
+    timer: f32,
+    /// Cooldown before the next pounce (counts down while `Ready`).
+    cooldown: f32,
+    from: Vec3,
+    to: Vec3,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JumpPhase {
+    Ready,
+    Hunker,
+    Air,
+}
+
+/// A scout's recon state machine: roam hunting for prey, then carry a sighting home to raise a rally.
+#[derive(Clone, Copy)]
+enum ScoutState {
+    /// Ranging the map looking for prey (aggressive wander).
+    Roaming,
+    /// Spotted prey — running back to `home_pos` to plant a rally beacon at `prey_pos`.
+    Reporting { prey_pos: Vec3, home_pos: Vec3 },
+}
+
+/// Marks the ~[`SCOUT_FRACTION`] of crabs that are scouts (recon recruiters). Holds the roam/report
+/// state and this scout's private wander heading + RNG. Models ant scout-recruitment foraging: roam →
+/// spot → return home → recruit (Talamali et al., Science Robotics 2021). Read by `think` (to drive the
+/// Report/Scout modes) and `scout_sense_and_report` (detection + rally deposit); its wander state is
+/// advanced by `crab_locomotion`'s Scout branch.
+#[derive(Component)]
+pub struct Scout {
+    state: ScoutState,
+    /// Current roam heading (world dir, re-rolled on `wander_timer`); mirrors `EnemyMotion.wander_dir`.
+    wander_dir: Vec3,
+    wander_timer: f32,
+    /// Seconds until this scout can raise another rally. Prevents a scout sitting near both prey and
+    /// its nest from re-planting the beacon every frame (which would saturate the field and defeat its
+    /// self-limiting decay). While >0 the scout keeps roaming and ignores sightings.
+    report_cooldown: f32,
+    /// Per-scout LCG state for heading re-rolls (seeded from spawn hash so scouts diverge).
+    rng: u32,
+}
+
+impl Scout {
+    fn new(pos: Vec3) -> Self {
+        Self {
+            state: ScoutState::Roaming,
+            wander_dir: Vec3::ZERO,
+            wander_timer: 0.0,
+            report_cooldown: 0.0,
+            rng: (hash01(pos + Vec3::splat(5.0)) * 4_000_000.0) as u32 | 1,
+        }
+    }
+
+    /// 1.0-equivalent gate for the brain: this scout is holding a sighting it still needs to report.
+    pub fn prey_spotted(&self) -> bool {
+        matches!(self.state, ScoutState::Reporting { .. })
+    }
+
+    /// The home nest a reporting scout is running back to (the Report behaviour's target).
+    pub fn report_home(&self) -> Option<Vec3> {
+        match self.state {
+            ScoutState::Reporting { home_pos, .. } => Some(home_pos),
+            ScoutState::Roaming => None,
+        }
+    }
+}
+
 /// Link from a crab to its (asynchronously-spawned) `AnimationPlayer`, plus which state's clip is
 /// currently playing (so `drive_crab_animation` only re-triggers on a real change).
 #[derive(Component)]
@@ -206,6 +317,8 @@ impl Plugin for CrabPlugin {
                     crab_locomotion
                         .after(rebuild_crab_field)
                         .after(crate::ai::AiSet::Think),
+                    // Pounce owns the transform of mid-jump crabs; runs after locomotion set the rest.
+                    crab_jump.after(crab_locomotion),
                     // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
                     carry_gibs
                         .after(crab_locomotion)
@@ -216,6 +329,9 @@ impl Plugin for CrabPlugin {
                     crab_despawn_dead,
                     deposit_crab_density,
                     deposit_meat_scent,
+                    // Scout detection + rally deposit: before the field drains so the beacon is live
+                    // this frame, and before Think so the reporting state feeds the scout brain.
+                    scout_sense_and_report.before(crate::ai::AiSet::Deposits),
                     nest_reproduce,
                 ),
             );
@@ -266,7 +382,7 @@ fn spawn_crabs(
 ) {
     let collider = meshes.add(Sphere::new(CRAB_COLLIDER_R));
     let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(CRAB_GLB));
-    let dome = meshes.add(Sphere::new(1.0)); // shared unit sphere → floor-buried dome per nest
+    let dome = meshes.add(crate::nest::nest_dome_mesh()); // shared unit hemisphere → wall pimple per nest
     // Keep the shared handles so the reproduction system can birth new crabs at runtime.
     commands.insert_resource(CrabAssets {
         collider: collider.clone(),
@@ -301,14 +417,44 @@ fn spawn_crabs(
         return;
     }
 
-    // A dimensional nest portal at each cluster seed — the crabs' home + meat-delivery + birth anchor.
+    // A dimensional nest portal near each cluster seed — the crabs' home + meat-delivery + birth anchor.
+    // The dome sits ON a wall (bulging into the room); the delivery cell is the walled floor cell it
+    // hangs over. Search the seed, then rings outward, for the nearest walled floor cell to seat it on.
     for &seed in &seeds {
-        crate::nest::spawn_nest(
-            &mut commands,
-            &mut nest_mats,
-            dome.clone(),
-            dungeon.cell_center(seed),
-        );
+        let mut placed = false;
+        'search: for radius in 0i32..4 {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx.abs().max(dy.abs()) != radius {
+                        continue; // only the shell of this ring (inner rings already tried)
+                    }
+                    let cell = seed + IVec2::new(dx, dy);
+                    if !dungeon.is_floor(cell) {
+                        continue;
+                    }
+                    let center = dungeon.cell_center(cell);
+                    if let Some(&(face, normal)) = dungeon.wall_faces_near(center).first() {
+                        if crate::nest::spawn_nest(
+                            &mut commands,
+                            &mut nest_mats,
+                            dome.clone(),
+                            face,
+                            normal,
+                            center,
+                            &dungeon,
+                        )
+                        .is_some()
+                        {
+                            placed = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        if !placed {
+            warn!("crab: no wall face near cluster seed {seed:?} to seat a nest");
+        }
     }
 
     let per_cluster = CRAB_COUNT.div_ceil(seeds.len());
@@ -370,22 +516,42 @@ fn spawn_crab_on_patch(
     let heading = p.tan_u;
     let seat = pos + normal * CRAB_BODY_CENTER;
 
-    commands
-        .spawn((
+    // ~SCOUT_FRACTION of crabs are scouts, chosen by a stable per-spawn hash (a distinct salt from the
+    // climb/angle biases so the split is independent). A scout runs the recon brain and carries a
+    // `Scout` component; the rest run the assault brain. One path — a plain conditional, no fallback.
+    let is_scout = hash01(pos + Vec3::new(2.7, 8.1, 3.3)) < SCOUT_FRACTION;
+    let brain_id = if is_scout {
+        crate::ai::brain::BrainId::Scout
+    } else {
+        crate::ai::brain::BrainId::Crab
+    };
+
+    let mut ec = commands.spawn((
             Crab,
             Hostile,
             Health::new(CRAB_HP),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)
             crate::ai::drives::Drives::new(), // needs the utility brain weighs (hunger/fear/…)
-            crate::ai::brain::BrainId::Crab,
+            brain_id,
             crate::ai::brain::ActiveBehavior::new(pos),
             crate::ai::brain::ThinkTimer::staggered(pos),
-            CrabAttached { host: None },
-            CrabCarry {
-                capacity: CRAB_CARRY_CAPACITY * (0.8 + 0.4 * hash01(pos)),
-                target: None,
-                hauling: false,
-            },
+            // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
+            (
+                CrabAttached { host: None },
+                CrabCarry {
+                    capacity: CRAB_CARRY_CAPACITY * (0.8 + 0.4 * hash01(pos)),
+                    target: None,
+                    hauling: false,
+                },
+                CrabJump {
+                    phase: JumpPhase::Ready,
+                    timer: 0.0,
+                    // Stagger initial cooldowns by hash so a fresh cluster doesn't pounce in lockstep.
+                    cooldown: JUMP_COOLDOWN * hash01(pos),
+                    from: Vec3::ZERO,
+                    to: Vec3::ZERO,
+                },
+            ),
             CrabMotion {
                 patch,
                 pos,
@@ -400,12 +566,14 @@ fn spawn_crab_on_patch(
             Mesh3d(collider.clone()),
             Transform::from_translation(seat).with_rotation(surface_orientation(heading, normal)),
             Visibility::Inherited,
-        ))
-        .with_child((
-            WorldAssetRoot(scene.clone()),
-            Transform::from_translation(Vec3::Y * CRAB_MODEL_Y)
-                .with_scale(Vec3::splat(CRAB_RENDER_SCALE)),
         ));
+    ec.with_child((
+        WorldAssetRoot(scene.clone()),
+        Transform::from_translation(Vec3::Y * CRAB_MODEL_Y).with_scale(Vec3::splat(CRAB_RENDER_SCALE)),
+    ));
+    if is_scout {
+        ec.insert(Scout::new(pos));
+    }
 }
 
 /// Cell offsets around a nest seed, sorted nearest-first, out to Chebyshev radius 3 (~49 cells) so a
@@ -425,7 +593,7 @@ fn nest_offsets() -> Vec<(i32, i32)> {
 /// `enemy::rebuild_enemy_field`'s gate, over the surface graph).
 fn rebuild_crab_field(
     graph: Option<Res<SurfaceGraph>>,
-    units: Query<&Transform, With<Unit>>,
+    units: Query<&Transform, With<Prey>>,
     dungeon: Res<Dungeon>,
     mut crab_field: ResMut<CrabField>,
 ) {
@@ -458,7 +626,7 @@ fn crab_locomotion(
     crab_field: Res<CrabField>,
     dungeon: Res<Dungeon>,
     stig: Res<crate::ai::field::Stig>,
-    units: Query<(Entity, &Transform), (With<Unit>, Without<Crab>)>,
+    units: Query<(Entity, &Transform), (With<Prey>, Without<Crab>)>,
     // Gib transforms, for a `SeekMeat`/`Carry` crab to steer to the specific chunk it's committed to.
     gibs: Query<&Transform, (With<crate::gore::GibChunk>, Without<Crab>, Without<Unit>)>,
     mut crabs: Query<
@@ -469,6 +637,8 @@ fn crab_locomotion(
             &mut Transform,
             &crate::ai::brain::ActiveBehavior,
             Option<&CrabCarry>,
+            Option<&CrabJump>,
+            Option<&mut Scout>,
         ),
         With<Crab>,
     >,
@@ -490,13 +660,19 @@ fn crab_locomotion(
 
     // Spatial hash of crab positions (3D) keyed by floor cell, for O(n·k) separation.
     let mut hash: HashMap<IVec2, Vec<Vec3>> = HashMap::new();
-    for (motion, _, _, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
     }
 
-    for (mut motion, mut state, mut attached, mut transform, active, carry) in &mut crabs {
+    for (mut motion, mut state, mut attached, mut transform, active, carry, jump, mut scout) in
+        &mut crabs
+    {
+        // Mid-pounce crabs are owned by `crab_jump` (it drives their arc + transform) — skip them here.
+        if jump.is_some_and(|j| j.phase != JumpPhase::Ready) {
+            continue;
+        }
         // Reynolds separation: raw 3D push away from nearby crabs (bounding-box spacing). Self is
         // skipped by the `d > eps` test; the per-cell hash keeps this O(n·k).
         let cell = dungeon.world_to_cell(motion.pos);
@@ -536,6 +712,10 @@ fn crab_locomotion(
             active.mode,
             crate::ai::utility::Mode::SeekMeat | crate::ai::utility::Mode::Carry
         );
+        // Scout recon modes + the swarm's recruited rally (see `crate::ai::brain::scout_brain`).
+        let scouting = matches!(active.mode, crate::ai::utility::Mode::Scout);
+        let reporting = matches!(active.mode, crate::ai::utility::Mode::Report);
+        let rallying = matches!(active.mode, crate::ai::utility::Mode::Rally);
         let gib_pos = carry
             .and_then(|c| c.target)
             .and_then(|e| gibs.get(e).ok())
@@ -586,11 +766,39 @@ fn crab_locomotion(
             motion.latched = false;
             attached.host = None;
             crab_flee(&mut motion, &stig, &dungeon, &graph, sep, dt, t)
+        } else if rallying {
+            // --- RALLY: mass on the scout's beacon (climb the RALLY gradient toward the sighting). ---
+            motion.latched = false;
+            attached.host = None;
+            crab_rally(&mut motion, &stig, &dungeon, &graph, active.target, sep, dt, t)
+        } else if scouting && let Some(scout) = scout.as_deref_mut() {
+            // --- SCOUT ROAM: aggressive wander across floor + walls hunting for prey to report. ---
+            motion.latched = false;
+            attached.host = None;
+            crab_scout_roam(&mut motion, scout, &graph, &dungeon, sep, dt, t)
+        } else if reporting {
+            // --- REPORT: run back to the home nest to raise the alarm (target = home). A flat final
+            // approach onto the nest cell via `steer_surface`'s `home`; the rally is planted by
+            // `scout_sense_and_report` on arrival. Falls back to holding heading if home is unknown. ---
+            motion.latched = false;
+            attached.host = None;
+            let home = active.target;
+            let desired = home.map(|h| h - motion.pos).unwrap_or(motion.heading);
+            if steer_surface(&mut motion, &graph, &dungeon, desired, home, CRAB_SPEED * SCOUT_SPEED_MUL, sep, dt, t) {
+                CrabState::Walk
+            } else {
+                CrabState::Idle
+            }
         } else if seeking {
             // --- SEEK MEAT: steer to the committed gib, or climb the MEAT gradient toward a pile. ---
             motion.latched = false;
             attached.host = None;
-            crab_seek_meat(&mut motion, &stig, &dungeon, &graph, gib_pos, sep, dt, t)
+            // Coarse fallback = the MEAT hotspot the brain aimed at; a hauling carrier hugs its chunk.
+            let coarse = active.target;
+            let hauling = carry.is_some_and(|c| c.hauling);
+            crab_seek_meat(
+                &mut motion, &stig, &dungeon, &graph, gib_pos, coarse, hauling, sep, dt, t,
+            )
         } else {
             // --- SURFACE MODE: shared flow-field pursuit across floor + walls. ---
             {
@@ -701,23 +909,143 @@ fn drive_crab_animation(
     }
 }
 
+/// Nearest prey position + planar distance to `pos` (read-only over the pounce system's prey query).
+fn nearest_prey_pos(
+    prey: &Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+    pos: Vec3,
+) -> Option<(Vec3, f32)> {
+    let mut best: Option<(Vec3, f32)> = None;
+    for (ptf, _) in prey.iter() {
+        let d = (ptf.translation.xz() - pos.xz()).length();
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((ptf.translation, d));
+        }
+    }
+    best
+}
+
+/// Pounce attack: a grounded, hunting crab hunkers down, then leaps a ballistic arc (~10 body lengths)
+/// onto a nearby unit and bites on landing. While hunkering/airborne this owns the crab's transform
+/// (`crab_locomotion` skips it); on landing it re-homes onto the surface and starts a cooldown. A short
+/// wind-up + high peak reads as a real pounce, not a glide.
+fn crab_jump(
+    time: Res<Time>,
+    graph: Option<Res<SurfaceGraph>>,
+    dungeon: Res<Dungeon>,
+    mut crabs: Query<
+        (
+            &mut CrabMotion,
+            &mut CrabState,
+            &mut CrabJump,
+            &mut Transform,
+            &crate::ai::brain::ActiveBehavior,
+        ),
+        With<Crab>,
+    >,
+    mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+) {
+    let Some(graph) = graph else { return };
+    let dt = time.delta_secs().min(MAX_FRAME_DT);
+
+    for (mut motion, mut state, mut jump, mut tf, active) in &mut crabs {
+        match jump.phase {
+            JumpPhase::Ready => {
+                jump.cooldown = (jump.cooldown - dt).max(0.0);
+                if jump.cooldown > 0.0 {
+                    continue;
+                }
+                // Only pounce while hunting units (approaching prey), and only at a unit in the band.
+                let aggressive = matches!(
+                    active.mode,
+                    crate::ai::utility::Mode::Latch | crate::ai::utility::Mode::Forage
+                );
+                if !aggressive {
+                    continue;
+                }
+                if let Some((tpos, d)) = nearest_prey_pos(&prey, motion.pos) {
+                    if d > JUMP_MIN && d < JUMP_LEN {
+                        jump.phase = JumpPhase::Hunker;
+                        jump.timer = JUMP_HUNKER;
+                        jump.from = motion.pos;
+                        jump.to = tpos;
+                    }
+                }
+            }
+            JumpPhase::Hunker => {
+                jump.timer -= dt;
+                *state = CrabState::Attack;
+                // Crouch: dip toward the surface during the wind-up.
+                tf.translation = motion.pos + motion.normal * (CRAB_BODY_CENTER * 0.4);
+                if jump.timer <= 0.0 {
+                    // Launch toward the prey's CURRENT position.
+                    if let Some((tpos, _)) = nearest_prey_pos(&prey, motion.pos) {
+                        jump.to = tpos;
+                    }
+                    jump.from = motion.pos;
+                    jump.phase = JumpPhase::Air;
+                    jump.timer = JUMP_AIR;
+                    if crate::ai::diag::AI_DIAG {
+                        info!("crab: POUNCE dist={:.1}", (jump.to.xz() - jump.from.xz()).length());
+                    }
+                }
+            }
+            JumpPhase::Air => {
+                jump.timer -= dt;
+                let s = (1.0 - (jump.timer / JUMP_AIR)).clamp(0.0, 1.0);
+                let ground = jump.from.lerp(jump.to, s);
+                let height = JUMP_ARC * (std::f32::consts::PI * s).sin();
+                motion.pos = ground;
+                // Re-home onto the surface beneath the arc so it lands on a real patch.
+                if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(ground)) {
+                    motion.patch = fp;
+                    motion.normal = graph.patch(fp).normal;
+                }
+                let dir = jump.to.xz() - jump.from.xz();
+                if dir.length_squared() > 1.0e-6 {
+                    motion.heading = Vec3::new(dir.x, 0.0, dir.y).normalize_or(motion.heading);
+                }
+                tf.translation = ground + motion.normal * CRAB_BODY_CENTER + Vec3::Y * height;
+                tf.rotation = surface_orientation(motion.heading, motion.normal);
+                *state = CrabState::Attack;
+                if jump.timer <= 0.0 {
+                    // Land: clamp onto the patch and bite the nearest prey in reach.
+                    motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
+                    let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS + 0.2).powi(2);
+                    for (ptf, mut hp) in &mut prey {
+                        if (ptf.translation.xz() - motion.pos.xz()).length_squared() <= reach_sq {
+                            hp.current -= JUMP_DAMAGE;
+                            break;
+                        }
+                    }
+                    jump.phase = JumpPhase::Ready;
+                    jump.cooldown = JUMP_COOLDOWN;
+                }
+            }
+        }
+    }
+}
+
 /// Feeding frenzy: damage to a unit grows **super-linearly** with how many crabs are on it
 /// (`CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`), so one crab is a nuisance but a pile shreds it. Counts
 /// by PLANAR distance so a crab clinging high on the body still feeds.
 fn crab_contact_damage(
     time: Res<Time>,
-    crabs: Query<&Transform, (With<Crab>, Without<Unit>)>,
-    mut units: Query<(&Transform, &mut Health), (With<Unit>, Without<Crab>)>,
+    alarm: Res<crate::nest::NestAlarm>,
+    crabs: Query<&Transform, (With<Crab>, Without<Prey>)>,
+    mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
 ) {
     let dt = time.delta_secs();
-    // Reach = body radius + a little, so anything latched onto the cylinder counts.
+    let berserk = alarm.0 > 0.0;
+    // Reach = body radius + a little, so anything latched onto the cylinder counts (units and the boss).
     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS).powi(2);
-    for (unit_tf, mut hp) in &mut units {
+    for (unit_tf, mut hp) in &mut prey {
         let count = crabs
             .iter()
             .filter(|c| (c.translation.xz() - unit_tf.translation.xz()).length_squared() <= reach_sq)
             .count();
-        if count > 0 {
+        // Mass gate: a handful of crabs can't overcome the squad — the swarm must reach critical mass on
+        // a target before its (super-linear) bite bites. A nest under attack (berserk) waives the gate.
+        if count >= MASS_MIN || (berserk && count > 0) {
             hp.current -= CRAB_CONTACT_DPS * (count as f32).powf(DAMAGE_EXPONENT) * dt;
         }
     }
@@ -760,9 +1088,19 @@ const FLEE_SPEED_MUL: f32 = 1.3;
 /// Reproduction (positive feedback) + crowding cap. New crabs are born at a nest, paid for out of the
 /// meat its crews have hauled in — never if the nest cell is already crowded or the global cap is hit.
 const CRAB_COUNT_MAX: usize = 90;
-/// Delivered meat (hoard units) consumed to birth one crab at a nest — the forage→carry→breed payoff.
-/// Sized against measured delivery (chunks weigh ~0.1–1.5), so a nest births a crab every few hauls.
-const MEAT_PER_CRAB: f32 = 3.0;
+/// Seconds between a nest's timed crab respawns — a steady drip that replenishes the swarm regardless of
+/// meat delivery (the hauled meat still accumulates as the nest's `hoard`, driving its glow). Capped by
+/// `CRAB_COUNT_MAX` and suppressed while the nest cell is crowded.
+const NEST_RESPAWN_INTERVAL: f32 = 5.0;
+/// Weight → spawn-boost conversion when a chunk is delivered. A heavy chunk (~1.5) alone roughly maxes
+/// the boost; lighter chunks add proportionally, and deliveries accumulate. See [`SPAWN_BOOST_MAX`].
+const FEED_GAIN: f32 = 6.0;
+/// Cap on a nest's feeding surge. The effective respawn rate is `1 + spawn_boost`, so `9.0` = up to
+/// **10×** faster births while well-fed (the "x10 based on chunk weight" the design calls for).
+const SPAWN_BOOST_MAX: f32 = 9.0;
+/// How fast the feeding surge fades (units/s). At the cap it takes ~9 s to decay to base, so a steady
+/// stream of deliveries sustains fast spawning while a fed-then-starved nest relaxes back to the drip.
+const SPAWN_BOOST_DECAY: f32 = 1.0;
 const CROWD_CAP: f32 = 5.0; // local CRAB_DENSITY above this suppresses breeding (territorial)
 /// Per-second density each crab lays into the CRAB_DENSITY field (≈ evaporation rate, so the field's
 /// value at a cell tracks the local crab count).
@@ -776,18 +1114,31 @@ const MEAT_RATE: f32 = 0.5;
 const CRAB_CARRY_CAPACITY: f32 = 0.4;
 /// How close a crab must get to a gib to grab it, and to the nest to deliver.
 const GRAB_RANGE: f32 = 0.6;
-/// Speed a lifted chunk travels toward the nest — slower than a free crab (it's dragging a load).
+/// Line-of-sight range: within this of the committed chunk the crab straight-lines onto it; beyond it,
+/// it navigates by the wall-aware MEAT gradient. ~2 cells ≈ same room, so straight-line is unobstructed.
+const LOS_RANGE: f32 = 2.0;
+/// How tightly a *hauling* carrier hugs its chunk (mouth on it), vs `GRAB_RANGE` while merely gathering.
+const CARRY_HOLD: f32 = 0.12;
+/// Base speed a lifted chunk travels toward the nest — slower than a free crab (it's dragging a load).
+/// Scaled down by weight and up by crew size in `carry_gibs` (see `WEIGHT_DRAG`).
 const CARRY_SPEED: f32 = 1.6;
-/// Height a hauled chunk floats at so it reads as carried (the crew scuttles beneath it).
-const LIFT_HEIGHT: f32 = 0.3;
+/// Divisor turning a chunk's weight into drag: haul speed ≈ `CARRY_SPEED * crew / (weight * WEIGHT_DRAG)`,
+/// so a heavy chunk with a bare crew crawls and extra carriers speed it up (capped at `CARRY_SPEED`).
+/// Tuned against measured weights (~0.1–1.5) and capacity 0.4 so a solo light chunk moves near base speed.
+const WEIGHT_DRAG: f32 = 2.5;
+/// World height a hauled chunk rides at — the crew's mouth height (crab seat ~0.05 + model ~0.11 + tooth
+/// bone), so the chunk is gripped at the mouths rather than floating overhead.
+const CARRY_HEIGHT: f32 = 0.15;
 /// Horizontal distance from the nest at which a hauled chunk is delivered (nest dome radius + margin).
 const DELIVER_RANGE: f32 = 1.2;
 /// Seconds a crew may gather without lifting before it disbands (frees crabs stuck on a too-heavy chunk).
 const CREW_TIMEOUT: f32 = 6.0;
-/// A crab only enlists on a gib within this range — its `SeekMeat` steering is straight-line, so a
-/// far chunk (likely behind a wall) can't be reached; those crabs keep climbing the MEAT gradient
-/// (which routes around walls) until a chunk comes within reach, then commit.
-const MAX_COMMIT_DIST: f32 = 9.0;
+/// A crab only enlists on a gib once it is genuinely NEAR it (roughly line-of-sight). Commitment uses a
+/// straight-line distance, so a far gib may be behind a wall and unreachable; keeping the threshold
+/// small means crabs commit only to chunks they can actually walk to. Farther foragers keep climbing the
+/// wall-aware MEAT gradient until a chunk comes within reach, then commit. (Larger values re-introduce
+/// the "committed to an across-wall gib → stuck against the wall" freeze.)
+const MAX_COMMIT_DIST: f32 = 2.5;
 
 /// Shared handles kept so `nest_reproduce` can spawn new crabs at runtime.
 #[derive(Resource)]
@@ -808,83 +1159,224 @@ fn crab_flee(
     dt: f32,
     t: f32,
 ) -> CrabState {
-    let p = graph.patch(motion.patch);
-    // Gradient points toward higher THREAT; flee down it. If the field is flat here, keep heading so
-    // the crab keeps moving away rather than freezing.
+    // Flee down the THREAT gradient (away from danger); if the field is flat, keep the current heading
+    // so the crab keeps moving rather than freezing. `steer_surface` routes this along the graph, so a
+    // cornered crab climbs a wall to escape instead of clipping through it.
     let g = stig.gradient(crate::ai::field::FieldId::THREAT, dungeon, motion.pos);
-    let away = project_tangent(Vec3::new(-g.x, 0.0, -g.y), p.normal).normalize_or_zero();
-    let dir = if away.length_squared() > 1.0e-6 {
+    let away = Vec3::new(-g.x, 0.0, -g.y);
+    let desired = if away.length_squared() > 1.0e-6 {
         away
     } else {
-        project_tangent(motion.heading, p.normal).normalize_or_zero()
+        motion.heading
     };
-    let move_vec = dir * (CRAB_SPEED * FLEE_SPEED_MUL) + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
-    motion.pos += move_vec * dt;
-
-    // Free floor transfer: flight can head any direction, so re-home onto the floor cell under the crab.
-    if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(motion.pos)) {
-        motion.patch = fp;
-        let np = graph.patch(fp);
-        motion.pos = clamp_to_patch(motion.pos, np);
-        motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
+    if steer_surface(
+        motion,
+        graph,
+        dungeon,
+        desired,
+        None,
+        CRAB_SPEED * FLEE_SPEED_MUL,
+        sep,
+        dt,
+        t,
+    ) {
+        CrabState::Walk
     } else {
-        // Fled toward a wall/void — clamp back onto the current patch (can't flee through walls).
-        motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
+        CrabState::Idle
     }
-    if move_vec.length_squared() > 1.0e-6 {
+}
+
+/// Mass on a scout's rally beacon: climb *up* the RALLY gradient (toward the reported sighting), routed
+/// around walls by `steer_surface` (the field lives only on floor cells, so its gradient flows around
+/// walls — ACO trail ascent, Dorigo). A flat local field falls back to steering at the coarse rally
+/// hotspot the brain aimed at, so a crab out of the beacon's diffused reach still heads the right way.
+#[allow(clippy::too_many_arguments)]
+fn crab_rally(
+    motion: &mut CrabMotion,
+    stig: &crate::ai::field::Stig,
+    dungeon: &Dungeon,
+    graph: &crate::surface_nav::SurfaceGraph,
+    coarse: Option<Vec3>,
+    sep: Vec3,
+    dt: f32,
+    t: f32,
+) -> CrabState {
+    let g = stig.gradient(crate::ai::field::FieldId::RALLY, dungeon, motion.pos);
+    let toward = Vec3::new(g.x, 0.0, g.y);
+    let desired = if toward.length_squared() > 1.0e-6 {
+        toward
+    } else if let Some(c) = coarse {
+        c - motion.pos
+    } else {
+        motion.heading
+    };
+    if steer_surface(motion, graph, dungeon, desired, None, CRAB_SPEED, sep, dt, t) {
+        CrabState::Walk
+    } else {
+        CrabState::Idle
+    }
+}
+
+/// Aggressive scout roam: range across floor + walls on a heading re-rolled every `SCOUT_WANDER_INTERVAL`
+/// (copies `enemy::enemy_seek`'s wander, routed through the wall-aware `steer_surface` so scouts climb).
+/// Faster than the swarm forages so scouts cover ground and find prey to report.
+fn crab_scout_roam(
+    motion: &mut CrabMotion,
+    scout: &mut Scout,
+    graph: &crate::surface_nav::SurfaceGraph,
+    dungeon: &Dungeon,
+    sep: Vec3,
+    dt: f32,
+    t: f32,
+) -> CrabState {
+    scout.wander_timer -= dt;
+    if scout.wander_timer <= 0.0 || scout.wander_dir == Vec3::ZERO {
+        scout.wander_timer = SCOUT_WANDER_INTERVAL;
+        let angle = rand01(&mut scout.rng) * std::f32::consts::TAU;
+        scout.wander_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+    }
+    if steer_surface(
+        motion,
+        graph,
+        dungeon,
+        scout.wander_dir,
+        None,
+        CRAB_SPEED * SCOUT_SPEED_MUL,
+        sep,
+        dt,
+        t,
+    ) {
+        CrabState::Walk
+    } else {
+        CrabState::Idle
+    }
+}
+
+/// Move a crab one step along the surface graph toward a `desired` world direction, transferring between
+/// patches ONLY through graph gates (`SurfaceGraph::neighbors`) — the same wall-respecting mechanic as
+/// flow-field pursuit. It therefore never clips through a wall and can climb onto a wall patch when that
+/// is the best-aligned escape. `home` is an exact point the crab walks straight to when that point lies
+/// on its current patch (the final approach onto / hold on a gib). Returns whether the crab moved.
+#[allow(clippy::too_many_arguments)]
+fn steer_surface(
+    motion: &mut CrabMotion,
+    graph: &crate::surface_nav::SurfaceGraph,
+    dungeon: &Dungeon,
+    desired: Vec3,
+    home: Option<Vec3>,
+    speed: f32,
+    sep: Vec3,
+    dt: f32,
+    t: f32,
+) -> bool {
+    let p = graph.patch(motion.patch);
+
+    // Final approach: if the homing point sits on THIS patch's cell, walk straight to it (no gate).
+    let on_patch_home =
+        home.filter(|h| graph.floor_patch_cell(dungeon.world_to_cell(*h)) == Some(motion.patch));
+
+    // Otherwise pick the graph neighbour whose gate best matches the desired travel direction.
+    let desired_t = project_tangent(desired, p.normal).normalize_or_zero();
+    let mut best: Option<(u32, Vec3)> = None;
+    let mut best_dot = 0.0f32;
+    if on_patch_home.is_none() && desired_t.length_squared() > 1.0e-6 {
+        for (to, gate) in graph.neighbors(motion.patch) {
+            let g_dir = project_tangent(gate - motion.pos, p.normal).normalize_or_zero();
+            let d = g_dir.dot(desired_t);
+            if d > best_dot {
+                best_dot = d;
+                best = Some((to, gate));
+            }
+        }
+    }
+
+    // Steer toward the homing point, else the chosen gate, else drift in the desired direction (a
+    // dead-end with no aligned neighbour → the crab slides along the wall, clamped to its patch).
+    let steer_to = on_patch_home
+        .or(best.map(|(_, g)| g))
+        .unwrap_or(motion.pos + desired_t);
+    let tangent = project_tangent(steer_to - motion.pos, p.normal).normalize_or_zero();
+    let move_vec = tangent * speed + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
+    motion.pos += move_vec * dt;
+    motion.pos = clamp_to_patch(motion.pos, p);
+
+    // Commit a patch transfer only on physically reaching the chosen gate — never across a wall.
+    if let Some((to, gate)) = best {
+        if motion.pos.distance(gate) < TRANSFER_RADIUS {
+            motion.patch = to;
+            motion.pos = clamp_to_patch(gate, graph.patch(to));
+        }
+    }
+
+    // Ease onto the (possibly new) surface and turn toward travel.
+    let np = graph.patch(motion.patch);
+    motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
+    let moved = move_vec.length_squared() > 1.0e-6;
+    if moved {
         let h = project_tangent(move_vec, motion.normal).normalize_or(motion.heading);
         motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
     }
-    CrabState::Walk
+    moved
 }
 
-/// Foraging locomotion: crawl *up* toward meat. With a committed gib the crab steers straight to it and
-/// holds within `GRAB_RANGE` (so `carry_gibs` can lift once the crew has gathered); without one it climbs
-/// the MEAT gradient toward the nearest pile (ACO-style trail ascent; Dorigo). Free cell-by-cell floor
-/// transfer, like `crab_flee`. Returns the animation state.
+/// Foraging locomotion: crawl toward meat along walkable floor. Long-range navigation follows the MEAT
+/// stigmergy gradient, which — because the field lives only on floor cells and diffuses only between
+/// them — flows *around* walls (a proper floor-topology potential field; ACO trail ascent, Dorigo).
+/// Only within line-of-sight (`LOS_RANGE`) of the committed chunk does the crab straight-line home onto
+/// the exact gib, then hold within `GRAB_RANGE` for the lift. A flat local field falls back to steering
+/// at the coarse target (the MEAT hotspot for a forager, the chunk for a committed crab) so a crab out
+/// of the field's reach still heads the right way instead of freezing. Free cell-by-cell floor transfer.
 fn crab_seek_meat(
     motion: &mut CrabMotion,
     stig: &crate::ai::field::Stig,
     dungeon: &Dungeon,
     graph: &crate::surface_nav::SurfaceGraph,
     target: Option<Vec3>,
+    coarse: Option<Vec3>,
+    hauling: bool,
     sep: Vec3,
     dt: f32,
     t: f32,
 ) -> CrabState {
-    let p = graph.patch(motion.patch);
-    let dir = match target {
-        // Committed to a specific chunk: bee-line to it, but stop once within grabbing range so the
-        // crew can converge and lift (the crab holds its ground rather than jostling the gib).
+    // A hauling carrier hugs the chunk (mouth on it); a gathering crab holds a grab-range away.
+    let hold = if hauling { CARRY_HOLD } else { GRAB_RANGE };
+
+    // Committed to a chunk that's within reach: hold position and keep the mouth turned onto it.
+    if let Some(gp) = target {
+        let to = gp - motion.pos;
+        if to.length() < hold {
+            let np = graph.patch(motion.patch);
+            let h = project_tangent(to, np.normal).normalize_or(motion.heading);
+            motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
+            return CrabState::Attack;
+        }
+    }
+
+    // Desired travel direction. Near a committed chunk → straight at it (`steer_surface`'s `home` walks
+    // it in once it's on the same patch). Far, or uncommitted → climb the MEAT gradient (wall-aware:
+    // the field only lives on floor and routes around walls), falling back toward the coarse hotspot.
+    let grad = {
+        let g = stig.gradient(crate::ai::field::FieldId::MEAT, dungeon, motion.pos);
+        Vec3::new(g.x, 0.0, g.y)
+    };
+    let desired = match target {
+        Some(gp) if (gp - motion.pos).length() < LOS_RANGE => gp - motion.pos,
         Some(gp) => {
-            let to = gp - motion.pos;
-            if to.length() < GRAB_RANGE {
-                Vec3::ZERO
+            if grad.length_squared() > 1.0e-6 {
+                grad
             } else {
-                project_tangent(to, p.normal).normalize_or_zero()
+                gp - motion.pos
             }
         }
-        // No committed chunk yet: ascend the MEAT field toward higher concentration.
         None => {
-            let g = stig.gradient(crate::ai::field::FieldId::MEAT, dungeon, motion.pos);
-            project_tangent(Vec3::new(g.x, 0.0, g.y), p.normal).normalize_or_zero()
+            if grad.length_squared() > 1.0e-6 {
+                grad
+            } else {
+                coarse.map(|c| c - motion.pos).unwrap_or(Vec3::ZERO)
+            }
         }
     };
-    let move_vec = dir * CRAB_SPEED + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
-    motion.pos += move_vec * dt;
-
-    // Free floor transfer (foraging can head any direction; re-home onto the floor cell beneath).
-    if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(motion.pos)) {
-        motion.patch = fp;
-        let np = graph.patch(fp);
-        motion.pos = clamp_to_patch(motion.pos, np);
-        motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
-    } else {
-        motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
-    }
-    if move_vec.length_squared() > 1.0e-6 {
-        let h = project_tangent(move_vec, motion.normal).normalize_or(motion.heading);
-        motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
+    if steer_surface(motion, graph, dungeon, desired, target, CRAB_SPEED, sep, dt, t) {
         CrabState::Walk
     } else {
         CrabState::Idle
@@ -988,19 +1480,21 @@ fn release_on_flee(mut crabs: Query<(&crate::ai::brain::ActiveBehavior, &mut Cra
 /// The cooperative-transport state machine — the SOLE authority over a lifted chunk's transform and
 /// rigid-body mode. Each frame, per gib: prune dead/reassigned carriers, sum the live crew's capacity,
 /// then take exactly one transition:
-///   Resting/Crewing → Hauling   when Σ capacity ≥ weight AND the whole crew is within `GRAB_RANGE`
+///   Resting/Crewing → Hauling   when the capacity *gathered at the chunk* ≥ weight
 ///                                (switch Dynamic→Kinematic, zero velocities, pick the nearest nest);
 ///   Crewing → Resting            after `CREW_TIMEOUT` (disband a crew that can't lift);
 ///   Hauling → delivered          within `DELIVER_RANGE` of the nest (hoard += weight, consume the gib);
-///   Hauling → Crewing (drop)     if the crew's capacity falls below weight (Kinematic→Dynamic).
+///   Hauling → Crewing (drop)     if the crew's total capacity falls below weight (Kinematic→Dynamic).
 /// The three rigid-body switches are mutually exclusive (never two in one frame) — the "kinematic
-/// hand-off guard". During Hauling the gib LEADS (its transform advances toward the nest); the crabs
-/// just chase it via the `Carry` locomotion branch, so there's no circular follow.
+/// hand-off guard". During Hauling the gib LEADS along the nest's prebuilt `FlowField` (so it routes
+/// around walls), riding at mouth height; the crew just chases and grips it via the `Carry` locomotion
+/// branch, so there's no circular follow. Haul speed scales with crew size and inversely with weight.
 /// Holland & Melhuish 1999 (stigmergic cooperative transport); avian3d kinematic bodies are moved by
 /// transform, so zeroing Lin/Ang velocity on the switch prevents a residual-impulse launch.
 #[allow(clippy::type_complexity)]
 fn carry_gibs(
     time: Res<Time>,
+    dungeon: Res<Dungeon>,
     mut commands: Commands,
     mut gib_ring: ResMut<crate::gore::GibRing>,
     // `RigidBody` is an immutable component in avian3d — switch a body's type by re-inserting it via
@@ -1112,13 +1606,14 @@ fn carry_gibs(
                 }
             }
             crate::gore::CarryPhase::Hauling => {
-                // Destination nest position (if it still exists).
-                let nest_pos = carry
+                // Destination = the nest's floor delivery point + its walkway flow field (if it still
+                // exists; a razed nest yields None → the haul aborts and the chunk drops).
+                let nest_nav: Option<(Vec3, Arc<crate::flowfield::FlowField>)> = carry
                     .nest
                     .and_then(|n| nests.get(n).ok())
-                    .map(|(_, t, _)| t.translation);
+                    .map(|(_, _, nest)| (nest.pos, nest.flow.clone()));
 
-                if cap_total < carry.weight || nest_pos.is_none() {
+                if cap_total < carry.weight || nest_nav.is_none() {
                     // --- ABORT / DROP (Kinematic → Dynamic) ---
                     commands.entity(ge).insert(RigidBody::Dynamic);
                     carry.phase = crate::gore::CarryPhase::Crewing;
@@ -1128,13 +1623,16 @@ fn carry_gibs(
                             cc.hauling = false;
                         }
                     }
-                } else if let Some(np) = nest_pos {
-                    let horiz = (np - gtf.translation).with_y(0.0);
+                } else if let Some((npos, flow)) = nest_nav {
+                    let horiz = (npos - gtf.translation).with_y(0.0);
                     if horiz.length() <= DELIVER_RANGE {
                         // --- DELIVER (Kinematic → despawn) ---
                         if let Some(n) = carry.nest {
                             if let Ok((_, _, mut nest)) = nests.get_mut(n) {
                                 nest.hoard += carry.weight;
+                                // Feeding surge: heavier chunks accelerate births more, up to ~10×.
+                                nest.spawn_boost =
+                                    (nest.spawn_boost + carry.weight * FEED_GAIN).min(SPAWN_BOOST_MAX);
                             }
                         }
                         for &c in &carry.carriers {
@@ -1146,9 +1644,19 @@ fn carry_gibs(
                         // The ONE early-removal path (drops the id from the ring, then despawns).
                         gib_ring.consume(&mut commands, ge);
                     } else {
-                        // Haul: the gib leads, gliding toward the nest at carry speed; crew chases it.
-                        gtf.translation += horiz.normalize_or_zero() * (CARRY_SPEED * dt);
-                        gtf.translation.y = LIFT_HEIGHT;
+                        // Haul along the nest's flow field so the chunk threads walkways instead of
+                        // beelining through walls (Item #3). Speed scales up with crew and down with
+                        // weight (Item #6): a heavy chunk on a bare crew crawls; more carriers speed it.
+                        let steer = flow.steer(&dungeon, gtf.translation);
+                        let mut dir = Vec3::new(steer.x, 0.0, steer.y);
+                        if dir.length_squared() <= 1.0e-6 {
+                            dir = horiz; // at/near the goal cell but still outside DELIVER_RANGE: close in
+                        }
+                        let crew = carry.carriers.len() as f32;
+                        let speed = (CARRY_SPEED * crew / (carry.weight * WEIGHT_DRAG))
+                            .clamp(CARRY_SPEED * 0.35, CARRY_SPEED);
+                        gtf.translation += dir.normalize_or_zero() * (speed * dt);
+                        gtf.translation.y = CARRY_HEIGHT; // ride at the crew's mouth height (Item #2)
                         lv.0 = Vec3::ZERO;
                         av.0 = Vec3::ZERO;
                     }
@@ -1192,48 +1700,127 @@ fn deposit_meat_scent(
     }
 }
 
-/// Positive-feedback breeding — the ONE reproduction path (there is no latched-crab breeding). A nest
-/// spends the meat its crews have hauled in (`hoard`) to birth new crabs at its mouth: while the hoard
-/// covers another crab and the global cap allows it, deduct `MEAT_PER_CRAB` and spawn one on a floor
-/// patch at the nest. A crowded nest cell (local CRAB_DENSITY high) holds its hoard until the area
-/// thins — territorial self-limiting. This closes the forage→carry→deliver→breed loop (Holland &
-/// Melhuish 1999, stigmergic foraging; Dorigo, ACO positive feedback with a population ceiling).
+/// Scout recon + recruitment (Talamali et al., Science Robotics 2021; a decaying vectorial-pheromone
+/// target signal, Tang et al. 2019). Runs before the field deposits drain so a rally is live the same
+/// frame and `think` reads a fresh Scout state:
+/// - **Roaming**: if any prey is within `SCOUT_SIGHT` (planar) AND a nest exists, latch onto the sighting
+///   and switch to Reporting, remembering the prey cell and the nearest nest as home.
+/// - **Reporting**: once within `RALLY_ARRIVE` of home, plant a `RALLY_SIGNAL` burst at the remembered
+///   prey cell (the beacon the swarm masses on) and go back to Roaming. If home vanished (nest razed)
+///   mid-run the scout simply keeps heading to the recorded point and re-roams — no fallback branch.
+fn scout_sense_and_report(
+    time: Res<Time>,
+    mut scouts: Query<(&Transform, &mut Scout)>,
+    prey: Query<&Transform, With<Prey>>,
+    nests: Query<&crate::nest::Nest>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    let dt = time.delta_secs();
+    for (tf, mut scout) in &mut scouts {
+        let pos = tf.translation;
+        scout.report_cooldown = (scout.report_cooldown - dt).max(0.0);
+        match scout.state {
+            // Fresh off a report, still cooling down: keep roaming, ignore prey until the beacon breathes.
+            ScoutState::Roaming if scout.report_cooldown > 0.0 => continue,
+            ScoutState::Roaming => {
+                // Nearest prey on the ground plane.
+                let mut best = f32::MAX;
+                let mut spotted = None;
+                for pt in &prey {
+                    let d = (pt.translation.xz() - pos.xz()).length();
+                    if d < best {
+                        best = d;
+                        spotted = Some(pt.translation);
+                    }
+                }
+                let Some(prey_pos) = spotted.filter(|_| best <= SCOUT_SIGHT) else {
+                    continue;
+                };
+                // Nearest nest = the home to report back to. No nest → nowhere to report; keep roaming.
+                let mut hbest = f32::MAX;
+                let mut home = None;
+                for nest in &nests {
+                    let d = (nest.pos.xz() - pos.xz()).length();
+                    if d < hbest {
+                        hbest = d;
+                        home = Some(nest.pos);
+                    }
+                }
+                let Some(home_pos) = home else { continue };
+                scout.state = ScoutState::Reporting { prey_pos, home_pos };
+                if crate::ai::diag::AI_DIAG {
+                    info!("scout: SPOT prey@{:?} → report home@{:?}", prey_pos.xz(), home_pos.xz());
+                }
+            }
+            ScoutState::Reporting { prey_pos, home_pos } => {
+                if (home_pos.xz() - pos.xz()).length() <= RALLY_ARRIVE {
+                    deposits.0.push(crate::ai::field::Deposit {
+                        pos: prey_pos,
+                        field: crate::ai::field::FieldId::RALLY,
+                        amount: crate::ai::field::RALLY_SIGNAL,
+                    });
+                    scout.state = ScoutState::Roaming;
+                    scout.report_cooldown = REPORT_COOLDOWN;
+                    if crate::ai::diag::AI_DIAG {
+                        info!("scout: RALLY beacon planted @{:?}", prey_pos.xz());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Timed breeding — the ONE reproduction path. Each nest spawns a crab on its `NEST_RESPAWN_INTERVAL`
+/// timer (a steady ~1/5s drip), capped by `CRAB_COUNT_MAX` and suppressed while its own cell is crowded
+/// (local CRAB_DENSITY high) so births don't pile onto births. Newborns seat on the nest's floor
+/// delivery cell. Holland & Melhuish 1999 (nest-centred production) with a population ceiling.
 fn nest_reproduce(
+    time: Res<Time>,
     mut commands: Commands,
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
     stig: Res<crate::ai::field::Stig>,
     crab_assets: Option<Res<CrabAssets>>,
-    mut nests: Query<(&Transform, &mut crate::nest::Nest)>,
+    mut nests: Query<&mut crate::nest::Nest>,
     crabs: Query<(), With<Crab>>,
 ) {
     let (Some(graph), Some(crab_assets)) = (graph, crab_assets) else {
         return;
     };
+    let dt = time.delta_secs();
     let mut total = crabs.iter().count();
-    for (tf, mut nest) in &mut nests {
-        // Hold the hoard while the nest cell is crowded (don't pile births onto births).
-        let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, tf.translation);
+    for mut nest in &mut nests {
+        // Fade the feeding surge, then re-arm the next spawn at the boosted rate (up to 10× faster).
+        nest.spawn_boost = (nest.spawn_boost - SPAWN_BOOST_DECAY * dt).max(0.0);
+        nest.respawn_timer -= dt;
+        if nest.respawn_timer > 0.0 {
+            continue;
+        }
+        // Effective rate = 1 + spawn_boost (SPAWN_BOOST_MAX ⇒ ~10× faster). Re-arm even if this tick
+        // can't spawn (cap/crowd), so a fed nest keeps its fast cadence.
+        nest.respawn_timer = NEST_RESPAWN_INTERVAL / (1.0 + nest.spawn_boost);
+
+        if total >= CRAB_COUNT_MAX {
+            continue;
+        }
+        // Don't pile births onto a crowded nest cell (territorial self-limiting).
+        let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, nest.pos);
         if density >= CROWD_CAP {
             continue;
         }
-        let cell = dungeon.world_to_cell(tf.translation);
-        let Some(patch) = graph.floor_patch_cell(cell) else {
-            continue; // nest not over a floor patch — can't seat a newborn here
+        let Some(patch) = graph.floor_patch_cell(dungeon.world_to_cell(nest.pos)) else {
+            continue; // nest's delivery cell isn't floor — can't seat a newborn here
         };
-        while nest.hoard >= MEAT_PER_CRAB && total < CRAB_COUNT_MAX {
-            nest.hoard -= MEAT_PER_CRAB;
-            spawn_crab_on_patch(
-                &mut commands,
-                &graph,
-                patch,
-                &crab_assets.collider,
-                &crab_assets.scene,
-            );
-            total += 1;
-            if crate::ai::diag::AI_DIAG {
-                info!("nest: BIRTH total={total} hoard_left={:.1}", nest.hoard);
-            }
+        spawn_crab_on_patch(
+            &mut commands,
+            &graph,
+            patch,
+            &crab_assets.collider,
+            &crab_assets.scene,
+        );
+        total += 1;
+        if crate::ai::diag::AI_DIAG {
+            info!("nest: RESPAWN total={total}");
         }
     }
 }

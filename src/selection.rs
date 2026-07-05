@@ -1,11 +1,10 @@
-//! Mouse + keyboard control of the squad (RTS/MOBA style):
-//! - **Left-click a unit** → select it (green ring, "Move" cursor); a click elsewhere while units
-//!   are selected issues a **move order** (units keep their selection). **Esc** deselects.
-//! - **1–5** select that unit; **6** selects all.
+//! Mouse control of the squad (RTS/MOBA style). The **whole squad is always selected** — every unit
+//! wears the green ring and `keep_squad_selected` re-selects any that lack it (a fresh spawn, say), so
+//! the player never has to select and can't deselect. A **left-click** issues a **move order** to the
+//! whole group toward one shared destination.
 //!
-//! Selection/commands use a single cursor ray → ground-plane hit (no mesh picking needed): the hit
-//! world point drives both unit-proximity selection and the move target. Green rings are drawn with
-//! `gizmos.circle` (no per-unit ring entities to manage).
+//! Commands use a single cursor ray → ground-plane hit (no mesh picking needed): the hit world point is
+//! the move target. Green rings are drawn with `gizmos.circle` (no per-unit ring entities to manage).
 
 use std::f32::consts::FRAC_PI_2;
 
@@ -17,10 +16,8 @@ use std::sync::Arc;
 use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
-use crate::squad::{MoveOrder, Selected, Unit, UnitIndex};
+use crate::squad::{MoveOrder, Selected, Unit};
 
-/// Click within this ground distance of a unit to select it.
-const SELECT_RADIUS: f32 = 0.6;
 /// Radius of the green selection ring.
 const RING_RADIUS: f32 = 0.6;
 
@@ -35,8 +32,9 @@ impl Plugin for SelectionPlugin {
         app.add_systems(
             Update,
             (
+                // Guarantee the whole squad is selected before anything reads the selection this frame.
+                keep_squad_selected.before(command_input),
                 command_input,
-                hotkey_select,
                 draw_selection_rings,
                 update_cursor,
             ),
@@ -52,28 +50,24 @@ fn cursor_ground_point(window: &Window, camera: &Camera, cam_tf: &GlobalTransfor
     Some(ray.get_point(dist))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The squad is always fully selected — every command targets the whole group. This inserts `Selected`
+/// on any `Unit` that lacks it (startup, or a freshly spawned unit), so the player never selects and
+/// can't deselect. Runs before `command_input` so orders + rings see the full squad this frame.
+fn keep_squad_selected(mut commands: Commands, units: Query<Entity, (With<Unit>, Without<Selected>)>) {
+    for e in &units {
+        commands.entity(e).insert(Selected);
+    }
+}
+
 pub fn command_input(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     dungeon: Res<Dungeon>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    units: Query<(Entity, &Transform), With<Unit>>,
     selected: Query<(Entity, &Transform), With<Selected>>,
     mut sfx: MessageWriter<Sfx>,
 ) {
-    // Esc clears the whole selection.
-    if keys.just_pressed(KeyCode::Escape) {
-        if !selected.is_empty() {
-            sfx.write(Sfx::Deselect);
-        }
-        for (e, _) in &selected {
-            commands.entity(e).remove::<Selected>();
-        }
-    }
-
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
@@ -82,26 +76,7 @@ pub fn command_input(
         return;
     };
 
-    // Did the click land on a unit? Pick the nearest within SELECT_RADIUS.
-    let mut nearest: Option<(Entity, f32)> = None;
-    for (e, tf) in &units {
-        let d = (tf.translation - point).xz().length();
-        if d < SELECT_RADIUS && nearest.is_none_or(|(_, best)| d < best) {
-            nearest = Some((e, d));
-        }
-    }
-
-    if let Some((unit, _)) = nearest {
-        // Select just that unit.
-        for (e, _) in &selected {
-            commands.entity(e).remove::<Selected>();
-        }
-        commands.entity(unit).insert(Selected);
-        sfx.write(Sfx::Select);
-        return;
-    }
-
-    // Empty ground: if units are selected, order the whole group toward one shared destination.
+    // Left-click = order the whole (always-selected) squad toward one shared destination.
     if selected.is_empty() {
         return;
     }
@@ -159,43 +134,6 @@ fn nearest_floor(dungeon: &Dungeon, c: IVec2) -> Option<IVec2> {
         }
     }
     None
-}
-
-fn hotkey_select(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-    units: Query<(Entity, &UnitIndex), With<Unit>>,
-    selected: Query<Entity, With<Selected>>,
-    mut sfx: MessageWriter<Sfx>,
-) {
-    const DIGITS: [KeyCode; 5] = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-    ];
-
-    let select_all = keys.just_pressed(KeyCode::Digit6);
-    let single = DIGITS.iter().position(|&k| keys.just_pressed(k));
-    if single.is_none() && !select_all {
-        return;
-    }
-    sfx.write(if select_all {
-        Sfx::SelectAll
-    } else {
-        Sfx::Select
-    });
-
-    // Any select command clears the current selection first.
-    for e in &selected {
-        commands.entity(e).remove::<Selected>();
-    }
-    for (e, idx) in &units {
-        if select_all || single == Some(idx.0 as usize) {
-            commands.entity(e).insert(Selected);
-        }
-    }
 }
 
 fn draw_selection_rings(mut gizmos: Gizmos, selected: Query<&Transform, With<Selected>>) {

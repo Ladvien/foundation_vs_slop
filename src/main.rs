@@ -59,6 +59,12 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Foundation vs. Slop".into(),
+                // Launch borderless-fullscreen on the current monitor (fills the screen at the desktop
+                // resolution, no mode switch). `BorderlessFullscreen` over exclusive `Fullscreen` so
+                // alt-tab / the in-process `devshot` capture stay well-behaved.
+                mode: bevy::window::WindowMode::BorderlessFullscreen(
+                    bevy::window::MonitorSelection::Current,
+                ),
                 ..default()
             }),
             ..default()

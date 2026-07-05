@@ -28,13 +28,23 @@ impl FieldId {
     pub const CRAB_DENSITY: FieldId = FieldId(2);
     /// Meat trail — carryable gibs emit it; foraging crabs climb its gradient toward food.
     pub const MEAT: FieldId = FieldId(3);
+    /// Rally beacon — a scout that spotted prey plants a burst here (at the prey's last-seen cell)
+    /// on returning home; the swarm climbs its gradient to mass on the sighting. A decaying
+    /// vectorial-pheromone target signal (Tang, Xu, Yu, Zhang & Zhang, "Dynamic target searching and
+    /// tracking with swarm robots based on stigmergy", Robotics & Autonomous Systems 2019) —
+    /// evaporation is the automatic "call off the attack".
+    pub const RALLY: FieldId = FieldId(4);
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 4;
+pub const CHANNEL_COUNT: usize = 5;
 
 /// SCENT deposited by a death — a strong, lingering feeding-site marker the swarm and boss home on.
 pub const BLOOD_SCENT: f32 = 4.0;
+
+/// RALLY deposited by a reporting scout — a strong burst that seeds a follow gradient toward the
+/// prey's last-seen cell (mirrors [`BLOOD_SCENT`]).
+pub const RALLY_SIGNAL: f32 = 4.0;
 
 /// Per-channel behaviour, filled from `ai_tuning.ron` at startup.
 #[derive(Clone, Copy)]

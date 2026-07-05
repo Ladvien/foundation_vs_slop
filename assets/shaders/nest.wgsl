@@ -49,8 +49,12 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var col = vec3<f32>(4.0, 2.0, 1.0) * (a + 0.2) + a + a - d;
-    // Brighter as the hoard fills (0 → full over ~20 units of delivered meat).
-    let glow = mix(0.6, 1.6, clamp(material.hoard / 20.0, 0.0, 1.0));
+    // Brighter as the hoard fills (0 → full over ~20 units of delivered meat). Floored well above 0 so
+    // an empty portal still glows on the dome (on the flat billboard the `-d` vignette read fine, but on
+    // the 3D dome it drove most of the surface to black — reading as a hole, not a portal).
+    let glow = mix(1.4, 2.8, clamp(material.hoard / 20.0, 0.0, 1.0));
     col = col * glow;
-    return vec4<f32>(max(col, vec3<f32>(0.0)), 1.0);
+    // Never fully black: a dim fiery ember floor so the pimple always reads as a live portal.
+    col = max(col, vec3<f32>(0.28, 0.08, 0.14));
+    return vec4<f32>(col, 1.0);
 }

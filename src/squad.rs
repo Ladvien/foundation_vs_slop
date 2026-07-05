@@ -23,9 +23,11 @@ use crate::orca::{self, Agent};
 #[derive(Component)]
 pub struct Unit;
 
-/// A unit's 0-based slot, so number keys 1–5 map to `UnitIndex(0)`..`UnitIndex(4)` (see `selection`).
+/// Shared marker for anything the crab swarm treats as prey to swarm/latch/bite — squad units AND the
+/// smiley boss (`crate::enemy`). Crab targeting keys on `Prey` (nearest wins), so the same forage/latch
+/// code path drives crabs onto whichever prey is closest, without knowing its type.
 #[derive(Component)]
-pub struct UnitIndex(pub u8);
+pub struct Prey;
 
 /// Ground-plane movement speed, world units per second.
 #[derive(Component)]
@@ -136,7 +138,7 @@ const GUN_YAW: f32 = 0.0;
 /// The gun's barrel tip in figurine-local space — laser bolts spawn here (see `laser`).
 pub const MUZZLE_LOCAL: Vec3 = Vec3::new(GUN_OFFSET.x, GUN_OFFSET.y, GUN_OFFSET.z - 0.35);
 
-/// Five distinct outfit colors, one per squad member (index-matched to `UnitIndex`).
+/// Five distinct outfit colors, one per squad member (index-matched to spawn order).
 const OUTFITS: [Color; 5] = [
     Color::srgb(0.85, 0.22, 0.20), // red
     Color::srgb(0.22, 0.45, 0.90), // blue
@@ -194,7 +196,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
         commands
             .spawn((
                 Unit,
-                UnitIndex(i as u8),
+                Prey, // crabs may swarm/bite units (nearest-prey targeting)
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
                 Health::new(UNIT_HP),

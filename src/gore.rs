@@ -193,6 +193,16 @@ struct BloodPool;
 #[derive(Component)]
 pub struct GibChunk;
 
+/// The last *confined* ground position (XZ, y=0) of a gib. `confine_gibs` sweeps each frame's motion
+/// from here with [`Dungeon::resolve_move`] so a chunk that drifts into — or arcs over — a wall is
+/// stopped at the room-side wall face and pulled back into the walkable area (walls are only
+/// `WALL_HEIGHT` tall, so without this a launched chunk clears them onto the unbounded floor plane).
+#[derive(Component)]
+struct GibConfine(Vec3);
+
+/// Half-extent used when sweeping a gib against walls (thin — chunks are small debris).
+const GIB_CONFINE_HALF: f32 = 0.05;
+
 /// A meat chunk the crabs can scavenge and haul to their nest. `weight = density × mesh_volume`; a crab
 /// has a finite carry capacity, so a heavy chunk needs several crabs (Σ capacities ≥ weight) to lift it
 /// (cooperative transport). The carry state machine (see `crab::carry_gibs`) owns `carriers`/`phase`.
@@ -442,6 +452,7 @@ impl Plugin for GorePlugin {
                     compute_meat_volumes,
                     drain_gore,
                     update_droplets,
+                    confine_gibs,
                     cap_blood_pools,
                     cap_gib_chunks,
                     despawn_gore,
@@ -685,6 +696,31 @@ fn drain_gore(
 /// Rigid Body Simulation with Extended Position Based Dynamics", SCA 2020). Returns the parent entity
 /// so the caller can attach the visual mesh child(ren) at the render `scale`.
 #[allow(clippy::too_many_arguments)]
+/// Keep every gib chunk inside the walkable area. Gibs are dynamic bodies and the walls are only
+/// `WALL_HEIGHT` (=1) tall, so a chunk launched upward can clear a wall and land on the infinite floor
+/// plane out in the void. Each frame we sweep the chunk's ground motion with [`Dungeon::resolve_move`],
+/// which stops a box at the **room-side wall face** (not the wall centre); if the chunk crossed a wall,
+/// it's snapped back onto the floor and its horizontal velocity killed so it can't push through again.
+/// avian 0.7 syncs `Transform` → `Position` before each sim step, so writing `Transform` here holds.
+fn confine_gibs(
+    dungeon: Res<Dungeon>,
+    mut gibs: Query<(&mut Transform, &mut LinearVelocity, &mut GibConfine), With<GibChunk>>,
+) {
+    for (mut tf, mut lv, mut prev) in &mut gibs {
+        let moved = Vec3::new(tf.translation.x - prev.0.x, 0.0, tf.translation.z - prev.0.z);
+        let resolved = dungeon.resolve_move(prev.0, moved, Vec2::splat(GIB_CONFINE_HALF));
+        if (resolved.x - tf.translation.x).abs() > 1.0e-4
+            || (resolved.z - tf.translation.z).abs() > 1.0e-4
+        {
+            tf.translation.x = resolved.x;
+            tf.translation.z = resolved.z;
+            lv.0.x = 0.0;
+            lv.0.z = 0.0;
+        }
+        prev.0 = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
+    }
+}
+
 fn spawn_gib_body(
     commands: &mut Commands,
     gib_ring: &mut GibRing,
@@ -707,6 +743,7 @@ fn spawn_gib_body(
             Transform::from_translation(pos),
             Visibility::default(),
             GibChunk,
+            GibConfine(pos.with_y(0.0)),
         ))
         .id();
     gib_ring.0.push_back(id);

@@ -72,12 +72,6 @@ const GROWL_VOL: f32 = 0.6;
 /// A discrete sound request. Gameplay systems elsewhere write these; [`play_sfx`] consumes them.
 #[derive(Message, Clone, Copy)]
 pub enum Sfx {
-    /// A single unit was selected (click or number key).
-    Select,
-    /// The whole squad was selected (key 6).
-    SelectAll,
-    /// Selection was cleared with Esc.
-    Deselect,
     /// A move order was issued to at least one unit.
     MoveOrder,
     /// A move click had nowhere reachable to go.
@@ -97,9 +91,6 @@ pub enum Sfx {
 /// Handles for every clip, loaded once at startup.
 #[derive(Resource)]
 struct AudioAssets {
-    select: Handle<AudioSource>,
-    select_all: Handle<AudioSource>,
-    deselect: Handle<AudioSource>,
     move_order: Handle<AudioSource>,
     invalid: Handle<AudioSource>,
     fire: Handle<AudioSource>,
@@ -145,9 +136,6 @@ impl Plugin for GameAudioPlugin {
 /// Load every handle, start the always-on wind bed, and start the calm music loop.
 fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
     let a = AudioAssets {
-        select: assets.load("audio/ui/select.ogg"),
-        select_all: assets.load("audio/ui/select_all.ogg"),
-        deselect: assets.load("audio/ui/deselect.ogg"),
         move_order: assets.load("audio/ui/move_order.ogg"),
         invalid: assets.load("audio/ui/invalid.ogg"),
         fire: assets.load("audio/weapon/fire.ogg"),
@@ -194,9 +182,6 @@ fn play_sfx(
     let mut fire_voices = 0usize;
     for sfx in msgs.read() {
         let (handle, vol, speed) = match sfx {
-            Sfx::Select => (assets.select.clone(), UI_VOL, jitter(&mut rng, 0.05)),
-            Sfx::SelectAll => (assets.select_all.clone(), UI_VOL, jitter(&mut rng, 0.03)),
-            Sfx::Deselect => (assets.deselect.clone(), UI_VOL, jitter(&mut rng, 0.05)),
             Sfx::MoveOrder => (assets.move_order.clone(), UI_VOL, jitter(&mut rng, 0.05)),
             Sfx::Invalid => (assets.invalid.clone(), UI_VOL, jitter(&mut rng, 0.03)),
             Sfx::Fire => {

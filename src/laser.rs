@@ -32,6 +32,9 @@ const FIRE_INTERVAL: f32 = 0.15;
 const LASER_SPEED: f32 = 22.0;
 /// Bolt lifetime in seconds (a fallback despawn if it never meets a wall).
 const LASER_LIFE: f32 = 1.2;
+/// Half-width of a bolt for wall sweeps (thin — it's a bolt). Only used by `resolve_move` so the bolt
+/// stops on the room-side wall face rather than passing through the slab.
+const LASER_HALF: f32 = 0.02;
 /// Hit points removed from an enemy per bolt.
 const LASER_DAMAGE: f32 = 0.2; // 1/50 power so the swarm survives to be watched (restore 10.0 for real combat)
 /// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
@@ -40,6 +43,10 @@ const BASE_SPREAD: f32 = 0.06;
 /// Extra aim-cone half-angle added at full movement speed — dominates `BASE_SPREAD`, so a moving unit
 /// sprays. Scaled by (unit speed / `UNIT_SPEED`).
 const MOVE_SPREAD: f32 = 0.40;
+/// Extra aim-cone half-angle added at `DIST_SPREAD_RANGE` tiles of target range — distant crabs are
+/// harder to hit (accuracy falls off linearly with distance up to this cap). A near target stays crisp.
+const DIST_SPREAD: f32 = 0.30;
+const DIST_SPREAD_RANGE: f32 = 14.0;
 /// A unit only shoots things in its FRONT arc (it faces its travel direction). Targets whose bearing is
 /// more than this half-angle off the unit's forward are ignored — so a crab on a unit's back is safe
 /// from that unit's own gun (only a teammate facing it can shoot it off). cos(75°) ≈ 0.26.
@@ -153,9 +160,11 @@ fn fire_laser(
         let Ok(aim) = Dir3::new(target - muzzle) else {
             continue;
         };
-        // Movement penalty: spread grows from BASE_SPREAD (still) toward BASE+MOVE (full speed).
+        // Spread grows with (a) the unit's own speed and (b) the target's range — a still unit firing
+        // point-blank is crisp; a moving unit shooting a far crab sprays.
         let move_frac = (velocity.0.length() / UNIT_SPEED).clamp(0.0, 1.0);
-        let spread = BASE_SPREAD + MOVE_SPREAD * move_frac;
+        let dist_frac = ((target - muzzle).length() / DIST_SPREAD_RANGE).clamp(0.0, 1.0);
+        let spread = BASE_SPREAD + MOVE_SPREAD * move_frac + DIST_SPREAD * dist_frac;
         let forward = scatter(*aim, spread, &mut rng);
         commands.spawn((
             Laser {
@@ -248,10 +257,22 @@ fn update_lasers(
             }
         }
 
-        // Despawn on lifetime end or when it leaves the floor (into a wall/void cell). The
-        // cell test is coarse vs the inset wall slab (≤0.2 tile) but imperceptible at bolt speed.
-        let cell = dungeon.world_to_cell(transform.translation);
-        let hit_wall = !dungeon.is_floor(cell);
+        // Wall block: sweep this frame's motion against the wall slabs with `resolve_move`, which stops
+        // at the **room-side (inner) wall face** (±0.3 from cell centre) — not the coarse tile boundary,
+        // and not the wall centre. If the bolt would have crossed into a wall, it's stopped on that
+        // surface and the spark bursts there, in the room, instead of behind/inside the slab.
+        let moved = Vec3::new(
+            transform.translation.x - prev.x,
+            0.0,
+            transform.translation.z - prev.z,
+        );
+        let resolved = dungeon.resolve_move(prev, moved, Vec2::splat(LASER_HALF));
+        let hit_wall = (resolved.x - transform.translation.x).abs() > 1.0e-4
+            || (resolved.z - transform.translation.z).abs() > 1.0e-4;
+        if hit_wall {
+            transform.translation.x = resolved.x;
+            transform.translation.z = resolved.z;
+        }
         if laser.life <= 0.0 || hit_wall {
             // Only a real collision (not a mid-air timeout) spawns an impact burst (see `impact_fx`).
             if hit_wall {

@@ -18,6 +18,8 @@ struct SmileySettings {
     smile: f32,
     // 0 = faithful yellow smiley, 1 = fully bled to hostile red.
     menace: f32,
+    // 0 = normal, 1 = full panic: pin-prick pupils + a cold, drained pallor as the swarm overwhelms it.
+    panic: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: SmileySettings;
@@ -98,7 +100,8 @@ fn Eye(uv_in: vec2<f32>, side: f32, m: vec2<f32>, smile: f32) -> vec4<f32> {
     rgb = mix(rgb, irisCol, irisMask);                                      // blend in iris
 
     d = length(uv - m * 0.45);                                             // pupil looks toward `m`
-    let pupilSize = mix(0.4, 0.16, smile);
+    // Panic shrinks the pupils to terrified pin-pricks.
+    let pupilSize = mix(mix(0.4, 0.16, smile), 0.05, material.panic);
     var pupilMask = smoothstep(pupilSize, pupilSize * 0.85, d);
     pupilMask *= irisMask;
     rgb = mix(rgb, vec3<f32>(0.0), pupilMask);                             // blend in pupil
@@ -210,5 +213,7 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
 
     // Menace: bleed the lit face toward hostile red (multiplied by coverage so the outside stays clear).
     col = vec4<f32>(mix(col.rgb, vec3<f32>(0.85, 0.05, 0.05), material.menace * col.a), col.a);
+    // Panic: drain the face toward a cold, sickly pallor (over coverage so the outside stays clear).
+    col = vec4<f32>(mix(col.rgb, vec3<f32>(0.75, 0.82, 0.92), material.panic * 0.7 * col.a), col.a);
     return col;
 }

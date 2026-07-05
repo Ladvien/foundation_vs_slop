@@ -130,6 +130,18 @@ impl SurfaceGraph {
         self.index.get(&(cell, FLOOR_SLOT)).copied()
     }
 
+    /// Graph neighbours of a patch as `(neighbour_patch, gate)` pairs — the ONLY moves that don't cross
+    /// a wall (edges are built only where a crab can physically walk/climb; the gate is the shared
+    /// boundary point to steer at). Free-steering foragers/fleers pick a neighbour by desired direction
+    /// and transfer at its gate, exactly like flow-field pursuit, so they never clip through walls.
+    pub fn neighbors(&self, patch: u32) -> impl Iterator<Item = (u32, Vec3)> + '_ {
+        self.adj
+            .get(patch as usize)
+            .into_iter()
+            .flatten()
+            .map(|a| (a.to, a.gate))
+    }
+
     /// The first walled-edge patch of the cell containing `pos` (for seeding crabs onto a wall).
     pub fn wall_patch_at(&self, dungeon: &Dungeon, pos: Vec3) -> Option<u32> {
         let cell = dungeon.world_to_cell(pos);

@@ -7,5 +7,7 @@
         threat:       ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
         crab_density: ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
         meat:         ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
+        // rally: scout-planted beacon at a prey sighting; swarm climbs its gradient to mass.
+        rally:        ( evaporate: 0.3,  diffuse: 0.15, deposit_radius: 2.0 ),
     ),
 )

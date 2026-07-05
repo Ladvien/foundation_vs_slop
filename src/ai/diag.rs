@@ -14,7 +14,7 @@ use crate::enemy::Enemy;
 
 /// Master switch for the diagnostic logging systems. Flip to `true` to watch fields/drives/modes in
 /// the console when tuning emergence; `false` for normal play (systems early-return, ~free).
-pub const AI_DIAG: bool = true;
+pub const AI_DIAG: bool = false;
 
 /// Log each channel's peak value + location once per second (verifies deposit/evaporate/diffuse).
 pub fn log_fields(
@@ -38,12 +38,14 @@ pub fn log_fields(
     let (th_pos, th) = stig.hotspot(FieldId::THREAT, &dungeon);
     let (cd_pos, cd) = stig.hotspot(FieldId::CRAB_DENSITY, &dungeon);
     let (mt_pos, mt) = stig.hotspot(FieldId::MEAT, &dungeon);
+    let (rl_pos, rl) = stig.hotspot(FieldId::RALLY, &dungeon);
     info!(
-        "ai-fields: scent={sc:.2}@{:?} threat={th:.2}@{:?} density={cd:.2}@{:?} meat={mt:.2}@{:?}",
+        "ai-fields: scent={sc:.2}@{:?} threat={th:.2}@{:?} density={cd:.2}@{:?} meat={mt:.2}@{:?} rally={rl:.2}@{:?}",
         sc_pos.xz(),
         th_pos.xz(),
         cd_pos.xz(),
-        mt_pos.xz()
+        mt_pos.xz(),
+        rl_pos.xz()
     );
 }
 
@@ -128,6 +130,9 @@ pub fn log_crab_modes(
     let mut flee = 0;
     let mut seek = 0;
     let mut carry = 0;
+    let mut scout = 0;
+    let mut report = 0;
+    let mut rally = 0;
     let mut other = 0;
     let mut mean = Vec2::ZERO;
     let mut n = 0.0f32;
@@ -138,6 +143,9 @@ pub fn log_crab_modes(
             Mode::Flee => flee += 1,
             Mode::SeekMeat => seek += 1,
             Mode::Carry => carry += 1,
+            Mode::Scout => scout += 1,
+            Mode::Report => report += 1,
+            Mode::Rally => rally += 1,
             _ => other += 1,
         }
         mean += tf.translation.xz();
@@ -153,7 +161,7 @@ pub fn log_crab_modes(
     }
     let spread = (var / n).sqrt();
     info!(
-        "ai-crabs: forage={forage} latch={latch} flee={flee} seek={seek} carry={carry} other={other} spread={spread:.1}"
+        "ai-crabs: forage={forage} latch={latch} flee={flee} seek={seek} carry={carry} scout={scout} report={report} rally={rally} other={other} spread={spread:.1}"
     );
 }
 

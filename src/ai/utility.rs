@@ -28,6 +28,12 @@ pub enum Mode {
     SeekMeat,
     /// Haul a grabbed gib home to the nest.
     Carry,
+    /// Scout roam: range far and fast across floor + walls, hunting for prey to report.
+    Scout,
+    /// A scout that spotted prey runs back to its home nest to raise the alarm.
+    Report,
+    /// Mass on a scout's rally beacon (the reported sighting) — the swarm's recruited attack.
+    Rally,
 }
 
 /// A perception fact the brain reads (extend freely).
@@ -46,6 +52,12 @@ pub enum Fact {
     MeatHotspot,
     /// 1.0 while this crab is hauling a lifted gib (latches the Carry behaviour).
     CarryingMeat,
+    /// 1.0 while a nest is under attack — the swarm goes berserk and ignores fear.
+    Berserk,
+    /// 1.0 while this scout has a prey sighting it still needs to carry home (latches Report).
+    PreySpotted,
+    /// Peak value of the RALLY field anywhere (is there an active rally beacon to mass on).
+    RallyHotspot,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -112,6 +124,10 @@ pub enum TargetKind {
     MeatHotspot,
     /// The crab's home nest (Carry destination; resolved from the carried gib, not from `decide`).
     Nest,
+    /// A reporting scout's home nest (resolved from its stored sighting, not from the field).
+    Home,
+    /// The peak of the RALLY field (the massing swarm's aim point).
+    RallyHotspot,
 }
 
 /// A complete behaviour: a small data literal.
@@ -153,6 +169,12 @@ pub struct Perception {
     pub meat_val: f32,
     /// 1.0 while this crab is hauling a lifted gib.
     pub carrying: f32,
+    /// 1.0 while a nest is under attack (berserk — suppresses fear/flee).
+    pub berserk: f32,
+    /// 1.0 while this scout has a sighting to report (drives Report over roam).
+    pub prey_spotted: f32,
+    /// Peak RALLY value (an active rally beacon to mass on).
+    pub rally_val: f32,
 }
 
 impl Perception {
@@ -166,6 +188,9 @@ impl Perception {
             Input::Perc(Fact::SelfHealthFrac) => self.health_frac,
             Input::Perc(Fact::MeatHotspot) => self.meat_val,
             Input::Perc(Fact::CarryingMeat) => self.carrying,
+            Input::Perc(Fact::Berserk) => self.berserk,
+            Input::Perc(Fact::PreySpotted) => self.prey_spotted,
+            Input::Perc(Fact::RallyHotspot) => self.rally_val,
         }
     }
 }
