@@ -229,12 +229,315 @@ impl Plugin for DungeonPlugin {
     }
 }
 
+// ── Topology-agnostic coarse layer ───────────────────────────────────────────────────────────────
+// Both dungeon topologies — the fixed grid lattice and (Phase 3) the Poisson/Delaunay graph — produce
+// a `CoarseLayout` and hand it to the single fine carver `expand_to_fine`, so furnish/nav/fog/occlusion
+// never depend on which topology ran. The grid front-end (`grid_layout`) is a byte-identical restatement
+// of the old carve's coarse phase (Step-0 golden gate); the graph front-end is added later.
+
+/// One room slot: its fine-grid centre and the block-like extent that bounds its room sizing, jitter,
+/// and expansion-to-touch. For the grid, `bounds` is the exact block rect and `center` its centre.
+struct Site {
+    center: IVec2,
+    bounds: Rect2,
+}
+
+/// The coarse room graph handed to `expand_to_fine`, independent of how it was produced. `sites` are in
+/// carve order (the grid emits them row-major over kept slots, so RNG draws and region ids stay in
+/// lockstep with the pre-refactor loop). `adjacency` is the undirected set of corridor links between kept
+/// sites (already trimmed to one connected component). `spawn_site` is chosen by the front-end (each
+/// topology owns its spawn rule) so `expand_to_fine` never re-derives it.
+struct CoarseLayout {
+    width: usize,
+    height: usize,
+    sites: Vec<Site>,
+    adjacency: Vec<(usize, usize)>,
+    spawn_site: usize,
+}
+
+/// The cardinal direction (N/E/S/W) from `from` toward `to`, by dominant axis (ties → horizontal). For
+/// grid block centres — offset by exactly `(±block, 0)` or `(0, ±block)` — this returns the same single
+/// cardinal the pre-refactor `linked`/opening loops used, so the Grid path stays byte-identical. For
+/// arbitrary graph sites it is the corridor's room-mouth direction.
+fn cardinal_to(from: IVec2, to: IVec2) -> usize {
+    let d = to - from;
+    if d.x.abs() >= d.y.abs() {
+        if d.x >= 0 {
+            E
+        } else {
+            W
+        }
+    } else if d.y >= 0 {
+        S
+    } else {
+        N
+    }
+}
+
+/// Build the Grid topology's `CoarseLayout` from a collapsed coarse WFC grid + its kept-slot mask. Sites
+/// are the kept block centres (row-major, preserving carve order); each site's `bounds` is its exact
+/// block rect; adjacency is every kept∧kept∧`open` edge (E and S per slot, each counted once, oriented
+/// so the neighbour's W/N view is reconstructed from the socket-rule symmetry in `expand_to_fine`);
+/// `spawn_site` is the kept slot nearest the coarse centre — the exact pre-refactor spawn rule.
+fn grid_layout(
+    coarse: &wfc::WfcResult,
+    kept: &[bool],
+    config: &DungeonConfig,
+) -> Result<CoarseLayout, String> {
+    let (cw, ch, block) = (config.coarse_w, config.coarse_h, config.block);
+    let mut slot_site: Vec<Option<usize>> = vec![None; cw * ch];
+    let mut sites: Vec<Site> = Vec::new();
+    for cy in 0..ch {
+        for cx in 0..cw {
+            if !kept[cy * cw + cx] {
+                continue;
+            }
+            slot_site[cy * cw + cx] = Some(sites.len());
+            sites.push(Site {
+                center: IVec2::new((cx * block + block / 2) as i32, (cy * block + block / 2) as i32),
+                bounds: Rect2 {
+                    min: [(cx * block) as i32, (cy * block) as i32],
+                    max: [((cx + 1) * block) as i32, ((cy + 1) * block) as i32],
+                },
+            });
+        }
+    }
+
+    // E and S edges only (each undirected link counted once); the neighbour's W/N view is reconstructed
+    // in `expand_to_fine`. `if let Some(b)` subsumes the old `kept[neighbour]` guard (a slot has a site
+    // iff it is kept).
+    let mut adjacency: Vec<(usize, usize)> = Vec::new();
+    let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * cw + cx].open[dir];
+    for cy in 0..ch {
+        for cx in 0..cw {
+            let Some(a) = slot_site[cy * cw + cx] else {
+                continue;
+            };
+            if cx + 1 < cw && coarse_open(cx, cy, E) {
+                if let Some(b) = slot_site[cy * cw + cx + 1] {
+                    adjacency.push((a, b));
+                }
+            }
+            if cy + 1 < ch && coarse_open(cx, cy, S) {
+                if let Some(b) = slot_site[(cy + 1) * cw + cx] {
+                    adjacency.push((a, b));
+                }
+            }
+        }
+    }
+
+    // Spawn at the kept slot nearest the coarse centre (total_cmp → no NaN/unwrap).
+    let center = Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0);
+    let spawn_slot = (0..cw * ch)
+        .filter(|&i| kept[i])
+        .min_by(|&a, &b| {
+            let pa = Vec2::new((a % cw) as f32, (a / cw) as f32);
+            let pb = Vec2::new((b % cw) as f32, (b / cw) as f32);
+            (pa - center)
+                .length_squared()
+                .total_cmp(&(pb - center).length_squared())
+        })
+        .ok_or_else(|| {
+            "dungeon generation produced zero rooms (largest component empty)".to_string()
+        })?;
+    let spawn_site = slot_site[spawn_slot]
+        .ok_or_else(|| "spawn slot was not a kept site (unreachable)".to_string())?;
+
+    Ok(CoarseLayout {
+        width: cw * block,
+        height: ch * block,
+        sites,
+        adjacency,
+        spawn_site,
+    })
+}
+
+/// Carve the fine grid from a topology-agnostic `CoarseLayout`: one room per site (type-driven size,
+/// liminality jitter + expansion-to-touch), one corridor per adjacency edge, then doorway openings +
+/// necking. Shared by both topologies. Byte-identical to the pre-refactor grid carve when handed a
+/// `grid_layout` (the Step-0 golden gate). The carve RNG (`config.seed ^ 0xC0FFEE`, created by the
+/// caller) is drawn only in the room pass, in site order — so the Grid path's draw sequence is unchanged.
+fn expand_to_fine(
+    layout: &CoarseLayout,
+    config: &DungeonConfig,
+    rng: &mut impl DetRng,
+) -> (Vec<bool>, Vec<Region>, IVec2) {
+    let (width, height) = (layout.width, layout.height);
+    let mut walkable = vec![false; width * height];
+    let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
+
+    // Per-site incidence, derived from adjacency once (no RNG). `site_dirs[si][dir]` drives expansion-
+    // to-touch; `incident[si]` (sorted by (dir, neighbour)) drives the opening/necking pass in the same
+    // N,E,S,W order the pre-refactor four-direction scan used. Each undirected edge contributes its
+    // cardinal to one endpoint and the opposite to the other, reconstructing the old per-slot
+    // `linked(dir)` for all four directions (socket-rule symmetry).
+    let mut site_dirs = vec![[false; 4]; layout.sites.len()];
+    let mut incident: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layout.sites.len()];
+    for &(a, b) in &layout.adjacency {
+        let da = cardinal_to(layout.sites[a].center, layout.sites[b].center);
+        let db = cardinal_to(layout.sites[b].center, layout.sites[a].center);
+        site_dirs[a][da] = true;
+        site_dirs[b][db] = true;
+        incident[a].push((da, b));
+        incident[b].push((db, a));
+    }
+    for inc in &mut incident {
+        inc.sort_by_key(|&(dir, nb)| (dir, nb));
+    }
+
+    // Room pass — one room per site (the only RNG-consuming pass; draws stay in site order). Size + type
+    // are drawn from the config's weighted room-type table (Merrell 2011); the room is block-centred at
+    // liminality 1.0 and slides off-centre + grows toward its linked edges as liminality drops.
+    let mut regions: Vec<Region> = Vec::new();
+    for (si, site) in layout.sites.iter().enumerate() {
+        let (bmin, bmax) = (site.bounds.min, site.bounds.max);
+        let (bw, bh) = ((bmax[0] - bmin[0]) as usize, (bmax[1] - bmin[1]) as usize);
+        let max_side = bw.min(bh).saturating_sub(2); // keep a >=1-tile rock margin inside the block
+        let (rw, rh, tag) = pick_room(config, max_side, rng);
+        let (bx, by) = (site.center.x, site.center.y);
+        let cox = bmin[0] as usize + (bw - rw) / 2;
+        let coy = bmin[1] as usize + (bh - rh) / 2;
+        let ox = jitter_origin(cox, rw, bmin[0] as usize, bw, bx as usize, t, rng);
+        let oy = jitter_origin(coy, rh, bmin[1] as usize, bh, by as usize, t, rng);
+
+        // Expansion-to-touch: grow each LINKED edge toward the block boundary, capped one cell short (so
+        // a >=2-cell doorway gap always remains). No RNG — liminality 1.0 (t=0) stays byte-identical.
+        let toward = |near: i32, cap: i32| near + ((cap - near) as f32 * t).round() as i32;
+        let mut left = ox as i32;
+        let mut right = (ox + rw) as i32;
+        let mut top = oy as i32;
+        let mut bot = (oy + rh) as i32;
+        if site_dirs[si][W] {
+            left = toward(left, bmin[0] + 1);
+        }
+        if site_dirs[si][E] {
+            right = toward(right, bmax[0] - 1);
+        }
+        if site_dirs[si][N] {
+            top = toward(top, bmin[1] + 1);
+        }
+        if site_dirs[si][S] {
+            bot = toward(bot, bmax[1] - 1);
+        }
+        let (ox, rw) = (left as usize, (right - left) as usize);
+        let (oy, rh) = (top as usize, (bot - top) as usize);
+        for y in oy..oy + rh {
+            for x in ox..ox + rw {
+                walkable[y * width + x] = true;
+            }
+        }
+
+        regions.push(Region {
+            id: si as u32,
+            rect: Rect2 {
+                min: [ox as i32, oy as i32],
+                max: [(ox + rw) as i32, (oy + rh) as i32],
+            },
+            openings: Vec::new(),
+            adjacency: Vec::new(),
+            props: PropertyBag {
+                tags: vec!["room".to_string(), tag],
+            },
+        });
+    }
+
+    // Corridor pass — one `corridor_width`-wide corridor per adjacency edge, between the site centres.
+    for &(a, b) in &layout.adjacency {
+        carve_corridor(
+            &mut walkable,
+            width,
+            height,
+            layout.sites[a].center,
+            layout.sites[b].center,
+            config.corridor_width,
+        );
+    }
+
+    // Opening pass — record each region's adjacency + the interior wall cell where its corridor meets the
+    // room, and neck the doorway down to the block-centre lane (rock out the extra lanes just outside the
+    // wall). Iterated in (dir, neighbour) order per site so openings/adjacency match the old N,E,S,W scan.
+    for (si, inc) in incident.iter().enumerate() {
+        let (bx, by) = (layout.sites[si].center.x, layout.sites[si].center.y);
+        let rect = regions[si].rect;
+        for &(dir, nb) in inc {
+            // Opening = the corridor's centre-line (lane-0) cell where it pierces the wall. For the grid
+            // that lane sits at the block-centre row/col (bx/by) ⇒ identical to the pre-refactor cell.
+            let cell = match dir {
+                N => [bx, rect.min[1]],
+                S => [bx, rect.max[1] - 1],
+                E => [rect.max[0] - 1, by],
+                W => [rect.min[0], by],
+                _ => unreachable!(),
+            };
+            regions[si].adjacency.push(nb as u32);
+            regions[si].openings.push(Opening { dir, cell });
+            for lane in 1..config.corridor_width as i32 {
+                let neck = match dir {
+                    E => IVec2::new(cell[0] + 1, cell[1] + lane),
+                    W => IVec2::new(cell[0] - 1, cell[1] + lane),
+                    N => IVec2::new(cell[0] + lane, cell[1] - 1),
+                    S => IVec2::new(cell[0] + lane, cell[1] + 1),
+                    _ => unreachable!(),
+                };
+                if neck.x >= 0
+                    && neck.y >= 0
+                    && (neck.x as usize) < width
+                    && (neck.y as usize) < height
+                {
+                    walkable[neck.y as usize * width + neck.x as usize] = false;
+                }
+            }
+        }
+    }
+
+    let spawn = layout.sites[layout.spawn_site].center;
+    (walkable, regions, spawn)
+}
+
+/// Carve a `lanes`-wide corridor between two site centres. Axis-aligned edges (always, for the grid) are
+/// a single straight run — lanes stack +y for a horizontal corridor, +x for a vertical one, byte-
+/// identical to the pre-refactor E/S carve. Diagonal graph routes carve an L (both legs), keeping each
+/// room-mouth segment axis-aligned so necking/openings still apply. Writes are bounds-checked (a no-op
+/// for in-bounds grid corridors) so a wide/edge diagonal can never index out of the mask.
+fn carve_corridor(walkable: &mut [bool], width: usize, height: usize, a: IVec2, b: IVec2, lanes: usize) {
+    let carve_h = |walkable: &mut [bool], x0: i32, x1: i32, y: i32| {
+        for x in x0.min(x1)..=x0.max(x1) {
+            for lane in 0..lanes as i32 {
+                let (px, py) = (x, y + lane);
+                if px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height {
+                    walkable[py as usize * width + px as usize] = true;
+                }
+            }
+        }
+    };
+    let carve_v = |walkable: &mut [bool], y0: i32, y1: i32, x: i32| {
+        for y in y0.min(y1)..=y0.max(y1) {
+            for lane in 0..lanes as i32 {
+                let (px, py) = (x + lane, y);
+                if px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height {
+                    walkable[py as usize * width + px as usize] = true;
+                }
+            }
+        }
+    };
+    if a.y == b.y {
+        carve_h(walkable, a.x, b.x, a.y);
+    } else if a.x == b.x {
+        carve_v(walkable, a.y, b.y, a.x);
+    } else {
+        // Diagonal (graph only): an L via the corner (b.x, a.y) — the horizontal leg leaves `a`'s wall,
+        // the vertical leg enters `b`'s wall, both axis-aligned. The grid never reaches this branch.
+        carve_h(walkable, a.x, b.x, a.y);
+        carve_v(walkable, a.y, b.y, b.x);
+    }
+}
+
 impl Dungeon {
     /// Collapse a coarse room graph, keep the largest connected component, and expand
     /// each surviving slot into a room + corridors on the fine grid. Fails loud (one path) if the
     /// collapse yields zero rooms, rather than returning a degenerate empty dungeon.
     fn generate(config: &DungeonConfig) -> Result<Self, String> {
-        let (cw, ch, block) = (config.coarse_w, config.coarse_h, config.block);
+        let (cw, ch) = (config.coarse_w, config.coarse_h);
         let weights = [
             config.wfc_weights.rock,
             config.wfc_weights.dead_end,
@@ -269,222 +572,18 @@ impl Dungeon {
                 )
             })?;
 
-        let width = cw * block;
-        let height = ch * block;
-        let mut walkable = vec![false; width * height];
+        // Build the Grid topology's coarse layout from the kept slots, then carve the fine grid through
+        // the shared `expand_to_fine`. The carve RNG is seeded here (separately from the WFC seed) and
+        // drawn only inside `expand_to_fine`, in site order — byte-identical to the pre-refactor carve.
+        let layout = grid_layout(&coarse, &kept, config)?;
         let mut rng = seeded(config.seed ^ 0xC0FFEE);
-
-        let block_center = |cx: usize, cy: usize| (cx * block + block / 2, cy * block + block / 2);
-        let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * cw + cx].open[dir];
-        // Does slot (cx,cy) actually connect to a kept neighbour on `dir` (a corridor is carved there)?
-        // Rooms grow only toward these edges (Phase 2b); this mirrors the corridor-carve guard exactly.
-        let linked = |cx: usize, cy: usize, dir: usize| -> bool {
-            let (nx, ny) = match dir {
-                N => (cx as i32, cy as i32 - 1),
-                E => (cx as i32 + 1, cy as i32),
-                S => (cx as i32, cy as i32 + 1),
-                W => (cx as i32 - 1, cy as i32),
-                _ => unreachable!(),
-            };
-            nx >= 0
-                && ny >= 0
-                && (nx as usize) < cw
-                && (ny as usize) < ch
-                && kept[ny as usize * cw + nx as usize]
-                && coarse_open(cx, cy, dir)
-        };
-
-        // One placement Region per kept slot. `slot_region[slot]` maps a coarse slot to its region id
-        // so the adjacency/opening pass below can link neighbours. Rects are captured here (in the same
-        // RNG-consuming loop) so region geometry stays in lockstep with the carved rooms.
-        let mut regions: Vec<Region> = Vec::new();
-        let mut slot_region: Vec<Option<u32>> = vec![None; cw * ch];
-
-        // Carve a room in every kept slot's block. Size + type are drawn per room from the config's
-        // weighted room-type table (Merrell 2011: per-room area + aspect ratio), so rooms read at
-        // realistic metric scale and carry a type tag the furniture pass couples to. The room is centred
-        // in its block at liminality 1.0 (today's rigid grid); as liminality drops toward 0 it slides
-        // off-centre (`jitter_origin`), breaking the lattice into an organic scatter — bounded so the
-        // block centre stays interior to the room, keeping every corridor connected.
-        let max_side = block.saturating_sub(2); // keep a >=1-tile rock margin inside the block
-        let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
-        for cy in 0..ch {
-            for cx in 0..cw {
-                if !kept[cy * cw + cx] {
-                    continue;
-                }
-                let (rw, rh, tag) = pick_room(config, max_side, &mut rng);
-                let (bx, by) = block_center(cx, cy);
-                let cox = cx * block + (block - rw) / 2;
-                let coy = cy * block + (block - rh) / 2;
-                let ox = jitter_origin(cox, rw, cx * block, block, bx, t, &mut rng);
-                let oy = jitter_origin(coy, rh, cy * block, block, by, t, &mut rng);
-                // Phase 2b (expansion-to-touch): grow the room toward its LINKED edges so it reaches
-                // toward its corridors — at liminality 0 (t=1) linked rooms nearly touch (short corridors,
-                // much less dead space); at 1.0 (t=0) no growth. Each linked edge is capped one cell short
-                // of the block boundary, so a >=2-cell doorway gap always remains for the corridor + neck
-                // (rooms never merge, and the block centre stays interior). No RNG is drawn, so liminality
-                // 1.0 stays byte-identical. Unlinked edges keep their rock margin (the negative space).
-                let (bxs, bys, blk) = ((cx * block) as i32, (cy * block) as i32, block as i32);
-                let toward = |near: i32, cap: i32| near + ((cap - near) as f32 * t).round() as i32;
-                let mut left = ox as i32;
-                let mut right = (ox + rw) as i32;
-                let mut top = oy as i32;
-                let mut bot = (oy + rh) as i32;
-                if linked(cx, cy, W) {
-                    left = toward(left, bxs + 1);
-                }
-                if linked(cx, cy, E) {
-                    right = toward(right, bxs + blk - 1);
-                }
-                if linked(cx, cy, N) {
-                    top = toward(top, bys + 1);
-                }
-                if linked(cx, cy, S) {
-                    bot = toward(bot, bys + blk - 1);
-                }
-                let (ox, rw) = (left as usize, (right - left) as usize);
-                let (oy, rh) = (top as usize, (bot - top) as usize);
-                for y in oy..oy + rh {
-                    for x in ox..ox + rw {
-                        walkable[y * width + x] = true;
-                    }
-                }
-
-                let id = regions.len() as u32;
-                slot_region[cy * cw + cx] = Some(id);
-                regions.push(Region {
-                    id,
-                    rect: Rect2 {
-                        min: [ox as i32, oy as i32],
-                        max: [(ox + rw) as i32, (oy + rh) as i32],
-                    },
-                    openings: Vec::new(),
-                    adjacency: Vec::new(),
-                    props: PropertyBag {
-                        tags: vec!["room".to_string(), tag],
-                    },
-                });
-            }
-        }
-
-        // Carve a `corridor_width`-wide corridor along each Link edge, between the two block centres,
-        // so the (0.7-wide) hero fits with room to spare. Lanes stack off the block-centre lane: an E
-        // corridor stacks in +y, an S corridor in +x. At `corridor_width = 2` this is the classic carve.
-        let lanes = config.corridor_width;
-        for cy in 0..ch {
-            for cx in 0..cw {
-                if !kept[cy * cw + cx] {
-                    continue;
-                }
-                let (bx, by) = block_center(cx, cy);
-                if cx + 1 < cw && kept[cy * cw + cx + 1] && coarse_open(cx, cy, E) {
-                    let (nx, _) = block_center(cx + 1, cy);
-                    for x in bx..=nx {
-                        for lane in 0..lanes {
-                            walkable[(by + lane) * width + x] = true;
-                        }
-                    }
-                }
-                if cy + 1 < ch && kept[(cy + 1) * cw + cx] && coarse_open(cx, cy, S) {
-                    let (_, ny) = block_center(cx, cy + 1);
-                    for y in by..=ny {
-                        for lane in 0..lanes {
-                            walkable[y * width + bx + lane] = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Link regions: for every corridor leaving a kept slot, record an adjacency edge and the
-        // interior floor cell where the corridor meets the room wall (the region's opening). Edge
-        // links are symmetric under the WFC socket rule (a slot's `open[dir]` agrees with its
-        // neighbour's `open[opposite]`), so scanning all four directions finds every opening once.
-        for cy in 0..ch {
-            for cx in 0..cw {
-                let Some(id) = slot_region[cy * cw + cx] else {
-                    continue;
-                };
-                let (bx, by) = block_center(cx, cy);
-                let rect = regions[id as usize].rect;
-                for dir in [N, E, S, W] {
-                    let (nx, ny) = match dir {
-                        N => (cx as i32, cy as i32 - 1),
-                        E => (cx as i32 + 1, cy as i32),
-                        S => (cx as i32, cy as i32 + 1),
-                        W => (cx as i32 - 1, cy as i32),
-                        _ => unreachable!(),
-                    };
-                    if nx < 0 || ny < 0 || nx >= cw as i32 || ny >= ch as i32 {
-                        continue;
-                    }
-                    if !coarse_open(cx, cy, dir) {
-                        continue;
-                    }
-                    let Some(nid) = slot_region[ny as usize * cw + nx as usize] else {
-                        continue;
-                    };
-                    let cell = match dir {
-                        N => [bx as i32, rect.min[1]],
-                        S => [bx as i32, rect.max[1] - 1],
-                        E => [rect.max[0] - 1, by as i32],
-                        W => [rect.min[0], by as i32],
-                        _ => unreachable!(),
-                    };
-                    let region = &mut regions[id as usize];
-                    region.adjacency.push(nid);
-                    region.openings.push(Opening { dir, cell });
-
-                    // Neck the corridor down to a single-tile doorway at the room wall, so one door leaf
-                    // fills the gap (no open strip beside it). The carve stacks `corridor_width` lanes off
-                    // the block-centre lane; the doorway keeps only the block-centre lane, so step one
-                    // cell out of the room into the corridor (per `dir`) and rock out every *extra* lane
-                    // there. Rocking (not just drawing a wall) keeps walkability, collision, and flow
-                    // fields consistent — the block-centre tile stays open, so the room stays connected.
-                    for lane in 1..config.corridor_width as i32 {
-                        let neck = match dir {
-                            E => IVec2::new(cell[0] + 1, cell[1] + lane),
-                            W => IVec2::new(cell[0] - 1, cell[1] + lane),
-                            N => IVec2::new(cell[0] + lane, cell[1] - 1),
-                            S => IVec2::new(cell[0] + lane, cell[1] + 1),
-                            _ => unreachable!(),
-                        };
-                        if neck.x >= 0
-                            && neck.y >= 0
-                            && (neck.x as usize) < width
-                            && (neck.y as usize) < height
-                        {
-                            walkable[neck.y as usize * width + neck.x as usize] = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Spawn at the block centre of the kept room nearest the coarse centre. A dungeon with zero
-        // rooms is a generation failure surfaced loudly (one path), not a degenerate empty world.
-        let center = Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0);
-        let spawn_slot = (0..cw * ch)
-            .filter(|&i| kept[i])
-            .min_by(|&a, &b| {
-                let pa = Vec2::new((a % cw) as f32, (a / cw) as f32);
-                let pb = Vec2::new((b % cw) as f32, (b / cw) as f32);
-                // total_cmp is a total order over f32 (finite coords never NaN), so no unwrap/panic.
-                (pa - center)
-                    .length_squared()
-                    .total_cmp(&(pb - center).length_squared())
-            })
-            .ok_or_else(|| {
-                "dungeon generation produced zero rooms (largest component empty)".to_string()
-            })?;
-        let (sx, sy) = block_center(spawn_slot % cw, spawn_slot / cw);
+        let (walkable, regions, spawn) = expand_to_fine(&layout, config, &mut rng);
 
         Ok(Dungeon {
-            width,
-            height,
+            width: layout.width,
+            height: layout.height,
             walkable,
-            spawn: IVec2::new(sx as i32, sy as i32),
+            spawn,
             regions,
         })
     }
