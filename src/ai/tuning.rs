@@ -38,6 +38,7 @@ pub struct FieldsTuning {
     pub threat: ChannelTuning,
     pub crab_density: ChannelTuning,
     pub meat: ChannelTuning,
+    pub alarm: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -48,6 +49,7 @@ impl FieldsTuning {
         defs[FieldId::THREAT.0] = self.threat.into();
         defs[FieldId::CRAB_DENSITY.0] = self.crab_density.into();
         defs[FieldId::MEAT.0] = self.meat.into();
+        defs[FieldId::ALARM.0] = self.alarm.into();
         defs
     }
 }
@@ -103,6 +105,14 @@ impl Default for AiTuning {
                     evaporate: 0.3,
                     diffuse: 0.12,
                     deposit_radius: 2.0,
+                },
+                // Alarm floods ~one room around a wounded crab (large radius, no diffusion so it stays a
+                // localized bloom rather than seeping mapwide) and fades over ~2–3 s so the muster is a
+                // sharp retaliatory surge, not a permanent aggro. Refreshed by every fresh wound.
+                alarm: ChannelTuning {
+                    evaporate: 0.5,
+                    diffuse: 0.0,
+                    deposit_radius: 5.0,
                 },
             },
             // Rally vectors decay over a few seconds (call-off), accumulate scout deposits, and smear a

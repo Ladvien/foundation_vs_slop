@@ -26,6 +26,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use bevy::prelude::*;
 
+use crate::crab::CRAB_COLLIDER_R;
 use crate::dungeon::{Dungeon, TILE_SIZE, WALL_HEIGHT, WALL_THICKNESS};
 use crate::wfc::{E, N, S, W};
 
@@ -74,15 +75,22 @@ pub enum PatchKind {
 }
 
 /// One axis-aligned rectangular surface a crab can stand on. `center`/`normal`/`tan_u`/`tan_v` define
-/// its plane and in-plane axes; `half` is the (u,v) half-extent. Floor: normal +Y, tan_u +X, tan_v +Z.
-/// Wall: normal is the inward face normal (±X/±Z), tan_u the horizontal run, tan_v +Y (up the face).
+/// its plane and in-plane axes. `min`/`max` are the clamp bounds along (tan_u, tan_v). Floor: normal
+/// +Y, tan_u +X, tan_v +Z. Wall: normal is the inward face normal (±X/±Z), tan_u the horizontal run,
+/// tan_v +Y (up the face).
+///
+/// The bounds are **asymmetric** so a floor cell's walled edges can be pulled in to the wall's inner
+/// face (minus a crab-body clearance): a crab clamped here can't wedge its body into the bounding
+/// wall slab. Open (floor-neighbour) edges keep the full half-tile so the crab can still reach the
+/// floor↔floor transfer gate at the cell boundary. Wall patches stay symmetric (`min = -half`).
 pub struct Patch {
     pub kind: PatchKind,
     pub center: Vec3,
     pub normal: Vec3,
     pub tan_u: Vec3,
     pub tan_v: Vec3,
-    pub half: Vec2,
+    pub min: Vec2,
+    pub max: Vec2,
 }
 
 /// A directed step in the surface graph: to a neighbor patch, its integer cost (≈10·world distance,
@@ -155,6 +163,18 @@ impl SurfaceGraph {
         let inner = 0.5 * TILE_SIZE - WALL_THICKNESS; // inner-face inset from cell centre
         let hy = WALL_HEIGHT * 0.5;
 
+        // A walled edge is *climbable* unless it's a camera-facing (E/S) knee wall in short-wall mode:
+        // those are squashed to ~0.6 m at render, so a full-height (Y 0→2.4) climb patch there would
+        // leave wall-seeded and descending crabs standing in the air above the short wall. Such edges
+        // get no wall patch — crabs near them navigate the floor — the same edges the nest-seating pass
+        // skips (`crab.rs`). The slab still physically exists (short, not gone), so the floor-clamp below
+        // keeps using `walled`.
+        let climbable = |cell: IVec2, dir: usize| -> bool {
+            dungeon.walled(cell, dir)
+                && !(crate::dungeon::SHORT_CAMERA_WALLS
+                    && crate::dungeon::is_camera_facing(wall_normal(dir)))
+        };
+
         let mut patches: Vec<Patch> = Vec::new();
         let mut index: HashMap<(IVec2, u8), u32> = HashMap::new();
 
@@ -167,28 +187,45 @@ impl SurfaceGraph {
                 }
                 let c = dungeon.cell_center(cell); // y = 0
                 index.insert((cell, FLOOR_SLOT), patches.len() as u32);
+                // Per-edge clamp bounds: a walled edge is pulled in to the wall's inner face minus a
+                // crab-body clearance so a crab can't wedge into the slab; an open edge keeps the full
+                // half-tile so the crab can still reach the floor↔floor transfer gate at the boundary.
+                // tan_u = +X (E:+ / W:-), tan_v = +Z (S:+ / N:-); see `Dungeon::is_solid`.
+                let clamp = inner - CRAB_COLLIDER_R;
+                let full = 0.5 * TILE_SIZE;
+                let max = Vec2::new(
+                    if dungeon.walled(cell, E) { clamp } else { full },
+                    if dungeon.walled(cell, S) { clamp } else { full },
+                );
+                let min = Vec2::new(
+                    if dungeon.walled(cell, W) { -clamp } else { -full },
+                    if dungeon.walled(cell, N) { -clamp } else { -full },
+                );
                 patches.push(Patch {
                     kind: PatchKind::Floor(cell),
                     center: c,
                     normal: Vec3::Y,
                     tan_u: Vec3::X,
                     tan_v: Vec3::Z,
-                    half: Vec2::splat(0.5 * TILE_SIZE),
+                    min,
+                    max,
                 });
 
                 for dir in [N, E, S, W] {
-                    if !dungeon.walled(cell, dir) {
+                    if !climbable(cell, dir) {
                         continue;
                     }
                     let (base, normal, tan_u) = wall_frame(c, dir, inner);
                     index.insert((cell, wall_slot(dir)), patches.len() as u32);
+                    let half = Vec2::new(0.5 * TILE_SIZE, hy);
                     patches.push(Patch {
                         kind: PatchKind::Wall(cell, dir),
                         center: base + Vec3::Y * hy,
                         normal,
                         tan_u,
                         tan_v: Vec3::Y,
-                        half: Vec2::new(0.5 * TILE_SIZE, hy),
+                        min: -half,
+                        max: half,
                     });
                 }
             }
@@ -244,7 +281,7 @@ impl SurfaceGraph {
 
                 // Per walled edge of this cell: mount, along-run, corner adjacencies.
                 for dir in [N, E, S, W] {
-                    if !dungeon.walled(cell, dir) {
+                    if !climbable(cell, dir) {
                         continue;
                     }
                     let wall_id = index[&(cell, wall_slot(dir))];
@@ -256,7 +293,7 @@ impl SurfaceGraph {
                     // (3) Along-run — same-dir wall on a run-neighbour cell. Shared vertical edge.
                     for off in run_offsets(dir) {
                         let rn = cell + off;
-                        if dungeon.is_floor(rn) && dungeon.walled(rn, dir) {
+                        if dungeon.is_floor(rn) && climbable(rn, dir) {
                             if let Some(&rid) = index.get(&(rn, wall_slot(dir))) {
                                 let gate = base
                                     + Vec3::Y * hy
@@ -269,7 +306,7 @@ impl SurfaceGraph {
                             let partner_cell = rn + dir_offset(dir);
                             if let Some(pdir) = offset_to_dir(-off) {
                                 if dungeon.is_floor(partner_cell)
-                                    && dungeon.walled(partner_cell, pdir)
+                                    && climbable(partner_cell, pdir)
                                 {
                                     if let Some(&pid) =
                                         index.get(&(partner_cell, wall_slot(pdir)))
@@ -293,7 +330,7 @@ impl SurfaceGraph {
                     (S, W, -1.0, 1.0),
                     (W, N, -1.0, -1.0),
                 ] {
-                    if dungeon.walled(cell, a) && dungeon.walled(cell, b) {
+                    if climbable(cell, a) && climbable(cell, b) {
                         let aid = index[&(cell, wall_slot(a))];
                         let bid = index[&(cell, wall_slot(b))];
                         let gate = Vec3::new(c.x + sx * inner, hy, c.z + sz * inner);
@@ -319,15 +356,27 @@ impl SurfaceGraph {
     }
 }
 
+/// Inward face normal (±X/±Z) of a walled edge — the normal `Dungeon::is_camera_facing` classifies, so
+/// surface nav and the renderer agree on which edges face the camera.
+fn wall_normal(dir: usize) -> Vec3 {
+    match dir {
+        E => Vec3::NEG_X,
+        W => Vec3::X,
+        N => Vec3::Z,
+        _ /* S */ => Vec3::NEG_Z,
+    }
+}
+
 /// Inner-face base centre (y=0), inward normal, and horizontal run axis for a walled edge.
 fn wall_frame(cell_center: Vec3, dir: usize, inner: f32) -> (Vec3, Vec3, Vec3) {
     let c = cell_center;
-    match dir {
-        E => (Vec3::new(c.x + inner, 0.0, c.z), Vec3::NEG_X, Vec3::Z),
-        W => (Vec3::new(c.x - inner, 0.0, c.z), Vec3::X, Vec3::Z),
-        N => (Vec3::new(c.x, 0.0, c.z - inner), Vec3::Z, Vec3::X),
-        _ /* S */ => (Vec3::new(c.x, 0.0, c.z + inner), Vec3::NEG_Z, Vec3::X),
-    }
+    let (base, tan_u) = match dir {
+        E => (Vec3::new(c.x + inner, 0.0, c.z), Vec3::Z),
+        W => (Vec3::new(c.x - inner, 0.0, c.z), Vec3::Z),
+        N => (Vec3::new(c.x, 0.0, c.z - inner), Vec3::X),
+        _ /* S */ => (Vec3::new(c.x, 0.0, c.z + inner), Vec3::X),
+    };
+    (base, wall_normal(dir), tan_u)
 }
 
 /// Integer edge cost ≈ 10·(world distance between patch centres), floored at 1, matching the octile

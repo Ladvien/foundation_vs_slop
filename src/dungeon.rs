@@ -35,11 +35,32 @@ const DOORWAY_HEIGHT: f32 = 2.0;
 /// Camera-facing (SE/SW — i.e. the E and S edge) walls render at this fraction of `WALL_HEIGHT`: a low
 /// knee wall you always see over into every room, regardless of where the squad is. Their doors and
 /// headers are dropped too (nothing to frame on a knee wall). **To revert:** set this to `1.0` — walls
-/// become full height again and the per-room `occlusion::room_cutaway` takes over instead.
+/// become full height again and `occlusion::room_cutaway` (rooms + corridor units) takes over instead.
 pub const CAMERA_WALL_FRACTION: f32 = 0.25;
 
 /// True when the camera-facing-wall knee-wall mode is active (any fraction below full height).
 pub const SHORT_CAMERA_WALLS: bool = CAMERA_WALL_FRACTION < 1.0;
+
+/// A wall counts as camera-facing when its position sits at least this far toward +X or +Z of its cell
+/// centre (its E or S edge). Straight edges sit at ≈0.4 and corner arms similarly, so 0.1 cleanly
+/// separates the near (E/S) faces from the far (N/W) ones.
+pub const CAMERA_FACING_EPS: f32 = 0.1;
+
+/// In the fixed 45° iso view the camera looks from (+X,+Z), so the walls that occlude a room's interior
+/// are its E/S faces, whose inner faces point toward the camera with normal `-X` / `-Z`. This is the
+/// single source of truth for "camera-facing": knee-wall squashing, occlusion cutaway, furniture
+/// wall-face selection, and crab-nest seating all classify walls through this rule (by normal here, or
+/// via the positional [`is_camera_facing_pos`] twin), so they can never disagree about which walls
+/// face the camera.
+pub fn is_camera_facing(inner_face_normal: Vec3) -> bool {
+    inner_face_normal == Vec3::NEG_X || inner_face_normal == Vec3::NEG_Z
+}
+
+/// [`is_camera_facing`] for callers holding a spawned wall's world position rather than its face
+/// normal: a wall on its cell's E/S edge sits `> CAMERA_FACING_EPS` toward +X/+Z of the cell centre.
+pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
+    wall_pos.x - cell_center.x > CAMERA_FACING_EPS || wall_pos.z - cell_center.z > CAMERA_FACING_EPS
+}
 
 // Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles. At 1 tile =
 // 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. The BLOCK is
@@ -53,6 +74,12 @@ const BLOCK: usize = 32;
 /// gives Backrooms variety — small offices next to large open rooms, all with empty floor to spare.
 const ROOM_MIN: usize = 6;
 const ROOM_MAX: usize = 14;
+
+/// The corridor's second lane, as a cell offset from the block-centre lane. Corridors are carved 2-wide
+/// (the block-centre lane plus this offset); the doorway keeps the block-centre lane and necks the other
+/// one, so the carve and the neck derive from this same offset — otherwise the neck rocks the wrong cell
+/// and the doorway silently reverts to a 2-wide wedge that squads get stuck in.
+const CORRIDOR_LANE: usize = 1;
 
 const DUNGEON_SEED: u64 = 0x5C0_9191; // nods to SCP-9191, the slop generator
 const MAX_ATTEMPTS: u32 = 20;
@@ -174,14 +201,14 @@ impl Dungeon {
                     let (nx, _) = block_center(cx + 1, cy);
                     for x in bx..=nx {
                         walkable[by * width + x] = true;
-                        walkable[(by + 1) * width + x] = true;
+                        walkable[(by + CORRIDOR_LANE) * width + x] = true;
                     }
                 }
                 if cy + 1 < COARSE_H && kept[(cy + 1) * COARSE_W + cx] && coarse_open(cx, cy, S) {
                     let (_, ny) = block_center(cx, cy + 1);
                     for y in by..=ny {
                         walkable[y * width + bx] = true;
-                        walkable[y * width + bx + 1] = true;
+                        walkable[y * width + bx + CORRIDOR_LANE] = true;
                     }
                 }
             }
@@ -232,11 +259,15 @@ impl Dungeon {
                     // block-centre tile, so we rock out the corridor's *other* boundary cell. Rocking
                     // it (not just drawing a wall) keeps walkability, collision, and flow fields
                     // consistent — the doorway `by`/`bx` tile stays open, so the room stays connected.
+                    // Step one cell out of the room into the corridor (per `dir`), then to the corridor's
+                    // second lane — the `+CORRIDOR_LANE` cell the carve added and the doorway does not
+                    // keep — and rock it out so the opening necks to a single tile.
+                    let lane = CORRIDOR_LANE as i32;
                     let neck = match dir {
-                        E => IVec2::new(cell[0] + 1, cell[1] + 1),
-                        W => IVec2::new(cell[0] - 1, cell[1] + 1),
-                        N => IVec2::new(cell[0] + 1, cell[1] - 1),
-                        S => IVec2::new(cell[0] + 1, cell[1] + 1),
+                        E => IVec2::new(cell[0] + 1, cell[1] + lane),
+                        W => IVec2::new(cell[0] - 1, cell[1] + lane),
+                        N => IVec2::new(cell[0] + lane, cell[1] - 1),
+                        S => IVec2::new(cell[0] + lane, cell[1] + 1),
                         _ => unreachable!(),
                     };
                     if neck.x >= 0
@@ -321,6 +352,26 @@ impl Dungeon {
             || (self.walled(cell, W) && lx < -inner)
             || (self.walled(cell, N) && lz < -inner)
             || (self.walled(cell, S) && lz > inner)
+    }
+
+    /// Build a `Dungeon` directly from a row-major `walkable` mask, for tests that need a
+    /// deterministic hand-crafted layout without running WFC generation.
+    #[cfg(test)]
+    pub(crate) fn from_walkable(width: usize, height: usize, walkable: Vec<bool>) -> Self {
+        assert_eq!(walkable.len(), width * height, "walkable mask size mismatch");
+        Dungeon {
+            width,
+            height,
+            walkable,
+            spawn: IVec2::ZERO,
+            regions: Vec::new(),
+        }
+    }
+
+    /// Test-only accessor for the private [`Self::is_solid`] ground-truth wall test.
+    #[cfg(test)]
+    pub(crate) fn is_solid_test(&self, x: f32, z: f32) -> bool {
+        self.is_solid(x, z)
     }
 
     /// The inner faces of any walls bounding the cell that contains `pos`, as
@@ -778,7 +829,7 @@ fn spawn_tiles(
         if SHORT_CAMERA_WALLS && wall_size.is_some() {
             let cx = cell.x as f32 * TILE_SIZE;
             let cz = cell.y as f32 * TILE_SIZE;
-            if transform.translation.x - cx > 0.1 || transform.translation.z - cz > 0.1 {
+            if is_camera_facing_pos(transform.translation, Vec3::new(cx, 0.0, cz)) {
                 transform.scale.y = CAMERA_WALL_FRACTION;
                 transform.translation.y = WALL_HEIGHT * CAMERA_WALL_FRACTION * 0.5;
             }

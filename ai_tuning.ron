@@ -7,6 +7,10 @@
         threat:       ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
         crab_density: ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
         meat:         ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
+        // Alarm: a wounded crab floods this ~one room (deposit_radius) so nearby crabs muster instead of
+        // fleeing. No diffusion (stays a local bloom); evaporate over ~2–3 s so the surge is a sharp
+        // retaliation, not permanent aggro. Radius is the "how far the alarm carries" dial.
+        alarm:        ( evaporate: 0.5,  diffuse: 0.0,  deposit_radius: 5.0 ),
     ),
     // Vectorial rally pheromone (Tang et al. 2019): scouts deposit direction vectors toward live prey;
     // the swarm reads the local bearing and masses on it. decay = call-off rate, accumulate = deposit

@@ -34,6 +34,9 @@ pub enum Mode {
     Mark,
     /// Mass on the local rally pheromone (the scout-marked prey) — the swarm's recruited attack.
     Rally,
+    /// Muster: a nearby crab was just wounded — converge on the squad and press (a retaliatory surge,
+    /// driven by the local ALARM pheromone). The twin of Rally, but recruited by kin damage, not a scout.
+    Muster,
 }
 
 /// A perception fact the brain reads (extend freely).
@@ -59,6 +62,10 @@ pub enum Fact {
     /// Magnitude of the vectorial rally pheromone sampled at the agent's OWN cell — a *local* read (not a
     /// global peak), so only crabs actually near a scout-marked sighting rally / suppress their flight.
     RallyHere,
+    /// ALARM field sampled at the agent's own cell — a *local* read of the "wounded kin" warning cry, so
+    /// only crabs within ~one room of a casualty muster (gates Muster on) and press through fire (gates
+    /// Flee off). Fades as the alarm evaporates, so fear resumes once the retaliation window closes.
+    AlarmHere,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -176,6 +183,9 @@ pub struct Perception {
     /// Magnitude of the vectorial rally pheromone at the agent's own cell (a local read — see
     /// [`Fact::RallyHere`]; gates Rally on and Flee off only for crabs actually near a marked sighting).
     pub rally_val: f32,
+    /// ALARM field at the agent's own cell (a local read — see [`Fact::AlarmHere`]; gates Muster on and
+    /// Flee off only for crabs within ~one room of a wounded crab).
+    pub alarm_val: f32,
 }
 
 impl Perception {
@@ -192,6 +202,7 @@ impl Perception {
             Input::Perc(Fact::Berserk) => self.berserk,
             Input::Perc(Fact::PreySpotted) => self.prey_spotted,
             Input::Perc(Fact::RallyHere) => self.rally_val,
+            Input::Perc(Fact::AlarmHere) => self.alarm_val,
         }
     }
 }

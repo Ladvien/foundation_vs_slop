@@ -36,8 +36,10 @@ impl Health {
     }
 }
 
-/// Height of the bar above the owner's transform origin (owners sit near Y=0; head ≈ 1.0).
-const BAR_Y: f32 = 1.5;
+/// Height of the bar above the owner's transform origin (owners sit near Y=0). Calibrated to float
+/// just above the unit figurine's head — the figurine is ~1.82 m tall (0.7 m base mesh × `squad::
+/// FIGURINE_SCALE` 2.6), so the bar clears it with a small gap. Tune by eye via devshot.
+const BAR_Y: f32 = 2.0;
 /// Bar quad size in world units (wide and short).
 const BAR_WIDTH: f32 = 1.1;
 const BAR_HEIGHT: f32 = 0.16;

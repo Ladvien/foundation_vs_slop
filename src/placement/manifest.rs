@@ -43,10 +43,30 @@ impl FurnitureManifest {
     }
 }
 
+/// The WFC scatter solver packs `tiled.len() + 1` prototypes (the extra slot is the empty cell) into
+/// a single `u32` compatibility mask, so a manifest may declare at most this many `Role::Tiled` items.
+/// Enforced at parse time so an oversized kit fails loudly at the door rather than shift-overflowing
+/// the solver (`collapse_grid`'s `assert!(n <= 32)`) at furnish time.
+pub const MAX_TILED_PROTOTYPES: usize = 31;
+
 /// Parse a manifest from RON text. Returns a descriptive error rather than panicking — the caller
-/// (plugin build) decides how loudly to surface a malformed manifest.
+/// (plugin build) decides how loudly to surface a malformed manifest. Also enforces the WFC
+/// [`MAX_TILED_PROTOTYPES`] cap so a data-only kit swap can never crash the solver later.
 pub fn parse_manifest(text: &str) -> Result<FurnitureManifest, String> {
-    ron::from_str::<FurnitureManifest>(text).map_err(|e| format!("manifest parse error: {e}"))
+    let manifest =
+        ron::from_str::<FurnitureManifest>(text).map_err(|e| format!("manifest parse error: {e}"))?;
+    let tiled = manifest
+        .items
+        .iter()
+        .filter(|i| matches!(i.role, Role::Tiled))
+        .count();
+    if tiled > MAX_TILED_PROTOTYPES {
+        return Err(format!(
+            "manifest declares {tiled} `role: Tiled` items; the WFC scatter solver supports at most \
+             {MAX_TILED_PROTOTYPES} (its u32 prototype mask). Reduce the Tiled set or retag items."
+        ));
+    }
+    Ok(manifest)
 }
 
 /// Read + parse a manifest file. One path: a missing or malformed manifest is a hard, loud error
@@ -78,5 +98,20 @@ mod tests {
         assert!(matches!(m.items[1].role, Role::Freestanding));
         assert_eq!(m.by_role(|r| matches!(r, Role::Freestanding)).len(), 1);
         assert_eq!(m.items[1].affordances, vec!["sit".to_string()]);
+    }
+
+    #[test]
+    fn rejects_too_many_tiled() {
+        // One past the cap: the WFC u32 mask can't fit `n = tiled.len() + 1` prototypes, so the
+        // manifest must be rejected at the door rather than panicking the solver at furnish time.
+        let mut body = String::new();
+        for i in 0..=MAX_TILED_PROTOTYPES {
+            body.push_str(&format!(
+                "( key: \"t{i}\", glb: \"x/t{i}.glb\", category: \"decor\", role: Tiled, footprint: (0.5, 0.5) ),\n"
+            ));
+        }
+        let text = format!("( items: [ {body} ] )");
+        let err = parse_manifest(&text).expect_err("more than the cap of Tiled items must be rejected");
+        assert!(err.contains("Tiled"), "error should name the Tiled cap: {err}");
     }
 }

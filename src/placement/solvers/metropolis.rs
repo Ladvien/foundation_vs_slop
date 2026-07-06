@@ -16,15 +16,17 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use rand_chacha::ChaCha8Rng;
 use serde::Deserialize;
 
+use crate::dungeon::WALL_THICKNESS;
 use crate::placement::ir::{
     Candidate, Capabilities, Constraint, Hardness, Locality, Modality, Outcome, Placement,
-    PlacementProblem, Predicate, Region, Scope, SolveError,
+    PlacementProblem, Predicate, Region, Role, Scope, SolveError,
 };
 use crate::placement::solver::Solver;
 use crate::rng::DetRng;
 
-/// Wall inset so a footprint edge stops short of the wall slab (matches `dungeon::WALL_THICKNESS`).
-const WALL_INSET: f32 = 0.2;
+/// Wall inset so a footprint edge stops short of the wall slab. Tracks `dungeon::WALL_THICKNESS`
+/// directly (one source of truth) so a change to the wall slab can't silently desync the layout inset.
+const WALL_INSET: f32 = WALL_THICKNESS;
 
 /// Tunable cost weights + MH schedule, loaded from RON (Merrell 2011 density terms).
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +42,10 @@ pub struct MetropolisWeights {
     pub w_min_distance: f64,
     pub w_facing: f64,
     pub w_clearance: f64,
+    /// How coherently related furniture is arranged, in [0, 1]. Scales the `Facing` relation (a seat
+    /// facing its screen): 0 = pieces ignore each other (sparse, backrooms-random), 1 = fully arranged
+    /// (sofa firmly faces the TV). Tunable independently of the raw `w_facing` strength.
+    pub coherence: f64,
 }
 
 pub struct MetropolisSolver {
@@ -87,6 +93,10 @@ struct Bounds {
 impl Solver for MetropolisSolver {
     fn name(&self) -> &str {
         "metropolis"
+    }
+
+    fn handles(&self, role: &Role) -> bool {
+        matches!(role, Role::Freestanding)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -198,19 +208,15 @@ impl MetropolisSolver {
         let w = &self.weights;
         let mut overlap = 0.0;
         let mut bounds = 0.0;
-        let mut wall = 0.0;
 
         for (i, a) in objs.iter().enumerate() {
             let (ahw, ahd) = a.half_extents();
             // In-bounds: quadratic penalty for any part of the footprint past a wall.
             let (bx0, bx1, bz0, bz1) = (rx0 + ahw, rx1 - ahw, rz0 + ahd, rz1 - ahd);
             bounds += over(bx0 - a.x) + over(a.x - bx1) + over(bz0 - a.z) + over(a.z - bz1);
-            // Back-to-wall attraction: distance from the footprint to the nearest wall (minimize).
-            let d_left = (a.x - ahw) - rx0;
-            let d_right = rx1 - (a.x + ahw);
-            let d_bottom = (a.z - ahd) - rz0;
-            let d_top = rz1 - (a.z + ahd);
-            wall += d_left.min(d_right).min(d_bottom).min(d_top).max(0.0) as f64;
+            // Back-to-wall attraction is NOT applied unconditionally here: it is emitted per piece as
+            // an explicit `AgainstWall` constraint (see `freestanding_constraints`) and scored once in
+            // `constraint_cost`. Scoring it here too would double-count `w_wall` (~2× the tuned pull).
 
             for b in objs.iter().skip(i + 1) {
                 overlap += aabb_overlap_area(a, b) as f64;
@@ -226,7 +232,7 @@ impl MetropolisSolver {
             constraint_cost += weight * self.constraint_cost(c, objs, (rx0, rx1, rz0, rz1));
         }
 
-        w.w_overlap * overlap + w.w_bounds * bounds + w.w_wall * wall + constraint_cost
+        w.w_overlap * overlap + w.w_bounds * bounds + constraint_cost
     }
 
     /// Cost contribution of one explicit constraint (0 = satisfied). `bounds` is the room interior
@@ -249,7 +255,9 @@ impl MetropolisSolver {
                     let (dx, dz) = (b.x - a.x, b.z - a.z);
                     let len = (dx * dx + dz * dz).sqrt().max(1e-4);
                     let dot = (fx * dx + fz * dz) / len;
-                    w.w_facing * (1.0 - dot as f64)
+                    // Scaled by `coherence` so the seat→screen arrangement is tunable from
+                    // backrooms-random (0) to living-room-coherent (1) without retuning `w_facing`.
+                    w.w_facing * w.coherence * (1.0 - dot as f64)
                 } else {
                     0.0
                 }
@@ -362,6 +370,7 @@ mod tests {
             w_min_distance: 2.0,
             w_facing: 1.5,
             w_clearance: 2.0,
+            coherence: 0.3,
         }
     }
     fn region() -> Region {
@@ -388,7 +397,7 @@ mod tests {
         let r = region();
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![item(1.6, 0.7), item(2.0, 0.9), item(0.9, 0.6)],
+            candidates: vec![item(1.6, 0.7), item(2.0, 0.9), item(0.9, 0.6)].into(),
             constraints: Vec::new(),
         };
         let mut rng = seeded(3);
@@ -429,7 +438,7 @@ mod tests {
         let r = region();
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![item(1.6, 0.7), item(0.9, 0.6)],
+            candidates: vec![item(1.6, 0.7), item(0.9, 0.6)].into(),
             constraints: Vec::new(),
         };
         let solver = MetropolisSolver::new(weights());

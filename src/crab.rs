@@ -88,9 +88,10 @@ const CRAB_BODY_CENTER: f32 = 0.125;
 /// sits near the model's top). Calibrated by eye via devshot, scaled with `CRAB_RENDER_SCALE`.
 const CRAB_MODEL_Y: f32 = 0.275;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
-/// unscaled. Sized to hug the *visible* crab (rendered span ≈0.19 → radius ≈0.1) so a bolt only draws
+/// unscaled. Sized to hug the *visible* crab (rendered span ≈0.46 → radius ≈0.3) so a bolt only draws
 /// blood on a real hit — a near-miss now passes cleanly instead of registering on an oversized hitbox.
-const CRAB_COLLIDER_R: f32 = 0.12;
+/// Scales in lockstep with `CRAB_RENDER_SCALE` (2.5× when the model grew 0.06→0.15).
+pub(crate) const CRAB_COLLIDER_R: f32 = 0.30;
 
 /// Reynolds separation: crabs within this centre distance push apart, so the swarm actively spreads
 /// out instead of stacking (≈2× the crab footprint → they hold a visible gap). Applied as a real
@@ -104,6 +105,17 @@ const CRAB_SEP_STRENGTH: f32 = 7.0;
 /// by its `angle_bias`, so they weave out of sync and fan across the corridor.
 const CRAB_JITTER_STRENGTH: f32 = 0.6;
 const CRAB_JITTER_FREQ: f32 = 2.3;
+
+/// Alarm-pheromone recruitment to defense. When a crab is wounded it floods the local ALARM channel
+/// (see `crate::ai::field::FieldId::ALARM` / `crab_alarm_on_damage`) so nearby crabs muster and converge
+/// on the squad instead of fleeing — the retaliatory, *local* twin of the nest berserk alarm (nest hit →
+/// global berserk, crab hit → a one-room alarm bloom). Peak value deposited at the wound; it falls off
+/// over the channel's ~one-room `deposit_radius` and evaporates over a couple seconds. Heylighen,
+/// "Stigmergy as a universal coordination mechanism", Cognitive Systems Research 2016 (a warning-cry).
+const ALARM_DEPOSIT: f32 = 2.0;
+/// Speed multiplier while mustering — an alarmed crab charges noticeably faster than a calm forage, so a
+/// bolt into a pack reads as a scary surge boiling toward the shooter rather than a leisurely approach.
+const MUSTER_SPEED_MUL: f32 = 1.4;
 
 /// Scout recon tuning (the swarm's ~20% roaming recruiters; see [`Scout`] / `scout_sense_and_report`).
 /// Fraction of crabs tagged as scouts at spawn (deterministic by spatial hash, so newborns split the
@@ -348,6 +360,9 @@ impl Plugin for CrabPlugin {
                     attach_crab_animation,
                     drive_crab_animation,
                     crab_contact_damage,
+                    // Flood the local ALARM channel when a crab is wounded, before the deposits drain so
+                    // the muster bloom is live this frame (mirrors `scout_mark_prey`'s ordering).
+                    crab_alarm_on_damage.before(crate::ai::AiSet::Deposits),
                     crab_despawn_dead,
                     deposit_crab_density,
                     deposit_meat_scent,
@@ -462,7 +477,7 @@ fn spawn_crabs(
                     // float in the cutaway gap above the short wall. Prefer W/N faces (normals +X/+Z);
                     // a cell with only knee walls is skipped and the ring search moves on.
                     let full_face = dungeon.wall_faces_near(center).into_iter().find(|&(_, n)| {
-                        !crate::dungeon::SHORT_CAMERA_WALLS || (n != Vec3::NEG_X && n != Vec3::NEG_Z)
+                        !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(n)
                     });
                     if let Some((face, normal)) = full_face {
                         if crate::nest::spawn_nest(
@@ -756,6 +771,9 @@ fn crab_locomotion(
         let scouting = matches!(active.mode, crate::ai::utility::Mode::Scout);
         let marking = matches!(active.mode, crate::ai::utility::Mode::Mark);
         let rallying = matches!(active.mode, crate::ai::utility::Mode::Rally);
+        // Muster: alarmed by a wounded neighbour — pursue the squad (same surface flow-field path as a
+        // forage) but at a faster surge speed, so the retaliation reads as an aggressive charge.
+        let mustering = matches!(active.mode, crate::ai::utility::Mode::Muster);
         let gib_pos = carry
             .and_then(|c| c.target)
             .and_then(|e| gibs.get(e).ok())
@@ -858,7 +876,9 @@ fn crab_locomotion(
                 let side = tangent.cross(p.normal).normalize_or_zero();
                 let phase = now * CRAB_JITTER_FREQ + motion.angle_bias * std::f32::consts::TAU;
                 let jitter = side * (phase.sin() * CRAB_JITTER_STRENGTH);
-                let move_vec = tangent * CRAB_SPEED
+                // Mustered (alarmed) crabs surge faster than a calm forage — the scary charge.
+                let pursue_speed = if mustering { CRAB_SPEED * MUSTER_SPEED_MUL } else { CRAB_SPEED };
+                let move_vec = tangent * pursue_speed
                     + jitter
                     + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
                 let moving = move_vec.length_squared() > 1.0e-6;
@@ -1085,6 +1105,30 @@ fn crab_jump(
                     jump.cooldown = JUMP_COOLDOWN;
                 }
             }
+        }
+    }
+}
+
+/// Alarm-pheromone recruitment to defense: a wounded crab floods the local ALARM channel so every crab
+/// within ~one room reads `Fact::AlarmHere`, musters (converges on the squad), and stops fleeing — the
+/// fix for "shoot the crabs and they just scatter". This is the retaliatory, *local* twin of the nest
+/// berserk alarm (`nest::nest_alarm`): nest hit → whole-swarm berserk, crab hit → a one-room alarm bloom
+/// that self-limits as the field evaporates. Detection mirrors `nest_alarm`'s idiom — a crab whose
+/// `Health` changed this frame and now sits below full was just hit (crabs never heal), so it deposits.
+/// A stigmergic warning cry (Heylighen, "Stigmergy as a universal coordination mechanism", CSR 2016).
+fn crab_alarm_on_damage(
+    crabs: Query<(Ref<Health>, &Transform), With<Crab>>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    for (hp, tf) in &crabs {
+        // `is_changed()` also fires on spawn; `is_added()` screens that out. `current < max` restricts to
+        // an actual wound (a fresh full-health crab that was merely touched by the ECS won't deposit).
+        if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
+            deposits.0.push(crate::ai::field::Deposit {
+                pos: tf.translation,
+                field: crate::ai::field::FieldId::ALARM,
+                amount: ALARM_DEPOSIT,
+            });
         }
     }
 }
@@ -1944,11 +1988,14 @@ fn project_tangent(v: Vec3, normal: Vec3) -> Vec3 {
     v - normal * v.dot(normal)
 }
 
-/// Clamp a world point onto a patch's rectangle (keeps a crab on its current surface).
+/// Clamp a world point onto a patch's rectangle (keeps a crab on its current surface). The bounds are
+/// asymmetric: a floor patch's walled edges are inset to the wall's inner face minus a body clearance
+/// (see `SurfaceGraph::build`), so a crab pushed sideways by separation/jitter can't wedge into the
+/// bounding wall slab, while open edges keep the full half-tile so gate transfers still commit.
 fn clamp_to_patch(pos: Vec3, p: &crate::surface_nav::Patch) -> Vec3 {
     let d = pos - p.center;
-    let u = d.dot(p.tan_u).clamp(-p.half.x, p.half.x);
-    let v = d.dot(p.tan_v).clamp(-p.half.y, p.half.y);
+    let u = d.dot(p.tan_u).clamp(p.min.x, p.max.x);
+    let v = d.dot(p.tan_v).clamp(p.min.y, p.max.y);
     p.center + p.tan_u * u + p.tan_v * v
 }
 
@@ -1961,4 +2008,127 @@ fn surface_orientation(heading: Vec3, normal: Vec3) -> Quat {
     let mut t = Transform::IDENTITY;
     t.look_to(fwd, up);
     t.rotation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dungeon::{Dungeon, TILE_SIZE, WALL_THICKNESS};
+    use crate::surface_nav::SurfaceGraph;
+    use crate::wfc::{E, N, S, W};
+
+    /// The wall's inner (room-facing) face, from cell centre — the ground-truth threshold
+    /// `Dungeon::is_solid` uses. A crab body must stay short of this by its radius.
+    fn wall_inner_face() -> f32 {
+        0.5 * TILE_SIZE - WALL_THICKNESS
+    }
+
+    /// Build a `Dungeon` whose only floor cells are `floors` (all else rock), on a `w×h` grid.
+    fn dungeon_with(w: usize, h: usize, floors: &[IVec2]) -> Dungeon {
+        let mut mask = vec![false; w * h];
+        for c in floors {
+            mask[c.y as usize * w + c.x as usize] = true;
+        }
+        Dungeon::from_walkable(w, h, mask)
+    }
+
+    /// A crab clamped onto a floor patch — even shoved hard past every walled edge — must never
+    /// end up with its body inside a bounding wall slab. This is the exact bug that was reported
+    /// (crabs clipping into walls) and the invariant the per-edge floor-patch inset restores.
+    #[test]
+    fn crab_cannot_be_clamped_into_a_wall() {
+        // A single floor cell at (1,1) surrounded by rock ⇒ walled on all four edges.
+        let cell = IVec2::new(1, 1);
+        let dungeon = dungeon_with(3, 3, &[cell]);
+        for dir in [N, E, S, W] {
+            assert!(dungeon.walled(cell, dir), "fixture must wall every edge of the cell");
+        }
+
+        let graph = SurfaceGraph::build(&dungeon);
+        let patch_id = graph
+            .floor_patch_cell(cell)
+            .expect("center cell must have a floor patch");
+        let patch = graph.patch(patch_id);
+        let center = dungeon.cell_center(cell);
+        let r = CRAB_COLLIDER_R;
+
+        // Sanity: the walls really are there — the FULL-tile corner (what the old, un-inset clamp
+        // permitted) sits inside a wall slab. This is precisely what used to let crabs clip.
+        assert!(
+            dungeon.is_solid_test(center.x + 0.5 * TILE_SIZE, center.z),
+            "the tile edge is inside a wall — the old full-tile clamp would embed the crab here"
+        );
+
+        // Shove a crab far past each edge (and past each corner), clamp, and assert its whole
+        // body footprint (centre ± radius on X and Z) stays out of solid geometry.
+        let far = 5.0;
+        let pushes = [
+            Vec3::new(far, 0.0, 0.0),
+            Vec3::new(-far, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, far),
+            Vec3::new(0.0, 0.0, -far),
+            Vec3::new(far, 0.0, far),
+            Vec3::new(-far, 0.0, far),
+            Vec3::new(far, 0.0, -far),
+            Vec3::new(-far, 0.0, -far),
+        ];
+        for push in pushes {
+            let clamped = clamp_to_patch(center + push, patch);
+            for (dx, dz) in [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)] {
+                assert!(
+                    !dungeon.is_solid_test(clamped.x + dx, clamped.z + dz),
+                    "crab body clipped a wall: push={push:?} clamped={clamped:?} offset=({dx},{dz})"
+                );
+            }
+        }
+    }
+
+    /// The inset must apply ONLY to walled edges. An OPEN edge (floor neighbour) keeps the full
+    /// half-tile so a crab can still reach the floor↔floor transfer gate at the cell boundary —
+    /// insetting it would strand the crab and break pursuit. Uses a straight corridor so the
+    /// middle cell is open E/W and walled N/S.
+    #[test]
+    fn open_edges_keep_full_extent_walled_edges_inset() {
+        let cells = [IVec2::new(0, 1), IVec2::new(1, 1), IVec2::new(2, 1)];
+        let mid = cells[1];
+        let dungeon = dungeon_with(3, 3, &cells);
+        assert!(!dungeon.walled(mid, E) && !dungeon.walled(mid, W), "E/W must be open");
+        assert!(dungeon.walled(mid, N) && dungeon.walled(mid, S), "N/S must be walled");
+
+        let graph = SurfaceGraph::build(&dungeon);
+        let patch = graph.patch(graph.floor_patch_cell(mid).expect("floor patch"));
+        let center = dungeon.cell_center(mid);
+
+        // Open edges (±X): the crab reaches the full ±0.5 boundary (the transfer gate location).
+        let east = clamp_to_patch(center + Vec3::new(5.0, 0.0, 0.0), patch);
+        let west = clamp_to_patch(center + Vec3::new(-5.0, 0.0, 0.0), patch);
+        assert!(
+            (east.x - center.x - 0.5 * TILE_SIZE).abs() < 1e-5,
+            "open E edge must keep full half-tile extent, got {}",
+            east.x - center.x
+        );
+        assert!(
+            (west.x - center.x + 0.5 * TILE_SIZE).abs() < 1e-5,
+            "open W edge must keep full half-tile extent, got {}",
+            west.x - center.x
+        );
+
+        // Walled edges (±Z): the crab is held short of the wall inner face by its radius.
+        let bound = wall_inner_face() - CRAB_COLLIDER_R;
+        let south = clamp_to_patch(center + Vec3::new(0.0, 0.0, 5.0), patch);
+        let north = clamp_to_patch(center + Vec3::new(0.0, 0.0, -5.0), patch);
+        assert!(
+            (south.z - center.z - bound).abs() < 1e-5,
+            "walled S edge must inset to inner_face - radius, got {}",
+            south.z - center.z
+        );
+        assert!(
+            (north.z - center.z + bound).abs() < 1e-5,
+            "walled N edge must inset to inner_face - radius, got {}",
+            north.z - center.z
+        );
+        // And that inset genuinely keeps the body off the slab.
+        assert!(!dungeon.is_solid_test(south.x, south.z + CRAB_COLLIDER_R));
+        assert!(!dungeon.is_solid_test(north.x, north.z - CRAB_COLLIDER_R));
+    }
 }

@@ -28,6 +28,10 @@ impl Solver for WfcSolver {
         "wfc"
     }
 
+    fn handles(&self, role: &Role) -> bool {
+        matches!(role, Role::Tiled)
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             hardness: Hardness::Hard,
@@ -148,7 +152,7 @@ mod tests {
         let r = region();
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![tiled("a"), tiled("b")],
+            candidates: vec![tiled("a"), tiled("b")].into(),
             constraints: Vec::new(),
         };
         let mut rng = seeded(7);
@@ -174,7 +178,7 @@ mod tests {
         freestanding.role = Role::Freestanding;
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![freestanding],
+            candidates: vec![freestanding].into(),
             constraints: Vec::new(),
         };
         let mut rng = seeded(7);
@@ -187,7 +191,7 @@ mod tests {
         let r = region();
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![tiled("a")],
+            candidates: vec![tiled("a")].into(),
             constraints: Vec::new(),
         };
         let run = || {

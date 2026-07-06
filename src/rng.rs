@@ -4,7 +4,7 @@
 //! through this single type so a given seed always yields the same world (determinism invariant of
 //! the placement grammar; see `slop/research/2026-07-05-placement-grammar-implementation.md` §4).
 
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Seed a fresh ChaCha8 stream. All generation randomness starts here. Derive per-region sub-streams
@@ -18,9 +18,10 @@ pub fn seeded(seed: u64) -> ChaCha8Rng {
 pub trait DetRng {
     /// A fresh full 64-bit draw (e.g. a sub-seed for a nested generator).
     fn raw_u64(&mut self) -> u64;
-    /// Uniform integer in `[0, n)`. Panics only if `n == 0`, which is always a caller bug.
+    /// Uniform integer in `[0, n)` (unbiased). Returns 0 for the degenerate `n == 0` (a caller bug)
+    /// rather than panicking.
     fn below(&mut self, n: usize) -> usize;
-    /// Uniform integer in the inclusive range `[lo, hi]`.
+    /// Uniform integer in the inclusive range `[lo, hi]`. Returns `lo` when `hi <= lo`.
     fn range_usize(&mut self, lo: usize, hi: usize) -> usize;
     /// Uniform float in `[0, 1)`.
     fn unit(&mut self) -> f64;
@@ -34,10 +35,21 @@ impl DetRng for ChaCha8Rng {
     }
     #[inline]
     fn below(&mut self, n: usize) -> usize {
-        (self.raw_u64() % n as u64) as usize
+        // Unbiased uniform draw in [0, n) via `rand`'s range sampler — not the modulo reduction
+        // `raw_u64() % n`, which skews toward low indices whenever n does not divide 2^64. `n == 0`
+        // has no valid result; every caller guarantees n > 0, but guard so a bug can't panic.
+        if n == 0 {
+            return 0;
+        }
+        self.random_range(0..n)
     }
     #[inline]
     fn range_usize(&mut self, lo: usize, hi: usize) -> usize {
+        // Inclusive [lo, hi]. Guard the degenerate/inverted range so `hi - lo + 1` can't underflow
+        // (usize wraps): [lo, lo] is exactly {lo}, and no caller passes hi < lo.
+        if hi <= lo {
+            return lo;
+        }
         lo + self.below(hi - lo + 1)
     }
     #[inline]

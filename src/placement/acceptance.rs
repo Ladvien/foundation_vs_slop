@@ -36,6 +36,7 @@ fn test_weights() -> MetropolisWeights {
         w_min_distance: 2.0,
         w_facing: 1.5,
         w_clearance: 2.0,
+        coherence: 0.3,
     }
 }
 
@@ -82,6 +83,9 @@ impl Solver for FillEverythingSolver {
     fn name(&self) -> &str {
         "fill-everything"
     }
+    fn handles(&self, role: &Role) -> bool {
+        matches!(role, Role::Tiled)
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             hardness: Hardness::Hard,
@@ -109,7 +113,7 @@ fn axis1_backend_swap_same_grammar() {
     let region = room(0, 4, 4);
     let make_problem = || PlacementProblem {
         region: &region,
-        candidates: vec![tiled("prop")],
+        candidates: vec![tiled("prop")].into(),
         constraints: Vec::new(),
     };
 
@@ -176,7 +180,7 @@ fn axis2_asset_swap_manifest_only() {
             .collect();
         assert!(!tiled_items.is_empty(), "each kit has at least one tiled prop");
         let region = room(7, 4, 4);
-        let problem = PlacementProblem { region: &region, candidates: tiled_items, constraints: Vec::new() };
+        let problem = PlacementProblem { region: &region, candidates: tiled_items.into(), constraints: Vec::new() };
         let out = orch.solve_group(&problem, &mut seeded(5)).expect("routes + solves");
         assert!(matches!(out, Outcome::Assignment(_)));
     }
@@ -211,7 +215,7 @@ fn axis3_domain_swap_new_predicate_same_orchestrator() {
 
     // The SAME orchestrator that furnishes interiors handles the parcel — new predicate, no new engine.
     let orch = full_orchestrator();
-    let problem = PlacementProblem { region: &parcel, candidates: buildings.clone(), constraints };
+    let problem = PlacementProblem { region: &parcel, candidates: buildings.clone().into(), constraints };
     let out = orch.solve_group(&problem, &mut seeded(9)).expect("parcel routes + solves");
 
     let placed = match out {

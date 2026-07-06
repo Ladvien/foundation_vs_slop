@@ -28,12 +28,19 @@ impl FieldId {
     pub const CRAB_DENSITY: FieldId = FieldId(2);
     /// Meat trail — carryable gibs emit it; foraging crabs climb its gradient toward food.
     pub const MEAT: FieldId = FieldId(3);
+    /// Alarm — a **wounded crab** floods this locally; nearby crabs read it and muster (converge on the
+    /// squad) instead of fleeing. The retaliatory, *local* twin of the global nest berserk (`NestAlarm`):
+    /// nest hit → whole-swarm berserk, crab hit → a one-room alarm bloom. Models alarm-pheromone
+    /// recruitment to defense in social insects — a stigmergic "warning cry" (Heylighen, "Stigmergy as a
+    /// universal coordination mechanism", Cognitive Systems Research 2016). Deposited by
+    /// `crab::crab_alarm_on_damage`; read by the brain as `Fact::AlarmHere` (gates Muster on, Flee off).
+    pub const ALARM: FieldId = FieldId(4);
     // NOTE: the rally beacon is NOT a scalar channel — it's a *vectorial* pheromone (see [`RallyField`]
     // below), which stores a direction toward the moving prey rather than a scalar concentration.
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 4;
+pub const CHANNEL_COUNT: usize = 5;
 
 /// SCENT deposited by a death — a strong, lingering feeding-site marker the swarm and boss home on.
 pub const BLOOD_SCENT: f32 = 4.0;

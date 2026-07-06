@@ -10,6 +10,8 @@
 //! pass); `Region` alone is wired into `Dungeon` at Stage 0.
 #![allow(dead_code)] // Staged scaffolding: solver/constraint types land ahead of their Stage 1–4 consumers.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// Stable handle for a region within one generation. Index into `Dungeon::regions`.
@@ -205,7 +207,9 @@ pub struct Placement {
 /// Grammar IR compiled for one bounded region — engine-free, the sole input to a `Solver` (vetting §2).
 pub struct PlacementProblem<'a> {
     pub region: &'a Region,
-    pub candidates: Vec<Candidate>,
+    /// Shared, immutable candidate set. `Arc<[_]>` so the furnish pass hands the same tiled catalogue to
+    /// every region's problem with a refcount bump instead of a per-region deep clone of owned strings.
+    pub candidates: Arc<[Candidate]>,
     pub constraints: Vec<Constraint>,
 }
 

@@ -25,6 +25,10 @@ impl Solver for ConstraintSolver {
         "constraint"
     }
 
+    fn handles(&self, role: &Role) -> bool {
+        matches!(role, Role::Anchor { host: Host::Opening })
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             hardness: Hardness::Hard,
@@ -145,7 +149,7 @@ mod tests {
         let r = region_with_openings();
         let problem = PlacementProblem {
             region: &r,
-            candidates: vec![door()],
+            candidates: vec![door()].into(),
             constraints: vec![count_door(count)],
         };
         let mut rng = seeded(seed);

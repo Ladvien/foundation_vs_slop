@@ -1,9 +1,22 @@
 
-## Smiley
-Is cow like. It should have a saddish look on its face, until it sees a squad member.  To which it moves towards the closest squad member, with its eyes and smiling getting bigger the closer it is.  If the Smiley is in LoS of any squad member and its attacked, it looks scared and runs away.  But if no squad member is looking directly at it (raytracing area), _and_ its attacked, it looks angry, then switches to a different shader, still in a sphere shaped, but shoots a lighting bolt at the enemy, instantly killing it, then switches back to its angry face relaxing, if that was the last enemy.  The idea is to give an idea of how comisically powerful this entity is, but it is trying to conceal this from you.  Like, it's so lonely, it wants to try to keep you around, even though it could kill you instatly.  Like it knows how cognitohazardous it is to you and trying to save you from that.
-
 ## Crabs
 
+Wall-climbing swarm — ~40 to start, breed up to ~5000, from 4 nests in far rooms. One crab dies to a shot or two; the threat is the mass. They climb walls like floors, so geometry won't corner them.
+
+- **Forage & haul.** Corpse gibs emit a *meat* scent; hungry crabs climb the gradient to a pile. Heavy chunks need a crew to lift and haul home (along walls). Delivered meat is the nest's only breeding fuel — well-fed nests birth ~10× faster, starved ones stop. Destroy the gibs to cut off reinforcements.
+- **Numbers kill.** Under ~5 crabs on a target, zero damage. Past that the bite scales super-linearly — a pile shreds a unit in seconds. They cling to the **back**, out of the gun's reach, spread over the whole body.
+- **Pounce.** Near a unit, hunker then leap a ballistic arc (~10 body lengths), biting on landing. Same critical-mass rule: a lone leaper lands but does no damage.
+- **Scent-only coordination (stigmergy).** *Meat* draws foragers; *blood* from kills pulls the swarm (and the Smiley); *threat* from gunfire frightens them; *crowding* caps nest breeding; scouts lay a directional *rally* pheromone at spotted prey.
+- **Scouts recruit.** ~1 in 5 is a scout: roams fast, and on spotting prey shadows it and lays rally pheromone at its live position, pulling the swarm in. Lose sight → pheromone evaporates → attack calls off. Scouts don't fight.
+- **Fear scatters them.** Gunfire raises *threat* → fear → flee (dropping loads); it decays and they resume. Overrides: a nest under attack goes **berserk**, and crabs in a fresh rally beacon push through fire.
+
+### TODO
+
+- **Stealth pounce:** gate the leap on the target's facing — stalk to the blind side and only pounce when prey isn't looking. (Now: range + cooldown only.)
+- **Dynamic castes:** let crabs re-role between scout and assault as swarm needs shift. (Now: fixed at birth.)
+
+## Smiley
+Is cow like. It should have a saddish look on its face, until it sees a squad member.  To which it moves towards the closest squad member, with its eyes and smiling getting bigger the closer it is.  If the Smiley is in LoS of any squad member and its attacked, it looks scared and runs away.  But if no squad member is looking directly at it (raytracing area), _and_ its attacked, it looks angry, then switches to a different shader, still in a sphere shaped, but shoots a lighting bolt at the enemy, instantly killing it, then switches back to its angry face relaxing, if that was the last enemy.  The idea is to give an idea of how comisically powerful this entity is, but it is trying to conceal this from you.  Like, it's so lonely, it wants to try to keep you around, even though it could kill you instatly.  Like it knows how cognitohazardous it is to you and trying to save you from that.
 
 
 ## Favorite Shaders

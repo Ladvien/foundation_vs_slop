@@ -16,13 +16,14 @@
 
 use std::collections::HashSet;
 use std::f32::consts::PI;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use rayon::prelude::*;
 
 use crate::dungeon::{Dungeon, WALL_HEIGHT};
-use crate::rng::seeded;
-use crate::squad::Unit;
+use crate::fog::FogGrid;
+use crate::rng::{seeded, DetRng};
 
 use super::ir::{
     Candidate, Constraint, Dof, Host, Modality, Outcome, Placement, PlacementProblem,
@@ -46,6 +47,11 @@ const TILED_PER_ROOM: usize = 2;
 /// crowding).
 const FREESTANDING_PER_ROOM: usize = 2;
 
+/// Minimum centre-to-centre spacing (metres) requested between freestanding pieces, so a room reads as
+/// sparse scatter (backrooms) rather than a clump. Emitted as a Soft `MinDistance` the Metropolis
+/// solver honors via `w_min_distance` — sparseness, independent of the `coherence` arrangement knob.
+const FREESTANDING_MIN_GAP: f32 = 1.5;
+
 /// Wall lights placed per room — a sparse accent on a full-height wall (see the wall-anchor pass).
 const WALL_LIGHTS_PER_ROOM: usize = 1;
 
@@ -64,12 +70,20 @@ struct SpawnReq {
     rot: Quat,
 }
 
+/// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
+/// way to reason about what a piece is *for* (Fisher 2012; Qi 2018), rather than its kit-specific key.
+fn affords(item: &ManifestItem, aff: &str) -> bool {
+    item.affordances.iter().any(|a| a == aff)
+}
+
 /// Pick a freestanding furniture set for a region from whatever the manifest offers, keyed by a
 /// stand-in room "type" (`region_id % 4`, a Stage-4+ region-typing placeholder). Selection is by
-/// semantic TAGS, never by hardcoded asset keys, so any asset kit furnishes rooms with zero code
-/// changes — the Stage-5 asset-swap contract (Tutenel et al. semantic room classes `[home-still:
-/// cgf.12276]`; Merrell et al. 2011). Returns up to `count` distinct items; a room whose type-tags
-/// aren't in the kit still gets furniture via the top-up cycle, so it's never left empty.
+/// semantic TAGS and AFFORDANCES, never by hardcoded asset keys, so any asset kit furnishes rooms with
+/// zero code changes — the Stage-5 asset-swap contract (Tutenel et al. semantic room classes
+/// `[home-still: cgf.12276]`; Merrell et al. 2011). The scan is rotated by region so two rooms of the
+/// same type don't get an identical set, and a living room that picks a seat is also given a screen so
+/// the seat→screen relation can fire. Returns up to `count` distinct items; a room whose type-tags
+/// aren't in the kit still gets furniture via the top-up pass, so it's never left empty.
 fn room_profile<'a>(
     region_id: RegionId,
     freestanding: &[&'a ManifestItem],
@@ -79,34 +93,49 @@ fn room_profile<'a>(
         return Vec::new();
     }
     // Room "type" → preferred semantic tags (the room class). A kit that tags its items reproduces
-    // themed rooms; a kit that tags differently (or not at all) still furnishes via the cycle below.
+    // themed rooms; a kit that tags differently (or not at all) still furnishes via the top-up pass.
     let preferred: &[&str] = match region_id % 4 {
         0 => &["living"],
         1 => &["bedroom"],
         2 => &["kitchen", "dining"],
         _ => &["study", "living"],
     };
+    let n = freestanding.len();
+    // Region-rotated scan offset so two rooms of the same type don't select an identical set (the old
+    // fixed manifest-order scan made every same-type room identical, and never reached later items).
+    let start = region_id as usize % n;
     let mut chosen: Vec<&ManifestItem> = Vec::new();
-    // First, items whose tags match this room's type.
-    for it in freestanding {
-        if chosen.len() >= count {
-            break;
-        }
-        if it.tags.iter().any(|t| preferred.contains(&t.as_str())) {
-            chosen.push(it);
+    // Preferred (room-type-tagged) items first, then top up from the rest — both scanned from the
+    // rotated offset, so the room fills to `min(count, n)`, varies by region, and is never empty.
+    for want_preferred in [true, false] {
+        for k in 0..n {
+            if chosen.len() >= count {
+                break;
+            }
+            let it = freestanding[(start + k) % n];
+            let is_preferred = it.tags.iter().any(|t| preferred.contains(&t.as_str()));
+            if is_preferred == want_preferred && !chosen.iter().any(|c| c.key == it.key) {
+                chosen.push(it);
+            }
         }
     }
-    // Then top up from the whole freestanding set, offset by region so adjacent rooms differ, so a
-    // room is never empty just because the kit lacks the preferred tags. Scanning `n` consecutive
-    // offsets visits every item exactly once, so this fills to `min(count, n)` and always terminates.
-    let n = freestanding.len();
-    for k in 0..n {
-        if chosen.len() >= count {
-            break;
-        }
-        let cand = freestanding[(region_id as usize + k) % n];
-        if !chosen.iter().any(|c| c.key == cand.key) {
-            chosen.push(cand);
+    // One coherent pairing, kit-agnostic via affordances: a living room that picked a seat ("sit") but
+    // no screen ("emit") swaps a non-seat pick for a screen, so the seat→screen `Facing` relation can
+    // fire (the showcase sofa-faces-TV rule). A swap, not a growth, so the room stays sparse.
+    if preferred.contains(&"living")
+        && chosen.iter().any(|it| affords(it, "sit"))
+        && !chosen.iter().any(|it| affords(it, "emit"))
+    {
+        if let Some(screen) = freestanding
+            .iter()
+            .copied()
+            .find(|it| affords(it, "emit") && !chosen.iter().any(|c| c.key == it.key))
+        {
+            if let Some(slot) = chosen.iter().position(|it| !affords(it, "sit")) {
+                chosen[slot] = screen;
+            } else if chosen.len() < count {
+                chosen.push(screen);
+            }
         }
     }
     chosen
@@ -126,9 +155,7 @@ fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3
             }
             let center = dungeon.cell_center(IVec2::new(cx, cz));
             for (face, normal) in dungeon.wall_faces_near(center) {
-                if !crate::dungeon::SHORT_CAMERA_WALLS
-                    || (normal != Vec3::NEG_X && normal != Vec3::NEG_Z)
-                {
+                if !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(normal) {
                     faces.push((face, normal));
                 }
             }
@@ -149,7 +176,8 @@ pub fn furnish_regions(
     let ceiling = catalogue.by_role(|r| matches!(r, Role::Anchor { host: Host::Ceiling }));
     let wall_lights = catalogue.by_role(|r| matches!(r, Role::Anchor { host: Host::Wall }));
     let tiled = catalogue.by_role(|r| matches!(r, Role::Tiled));
-    let tiled_candidates: Vec<Candidate> = tiled.iter().map(|it| to_candidate(it)).collect();
+    let tiled_candidates: Arc<[Candidate]> =
+        tiled.iter().map(|it| to_candidate(it)).collect::<Vec<_>>().into();
     let freestanding = catalogue.by_role(|r| matches!(r, Role::Freestanding));
 
     // ---- Parallel solve: each region is independent, so fan out over rayon. ----
@@ -187,13 +215,14 @@ pub fn furnish_regions(
                 }
             }
 
-            // Pass 2 — tiled scatter (→ WfcSolver).
+            // Pass 2 — tiled scatter (→ WfcSolver). WFC returns a sparse fill in row-major order, so
+            // taking the first N would bunch the props in the room's min (upper-left) corner; shuffle
+            // first, then take, to spread the kept props across the whole floor.
             if !tiled_candidates.is_empty() {
                 let problem = PlacementProblem { region, candidates: tiled_candidates.clone(), constraints: Vec::new() };
-                for p in solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled")
-                    .into_iter()
-                    .take(TILED_PER_ROOM)
-                {
+                let mut placed = solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled");
+                shuffle_placements(&mut placed, &mut rng);
+                for p in placed.into_iter().take(TILED_PER_ROOM) {
                     if let Some(item) = tiled.get(p.candidate) {
                         let pos = dungeon.cell_center(IVec2::new(p.pos[0] as i32, p.pos[2] as i32));
                         out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
@@ -207,7 +236,8 @@ pub fn furnish_regions(
             // room classes; Merrell et al. 2011 — the Stage-5 asset-swap contract).
             let profile = room_profile(region.id, &freestanding, FREESTANDING_PER_ROOM);
             if !profile.is_empty() {
-                let candidates: Vec<Candidate> = profile.iter().map(|it| to_candidate(it)).collect();
+                let candidates: Arc<[Candidate]> =
+                    profile.iter().map(|it| to_candidate(it)).collect::<Vec<_>>().into();
                 let constraints = freestanding_constraints(&profile);
                 let problem = PlacementProblem { region, candidates, constraints };
                 for p in solve_placements(orchestrator, &problem, &mut rng, region.id, "freestanding") {
@@ -237,6 +267,15 @@ pub fn furnish_regions(
     }
 }
 
+/// Deterministic Fisher–Yates shuffle of solver placements via the region's seeded RNG. Used to spread
+/// tiled scatter across the room: WFC returns filled cells in row-major order, so taking the first N
+/// without shuffling biases them into the min (upper-left) corner. `below` is unbiased (see `rng`).
+fn shuffle_placements(placements: &mut [Placement], rng: &mut rand_chacha::ChaCha8Rng) {
+    for i in (1..placements.len()).rev() {
+        placements.swap(i, rng.below(i + 1));
+    }
+}
+
 /// Route a problem through the orchestrator and flatten its outcome to a placement list.
 fn solve_placements(
     orchestrator: &super::solver::Orchestrator,
@@ -256,9 +295,12 @@ fn solve_placements(
     }
 }
 
-/// Soft constraints for a freestanding set: every item prefers its back to a wall (which also makes
-/// the group Soft+Relational so the orchestrator routes it to Metropolis, not WFC), and a sofa is
-/// asked to face a TV if both are present.
+/// Soft constraints for a freestanding set. Every item prefers its back to a wall (which keeps the
+/// group Soft so the orchestrator routes it to Metropolis, not WFC); every pair is pushed apart by a
+/// `MinDistance` so the room reads as sparse scatter (backrooms) rather than a clump; and a seat is
+/// asked to face a screen so a sofa faces its TV. The relation is selected by AFFORDANCE ("sit" faces
+/// "emit"), not by hardcoded asset keys, so it survives an asset-kit swap; its arrangement strength is
+/// scaled by `coherence` in the solver's cost.
 fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     let mut id = 0u32;
@@ -272,39 +314,75 @@ fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
         });
         id += 1;
     }
-    let sofa = profile.iter().position(|it| it.key == "sofa");
-    let tv = profile.iter().position(|it| it.key == "tv");
-    if let (Some(s), Some(t)) = (sofa, tv) {
-        constraints.push(Constraint {
-            id,
-            scope: Scope::Object(s),
-            predicate: Predicate::Facing(t),
-            modality: Modality::Soft(1.0),
-            guard: None,
-        });
+    // Spread: keep every pair of pieces at least `FREESTANDING_MIN_GAP` apart so a room reads sparse
+    // (backrooms) rather than clumped. Soft — tuned by the solver's `w_min_distance`.
+    for i in 0..profile.len() {
+        for j in (i + 1)..profile.len() {
+            constraints.push(Constraint {
+                id,
+                scope: Scope::Pair(i, j),
+                predicate: Predicate::MinDistance(FREESTANDING_MIN_GAP),
+                modality: Modality::Soft(1.0),
+                guard: None,
+            });
+            id += 1;
+        }
+    }
+    // The one relational rule, kit-agnostic: a seat faces a screen (sofa → TV). Its strength is scaled
+    // by `coherence` in the solver, so it ranges from ignored (backrooms) to firmly arranged.
+    let seat = profile.iter().position(|it| affords(it, "sit"));
+    let screen = profile.iter().position(|it| affords(it, "emit"));
+    if let (Some(s), Some(t)) = (seat, screen) {
+        if s != t {
+            constraints.push(Constraint {
+                id,
+                scope: Scope::Object(s),
+                predicate: Predicate::Facing(t),
+                modality: Modality::Soft(1.0),
+                guard: None,
+            });
+        }
     }
     constraints
 }
 
-/// Show furniture only in rooms a squad member currently occupies; hide everything else. Owns
-/// furniture `Visibility` exclusively (furniture is not fog-managed), so nothing else fights it.
+/// Rooms that have entered the squad's line of sight at least once. Furniture reveal is one-way and
+/// per-room: a region is inserted the first frame any of its cells is `seen`, and its furniture then
+/// stays visible for the rest of the run — the same permanent reveal the floor/wall tiles use.
+#[derive(Resource, Default)]
+pub struct RevealedRooms(pub HashSet<RegionId>);
+
+/// Reveal a room's furniture the first time the squad gains line of sight into it, and keep it visible
+/// thereafter (remembered, per-room). The knee-wall layout lets the camera see into every room, so
+/// gating on live *occupancy* left explored rooms reading empty until re-entry; instead we key off the
+/// fog's permanent `seen` memory ([`FogGrid::seen_at`]). Owns furniture `Visibility` exclusively (fog
+/// never touches furniture), so nothing else fights it. One-way — only ever flips Hidden→Visible.
 pub fn furniture_room_visibility(
-    units: Query<&Transform, With<Unit>>,
+    fog: Res<FogGrid>,
     dungeon: Res<Dungeon>,
+    mut revealed: ResMut<RevealedRooms>,
     mut furniture: Query<(&PlacedIn, &mut Visibility)>,
 ) {
-    let occupied: HashSet<RegionId> = units
-        .iter()
-        .filter_map(|t| dungeon.region_at(dungeon.world_to_cell(t.translation)))
-        .collect();
+    // Grow the revealed set: a region is revealed once any of its interior cells has been seen.
+    // Already-revealed regions are skipped (one-way), so this settles to a cheap membership check.
+    for region in &dungeon.regions {
+        if revealed.0.contains(&region.id) {
+            continue;
+        }
+        let (mn, mx) = (region.rect.min, region.rect.max);
+        'scan: for cx in mn[0]..mx[0] {
+            for cz in mn[1]..mx[1] {
+                if fog.seen_at(IVec2::new(cx, cz)) {
+                    revealed.0.insert(region.id);
+                    break 'scan;
+                }
+            }
+        }
+    }
+    // Reveal furniture in revealed rooms. One-way, so we only ever write the Hidden→Visible transition.
     for (placed, mut vis) in &mut furniture {
-        let want = if occupied.contains(&placed.0) {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if *vis != want {
-            *vis = want;
+        if revealed.0.contains(&placed.0) && *vis != Visibility::Visible {
+            *vis = Visibility::Visible;
         }
     }
 }
@@ -318,6 +396,95 @@ fn to_candidate(item: &ManifestItem) -> Candidate {
         footprint: [item.footprint.0 * FURNITURE_SCALE, item.footprint.1 * FURNITURE_SCALE],
         dof: Dof { translate: true, rotate_quarter: true, rotate_free: false },
         affordances: item.affordances.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::ir::{Predicate, Role};
+
+    fn item(key: &str, tags: &[&str], affs: &[&str]) -> ManifestItem {
+        ManifestItem {
+            key: key.into(),
+            glb: format!("{key}.glb"),
+            category: "furniture".into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            role: Role::Freestanding,
+            footprint: (1.0, 1.0),
+            affordances: affs.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The shipped kit's 8 freestanding items in manifest order: the seat (sofa) and screen (tv) are
+    /// both "living"-tagged but the screen is last, which the old cap+order could never co-select.
+    fn kit() -> Vec<ManifestItem> {
+        vec![
+            item("bed", &["bedroom"], &["sleep", "support"]),
+            item("sofa", &["living"], &["sit"]),
+            item("table", &["living", "dining"], &["support"]),
+            item("chair", &["dining"], &["sit"]),
+            item("drawer", &["bedroom"], &["store", "support"]),
+            item("shelf", &["living"], &["store"]),
+            item("fridge", &["kitchen"], &["store"]),
+            item("tv", &["living"], &["emit"]),
+        ]
+    }
+
+    #[test]
+    fn living_room_that_picks_a_seat_also_gets_a_screen() {
+        let items = kit();
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        for region_id in [0u32, 3, 4, 7, 8, 11] {
+            if region_id % 4 != 0 && region_id % 4 != 3 {
+                continue; // only living-type rooms carry the seat→screen pairing
+            }
+            let profile = room_profile(region_id, &refs, FREESTANDING_PER_ROOM);
+            let has_seat = profile.iter().any(|it| affords(it, "sit"));
+            let has_screen = profile.iter().any(|it| affords(it, "emit"));
+            assert!(
+                !has_seat || has_screen,
+                "living room {region_id} picked a seat but no screen: {:?}",
+                profile.iter().map(|it| it.key.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn same_type_living_rooms_can_differ() {
+        // The region-rotated scan differentiates two living rooms (both region_id % 4 == 0) that the
+        // old fixed manifest-order scan would have furnished identically.
+        let items = kit();
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let keys = |rid| {
+            let mut k: Vec<&str> = room_profile(rid, &refs, FREESTANDING_PER_ROOM)
+                .iter()
+                .map(|it| it.key.as_str())
+                .collect();
+            k.sort_unstable();
+            k
+        };
+        assert_ne!(keys(0), keys(4), "two living rooms should not get an identical set");
+    }
+
+    #[test]
+    fn freestanding_constraints_are_kit_agnostic_and_spread() {
+        // A seat + screen chosen by AFFORDANCE (not by the keys "sofa"/"tv") must still emit the Facing
+        // relation, and every pair must get a spreading MinDistance.
+        let items = vec![
+            item("couch", &["lounge"], &["sit"]),
+            item("monitor", &["lounge"], &["emit"]),
+        ];
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let cs = freestanding_constraints(&refs);
+        assert!(
+            cs.iter().any(|c| matches!(c.predicate, Predicate::Facing(_))),
+            "a seat + screen (by affordance) should emit a Facing relation regardless of asset keys"
+        );
+        assert!(
+            cs.iter().any(|c| matches!(c.predicate, Predicate::MinDistance(_))),
+            "freestanding pairs should be spread apart"
+        );
     }
 }
 

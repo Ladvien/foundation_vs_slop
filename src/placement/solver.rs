@@ -10,7 +10,7 @@ use rand_chacha::ChaCha8Rng;
 
 use super::ir::{
     Capabilities, Constraint, Hardness, Locality, Modality, Outcome, Predicate, PlacementProblem,
-    SolveError,
+    Role, SolveError,
 };
 
 /// A placement backend. `solve` takes the region's RNG sub-stream so results are reproducible under a
@@ -19,6 +19,15 @@ use super::ir::{
 pub trait Solver: Send + Sync {
     /// Stable, human-readable name (diagnostics + the backend-swap acceptance test).
     fn name(&self) -> &str;
+    /// The candidate `Role` this backend places — the routing key. Every `PlacementProblem` the furnish
+    /// pass builds is role-homogeneous (the catalogue is partitioned `by_role` first) and each backend
+    /// already dispatches on role internally, so a group's role names its backend 1:1. Roles partition
+    /// the backends, so routing is unambiguous and registration-order-independent.
+    fn handles(&self, role: &Role) -> bool;
+    /// Constraint shapes this backend can satisfy. NOT a routing key (role is) — `solve_group` uses it
+    /// only as a post-route guard that the role-selected backend can honor the group's constraints,
+    /// failing loud on a mismatch instead of letting a backend silently ignore a predicate it can't
+    /// model.
     fn capabilities(&self) -> Capabilities;
     fn solve(&self, problem: &PlacementProblem, rng: &mut ChaCha8Rng) -> Result<Outcome, SolveError>;
 }
@@ -95,8 +104,8 @@ fn covers(cap: &Capabilities, req: &Requirement) -> bool {
     hardness_ok && locality_ok && cardinality_ok
 }
 
-/// Registry + router. Backends are tried in registration order; the first that covers a group wins,
-/// so registration order encodes preference (specific/cheap before general/expensive).
+/// Registry + router. Each backend handles a disjoint set of candidate `Role`s, so a group routes to
+/// exactly the backend that handles its (homogeneous) role — independent of registration order.
 #[derive(Default)]
 pub struct Orchestrator {
     solvers: Vec<Box<dyn Solver>>,
@@ -112,42 +121,63 @@ impl Orchestrator {
         self
     }
 
-    /// The first registered backend that covers `req`, or `None` (caller surfaces `Unsupported`).
-    pub fn route(&self, req: &Requirement) -> Option<&dyn Solver> {
+    /// The backend that handles `role`, or `None` (caller surfaces `Unsupported`). Roles partition the
+    /// backends 1:1, so this is unambiguous regardless of registration order.
+    pub fn route(&self, role: &Role) -> Option<&dyn Solver> {
         self.solvers
             .iter()
-            .find(|s| covers(&s.capabilities(), req))
+            .find(|s| s.handles(role))
             .map(|b| b.as_ref())
     }
 
-    /// Compile-group → route → solve. Groups whose capabilities no backend covers yield
-    /// `SolveError::Unsupported` rather than a silent skip.
+    /// Route by candidate role → guard the constraint shape → solve. Every problem the furnish pass
+    /// builds is role-homogeneous, so the first candidate's role names the backend. A role no backend
+    /// handles, or a group whose constraints exceed the routed backend's capabilities, yields
+    /// `SolveError::Unsupported` — a loud failure, never a silent empty placement.
     pub fn solve_group(
         &self,
         problem: &PlacementProblem,
         rng: &mut ChaCha8Rng,
     ) -> Result<Outcome, SolveError> {
-        let req = Requirement::of(&problem.constraints);
-        match self.route(&req) {
-            Some(solver) => solver.solve(problem, rng),
-            None => Err(SolveError::Unsupported),
+        let Some(role) = problem.candidates.first().map(|c| &c.role) else {
+            // No candidates ⇒ nothing to place. An empty success, not a routing failure.
+            return Ok(Outcome::Assignment(Vec::new()));
+        };
+        let Some(solver) = self.route(role) else {
+            return Err(SolveError::Unsupported);
+        };
+        // Post-route guard: the role picked the backend; ensure it can also satisfy the group's
+        // constraint shape (e.g. reject a hard cardinality count landing on the soft freestanding
+        // backend) rather than letting the backend silently drop predicates it doesn't model.
+        if !covers(&solver.capabilities(), &Requirement::of(&problem.constraints)) {
+            return Err(SolveError::Unsupported);
         }
+        solver.solve(problem, rng)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::ir::{Constraint, Modality, Predicate, Scope};
+    use crate::placement::ir::{Candidate, Dof, Host, Opening, PropertyBag, Rect2, Region, Scope};
+    use crate::rng::seeded;
 
-    /// A backend that advertises a fixed capability profile — enough to exercise routing.
-    struct Mock(Capabilities, &'static str);
+    /// A backend that handles one role and advertises a fixed capability profile — enough to exercise
+    /// role routing and the post-route constraint guard.
+    struct Mock {
+        role: Role,
+        caps: Capabilities,
+        label: &'static str,
+    }
     impl Solver for Mock {
         fn name(&self) -> &str {
-            self.1
+            self.label
+        }
+        fn handles(&self, role: &Role) -> bool {
+            *role == self.role
         }
         fn capabilities(&self) -> Capabilities {
-            self.0
+            self.caps
         }
         fn solve(&self, _: &PlacementProblem, _: &mut ChaCha8Rng) -> Result<Outcome, SolveError> {
             Ok(Outcome::Assignment(Vec::new()))
@@ -163,70 +193,144 @@ mod tests {
             needs_training_data: false,
         }
     }
-    fn con(id: u32, predicate: Predicate, modality: Modality) -> Constraint {
-        Constraint {
-            id,
-            scope: Scope::Region,
-            predicate,
-            modality,
-            guard: None,
+    fn mock(role: Role, caps: Capabilities, label: &'static str) -> Box<dyn Solver> {
+        Box::new(Mock { role, caps, label })
+    }
+    fn region_4x4() -> Region {
+        Region {
+            id: 0,
+            rect: Rect2 { min: [0, 0], max: [4, 4] },
+            openings: vec![Opening { dir: 0, cell: [2, 0] }],
+            adjacency: Vec::new(),
+            props: PropertyBag::default(),
+        }
+    }
+    fn candidate(role: Role) -> Candidate {
+        Candidate {
+            asset: "x".into(),
+            role,
+            footprint: [1.0, 1.0],
+            dof: Dof::default(),
+            affordances: Vec::new(),
         }
     }
 
     #[test]
-    fn local_hard_group_routes_to_local_hard_backend() {
+    fn routes_by_candidate_role() {
         let mut o = Orchestrator::new();
-        o.register(Box::new(Mock(cap(Hardness::Hard, Locality::Local, false), "wfc")));
-        let req = Requirement::of(&[con(0, Predicate::AgainstWall, Modality::Hard)]);
-        assert_eq!(o.route(&req).map(|s| s.name()), Some("wfc"));
-    }
-
-    #[test]
-    fn cardinality_group_needs_a_cardinality_backend() {
-        let mut o = Orchestrator::new();
-        o.register(Box::new(Mock(cap(Hardness::Hard, Locality::Local, false), "wfc")));
-        let req = Requirement::of(&[con(
-            0,
-            Predicate::Count {
-                tag: "door".into(),
-                count: 1,
-            },
-            Modality::Hard,
-        )]);
-        // The local WFC backend cannot cover a global cardinality count.
-        assert!(o.route(&req).is_none());
-        o.register(Box::new(Mock(
-            cap(Hardness::Hard, Locality::Global, true),
-            "constraint",
-        )));
-        assert_eq!(o.route(&req).map(|s| s.name()), Some("constraint"));
-    }
-
-    #[test]
-    fn relational_soft_group_is_not_covered_by_local_hard() {
-        let mut o = Orchestrator::new();
-        o.register(Box::new(Mock(cap(Hardness::Hard, Locality::Local, false), "wfc")));
-        let req = Requirement::of(&[con(0, Predicate::MinDistance(1.0), Modality::Soft(1.0))]);
-        assert!(o.route(&req).is_none());
-        // A soft/relational backend (Metropolis, Stage 3) covers it.
-        o.register(Box::new(Mock(
+        o.register(mock(Role::Tiled, cap(Hardness::Hard, Locality::Local, false), "wfc"));
+        o.register(mock(
+            Role::Freestanding,
             cap(Hardness::Soft, Locality::Relational, false),
             "metropolis",
-        )));
-        assert_eq!(o.route(&req).map(|s| s.name()), Some("metropolis"));
+        ));
+        assert_eq!(o.route(&Role::Tiled).map(|s| s.name()), Some("wfc"));
+        assert_eq!(o.route(&Role::Freestanding).map(|s| s.name()), Some("metropolis"));
     }
 
     #[test]
-    fn mixed_hard_and_soft_needs_a_both_backend() {
+    fn routing_is_registration_order_independent() {
+        // The old capability routing let ConstraintSolver{Hard,Global} also cover a {Hard,Local} tiled
+        // group, so WFC won only by being registered first. Role routing is unambiguous either way.
+        let tiled = || mock(Role::Tiled, cap(Hardness::Hard, Locality::Local, false), "wfc");
+        let cons = || {
+            mock(
+                Role::Anchor { host: Host::Opening },
+                cap(Hardness::Hard, Locality::Global, true),
+                "constraint",
+            )
+        };
+        let mut a = Orchestrator::new();
+        a.register(tiled());
+        a.register(cons());
+        let mut b = Orchestrator::new();
+        b.register(cons());
+        b.register(tiled());
+        assert_eq!(a.route(&Role::Tiled).map(|s| s.name()), Some("wfc"));
+        assert_eq!(b.route(&Role::Tiled).map(|s| s.name()), Some("wfc"));
+    }
+
+    #[test]
+    fn unhandled_role_has_no_route() {
+        let mut o = Orchestrator::new();
+        o.register(mock(Role::Tiled, cap(Hardness::Hard, Locality::Local, false), "wfc"));
+        assert!(o.route(&Role::Freestanding).is_none());
+    }
+
+    #[test]
+    fn empty_candidates_is_empty_success() {
+        let region = region_4x4();
+        let o = Orchestrator::new();
+        let problem = PlacementProblem {
+            region: &region,
+            candidates: Vec::new().into(),
+            constraints: Vec::new(),
+        };
+        assert!(matches!(
+            o.solve_group(&problem, &mut seeded(1)),
+            Ok(Outcome::Assignment(ref p)) if p.is_empty()
+        ));
+    }
+
+    #[test]
+    fn post_route_guard_rejects_constraint_mismatch() {
+        // Role routes this Freestanding group to the soft backend, but it also carries a hard
+        // cardinality count the soft backend can't model — solve_group must fail loud, not silently
+        // hand it to a backend that ignores the count.
+        let region = region_4x4();
+        let mut o = Orchestrator::new();
+        o.register(mock(
+            Role::Freestanding,
+            cap(Hardness::Soft, Locality::Relational, false),
+            "metropolis",
+        ));
+        let problem = PlacementProblem {
+            region: &region,
+            candidates: vec![candidate(Role::Freestanding)].into(),
+            constraints: vec![Constraint {
+                id: 0,
+                scope: Scope::Region,
+                predicate: Predicate::Count { tag: "door".into(), count: 1 },
+                modality: Modality::Hard,
+                guard: None,
+            }],
+        };
+        assert!(matches!(
+            o.solve_group(&problem, &mut seeded(1)),
+            Err(SolveError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn role_routed_group_with_matching_constraints_solves() {
+        let region = region_4x4();
+        let mut o = Orchestrator::new();
+        o.register(mock(
+            Role::Freestanding,
+            cap(Hardness::Soft, Locality::Relational, false),
+            "metropolis",
+        ));
+        let problem = PlacementProblem {
+            region: &region,
+            candidates: vec![candidate(Role::Freestanding)].into(),
+            constraints: vec![Constraint {
+                id: 0,
+                scope: Scope::Object(0),
+                predicate: Predicate::AgainstWall,
+                modality: Modality::Soft(1.0),
+                guard: None,
+            }],
+        };
+        assert!(matches!(o.solve_group(&problem, &mut seeded(1)), Ok(Outcome::Assignment(_))));
+    }
+
+    #[test]
+    fn requirement_of_mixed_hard_and_soft_is_both() {
+        // Requirement::of still drives the post-route guard, so keep its Both-derivation covered.
         let req = Requirement::of(&[
-            con(0, Predicate::AgainstWall, Modality::Hard),
-            con(1, Predicate::MinDistance(1.0), Modality::Soft(1.0)),
+            Constraint { id: 0, scope: Scope::Region, predicate: Predicate::AgainstWall, modality: Modality::Hard, guard: None },
+            Constraint { id: 1, scope: Scope::Region, predicate: Predicate::MinDistance(1.0), modality: Modality::Soft(1.0), guard: None },
         ]);
         assert!(matches!(req.hardness, Hardness::Both));
-        let mut o = Orchestrator::new();
-        o.register(Box::new(Mock(cap(Hardness::Hard, Locality::Relational, false), "hard-only")));
-        assert!(o.route(&req).is_none());
-        o.register(Box::new(Mock(cap(Hardness::Both, Locality::Relational, false), "both")));
-        assert_eq!(o.route(&req).map(|s| s.name()), Some("both"));
     }
 }

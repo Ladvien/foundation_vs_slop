@@ -87,7 +87,9 @@ impl Plugin for PlacementPlugin {
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
         app.add_systems(Startup, furnish::furnish_regions);
-        // Show furniture only in the room the squad currently occupies.
+        // Reveal each room's furniture the first time the squad gains line of sight into it, and keep
+        // it revealed thereafter (remembered, per-room — see `furniture_room_visibility`).
+        app.init_resource::<furnish::RevealedRooms>();
         app.add_systems(Update, furnish::furniture_room_visibility);
     }
 }

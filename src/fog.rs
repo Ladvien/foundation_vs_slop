@@ -64,6 +64,17 @@ impl FogGrid {
         let idx = self.index(c);
         idx < self.vis.len() && self.vis[idx] == CellVis::Visible
     }
+
+    /// Has cell `c` *ever* been in a unit's line of sight (Explored or Visible)? This is the permanent,
+    /// one-way "explored" memory — never demoted back to Unseen — the same reveal the floor/wall tiles
+    /// use. Furniture reveal keys off this so a room seen once stays furnished after the squad leaves.
+    pub fn seen_at(&self, c: IVec2) -> bool {
+        if c.x < 0 || c.y < 0 || c.x as usize >= self.width {
+            return false;
+        }
+        let idx = self.index(c);
+        idx < self.vis.len() && self.vis[idx] != CellVis::Unseen
+    }
 }
 
 pub struct FogPlugin;

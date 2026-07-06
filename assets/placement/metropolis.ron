@@ -17,4 +17,6 @@
     w_min_distance: 2.0,    // honor explicit MinDistance constraints
     w_facing: 1.5,          // honor explicit Facing constraints (e.g. sofa faces TV)
     w_clearance: 2.0,       // honor explicit Clearance constraints
+    coherence: 0.3,         // [0,1] how coherently related furniture is arranged (scales Facing):
+                            // 0 = backrooms-random, 1 = sofa firmly faces the TV
 )

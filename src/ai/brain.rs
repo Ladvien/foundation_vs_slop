@@ -30,6 +30,12 @@ const HUNT_SCENT_MIN: f32 = 1.0;
 /// marking clears it; an evaporated / distant cell won't, so only crabs near the sighting are recruited.
 const RALLY_MIN: f32 = 0.5;
 
+/// The local ALARM strength a crab must be standing in before it musters on a wounded neighbour (gates the
+/// Muster behaviour on, and gates Flee off — the retaliation twin of the `RALLY_MIN` / berserk gates). A
+/// cell inside a fresh casualty's ~one-room bloom clears it; an evaporated / distant cell won't, so only
+/// crabs near the wound surge while the rest of the swarm still fears gunfire.
+const ALARM_MIN: f32 = 0.3;
+
 /// Seconds between decisions for one agent (steering still runs every frame). RON-tunable later.
 const THINK_INTERVAL: f32 = 0.3;
 /// Boss "chase falls off" range, in tiles (mirrors `enemy::CHASE_TILES`).
@@ -231,6 +237,9 @@ pub fn think(
             // LOCAL magnitude of the vectorial rally pheromone at this crab's cell (not a global peak):
             // only crabs actually near a scout-marked sighting rally / have their flight suppressed.
             rally_val: rally.sample(&dungeon, pos).length(),
+            // LOCAL ALARM at this crab's cell — the "wounded kin" warning cry. Only crabs within ~one room
+            // of a casualty read it, so only they muster and press through fire (see `Fact::AlarmHere`).
+            alarm_val: stig.sample(FieldId::ALARM, &dungeon, pos),
         };
 
         let brain = match brain_id {
@@ -319,6 +328,13 @@ fn smiley_brain() -> Brain {
 /// the pounce) take over — so the recruited swarm actually *bites* instead of milling on the beacon cell.
 /// A live rally *also* gates Flee off (like the nest-berserk gate), so a recruited swarm presses through
 /// gunfire to the sighting; fear resumes once the beacon evaporates.
+///
+/// **Muster** (rank 1, Rally's twin) closes the "shoot the crabs and they just run" gap: when a crab is
+/// wounded it floods a *local* ALARM pheromone (see [`FieldId::ALARM`] / `crab::crab_alarm_on_damage`), and
+/// every crab within ~one room reads `Fact::AlarmHere` — which fires Muster (converge on the squad) AND
+/// gates its Flee off. So a bolt into a pack no longer scatters it; the neighbours boil toward the shooter
+/// and press until the alarm evaporates. Alarm-pheromone recruitment to defense in social insects — a
+/// stigmergic warning cry (Heylighen, "Stigmergy as a universal coordination mechanism", CSR 2016).
 fn crab_brain() -> Brain {
     Brain {
         behaviors: vec![
@@ -331,6 +347,40 @@ fn crab_brain() -> Brain {
                     input: Input::Drive(DriveId::HUNGER),
                     curve: Curve::Linear { m: 0.8, b: 0.2 }, // always ≥0.2 so a choice exists
                 }],
+            },
+            // Muster: a neighbour was just wounded — converge on the squad and press. Gated on the LOCAL
+            // alarm bloom, so only crabs within ~one room of the casualty surge. Rank 3 so the alarm is
+            // *decisive*: it beats foraging AND scavenging (Forage 0 / SeekMeat 2), so an alarmed crab
+            // drops the food and charges the squad — the "converge + swarm the shooter" the design calls
+            // for, not a leisurely graze. It still yields to the bite: a second Step gates Muster OFF once
+            // the crab is within latch range (dist < ~LATCH_RANGE), so Latch (rank 2, un-suppressed once
+            // Flee is alarm-gated) takes over and it feeds instead of charging through. Flee (rank 4) is
+            // separately gated off by the same alarm (see below), so muster genuinely overrides flight.
+            // Self-limiting — the alarm evaporates, both Steps fall through, and the crab reverts to
+            // ordinary foraging (or fear). A stigmergic warning-cry recruitment (Heylighen, CSR 2016).
+            Behavior {
+                mode: Mode::Muster,
+                rank: 3,
+                target: TargetKind::NearestUnit,
+                considerations: vec![
+                    Consideration {
+                        input: Input::Perc(Fact::AlarmHere),
+                        curve: Curve::Step {
+                            threshold: ALARM_MIN,
+                            below: 0.0,
+                            above: 1.0,
+                        },
+                    },
+                    Consideration {
+                        // Only while OUT of latch range — inside it, hand off to Latch so the crab bites.
+                        input: Input::Perc(Fact::NearestUnitDist),
+                        curve: Curve::Step {
+                            threshold: 1.2, // ≈ LATCH_RANGE (matches the Latch gate)
+                            below: 0.0,
+                            above: 1.0,
+                        },
+                    },
+                ],
             },
             // Climb onto and feed on a unit once close AND hungry.
             Behavior {
@@ -439,6 +489,18 @@ fn crab_brain() -> Brain {
                             above: 0.0,
                         },
                     },
+                    Consideration {
+                        // Local alarm live → 0: a crab whose neighbour was just shot retaliates instead of
+                        // fleeing (the muster gate, twin of the berserk/rally gates). Local read, so only
+                        // crabs within ~one room of the casualty press through fire; the rest of the swarm
+                        // still flees a firefight. Fades below ALARM_MIN → fear resumes.
+                        input: Input::Perc(Fact::AlarmHere),
+                        curve: Curve::Step {
+                            threshold: ALARM_MIN,
+                            below: 1.0,
+                            above: 0.0,
+                        },
+                    },
                 ],
             },
         ],
@@ -481,16 +543,28 @@ fn scout_brain() -> Brain {
                     },
                 }],
             },
-            // Scouts panic too: flee down the THREAT gradient when afraid (no berserk gate — a scout's
-            // job is recon, not a fearless press).
+            // Scouts panic too: flee down the THREAT gradient when afraid. No berserk gate (a scout's job
+            // is recon, not a fearless press) — but the LOCAL alarm gate DOES apply: a scout standing in a
+            // wounded neighbour's alarm bloom holds its ground (and keeps roaming/marking the fight) instead
+            // of bolting, so "the crabs near a casualty go aggressive" covers the whole local swarm.
             Behavior {
                 mode: Mode::Flee,
                 rank: 3,
                 target: TargetKind::None,
-                considerations: vec![Consideration {
-                    input: Input::Drive(DriveId::FEAR),
-                    curve: Curve::Logistic { k: 10.0, x0: 0.45 },
-                }],
+                considerations: vec![
+                    Consideration {
+                        input: Input::Drive(DriveId::FEAR),
+                        curve: Curve::Logistic { k: 10.0, x0: 0.45 },
+                    },
+                    Consideration {
+                        input: Input::Perc(Fact::AlarmHere),
+                        curve: Curve::Step {
+                            threshold: ALARM_MIN,
+                            below: 1.0,
+                            above: 0.0,
+                        },
+                    },
+                ],
             },
         ],
     }

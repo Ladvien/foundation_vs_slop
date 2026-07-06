@@ -1,7 +1,8 @@
 //! Room-based camera-side wall cutaway. In the fixed 45° isometric view the walls between the camera
 //! and a room's interior (the E/S faces, since the camera looks from (+X,+Z)) hide anything inside —
-//! including the squad. The fix is the standard iso solution: for every room a squad member is in,
-//! turn off its two camera-facing walls so the squad reads clearly, while every other wall stays solid.
+//! including the squad. The fix is the standard iso solution: turn off the camera-facing walls of every
+//! room a squad member is in — plus, via a proximity cut, the walls around a member walking a corridor
+//! (corridors belong to no region) — so the squad always reads clearly, while every other wall stays solid.
 //!
 //! Because the camera never rotates (see `camera`), "toward the camera" on the ground plane is the
 //! constant direction (+X,+Z); a wall on its cell's E or S edge sits on that side, so the occluder set
@@ -16,7 +17,7 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 
-use crate::dungeon::{Dungeon, Tile, Wall};
+use crate::dungeon::{is_camera_facing_pos, Dungeon, Tile, Wall};
 use crate::placement::ir::RegionId;
 use crate::squad::Unit;
 
@@ -29,10 +30,11 @@ pub struct WallMaterials {
     pub invisible: Handle<StandardMaterial>,
 }
 
-/// A wall counts as camera-facing when its position sits at least this far toward +X or +Z of its
-/// cell centre (its E or S edge). Straight edges sit at ≈0.4 and corner arms similarly, so 0.1 cleanly
-/// separates the near (E/S) faces from the far (N/W) ones.
-const CAMERA_FACING_EPS: f32 = 0.1;
+/// Distance (world units) within which a corridor-standing unit's camera-facing walls are cut. Corridor
+/// cells belong to no region, so the room test can't reach them; this proximity cut keeps a unit walking
+/// a corridor from being embedded in its camera-facing wall. ~2 m covers the unit's own cell plus the
+/// wall just in front of it.
+const CUTAWAY_RADIUS: f32 = 2.0;
 
 pub struct OcclusionPlugin;
 
@@ -42,8 +44,9 @@ impl Plugin for OcclusionPlugin {
     }
 }
 
-/// Each frame, turn off (make invisible) the E/S walls of every room a squad member occupies, and
-/// restore all other walls to opaque.
+/// Each frame, turn off (make invisible) the camera-facing (E/S) walls that would occlude a squad
+/// member — the walls of any room a member occupies, plus (via a proximity cut) the walls around a
+/// member standing in a corridor — and restore all other walls to opaque.
 fn room_cutaway(
     units: Query<&Transform, With<Unit>>,
     dungeon: Res<Dungeon>,
@@ -55,22 +58,28 @@ fn room_cutaway(
         return;
     }
 
-    // Rooms currently holding a squad member.
-    let occupied: HashSet<RegionId> = units
-        .iter()
-        .filter_map(|t| dungeon.region_at(dungeon.world_to_cell(t.translation)))
-        .collect();
+    // Rooms holding a squad member, plus the world positions of members standing in corridors (which
+    // belong to no region, so the room test alone would leave a corridor-walker embedded in its
+    // camera-facing wall — the bug the removed per-unit cutaway existed to fix).
+    let mut occupied: HashSet<RegionId> = HashSet::new();
+    let mut corridor_units: Vec<Vec3> = Vec::new();
+    for t in &units {
+        match dungeon.region_at(dungeon.world_to_cell(t.translation)) {
+            Some(region) => {
+                occupied.insert(region);
+            }
+            None => corridor_units.push(t.translation),
+        }
+    }
 
     for (tile, wall_tf, mut material) in &mut walls {
-        // Cut the wall only if it belongs to an occupied room and faces the camera (E or S edge).
-        let cut = match dungeon.region_at(tile.cell) {
-            Some(region) if occupied.contains(&region) => {
-                let center = dungeon.cell_center(tile.cell);
-                (wall_tf.translation.x - center.x) > CAMERA_FACING_EPS
-                    || (wall_tf.translation.z - center.z) > CAMERA_FACING_EPS
-            }
-            _ => false,
-        };
+        // Only camera-facing (E/S) walls ever occlude the interior; cut one if it belongs to an occupied
+        // room or sits within `CUTAWAY_RADIUS` of a corridor-standing member.
+        let cut = is_camera_facing_pos(wall_tf.translation, dungeon.cell_center(tile.cell))
+            && (matches!(dungeon.region_at(tile.cell), Some(r) if occupied.contains(&r))
+                || corridor_units.iter().any(|u| {
+                    wall_tf.translation.distance_squared(*u) < CUTAWAY_RADIUS * CUTAWAY_RADIUS
+                }));
 
         let want = if cut { &mats.invisible } else { &mats.opaque };
         // Change-detection guard: only write when the handle differs, so Bevy doesn't re-flag every
