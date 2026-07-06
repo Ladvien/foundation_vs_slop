@@ -23,6 +23,7 @@ mod dungeon;
 mod enemy;
 mod flowfield;
 mod fog;
+mod geom;
 mod gore;
 mod health;
 mod juice;
