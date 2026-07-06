@@ -276,6 +276,23 @@ impl Dungeon {
 
         let block_center = |cx: usize, cy: usize| (cx * block + block / 2, cy * block + block / 2);
         let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * cw + cx].open[dir];
+        // Does slot (cx,cy) actually connect to a kept neighbour on `dir` (a corridor is carved there)?
+        // Rooms grow only toward these edges (Phase 2b); this mirrors the corridor-carve guard exactly.
+        let linked = |cx: usize, cy: usize, dir: usize| -> bool {
+            let (nx, ny) = match dir {
+                N => (cx as i32, cy as i32 - 1),
+                E => (cx as i32 + 1, cy as i32),
+                S => (cx as i32, cy as i32 + 1),
+                W => (cx as i32 - 1, cy as i32),
+                _ => unreachable!(),
+            };
+            nx >= 0
+                && ny >= 0
+                && (nx as usize) < cw
+                && (ny as usize) < ch
+                && kept[ny as usize * cw + nx as usize]
+                && coarse_open(cx, cy, dir)
+        };
 
         // One placement Region per kept slot. `slot_region[slot]` maps a coarse slot to its region id
         // so the adjacency/opening pass below can link neighbours. Rects are captured here (in the same
@@ -302,6 +319,32 @@ impl Dungeon {
                 let coy = cy * block + (block - rh) / 2;
                 let ox = jitter_origin(cox, rw, cx * block, block, bx, t, &mut rng);
                 let oy = jitter_origin(coy, rh, cy * block, block, by, t, &mut rng);
+                // Phase 2b (expansion-to-touch): grow the room toward its LINKED edges so it reaches
+                // toward its corridors — at liminality 0 (t=1) linked rooms nearly touch (short corridors,
+                // much less dead space); at 1.0 (t=0) no growth. Each linked edge is capped one cell short
+                // of the block boundary, so a >=2-cell doorway gap always remains for the corridor + neck
+                // (rooms never merge, and the block centre stays interior). No RNG is drawn, so liminality
+                // 1.0 stays byte-identical. Unlinked edges keep their rock margin (the negative space).
+                let (bxs, bys, blk) = ((cx * block) as i32, (cy * block) as i32, block as i32);
+                let toward = |near: i32, cap: i32| near + ((cap - near) as f32 * t).round() as i32;
+                let mut left = ox as i32;
+                let mut right = (ox + rw) as i32;
+                let mut top = oy as i32;
+                let mut bot = (oy + rh) as i32;
+                if linked(cx, cy, W) {
+                    left = toward(left, bxs + 1);
+                }
+                if linked(cx, cy, E) {
+                    right = toward(right, bxs + blk - 1);
+                }
+                if linked(cx, cy, N) {
+                    top = toward(top, bys + 1);
+                }
+                if linked(cx, cy, S) {
+                    bot = toward(bot, bys + blk - 1);
+                }
+                let (ox, rw) = (left as usize, (right - left) as usize);
+                let (oy, rh) = (top as usize, (bot - top) as usize);
                 for y in oy..oy + rh {
                     for x in ox..ox + rw {
                         walkable[y * width + x] = true;
@@ -1254,5 +1297,22 @@ mod tests {
                 || r.rect.min[1] as usize % block != (block - h) / 2
         });
         assert!(any_offset, "liminality 0 should slide at least one room off-centre");
+    }
+
+    #[test]
+    fn liminality_0_rooms_never_overlap() {
+        // Expansion-to-touch grows rooms toward their links, but each stays within its own block, so no
+        // two rooms ever overlap — a safety net on the extension math at maximum growth.
+        let mut config = test_config();
+        config.liminality = 0.0;
+        let d = Dungeon::generate(&config).expect("gen");
+        let overlaps = |a: &Rect2, b: &Rect2| {
+            a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1]
+        };
+        for (i, a) in d.regions.iter().enumerate() {
+            for b in &d.regions[i + 1..] {
+                assert!(!overlaps(&a.rect, &b.rect), "regions {} and {} overlap", a.id, b.id);
+            }
+        }
     }
 }
