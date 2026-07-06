@@ -56,10 +56,23 @@ rooms realistically sized/typed, couple furniture to room type, and fix two corr
   valid non-contradiction WFC result that `wfc::generate` won't retry), then fails loud — so
   RON-adjustable small grids don't crash. Tested: `zero_room_config_returns_err_not_panic`.
 
-## The liminality dial (present, consumed in Phase 2)
-`config.liminality ∈ [0,1]` ships at `1.0` (today's sparse Backrooms look) and is validated but not yet
-read by the carve. Phase 2 makes every organic perturbation `base + delta * (1 - liminality)`, so at
-`1.0` the carve is byte-identical to Phase 1 and at `0.0` rooms share walls with bent corridors.
+## The liminality dial (Phase 2 — implemented)
+`config.liminality ∈ [0,1]` ships at `1.0` (sparse Backrooms). Every organic perturbation is
+`base + delta·(1 - liminality)` and draws no RNG at `t=0`, so `1.0` is byte-identical to Phase 1.
+- **Jitter** (`jitter_origin`): slides each room off its block centre, bounded so the block centre stays
+  interior (corridors always connect with no change to the corridor carve).
+- **Expansion-to-touch**: rooms grow toward their *linked* edges (only where a corridor exists), capped
+  one cell short of the block boundary so a ≥2-cell doorway gap always remains (rooms never merge). At
+  `liminality 0` connected rooms nearly touch — floor jumps ~1528→~4996 tiles, corridors become short
+  doorway gaps, the dead negative space collapses.
+- **Bent corridors** (planned) were *skipped*: expansion already shrinks corridors to doorway gaps, so
+  bending them adds negligible value at high carve-rewrite risk.
+
+## Correctness bugs fixed (from the max-effort review)
+- gore blood decals no longer float above the knee-high camera-facing walls (added the
+  `is_camera_facing`/`SHORT_CAMERA_WALLS` filter the other subsystems already apply).
+- Deleted the dead `room_cutaway` "backup mode" — removed `occlusion.rs`, `OcclusionPlugin`,
+  `WallMaterials`, and `Dungeon::region_at`; knee-walls are the single camera-occlusion path (one-path).
 
 ## Verification
 - `cargo test` — 47 passing (8 new: 6 dungeon-generation, 2 furniture-coupling, plus 2 wfc boundary).
