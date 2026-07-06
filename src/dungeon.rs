@@ -8,6 +8,7 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::geom::{self, Point};
 use crate::placement::ir::{Opening, PropertyBag, Rect2, Region};
 use crate::rng::{seeded, DetRng};
 use crate::wfc::{self, CellKind, E, N, S, W};
@@ -72,9 +73,27 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
 /// physical wall/tile dimensions stay compile-time `const`s above, since they are consumed by `const`
 /// initializers in other modules (`squad`, `metropolis`, `nest`) and are a world-physics contract, not
 /// a per-seed generation knob.
+/// Which coarse layout the dungeon is built on. `Grid` is the fixed `coarse_w × coarse_h` lattice (the
+/// default, unchanged). `Graph` places rooms irregularly (Poisson-disk sites connected by a Delaunay
+/// graph collapsed with `wfc::collapse_graph`) for an organic, non-lattice look. This is config-selected
+/// routing, not a fallback — each topology fails loud if it can't yield a usable dungeon (one path).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub enum Topology {
+    #[default]
+    Grid,
+    /// `site_spacing`: minimum tile distance between room sites (Poisson radius; must fit the level).
+    /// `link_weights[k]`: relative weight of a site having `k` corridors (0-link rare, 1–2 dominant).
+    Graph {
+        site_spacing: f32,
+        link_weights: [f64; 6],
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DungeonConfig {
-    /// Coarse WFC grid, in room slots. Each slot expands to a `block`×`block` fine-tile patch.
+    /// Coarse WFC grid, in room slots. Each slot expands to a `block`×`block` fine-tile patch. For
+    /// `Topology::Graph` this defines the level extent (`coarse_w*block × coarse_h*block`) that the
+    /// Poisson sites are scattered across.
     pub coarse_w: usize,
     pub coarse_h: usize,
     /// Fine tiles (= metres) per coarse slot side. Rooms float inside their block (the Backrooms void).
@@ -91,6 +110,10 @@ pub struct DungeonConfig {
     pub wfc_weights: WfcWeights,
     /// Weighted room classes with realistic metric footprints (Merrell 2011: per-room area + aspect).
     pub room_types: Vec<RoomType>,
+    /// Coarse layout selector. `#[serde(default)]` → the shipped RON (no `topology` field) stays `Grid`,
+    /// so there is no behaviour change until a config opts in.
+    #[serde(default)]
+    pub topology: Topology,
 }
 
 /// The six coarse WFC base-prototype weights, in `wfc::build_prototypes` order.
@@ -164,6 +187,26 @@ pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
     }
     if cfg.room_types.iter().map(|t| t.weight).sum::<f64>() <= 0.0 {
         return Err("room_types weights must sum to > 0".into());
+    }
+    if let Topology::Graph { site_spacing, link_weights } = &cfg.topology {
+        // Lower bound keeps per-site bounds large enough that rooms provably never overlap (the sizing
+        // needs the nearest-neighbour Chebyshev distance ≥ ~4 tiles, i.e. Poisson radius ≥ ~5.66).
+        let min_spacing = ROOM_FLOOR as f32 + 4.0;
+        let level = (cfg.coarse_w.min(cfg.coarse_h) * cfg.block) as f32;
+        if !site_spacing.is_finite() || *site_spacing < min_spacing {
+            return Err(format!("topology Graph: site_spacing must be >= {min_spacing} (got {site_spacing})"));
+        }
+        if *site_spacing >= level {
+            return Err(format!(
+                "topology Graph: site_spacing {site_spacing} does not fit the {level}-tile level"
+            ));
+        }
+        if link_weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+            return Err("topology Graph: link_weights must be finite and >= 0".into());
+        }
+        if link_weights.iter().sum::<f64>() <= 0.0 {
+            return Err("topology Graph: link_weights must sum to > 0".into());
+        }
     }
     Ok(cfg)
 }
@@ -532,11 +575,235 @@ fn carve_corridor(walkable: &mut [bool], width: usize, height: usize, a: IVec2, 
     }
 }
 
+// ── Graph topology front-end ─────────────────────────────────────────────────────────────────────
+// Poisson-disk sites → Bowyer–Watson Delaunay → degree-≤5 prune (`geom`) → `wfc::collapse_graph` decides
+// which edges are corridors → keep the largest linked component → a `CoarseLayout` for `expand_to_fine`.
+
+/// Build the Graph topology's `CoarseLayout`. Fails loud (one path) if the sites are too sparse to
+/// sample or no collapse connects at least half of them (a rock-heavy roll can strand rooms).
+fn graph_layout(
+    config: &DungeonConfig,
+    site_spacing: f32,
+    link_weights: &[f64],
+) -> Result<CoarseLayout, String> {
+    let (width, height) = (config.coarse_w * config.block, config.coarse_h * config.block);
+
+    // Poisson sites, from their own RNG sub-stream (independent of the carve RNG).
+    let mut site_rng = seeded(config.seed ^ 0x517E_5EED);
+    let points = geom::poisson_disk(width as f64, height as f64, site_spacing as f64, 30, &mut site_rng);
+    let n = points.len();
+    if n < 2 {
+        return Err(format!(
+            "graph topology: Poisson sampling produced {n} site(s) — site_spacing {site_spacing} is \
+             too large for the {width}x{height} level"
+        ));
+    }
+
+    // Delaunay graph, pruned to the collapse's degree cap, as port-indexed adjacency.
+    let edges = geom::prune_to_max_degree(&points, &geom::delaunay_edges(&points), wfc::MAX_DEGREE);
+    let neighbors = port_neighbors(n, &edges);
+
+    // Collapse which edges are corridors, retrying with offset seeds until the largest linked component
+    // covers at least half the sites — else fail loud rather than ship a mostly-isolated dungeon.
+    let need = n.div_ceil(2).max(1);
+    for attempt in 0..config.max_attempts.max(1) {
+        let seed = (config.seed ^ 0xC011_AB5E).wrapping_add(attempt as u64);
+        let Some(pattern) = wfc::collapse_graph(&neighbors, link_weights, seed) else {
+            continue; // only a malformed table returns None; the prune guarantees it won't
+        };
+        let links = corridor_edges(&neighbors, &pattern);
+        let kept = largest_graph_component(n, &links);
+        if kept.len() >= need {
+            return Ok(build_graph_layout(&points, &links, &kept, width, height));
+        }
+    }
+    Err(format!(
+        "graph topology: no collapse connected at least {need} of {n} sites after {} attempts; \
+         raise link_weights or lower site_spacing",
+        config.max_attempts.max(1)
+    ))
+}
+
+/// Turn an undirected edge set into port-indexed adjacency for `wfc::collapse_graph`: each node's
+/// neighbours sorted (a deterministic port order), every edge present at both endpoints with swapped
+/// ports so the socket rule can pair them.
+fn port_neighbors(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in edges {
+        adj[a].push(b);
+        adj[b].push(a);
+    }
+    for nb in &mut adj {
+        nb.sort_unstable();
+        nb.dedup();
+    }
+    let mut neighbors: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    for a in 0..n {
+        for &b in &adj[a] {
+            // `a`'s port to `b` is `b`'s slot in `adj[a]` (push order); `b`'s back-port is `a`'s slot in
+            // `adj[b]`. `position` is always `Some` since `adj` is symmetric.
+            if let Some(b_port) = adj[b].iter().position(|&x| x == a) {
+                neighbors[a].push((b, b_port));
+            }
+        }
+    }
+    neighbors
+}
+
+/// The undirected corridor edges implied by a collapse result: `a`'s port `p → b` is a corridor iff bit
+/// `p` of `pattern[a]` is set (the socket rule guarantees `b` agrees). Counted once (`a < b`).
+fn corridor_edges(neighbors: &[Vec<(usize, usize)>], pattern: &[usize]) -> Vec<(usize, usize)> {
+    let mut edges = Vec::new();
+    for (a, ports) in neighbors.iter().enumerate() {
+        for (p, &(b, _)) in ports.iter().enumerate() {
+            if (pattern[a] >> p) & 1 == 1 && a < b {
+                edges.push((a, b));
+            }
+        }
+    }
+    edges
+}
+
+/// The largest connected component of a site graph (given its corridor edges), as a sorted node list.
+/// Isolated sites are size-1 components, so the largest linked cluster wins — the graph analogue of
+/// `largest_room_component`.
+fn largest_graph_component(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in edges {
+        adj[a].push(b);
+        adj[b].push(a);
+    }
+    let mut visited = vec![false; n];
+    let mut best: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        let mut comp = Vec::new();
+        let mut stack = vec![start];
+        visited[start] = true;
+        while let Some(u) = stack.pop() {
+            comp.push(u);
+            for &v in &adj[u] {
+                if !visited[v] {
+                    visited[v] = true;
+                    stack.push(v);
+                }
+            }
+        }
+        if comp.len() > best.len() {
+            best = comp;
+        }
+    }
+    best.sort_unstable();
+    best
+}
+
+/// Assemble a `CoarseLayout` from the kept sites. Each site's centre rounds to the fine grid; its bounds
+/// are a square of half the Chebyshev distance to the nearest kept neighbour (so rooms provably never
+/// overlap — `h_i + h_j ≤ Cheb(i,j)`), floored so a room fits and clamped into the level. Adjacency is
+/// remapped to kept indices; spawn is the kept site nearest the level centre.
+fn build_graph_layout(
+    points: &[Point],
+    links: &[(usize, usize)],
+    kept: &[usize],
+    width: usize,
+    height: usize,
+) -> CoarseLayout {
+    let mut old_to_new = vec![None; points.len()];
+    for (new_i, &old) in kept.iter().enumerate() {
+        old_to_new[old] = Some(new_i);
+    }
+
+    let sites: Vec<Site> = kept
+        .iter()
+        .map(|&old| {
+            let c = points[old];
+            let mut min_cheb = f64::MAX;
+            for &other in kept {
+                if other != old {
+                    let o = points[other];
+                    min_cheb = min_cheb.min((o[0] - c[0]).abs().max((o[1] - c[1]).abs()));
+                }
+            }
+            // `>= 2` so `max_side` leaves room for a ROOM_FLOOR room; a lone kept site (no neighbour) gets
+            // a modest default box. The floor never overlaps because `Cheb ≥ 2·h` for adjacent pairs.
+            let h = if min_cheb.is_finite() {
+                ((0.5 * min_cheb).floor() as i32).max(ROOM_FLOOR as i32)
+            } else {
+                ((width.min(height) as i32) / 8).max(ROOM_FLOOR as i32 + 2)
+            };
+            let (cx, cy) = (c[0].round() as i32, c[1].round() as i32);
+            Site {
+                center: IVec2::new(cx, cy),
+                bounds: Rect2 {
+                    min: [(cx - h).max(0), (cy - h).max(0)],
+                    max: [(cx + h).min(width as i32), (cy + h).min(height as i32)],
+                },
+            }
+        })
+        .collect();
+
+    let mut adjacency: Vec<(usize, usize)> = Vec::new();
+    for &(a, b) in links {
+        if let (Some(na), Some(nb)) = (old_to_new[a], old_to_new[b]) {
+            adjacency.push((na, nb));
+        }
+    }
+
+    let center = Vec2::new(width as f32 / 2.0, height as f32 / 2.0);
+    let spawn_site = (0..sites.len())
+        .min_by(|&a, &b| {
+            let pa = Vec2::new(sites[a].center.x as f32, sites[a].center.y as f32);
+            let pb = Vec2::new(sites[b].center.x as f32, sites[b].center.y as f32);
+            (pa - center)
+                .length_squared()
+                .total_cmp(&(pb - center).length_squared())
+        })
+        .unwrap_or(0); // kept is non-empty (need >= 1), so always Some
+
+    CoarseLayout {
+        width,
+        height,
+        sites,
+        adjacency,
+        spawn_site,
+    }
+}
+
 impl Dungeon {
     /// Collapse a coarse room graph, keep the largest connected component, and expand
     /// each surviving slot into a room + corridors on the fine grid. Fails loud (one path) if the
     /// collapse yields zero rooms, rather than returning a degenerate empty dungeon.
     fn generate(config: &DungeonConfig) -> Result<Self, String> {
+        // Build the coarse layout for the selected topology — both fail loud (one path) if they can't
+        // yield a usable dungeon — then carve the fine grid through the single shared `expand_to_fine`.
+        let layout = match &config.topology {
+            Topology::Grid => Self::grid_coarse_layout(config)?,
+            Topology::Graph { site_spacing, link_weights } => {
+                graph_layout(config, *site_spacing, link_weights)?
+            }
+        };
+
+        // The carve RNG is seeded here (separately from the coarse seed) and drawn only inside
+        // `expand_to_fine`, in site order — so the Grid path stays byte-identical to the pre-refactor carve.
+        let mut rng = seeded(config.seed ^ 0xC0FFEE);
+        let (walkable, regions, spawn) = expand_to_fine(&layout, config, &mut rng);
+
+        Ok(Dungeon {
+            width: layout.width,
+            height: layout.height,
+            walkable,
+            spawn,
+            regions,
+        })
+    }
+
+    /// The Grid topology's coarse layout: collapse the coarse WFC room graph (re-rolling with offset
+    /// seeds until it yields ≥1 room, else fail loud), keep the largest connected component, and hand it
+    /// to `grid_layout`. Attempt 0 uses the config seed unchanged, so this is byte-identical to a single
+    /// collapse when the config already produces rooms.
+    fn grid_coarse_layout(config: &DungeonConfig) -> Result<CoarseLayout, String> {
         let (cw, ch) = (config.coarse_w, config.coarse_h);
         let weights = [
             config.wfc_weights.rock,
@@ -548,9 +815,8 @@ impl Dungeon {
         ];
         // An all-Solid collapse is a *valid* (non-contradiction) WFC result, so `wfc::generate` won't
         // re-roll it on its own — a tiny grid or a heavily rock-weighted config can land there. Re-roll
-        // the whole coarse collapse with offset seeds until it yields at least one room, then fail loud
-        // (one path) rather than carve a degenerate empty dungeon. Attempt 0 uses the config seed
-        // unchanged, so a config that already produces rooms is byte-identical to a single collapse.
+        // the whole coarse collapse until it yields at least one room, then fail loud rather than carve
+        // a degenerate empty dungeon.
         let (coarse, kept) = (0..config.max_attempts.max(1))
             .map(|attempt| {
                 let c = wfc::generate(
@@ -571,21 +837,7 @@ impl Dungeon {
                     config.max_attempts.max(1)
                 )
             })?;
-
-        // Build the Grid topology's coarse layout from the kept slots, then carve the fine grid through
-        // the shared `expand_to_fine`. The carve RNG is seeded here (separately from the WFC seed) and
-        // drawn only inside `expand_to_fine`, in site order — byte-identical to the pre-refactor carve.
-        let layout = grid_layout(&coarse, &kept, config)?;
-        let mut rng = seeded(config.seed ^ 0xC0FFEE);
-        let (walkable, regions, spawn) = expand_to_fine(&layout, config, &mut rng);
-
-        Ok(Dungeon {
-            width: layout.width,
-            height: layout.height,
-            walkable,
-            spawn,
-            regions,
-        })
+        grid_layout(&coarse, &kept, config)
     }
 
     #[inline]
@@ -1282,6 +1534,7 @@ mod tests {
                 RoomType { tag: "bedroom".into(), area_min: 9.0, area_max: 20.0, aspect_min: 1.0, aspect_max: 1.5, weight: 1.5 },
                 RoomType { tag: "living".into(), area_min: 16.0, area_max: 40.0, aspect_min: 1.0, aspect_max: 1.7, weight: 1.6 },
             ],
+            topology: Topology::Grid,
         }
     }
 
@@ -1413,6 +1666,93 @@ mod tests {
                 assert!(!overlaps(&a.rect, &b.rect), "regions {} and {} overlap", a.id, b.id);
             }
         }
+    }
+
+    // ---- Phase 3 Step 5: Graph topology (Poisson + Delaunay + collapse_graph) integration ----------
+
+    /// A `Topology::Graph` config over a 96×96 level (~40 Poisson sites at spacing 14).
+    fn graph_test_config() -> DungeonConfig {
+        let mut c = test_config();
+        c.coarse_w = 6;
+        c.coarse_h = 6;
+        c.block = 16;
+        c.topology = Topology::Graph {
+            site_spacing: 14.0,
+            link_weights: [0.05, 1.2, 2.5, 1.2, 0.6, 0.6],
+        };
+        c
+    }
+
+    #[test]
+    fn graph_topology_generates_connected_non_overlapping_rooms() {
+        let config = graph_test_config();
+        let d = Dungeon::generate(&config).expect("graph topology must generate");
+        assert!(!d.regions.is_empty(), "graph must produce rooms");
+        assert!(d.walkable.iter().any(|&w| w), "graph must have floor");
+
+        // Non-overlap: every room stays within its non-overlapping per-site bounds.
+        let overlaps = |a: &Rect2, b: &Rect2| {
+            a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1]
+        };
+        for (i, a) in d.regions.iter().enumerate() {
+            for b in &d.regions[i + 1..] {
+                assert!(!overlaps(&a.rect, &b.rect), "graph regions {} and {} overlap", a.id, b.id);
+            }
+        }
+
+        // Connectivity: the front-end keeps only the largest linked component, so a flood-fill over
+        // region.adjacency from any room must reach every room.
+        let n = d.regions.len();
+        if n > 1 {
+            let mut visited = vec![false; n];
+            let mut stack = vec![0usize];
+            visited[0] = true;
+            let mut count = 1;
+            while let Some(u) = stack.pop() {
+                for &v in &d.regions[u].adjacency {
+                    let v = v as usize;
+                    if v < n && !visited[v] {
+                        visited[v] = true;
+                        count += 1;
+                        stack.push(v);
+                    }
+                }
+            }
+            assert_eq!(count, n, "all graph regions must be corridor-connected");
+        }
+    }
+
+    #[test]
+    fn graph_topology_is_deterministic() {
+        let config = graph_test_config();
+        let a = Dungeon::generate(&config).expect("gen a");
+        let b = Dungeon::generate(&config).expect("gen b");
+        assert_eq!(a.walkable, b.walkable, "same graph config + seed → same walkable mask");
+        assert_eq!(a.spawn, b.spawn);
+        assert_eq!(a.regions.len(), b.regions.len());
+    }
+
+    #[test]
+    fn topology_defaults_to_grid_when_absent() {
+        // The shipped RON has no `topology` field → serde default → Grid (no behaviour change).
+        let text = std::fs::read_to_string(DUNGEON_CONFIG_PATH).expect("read dungeon.ron");
+        let config = parse_config(&text).expect("valid");
+        assert!(matches!(config.topology, Topology::Grid), "absent topology must default to Grid");
+    }
+
+    #[test]
+    fn graph_config_validation() {
+        let base = r#"(coarse_w:6,coarse_h:6,block:16,corridor_width:2,seed:1,max_attempts:20,
+            liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
+            room_types:[(tag:"a",area_min:3.0,area_max:6.0,aspect_min:1.0,aspect_max:1.6,weight:1.0)],"#;
+        // NB: serde encodes `[f64; 6]` as a *tuple*, so RON writes `link_weights` with `(...)`, not `[...]`.
+        let small = format!("{base}topology:Graph(site_spacing:3.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))");
+        assert!(parse_config(&small).is_err(), "site_spacing below the floor must be rejected");
+        let zero = format!("{base}topology:Graph(site_spacing:14.0,link_weights:(0.0,0.0,0.0,0.0,0.0,0.0)))");
+        assert!(parse_config(&zero).is_err(), "zero-sum link_weights must be rejected");
+        let ok = format!("{base}topology:Graph(site_spacing:14.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))");
+        let cfg = parse_config(&ok).expect("valid graph config must parse");
+        assert!(Dungeon::generate(&cfg).is_ok(), "valid graph config must generate");
     }
 
     // ---- Phase 3 Step-0 golden: lock the current carve output so the `CoarseLayout` + `expand_to_fine`

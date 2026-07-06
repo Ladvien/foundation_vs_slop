@@ -4,9 +4,7 @@
 //! free (no Bevy) and fully deterministic — every random choice flows from the caller's [`DetRng`], so a
 //! seed reproduces the same layout. `f64` throughout for a bit-reproducible in-circle predicate.
 //!
-//! Until the graph front-end wires these in (`dungeon::graph_layout`), the module is consumed only by
-//! its own tests, so the public surface is `#![allow(dead_code)]` for now (removed in Step 5).
-#![allow(dead_code)]
+//! Consumed by the graph front-end in `dungeon::graph_layout` (and exercised by its own unit tests).
 
 use crate::rng::DetRng;
 

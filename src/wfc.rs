@@ -213,6 +213,7 @@ fn observe_min_entropy(cells: &[u32]) -> Option<Vec<usize>> {
 /// otherwise unreachable) case that every option was pruned — a contradiction the caller retries.
 /// Shared by both collapsers; keeping the single `unit()` draw here preserves the RNG draw order (the
 /// caller draws the tie-break `below` first, then this).
+#[allow(clippy::needless_range_loop)] // `b` is a bit position — it must index `weights` by domain bit
 fn collapse_one(mask: u32, weights: &[f64], rng: &mut impl DetRng) -> Option<usize> {
     let n = weights.len();
     let total: f64 = (0..n).filter(|&b| mask & (1 << b) != 0).map(|b| weights[b]).sum();
@@ -347,13 +348,9 @@ fn propagate(
 /// port-link patterns, so `2^5 = 32` (the `u32` mask width) is the ceiling. The graph front-end prunes
 /// the Delaunay graph to this before collapsing (widening to `u64`/`Vec` for higher degree is a later
 /// follow-up).
-// NOTE: `#[allow(dead_code)]` on this cluster is removed in Step 4, when the Graph front-end calls
-// `collapse_graph` and the whole chain becomes reachable from `Dungeon::generate`.
-#[allow(dead_code)]
 pub const MAX_DEGREE: usize = 5;
 
 /// Number of port-link patterns for a degree-`d` node (`2^d`).
-#[allow(dead_code)]
 #[inline]
 fn n_patterns(degree: usize) -> usize {
     1usize << degree
@@ -361,7 +358,6 @@ fn n_patterns(degree: usize) -> usize {
 
 /// The full (all-permissive) domain mask for a degree-`d` node: one set bit per port-link pattern.
 /// `d == MAX_DEGREE` fills all 32 bits (`u32::MAX`); the guard avoids the `1 << 32` overflow.
-#[allow(dead_code)]
 #[inline]
 fn full_domain(degree: usize) -> u32 {
     let p = n_patterns(degree);
@@ -387,7 +383,7 @@ fn full_domain(degree: usize) -> u32 {
 /// bit positions, so the pattern "set each forced bit, clear the rest" always survives — no domain can
 /// empty, under any weights or collapse order. The `Option` return still surfaces a malformed
 /// (degree > `MAX_DEGREE`) table defensively, and mirrors `collapse_grid`'s shape.
-#[allow(dead_code)]
+#[allow(clippy::needless_range_loop)] // `d`/`pat`/`p` are degree/pattern/port indices into parallel tables
 pub fn collapse_graph(
     neighbors: &[Vec<(usize, usize)>],
     link_weights: &[f64],
@@ -459,7 +455,6 @@ pub fn collapse_graph(
 /// each port `p → (ni, q)`: if some surviving `ci` pattern links on `p`, `ni` may keep its bit-`q`-set
 /// patterns; if some survivor walls on `p`, `ni` may keep its bit-`q`-clear patterns. Returns `false`
 /// on contradiction (an emptied domain).
-#[allow(dead_code)]
 fn propagate_graph(
     cells: &mut [u32],
     neighbors: &[Vec<(usize, usize)>],
