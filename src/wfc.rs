@@ -181,6 +181,60 @@ pub fn generate(
     panic!("WFC failed to converge after {max_attempts} attempts (seed {seed})");
 }
 
+/// Observe step (min-entropy / MRV): scan the domains and return the undecided cells with the fewest
+/// remaining options. `None` = a contradiction (some domain has emptied); `Some(empty)` = every cell is
+/// collapsed (done); `Some(ties)` = the lowest-entropy cells to choose among. Draws no RNG, and knows
+/// nothing about topology or alphabet size — shared by `collapse_grid` and `collapse_graph` so both
+/// observe through one code path. Note the raw `count_ones` comparison biases toward smaller-alphabet
+/// cells; that is a deliberate quality choice and must stay unchanged (the grid golden depends on it).
+fn observe_min_entropy(cells: &[u32]) -> Option<Vec<usize>> {
+    let mut best_count = u32::MAX;
+    let mut ties: Vec<usize> = Vec::new();
+    for (i, &mask) in cells.iter().enumerate() {
+        let count = mask.count_ones();
+        if count == 0 {
+            return None; // contradiction
+        }
+        if count > 1 {
+            if count < best_count {
+                best_count = count;
+                ties.clear();
+                ties.push(i);
+            } else if count == best_count {
+                ties.push(i);
+            }
+        }
+    }
+    Some(ties)
+}
+
+/// Collapse one cell's domain `mask` to a single prototype, chosen weighted by `weights[b]` over the set
+/// bits, drawing `rng.unit()` exactly once. Returns the chosen bit index, or `None` in the (FP-slack,
+/// otherwise unreachable) case that every option was pruned — a contradiction the caller retries.
+/// Shared by both collapsers; keeping the single `unit()` draw here preserves the RNG draw order (the
+/// caller draws the tie-break `below` first, then this).
+fn collapse_one(mask: u32, weights: &[f64], rng: &mut impl DetRng) -> Option<usize> {
+    let n = weights.len();
+    let total: f64 = (0..n).filter(|&b| mask & (1 << b) != 0).map(|b| weights[b]).sum();
+    let mut r = rng.unit() * total;
+    let mut pick = usize::MAX;
+    for b in 0..n {
+        if mask & (1 << b) != 0 {
+            r -= weights[b];
+            if r <= 0.0 {
+                pick = b;
+                break;
+            }
+        }
+    }
+    // Floating-point slack: fall through to the last allowed option. `?` returns None (a contradiction
+    // the caller retries) in the unreachable case that every option was pruned.
+    if pick == usize::MAX {
+        pick = (0..n).rev().find(|&b| mask & (1 << b) != 0)?;
+    }
+    Some(pick)
+}
+
 /// Generic grid Wave Function Collapse over an arbitrary prototype alphabet, returning the chosen
 /// prototype **index** per cell (row-major), or `None` on contradiction so the caller can retry.
 ///
@@ -216,51 +270,15 @@ pub fn collapse_grid(
     }
 
     loop {
-        // Observe: find the undecided cell with the fewest remaining options.
-        let mut best_count = u32::MAX;
-        let mut ties: Vec<usize> = Vec::new();
-        for (i, &mask) in cells.iter().enumerate() {
-            let count = mask.count_ones();
-            if count == 0 {
-                return None; // contradiction
-            }
-            if count > 1 {
-                if count < best_count {
-                    best_count = count;
-                    ties.clear();
-                    ties.push(i);
-                } else if count == best_count {
-                    ties.push(i);
-                }
-            }
-        }
+        // Observe the min-entropy cell(s), then collapse one — shared with `collapse_graph`. The RNG
+        // draw order is load-bearing: the tie-break `below` here, then the single `unit()` inside
+        // `collapse_one`. `?` on either step surfaces a contradiction as `None` for the caller to retry.
+        let ties = observe_min_entropy(&cells)?;
         if ties.is_empty() {
             break; // everything collapsed
         }
-
-        // Collapse the chosen cell to a single prototype, weighted by prototype weight.
         let chosen = ties[rng.below(ties.len())];
-        let mask = cells[chosen];
-        let total: f64 = (0..n)
-            .filter(|&b| mask & (1 << b) != 0)
-            .map(|b| weights[b])
-            .sum();
-        let mut r = rng.unit() * total;
-        let mut pick = usize::MAX;
-        for b in 0..n {
-            if mask & (1 << b) != 0 {
-                r -= weights[b];
-                if r <= 0.0 {
-                    pick = b;
-                    break;
-                }
-            }
-        }
-        // Floating-point slack: fall through to the last allowed option. `?` returns None (a
-        // contradiction the caller retries) in the unreachable case that every option was pruned.
-        if pick == usize::MAX {
-            pick = (0..n).rev().find(|&b| mask & (1 << b) != 0)?;
-        }
+        let pick = collapse_one(cells[chosen], weights, &mut rng)?;
         cells[chosen] = 1 << pick;
 
         // Propagate the collapse to a fixed point; an emptied neighbour domain is a contradiction.
