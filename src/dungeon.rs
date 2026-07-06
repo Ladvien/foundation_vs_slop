@@ -8,8 +8,7 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use crate::occlusion::WallMaterials;
-use crate::placement::ir::{Opening, PropertyBag, Rect2, Region, RegionId};
+use crate::placement::ir::{Opening, PropertyBag, Rect2, Region};
 use crate::rng::{seeded, DetRng};
 use crate::wfc::{self, CellKind, E, N, S, W};
 
@@ -35,8 +34,8 @@ const DOORWAY_HEIGHT: f32 = 2.0;
 
 /// Camera-facing (SE/SW — i.e. the E and S edge) walls render at this fraction of `WALL_HEIGHT`: a low
 /// knee wall you always see over into every room, regardless of where the squad is. Their doors and
-/// headers are dropped too (nothing to frame on a knee wall). **To revert:** set this to `1.0` — walls
-/// become full height again and `occlusion::room_cutaway` (rooms + corridor units) takes over instead.
+/// headers are dropped too (nothing to frame on a knee wall). This knee-wall cutaway is the *single*
+/// camera-occlusion path — keep it below `1.0` (there is no full-wall fallback mode).
 pub const CAMERA_WALL_FRACTION: f32 = 0.25;
 
 /// True when the camera-facing-wall knee-wall mode is active (any fraction below full height).
@@ -49,9 +48,9 @@ pub const CAMERA_FACING_EPS: f32 = 0.1;
 
 /// In the fixed 45° iso view the camera looks from (+X,+Z), so the walls that occlude a room's interior
 /// are its E/S faces, whose inner faces point toward the camera with normal `-X` / `-Z`. This is the
-/// single source of truth for "camera-facing": knee-wall squashing, occlusion cutaway, furniture
-/// wall-face selection, and crab-nest seating all classify walls through this rule (by normal here, or
-/// via the positional [`is_camera_facing_pos`] twin), so they can never disagree about which walls
+/// single source of truth for "camera-facing": knee-wall squashing, furniture wall-face selection,
+/// blood-splatter placement, and crab-nest seating all classify walls through this rule (by normal here,
+/// or via the positional [`is_camera_facing_pos`] twin), so they can never disagree about which walls
 /// face the camera.
 pub fn is_camera_facing(inner_face_normal: Vec3) -> bool {
     inner_face_normal == Vec3::NEG_X || inner_face_normal == Vec3::NEG_Z
@@ -570,15 +569,6 @@ impl Dungeon {
         Vec3::new(c.x as f32 * TILE_SIZE, 0.0, c.y as f32 * TILE_SIZE)
     }
 
-    /// The region (room) whose rect contains fine-grid cell `c`, if any. Corridor cells lie in no
-    /// region. Used by the room-based wall cutaway and furniture visibility gating.
-    pub fn region_at(&self, c: IVec2) -> Option<RegionId> {
-        self.regions
-            .iter()
-            .find(|r| r.rect.contains([c.x, c.y]))
-            .map(|r| r.id)
-    }
-
     pub fn world_to_cell(&self, pos: Vec3) -> IVec2 {
         IVec2::new(
             (pos.x / TILE_SIZE).round() as i32,
@@ -941,19 +931,6 @@ fn spawn_tiles(
         perceptual_roughness: 0.95,
         metallic: 0.0,
         ..default()
-    });
-    // Fully transparent twin of `wall_mat`, used by the room cutaway to "turn off" the camera-facing
-    // walls of a room the squad occupies (see `occlusion`). Only two wall material handles ever exist,
-    // so the cutaway swaps between them per wall without cloning a material per entity. Alpha 0 with a
-    // blend mode draws nothing and writes no depth, so the squad reads clearly through the gap.
-    let wall_mat_invisible = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
-    commands.insert_resource(WallMaterials {
-        opaque: wall_mat.clone(),
-        invisible: wall_mat_invisible,
     });
     let floor_mat = materials.add(StandardMaterial {
         base_color_texture: Some(assets.load(FLOOR_TEXTURE)),

@@ -993,6 +993,12 @@ fn spawn_wall_splatters(
     seed: u32,
 ) {
     for (idx, (face, normal)) in dungeon.wall_faces_near(pos).into_iter().enumerate() {
+        // Skip camera-facing (E/S) walls while they're knee-high: a full-height splat would hang in the
+        // air above the squashed wall. Same guard crab (crab.rs) and furnish (furnish.rs) apply to
+        // wall_faces_near — gore was the one subsystem missing it.
+        if crate::dungeon::SHORT_CAMERA_WALLS && crate::dungeon::is_camera_facing(normal) {
+            continue;
+        }
         let h = hash_f32(seed.wrapping_mul(97).wrapping_add(idx as u32 * 61 + 7));
         let h2 = hash_f32(seed.wrapping_mul(89).wrapping_add(idx as u32 * 41 + 3));
         // Splat height up the 1-unit wall; width varied a little per splat.

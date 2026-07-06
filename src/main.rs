@@ -29,7 +29,6 @@ mod juice;
 mod impact_fx;
 mod laser;
 mod nest;
-mod occlusion;
 mod orca;
 mod placement;
 mod rng;
@@ -86,7 +85,6 @@ fn main() {
             squad::SquadPlugin,
             selection::SelectionPlugin,
             fog::FogPlugin,
-            occlusion::OcclusionPlugin,
             health::HealthPlugin,
             (
                 ai::AiPlugin,
