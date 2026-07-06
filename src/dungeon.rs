@@ -283,18 +283,25 @@ impl Dungeon {
         let mut regions: Vec<Region> = Vec::new();
         let mut slot_region: Vec<Option<u32>> = vec![None; cw * ch];
 
-        // Carve a centred room in every kept slot's block. Size + type are drawn per room from the
-        // config's weighted room-type table (Merrell 2011: per-room area + aspect ratio), so rooms read
-        // at realistic metric scale and carry a type tag the furniture pass couples to.
+        // Carve a room in every kept slot's block. Size + type are drawn per room from the config's
+        // weighted room-type table (Merrell 2011: per-room area + aspect ratio), so rooms read at
+        // realistic metric scale and carry a type tag the furniture pass couples to. The room is centred
+        // in its block at liminality 1.0 (today's rigid grid); as liminality drops toward 0 it slides
+        // off-centre (`jitter_origin`), breaking the lattice into an organic scatter — bounded so the
+        // block centre stays interior to the room, keeping every corridor connected.
         let max_side = block.saturating_sub(2); // keep a >=1-tile rock margin inside the block
+        let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
         for cy in 0..ch {
             for cx in 0..cw {
                 if !kept[cy * cw + cx] {
                     continue;
                 }
                 let (rw, rh, tag) = pick_room(config, max_side, &mut rng);
-                let ox = cx * block + (block - rw) / 2;
-                let oy = cy * block + (block - rh) / 2;
+                let (bx, by) = block_center(cx, cy);
+                let cox = cx * block + (block - rw) / 2;
+                let coy = cy * block + (block - rh) / 2;
+                let ox = jitter_origin(cox, rw, cx * block, block, bx, t, &mut rng);
+                let oy = jitter_origin(coy, rh, cy * block, block, by, t, &mut rng);
                 for y in oy..oy + rh {
                     for x in ox..ox + rw {
                         walkable[y * width + x] = true;
@@ -770,6 +777,43 @@ fn rand_range_f32(rng: &mut impl DetRng, lo: f32, hi: f32) -> f32 {
     lo + (rng.unit() as f32) * (hi - lo)
 }
 
+/// Slide a room's centred origin off-centre within its block for the liminality dial (Phase 2). `t` is
+/// `1 - liminality`: at `t = 0` (liminality 1.0) the room stays centred — the shipped Backrooms grid,
+/// and *no RNG is drawn*, so that layout is byte-identical to the pre-dial carve. As `t` grows the room
+/// slides by up to `t` of its available slack, chosen from the carve RNG. The slack is bounded by two
+/// rules: keep a >=1-tile rock margin inside the block, and keep the block centre (`bcenter`) at least
+/// one cell inside the room walls — so the block-centre corridor lane is always interior floor and every
+/// corridor still connects, with no change to the corridor carve. Rooms stay axis-aligned rectangles.
+fn jitter_origin(
+    centered: usize,
+    room: usize,
+    block_start: usize,
+    block: usize,
+    bcenter: usize,
+    t: f32,
+    rng: &mut impl DetRng,
+) -> usize {
+    if t <= 0.0 {
+        return centered;
+    }
+    let (c, r, bs, blk, bc) = (
+        centered as i64,
+        room as i64,
+        block_start as i64,
+        block as i64,
+        bcenter as i64,
+    );
+    let lo = (bs + 1).max(bc - r + 2);
+    let hi = (bs + blk - r - 1).min(bc - 1);
+    if hi <= lo {
+        return centered; // no slack (a small room hugging the block centre) → stay centred
+    }
+    // Window of half-widths `t·(c-lo)` left and `t·(hi-c)` right, both within [lo, hi] since t <= 1.
+    let left = (((c - lo) as f32) * t).round() as i64;
+    let right = (((hi - c) as f32) * t).round() as i64;
+    ((c - left) + rng.below((left + right + 1) as usize) as i64) as usize
+}
+
 /// Flood-fill the coarse room slots across Link edges, returning a per-slot mask of the
 /// single largest connected component (the playable dungeon; the rest becomes rock).
 fn largest_room_component(coarse: &wfc::WfcResult) -> Vec<bool> {
@@ -1174,5 +1218,41 @@ mod tests {
             liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
             room_types:[])"#;
         assert!(parse_config(empty_types).is_err(), "empty room_types must be rejected");
+    }
+
+    #[test]
+    fn liminality_1_centers_rooms() {
+        // At liminality 1.0 (t=0) jitter_origin is a no-op: every room stays block-centred (the shipped
+        // grid). ox = cx*block + (block-rw)/2, so ox % block == (block-rw)/2.
+        let mut config = test_config();
+        config.liminality = 1.0;
+        let block = config.block;
+        let d = Dungeon::generate(&config).expect("gen");
+        for r in &d.regions {
+            let w = r.rect.width() as usize;
+            let h = r.rect.height() as usize;
+            assert_eq!(r.rect.min[0] as usize % block, (block - w) / 2, "room not x-centred");
+            assert_eq!(r.rect.min[1] as usize % block, (block - h) / 2, "room not y-centred");
+        }
+    }
+
+    #[test]
+    fn liminality_0_still_generates_connected_rooms() {
+        // At liminality 0.0 (max jitter) generation still succeeds with rooms + floor — the jitter is
+        // bounded to keep each block centre interior, so corridors still connect. And at least one room
+        // slides off its centred position, so the dial demonstrably did something.
+        let mut config = test_config();
+        config.liminality = 0.0;
+        let block = config.block;
+        let d = Dungeon::generate(&config).expect("gen at liminality 0");
+        assert!(!d.regions.is_empty());
+        assert!(d.walkable.iter().any(|&w| w), "must have floor");
+        let any_offset = d.regions.iter().any(|r| {
+            let w = r.rect.width() as usize;
+            let h = r.rect.height() as usize;
+            r.rect.min[0] as usize % block != (block - w) / 2
+                || r.rect.min[1] as usize % block != (block - h) / 2
+        });
+        assert!(any_offset, "liminality 0 should slide at least one room off-centre");
     }
 }
