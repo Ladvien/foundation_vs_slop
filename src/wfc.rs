@@ -363,6 +363,26 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    // Phase 3 Step-0 golden: locks the EXACT observe→below→collapse→unit draw sequence so the Step-2
+    // shared-helper extraction (`observe_min_entropy`/`collapse_one`) stays byte-identical for BOTH
+    // `collapse_grid` callers (the dungeon coarse grid and the furniture solver). All-`full` support
+    // isolates the collapse draw path — the exact piece the refactor moves. Captured pre-refactor.
+    const GOLDEN_COLLAPSE_GRID: [usize; 25] = [
+        3, 1, 0, 1, 1, 2, 1, 2, 1, 2, 1, 3, 0, 3, 0, 2, 1, 1, 0, 1, 2, 1, 3, 1, 2,
+    ];
+
+    #[test]
+    fn golden_collapse_grid_draw_order_is_stable() {
+        let n = 4;
+        let full = (1u32 << n) - 1;
+        let support = [vec![full; n], vec![full; n], vec![full; n], vec![full; n]];
+        let weights = vec![1.0, 2.0, 0.5, 1.5];
+        let initial = [full; 25];
+        let picks = collapse_grid(5, 5, &weights, &support, &initial, 123).expect("collapses");
+        println!("GOLDEN_COLLAPSE_GRID = {picks:?}");
+        assert_eq!(picks.as_slice(), &GOLDEN_COLLAPSE_GRID, "collapse_grid draw order changed");
+    }
+
     #[test]
     fn room_graph_still_generates_floors() {
         let r = generate(9, 9, 0x5C0_9191, 20, &[6.0, 1.2, 2.5, 2.5, 1.2, 0.6]);

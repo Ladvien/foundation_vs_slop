@@ -1315,4 +1315,96 @@ mod tests {
             }
         }
     }
+
+    // ---- Phase 3 Step-0 golden: lock the current carve output so the `CoarseLayout` + `expand_to_fine`
+    // refactor (and the `wfc.rs` shared-helper extraction) stay byte-identical for the Grid topology.
+    // Captured from pre-refactor code. FNV-1a over the FULL Dungeon output (dims, walkable mask, spawn,
+    // and every region's rect/tags/adjacency/openings) so any drift in geometry, RNG draw order, or
+    // region-link order flips the hash. Uses `test_config()` (self-contained) rather than the shipped
+    // RON so the gate is stable even while `assets/dungeon.ron` is temporarily edited for devshot.
+    // Order: liminality 1.0 for seeds [1,2,3], then liminality 0.0 for seeds [1,2,3] (1.0 draws zero
+    // jitter RNG, so 0.0 must be covered too to exercise the `jitter_origin` draw path).
+    const GOLDEN_DUNGEON: [u64; 6] = [
+        6957523862328423815,
+        11240897994882043585,
+        561762913735026758,
+        1697550422418485487,
+        8957626850529888883,
+        532801744308618758,
+    ];
+
+    /// FNV-1a accumulator — deterministic across runs (unlike `DefaultHasher`'s per-process seed).
+    struct Fnv(u64);
+    impl Fnv {
+        fn new() -> Self {
+            Fnv(0xcbf2_9ce4_8422_2325)
+        }
+        fn push(&mut self, v: u64) {
+            self.0 ^= v;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        fn push_str(&mut self, s: &str) {
+            for b in s.bytes() {
+                self.push(b as u64);
+            }
+            self.push(0xFF); // field separator
+        }
+    }
+
+    fn fingerprint(d: &Dungeon) -> u64 {
+        let mut f = Fnv::new();
+        f.push(d.width as u64);
+        f.push(d.height as u64);
+        for &w in &d.walkable {
+            f.push(w as u64);
+        }
+        f.push(d.spawn.x as u64);
+        f.push(d.spawn.y as u64);
+        f.push(d.regions.len() as u64);
+        for r in &d.regions {
+            f.push(r.id as u64);
+            f.push(r.rect.min[0] as u64);
+            f.push(r.rect.min[1] as u64);
+            f.push(r.rect.max[0] as u64);
+            f.push(r.rect.max[1] as u64);
+            for t in &r.props.tags {
+                f.push_str(t);
+            }
+            f.push(0xF0F0);
+            for &a in &r.adjacency {
+                f.push(a as u64);
+            }
+            f.push(0x0F0F);
+            for o in &r.openings {
+                f.push(o.dir as u64);
+                f.push(o.cell[0] as u64);
+                f.push(o.cell[1] as u64);
+            }
+        }
+        f.0
+    }
+
+    fn golden_fingerprints() -> Vec<u64> {
+        let base = test_config();
+        let mut fps = Vec::new();
+        for lim in [1.0f32, 0.0] {
+            for seed in [1u64, 2, 3] {
+                let mut cfg = base.clone();
+                cfg.seed = seed;
+                cfg.liminality = lim;
+                let d = Dungeon::generate(&cfg).expect("golden config must generate");
+                fps.push(fingerprint(&d));
+            }
+        }
+        fps
+    }
+
+    #[test]
+    fn golden_dungeon_snapshot_is_stable() {
+        // Byte-identical gate for the Phase 3 grid refactor. If this fails after a change that was meant
+        // to be behavior-neutral, the carve drifted — see slop/research/2026-07-06-phase3-graph-wfc-plan.
+        let fps = golden_fingerprints();
+        println!("GOLDEN_DUNGEON = {fps:?}");
+        assert_eq!(fps.as_slice(), &GOLDEN_DUNGEON, "dungeon carve output changed (Phase 3 Step 0)");
+    }
 }
