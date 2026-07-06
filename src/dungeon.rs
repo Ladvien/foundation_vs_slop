@@ -6,6 +6,7 @@
 use avian3d::prelude::*;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
+use serde::Deserialize;
 
 use crate::occlusion::WallMaterials;
 use crate::placement::ir::{Opening, PropertyBag, Rect2, Region, RegionId};
@@ -62,27 +63,118 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
     wall_pos.x - cell_center.x > CAMERA_FACING_EPS || wall_pos.z - cell_center.z > CAMERA_FACING_EPS
 }
 
-// Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles. At 1 tile =
-// 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. The BLOCK is
-// vastly larger than the rooms so each floats in deep negative space — 6–14 m rooms inside 32 m blocks
-// leave ~9–13 m of void on every side, and the 2 m hallways between block centres stretch into long,
-// empty liminal runs. 6×6 → a sprawling ~190 m level of well-separated rooms adrift in emptiness.
-const COARSE_W: usize = 6;
-const COARSE_H: usize = 6;
-const BLOCK: usize = 32;
-/// Room side length range in metres (kept ≤ BLOCK-2 so every room has a rock margin). The wide spread
-/// gives Backrooms variety — small offices next to large open rooms, all with empty floor to spare.
-const ROOM_MIN: usize = 6;
-const ROOM_MAX: usize = 14;
+// Coarse WFC operates on room slots; each expands to a `block`×`block` patch of fine tiles. At 1 tile =
+// 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. When `block` is
+// vastly larger than the rooms each floats in deep negative space — the liminal look — so the
+// generation shape is data-driven via `assets/dungeon.ron` (see `DungeonConfig`), not hardcoded here.
 
-/// The corridor's second lane, as a cell offset from the block-centre lane. Corridors are carved 2-wide
-/// (the block-centre lane plus this offset); the doorway keeps the block-centre lane and necks the other
-/// one, so the carve and the neck derive from this same offset — otherwise the neck rocks the wrong cell
-/// and the doorway silently reverts to a 2-wide wedge that squads get stuck in.
-const CORRIDOR_LANE: usize = 1;
+/// Generation parameters loaded from `assets/dungeon.ron` — the single source of truth for the coarse
+/// WFC, room sizing, and (Phase 2) the liminality dial. 1 tile = 1 m. This is the *dungeon shape* knob;
+/// physical wall/tile dimensions stay compile-time `const`s above, since they are consumed by `const`
+/// initializers in other modules (`squad`, `metropolis`, `nest`) and are a world-physics contract, not
+/// a per-seed generation knob.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DungeonConfig {
+    /// Coarse WFC grid, in room slots. Each slot expands to a `block`×`block` fine-tile patch.
+    pub coarse_w: usize,
+    pub coarse_h: usize,
+    /// Fine tiles (= metres) per coarse slot side. Rooms float inside their block (the Backrooms void).
+    pub block: usize,
+    /// Corridor width in tiles (2 = today's carve: the block-centre lane plus `corridor_width - 1` more).
+    pub corridor_width: usize,
+    pub seed: u64,
+    /// WFC restart budget before a convergence failure panics (loud, one-path).
+    pub max_attempts: u32,
+    /// Liminality dial in [0,1] (consumed in Phase 2). 1.0 = sparse Backrooms boxes adrift in the void;
+    /// 0.0 = realistic contiguous rooms sharing walls. Present now so Phase 1 and 2 share one schema.
+    pub liminality: f32,
+    /// The six coarse WFC prototype weights (the dungeon's shape distribution).
+    pub wfc_weights: WfcWeights,
+    /// Weighted room classes with realistic metric footprints (Merrell 2011: per-room area + aspect).
+    pub room_types: Vec<RoomType>,
+}
 
-const DUNGEON_SEED: u64 = 0x5C0_9191; // nods to SCP-9191, the slop generator
-const MAX_ATTEMPTS: u32 = 20;
+/// The six coarse WFC base-prototype weights, in `wfc::build_prototypes` order.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WfcWeights {
+    pub rock: f64,
+    pub dead_end: f64,
+    pub corridor: f64,
+    pub corner: f64,
+    pub tee: f64,
+    pub cross: f64,
+}
+
+/// One weighted room class. `area` in m² (= tiles², since 1 tile = 1 m); `aspect` = long/short (≥ 1).
+/// Realistic residential ranges: Merrell, Schkufza & Koltun, "Computer-Generated Residential Building
+/// Layouts"; Smelik et al., "A Survey on Procedural Modelling for Virtual Worlds" (cgf.12276).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoomType {
+    pub tag: String,
+    pub area_min: f32,
+    pub area_max: f32,
+    pub aspect_min: f32,
+    pub aspect_max: f32,
+    pub weight: f64,
+}
+
+/// Minimum room side in tiles, so a tiny-area type (a ~3 m² bathroom) never rounds to a degenerate
+/// 0/1-tile room. A structural floor of the carve, not a per-seed knob.
+const ROOM_FLOOR: usize = 2;
+
+/// Path to the required dungeon generation config (mirrors the placement RON load contract).
+const DUNGEON_CONFIG_PATH: &str = "assets/dungeon.ron";
+
+/// Parse + validate a [`DungeonConfig`] from RON text. Returns a descriptive error rather than
+/// panicking — the caller decides how loudly (mirrors `placement::manifest::parse_manifest`). Validates
+/// every invariant generation relies on, so a bad config fails at the door, not mid-carve.
+pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
+    let cfg: DungeonConfig =
+        ron::from_str(text).map_err(|e| format!("{DUNGEON_CONFIG_PATH} parse error: {e}"))?;
+    if cfg.coarse_w == 0 || cfg.coarse_h == 0 {
+        return Err("coarse_w and coarse_h must be > 0".into());
+    }
+    if cfg.block < 4 {
+        return Err(format!("block must be >= 4 (got {})", cfg.block));
+    }
+    if cfg.corridor_width == 0 || cfg.corridor_width > cfg.block {
+        return Err(format!(
+            "corridor_width must be in 1..=block (got {})",
+            cfg.corridor_width
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.liminality) {
+        return Err(format!("liminality must be in [0,1] (got {})", cfg.liminality));
+    }
+    if cfg.room_types.is_empty() {
+        return Err("room_types must be non-empty".into());
+    }
+    for t in &cfg.room_types {
+        if t.weight < 0.0 {
+            return Err(format!("room type '{}' weight must be >= 0", t.tag));
+        }
+        if t.area_min <= 0.0 || t.area_max < t.area_min {
+            return Err(format!("room type '{}' area range invalid", t.tag));
+        }
+        if t.aspect_min < 1.0 || t.aspect_max < t.aspect_min {
+            return Err(format!(
+                "room type '{}' aspect range invalid (aspect must be >= 1)",
+                t.tag
+            ));
+        }
+    }
+    if cfg.room_types.iter().map(|t| t.weight).sum::<f64>() <= 0.0 {
+        return Err("room_types weights must sum to > 0".into());
+    }
+    Ok(cfg)
+}
+
+/// Read + parse the dungeon config file. One path: a missing or malformed config is a hard error the
+/// caller surfaces loudly (there is no default generation to fall back to).
+fn load_config(path: &str) -> Result<DungeonConfig, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    parse_config(&text)
+}
 
 // CC0 Backrooms textures (see assets/textures/CREDITS.md). Seamless 1024² diffuse maps;
 // mapped onto textured primitives because the Kenney GLB UVs are palette-atlas points.
@@ -127,45 +219,83 @@ pub struct DungeonPlugin;
 
 impl Plugin for DungeonPlugin {
     fn build(&self, app: &mut App) {
-        // Generation is pure CPU work with no asset dependency, so build the grid and
-        // insert the resource now — it is then available to every Startup system
-        // (player spawn, fog init) without cross-plugin ordering games.
-        app.insert_resource(Dungeon::generate(DUNGEON_SEED));
+        // Required config — one path, no fallback (mirrors `PlacementPlugin`). A missing or malformed
+        // `assets/dungeon.ron` is a loud startup failure, not a silent default world.
+        let config = load_config(DUNGEON_CONFIG_PATH).unwrap_or_else(|e| panic!("dungeon: {e}"));
+        // Generation is pure CPU work with no asset dependency, so build the grid and insert the
+        // resource now — it is then available to every Startup system (player spawn, fog init) without
+        // cross-plugin ordering games. A zero-room generation is a loud, one-path failure.
+        app.insert_resource(Dungeon::generate(&config).unwrap_or_else(|e| panic!("dungeon: {e}")));
         app.add_systems(Startup, spawn_tiles);
     }
 }
 
 impl Dungeon {
     /// Collapse a coarse room graph, keep the largest connected component, and expand
-    /// each surviving slot into a room + corridors on the fine grid.
-    fn generate(seed: u64) -> Self {
-        let coarse = wfc::generate(COARSE_W, COARSE_H, seed, MAX_ATTEMPTS);
-        let kept = largest_room_component(&coarse);
+    /// each surviving slot into a room + corridors on the fine grid. Fails loud (one path) if the
+    /// collapse yields zero rooms, rather than returning a degenerate empty dungeon.
+    fn generate(config: &DungeonConfig) -> Result<Self, String> {
+        let (cw, ch, block) = (config.coarse_w, config.coarse_h, config.block);
+        let weights = [
+            config.wfc_weights.rock,
+            config.wfc_weights.dead_end,
+            config.wfc_weights.corridor,
+            config.wfc_weights.corner,
+            config.wfc_weights.tee,
+            config.wfc_weights.cross,
+        ];
+        // An all-Solid collapse is a *valid* (non-contradiction) WFC result, so `wfc::generate` won't
+        // re-roll it on its own — a tiny grid or a heavily rock-weighted config can land there. Re-roll
+        // the whole coarse collapse with offset seeds until it yields at least one room, then fail loud
+        // (one path) rather than carve a degenerate empty dungeon. Attempt 0 uses the config seed
+        // unchanged, so a config that already produces rooms is byte-identical to a single collapse.
+        let (coarse, kept) = (0..config.max_attempts.max(1))
+            .map(|attempt| {
+                let c = wfc::generate(
+                    cw,
+                    ch,
+                    config.seed.wrapping_add(attempt as u64),
+                    config.max_attempts,
+                    &weights,
+                );
+                let kept = largest_room_component(&c);
+                (c, kept)
+            })
+            .find(|(_, kept)| kept.iter().any(|&b| b))
+            .ok_or_else(|| {
+                format!(
+                    "dungeon generation produced zero rooms after {} attempts (coarse {cw}x{ch}); \
+                     the room/weight config cannot fill this grid",
+                    config.max_attempts.max(1)
+                )
+            })?;
 
-        let width = COARSE_W * BLOCK;
-        let height = COARSE_H * BLOCK;
+        let width = cw * block;
+        let height = ch * block;
         let mut walkable = vec![false; width * height];
-        let mut rng = seeded(seed ^ 0xC0FFEE);
+        let mut rng = seeded(config.seed ^ 0xC0FFEE);
 
-        let block_center = |cx: usize, cy: usize| (cx * BLOCK + BLOCK / 2, cy * BLOCK + BLOCK / 2);
-        let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * COARSE_W + cx].open[dir];
+        let block_center = |cx: usize, cy: usize| (cx * block + block / 2, cy * block + block / 2);
+        let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * cw + cx].open[dir];
 
         // One placement Region per kept slot. `slot_region[slot]` maps a coarse slot to its region id
         // so the adjacency/opening pass below can link neighbours. Rects are captured here (in the same
         // RNG-consuming loop) so region geometry stays in lockstep with the carved rooms.
         let mut regions: Vec<Region> = Vec::new();
-        let mut slot_region: Vec<Option<u32>> = vec![None; COARSE_W * COARSE_H];
+        let mut slot_region: Vec<Option<u32>> = vec![None; cw * ch];
 
-        // Carve a centred room in every kept slot's block.
-        for cy in 0..COARSE_H {
-            for cx in 0..COARSE_W {
-                if !kept[cy * COARSE_W + cx] {
+        // Carve a centred room in every kept slot's block. Size + type are drawn per room from the
+        // config's weighted room-type table (Merrell 2011: per-room area + aspect ratio), so rooms read
+        // at realistic metric scale and carry a type tag the furniture pass couples to.
+        let max_side = block.saturating_sub(2); // keep a >=1-tile rock margin inside the block
+        for cy in 0..ch {
+            for cx in 0..cw {
+                if !kept[cy * cw + cx] {
                     continue;
                 }
-                let rw = rng.range_usize(ROOM_MIN, ROOM_MAX);
-                let rh = rng.range_usize(ROOM_MIN, ROOM_MAX);
-                let ox = cx * BLOCK + (BLOCK - rw) / 2;
-                let oy = cy * BLOCK + (BLOCK - rh) / 2;
+                let (rw, rh, tag) = pick_room(config, max_side, &mut rng);
+                let ox = cx * block + (block - rw) / 2;
+                let oy = cy * block + (block - rh) / 2;
                 for y in oy..oy + rh {
                     for x in ox..ox + rw {
                         walkable[y * width + x] = true;
@@ -173,7 +303,7 @@ impl Dungeon {
                 }
 
                 let id = regions.len() as u32;
-                slot_region[cy * COARSE_W + cx] = Some(id);
+                slot_region[cy * cw + cx] = Some(id);
                 regions.push(Region {
                     id,
                     rect: Rect2 {
@@ -183,32 +313,36 @@ impl Dungeon {
                     openings: Vec::new(),
                     adjacency: Vec::new(),
                     props: PropertyBag {
-                        tags: vec!["room".to_string()],
+                        tags: vec!["room".to_string(), tag],
                     },
                 });
             }
         }
 
-        // Carve a 2-wide corridor along each Link edge, between the two block centres,
-        // so the (0.7-wide) hero fits with room to spare.
-        for cy in 0..COARSE_H {
-            for cx in 0..COARSE_W {
-                if !kept[cy * COARSE_W + cx] {
+        // Carve a `corridor_width`-wide corridor along each Link edge, between the two block centres,
+        // so the (0.7-wide) hero fits with room to spare. Lanes stack off the block-centre lane: an E
+        // corridor stacks in +y, an S corridor in +x. At `corridor_width = 2` this is the classic carve.
+        let lanes = config.corridor_width;
+        for cy in 0..ch {
+            for cx in 0..cw {
+                if !kept[cy * cw + cx] {
                     continue;
                 }
                 let (bx, by) = block_center(cx, cy);
-                if cx + 1 < COARSE_W && kept[cy * COARSE_W + cx + 1] && coarse_open(cx, cy, E) {
+                if cx + 1 < cw && kept[cy * cw + cx + 1] && coarse_open(cx, cy, E) {
                     let (nx, _) = block_center(cx + 1, cy);
                     for x in bx..=nx {
-                        walkable[by * width + x] = true;
-                        walkable[(by + CORRIDOR_LANE) * width + x] = true;
+                        for lane in 0..lanes {
+                            walkable[(by + lane) * width + x] = true;
+                        }
                     }
                 }
-                if cy + 1 < COARSE_H && kept[(cy + 1) * COARSE_W + cx] && coarse_open(cx, cy, S) {
+                if cy + 1 < ch && kept[(cy + 1) * cw + cx] && coarse_open(cx, cy, S) {
                     let (_, ny) = block_center(cx, cy + 1);
                     for y in by..=ny {
-                        walkable[y * width + bx] = true;
-                        walkable[y * width + bx + CORRIDOR_LANE] = true;
+                        for lane in 0..lanes {
+                            walkable[y * width + bx + lane] = true;
+                        }
                     }
                 }
             }
@@ -218,9 +352,9 @@ impl Dungeon {
         // interior floor cell where the corridor meets the room wall (the region's opening). Edge
         // links are symmetric under the WFC socket rule (a slot's `open[dir]` agrees with its
         // neighbour's `open[opposite]`), so scanning all four directions finds every opening once.
-        for cy in 0..COARSE_H {
-            for cx in 0..COARSE_W {
-                let Some(id) = slot_region[cy * COARSE_W + cx] else {
+        for cy in 0..ch {
+            for cx in 0..cw {
+                let Some(id) = slot_region[cy * cw + cx] else {
                     continue;
                 };
                 let (bx, by) = block_center(cx, cy);
@@ -233,13 +367,13 @@ impl Dungeon {
                         W => (cx as i32 - 1, cy as i32),
                         _ => unreachable!(),
                     };
-                    if nx < 0 || ny < 0 || nx >= COARSE_W as i32 || ny >= COARSE_H as i32 {
+                    if nx < 0 || ny < 0 || nx >= cw as i32 || ny >= ch as i32 {
                         continue;
                     }
                     if !coarse_open(cx, cy, dir) {
                         continue;
                     }
-                    let Some(nid) = slot_region[ny as usize * COARSE_W + nx as usize] else {
+                    let Some(nid) = slot_region[ny as usize * cw + nx as usize] else {
                         continue;
                     };
                     let cell = match dir {
@@ -253,56 +387,57 @@ impl Dungeon {
                     region.adjacency.push(nid);
                     region.openings.push(Opening { dir, cell });
 
-                    // Neck the 2-wide corridor down to a single-tile doorway at the room wall, so one
-                    // door leaf fills the gap (no open strip beside it). The carve makes corridors
-                    // 2-wide along `by`/`by+1` (E/W) or `bx`/`bx+1` (N/S); the doorway keeps the
-                    // block-centre tile, so we rock out the corridor's *other* boundary cell. Rocking
-                    // it (not just drawing a wall) keeps walkability, collision, and flow fields
-                    // consistent — the doorway `by`/`bx` tile stays open, so the room stays connected.
-                    // Step one cell out of the room into the corridor (per `dir`), then to the corridor's
-                    // second lane — the `+CORRIDOR_LANE` cell the carve added and the doorway does not
-                    // keep — and rock it out so the opening necks to a single tile.
-                    let lane = CORRIDOR_LANE as i32;
-                    let neck = match dir {
-                        E => IVec2::new(cell[0] + 1, cell[1] + lane),
-                        W => IVec2::new(cell[0] - 1, cell[1] + lane),
-                        N => IVec2::new(cell[0] + lane, cell[1] - 1),
-                        S => IVec2::new(cell[0] + lane, cell[1] + 1),
-                        _ => unreachable!(),
-                    };
-                    if neck.x >= 0
-                        && neck.y >= 0
-                        && (neck.x as usize) < width
-                        && (neck.y as usize) < height
-                    {
-                        walkable[neck.y as usize * width + neck.x as usize] = false;
+                    // Neck the corridor down to a single-tile doorway at the room wall, so one door leaf
+                    // fills the gap (no open strip beside it). The carve stacks `corridor_width` lanes off
+                    // the block-centre lane; the doorway keeps only the block-centre lane, so step one
+                    // cell out of the room into the corridor (per `dir`) and rock out every *extra* lane
+                    // there. Rocking (not just drawing a wall) keeps walkability, collision, and flow
+                    // fields consistent — the block-centre tile stays open, so the room stays connected.
+                    for lane in 1..config.corridor_width as i32 {
+                        let neck = match dir {
+                            E => IVec2::new(cell[0] + 1, cell[1] + lane),
+                            W => IVec2::new(cell[0] - 1, cell[1] + lane),
+                            N => IVec2::new(cell[0] + lane, cell[1] - 1),
+                            S => IVec2::new(cell[0] + lane, cell[1] + 1),
+                            _ => unreachable!(),
+                        };
+                        if neck.x >= 0
+                            && neck.y >= 0
+                            && (neck.x as usize) < width
+                            && (neck.y as usize) < height
+                        {
+                            walkable[neck.y as usize * width + neck.x as usize] = false;
+                        }
                     }
                 }
             }
         }
 
-        // Spawn at the block centre of the kept room nearest the coarse centre.
-        let center = Vec2::new(COARSE_W as f32 / 2.0, COARSE_H as f32 / 2.0);
-        let spawn_slot = (0..COARSE_W * COARSE_H)
+        // Spawn at the block centre of the kept room nearest the coarse centre. A dungeon with zero
+        // rooms is a generation failure surfaced loudly (one path), not a degenerate empty world.
+        let center = Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0);
+        let spawn_slot = (0..cw * ch)
             .filter(|&i| kept[i])
             .min_by(|&a, &b| {
-                let pa = Vec2::new((a % COARSE_W) as f32, (a / COARSE_W) as f32);
-                let pb = Vec2::new((b % COARSE_W) as f32, (b / COARSE_W) as f32);
+                let pa = Vec2::new((a % cw) as f32, (a / cw) as f32);
+                let pb = Vec2::new((b % cw) as f32, (b / cw) as f32);
+                // total_cmp is a total order over f32 (finite coords never NaN), so no unwrap/panic.
                 (pa - center)
                     .length_squared()
-                    .partial_cmp(&(pb - center).length_squared())
-                    .unwrap()
+                    .total_cmp(&(pb - center).length_squared())
             })
-            .expect("dungeon must contain at least one room");
-        let (sx, sy) = block_center(spawn_slot % COARSE_W, spawn_slot / COARSE_W);
+            .ok_or_else(|| {
+                "dungeon generation produced zero rooms (largest component empty)".to_string()
+            })?;
+        let (sx, sy) = block_center(spawn_slot % cw, spawn_slot / cw);
 
-        Dungeon {
+        Ok(Dungeon {
             width,
             height,
             walkable,
             spawn: IVec2::new(sx as i32, sy as i32),
             regions,
-        }
+        })
     }
 
     #[inline]
@@ -603,6 +738,46 @@ impl Dungeon {
 
         p
     }
+}
+
+/// Pick a weighted room type and draw its footprint in tiles (Merrell 2011: per-room area + aspect).
+/// Deterministic — draws type, area, aspect, then orientation from the carve RNG in a fixed order.
+/// Dimensions round to whole tiles and clamp to `[ROOM_FLOOR, max_side]` so the room fits its block with
+/// a rock margin. Returns `(width, depth, type_tag)`.
+fn pick_room(config: &DungeonConfig, max_side: usize, rng: &mut impl DetRng) -> (usize, usize, String) {
+    let ty = weighted_room_type(&config.room_types, rng);
+    let area = rand_range_f32(rng, ty.area_min, ty.area_max);
+    let aspect = rand_range_f32(rng, ty.aspect_min, ty.aspect_max);
+    let long = (area * aspect).sqrt();
+    let short = (area / aspect).sqrt();
+    // Randomly orient the long axis to x or y so rooms aren't all landscape.
+    let (w_f, h_f) = if rng.unit() < 0.5 { (long, short) } else { (short, long) };
+    let cap = max_side.max(ROOM_FLOOR); // guard clamp's min <= max even for a tiny block
+    let rw = (w_f.round() as usize).clamp(ROOM_FLOOR, cap);
+    let rh = (h_f.round() as usize).clamp(ROOM_FLOOR, cap);
+    (rw, rh, ty.tag.clone())
+}
+
+/// Weighted choice of a room type (same idiom as `wfc::collapse_grid`'s prototype pick). `types` is
+/// validated non-empty with positive total weight at config load, so the fall-through is unreachable.
+fn weighted_room_type<'a>(types: &'a [RoomType], rng: &mut impl DetRng) -> &'a RoomType {
+    let total: f64 = types.iter().map(|t| t.weight).sum();
+    let mut r = rng.unit() * total;
+    for t in types {
+        r -= t.weight;
+        if r <= 0.0 {
+            return t;
+        }
+    }
+    &types[types.len() - 1]
+}
+
+/// Uniform f32 in `[lo, hi)` from the deterministic RNG; returns `lo` for a degenerate/inverted range.
+fn rand_range_f32(rng: &mut impl DetRng, lo: f32, hi: f32) -> f32 {
+    if hi <= lo {
+        return lo;
+    }
+    lo + (rng.unit() as f32) * (hi - lo)
 }
 
 /// Flood-fill the coarse room slots across Link edges, returning a per-slot mask of the
@@ -914,5 +1089,113 @@ fn spawn_tiles(
                 Some(header_size),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small, valid config for generation tests (avoids depending on the shipped RON's exact values).
+    fn test_config() -> DungeonConfig {
+        DungeonConfig {
+            coarse_w: 4,
+            coarse_h: 4,
+            block: 16,
+            corridor_width: 2,
+            seed: 0x5C0_9191,
+            max_attempts: 20,
+            liminality: 1.0,
+            wfc_weights: WfcWeights {
+                rock: 6.0,
+                dead_end: 1.2,
+                corridor: 2.5,
+                corner: 2.5,
+                tee: 1.2,
+                cross: 0.6,
+            },
+            room_types: vec![
+                RoomType { tag: "bathroom".into(), area_min: 3.0, area_max: 6.0, aspect_min: 1.0, aspect_max: 1.6, weight: 0.8 },
+                RoomType { tag: "bedroom".into(), area_min: 9.0, area_max: 20.0, aspect_min: 1.0, aspect_max: 1.5, weight: 1.5 },
+                RoomType { tag: "living".into(), area_min: 16.0, area_max: 40.0, aspect_min: 1.0, aspect_max: 1.7, weight: 1.6 },
+            ],
+        }
+    }
+
+    #[test]
+    fn shipped_config_parses_and_generates() {
+        // The real assets/dungeon.ron must parse, validate, and generate a non-empty dungeon.
+        let text = std::fs::read_to_string(DUNGEON_CONFIG_PATH).expect("read dungeon.ron");
+        let config = parse_config(&text).expect("dungeon.ron must be valid");
+        let d = Dungeon::generate(&config).expect("must generate at least one room");
+        assert!(!d.regions.is_empty(), "shipped config must produce rooms");
+        assert!(d.walkable.iter().any(|&w| w), "dungeon must have floor");
+    }
+
+    #[test]
+    fn generate_is_deterministic_for_a_config() {
+        let config = test_config();
+        let a = Dungeon::generate(&config).expect("gen a");
+        let b = Dungeon::generate(&config).expect("gen b");
+        assert_eq!(a.walkable, b.walkable, "same (config, seed) → same walkable mask");
+        assert_eq!(a.spawn, b.spawn);
+        assert_eq!(a.regions.len(), b.regions.len());
+        for (ra, rb) in a.regions.iter().zip(&b.regions) {
+            assert_eq!(ra.rect, rb.rect);
+            assert_eq!(ra.props.tags, rb.props.tags);
+        }
+    }
+
+    #[test]
+    fn every_region_carries_a_type_tag() {
+        let config = test_config();
+        let type_tags: Vec<&str> = config.room_types.iter().map(|t| t.tag.as_str()).collect();
+        let d = Dungeon::generate(&config).expect("gen");
+        for r in &d.regions {
+            assert!(r.props.has("room"), "region {} missing base 'room' tag", r.id);
+            assert!(
+                r.props.tags.iter().any(|t| type_tags.contains(&t.as_str())),
+                "region {} has no room-type tag: {:?}",
+                r.id,
+                r.props.tags
+            );
+        }
+    }
+
+    #[test]
+    fn room_dims_fit_block_with_margin() {
+        let config = test_config();
+        let max_side = (config.block - 2) as i32;
+        let d = Dungeon::generate(&config).expect("gen");
+        for r in &d.regions {
+            let (w, h) = (r.rect.width(), r.rect.height());
+            assert!(w >= ROOM_FLOOR as i32 && w <= max_side, "room width {w} out of range");
+            assert!(h >= ROOM_FLOOR as i32 && h <= max_side, "room height {h} out of range");
+        }
+    }
+
+    #[test]
+    fn zero_room_config_returns_err_not_panic() {
+        // A 1×1 coarse grid: the sole cell borders the void on all four edges, so the boundary rule
+        // (`wfc::boundary_initial`) forbids every Link and it collapses to rock → zero rooms → a loud
+        // Err, never a panic. Exercises the `Result` path that replaced the old `.expect(...)`.
+        let mut config = test_config();
+        config.coarse_w = 1;
+        config.coarse_h = 1;
+        assert!(Dungeon::generate(&config).is_err());
+    }
+
+    #[test]
+    fn config_validation_rejects_bad_values() {
+        // parse_config fails loud at the door on invalid input (one path, no silent default).
+        assert!(parse_config("not ron").is_err());
+        let bad_liminality = r#"(coarse_w:6,coarse_h:6,block:32,corridor_width:2,seed:1,max_attempts:20,
+            liminality:2.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
+            room_types:[(tag:"a",area_min:3.0,area_max:6.0,aspect_min:1.0,aspect_max:1.6,weight:1.0)])"#;
+        assert!(parse_config(bad_liminality).is_err(), "liminality > 1 must be rejected");
+        let empty_types = r#"(coarse_w:6,coarse_h:6,block:32,corridor_width:2,seed:1,max_attempts:20,
+            liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
+            room_types:[])"#;
+        assert!(parse_config(empty_types).is_err(), "empty room_types must be rejected");
     }
 }

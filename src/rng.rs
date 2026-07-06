@@ -21,8 +21,6 @@ pub trait DetRng {
     /// Uniform integer in `[0, n)` (unbiased). Returns 0 for the degenerate `n == 0` (a caller bug)
     /// rather than panicking.
     fn below(&mut self, n: usize) -> usize;
-    /// Uniform integer in the inclusive range `[lo, hi]`. Returns `lo` when `hi <= lo`.
-    fn range_usize(&mut self, lo: usize, hi: usize) -> usize;
     /// Uniform float in `[0, 1)`.
     fn unit(&mut self) -> f64;
 }
@@ -42,15 +40,6 @@ impl DetRng for ChaCha8Rng {
             return 0;
         }
         self.random_range(0..n)
-    }
-    #[inline]
-    fn range_usize(&mut self, lo: usize, hi: usize) -> usize {
-        // Inclusive [lo, hi]. Guard the degenerate/inverted range so `hi - lo + 1` can't underflow
-        // (usize wraps): [lo, lo] is exactly {lo}, and no caller passes hi < lo.
-        if hi <= lo {
-            return lo;
-        }
-        lo + self.below(hi - lo + 1)
     }
     #[inline]
     fn unit(&mut self) -> f64 {

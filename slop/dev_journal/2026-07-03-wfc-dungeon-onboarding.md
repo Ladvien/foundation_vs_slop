@@ -1,5 +1,12 @@
 # Dev Journal: 2026-07-03 — WFC Dungeon Build & Codebase Onboarding
 
+> **⚠ Superseded (for the generator) by [2026-07-06-dungeon-config-and-realistic-rooms.md](2026-07-06-dungeon-config-and-realistic-rooms.md).**
+> The generation constants described below (COARSE 7×7 / BLOCK 7 / ROOM 4–5, hardcoded WFC
+> weights, `region_id % 4` room typing) no longer match `src/dungeon.rs` / `src/wfc.rs`: room
+> sizing is now data-driven from `assets/dungeon.ron` (`DungeonConfig`), rooms carry a real type
+> tag, and the coarse WFC enforces a boundary invariant. The onboarding narrative below is still
+> useful for the overall architecture; treat the specific generator numbers as historical.
+
 **Session Duration:** ~1 day (multiple iterations)
 **Walkthrough:** None
 **Purpose:** This entry doubles as onboarding documentation — everything a future

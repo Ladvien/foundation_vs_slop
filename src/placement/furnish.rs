@@ -76,30 +76,27 @@ fn affords(item: &ManifestItem, aff: &str) -> bool {
     item.affordances.iter().any(|a| a == aff)
 }
 
-/// Pick a freestanding furniture set for a region from whatever the manifest offers, keyed by a
-/// stand-in room "type" (`region_id % 4`, a Stage-4+ region-typing placeholder). Selection is by
-/// semantic TAGS and AFFORDANCES, never by hardcoded asset keys, so any asset kit furnishes rooms with
-/// zero code changes — the Stage-5 asset-swap contract (Tutenel et al. semantic room classes
-/// `[home-still: cgf.12276]`; Merrell et al. 2011). The scan is rotated by region so two rooms of the
-/// same type don't get an identical set, and a living room that picks a seat is also given a screen so
-/// the seat→screen relation can fire. Returns up to `count` distinct items; a room whose type-tags
-/// aren't in the kit still gets furniture via the top-up pass, so it's never left empty.
+/// Pick a freestanding furniture set for a region from whatever the manifest offers, keyed by the
+/// region's own room-type tags (chosen at generation in `dungeon.rs`, stored on `Region.props.tags`).
+/// Selection is by semantic TAGS and AFFORDANCES, never by hardcoded asset keys, so any asset kit
+/// furnishes rooms with zero code changes — the Stage-5 asset-swap contract (Tutenel et al. semantic
+/// room classes `[home-still: cgf.12276]`; Merrell et al. 2011). The scan is rotated by `region_id` so
+/// two rooms of the same type don't get an identical set, and a living room that picks a seat is also
+/// given a screen so the seat→screen relation can fire. Returns up to `count` distinct items; a room
+/// whose type-tags aren't in the kit still gets furniture via the top-up pass, so it's never left empty.
 fn room_profile<'a>(
     region_id: RegionId,
+    type_tags: &[String],
     freestanding: &[&'a ManifestItem],
     count: usize,
 ) -> Vec<&'a ManifestItem> {
     if freestanding.is_empty() || count == 0 {
         return Vec::new();
     }
-    // Room "type" → preferred semantic tags (the room class). A kit that tags its items reproduces
-    // themed rooms; a kit that tags differently (or not at all) still furnishes via the top-up pass.
-    let preferred: &[&str] = match region_id % 4 {
-        0 => &["living"],
-        1 => &["bedroom"],
-        2 => &["kitchen", "dining"],
-        _ => &["study", "living"],
-    };
+    // The region's own type tags ARE the preferred room class. A kit that tags its items to match
+    // reproduces themed rooms; a kit that tags differently (or a room whose type has no kit match) still
+    // furnishes via the top-up pass below. (The base "room" tag matches nothing in the kit — harmless.)
+    let preferred = type_tags;
     let n = freestanding.len();
     // Region-rotated scan offset so two rooms of the same type don't select an identical set (the old
     // fixed manifest-order scan made every same-type room identical, and never reached later items).
@@ -113,7 +110,7 @@ fn room_profile<'a>(
                 break;
             }
             let it = freestanding[(start + k) % n];
-            let is_preferred = it.tags.iter().any(|t| preferred.contains(&t.as_str()));
+            let is_preferred = it.tags.iter().any(|t| preferred.contains(t));
             if is_preferred == want_preferred && !chosen.iter().any(|c| c.key == it.key) {
                 chosen.push(it);
             }
@@ -122,7 +119,7 @@ fn room_profile<'a>(
     // One coherent pairing, kit-agnostic via affordances: a living room that picked a seat ("sit") but
     // no screen ("emit") swaps a non-seat pick for a screen, so the seat→screen `Facing` relation can
     // fire (the showcase sofa-faces-TV rule). A swap, not a growth, so the room stays sparse.
-    if preferred.contains(&"living")
+    if preferred.iter().any(|t| t == "living")
         && chosen.iter().any(|it| affords(it, "sit"))
         && !chosen.iter().any(|it| affords(it, "emit"))
     {
@@ -234,7 +231,8 @@ pub fn furnish_regions(
             // from the manifest's Freestanding items by semantic room-type tags, never hardcoded asset
             // keys, so any asset kit furnishes rooms with zero code changes (Tutenel et al. semantic
             // room classes; Merrell et al. 2011 — the Stage-5 asset-swap contract).
-            let profile = room_profile(region.id, &freestanding, FREESTANDING_PER_ROOM);
+            let profile =
+                room_profile(region.id, &region.props.tags, &freestanding, FREESTANDING_PER_ROOM);
             if !profile.is_empty() {
                 let candidates: Arc<[Candidate]> =
                     profile.iter().map(|it| to_candidate(it)).collect::<Vec<_>>().into();
@@ -435,11 +433,9 @@ mod tests {
     fn living_room_that_picks_a_seat_also_gets_a_screen() {
         let items = kit();
         let refs: Vec<&ManifestItem> = items.iter().collect();
+        let living = vec!["room".to_string(), "living".to_string()];
         for region_id in [0u32, 3, 4, 7, 8, 11] {
-            if region_id % 4 != 0 && region_id % 4 != 3 {
-                continue; // only living-type rooms carry the seat→screen pairing
-            }
-            let profile = room_profile(region_id, &refs, FREESTANDING_PER_ROOM);
+            let profile = room_profile(region_id, &living, &refs, FREESTANDING_PER_ROOM);
             let has_seat = profile.iter().any(|it| affords(it, "sit"));
             let has_screen = profile.iter().any(|it| affords(it, "emit"));
             assert!(
@@ -452,12 +448,13 @@ mod tests {
 
     #[test]
     fn same_type_living_rooms_can_differ() {
-        // The region-rotated scan differentiates two living rooms (both region_id % 4 == 0) that the
-        // old fixed manifest-order scan would have furnished identically.
+        // The region-rotated scan differentiates two same-type rooms that the old fixed manifest-order
+        // scan would have furnished identically.
         let items = kit();
         let refs: Vec<&ManifestItem> = items.iter().collect();
+        let living = vec!["room".to_string(), "living".to_string()];
         let keys = |rid| {
-            let mut k: Vec<&str> = room_profile(rid, &refs, FREESTANDING_PER_ROOM)
+            let mut k: Vec<&str> = room_profile(rid, &living, &refs, FREESTANDING_PER_ROOM)
                 .iter()
                 .map(|it| it.key.as_str())
                 .collect();
@@ -465,6 +462,39 @@ mod tests {
             k
         };
         assert_ne!(keys(0), keys(4), "two living rooms should not get an identical set");
+    }
+
+    #[test]
+    fn room_type_tag_selects_matching_furniture() {
+        // A room's generation-time type tag drives selection: an "office" room prefers the office desk
+        // over the bed/sofa, even though all three are eligible freestanding items.
+        let items = vec![
+            item("desk", &["office"], &["support"]),
+            item("bed", &["bedroom"], &["sleep"]),
+            item("sofa", &["living"], &["sit"]),
+        ];
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let office = vec!["room".to_string(), "office".to_string()];
+        let profile = room_profile(7, &office, &refs, 1);
+        assert_eq!(profile.len(), 1);
+        assert_eq!(profile[0].key, "desk", "office room must prefer the office-tagged desk");
+    }
+
+    #[test]
+    fn untyped_room_still_furnishes_via_topup() {
+        // A room whose type has no kit match (e.g. "hall") is never left empty — the universal top-up
+        // pass fills it from the rest of the catalogue. This is the single furnishing path (no branch).
+        let items = vec![
+            item("bed", &["bedroom"], &["sleep"]),
+            item("sofa", &["living"], &["sit"]),
+        ];
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let hall = vec!["room".to_string(), "hall".to_string()];
+        let profile = room_profile(2, &hall, &refs, 2);
+        assert!(
+            !profile.is_empty(),
+            "a room with no type match must still get furniture via top-up"
+        );
     }
 
     #[test]

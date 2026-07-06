@@ -64,5 +64,22 @@
         ( key: "tv", glb: "low_poly_furniture/glb/Electronics/TV A.glb",
           category: "appliance", tags: ["living"], role: Freestanding, footprint: (0.88, 0.80),
           affordances: ["emit"] ),
+
+        // Office — a desk so "office"-tagged rooms (a generation-time room type) read as workspaces.
+        ( key: "desk", glb: "low_poly_furniture/glb/Tables/Desk.glb",
+          category: "table", tags: ["office"], role: Freestanding, footprint: (1.20, 0.60),
+          affordances: ["support"] ),
+
+        // Bathroom fixtures for "bathroom"-tagged rooms. Footprints are approximate metre bounds of the
+        // kit's GLBs; `hygiene` is a domain affordance no layout rule targets (harmless, themed intent).
+        ( key: "toilet", glb: "low_poly_furniture/glb/Bathroom/Toilet.glb",
+          category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.40, 0.60),
+          affordances: ["hygiene"] ),
+        ( key: "sink", glb: "low_poly_furniture/glb/Bathroom/Sink.glb",
+          category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.50, 0.42),
+          affordances: ["hygiene"] ),
+        ( key: "bath", glb: "low_poly_furniture/glb/Bathroom/Bath.glb",
+          category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (1.70, 0.70),
+          affordances: ["hygiene"] ),
     ],
 )

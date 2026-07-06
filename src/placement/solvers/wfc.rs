@@ -83,11 +83,14 @@ impl Solver for WfcSolver {
             vec![full; n],
             vec![full; n],
         ];
+        // Fully-permissive starting domain: the tiled scatter has no boundary/unary constraints (a
+        // furniture cell has no off-grid-Link notion), so every cell starts able to hold any prototype.
+        let initial = vec![full; w * h];
 
         // Reseed each restart from the region's RNG sub-stream so retries are distinct yet reproducible.
         for _ in 0..MAX_RESTARTS {
             let seed = rng.raw_u64();
-            if let Some(picks) = collapse_grid(w, h, &weights, &support, seed) {
+            if let Some(picks) = collapse_grid(w, h, &weights, &support, &initial, seed) {
                 let placed = picks
                     .iter()
                     .enumerate()
