@@ -8,6 +8,8 @@
 //! each slot into an actual room + corridors. The generator is deterministic for a given
 //! seed and has no Bevy dependency.
 
+use crate::rng::{seeded, DetRng};
+
 /// Direction indices into every `[_; 4]` edge array: North, East, South, West.
 pub const N: usize = 0;
 pub const E: usize = 1;
@@ -108,57 +110,31 @@ fn build_support(protos: &[Prototype]) -> [Vec<u32>; 4] {
     support
 }
 
-/// Small deterministic xorshift64 PRNG — keeps generation reproducible with zero deps.
-/// Shared with `dungeon` (room sizing) so there is one PRNG implementation.
-pub(crate) struct Rng(u64);
-
-impl Rng {
-    pub(crate) fn new(seed: u64) -> Self {
-        // Force a non-zero state (xorshift is stuck at zero).
-        Rng((seed ^ 0x9E37_79B9_7F4A_7C15) | 1)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-    fn next_f64(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-    pub(crate) fn below(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
-    }
-    /// Inclusive integer in `[lo, hi]`.
-    pub(crate) fn range_usize(&mut self, lo: usize, hi: usize) -> usize {
-        lo + self.below(hi - lo + 1)
-    }
-}
-
 /// Generate a dungeon grid. Retries on contradiction with an offset seed; panics
 /// loudly if the (permissive) alphabet still fails to converge — there is one path,
-/// and an unconvergeable generation is a bug to surface, not to paper over.
+/// and an unconvergeable generation is a bug to surface, not to paper over. (This is the *substrate*
+/// pass; the placement-grammar furniture pass degrades to `Outcome::Partial` instead — see
+/// `crate::placement::solvers::wfc`.)
 pub fn generate(width: usize, height: usize, seed: u64, max_attempts: u32) -> WfcResult {
     let protos = build_prototypes();
-    assert!(protos.len() <= 32, "prototype set must fit in a u32 mask");
+    let weights: Vec<f64> = protos.iter().map(|p| p.weight).collect();
     let support = build_support(&protos);
-    let full: u32 = if protos.len() == 32 {
-        u32::MAX
-    } else {
-        (1u32 << protos.len()) - 1
-    };
 
     for attempt in 0..max_attempts {
-        if let Some(cells) = try_collapse(
+        if let Some(picks) = collapse_grid(
             width,
             height,
-            &protos,
+            &weights,
             &support,
-            full,
             seed.wrapping_add(attempt as u64),
         ) {
+            let cells = picks
+                .iter()
+                .map(|&b| CellData {
+                    kind: protos[b].kind,
+                    open: protos[b].open,
+                })
+                .collect();
             return WfcResult {
                 width,
                 height,
@@ -169,19 +145,26 @@ pub fn generate(width: usize, height: usize, seed: u64, max_attempts: u32) -> Wf
     panic!("WFC failed to converge after {max_attempts} attempts (seed {seed})");
 }
 
-/// One collapse attempt. Returns `None` on contradiction so the caller can retry.
+/// Generic grid Wave Function Collapse over an arbitrary prototype alphabet, returning the chosen
+/// prototype **index** per cell (row-major), or `None` on contradiction so the caller can retry.
+///
+/// This is the reusable core (Karth & Smith 2017: WFC *is* finite-domain constraint solving). The
+/// dungeon room-graph builder above and the placement `WfcSolver` both drive it — the only difference
+/// is the alphabet: `weights[p]` is prototype `p`'s selection weight, and `support[dir][p]` is the
+/// bitmask of prototypes that may legally sit on the `dir` (N/E/S/W) side of `p`.
 // The `b`/`dir` loops index by bit position / direction, which double as offset math.
 #[allow(clippy::needless_range_loop)]
-fn try_collapse(
+pub fn collapse_grid(
     width: usize,
     height: usize,
-    protos: &[Prototype],
+    weights: &[f64],
     support: &[Vec<u32>; 4],
-    full: u32,
     seed: u64,
-) -> Option<Vec<CellData>> {
-    let n = protos.len();
-    let mut rng = Rng::new(seed);
+) -> Option<Vec<usize>> {
+    let n = weights.len();
+    assert!(n <= 32, "prototype set must fit in a u32 mask");
+    let full: u32 = if n == 32 { u32::MAX } else { (1u32 << n) - 1 };
+    let mut rng = seeded(seed);
     let mut cells = vec![full; width * height]; // per-cell mask of still-allowed prototypes
 
     loop {
@@ -212,13 +195,13 @@ fn try_collapse(
         let mask = cells[chosen];
         let total: f64 = (0..n)
             .filter(|&b| mask & (1 << b) != 0)
-            .map(|b| protos[b].weight)
+            .map(|b| weights[b])
             .sum();
-        let mut r = rng.next_f64() * total;
+        let mut r = rng.unit() * total;
         let mut pick = usize::MAX;
         for b in 0..n {
             if mask & (1 << b) != 0 {
-                r -= protos[b].weight;
+                r -= weights[b];
                 if r <= 0.0 {
                     pick = b;
                     break;
@@ -227,7 +210,10 @@ fn try_collapse(
         }
         // Floating-point slack: fall through to the last allowed option.
         if pick == usize::MAX {
-            pick = (0..n).rev().find(|&b| mask & (1 << b) != 0).unwrap();
+            pick = match (0..n).rev().find(|&b| mask & (1 << b) != 0) {
+                Some(b) => b,
+                None => return None, // every option pruned this frame — treat as a contradiction
+            };
         }
         cells[chosen] = 1 << pick;
 
@@ -272,13 +258,50 @@ fn try_collapse(
 
     let result = cells
         .iter()
-        .map(|&mask| {
-            let b = mask.trailing_zeros() as usize;
-            CellData {
-                kind: protos[b].kind,
-                open: protos[b].open,
-            }
-        })
+        .map(|&mask| mask.trailing_zeros() as usize)
         .collect();
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_compatible_alphabet_always_collapses() {
+        let n = 3;
+        let full = (1u32 << n) - 1;
+        let support = [vec![full; n], vec![full; n], vec![full; n], vec![full; n]];
+        let weights = vec![1.0, 1.0, 1.0];
+        let picks = collapse_grid(4, 4, &weights, &support, 42).expect("all-compatible must collapse");
+        assert_eq!(picks.len(), 16);
+        assert!(picks.iter().all(|&p| p < n));
+    }
+
+    #[test]
+    fn forbidding_every_neighbour_contradicts() {
+        // Support that allows no prototype beside any other → any multi-cell grid contradicts.
+        let n = 2;
+        let support = [vec![0u32; n], vec![0u32; n], vec![0u32; n], vec![0u32; n]];
+        let weights = vec![1.0, 1.0];
+        assert!(collapse_grid(2, 1, &weights, &support, 1).is_none());
+    }
+
+    #[test]
+    fn collapse_is_deterministic_for_a_seed() {
+        let n = 4;
+        let full = (1u32 << n) - 1;
+        let support = [vec![full; n], vec![full; n], vec![full; n], vec![full; n]];
+        let weights = vec![1.0, 2.0, 0.5, 1.5];
+        let a = collapse_grid(5, 5, &weights, &support, 123);
+        let b = collapse_grid(5, 5, &weights, &support, 123);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn room_graph_still_generates_floors() {
+        let r = generate(9, 9, 0x5C0_9191, 20);
+        assert_eq!(r.cells.len(), 81);
+        assert!(r.cells.iter().any(|c| matches!(c.kind, CellKind::Floor)));
+    }
 }

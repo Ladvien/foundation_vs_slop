@@ -9,6 +9,8 @@
 
 use bevy::prelude::*;
 
+use crate::util::hash_f32;
+
 /// Pending splash bursts to render (one per kill). Spiked by `gore`, drained by [`spawn_lens_splats`].
 #[derive(Resource, Default)]
 pub struct BloodLens {
@@ -52,14 +54,6 @@ impl Plugin for BloodLensPlugin {
 
 fn load_image(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(LensImage(assets.load("textures/blood/blood_lens.png")));
-}
-
-/// Deterministic hash → f32 in [0,1) (PCG-style), matching `gore`'s texture-free noise philosophy.
-fn hash_f32(x: u32) -> f32 {
-    let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
-    h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
-    h = (h >> 22) ^ h;
-    (h as f32) / (u32::MAX as f32)
 }
 
 /// Drain pending bursts: each spawns a spray of randomized blood decals across the screen.

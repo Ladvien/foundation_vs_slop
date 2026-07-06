@@ -79,25 +79,31 @@ const JUMP_DAMAGE: f32 = 8.0;
 /// (scout roam ×`SCOUT_SPEED_MUL`, flee ×`FLEE_SPEED_MUL`, rally/seek at 1×), so tuning it slows the
 /// whole swarm uniformly.
 const CRAB_SPEED: f32 = 2.1; // 3/4 of the earlier 2.8 — a calmer, less frantic scuttle
-/// Uniform render scale for the child model (native span ~3.2 → ~0.19 m). Small scuttling vermin —
-/// ~1/2.5 the earlier size, which read as too big. Seat constants below scale down with it.
-const CRAB_RENDER_SCALE: f32 = 0.06;
+/// Uniform render scale for the child model (native height ~3.06 → ~0.46 m ≈ 1.5 ft tall, sized to
+/// the ~6 ft squad and 8 ft ceilings). Seat constants below scale with it.
+const CRAB_RENDER_SCALE: f32 = 0.15;
 /// Root body-centre height above the surface, along the surface normal (also seats the collider).
-const CRAB_BODY_CENTER: f32 = 0.05;
+const CRAB_BODY_CENTER: f32 = 0.125;
 /// Local Y offset of the scaled model under the root so its body rests on the surface (the glb origin
 /// sits near the model's top). Calibrated by eye via devshot, scaled with `CRAB_RENDER_SCALE`.
-const CRAB_MODEL_Y: f32 = 0.11;
+const CRAB_MODEL_Y: f32 = 0.275;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
 /// unscaled. Sized to hug the *visible* crab (rendered span ≈0.19 → radius ≈0.1) so a bolt only draws
 /// blood on a real hit — a near-miss now passes cleanly instead of registering on an oversized hitbox.
 const CRAB_COLLIDER_R: f32 = 0.12;
 
-/// Reynolds separation: crabs within this centre distance push apart (≈1.2× the crab footprint, so
-/// they space out to roughly touching but *may* still overlap when crowded). Applied as a real
+/// Reynolds separation: crabs within this centre distance push apart, so the swarm actively spreads
+/// out instead of stacking (≈2× the crab footprint → they hold a visible gap). Applied as a real
 /// displacement (not just a steering nudge) so the spacing actually holds. Reynolds, "Steering
 /// Behaviors For Autonomous Characters", GDC 1999.
-const CRAB_SEP_RADIUS: f32 = 0.24;
-const CRAB_SEP_STRENGTH: f32 = 6.0;
+const CRAB_SEP_RADIUS: f32 = 0.45;
+const CRAB_SEP_STRENGTH: f32 = 7.0;
+
+/// Per-crab path jitter: a small side-to-side wander perpendicular to the travel direction, so crabs
+/// sharing one flow-field path don't converge into a single stacked line. Each crab's phase is offset
+/// by its `angle_bias`, so they weave out of sync and fan across the corridor.
+const CRAB_JITTER_STRENGTH: f32 = 0.6;
+const CRAB_JITTER_FREQ: f32 = 2.3;
 
 /// Scout recon tuning (the swarm's ~20% roaming recruiters; see [`Scout`] / `scout_sense_and_report`).
 /// Fraction of crabs tagged as scouts at spawn (deterministic by spatial hash, so newborns split the
@@ -450,7 +456,15 @@ fn spawn_crabs(
                         continue;
                     }
                     let center = dungeon.cell_center(cell);
-                    if let Some(&(face, normal)) = dungeon.wall_faces_near(center).first() {
+                    // Seat the nest only on a full-height wall. The camera-facing E/S edges are knee
+                    // walls (squashed to `CAMERA_WALL_FRACTION`; their inner faces point -X / -Z — see
+                    // `Dungeon::wall_faces_near`), and a dome seated mid-`WALL_HEIGHT` on one would
+                    // float in the cutaway gap above the short wall. Prefer W/N faces (normals +X/+Z);
+                    // a cell with only knee walls is skipped and the ring search moves on.
+                    let full_face = dungeon.wall_faces_near(center).into_iter().find(|&(_, n)| {
+                        !crate::dungeon::SHORT_CAMERA_WALLS || (n != Vec3::NEG_X && n != Vec3::NEG_Z)
+                    });
+                    if let Some((face, normal)) = full_face {
                         if crate::nest::spawn_nest(
                             &mut commands,
                             &mut nest_mats,
@@ -673,6 +687,7 @@ fn crab_locomotion(
         return;
     };
     let dt = time.delta_secs().min(MAX_FRAME_DT);
+    let now = time.elapsed_secs(); // for per-crab path jitter (see CRAB_JITTER_*)
 
     // Per-unit: entity, foot position, and forward (local -Z) — its gun only reaches the front.
     let unit_data: Vec<(Entity, Vec3, Vec3)> = units
@@ -838,8 +853,14 @@ fn crab_locomotion(
                     }
                     None => Vec3::ZERO,
                 };
-                let move_vec =
-                    tangent * CRAB_SPEED + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
+                // Weave side-to-side across the flow direction (on the surface plane) so crabs fan out
+                // over the path instead of stacking; each crab's phase is offset by its bias.
+                let side = tangent.cross(p.normal).normalize_or_zero();
+                let phase = now * CRAB_JITTER_FREQ + motion.angle_bias * std::f32::consts::TAU;
+                let jitter = side * (phase.sin() * CRAB_JITTER_STRENGTH);
+                let move_vec = tangent * CRAB_SPEED
+                    + jitter
+                    + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
                 let moving = move_vec.length_squared() > 1.0e-6;
                 motion.pos += move_vec * dt;
                 motion.pos = clamp_to_patch(motion.pos, p);
@@ -1442,11 +1463,17 @@ fn assign_meat_targets(
     mut crabs: Query<(Entity, &CrabMotion, &mut CrabCarry, &crate::ai::brain::ActiveBehavior), With<Crab>>,
     mut gibs: Query<(Entity, &Transform, &mut crate::gore::Carryable)>,
 ) {
-    // Drop targets whose gib no longer exists (e.g. capped out of the ring) so the crab re-forages.
+    // Drop targets whose gib no longer exists (e.g. capped out of the ring mid-haul) so the crab
+    // re-forages. Clearing `hauling` alongside `target` is essential: a lone `target = None` strands a
+    // carrier that was mid-haul, because `hauling` keeps `Fact::CarryingMeat` — and thus the `Carry`
+    // mode — latched with no chunk to carry. The brain then never leaves Carry, so it steers nowhere
+    // (`target` is None), `release_uncommitted_carriers` can't recover it (Carry counts as
+    // "committed"), and `carry_gibs` never touches it (the gib is gone) — the crab freezes forever.
     for (_, _, mut cc, _) in &mut crabs {
         if let Some(g) = cc.target {
             if gibs.get(g).is_err() {
                 cc.target = None;
+                cc.hauling = false;
             }
         }
     }
@@ -1718,7 +1745,20 @@ fn carry_gibs(
                         let crew = carry.carriers.len() as f32;
                         let speed = (CARRY_SPEED * crew / (carry.weight * WEIGHT_DRAG))
                             .clamp(CARRY_SPEED * 0.35, CARRY_SPEED);
-                        gtf.translation += dir.normalize_or_zero() * (speed * dt);
+                        // Wall-confine the haul step. The flow field already threads walkways, but the
+                        // `dir = horiz` straight-line fallback above (taken when the steer is ~0 right
+                        // next to the wall-mounted nest) has no wall backstop, so a hauled chunk could
+                        // be dragged through the wall/corner onto the void floor. Sweep the horizontal
+                        // move against room walls with the same `resolve_move` the Dynamic path uses in
+                        // `gore::confine_gibs`, so the chunk stops at the room-side wall face instead.
+                        let step = dir.normalize_or_zero() * (speed * dt);
+                        let resolved = dungeon.resolve_move(
+                            gtf.translation.with_y(0.0),
+                            Vec3::new(step.x, 0.0, step.z),
+                            Vec2::splat(crate::gore::GIB_CONFINE_HALF),
+                        );
+                        gtf.translation.x = resolved.x;
+                        gtf.translation.z = resolved.z;
                         gtf.translation.y = CARRY_HEIGHT; // ride at the crew's mouth height (Item #2)
                         lv.0 = Vec3::ZERO;
                         av.0 = Vec3::ZERO;

@@ -40,6 +40,7 @@ use bevy::time::Real;
 use avian3d::prelude::*;
 
 use crate::autogib::AutogibCache;
+use crate::util::hash_f32;
 use crate::blood_lens::BloodLens;
 use crate::dungeon::Dungeon;
 use crate::juice::{Hitstop, Trauma};
@@ -201,7 +202,7 @@ pub struct GibChunk;
 struct GibConfine(Vec3);
 
 /// Half-extent used when sweeping a gib against walls (thin — chunks are small debris).
-const GIB_CONFINE_HALF: f32 = 0.05;
+pub const GIB_CONFINE_HALF: f32 = 0.05;
 
 /// A meat chunk the crabs can scavenge and haul to their nest. `weight = density × mesh_volume`; a crab
 /// has a finite carry capacity, so a heavy chunk needs several crabs (Σ capacities ≥ weight) to lift it
@@ -539,15 +540,6 @@ fn load_settings_at_startup(mut settings: ResMut<GoreSettings>) {
     }
 }
 
-/// Deterministic hash → f32 in [0,1) from a u32 (PCG-style output mix). Used for gib randomness so
-/// we don't depend on a RNG resource (matches the shader's texture-free noise philosophy).
-fn hash_f32(x: u32) -> f32 {
-    let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
-    h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
-    h = (h >> 22) ^ h;
-    (h as f32) / (u32::MAX as f32)
-}
-
 /// Service every queued gore request: spray (all), pool (all), and gibs (unit crunch only).
 #[allow(clippy::too_many_arguments)]
 fn drain_gore(
@@ -584,18 +576,47 @@ fn drain_gore(
     let cam_pos = camera.translation();
 
     for ev in queue.0.drain(..) {
-        // Fog of war extends to death feedback (from the squad's POV): a kill the squad can't currently
-        // see leaves NO trace — no blood spray/pool/splatter, no gibs, no screen-shake/hitstop/lens.
-        // `FleshHit` is never gated (the laser only fires at fog-visible enemies), and squad deaths
-        // always happen in view, so a player's remains still spawn for the crabs to haul.
+        *seed = seed.wrapping_add(1);
+        let fseed = *seed as f32 * 0.618;
+
+        // --- SIM viscera (kills only): the unit's own mesh sliced into flying fragment gibs (raw-meat
+        //     cut faces, blaster flung off intact — see `autogib`) plus permanent meat chunks. The crab
+        //     forage→haul→breed economy consumes these, so they spawn for EVERY kill regardless of the
+        //     squad's line of sight. Gating a simulation resource on fog (a pure presentation concern)
+        //     would starve nests of food from off-screen kills — e.g. the smiley devouring a pile of
+        //     crabs, or being killed, in a room the squad isn't currently viewing.
+        if let GoreKind::UnitCrunch = ev.kind {
+            if let Some(g) = &ev.gib {
+                spawn_fragments(
+                    &mut commands,
+                    &cache,
+                    &assets,
+                    &mut std_mats,
+                    &settings,
+                    &mut gib_ring,
+                    g.source,
+                    g.origin,
+                    g.scale,
+                    ev.tint,
+                    *seed,
+                );
+            } else {
+                warn!("gore: UnitCrunch without a gib source; no fragment gibs spawned");
+            }
+        }
+        if let GoreKind::UnitCrunch | GoreKind::EnemySplat = ev.kind {
+            spawn_meat_chunks(&mut commands, &assets, &settings, &mut gib_ring, &volumes, ev.pos, *seed);
+        }
+
+        // --- Presentation feedback below is fog-gated: a kill the squad can't currently see leaves NO
+        //     visible trace — no blood spray/pool/splatter, no screen-shake/hitstop/lens (but the sim
+        //     viscera above still spawned). `FleshHit` is never gated (the laser only fires at
+        //     fog-visible enemies), and squad deaths always happen in view.
         if matches!(ev.kind, GoreKind::UnitCrunch | GoreKind::EnemySplat)
             && !fog.visible_at(dungeon.world_to_cell(ev.pos))
         {
             continue;
         }
-
-        *seed = seed.wrapping_add(1);
-        let fseed = *seed as f32 * 0.618;
 
         // Feel layer: kick the camera, freeze-frame, and splatter the lens — **on a kill only**.
         // Flesh hits get no shake (auto-fire lands many per second; shaking on each is nauseating).
@@ -667,31 +688,10 @@ fn drain_gore(
             .id();
         ring.0.push_back(pool_id);
 
-        // --- Autogib fragments (squad crunch only): the unit's own mesh sliced into flying chunks
-        //     with raw-meat cut faces, plus its blaster flung off intact (see `autogib`).
-        if let GoreKind::UnitCrunch = ev.kind {
-            if let Some(g) = &ev.gib {
-                spawn_fragments(
-                    &mut commands,
-                    &cache,
-                    &assets,
-                    &mut std_mats,
-                    &settings,
-                    &mut gib_ring,
-                    g.source,
-                    g.origin,
-                    g.scale,
-                    ev.tint,
-                    *seed,
-                );
-            } else {
-                warn!("gore: UnitCrunch without a gib source; no fragment gibs spawned");
-            }
-        }
-
-        // --- Meat chunks + wall splatter (any death): permanent viscera + blood on nearby walls.
+        // --- Wall splatter (any death): blood on the walls bounding the death cell. (The permanent
+        //     meat chunks and fragment gibs already spawned above, before the fog gate — they feed the
+        //     crab economy and so must not depend on line of sight.)
         if let GoreKind::UnitCrunch | GoreKind::EnemySplat = ev.kind {
-            spawn_meat_chunks(&mut commands, &assets, &settings, &mut gib_ring, &volumes, ev.pos, *seed);
             spawn_wall_splatters(
                 &mut commands,
                 &assets,
@@ -722,9 +722,21 @@ fn drain_gore(
 /// avian 0.7 syncs `Transform` → `Position` before each sim step, so writing `Transform` here holds.
 fn confine_gibs(
     dungeon: Res<Dungeon>,
-    mut gibs: Query<(&mut Transform, &mut LinearVelocity, &mut GibConfine), With<GibChunk>>,
+    mut gibs: Query<
+        (&mut Transform, &mut LinearVelocity, &mut GibConfine, Option<&Carryable>),
+        With<GibChunk>,
+    >,
 ) {
-    for (mut tf, mut lv, mut prev) in &mut gibs {
+    for (mut tf, mut lv, mut prev, carry) in &mut gibs {
+        // A chunk mid-haul is Kinematic and driven along the nest flow field by `crab::carry_gibs` —
+        // the sole authority over its transform then. Skip confinement so the two systems don't fight
+        // (confine would yank a hauled chunk back toward its last grounded XZ when the haul route skirts
+        // a wall). Keep `prev` synced to the live position so that, if the crew drops it back to a
+        // Dynamic body, confinement resumes from wherever the haul left it, not a stale pre-haul point.
+        if carry.is_some_and(|c| c.phase == CarryPhase::Hauling) {
+            prev.0 = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
+            continue;
+        }
         let moved = Vec3::new(tf.translation.x - prev.0.x, 0.0, tf.translation.z - prev.0.z);
         let resolved = dungeon.resolve_move(prev.0, moved, Vec2::splat(GIB_CONFINE_HALF));
         if (resolved.x - tf.translation.x).abs() > 1.0e-4
@@ -927,8 +939,22 @@ fn spawn_meat_chunks(
         // Carry weight = density × world mesh volume. The chunk mesh is the unit mesh scaled by 2*half,
         // so volume = unit_volume × (2*half)³. Falls back to the box volume until the GLB volumes load.
         let side = (2.0 * half).powi(3);
-        let unit_vol = volumes.unit.get(idx).copied().unwrap_or(1.0);
-        let weight = MEAT_DENSITY * unit_vol * side;
+        // Sanitize the mesh volume at the door: a degenerate GLB can compute a NaN/inf/≤0 volume, and
+        // `f32::clamp` passes a NaN operand straight through (NaN < min and NaN > max are both false),
+        // so an unguarded NaN would yield a NaN weight that no crew's `Σcapacity ≥ weight` check can
+        // ever satisfy — the chunk would litter the floor forever, denying the nest that food. Treat a
+        // non-finite / non-positive volume exactly like an un-loaded one: fall back to the unit box.
+        let unit_vol = volumes
+            .unit
+            .get(idx)
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0);
+        // Clamp to the same liftable band as fragments. Without it, an un-loaded `unit_vol` fallback
+        // (1.0 vs the real ~0.1-0.5, before the GLB volumes finish computing) or an oversized chunk
+        // yields a weight no crew can gather enough capacity to lift — the chunk then sits stuck until
+        // the crew times out and the food is wasted.
+        let weight = (MEAT_DENSITY * unit_vol * side).clamp(FRAG_WEIGHT_MIN, FRAG_WEIGHT_MAX);
         if crate::ai::diag::AI_DIAG {
             info!("gore: meat chunk idx={idx} half={half:.3} weight={weight:.2}");
         }
@@ -1198,15 +1224,41 @@ fn cap_blood_pools(mut commands: Commands, settings: Res<GoreSettings>, mut ring
     }
 }
 
-/// Keep the number of physics gib chunks bounded: recycle the oldest once over the cap. This is what
-/// stops the rigid-body count (and the pile of viscera) from growing without limit.
-fn cap_gib_chunks(mut commands: Commands, settings: Res<GoreSettings>, mut ring: ResMut<GibRing>) {
-    while ring.0.len() > settings.max_gibs {
-        if let Some(old) = ring.0.pop_front() {
-            // Only this system despawns gib chunks (otherwise permanent) and each id is popped once,
-            // so the entity is always still alive here.
-            commands.entity(old).despawn();
+/// Keep the number of physics gib chunks bounded: recycle the oldest *idle* chunk once over the cap.
+/// This is what stops the rigid-body count (and the pile of viscera) from growing without limit.
+///
+/// Class-aware recycling (cf. Weber, Mateas & Jhala, "A Particle Model for State Estimation in
+/// Real-Time Strategy Games", AIIDE 2011 — age particles out *by class*, never blindly, so in-use
+/// state isn't discarded). Off-screen kills legitimately push chunks into this shared ring (they feed
+/// nests the squad can't see — see the spawn note above), so the ring can overflow with fresh viscera
+/// while real haul jobs are in flight. A blind FIFO pop could then evict a meat chunk a crew is
+/// mid-haul to a nest (it vanishes from under the carriers, so the nest is never fed) or one a crew is
+/// gathering to lift. So protect chunks actively in the crab economy (`Hauling`/`Crewing`) and recycle
+/// only idle ones — `Resting`, or pure decoration with no `Carryable` (guns) — oldest first.
+fn cap_gib_chunks(
+    mut commands: Commands,
+    settings: Res<GoreSettings>,
+    mut ring: ResMut<GibRing>,
+    carry: Query<&Carryable>,
+) {
+    // Scan from the oldest end; skip in-economy chunks, despawn the first recyclable one, repeat. The
+    // ring is small (cap ~200) and this only does work when over cap, so the O(n) `remove` is cheap.
+    // If every over-cap chunk is in-flight (pathological), we briefly exceed the cap rather than yank a
+    // live haul — the excess drains as soon as those chunks deliver (`GibRing::consume`) or time out.
+    let mut idx = 0;
+    while ring.0.len() > settings.max_gibs && idx < ring.0.len() {
+        let e = ring.0[idx];
+        let in_economy = carry
+            .get(e)
+            .is_ok_and(|c| matches!(c.phase, CarryPhase::Hauling | CarryPhase::Crewing));
+        if in_economy {
+            idx += 1; // protected — try the next-oldest
+            continue;
         }
+        // Only this system despawns idle gib chunks (otherwise permanent) and each id appears once, so
+        // the entity is always still alive here. Don't advance `idx`: the next entry shifts into it.
+        ring.0.remove(idx);
+        commands.entity(e).despawn();
     }
 }
 
@@ -1220,12 +1272,32 @@ fn despawn_gore(mut commands: Commands, time: Res<Time>, fx: Query<(Entity, &Gor
 }
 
 fn read_settings() -> Option<GoreSettings> {
-    let text = std::fs::read_to_string(CONFIG_PATH).ok()?;
-    match ron::from_str(&text) {
-        Ok(settings) => Some(settings),
+    let text = match std::fs::read_to_string(CONFIG_PATH) {
+        Ok(text) => text,
+        // Optional override file; absence means "use the built-in defaults".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            warn!("gore: failed to parse {CONFIG_PATH}: {e}");
-            None
+            error!("gore: {CONFIG_PATH} exists but could not be read: {e}");
+            std::process::exit(1);
         }
+    };
+    let settings: GoreSettings = match ron::from_str(&text) {
+        Ok(settings) => settings,
+        // Fail loud on a malformed override rather than silently running on defaults — a designer's
+        // broken edit must not look like it simply "had no effect" (one-path rule).
+        Err(e) => {
+            error!("gore: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Validate at the door: `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which
+    // panics when `min > max`. Reject an inverted pair loudly here instead of crashing later mid-combat.
+    if settings.autogib_min_pieces > settings.autogib_max_pieces {
+        error!(
+            "gore: {CONFIG_PATH} has autogib_min_pieces ({}) > autogib_max_pieces ({}) — fix the RON",
+            settings.autogib_min_pieces, settings.autogib_max_pieces
+        );
+        std::process::exit(1);
     }
+    Some(settings)
 }

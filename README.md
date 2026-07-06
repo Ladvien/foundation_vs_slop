@@ -1,6 +1,6 @@
 
 ## Smiley
-
+Is cow like. It should have a saddish look on its face, until it sees a squad member.  To which it moves towards the closest squad member, with its eyes and smiling getting bigger the closer it is.  If the Smiley is in LoS of any squad member and its attacked, it looks scared and runs away.  But if no squad member is looking directly at it (raytracing area), _and_ its attacked, it looks angry, then switches to a different shader, still in a sphere shaped, but shoots a lighting bolt at the enemy, instantly killing it, then switches back to its angry face relaxing, if that was the last enemy.  The idea is to give an idea of how comisically powerful this entity is, but it is trying to conceal this from you.  Like, it's so lonely, it wants to try to keep you around, even though it could kill you instatly.  Like it knows how cognitohazardous it is to you and trying to save you from that.
 
 ## Crabs
 

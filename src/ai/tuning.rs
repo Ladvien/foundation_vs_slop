@@ -1,6 +1,7 @@
 //! Hot-tunable numeric knobs for the AI layer, loaded from `ai_tuning.ron` at startup — the exact
-//! pattern `vhs.rs` uses (`load_config`): read the file if present, swap the resource on success,
-//! `warn!` and keep defaults on failure, never write it back (one path, no fallback file).
+//! pattern `vhs.rs` uses (`read_config`): if the file is absent keep the built-in defaults; if it is
+//! present, swap the resource on success and **fail loud** (`error!` + exit) on an unreadable or
+//! malformed file rather than silently running on defaults (one path, no fallback file).
 //!
 //! Structure lives in code (behaviours, drives, channels are type-safe Rust); only the *numbers* live
 //! here, so a designer can retune emergence — evaporation rates, curve steepness, drive gains — and
@@ -115,16 +116,30 @@ impl Default for AiTuning {
     }
 }
 
-/// Load `ai_tuning.ron` if present; otherwise keep defaults. Mirrors `vhs::load_config`.
+/// Load `ai_tuning.ron` if present (else keep the built-in defaults); a present-but-broken file fails
+/// loud rather than degrading to defaults. Mirrors `vhs::read_config`.
 pub fn load_tuning(mut tuning: ResMut<AiTuning>) {
-    let Ok(text) = std::fs::read_to_string(TUNING_PATH) else {
-        return; // no file → keep defaults (one path, nothing written)
+    let text = match std::fs::read_to_string(TUNING_PATH) {
+        Ok(text) => text,
+        // The tuning file is an optional override; its absence just means "use the built-in defaults".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        // Present but unreadable is a real error — fail loud rather than silently run on defaults.
+        Err(e) => {
+            error!("ai: {TUNING_PATH} exists but could not be read: {e}");
+            std::process::exit(1);
+        }
     };
     match ron::from_str::<AiTuning>(&text) {
         Ok(loaded) => {
             info!("ai: loaded {TUNING_PATH}");
             *tuning = loaded;
         }
-        Err(e) => warn!("ai: failed to parse {TUNING_PATH}, keeping defaults: {e}"),
+        // Fail loud: a malformed override falling back to defaults is the exact "degraded substitute"
+        // the one-path rule forbids — a designer's broken retune would look like it simply had no
+        // effect. Halt so the RON error is impossible to miss.
+        Err(e) => {
+            error!("ai: {TUNING_PATH} is present but failed to parse — fix the RON: {e}");
+            std::process::exit(1);
+        }
     }
 }

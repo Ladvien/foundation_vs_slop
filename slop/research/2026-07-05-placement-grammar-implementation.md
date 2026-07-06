@@ -8,6 +8,35 @@ Scope decision (2026-07-05): **all Stages 0–5**, built as sequential increment
 Dependency decision: **add `rand_chacha` + `bevy_rand` + `rayon`** (portable reproducible RNG,
 ECS-safe randomness, parallel per-region MCMC).
 
+## Build status — Stages 0–5 COMPLETE (2026-07-05)
+
+All six stages implemented and verified. `cargo check`/`build` clean (zero warnings); **28 tests pass**
+including the three falsifiable extensibility acceptance tests (`src/placement/acceptance.rs`). Verified
+visually via `devshot` screenshots: region markers (S0), per-region WFC tiling (S1), a furnished frame
+of doors + scattered props (S2), Metropolis-arranged furniture against walls (S3), and one-door-per-room
+cardinality (S4).
+
+Module map as built: `src/rng.rs` (unified ChaCha8), `src/placement/{ir,solver,manifest,furnish}.rs`,
+`src/placement/solvers/{wfc,metropolis,constraint}.rs`, `src/placement/acceptance.rs`. Data:
+`assets/placement/{furniture,furniture_kenney,metropolis}.ron`. Assets: 112 FBX→GLB conversions under
+`assets/low_poly_furniture/glb/` (Blender headless, scale 0.2 → metres, floor-seated).
+
+**Known follow-ups (not part of the placement-grammar stages, deferred):**
+- **Fog integration** (confirmed deferred by the user — leaving furniture always-visible aids
+  debugging until the feature is done). Placed furniture is not fog-gated, so the whole furnished
+  dungeon shows regardless of exploration. Concrete fix: in `furnish.rs`'s spawn, add
+  `crate::dungeon::Tile { cell }` (cell = `dungeon.world_to_cell(pos)`) and `Visibility::Hidden` to
+  each furniture entity. `fog::update_los` indexes every `Tile`-tagged entity by cell in `cell_tiles`
+  and flips it `Hidden → Visible` on first sighting, so furniture then reveals exactly like its cell's
+  floor/walls. Furniture has no `StandardMaterial` root, so `apply_floor_fog`'s dimming query skips it
+  (reveal only, no material swap) — which is the desired behavior.
+- **Colliders** — furniture spawns as visual `WorldAssetRoot` only; add Avian static cuboid colliders
+  (footprint × height) so gib chunks bounce off furniture.
+- **`bevy_rand`** is a dependency but ECS-side randomness still uses direct seeding; adopt `bevy_rand`
+  resources if any placement RNG moves into a per-frame ECS system.
+- **One-door-per-room** (`DOORS_PER_ROOM = 1`) is the cardinality *demonstration*; raise it for a
+  denser door aesthetic if desired.
+
 ---
 
 ## 0. Ground truth — what the repo looks like today

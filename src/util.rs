@@ -30,3 +30,16 @@ pub fn hash01_u32(seed: u32) -> f32 {
     h ^= h >> 15;
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
+
+/// Deterministic hash → f32 in `[0, 1)` from a `u32` (PCG-style output mix). The canonical stateless
+/// draw for per-spawn effect randomness that must not depend on a RNG *resource* — matching the
+/// shaders' texture-free noise philosophy, reproducible per seed. Callers mix their own key into `x`
+/// (a spawn counter, a fragment index, a salt). Distinct from [`hash01_u32`], which is a different
+/// avalanche kept for position-independent nest-spawn draws.
+#[inline]
+pub fn hash_f32(x: u32) -> f32 {
+    let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
+    h = (h >> 22) ^ h;
+    (h as f32) / (u32::MAX as f32)
+}

@@ -80,17 +80,17 @@ pub struct GunModel;
 #[derive(Component)]
 struct Recolored;
 
-/// Scale the figurine so a unit stands a bit taller than the 1.0 walls and reads at the enemies'
-/// scale (0.7 × 1.8 ≈ 1.3, vs the smiley's ~1.26 capsule). Uniform, so the carried gun and the
-/// autogib fragments stay proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the
-/// visual on purpose — see below.
-const FIGURINE_SCALE: f32 = 1.8;
-/// Square collision half-extent. Sized so a unit (0.54 wide) fits the narrowest walkable channel:
-/// a corridor cell walled on both sides has only `TILE - 2·WALL_THICKNESS = 0.6` of clear width, so
-/// a wider box would physically wedge in 1-wide passages regardless of steering. Deliberately a
-/// touch under the figurine's visual radius — a unit reaching its goal reliably matters more than
-/// pixel-exact wall contact.
-const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.27);
+/// Scale the figurine to a ~6 ft squad member: the base mesh is 0.7 m tall, so 0.7 × 2.6 ≈ 1.82 m —
+/// about three-quarters of the 2.4 m (~8 ft) ceiling, a believable human proportion. Uniform, so the
+/// carried gun and the autogib fragments stay proportional. Collision (`UNIT_HALF_EXTENTS`) stays
+/// narrower than the visual on purpose — see below.
+const FIGURINE_SCALE: f32 = 2.6;
+/// Square collision half-extent. Sized well under the narrowest walkable channel so units don't
+/// wedge/catch in 1-tile doorways: a doorway walled on both sides has `TILE - 2·WALL_THICKNESS = 0.6`
+/// of clear width, and 0.44-wide unit leaves ~0.08 m of slack per side to slide through cleanly. Well
+/// under the figurine's visual radius on purpose — reaching the goal reliably beats pixel-exact
+/// contact, and the visual is far wider anyway.
+const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.22);
 /// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
 /// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
 pub const UNIT_SPEED: f32 = 6.0;
@@ -284,29 +284,35 @@ fn recolor_units(
     is_gun: Query<(), With<GunModel>>,
 ) {
     for (unit, outfit) in &units {
-        let material = materials.add(StandardMaterial {
-            base_color: outfit.0,
-            perceptual_roughness: 0.7,
-            ..default()
-        });
-        let mut recolored_any = false;
         let mut stack: Vec<Entity> = match children.get(unit) {
             Ok(c) => c.iter().collect(),
             Err(_) => continue,
         };
+        // Mint the outfit material lazily — only once we've actually found a mesh to recolor. Creating
+        // it up-front orphaned a fresh `StandardMaterial` on every frame the scene was still streaming
+        // (the guard above `continue`s) or had spawned meshes but no material yet, churning one throwaway
+        // asset per unit per frame across the whole async-load window. `material.is_some()` also doubles
+        // as the "did we recolor anything?" flag that gates the `Recolored` tag.
+        let mut material: Option<Handle<StandardMaterial>> = None;
         while let Some(e) = stack.pop() {
             if is_gun.get(e).is_ok() {
                 continue; // don't recurse into the gun sub-model
             }
             if has_material.get(e).is_ok() {
-                commands.entity(e).insert(MeshMaterial3d(material.clone()));
-                recolored_any = true;
+                let handle = material.get_or_insert_with(|| {
+                    materials.add(StandardMaterial {
+                        base_color: outfit.0,
+                        perceptual_roughness: 0.7,
+                        ..default()
+                    })
+                });
+                commands.entity(e).insert(MeshMaterial3d(handle.clone()));
             }
             if let Ok(ch) = children.get(e) {
                 stack.extend(ch.iter());
             }
         }
-        if recolored_any {
+        if material.is_some() {
             commands.entity(unit).insert(Recolored);
         }
     }

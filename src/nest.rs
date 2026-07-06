@@ -24,13 +24,16 @@ use crate::flowfield::FlowField;
 use crate::health::Health;
 
 /// Radius of the hemisphere rim across the wall face (its tangent axes). Sized so the rim
-/// (`NEST_WALL_HEIGHT ± NEST_RADIUS`) stays within the 1-unit wall and cell face.
+/// (`NEST_WALL_HEIGHT ± NEST_RADIUS`) stays within the wall and cell face.
 const NEST_RADIUS: f32 = 0.4;
 /// Depth the dome protrudes along the wall's normal into the room (the pimple's height). A shade under
 /// the radius → a rounded, slightly-shallow bulge. Nothing sits behind the wall face (hemisphere).
 const NEST_DEPTH: f32 = 0.38;
-/// Height up the (1-unit) wall to seat the dome centre (its flat rim's centre on the face).
-const NEST_WALL_HEIGHT: f32 = 0.5;
+/// Height up the wall to seat the dome centre (its flat rim's centre on the face). Mid-wall, so it
+/// tracks the ceiling height rather than a hardcoded value. Nests are seated only on full-height walls
+/// (the crab placement pass skips the camera-facing knee walls — see `crab.rs`), so mid-`WALL_HEIGHT`
+/// always lands on solid wall and the dome reads as seated, never floating above a short E/S wall.
+const NEST_WALL_HEIGHT: f32 = crate::dungeon::WALL_HEIGHT * 0.5;
 /// Nest hit points. Sized so a focused squad razes it in a few seconds at the current nerfed
 /// `LASER_DAMAGE` (see `laser.rs`); raise alongside laser power for a longer siege.
 const NEST_HP: f32 = 60.0;

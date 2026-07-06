@@ -32,8 +32,9 @@
 //! walking whatever scene a unit loads (skipping the gun), sub-meshes with missing normals/UVs are
 //! synthesized, arbitrary/non-watertight input is welded and any unclosed cap dropped (never a
 //! panic), fragment count/size scale off the mesh bounding box, and the cache is keyed by the source
-//! asset id so swapping the GLB needs zero code change. The skinned path is reserved (see
-//! [`BakePose`]) but not built — our figurine is static.
+//! asset id so swapping the GLB needs zero code change. The skinned path (snapshot the death pose
+//! before fracturing, since bind-pose geometry isn't what the player sees) is not built — our
+//! figurine is static.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
@@ -44,6 +45,7 @@ use bevy::prelude::*;
 
 use crate::gore::GoreSettings;
 use crate::squad::{GunModel, Unit};
+use crate::util::hash_f32;
 
 /// Classification tolerance: a vertex within `EPS` of the cut plane is treated as lying *on* it, so
 /// slicing near-coincident geometry doesn't spawn zero-area slivers. Positions are in figurine-local
@@ -132,15 +134,6 @@ impl Soup {
         let (mn, mx) = self.bbox();
         ((mx - mn) * 0.5).max_element()
     }
-}
-
-/// Deterministic hash → f32 in `[0,1)` (PCG-style output mix), matching the texture-free noise
-/// philosophy in `gore`/`impact_fx` — no RNG-crate dependency, reproducible fracture per seed.
-fn hash_f32(x: u32) -> f32 {
-    let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
-    h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277_803_737);
-    h = (h >> 22) ^ h;
-    (h as f32) / (u32::MAX as f32)
 }
 
 /// Signed distance from `p` to the plane (positive on the `+normal` side).
@@ -462,6 +455,35 @@ fn fracture(src: Soup, target: usize, min_extent: f32, seed: u32, impact_dir: Op
 // Bevy Mesh <-> Soup adapters (the only Bevy-typed geometry fns).
 // ---------------------------------------------------------------------------------------------
 
+/// Decode a mesh's index buffer into a triangle list, handling all encodings: `U16`, `U32`, and
+/// non-indexed (consecutive triples). `vertex_count` drives only the non-indexed case, whose
+/// triangles are `[0,1,2], [3,4,5], …` over the position array. Callers bounds-check the returned
+/// indices against their own vertex data before dereferencing.
+fn triangle_indices(mesh: &Mesh, vertex_count: usize) -> Vec<[u32; 3]> {
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    match mesh.indices() {
+        Some(Indices::U16(v)) => {
+            for c in v.chunks_exact(3) {
+                tris.push([c[0] as u32, c[1] as u32, c[2] as u32]);
+            }
+        }
+        Some(Indices::U32(v)) => {
+            for c in v.chunks_exact(3) {
+                tris.push([c[0], c[1], c[2]]);
+            }
+        }
+        None => {
+            let n = vertex_count as u32;
+            let mut i = 0;
+            while i + 3 <= n {
+                tris.push([i, i + 1, i + 2]);
+                i += 3;
+            }
+        }
+    }
+    tris
+}
+
 /// Append one loaded mesh's triangles into `soup`, transformed by `xform` (the sub-mesh's transform
 /// relative to the character root). Robust to arbitrary layouts: missing `NORMAL` → synthesized flat
 /// normals; missing `UV_0` → zero-filled; `U16`/`U32`/non-indexed all handled. Returns `false`
@@ -478,27 +500,7 @@ pub(crate) fn mesh_signed_volume(mesh: &Mesh) -> Option<f32> {
         return None;
     }
     let p: Vec<Vec3> = positions.iter().map(|v| Vec3::from_array(*v)).collect();
-    let mut tris: Vec<[u32; 3]> = Vec::new();
-    match mesh.indices() {
-        Some(Indices::U16(v)) => {
-            for c in v.chunks_exact(3) {
-                tris.push([c[0] as u32, c[1] as u32, c[2] as u32]);
-            }
-        }
-        Some(Indices::U32(v)) => {
-            for c in v.chunks_exact(3) {
-                tris.push([c[0], c[1], c[2]]);
-            }
-        }
-        None => {
-            let n = p.len() as u32;
-            let mut i = 0;
-            while i + 3 <= n {
-                tris.push([i, i + 1, i + 2]);
-                i += 3;
-            }
-        }
-    }
+    let tris = triangle_indices(mesh, p.len());
     let mut vol = 0.0f32;
     for t in &tris {
         let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
@@ -545,27 +547,7 @@ fn append_mesh(soup: &mut Soup, mesh: &Mesh, xform: Mat4, interior: bool) -> boo
     };
 
     // Collect the triangle index list (handling all index encodings).
-    let mut tris: Vec<[u32; 3]> = Vec::new();
-    match mesh.indices() {
-        Some(Indices::U16(v)) => {
-            for c in v.chunks_exact(3) {
-                tris.push([c[0] as u32, c[1] as u32, c[2] as u32]);
-            }
-        }
-        Some(Indices::U32(v)) => {
-            for c in v.chunks_exact(3) {
-                tris.push([c[0], c[1], c[2]]);
-            }
-        }
-        None => {
-            let n = tp.len() as u32;
-            let mut i = 0;
-            while i + 3 <= n {
-                tris.push([i, i + 1, i + 2]);
-                i += 3;
-            }
-        }
-    }
+    let tris = triangle_indices(mesh, tp.len());
 
     if !have_normals {
         // Area-weighted face normals accumulated onto shared vertices, then renormalized.
@@ -696,19 +678,6 @@ impl AutogibCache {
     }
 }
 
-/// How a source mesh is baked into fracture-ready geometry.
-///
-/// Only [`BakePose::Static`] is implemented: the figurine is a rigid mesh, so baking is just applying
-/// each sub-mesh's local transform. A future `Skinned` variant would first snapshot the mesh at its
-/// **death pose** (linear-blend-skinning the bind geometry through the joint matrices) *before*
-/// fracturing — bind-pose geometry is not the shape the player sees, so split planes and caps must be
-/// computed against the posed surface. See Wang, Pratscher & Zhang, "Rotational Regression for
-/// Articulated Character Skinning" (SIGGRAPH 2007). The skinned `dimensional_crab.glb`
-/// (JOINTS_0/WEIGHTS_0) would use that branch.
-enum BakePose {
-    Static,
-}
-
 /// Turn a fragment soup into cached meshes recentered to its bounding-box center (so a box collider
 /// centered on the spawned body matches the geometry). `None` if it has no drawable triangles.
 fn build_fragment(soup: &Soup, meshes: &mut Assets<Mesh>) -> Option<Fragment> {
@@ -760,7 +729,6 @@ fn bake_autogib(
     mat_q: Query<&MeshMaterial3d<StandardMaterial>>,
     is_gun: Query<(), With<GunModel>>,
 ) {
-    let pose = BakePose::Static;
     for (root, children) in &units {
         let source = root.0.id();
         if cache.baked.contains(&source) {
@@ -781,18 +749,16 @@ fn bake_autogib(
         while let Some((e, mat, in_gun)) = stack.pop() {
             if let Ok(mesh3d) = mesh_q.get(e) {
                 match meshes.get(&mesh3d.0) {
-                    Some(m) => match pose {
-                        BakePose::Static => {
-                            if in_gun {
-                                append_mesh(&mut gun, m, mat, false);
-                                if gun_material.is_none() {
-                                    gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
-                                }
-                            } else {
-                                append_mesh(&mut body, m, mat, false);
+                    Some(m) => {
+                        if in_gun {
+                            append_mesh(&mut gun, m, mat, false);
+                            if gun_material.is_none() {
+                                gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
                             }
+                        } else {
+                            append_mesh(&mut body, m, mat, false);
                         }
-                    },
+                    }
                     None => all_loaded = false, // sub-mesh still streaming
                 }
             }

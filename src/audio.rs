@@ -25,6 +25,7 @@ use crate::dungeon::Dungeon;
 use crate::enemy::{Enemy, Hostile};
 use crate::fog::FogGrid;
 use crate::squad::{Unit, Velocity};
+use crate::util::{next_u32, rand01};
 
 /// Looping-bed volumes and the mixing headroom for one-shots. Ambience and footsteps sit low so
 /// the foreground (weapons, gore, growls) reads clearly over them.
@@ -358,18 +359,6 @@ fn looped(vol: f32) -> PlaybackSettings {
     let mut s = PlaybackSettings::LOOP;
     s.volume = Volume::Linear(vol);
     s
-}
-
-/// Cheap LCG (Numerical Recipes constants), matching the project's hand-rolled RNG in `laser.rs` —
-/// no RNG crate. Full-period from any seed, including the `Local<u32>` default of 0.
-fn next_u32(state: &mut u32) -> u32 {
-    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-    *state
-}
-
-/// A float in [0, 1) from the LCG.
-fn rand01(state: &mut u32) -> f32 {
-    (next_u32(state) >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// A playback-speed multiplier of `1.0 ± amount`, so repeated one-shots don't sound identical.

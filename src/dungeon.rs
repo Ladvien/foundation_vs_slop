@@ -8,13 +8,16 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 use crate::occlusion::WallMaterials;
-use crate::wfc::{self, CellKind, Rng, E, N, S, W};
+use crate::placement::ir::{Opening, PropertyBag, Rect2, Region, RegionId};
+use crate::rng::{seeded, DetRng};
+use crate::wfc::{self, CellKind, E, N, S, W};
 
 /// World size of one fine grid cell.
 pub const TILE_SIZE: f32 = 1.0;
-/// Half the wall cuboid's thickness (walls are 0.2 thick) — used to inset walls flush
-/// with the tile edge.
-const WALL_HALF_THICKNESS: f32 = 0.1;
+/// Half the wall cuboid's thickness — used to inset walls flush with the tile edge. Thin (0.14 total)
+/// so a 1-tile doorway has `TILE - 2·WALL_THICKNESS = 0.72` of clear width: enough for a 0.44-wide
+/// unit to pass without wedging (the earlier 0.2 walls left only 0.6 and units caught in doorways).
+const WALL_HALF_THICKNESS: f32 = 0.07;
 /// Full wall thickness. Walls sit flush inside the tile edge, so a walled cell's
 /// walkable area is inset by this much — the collision uses it as the barrier plane.
 pub const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
@@ -23,16 +26,33 @@ pub const WALL_THICKNESS: f32 = WALL_HALF_THICKNESS * 2.0;
 const MAX_STEP: f32 = WALL_THICKNESS * 0.5;
 /// Wall height (full, for the enclosed Backrooms look). Public so the crab surface-nav graph
 /// (`surface_nav`) knows the vertical extent of each climbable wall face (Y 0→`WALL_HEIGHT`).
-pub const WALL_HEIGHT: f32 = 1.0;
+/// ~8 ft (2.4 m) at 1 unit = 1 m, so a ~6 ft squad member and real-scale furniture read correctly.
+pub const WALL_HEIGHT: f32 = 2.4;
+/// Clear height of a doorway opening (top of the door / bottom of the lintel). Below the ~2.05 m door
+/// so the door tucks under the header with no gap; the wall runs continuous above it (`WALL_HEIGHT`).
+const DOORWAY_HEIGHT: f32 = 2.0;
 
-// Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles.
-// 9×9 slots → a compact dungeon (63×63 tiles) so the squad runs into enemies quickly.
-const COARSE_W: usize = 9;
-const COARSE_H: usize = 9;
-const BLOCK: usize = 7;
-/// Room side length range (kept ≤ BLOCK-2 so every room has a ≥1-tile rock margin).
-const ROOM_MIN: usize = 4;
-const ROOM_MAX: usize = 5;
+/// Camera-facing (SE/SW — i.e. the E and S edge) walls render at this fraction of `WALL_HEIGHT`: a low
+/// knee wall you always see over into every room, regardless of where the squad is. Their doors and
+/// headers are dropped too (nothing to frame on a knee wall). **To revert:** set this to `1.0` — walls
+/// become full height again and the per-room `occlusion::room_cutaway` takes over instead.
+pub const CAMERA_WALL_FRACTION: f32 = 0.25;
+
+/// True when the camera-facing-wall knee-wall mode is active (any fraction below full height).
+pub const SHORT_CAMERA_WALLS: bool = CAMERA_WALL_FRACTION < 1.0;
+
+// Coarse WFC operates on room slots; each expands to a BLOCK×BLOCK patch of fine tiles. At 1 tile =
+// 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. The BLOCK is
+// vastly larger than the rooms so each floats in deep negative space — 6–14 m rooms inside 32 m blocks
+// leave ~9–13 m of void on every side, and the 2 m hallways between block centres stretch into long,
+// empty liminal runs. 6×6 → a sprawling ~190 m level of well-separated rooms adrift in emptiness.
+const COARSE_W: usize = 6;
+const COARSE_H: usize = 6;
+const BLOCK: usize = 32;
+/// Room side length range in metres (kept ≤ BLOCK-2 so every room has a rock margin). The wide spread
+/// gives Backrooms variety — small offices next to large open rooms, all with empty floor to spare.
+const ROOM_MIN: usize = 6;
+const ROOM_MAX: usize = 14;
 
 const DUNGEON_SEED: u64 = 0x5C0_9191; // nods to SCP-9191, the slop generator
 const MAX_ATTEMPTS: u32 = 20;
@@ -70,6 +90,10 @@ pub struct Dungeon {
     pub height: usize,
     walkable: Vec<bool>,
     pub spawn: IVec2,
+    /// One bounded region per kept room slot — the addressable containers the placement grammar
+    /// furnishes (see `crate::placement`). Carries each room's rect, boundary openings, and the
+    /// corridor-adjacency graph, so cross-room rules are first-class.
+    pub regions: Vec<Region>,
 }
 
 pub struct DungeonPlugin;
@@ -94,10 +118,16 @@ impl Dungeon {
         let width = COARSE_W * BLOCK;
         let height = COARSE_H * BLOCK;
         let mut walkable = vec![false; width * height];
-        let mut rng = Rng::new(seed ^ 0xC0FFEE);
+        let mut rng = seeded(seed ^ 0xC0FFEE);
 
         let block_center = |cx: usize, cy: usize| (cx * BLOCK + BLOCK / 2, cy * BLOCK + BLOCK / 2);
         let coarse_open = |cx: usize, cy: usize, dir: usize| coarse.cells[cy * COARSE_W + cx].open[dir];
+
+        // One placement Region per kept slot. `slot_region[slot]` maps a coarse slot to its region id
+        // so the adjacency/opening pass below can link neighbours. Rects are captured here (in the same
+        // RNG-consuming loop) so region geometry stays in lockstep with the carved rooms.
+        let mut regions: Vec<Region> = Vec::new();
+        let mut slot_region: Vec<Option<u32>> = vec![None; COARSE_W * COARSE_H];
 
         // Carve a centred room in every kept slot's block.
         for cy in 0..COARSE_H {
@@ -114,6 +144,21 @@ impl Dungeon {
                         walkable[y * width + x] = true;
                     }
                 }
+
+                let id = regions.len() as u32;
+                slot_region[cy * COARSE_W + cx] = Some(id);
+                regions.push(Region {
+                    id,
+                    rect: Rect2 {
+                        min: [ox as i32, oy as i32],
+                        max: [(ox + rw) as i32, (oy + rh) as i32],
+                    },
+                    openings: Vec::new(),
+                    adjacency: Vec::new(),
+                    props: PropertyBag {
+                        tags: vec!["room".to_string()],
+                    },
+                });
             }
         }
 
@@ -142,6 +187,69 @@ impl Dungeon {
             }
         }
 
+        // Link regions: for every corridor leaving a kept slot, record an adjacency edge and the
+        // interior floor cell where the corridor meets the room wall (the region's opening). Edge
+        // links are symmetric under the WFC socket rule (a slot's `open[dir]` agrees with its
+        // neighbour's `open[opposite]`), so scanning all four directions finds every opening once.
+        for cy in 0..COARSE_H {
+            for cx in 0..COARSE_W {
+                let Some(id) = slot_region[cy * COARSE_W + cx] else {
+                    continue;
+                };
+                let (bx, by) = block_center(cx, cy);
+                let rect = regions[id as usize].rect;
+                for dir in [N, E, S, W] {
+                    let (nx, ny) = match dir {
+                        N => (cx as i32, cy as i32 - 1),
+                        E => (cx as i32 + 1, cy as i32),
+                        S => (cx as i32, cy as i32 + 1),
+                        W => (cx as i32 - 1, cy as i32),
+                        _ => unreachable!(),
+                    };
+                    if nx < 0 || ny < 0 || nx >= COARSE_W as i32 || ny >= COARSE_H as i32 {
+                        continue;
+                    }
+                    if !coarse_open(cx, cy, dir) {
+                        continue;
+                    }
+                    let Some(nid) = slot_region[ny as usize * COARSE_W + nx as usize] else {
+                        continue;
+                    };
+                    let cell = match dir {
+                        N => [bx as i32, rect.min[1]],
+                        S => [bx as i32, rect.max[1] - 1],
+                        E => [rect.max[0] - 1, by as i32],
+                        W => [rect.min[0], by as i32],
+                        _ => unreachable!(),
+                    };
+                    let region = &mut regions[id as usize];
+                    region.adjacency.push(nid);
+                    region.openings.push(Opening { dir, cell });
+
+                    // Neck the 2-wide corridor down to a single-tile doorway at the room wall, so one
+                    // door leaf fills the gap (no open strip beside it). The carve makes corridors
+                    // 2-wide along `by`/`by+1` (E/W) or `bx`/`bx+1` (N/S); the doorway keeps the
+                    // block-centre tile, so we rock out the corridor's *other* boundary cell. Rocking
+                    // it (not just drawing a wall) keeps walkability, collision, and flow fields
+                    // consistent — the doorway `by`/`bx` tile stays open, so the room stays connected.
+                    let neck = match dir {
+                        E => IVec2::new(cell[0] + 1, cell[1] + 1),
+                        W => IVec2::new(cell[0] - 1, cell[1] + 1),
+                        N => IVec2::new(cell[0] + 1, cell[1] - 1),
+                        S => IVec2::new(cell[0] + 1, cell[1] + 1),
+                        _ => unreachable!(),
+                    };
+                    if neck.x >= 0
+                        && neck.y >= 0
+                        && (neck.x as usize) < width
+                        && (neck.y as usize) < height
+                    {
+                        walkable[neck.y as usize * width + neck.x as usize] = false;
+                    }
+                }
+            }
+        }
+
         // Spawn at the block centre of the kept room nearest the coarse centre.
         let center = Vec2::new(COARSE_W as f32 / 2.0, COARSE_H as f32 / 2.0);
         let spawn_slot = (0..COARSE_W * COARSE_H)
@@ -162,6 +270,7 @@ impl Dungeon {
             height,
             walkable,
             spawn: IVec2::new(sx as i32, sy as i32),
+            regions,
         }
     }
 
@@ -273,6 +382,15 @@ impl Dungeon {
 
     pub fn cell_center(&self, c: IVec2) -> Vec3 {
         Vec3::new(c.x as f32 * TILE_SIZE, 0.0, c.y as f32 * TILE_SIZE)
+    }
+
+    /// The region (room) whose rect contains fine-grid cell `c`, if any. Corridor cells lie in no
+    /// region. Used by the room-based wall cutaway and furniture visibility gating.
+    pub fn region_at(&self, c: IVec2) -> Option<RegionId> {
+        self.regions
+            .iter()
+            .find(|r| r.rect.contains([c.x, c.y]))
+            .map(|r| r.id)
     }
 
     pub fn world_to_cell(&self, pos: Vec3) -> IVec2 {
@@ -501,6 +619,14 @@ fn straight_wall(c: IVec2, dir: usize) -> Transform {
     }
 }
 
+/// Transform for a doorway lintel: a straight wall on edge `dir` of cell `c`, but raised so its
+/// bottom sits at [`DOORWAY_HEIGHT`] and it fills up to the ceiling — the header above a door.
+fn header_wall(c: IVec2, dir: usize) -> Transform {
+    let base = straight_wall(c, dir);
+    let y = DOORWAY_HEIGHT + (WALL_HEIGHT - DOORWAY_HEIGHT) * 0.5;
+    base.with_translation(base.translation.with_y(y))
+}
+
 /// Transforms for the two arms of a convex corner: a full-length arm plus a shortened arm
 /// that stops at the full arm's inner face, so the two cuboids meet without overlapping
 /// (no coincident tops → no z-fighting on textured corners). Built as an NE template, then
@@ -590,22 +716,18 @@ fn spawn_tiles(
         metallic: 0.0,
         ..default()
     });
-    // Ghosted twin of `wall_mat`, used by the cutaway for walls between the camera and the hero
-    // (see `occlusion`). Only two wall material handles ever exist, so the cutaway swaps between
-    // them per wall without cloning a material per entity. Alpha-to-coverage gives a *dithered*
-    // (screen-door) transparency via MSAA sample coverage — no depth-sort artifacts, and the
-    // hero reads through the stipple holes.
-    let wall_mat_faded = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.5),
-        base_color_texture: Some(assets.load(WALL_TEXTURE)),
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-        alpha_mode: AlphaMode::AlphaToCoverage,
+    // Fully transparent twin of `wall_mat`, used by the room cutaway to "turn off" the camera-facing
+    // walls of a room the squad occupies (see `occlusion`). Only two wall material handles ever exist,
+    // so the cutaway swaps between them per wall without cloning a material per entity. Alpha 0 with a
+    // blend mode draws nothing and writes no depth, so the squad reads clearly through the gap.
+    let wall_mat_invisible = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
+        alpha_mode: AlphaMode::Blend,
         ..default()
     });
     commands.insert_resource(WallMaterials {
         opaque: wall_mat.clone(),
-        faded: wall_mat_faded,
+        invisible: wall_mat_invisible,
     });
     let floor_mat = materials.add(StandardMaterial {
         base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
@@ -647,8 +769,20 @@ fn spawn_tiles(
     let mut spawn_tile = |cell: IVec2,
                           mesh: Handle<Mesh>,
                           material: Handle<StandardMaterial>,
-                          transform: Transform,
+                          mut transform: Transform,
                           wall_size: Option<Vec3>| {
+        // Knee-wall mode: any wall on the camera-facing (E/S) edge is squashed vertically to
+        // `CAMERA_WALL_FRACTION` and reseated on the floor, so the camera sees over it. Classified by
+        // the wall's offset from its cell centre (+X ⇒ E edge, +Z ⇒ S edge); floors sit at the centre
+        // and are never squashed. Scaling the transform scales its collider to match.
+        if SHORT_CAMERA_WALLS && wall_size.is_some() {
+            let cx = cell.x as f32 * TILE_SIZE;
+            let cz = cell.y as f32 * TILE_SIZE;
+            if transform.translation.x - cx > 0.1 || transform.translation.z - cz > 0.1 {
+                transform.scale.y = CAMERA_WALL_FRACTION;
+                transform.translation.y = WALL_HEIGHT * CAMERA_WALL_FRACTION * 0.5;
+            }
+        }
         let mut entity = commands.spawn((
             Tile { cell },
             Mesh3d(mesh),
@@ -706,6 +840,28 @@ fn spawn_tiles(
                     );
                 }
             }
+        }
+    }
+
+    // Doorway lintels: a short wall header above each 1-tile doorway (region opening), so the wall
+    // reads as one continuous run from above — the door tucks under it. Placed on the doorway cell's
+    // open wall edge, raised to `DOORWAY_HEIGHT`. Tagged like a wall (fog reveal + occlusion cutaway).
+    let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
+    let header_mesh = meshes.add(wall_mesh(header_size));
+    for region in &dungeon.regions {
+        for op in &region.openings {
+            // No lintel over an opening in a knee-high camera-facing (E/S) wall — it would float.
+            if SHORT_CAMERA_WALLS && (op.dir == E || op.dir == S) {
+                continue;
+            }
+            let cell = IVec2::new(op.cell[0], op.cell[1]);
+            spawn_tile(
+                cell,
+                header_mesh.clone(),
+                wall_mat.clone(),
+                header_wall(cell, op.dir),
+                Some(header_size),
+            );
         }
     }
 }

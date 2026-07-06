@@ -1,0 +1,445 @@
+//! `MetropolisSolver` — the Soft + Relational placement backend for `Freestanding` furniture.
+//!
+//! Direct port of the optimization-of-a-density-function-via-Metropolis–Hastings method of
+//! Merrell, Schkufza, Li, Agrawala & Koltun, "Interactive Furniture Layout Using Interior Design
+//! Guidelines" (ACM TOG / SIGGRAPH 2011, DOI 10.1145/2010324.1964982). Each candidate is an oriented
+//! footprint; a cost (density) function scores a layout by summing interior-design terms — non-overlap,
+//! in-bounds, back-to-wall alignment, plus any explicit pairwise constraints — and Metropolis–Hastings
+//! samples low-cost layouts. Per-region, seeded, and reproducible; the paper needed a GPU only for
+//! interactive re-suggestion, not the one-shot offline layout we do here.
+//!
+//! Weights live in `assets/placement/metropolis.ron` so layout is re-tunable with no code change
+//! (Merrell 2011 reports robustness to ~2× weight perturbation).
+
+use std::f32::consts::{FRAC_PI_2, TAU};
+
+use rand_chacha::ChaCha8Rng;
+use serde::Deserialize;
+
+use crate::placement::ir::{
+    Candidate, Capabilities, Constraint, Hardness, Locality, Modality, Outcome, Placement,
+    PlacementProblem, Predicate, Region, Scope, SolveError,
+};
+use crate::placement::solver::Solver;
+use crate::rng::DetRng;
+
+/// Wall inset so a footprint edge stops short of the wall slab (matches `dungeon::WALL_THICKNESS`).
+const WALL_INSET: f32 = 0.2;
+
+/// Tunable cost weights + MH schedule, loaded from RON (Merrell 2011 density terms).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetropolisWeights {
+    pub iterations: u32,
+    pub temp_start: f64,
+    pub temp_end: f64,
+    pub translate_sigma: f32,
+    pub rotate_prob: f64,
+    pub w_overlap: f64,
+    pub w_bounds: f64,
+    pub w_wall: f64,
+    pub w_min_distance: f64,
+    pub w_facing: f64,
+    pub w_clearance: f64,
+}
+
+pub struct MetropolisSolver {
+    weights: MetropolisWeights,
+}
+
+impl MetropolisSolver {
+    pub fn new(weights: MetropolisWeights) -> Self {
+        Self { weights }
+    }
+}
+
+/// One object's live state during optimization: centre (x, z) in world/tile coords + yaw about +Y.
+#[derive(Clone, Copy)]
+struct Obj {
+    x: f32,
+    z: f32,
+    yaw: f32,
+    // Native footprint half-extents (before yaw); AABB half-extents are swapped at 90°/270°.
+    hw: f32,
+    hd: f32,
+}
+
+impl Obj {
+    /// Axis-aligned half-extents given the current (quarter-turn) yaw.
+    fn half_extents(&self) -> (f32, f32) {
+        // Quarter-turn furniture: at 90°/270° width and depth swap.
+        let quarter = (self.yaw / FRAC_PI_2).round() as i32 & 3;
+        if quarter % 2 == 1 {
+            (self.hd, self.hw)
+        } else {
+            (self.hw, self.hd)
+        }
+    }
+}
+
+/// Interior bounds (min/max object-centre coords) after wall inset — computed per footprint at eval.
+struct Bounds {
+    xmin: f32,
+    xmax: f32,
+    zmin: f32,
+    zmax: f32,
+}
+
+impl Solver for MetropolisSolver {
+    fn name(&self) -> &str {
+        "metropolis"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            hardness: Hardness::Soft,
+            locality: Locality::Relational,
+            cardinality: false,
+            deterministic: true,
+            needs_training_data: false,
+        }
+    }
+
+    fn solve(&self, problem: &PlacementProblem, rng: &mut ChaCha8Rng) -> Result<Outcome, SolveError> {
+        let objs_meta: Vec<&Candidate> = problem.candidates.iter().collect();
+        let n = objs_meta.len();
+        if n == 0 {
+            return Ok(Outcome::Assignment(Vec::new()));
+        }
+
+        // Room interior in world/tile coords: cell centres span [min, max-1]; walls sit half a tile
+        // beyond, so an object centre is free within [min-0.5+inset+half, max-0.5-inset-half].
+        let r = problem.region;
+        let (rx0, rx1, rz0, rz1) = room_world_bounds(r);
+
+        // Initial layout: each object dropped at a random in-bounds cell, random quarter-turn yaw.
+        let mut cur: Vec<Obj> = objs_meta
+            .iter()
+            .map(|c| {
+                let hw = c.footprint[0] * 0.5;
+                let hd = c.footprint[1] * 0.5;
+                let yaw = (rng.below(4) as f32) * FRAC_PI_2;
+                let mut o = Obj { x: 0.0, z: 0.0, yaw, hw, hd };
+                let b = obj_bounds(&o, rx0, rx1, rz0, rz1);
+                o.x = rand_range(rng, b.xmin, b.xmax);
+                o.z = rand_range(rng, b.zmin, b.zmax);
+                o
+            })
+            .collect();
+
+        let mut cur_cost = self.cost(&cur, problem, rx0, rx1, rz0, rz1);
+        let mut best = cur.clone();
+        let mut best_cost = cur_cost;
+
+        let iters = self.weights.iterations.max(1);
+        let (t0, t1) = (self.weights.temp_start.max(1e-6), self.weights.temp_end.max(1e-6));
+        for step in 0..iters {
+            // Geometric annealing from t0 → t1.
+            let frac = step as f64 / iters as f64;
+            let temp = t0 * (t1 / t0).powf(frac);
+
+            let i = rng.below(n);
+            let saved = cur[i];
+            if rng.unit() < self.weights.rotate_prob {
+                cur[i].yaw = (cur[i].yaw + FRAC_PI_2) % TAU;
+            } else {
+                let s = self.weights.translate_sigma;
+                cur[i].x += rand_range(rng, -s, s);
+                cur[i].z += rand_range(rng, -s, s);
+            }
+            // Clamp into this object's in-bounds window so proposals stay legal.
+            let b = obj_bounds(&cur[i], rx0, rx1, rz0, rz1);
+            cur[i].x = cur[i].x.clamp(b.xmin, b.xmax);
+            cur[i].z = cur[i].z.clamp(b.zmin, b.zmax);
+
+            let cand_cost = self.cost(&cur, problem, rx0, rx1, rz0, rz1);
+            let accept = cand_cost <= cur_cost
+                || rng.unit() < (-(cand_cost - cur_cost) / temp).exp();
+            if accept {
+                cur_cost = cand_cost;
+                if cur_cost < best_cost {
+                    best_cost = cur_cost;
+                    best = cur.clone();
+                }
+            } else {
+                cur[i] = saved; // reject: restore
+            }
+        }
+
+        let placed: Vec<Placement> = best
+            .iter()
+            .enumerate()
+            .map(|(i, o)| Placement {
+                candidate: i,
+                pos: [o.x, 0.0, o.z],
+                yaw: o.yaw,
+            })
+            .collect();
+
+        // If explicit HARD constraints remain violated in the best layout, report them (graceful
+        // degradation, risk R3) — otherwise the best-effort soft layout is the ranked result.
+        let unsatisfied: Vec<_> = problem
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.modality, Modality::Hard))
+            .filter(|c| self.constraint_cost(c, &best, (rx0, rx1, rz0, rz1)) > 1e-3)
+            .map(|c| c.id)
+            .collect();
+        if unsatisfied.is_empty() {
+            Ok(Outcome::Ranked(vec![(best_cost, placed)]))
+        } else {
+            Ok(Outcome::Partial { placed, unsatisfied })
+        }
+    }
+}
+
+impl MetropolisSolver {
+    /// Total layout cost (Merrell 2011 density function): the weighted sum of interior-design terms.
+    fn cost(&self, objs: &[Obj], problem: &PlacementProblem, rx0: f32, rx1: f32, rz0: f32, rz1: f32) -> f64 {
+        let w = &self.weights;
+        let mut overlap = 0.0;
+        let mut bounds = 0.0;
+        let mut wall = 0.0;
+
+        for (i, a) in objs.iter().enumerate() {
+            let (ahw, ahd) = a.half_extents();
+            // In-bounds: quadratic penalty for any part of the footprint past a wall.
+            let (bx0, bx1, bz0, bz1) = (rx0 + ahw, rx1 - ahw, rz0 + ahd, rz1 - ahd);
+            bounds += over(bx0 - a.x) + over(a.x - bx1) + over(bz0 - a.z) + over(a.z - bz1);
+            // Back-to-wall attraction: distance from the footprint to the nearest wall (minimize).
+            let d_left = (a.x - ahw) - rx0;
+            let d_right = rx1 - (a.x + ahw);
+            let d_bottom = (a.z - ahd) - rz0;
+            let d_top = rz1 - (a.z + ahd);
+            wall += d_left.min(d_right).min(d_bottom).min(d_top).max(0.0) as f64;
+
+            for b in objs.iter().skip(i + 1) {
+                overlap += aabb_overlap_area(a, b) as f64;
+            }
+        }
+
+        let mut constraint_cost = 0.0;
+        for c in &problem.constraints {
+            let weight = match c.modality {
+                Modality::Soft(wt) => wt,
+                Modality::Hard => 1.0, // hard terms enter the cost heavily via their per-predicate weight
+            };
+            constraint_cost += weight * self.constraint_cost(c, objs, (rx0, rx1, rz0, rz1));
+        }
+
+        w.w_overlap * overlap + w.w_bounds * bounds + w.w_wall * wall + constraint_cost
+    }
+
+    /// Cost contribution of one explicit constraint (0 = satisfied). `bounds` is the room interior
+    /// (rx0, rx1, rz0, rz1) so wall-relative predicates can measure against the walls.
+    fn constraint_cost(&self, c: &Constraint, objs: &[Obj], bounds: (f32, f32, f32, f32)) -> f64 {
+        let w = &self.weights;
+        match (&c.scope, &c.predicate) {
+            (Scope::Pair(i, j), Predicate::MinDistance(min)) => {
+                if let (Some(a), Some(b)) = (objs.get(*i), objs.get(*j)) {
+                    let d = ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt();
+                    w.w_min_distance * over(*min - d) as f64
+                } else {
+                    0.0
+                }
+            }
+            (Scope::Object(i), Predicate::Facing(j)) => {
+                if let (Some(a), Some(b)) = (objs.get(*i), objs.get(*j)) {
+                    // Reward `a`'s facing direction pointing toward `b`: cost = 1 - cos(angle).
+                    let (fx, fz) = (a.yaw.sin(), a.yaw.cos());
+                    let (dx, dz) = (b.x - a.x, b.z - a.z);
+                    let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+                    let dot = (fx * dx + fz * dz) / len;
+                    w.w_facing * (1.0 - dot as f64)
+                } else {
+                    0.0
+                }
+            }
+            (Scope::Object(i), Predicate::Clearance(gap)) => {
+                // Penalize other objects intruding within `gap` of object i's footprint.
+                let Some(a) = objs.get(*i) else { return 0.0 };
+                let (ahw, ahd) = a.half_extents();
+                let mut pen = 0.0;
+                for (k, b) in objs.iter().enumerate() {
+                    if k == *i {
+                        continue;
+                    }
+                    let (bhw, bhd) = b.half_extents();
+                    let dx = (a.x - b.x).abs() - (ahw + bhw);
+                    let dz = (a.z - b.z).abs() - (ahd + bhd);
+                    let sep = dx.max(dz); // separation between footprints (negative = overlap)
+                    pen += over(gap - sep) as f64;
+                }
+                w.w_clearance * pen
+            }
+            (Scope::Object(i), Predicate::Aligned(_feature)) => {
+                // Domain-swap predicate (e.g. `aligned(a, "road")`): align the object's facing to the
+                // road axis (running along X). Penalty = |sin(yaw)|, zero when yaw ∈ {0, π}. Adding a
+                // new domain adds a predicate like this, not a new engine (vetting §3.3).
+                let Some(a) = objs.get(*i) else { return 0.0 };
+                w.w_facing * a.yaw.sin().abs() as f64
+            }
+            (Scope::Object(i), Predicate::AgainstWall) => {
+                // Distance from object i's footprint to the nearest wall (minimize → back to wall).
+                let Some(a) = objs.get(*i) else { return 0.0 };
+                let (ahw, ahd) = a.half_extents();
+                let (rx0, rx1, rz0, rz1) = bounds;
+                let d = ((a.x - ahw) - rx0)
+                    .min(rx1 - (a.x + ahw))
+                    .min((a.z - ahd) - rz0)
+                    .min(rz1 - (a.z + ahd))
+                    .max(0.0);
+                w.w_wall * d as f64
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+/// A one-sided ("hinge") penalty: `x` if positive, else 0.
+#[inline]
+fn over(x: f32) -> f64 {
+    x.max(0.0) as f64
+}
+
+#[inline]
+fn rand_range(rng: &mut ChaCha8Rng, lo: f32, hi: f32) -> f32 {
+    if hi <= lo {
+        return lo;
+    }
+    lo + (rng.unit() as f32) * (hi - lo)
+}
+
+/// AABB overlap area of two oriented (quarter-turn) footprints.
+fn aabb_overlap_area(a: &Obj, b: &Obj) -> f32 {
+    let (ahw, ahd) = a.half_extents();
+    let (bhw, bhd) = b.half_extents();
+    let ox = (ahw + bhw) - (a.x - b.x).abs();
+    let oz = (ahd + bhd) - (a.z - b.z).abs();
+    if ox > 0.0 && oz > 0.0 {
+        ox * oz
+    } else {
+        0.0
+    }
+}
+
+/// Room interior extents in world/tile coords, inset for the wall slab. Object centres live inside.
+fn room_world_bounds(r: &Region) -> (f32, f32, f32, f32) {
+    // Cell centres span [min, max-1]; the wall is half a tile beyond the outermost cell centre.
+    let rx0 = r.rect.min[0] as f32 - 0.5 + WALL_INSET;
+    let rx1 = (r.rect.max[0] - 1) as f32 + 0.5 - WALL_INSET;
+    let rz0 = r.rect.min[1] as f32 - 0.5 + WALL_INSET;
+    let rz1 = (r.rect.max[1] - 1) as f32 + 0.5 - WALL_INSET;
+    (rx0, rx1, rz0, rz1)
+}
+
+/// The in-bounds window for a specific object's centre (room bounds shrunk by its half-extents).
+fn obj_bounds(o: &Obj, rx0: f32, rx1: f32, rz0: f32, rz1: f32) -> Bounds {
+    let (hw, hd) = o.half_extents();
+    Bounds {
+        xmin: rx0 + hw,
+        xmax: (rx1 - hw).max(rx0 + hw),
+        zmin: rz0 + hd,
+        zmax: (rz1 - hd).max(rz0 + hd),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::ir::{Dof, PropertyBag, Rect2, Role};
+    use crate::rng::seeded;
+
+    fn weights() -> MetropolisWeights {
+        MetropolisWeights {
+            iterations: 3000,
+            temp_start: 1.0,
+            temp_end: 0.02,
+            translate_sigma: 0.6,
+            rotate_prob: 0.35,
+            w_overlap: 10.0,
+            w_bounds: 25.0,
+            w_wall: 1.2,
+            w_min_distance: 2.0,
+            w_facing: 1.5,
+            w_clearance: 2.0,
+        }
+    }
+    fn region() -> Region {
+        Region {
+            id: 0,
+            rect: Rect2 { min: [0, 0], max: [5, 5] }, // 5×5 room
+            openings: Vec::new(),
+            adjacency: Vec::new(),
+            props: PropertyBag::default(),
+        }
+    }
+    fn item(w: f32, d: f32) -> Candidate {
+        Candidate {
+            asset: "x".into(),
+            role: Role::Freestanding,
+            footprint: [w, d],
+            dof: Dof { translate: true, rotate_quarter: true, rotate_free: false },
+            affordances: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn keeps_objects_inside_and_non_overlapping() {
+        let r = region();
+        let problem = PlacementProblem {
+            region: &r,
+            candidates: vec![item(1.6, 0.7), item(2.0, 0.9), item(0.9, 0.6)],
+            constraints: Vec::new(),
+        };
+        let mut rng = seeded(3);
+        let solver = MetropolisSolver::new(weights());
+        let out = solver.solve(&problem, &mut rng).expect("solve");
+        let placed = match out {
+            Outcome::Ranked(mut v) => v.remove(0).1,
+            Outcome::Assignment(p) => p,
+            Outcome::Partial { placed, .. } => placed,
+        };
+        assert_eq!(placed.len(), 3);
+        let (rx0, rx1, rz0, rz1) = room_world_bounds(&r);
+        // Reconstruct Objs to check bounds/overlap on the returned layout.
+        let objs: Vec<Obj> = placed
+            .iter()
+            .map(|p| {
+                let c = &problem.candidates[p.candidate];
+                Obj { x: p.pos[0], z: p.pos[2], yaw: p.yaw, hw: c.footprint[0] * 0.5, hd: c.footprint[1] * 0.5 }
+            })
+            .collect();
+        for o in &objs {
+            let (hw, hd) = o.half_extents();
+            assert!(o.x - hw >= rx0 - 0.05 && o.x + hw <= rx1 + 0.05, "x out of bounds");
+            assert!(o.z - hd >= rz0 - 0.05 && o.z + hd <= rz1 + 0.05, "z out of bounds");
+        }
+        // Overlap should be driven near zero by the optimizer.
+        let mut total = 0.0;
+        for (i, a) in objs.iter().enumerate() {
+            for b in objs.iter().skip(i + 1) {
+                total += aabb_overlap_area(a, b);
+            }
+        }
+        assert!(total < 0.25, "residual overlap too high: {total}");
+    }
+
+    #[test]
+    fn deterministic_under_seed() {
+        let r = region();
+        let problem = PlacementProblem {
+            region: &r,
+            candidates: vec![item(1.6, 0.7), item(0.9, 0.6)],
+            constraints: Vec::new(),
+        };
+        let solver = MetropolisSolver::new(weights());
+        let run = || {
+            let mut rng = seeded(11);
+            match solver.solve(&problem, &mut rng).expect("solve") {
+                Outcome::Ranked(v) => v[0].1.iter().map(|p| (p.pos[0].to_bits(), p.pos[2].to_bits())).collect::<Vec<_>>(),
+                _ => panic!("expected ranked"),
+            }
+        };
+        assert_eq!(run(), run());
+    }
+}

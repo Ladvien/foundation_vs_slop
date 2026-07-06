@@ -1,0 +1,93 @@
+//! Placement grammar — the extensible furniture/prop placement system.
+//!
+//! Architecture (see `slop/research/2026-07-05-placement-grammar-implementation.md`):
+//! a grammar compiles to an engine-free [`ir::PlacementProblem`]; an [`solver::Orchestrator`] routes
+//! each constraint group to a pluggable [`solver::Solver`] backend; the [`furnish`] Bevy pass consumes
+//! the resulting [`ir::Outcome`] and spawns entities. Stages land incrementally:
+//!   - Stage 0: the IR + `Solver` trait, `Region`s carried on `Dungeon`.
+//!   - Stage 1: the first backend ([`solvers::wfc::WfcSolver`], Hard + Local) + the orchestrator.
+//!   - Stage 2 (here): the affordance [`manifest`] + FBX→GLB assets; a deterministic anchor pass
+//!     (ceiling lights, doors) plus the WFC-routed tiled scatter now spawn real GLB furniture.
+//!   - Stage 3+: the Metropolis solver arranges `Freestanding` furniture; more backends follow.
+//!
+//! Determinism (§4): one seeded `ChaCha8Rng` stream split into per-region sub-streams (via
+//! [`splitmix64`]) so regions solve independently and reproducibly regardless of ECS/thread order.
+
+#[cfg(test)]
+mod acceptance;
+pub mod furnish;
+pub mod ir;
+pub mod manifest;
+pub mod solver;
+pub mod solvers;
+
+use bevy::prelude::*;
+
+use solver::Orchestrator;
+use solvers::constraint::ConstraintSolver;
+use solvers::metropolis::{MetropolisSolver, MetropolisWeights};
+use solvers::wfc::WfcSolver;
+
+/// Base seed for placement RNG. Per-region sub-seeds derive from `PLACEMENT_SEED ^ splitmix64(id)`.
+const PLACEMENT_SEED: u64 = 0x0050_1ACE;
+
+/// Path to the furniture manifest (the asset adapter). Editing it changes placement with no code diff.
+const MANIFEST_PATH: &str = "assets/placement/furniture.ron";
+/// Path to the Metropolis layout weights (re-tunable with no code change).
+const METROPOLIS_PATH: &str = "assets/placement/metropolis.ron";
+
+/// Mix an integer into a 64-bit seed (SplitMix64 finalizer, Steele et al. 2014). Used to derive a
+/// per-region sub-seed so each region gets an independent, reproducible RNG stream that does not
+/// depend on iteration or thread order.
+pub fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The registered solver backends, as a Bevy resource. `Orchestrator` itself is engine-free; this
+/// newtype gives it a home in the ECS world so the furnish pass (and later stages) route through it.
+#[derive(Resource)]
+pub struct PlacementSolvers(pub Orchestrator);
+
+/// Build the backend registry. Registration order encodes preference (first cover wins). The three
+/// backends have disjoint capability profiles, so a constraint group routes to exactly the right one:
+/// WFC = Hard+Local (tiled scatter), Metropolis = Soft+Relational (freestanding layout),
+/// ConstraintSolver = Hard+Global+Cardinality (counts / global rules like one-door-per-room).
+fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrator {
+    let mut orch = Orchestrator::new();
+    orch.register(Box::new(WfcSolver));
+    orch.register(Box::new(MetropolisSolver::new(metropolis_weights)));
+    orch.register(Box::new(ConstraintSolver));
+    orch
+}
+
+/// Tags a placed furniture entity with the region it belongs to — read by `furnish::furniture_room_visibility`
+/// to show furniture only in the room the squad currently occupies.
+#[derive(Component)]
+pub struct PlacedIn(pub ir::RegionId);
+
+pub struct PlacementPlugin;
+
+impl Plugin for PlacementPlugin {
+    fn build(&self, app: &mut App) {
+        // Required config — one path, no fallback. A missing/malformed manifest or weights file is a
+        // loud startup failure, not a silent empty/default world.
+        let weights_text = std::fs::read_to_string(METROPOLIS_PATH)
+            .unwrap_or_else(|e| panic!("placement: cannot read {METROPOLIS_PATH}: {e}"));
+        let weights: MetropolisWeights = ron::from_str(&weights_text)
+            .unwrap_or_else(|e| panic!("placement: {METROPOLIS_PATH} parse error: {e}"));
+        app.insert_resource(PlacementSolvers(build_solvers(weights)));
+
+        let catalogue = manifest::load_manifest(MANIFEST_PATH)
+            .unwrap_or_else(|e| panic!("placement: {e}"));
+        app.insert_resource(furnish::Manifest(catalogue));
+
+        // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
+        app.add_systems(Startup, furnish::furnish_regions);
+        // Show furniture only in the room the squad currently occupies.
+        app.add_systems(Update, furnish::furniture_room_visibility);
+    }
+}

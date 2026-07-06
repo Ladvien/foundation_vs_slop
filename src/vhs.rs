@@ -156,12 +156,21 @@ fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, mut cameras: Query<&mut V
 }
 
 fn read_config() -> Option<VhsConfig> {
-    let text = std::fs::read_to_string(CONFIG_PATH).ok()?;
+    let text = match std::fs::read_to_string(CONFIG_PATH) {
+        Ok(text) => text,
+        // Optional override file; absence means "use the built-in defaults".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            error!("vhs: {CONFIG_PATH} exists but could not be read: {e}");
+            std::process::exit(1);
+        }
+    };
     match ron::from_str(&text) {
         Ok(config) => Some(config),
+        // Fail loud on a malformed override rather than silently running on defaults (one-path rule).
         Err(e) => {
-            warn!("vhs: failed to parse {CONFIG_PATH}: {e}");
-            None
+            error!("vhs: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
+            std::process::exit(1);
         }
     }
 }

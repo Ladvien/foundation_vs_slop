@@ -1,0 +1,20 @@
+// Asset-swap manifest (Stage-5 acceptance test): the SAME schema, roles, and affordances as
+// furniture.ron, but pointed at a completely different asset kit (Kenney prototype kit, already GLB).
+// Swapping the whole furniture library is a matter of authoring THIS FILE — zero code changes. The
+// orchestrator, grammar, and furnish pass consume it identically.
+(
+    items: [
+        ( key: "door", glb: "kenney_prototype-kit/Models/GLB format/door-sliding.glb",
+          category: "door", tags: ["opening"], role: Anchor(host: Opening),
+          footprint: (1.0, 0.3), affordances: ["pass", "door"] ),
+        ( key: "wall_light", glb: "kenney_prototype-kit/Models/GLB format/indicator-round-e.glb",
+          category: "light", tags: ["wall"], role: Anchor(host: Wall),
+          footprint: (0.3, 0.2), affordances: ["emit"] ),
+        ( key: "crate", glb: "kenney_prototype-kit/Models/GLB format/crate-color.glb",
+          category: "prop", tags: ["decor"], role: Tiled, footprint: (0.9, 0.9),
+          affordances: ["support"] ),
+        ( key: "column", glb: "kenney_prototype-kit/Models/GLB format/column.glb",
+          category: "structure", tags: ["living"], role: Freestanding, footprint: (0.8, 0.8),
+          affordances: ["support"] ),
+    ],
+)

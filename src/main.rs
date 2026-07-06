@@ -4,9 +4,8 @@
 //! uncanny-valley monsters churned out by SCP-9191, a rogue monster-generating AI.
 //!
 //! This stage is an explorable, WFC-generated dungeon: one Bevy plugin per domain
-//! (dungeon, world lighting, camera, player, fog of war). The slop enemy/combat
-//! modules are shelved (files kept, not compiled) until they are placed into the
-//! dungeon in a later step.
+//! (dungeon, world lighting, camera, fog of war, crab/smiley enemies). The richer "slop"
+//! enemy/combat systems are not built yet — they'll be added in a later step.
 
 // Bevy's filtered queries produce unavoidably long tuple types; this lint fights
 // idiomatic ECS code, so it's disabled crate-wide (the standard Bevy convention).
@@ -18,6 +17,7 @@ mod blood_lens;
 mod ai;
 mod camera;
 mod crab;
+#[cfg(debug_assertions)]
 mod devshot;
 mod dungeon;
 mod enemy;
@@ -31,6 +31,8 @@ mod laser;
 mod nest;
 mod occlusion;
 mod orca;
+mod placement;
+mod rng;
 mod selection;
 mod squad;
 mod surface_nav;
@@ -49,7 +51,8 @@ use bevy::winit::{UpdateMode, WinitSettings};
 const GIB_GRAVITY: f32 = 18.0;
 
 fn main() {
-    App::new()
+    let mut app = App::new();
+    app
         // Keep rendering at full rate even when the window is unfocused/occluded, so the game
         // stays live in the background (and the `devshot` in-process screenshots aren't black).
         .insert_resource(WinitSettings {
@@ -77,7 +80,7 @@ fn main() {
         // DungeonPlugin must precede FogPlugin: it inserts the `Dungeon` resource in
         // its `build`, which FogPlugin reads at build time to size the fog grid.
         .add_plugins((
-            dungeon::DungeonPlugin,
+            (dungeon::DungeonPlugin, placement::PlacementPlugin),
             world::WorldPlugin,
             camera::CameraPlugin,
             squad::SquadPlugin,
@@ -96,7 +99,13 @@ fn main() {
             (juice::JuicePlugin, gore::GorePlugin, autogib::AutogibPlugin),
             audio::GameAudioPlugin,
             (vhs::VhsPlugin, blood_lens::BloodLensPlugin),
-            devshot::DevShotPlugin,
-        ))
-        .run();
+        ));
+
+    // devshot is a dev-only in-process screenshot tool — strip it (and its `mod`) from release builds
+    // (see CLAUDE.md). Gating both the registration and `mod devshot;` on `debug_assertions` keeps the
+    // release binary free of the module and its per-frame `screenshot.request` sentinel polling.
+    #[cfg(debug_assertions)]
+    app.add_plugins(devshot::DevShotPlugin);
+
+    app.run();
 }

@@ -1,6 +1,6 @@
 //! Laser-impact particle burst: a custom additive `Material` (see `assets/shaders/impact_fx.wgsl`)
-//! played on a camera-facing quad wherever a bolt hits a wall. Every knob is exposed live through
-//! an egui panel, and the panel can Save/Load the settings to `impact_fx.ron`.
+//! played on a camera-facing quad wherever a bolt hits a wall. Every knob is loaded once at startup
+//! from `impact_fx.ron` (see `read_settings`); there is no in-game panel.
 //!
 //! Decoupled trigger: anything that wants a burst pushes a world position into [`ImpactQueue`]
 //! (the laser does this on wall hits); this plugin drains the queue and spawns the effect. So a
@@ -10,7 +10,7 @@ use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const CONFIG_PATH: &str = "impact_fx.ron";
 
@@ -52,8 +52,9 @@ impl Material for ImpactMaterial {
     }
 }
 
-/// Human-facing, serializable knobs shown in the egui panel and saved to RON.
-#[derive(Resource, Serialize, Deserialize, Clone)]
+/// The impact-burst knobs, deserialized once at startup from `impact_fx.ron` (read-only — there is no
+/// in-game panel and nothing serializes these back out).
+#[derive(Resource, Deserialize, Clone)]
 struct ImpactFxSettings {
     particle_count: i32,
     color_a: [f32; 3],
@@ -187,12 +188,23 @@ fn despawn_impacts(mut commands: Commands, time: Res<Time>, bursts: Query<(Entit
 }
 
 fn read_settings() -> Option<ImpactFxSettings> {
-    let text = std::fs::read_to_string(CONFIG_PATH).ok()?;
+    let text = match std::fs::read_to_string(CONFIG_PATH) {
+        Ok(text) => text,
+        // Optional override file; absence means "use the built-in defaults".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // Present but unreadable is a real error — fail loud rather than silently running on defaults.
+        Err(e) => {
+            error!("impact_fx: {CONFIG_PATH} exists but could not be read: {e}");
+            std::process::exit(1);
+        }
+    };
     match ron::from_str(&text) {
         Ok(settings) => Some(settings),
+        // Fail loud on a malformed override rather than silently defaulting (one-path rule): a
+        // designer's broken retune must not look like it simply had no effect.
         Err(e) => {
-            warn!("impact_fx: failed to parse {CONFIG_PATH}: {e}");
-            None
+            error!("impact_fx: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
+            std::process::exit(1);
         }
     }
 }
