@@ -201,6 +201,14 @@ impl SmileyState {
     pub fn is_angry(&self) -> bool {
         matches!(self.mood, SmileyMood::Unleashing)
     }
+
+    /// Is it in its default sad-lonely-observer state — the *concealed* calm, before any mask cracks?
+    /// The audio layer reads this to swell a legato "uncanny calm" pad while the watcher is quietly
+    /// staring (van der Zwaag et al. 2011 — legato → tenderness/sadness), the counterpart to the sharp
+    /// percussive reveal when it flips to `Unleashing`.
+    pub fn is_watching(&self) -> bool {
+        matches!(self.mood, SmileyMood::Watching)
+    }
 }
 
 /// The watcher's memory of **who actually just hit it** — a working-memory fact (source + recency) in the

@@ -129,6 +129,16 @@ const GROWL_VOL: f32 = 0.6;
 /// Loud, and it ducks the whole bed to full so the reveal lands in the clear.
 const WATCHER_REVEAL_VOL: f32 = 0.85;
 
+/// The watcher's "uncanny calm" — a low legato dark-ambient pad that swells while it's quietly
+/// observing (`is_watching`) near the squad and fades when it isn't. Legato/sustained articulation
+/// reads as tenderness/sadness (van der Zwaag et al. 2011), the concealed counterpart to the sharp
+/// [`WATCHER_REVEAL_VOL`] stinger. Kept low so it's a bed under the calm music, not a second melody.
+const WATCHER_PAD_VOL: f32 = 0.18;
+/// Slow swell/decay for the pad (real time), so it breathes in and out legato rather than snapping.
+const WATCHER_PAD_FADE: f32 = 2.5;
+/// A watching watcher within this planar range of a unit engages the pad (it must be *near* to unsettle).
+const WATCHER_PAD_RANGE: f32 = 16.0;
+
 /// A discrete sound request. Gameplay systems elsewhere write these; [`play_sfx`] consumes them.
 ///
 /// World variants carry the world-space [`Vec3`] where the event happened, so [`play_sfx`] can spawn
@@ -193,6 +203,8 @@ struct AudioAssets {
     wind: Handle<AudioSource>,
     music_calm: Handle<AudioSource>,
     music_combat: Handle<AudioSource>,
+    /// Legato dark-ambient pad for the watcher's "uncanny calm" (see `watcher_pad`).
+    watcher_calm: Handle<AudioSource>,
 }
 
 /// Mix bus: relative group gains tuned in one place, plus a live sidechain `duck` envelope. Every
@@ -242,6 +254,10 @@ struct CalmMusic;
 /// start so the crossfade only has to move gains, never start a cold track.
 #[derive(Component)]
 struct CombatMusic;
+/// Marker: the watcher's legato "uncanny calm" pad. Silent unless a watcher is quietly observing near
+/// the squad (see `watcher_pad`); gain-driven each frame like the other beds.
+#[derive(Component)]
+struct WatcherPad;
 
 pub struct GameAudioPlugin;
 
@@ -263,6 +279,7 @@ impl Plugin for GameAudioPlugin {
                     crab_squitter,
                     growl_stinger,
                     watcher_stinger,
+                    watcher_pad,
                     ambient_oneshots,
                     update_music,
                     mute_when_background,
@@ -324,6 +341,7 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         wind: assets.load("audio/ambience/wind.ogg"),
         music_calm: assets.load("audio/music/calm.ogg"),
         music_combat: assets.load("audio/music/combat.ogg"),
+        watcher_calm: assets.load("audio/music/watcher_calm.ogg"),
     };
 
     // One spatial listener for the whole game. `sync_listener` parks it on the ground under the
@@ -344,6 +362,12 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         AudioPlayer::new(a.music_combat.clone()),
         looped(0.0),
         CombatMusic,
+    ));
+    // The watcher's legato pad — plays silently until a watcher is calmly observing near the squad.
+    commands.spawn((
+        AudioPlayer::new(a.watcher_calm.clone()),
+        looped(0.0),
+        WatcherPad,
     ));
     commands.insert_resource(MusicState { intensity: 0.0 });
     commands.insert_resource(a);
@@ -603,6 +627,47 @@ fn watcher_stinger(
     }
 
     angry.retain(|e, _| live.contains(e));
+}
+
+/// The watcher's "uncanny calm": swell a low legato dark-ambient pad while some watcher is quietly
+/// observing (`is_watching`) — visible and within [`WATCHER_PAD_RANGE`] of a unit — and fade it back
+/// out when none are. Legato/sustained = tenderness/sadness (van der Zwaag et al. 2011): the concealed,
+/// pre-reveal dread that the sharp [`watcher_stinger`] then shatters. Driven each frame like the other
+/// beds (× ambience × duck × master), so it ducks under action and mutes on a live alt-tab.
+fn watcher_pad(
+    time: Res<Time<Real>>,
+    bus: Res<AudioBus>,
+    gv: Res<GlobalVolume>,
+    dungeon: Res<Dungeon>,
+    fog: Res<FogGrid>,
+    watchers: Query<(&Transform, &SmileyState)>,
+    units: Query<&Transform, With<Unit>>,
+    mut level: Local<f32>,
+    mut pad: Query<&mut AudioSink, With<WatcherPad>>,
+) {
+    // Present = some watcher is calmly observing, in live sight, and near enough to unsettle.
+    let present = watchers.iter().any(|(tf, st)| {
+        st.is_watching()
+            && fog.visible_at(dungeon.world_to_cell(tf.translation))
+            && units
+                .iter()
+                .any(|u| (tf.translation.xz() - u.translation.xz()).length() <= WATCHER_PAD_RANGE)
+    });
+
+    // Slow legato swell toward presence, on real time (so it doesn't freeze paused / race at speed).
+    let target = if present { 1.0 } else { 0.0 };
+    let step = time.delta_secs() / WATCHER_PAD_FADE;
+    *level = if *level < target {
+        (*level + step).min(target)
+    } else {
+        (*level - step).max(target)
+    };
+
+    let duck_factor = 1.0 - bus.duck * DUCK_DEPTH;
+    let g = Volume::Linear(WATCHER_PAD_VOL * *level * bus.ambience * duck_factor) * gv.volume;
+    if let Ok(mut sink) = pad.single_mut() {
+        sink.set_volume(g);
+    }
 }
 
 /// Sparse randomized ambient one-shots (creaks, drips, a distant clock) scattered around the squad
