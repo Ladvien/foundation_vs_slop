@@ -11,6 +11,8 @@
 use bevy::prelude::*;
 use bevy::time::{Real, Virtual};
 
+use crate::time_control::GameSpeed;
+
 /// Accumulated screen-shake energy in `[0, 1]`. Combat systems (see `gore`) spike it on impacts; it
 /// bleeds off each frame. The camera turns it into a view offset scaled by `trauma²`.
 #[derive(Resource, Default)]
@@ -54,13 +56,25 @@ impl Plugin for JuicePlugin {
     }
 }
 
-/// Drive the virtual clock's relative speed from the hitstop window, timed on the real clock so the
-/// freeze releases itself (the virtual clock it controls would otherwise stall its own countdown).
-fn tick_hitstop(real: Res<Time<Real>>, hitstop: Res<Hitstop>, mut vtime: ResMut<Time<Virtual>>) {
+/// Drive the virtual clock's relative speed, timed on the real clock so a hitstop freeze releases
+/// itself (the virtual clock it controls would otherwise stall its own countdown).
+///
+/// This is the **single writer** of `Time<Virtual>`'s relative speed. It composes the three inputs
+/// that want to scale gameplay time — the player-selected game speed, the hitstop impact-freeze, and
+/// pause — into one value (see `time_control`, which owns [`GameSpeed`] but never sets the clock):
+/// `pause ⇒ 0`, otherwise `base × (frozen ? FROZEN_SPEED : 1)`. Keeping it one system is deliberate —
+/// two systems both calling `set_relative_speed` would fight frame-to-frame.
+fn tick_hitstop(
+    real: Res<Time<Real>>,
+    hitstop: Res<Hitstop>,
+    speed: Res<GameSpeed>,
+    mut vtime: ResMut<Time<Virtual>>,
+) {
+    let base = if speed.paused { 0.0 } else { speed.base };
     let target = if real.elapsed_secs() < hitstop.until_real {
-        FROZEN_SPEED
+        base * FROZEN_SPEED
     } else {
-        1.0
+        base
     };
     if (vtime.relative_speed() - target).abs() > 1e-4 {
         vtime.set_relative_speed(target);

@@ -46,6 +46,7 @@ pub mod sim_harness;
 pub mod visual_regression;
 pub mod squad;
 pub mod surface_nav;
+pub mod time_control;
 pub mod util;
 pub mod vhs;
 pub mod wfc;
@@ -117,7 +118,12 @@ pub fn run() {
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
-            (juice::JuicePlugin, gore::GorePlugin, autogib::AutogibPlugin),
+            (
+                time_control::TimeControlPlugin,
+                juice::JuicePlugin,
+                gore::GorePlugin,
+                autogib::AutogibPlugin,
+            ),
             audio::GameAudioPlugin,
             (vhs::VhsPlugin, blood_lens::BloodLensPlugin),
         ));

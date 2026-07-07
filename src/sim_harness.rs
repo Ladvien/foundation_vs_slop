@@ -137,7 +137,12 @@ pub fn build_headless_app(cfg: &SimConfig) -> App {
         ),
         crate::laser::LaserPlugin,
         crate::impact_fx::ImpactFxPlugin,
-        (crate::juice::JuicePlugin, crate::gore::GorePlugin, crate::autogib::AutogibPlugin),
+        (
+            crate::time_control::TimeControlPlugin,
+            crate::juice::JuicePlugin,
+            crate::gore::GorePlugin,
+            crate::autogib::AutogibPlugin,
+        ),
         crate::audio::GameAudioPlugin,
         (crate::vhs::VhsPlugin, crate::blood_lens::BloodLensPlugin),
     ));
