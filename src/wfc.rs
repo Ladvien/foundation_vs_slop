@@ -397,6 +397,16 @@ pub fn collapse_graph(
     if degree.iter().any(|&d| d > MAX_DEGREE) {
         return None; // graph front-end must prune to <= MAX_DEGREE first
     }
+    // Validate every edge's back-port and neighbour id so a malformed table returns `None` (as the doc
+    // promises) instead of panicking on an out-of-range index inside `propagate_graph`. `port_neighbors`
+    // always builds symmetric, in-range ports; this guards a future/foreign caller.
+    for ports in neighbors {
+        for &(ni, q) in ports {
+            if ni >= n_nodes || q >= degree[ni] {
+                return None;
+            }
+        }
+    }
 
     // Precompute, per degree `d` and port `p`, the pattern-masks over the `2^d` patterns: `set_mask` =
     // patterns with bit `p` set (a link on that port), `clear_mask` = patterns with bit `p` clear (a

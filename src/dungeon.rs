@@ -298,22 +298,76 @@ struct CoarseLayout {
     spawn_site: usize,
 }
 
-/// The cardinal direction (N/E/S/W) from `from` toward `to`, by dominant axis (ties → horizontal). For
-/// grid block centres — offset by exactly `(±block, 0)` or `(0, ±block)` — this returns the same single
-/// cardinal the pre-refactor `linked`/opening loops used, so the Grid path stays byte-identical. For
-/// arbitrary graph sites it is the corridor's room-mouth direction.
-fn cardinal_to(from: IVec2, to: IVec2) -> usize {
-    let d = to - from;
-    if d.x.abs() >= d.y.abs() {
-        if d.x >= 0 {
+/// The wall each endpoint of a corridor actually pierces, matching `carve_corridor`'s L-route: the
+/// horizontal leg runs from `a`, the vertical leg into `b`. So `a` exits horizontally (E/W) unless the
+/// edge is purely vertical, and `b` enters vertically (N/S) unless the edge is purely horizontal.
+/// Returns `(a_dir, b_dir)`. For axis-aligned edges — always, for grid block centres offset by exactly
+/// `(±block, 0)` or `(0, ±block)` — both reduce to the straight-line cardinal, so the Grid path stays
+/// byte-identical; for a diagonal graph edge each end gets the wall its leg crosses, not a dominant-axis
+/// guess (which would land one endpoint's door on a wall the corridor never touches).
+fn corridor_exit_dirs(a: IVec2, b: IVec2) -> (usize, usize) {
+    let a_dir = if a.x == b.x {
+        if b.y > a.y {
+            S
+        } else {
+            N
+        }
+    } else if b.x > a.x {
+        E
+    } else {
+        W
+    };
+    let b_dir = if a.y == b.y {
+        if a.x > b.x {
             E
         } else {
             W
         }
-    } else if d.y >= 0 {
+    } else if a.y > b.y {
         S
     } else {
         N
+    };
+    (a_dir, b_dir)
+}
+
+/// Where a corridor pierces one endpoint's room wall, from the carved L geometry (see `carve_corridor`).
+/// `sc` is this room's site centre, `nc` the neighbour's, `rect` this room's rect, `is_first` whether this
+/// site is the edge's FIRST endpoint (horizontal leg leaves it) or SECOND (vertical leg enters it).
+/// Returns `(dir, cell)`. The first endpoint always exits through its own centre row/col. The second is
+/// entered vertically (N/S) unless the L-corner `(sc.x, nc.y)` lands inside this room's y-range — then the
+/// corridor actually enters via the horizontal leg through the E/W wall at row `nc.y`. This handles the
+/// L-corner-inside-room case a dominant-axis guess gets wrong, and is byte-identical to the old
+/// block-centre formula for axis-aligned (grid) edges.
+fn derive_opening(sc: IVec2, nc: IVec2, rect: Rect2, is_first: bool) -> (usize, [i32; 2]) {
+    if is_first {
+        if sc.x == nc.x {
+            if nc.y > sc.y {
+                (S, [sc.x, rect.max[1] - 1])
+            } else {
+                (N, [sc.x, rect.min[1]])
+            }
+        } else if nc.x > sc.x {
+            (E, [rect.max[0] - 1, sc.y])
+        } else {
+            (W, [rect.min[0], sc.y])
+        }
+    } else if nc.y == sc.y {
+        // Pure-horizontal edge: the second endpoint is entered horizontally at its own centre row.
+        if nc.x < sc.x {
+            (W, [rect.min[0], sc.y])
+        } else {
+            (E, [rect.max[0] - 1, sc.y])
+        }
+    } else if nc.y < rect.min[1] {
+        (N, [sc.x, rect.min[1]])
+    } else if nc.y >= rect.max[1] {
+        (S, [sc.x, rect.max[1] - 1])
+    } else if nc.x < sc.x {
+        // L-corner inside this room's y-range → entered via the horizontal leg through the W/E wall.
+        (W, [rect.min[0], nc.y])
+    } else {
+        (E, [rect.max[0] - 1, nc.y])
     }
 }
 
@@ -415,17 +469,21 @@ fn expand_to_fine(
     // cardinal to one endpoint and the opposite to the other, reconstructing the old per-slot
     // `linked(dir)` for all four directions (socket-rule symmetry).
     let mut site_dirs = vec![[false; 4]; layout.sites.len()];
-    let mut incident: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layout.sites.len()];
+    // `incident[si]` = (sort_dir, neighbour, is_first). `is_first` marks the FIRST endpoint of the edge
+    // (carve_corridor runs the horizontal leg from the first endpoint, the vertical leg into the second),
+    // which the opening pass needs to derive each doorway from the real L geometry. `sort_dir` (centres
+    // only — rects aren't built yet) fixes a stable order matching the grid's N,E,S,W scan; it drives
+    // expansion-to-touch too (a soft dial), while the recorded opening dir is the exact carved wall.
+    let mut incident: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); layout.sites.len()];
     for &(a, b) in &layout.adjacency {
-        let da = cardinal_to(layout.sites[a].center, layout.sites[b].center);
-        let db = cardinal_to(layout.sites[b].center, layout.sites[a].center);
+        let (da, db) = corridor_exit_dirs(layout.sites[a].center, layout.sites[b].center);
         site_dirs[a][da] = true;
         site_dirs[b][db] = true;
-        incident[a].push((da, b));
-        incident[b].push((db, a));
+        incident[a].push((da, b, true));
+        incident[b].push((db, a, false));
     }
     for inc in &mut incident {
-        inc.sort_by_key(|&(dir, nb)| (dir, nb));
+        inc.sort_by_key(|&(dir, nb, _)| (dir, nb));
     }
 
     // Room pass — one room per site (the only RNG-consuming pass; draws stay in site order). Size + type
@@ -496,22 +554,15 @@ fn expand_to_fine(
         );
     }
 
-    // Opening pass — record each region's adjacency + the interior wall cell where its corridor meets the
-    // room, and neck the doorway down to the block-centre lane (rock out the extra lanes just outside the
-    // wall). Iterated in (dir, neighbour) order per site so openings/adjacency match the old N,E,S,W scan.
+    // Opening pass — record each region's adjacency + the interior wall cell where its corridor actually
+    // meets the room (derived from the carved L geometry, not a dominant-axis guess), and neck the doorway
+    // down to the centre lane. Iterated in sort order per site so openings/adjacency match the grid's
+    // N,E,S,W scan. `derive_opening` is byte-identical to the old cell formula for axis-aligned edges.
     for (si, inc) in incident.iter().enumerate() {
-        let (bx, by) = (layout.sites[si].center.x, layout.sites[si].center.y);
+        let sc = layout.sites[si].center;
         let rect = regions[si].rect;
-        for &(dir, nb) in inc {
-            // Opening = the corridor's centre-line (lane-0) cell where it pierces the wall. For the grid
-            // that lane sits at the block-centre row/col (bx/by) ⇒ identical to the pre-refactor cell.
-            let cell = match dir {
-                N => [bx, rect.min[1]],
-                S => [bx, rect.max[1] - 1],
-                E => [rect.max[0] - 1, by],
-                W => [rect.min[0], by],
-                _ => unreachable!(),
-            };
+        for &(_, nb, is_first) in inc {
+            let (dir, cell) = derive_opening(sc, layout.sites[nb].center, rect, is_first);
             regions[si].adjacency.push(nb as u32);
             regions[si].openings.push(Opening { dir, cell });
             for lane in 1..config.corridor_width as i32 {
@@ -588,9 +639,21 @@ fn graph_layout(
 ) -> Result<CoarseLayout, String> {
     let (width, height) = (config.coarse_w * config.block, config.coarse_h * config.block);
 
-    // Poisson sites, from their own RNG sub-stream (independent of the carve RNG).
+    // Poisson sites, from their own RNG sub-stream (independent of the carve RNG). The rect is inset by
+    // a small margin so every site sits at least `ROOM_FLOOR + 1` tiles from the level edge — that lets
+    // `build_graph_layout` give each site a *symmetric*, in-bounds bounds box, which keeps `site.center`
+    // interior to its room (the invariant the corridor/opening pass depends on).
+    let margin = (ROOM_FLOOR + 1) as f64;
+    let (inset_w, inset_h) = (
+        (width as f64 - 2.0 * margin).max(1.0),
+        (height as f64 - 2.0 * margin).max(1.0),
+    );
     let mut site_rng = seeded(config.seed ^ 0x517E_5EED);
-    let points = geom::poisson_disk(width as f64, height as f64, site_spacing as f64, 30, &mut site_rng);
+    let mut points = geom::poisson_disk(inset_w, inset_h, site_spacing as f64, 30, &mut site_rng);
+    for p in &mut points {
+        p[0] += margin;
+        p[1] += margin;
+    }
     let n = points.len();
     if n < 2 {
         return Err(format!(
@@ -700,9 +763,10 @@ fn largest_graph_component(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
 }
 
 /// Assemble a `CoarseLayout` from the kept sites. Each site's centre rounds to the fine grid; its bounds
-/// are a square of half the Chebyshev distance to the nearest kept neighbour (so rooms provably never
-/// overlap — `h_i + h_j ≤ Cheb(i,j)`), floored so a room fits and clamped into the level. Adjacency is
-/// remapped to kept indices; spawn is the kept site nearest the level centre.
+/// are a square, symmetric around the centre, sized to the smaller of half the nearest-neighbour
+/// Chebyshev distance (so rooms provably never overlap — `h_i + h_j ≤ Cheb(i,j)`) and the distance to the
+/// nearest level edge (so it stays in-bounds without breaking symmetry — the centre stays interior).
+/// Adjacency is remapped to kept indices; spawn is the kept site nearest the level centre.
 fn build_graph_layout(
     points: &[Point],
     links: &[(usize, usize)],
@@ -726,19 +790,21 @@ fn build_graph_layout(
                     min_cheb = min_cheb.min((o[0] - c[0]).abs().max((o[1] - c[1]).abs()));
                 }
             }
-            // `>= 2` so `max_side` leaves room for a ROOM_FLOOR room; a lone kept site (no neighbour) gets
-            // a modest default box. The floor never overlaps because `Cheb ≥ 2·h` for adjacent pairs.
-            let h = if min_cheb.is_finite() {
-                ((0.5 * min_cheb).floor() as i32).max(ROOM_FLOOR as i32)
-            } else {
-                ((width.min(height) as i32) / 8).max(ROOM_FLOOR as i32 + 2)
-            };
             let (cx, cy) = (c[0].round() as i32, c[1].round() as i32);
+            // Symmetric half-side: the smaller of half the nearest-neighbour Chebyshev distance (so no two
+            // rooms overlap — `h_i + h_j ≤ Cheb(i,j)`) and the distance to the nearest level edge (so the
+            // box stays symmetric around the centre AND in-bounds — keeping `site.center` interior to any
+            // room centred in it, which the corridor pass relies on). A lone kept site has
+            // `min_cheb == f64::MAX`; the edge terms bound it to a finite box, so there is no `i32`
+            // overflow. The Poisson inset guarantees `edge ≥ ROOM_FLOOR`, so `.max(ROOM_FLOOR)` never
+            // pushes the box out of bounds.
+            let edge = cx.min(width as i32 - cx).min(cy).min(height as i32 - cy);
+            let h = ((0.5 * min_cheb).min(edge as f64) as i32).max(ROOM_FLOOR as i32);
             Site {
                 center: IVec2::new(cx, cy),
                 bounds: Rect2 {
-                    min: [(cx - h).max(0), (cy - h).max(0)],
-                    max: [(cx + h).min(width as i32), (cy + h).min(height as i32)],
+                    min: [cx - h, cy - h],
+                    max: [cx + h, cy + h],
                 },
             }
         })
@@ -1683,14 +1749,44 @@ mod tests {
         c
     }
 
-    #[test]
-    fn graph_topology_generates_connected_non_overlapping_rooms() {
-        let config = graph_test_config();
-        let d = Dungeon::generate(&config).expect("graph topology must generate");
-        assert!(!d.regions.is_empty(), "graph must produce rooms");
-        assert!(d.walkable.iter().any(|&w| w), "graph must have floor");
+    /// Flood-fill `d.walkable` (4-connected) from `d.spawn`, returning the reached-cell mask.
+    fn reachable_from_spawn(d: &Dungeon) -> Vec<bool> {
+        let (w, h) = (d.width, d.height);
+        let mut seen = vec![false; w * h];
+        let start = d.spawn.y as usize * w + d.spawn.x as usize;
+        assert!(d.walkable[start], "spawn must be on a walkable cell");
+        seen[start] = true;
+        let mut stack = vec![start];
+        while let Some(i) = stack.pop() {
+            let (x, y) = ((i % w) as i32, (i / w) as i32);
+            for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h {
+                    let ni = ny as usize * w + nx as usize;
+                    if d.walkable[ni] && !seen[ni] {
+                        seen[ni] = true;
+                        stack.push(ni);
+                    }
+                }
+            }
+        }
+        seen
+    }
 
-        // Non-overlap: every room stays within its non-overlapping per-site bounds.
+    /// Assert every region has at least one interior floor cell reachable from spawn — true *geometric*
+    /// connectivity over the carved `walkable` mask, not just the logical `region.adjacency` graph (which
+    /// is connected by construction and so cannot catch a room whose corridor misses its rect).
+    fn assert_all_regions_reachable(d: &Dungeon) {
+        let seen = reachable_from_spawn(d);
+        let w = d.width;
+        for r in &d.regions {
+            let reached = (r.rect.min[1]..r.rect.max[1]).any(|y| {
+                (r.rect.min[0]..r.rect.max[0]).any(|x| seen[y as usize * w + x as usize])
+            });
+            assert!(reached, "region {} has no floor reachable from spawn", r.id);
+        }
+    }
+
+    fn assert_no_overlap(d: &Dungeon) {
         let overlaps = |a: &Rect2, b: &Rect2| {
             a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1]
         };
@@ -1699,26 +1795,70 @@ mod tests {
                 assert!(!overlaps(&a.rect, &b.rect), "graph regions {} and {} overlap", a.id, b.id);
             }
         }
+    }
 
-        // Connectivity: the front-end keeps only the largest linked component, so a flood-fill over
-        // region.adjacency from any room must reach every room.
-        let n = d.regions.len();
-        if n > 1 {
-            let mut visited = vec![false; n];
-            let mut stack = vec![0usize];
-            visited[0] = true;
-            let mut count = 1;
-            while let Some(u) = stack.pop() {
-                for &v in &d.regions[u].adjacency {
-                    let v = v as usize;
-                    if v < n && !visited[v] {
-                        visited[v] = true;
-                        count += 1;
-                        stack.push(v);
-                    }
+    #[test]
+    fn graph_topology_generates_connected_non_overlapping_rooms() {
+        let config = graph_test_config();
+        let d = Dungeon::generate(&config).expect("graph topology must generate");
+        assert!(!d.regions.is_empty(), "graph must produce rooms");
+        assert!(d.walkable.iter().any(|&w| w), "graph must have floor");
+        assert_no_overlap(&d);
+        assert_all_regions_reachable(&d);
+    }
+
+    #[test]
+    fn graph_topology_generates_at_liminality_0() {
+        // Exercise the graph carve's RNG-drawing geometry (room jitter + expansion-to-touch, t = 1) —
+        // the grid golden covers liminality 0.0, but the other graph tests run only at t = 0.
+        let mut config = graph_test_config();
+        config.liminality = 0.0;
+        let d = Dungeon::generate(&config).expect("graph must generate at liminality 0");
+        assert!(!d.regions.is_empty() && d.walkable.iter().any(|&x| x));
+        assert_no_overlap(&d);
+        assert_all_regions_reachable(&d);
+    }
+
+    // #4 regression + a target invariant for the deferred #5 work. Openings now land on the correct wall
+    // for the L-route (the #4 `derive_opening` fix, incl. the L-corner-inside-room case) and every room is
+    // reachable, but this stricter check — every doorway faces a real corridor mouth — still trips on the
+    // known Graph limitation #5: a Delaunay node can have >4 neighbours (forced at degree 5), so two
+    // corridors can share a wall and one's necking rocks the other's lane-0 mouth. That is doorway
+    // cosmetics, not connectivity (see graph_topology_generates_connected...). Un-ignore once corridors
+    // fan out along the wall / necking is coordinated across same-wall openings.
+    #[test]
+    #[ignore = "known Graph limitation #5: multiple corridors per wall can rock a lane-0 doorway mouth"]
+    fn graph_openings_sit_on_real_corridor_mouths() {
+        // Every recorded Opening must lie on its region's perimeter per its `dir`, AND the cell one step
+        // OUT of the room must be walkable — i.e. the door faces the corridor the L-route actually carved.
+        let config = graph_test_config();
+        let d = Dungeon::generate(&config).expect("gen");
+        let (w, h) = (d.width as i32, d.height as i32);
+        for r in &d.regions {
+            for o in &r.openings {
+                let [cx, cy] = o.cell;
+                match o.dir {
+                    N => assert_eq!(cy, r.rect.min[1], "N opening off the N wall of region {}", r.id),
+                    S => assert_eq!(cy, r.rect.max[1] - 1, "S opening off the S wall of region {}", r.id),
+                    E => assert_eq!(cx, r.rect.max[0] - 1, "E opening off the E wall of region {}", r.id),
+                    W => assert_eq!(cx, r.rect.min[0], "W opening off the W wall of region {}", r.id),
+                    _ => unreachable!(),
                 }
+                let (ox, oy) = match o.dir {
+                    N => (cx, cy - 1),
+                    S => (cx, cy + 1),
+                    E => (cx + 1, cy),
+                    W => (cx - 1, cy),
+                    _ => unreachable!(),
+                };
+                assert!(ox >= 0 && oy >= 0 && ox < w && oy < h, "opening mouth off-grid on region {}", r.id);
+                assert!(
+                    d.walkable[oy as usize * d.width + ox as usize],
+                    "region {} opening (dir {}) faces a wall, not a corridor",
+                    r.id,
+                    o.dir
+                );
             }
-            assert_eq!(count, n, "all graph regions must be corridor-connected");
         }
     }
 
