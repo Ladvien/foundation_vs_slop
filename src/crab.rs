@@ -1196,31 +1196,53 @@ fn crab_contact_damage(
 }
 
 /// Despawn dead crabs with a small blood burst + squelch (reuses the enemy-death VFX/SFX path).
+/// Tag set by `enemy::smiley_defense` on a crab it culls. Read by `crab_despawn_dead` (the single crab
+/// despawn owner) to emit the boss-swat gore variant and — crucially — suppress the blood SCENT bloom a
+/// normal death emits (a scent here would magnet more crabs into a feeding feedback loop).
+#[derive(Component)]
+pub struct Culled;
+
+/// The ONE system that removes a crab at ≤ 0 HP, whatever zeroed it (laser, `smiley_zap`, or a boss cull
+/// via the `Culled` tag). Being the sole despawn+gore owner is what prevents the double-despawn /
+/// double-gore race with `smiley_defense`, which now only zeroes HP + tags instead of despawning itself.
 fn crab_despawn_dead(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
-    crabs: Query<(Entity, &Health, &Transform), With<Crab>>,
+    crabs: Query<(Entity, &Health, &Transform, Option<&Culled>), With<Crab>>,
 ) {
-    for (entity, hp, tf) in &crabs {
+    for (entity, hp, tf, culled) in &crabs {
         if hp.current <= 0.0 {
-            gore.0.push(GoreEvent {
-                pos: tf.translation,
-                kind: GoreKind::EnemySplat,
-                tint: Color::srgb(0.35, 0.6, 0.15), // sickly green crab ichor
-                gib: None,
-                // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
-                // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
-                intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
-            });
-            // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
-            deposits.0.push(crate::ai::field::Deposit {
-                pos: tf.translation,
-                field: crate::ai::field::FieldId::SCENT,
-                amount: crate::ai::field::BLOOD_SCENT,
-            });
-            sfx.write(Sfx::EnemyDeath(tf.translation));
+            if culled.is_some() {
+                // Boss cull (`smiley_defense`): green-ichor swat, and deliberately NO SCENT deposit — a
+                // scent bloom here would magnet more crabs into a feeding feedback loop. No per-crab death
+                // sfx either (the boss already played one batched swat for the whole cull).
+                gore.0.push(GoreEvent {
+                    pos: tf.translation,
+                    kind: GoreKind::EnemySplat,
+                    tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
+                    gib: None,
+                    intensity: 0.2,
+                });
+            } else {
+                gore.0.push(GoreEvent {
+                    pos: tf.translation,
+                    kind: GoreKind::EnemySplat,
+                    tint: Color::srgb(0.35, 0.6, 0.15), // sickly green crab ichor
+                    gib: None,
+                    // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
+                    // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
+                    intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
+                });
+                // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
+                deposits.0.push(crate::ai::field::Deposit {
+                    pos: tf.translation,
+                    field: crate::ai::field::FieldId::SCENT,
+                    amount: crate::ai::field::BLOOD_SCENT,
+                });
+                sfx.write(Sfx::EnemyDeath(tf.translation));
+            }
             commands.entity(entity).despawn();
         }
     }
@@ -1717,10 +1739,30 @@ fn carry_gibs(
 
         match carry.phase {
             crate::gore::CarryPhase::Resting | crate::gore::CarryPhase::Crewing => {
-                if !has_crew {
-                    carry.phase = crate::gore::CarryPhase::Resting;
-                    carry.crew_timer = 0.0;
-                } else if cap_here >= carry.weight {
+                // A gathered crew lifts only if it has enough capacity at the chunk AND a nest still
+                // exists to receive it. Selecting the destination BEFORE committing means a chunk with
+                // every nest razed never lifts into an undeliverable Kinematic haul (which used to
+                // oscillate Crewing<->Hauling every fixed tick, resetting `crew_timer` each frame so the
+                // crew never disbanded). With no nest it stays a Crewing crew and disbands at
+                // CREW_TIMEOUT, cleanly re-foraging.
+                let mut dest: Option<Entity> = None;
+                if has_crew && cap_here >= carry.weight {
+                    // Nearest nest, ranked by the floor delivery cell (`nest.pos`), NOT the wall-mounted
+                    // dome `Transform`. Every other consumer (haul nav, deliver check, breeding, scout
+                    // home) uses `nest.pos`; ranking by the dome could commit the haul to a nest whose
+                    // delivery cell is across a wall, so the flow field returns nothing and the chunk
+                    // gets dragged straight through it. Match the deliver check's horizontal distance.
+                    let mut best_d = f32::INFINITY;
+                    for (ne, _ntf, nest) in nests.iter() {
+                        let d = (nest.pos - gtf.translation).with_y(0.0).length();
+                        if d < best_d {
+                            best_d = d;
+                            dest = Some(ne);
+                        }
+                    }
+                }
+
+                if let Some(nest_e) = dest {
                     // --- LIFT (Dynamic → Kinematic) ---
                     if crate::ai::diag::AI_DIAG {
                         let crew = carry
@@ -1746,26 +1788,15 @@ fn carry_gibs(
                     commands.entity(ge).insert(RigidBody::Kinematic);
                     lv.0 = Vec3::ZERO;
                     av.0 = Vec3::ZERO;
-                    // Nearest nest becomes the destination — ranked by the floor delivery cell
-                    // (`nest.pos`), NOT the wall-mounted dome `Transform`. Every other consumer (haul
-                    // nav, deliver check, breeding, scout home) uses `nest.pos`; ranking by the dome
-                    // here could commit the haul to a nest whose delivery cell is across a wall, so the
-                    // flow field returns nothing and the chunk gets dragged straight through it. Match
-                    // the deliver check's horizontal distance.
-                    let mut best: Option<(Entity, f32)> = None;
-                    for (ne, _ntf, nest) in nests.iter() {
-                        let d = (nest.pos - gtf.translation).with_y(0.0).length();
-                        if best.is_none_or(|(_, bd)| d < bd) {
-                            best = Some((ne, d));
-                        }
-                    }
-                    carry.nest = best.map(|(e, _)| e);
+                    carry.nest = Some(nest_e);
                     for &c in &carry.carriers {
                         if let Ok((_, mut cc)) = crabs.get_mut(c) {
                             cc.hauling = true;
                         }
                     }
-                } else {
+                } else if has_crew {
+                    // Crewing: not enough gathered capacity yet, OR nowhere to deliver. Keep gathering;
+                    // disband a crew that waits past CREW_TIMEOUT without lifting.
                     carry.phase = crate::gore::CarryPhase::Crewing;
                     carry.crew_timer += dt;
                     if carry.crew_timer >= CREW_TIMEOUT {
@@ -1780,6 +1811,9 @@ fn carry_gibs(
                         carry.phase = crate::gore::CarryPhase::Resting;
                         carry.crew_timer = 0.0;
                     }
+                } else {
+                    carry.phase = crate::gore::CarryPhase::Resting;
+                    carry.crew_timer = 0.0;
                 }
             }
             crate::gore::CarryPhase::Hauling => {
@@ -1790,8 +1824,26 @@ fn carry_gibs(
                     .and_then(|n| nests.get(n).ok())
                     .map(|(_, _, nest)| (nest.pos, nest.flow.clone()));
 
-                if cap_total < carry.weight || nest_nav.is_none() {
-                    // --- ABORT / DROP (Kinematic → Dynamic) ---
+                if nest_nav.is_none() {
+                    // --- NEST RAZED MID-HAUL: full release (Kinematic → Dynamic) ---
+                    // The destination nest no longer resolves, so there's nowhere to deliver. Drop the
+                    // load and fully release the crew (clear carriers, back to Resting) — mirroring the
+                    // CREW_TIMEOUT disband — instead of dropping to a Crewing limbo that can never
+                    // re-lift (the LIFT gate now refuses a nestless chunk) and would only sit emitting
+                    // MEAT scent until it timed out.
+                    commands.entity(ge).insert(RigidBody::Dynamic);
+                    for &c in &carry.carriers {
+                        if let Ok((_, mut cc)) = crabs.get_mut(c) {
+                            cc.target = None;
+                            cc.hauling = false;
+                        }
+                    }
+                    carry.carriers.clear();
+                    carry.phase = crate::gore::CarryPhase::Resting;
+                    carry.crew_timer = 0.0;
+                    carry.nest = None;
+                } else if cap_total < carry.weight {
+                    // --- ABORT / DROP (Kinematic → Dynamic): crew shrank below liftable capacity ---
                     commands.entity(ge).insert(RigidBody::Dynamic);
                     carry.phase = crate::gore::CarryPhase::Crewing;
                     carry.crew_timer = 0.0;
