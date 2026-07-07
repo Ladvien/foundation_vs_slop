@@ -7,20 +7,27 @@
 //! voice-capped per frame so a whole squad on full-auto reads as a firefight, not a buzzsaw.
 //!
 //! **World sounds are spatialized.** Every message that names a world position (fire, impacts,
-//! deaths) — plus the growl and squitter layers — spawns a *spatial* emitter at that point, so it
-//! pans left/right and attenuates with distance. A single [`SpatialListener`] tracks the camera's
-//! ground focus (see [`sync_listener`]); its ear axis lines up with screen-X, so an off-screen-left
-//! growl reads from the left (Grimshaw & Schott 2007, *acoustic ecology of FPS* — sound as an audio
-//! beacon; Zotkin et al. 2004, *Rendering Localized Spatial Audio* — pan + distance ⇒ externalized).
-//! UI blips and music stay non-spatial (they belong to the player, not the world).
+//! deaths) — plus the growl, squitter, and ambient layers — spawns a *spatial* emitter at that
+//! point, so it pans left/right and attenuates with distance. A single [`SpatialListener`] tracks
+//! the camera's ground focus (see [`sync_listener`]); its ear axis lines up with screen-X, so an
+//! off-screen-left growl reads from the left (Grimshaw & Schott 2007, *acoustic ecology of FPS* —
+//! sound as an audio beacon; Zotkin et al. 2004, *Rendering Localized Spatial Audio* — pan +
+//! distance ⇒ externalized). UI blips and music stay non-spatial (they belong to the player).
 //!
-//! Three continuous layers are driven locally instead of by messages, because each needs state the
+//! **One mix bus, with sidechain ducking.** All gains route through an [`AudioBus`] (music /
+//! ambience / sfx / ui groups + a live duck envelope) so relative levels are tuned in one place, and
+//! loud world events automatically dip the music+ambience beds so feedback punches through — then
+//! the beds recover (Böttcher & Serafin — buses/HDR; Nacke/Grimshaw 2010 — music-on/SFX-off is the
+//! *worst* condition, so never let the bed drown the feedback).
+//!
+//! Continuous layers are driven locally instead of by messages, because each needs state the
 //! emitting site doesn't keep: per-unit carpet footsteps (paced off [`Velocity`]), a monster-growl
-//! stinger fired on the false→true edge of an enemy entering sight range, and an **adaptive music**
-//! layer that crossfades a calm↔combat pair on a continuous *threat scalar* (count × proximity of
-//! visible hostiles) rather than a hard cut on a boolean (Khan et al. 2023, *Adaptive Background
-//! Music* — bind gain to a game variable; Kaushik 2025, *Procedural Music Generation* — layer, don't
-//! switch). A backrooms wind bed loops underneath the whole time.
+//! stinger fired on the false→true edge of an enemy entering sight range (round-robined over several
+//! growls so it never sounds stamped), a sparse randomized **ambient one-shot** layer (creaks/drips
+//! scattered around the squad — a living space, not a bare loop), and an **adaptive music** layer
+//! that crossfades a calm↔combat pair on a continuous *threat scalar* (count × proximity of visible
+//! hostiles) rather than a hard cut on a boolean (Khan et al. 2023 — bind gain to a game variable;
+//! Kaushik 2025 — layer, don't switch). A backrooms wind bed loops underneath the whole time.
 //!
 //! Assets live in `assets/audio/**` and are all Ogg Vorbis, so Bevy's default audio decoder plays
 //! them with no extra Cargo features (one decode path — no wav/mp3 feature flags).
@@ -68,6 +75,22 @@ const FADE_SECS: f32 = 1.5;
 /// music intensity is the max over all visible hostiles of `smoothstep(FAR, NEAR, nearest_unit_dist)`.
 const THREAT_NEAR: f32 = 3.0;
 const THREAT_FAR: f32 = 14.0;
+
+/// Sidechain ducking: each loud world event pushes the duck envelope up by `DUCK_ATTACK` (capped at
+/// 1); it decays back toward 0 at `DUCK_DECAY`/s (≈0.4 s after the last hit). At full duck the music
+/// and ambience beds drop to `1 − DUCK_DEPTH` of their level, so gunfire/growls/deaths cut through
+/// without the bed being permanently quieter (the fix for "too quiet under action").
+const DUCK_ATTACK: f32 = 0.3;
+const DUCK_DECAY: f32 = 2.5;
+const DUCK_DEPTH: f32 = 0.45;
+
+/// Randomized ambient one-shot layer: a creak/drip scattered every `AMBIENT_MIN_GAP`–`AMBIENT_MAX_GAP`
+/// seconds, placed `AMBIENT_RADIUS` out from the squad on a random bearing so it reads as coming from
+/// somewhere in the dungeon rather than a metronome on the player. Kept low, under the wind bed.
+const AMBIENT_MIN_GAP: f32 = 7.0;
+const AMBIENT_MAX_GAP: f32 = 18.0;
+const AMBIENT_RADIUS: f32 = 11.0;
+const AMBIENT_VOL: f32 = 0.4;
 
 /// Seconds between footfalls with a *single* unit walking. The interval scales down linearly with
 /// the number of movers (see `footsteps`), so a full squad patters ~5× faster and the sound
@@ -123,6 +146,18 @@ pub enum Sfx {
     UnitDeath(Vec3),
 }
 
+impl Sfx {
+    /// True for the loud world events that duck the music+ambience beds (sidechain). Fire, flesh
+    /// hits, and deaths are the transients feedback needs to punch through; UI blips and wall pings
+    /// don't warrant dipping the bed.
+    fn ducks(&self) -> bool {
+        matches!(
+            self,
+            Sfx::Fire(_) | Sfx::ImpactFlesh(_) | Sfx::EnemyDeath(_) | Sfx::UnitDeath(_)
+        )
+    }
+}
+
 /// Handles for every clip, loaded once at startup.
 #[derive(Resource)]
 struct AudioAssets {
@@ -138,13 +173,44 @@ struct AudioAssets {
     crunch: Handle<AudioSource>,
     /// Bone snap layered over the crunch for extra juice.
     bone_snap: Handle<AudioSource>,
-    growl: Handle<AudioSource>,
+    /// Monster growls — round-robined (no immediate repeat) so a repeatedly-sighted enemy doesn't
+    /// stamp the same clip (Böttcher & Serafin — sample variation is the first rung against repetition).
+    growls: [Handle<AudioSource>; 4],
     /// Dry insectoid chitter for the crab swarm (shared throttled voice, see `crab_squitter`).
     squitter: Handle<AudioSource>,
     footsteps: [Handle<AudioSource>; 4],
+    /// Sparse ambient one-shots (door creaks, water drips, a clock tick) for the randomized layer.
+    ambient: [Handle<AudioSource>; 6],
     wind: Handle<AudioSource>,
     music_calm: Handle<AudioSource>,
     music_combat: Handle<AudioSource>,
+}
+
+/// Mix bus: relative group gains tuned in one place, plus a live sidechain `duck` envelope. Every
+/// one-shot multiplies its per-clip base by its group gain at spawn; the forever-alive beds multiply
+/// by their group gain × the duck factor each frame. Master + mute stay on `GlobalVolume`.
+#[derive(Resource)]
+struct AudioBus {
+    music: f32,
+    ambience: f32,
+    sfx: f32,
+    ui: f32,
+    /// 0 = no duck … 1 = full duck. Bumped by loud events, decays each frame.
+    duck: f32,
+}
+
+impl Default for AudioBus {
+    fn default() -> Self {
+        // Group gains start at unity — the per-clip constants are already balanced; the bus exists so
+        // that balance is tuneable in one place and to carry the duck envelope.
+        Self {
+            music: 1.0,
+            ambience: 1.0,
+            sfx: 1.0,
+            ui: 1.0,
+            duck: 0.0,
+        }
+    }
 }
 
 /// Adaptive-music state: `intensity` ∈ [0, 1] is the crossfade position (0 = calm, 1 = full combat),
@@ -155,8 +221,9 @@ struct MusicState {
     intensity: f32,
 }
 
-/// Marker: the always-on backrooms wind bed. Its gain is driven each frame (× master) so it mutes on
-/// a live alt-tab too — `GlobalVolume` alone only affects sounds at *birth*, not a forever-alive sink.
+/// Marker: the always-on backrooms wind bed. Its gain is driven each frame (× ambience × duck ×
+/// master) so it ducks under action and mutes on a live alt-tab — `GlobalVolume` alone only affects
+/// sounds at *birth*, not a forever-alive sink.
 #[derive(Component)]
 struct WindBed;
 /// Marker: the calm music loop (audible when `intensity` = 0).
@@ -175,15 +242,18 @@ impl Plugin for GameAudioPlugin {
             .insert_resource(GlobalVolume::new(Volume::Linear(MASTER_VOLUME)))
             // World-units → audio-units for every spatial emitter that doesn't override it.
             .insert_resource(DefaultSpatialScale(SpatialScale::new(SPATIAL_SCALE)))
+            .init_resource::<AudioBus>()
             .add_systems(Startup, load_audio)
             .add_systems(
                 Update,
                 (
                     sync_listener,
+                    update_duck,
                     play_sfx,
                     footsteps,
                     crab_squitter,
                     growl_stinger,
+                    ambient_oneshots,
                     update_music,
                     mute_when_background,
                 ),
@@ -195,9 +265,9 @@ impl Plugin for GameAudioPlugin {
 /// another Space, minimised) or absent entirely (a headless run: the sim harness, a background/CI
 /// session, or a devshot capture). Restores `MASTER_VOLUME` the instant the window regains focus. One
 /// cheap resource write per frame; no per-sound bookkeeping. This mutes one-shots directly (they read
-/// `GlobalVolume` at birth); the forever-alive beds (wind + music) read it each frame in their own
-/// gain systems so they mute on a live alt-tab too. This is why running the game in the background —
-/// as this project does for `devshot` screenshots — makes no noise.
+/// `GlobalVolume` at birth); the forever-alive beds (wind + music) read it each frame in `update_music`
+/// so they mute on a live alt-tab too. This is why running the game in the background — as this project
+/// does for `devshot` screenshots — makes no noise.
 fn mute_when_background(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut volume: ResMut<GlobalVolume>,
@@ -219,13 +289,26 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         squelch: assets.load("audio/impact/squelch.ogg"),
         crunch: assets.load("audio/impact/crunch.ogg"),
         bone_snap: assets.load("audio/impact/bone_snap.ogg"),
-        growl: assets.load("audio/enemy/growl.ogg"),
+        growls: [
+            assets.load("audio/enemy/growl_1.ogg"),
+            assets.load("audio/enemy/growl_2.ogg"),
+            assets.load("audio/enemy/growl_3.ogg"),
+            assets.load("audio/enemy/growl_4.ogg"),
+        ],
         squitter: assets.load("audio/enemy/squitter.ogg"),
         footsteps: [
             assets.load("audio/foot/carpet_1.ogg"),
             assets.load("audio/foot/carpet_2.ogg"),
             assets.load("audio/foot/carpet_3.ogg"),
             assets.load("audio/foot/carpet_4.ogg"),
+        ],
+        ambient: [
+            assets.load("audio/ambience/oneshot/creak_1.ogg"),
+            assets.load("audio/ambience/oneshot/creak_2.ogg"),
+            assets.load("audio/ambience/oneshot/creak_3.ogg"),
+            assets.load("audio/ambience/oneshot/drip_1.ogg"),
+            assets.load("audio/ambience/oneshot/drip_2.ogg"),
+            assets.load("audio/ambience/oneshot/clock.ogg"),
         ],
         wind: assets.load("audio/ambience/wind.ogg"),
         music_calm: assets.load("audio/music/calm.ogg"),
@@ -273,12 +356,25 @@ fn sync_listener(
     tf.rotation = cam.rotation();
 }
 
+/// Advance the sidechain duck envelope: decay it toward 0 on real time, then bump it for each loud
+/// world event this frame (see [`Sfx::ducks`]). Reads the same [`Sfx`] stream as [`play_sfx`] (each
+/// `MessageReader` has its own cursor). Growls bump it too, directly in [`growl_stinger`].
+fn update_duck(time: Res<Time<Real>>, mut msgs: MessageReader<Sfx>, mut bus: ResMut<AudioBus>) {
+    bus.duck = (bus.duck - DUCK_DECAY * time.delta_secs()).max(0.0);
+    for sfx in msgs.read() {
+        if sfx.ducks() {
+            bus.duck = (bus.duck + DUCK_ATTACK).min(1.0);
+        }
+    }
+}
+
 /// Play one clip per queued [`Sfx`], voice-capping the fire spam and jittering pitch so repeats
 /// don't sound stamped. World variants spawn *spatial* emitters at their event position; UI variants
-/// stay non-spatial.
+/// stay non-spatial. Per-clip volumes route through the mix bus's sfx/ui group gains.
 fn play_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    bus: Res<AudioBus>,
     mut msgs: MessageReader<Sfx>,
     mut rng: Local<u32>,
 ) {
@@ -289,13 +385,13 @@ fn play_sfx(
             Sfx::MoveOrder => {
                 commands.spawn((
                     AudioPlayer::new(assets.move_order.clone()),
-                    one_shot(UI_VOL, jitter(&mut rng, 0.05)),
+                    one_shot(UI_VOL * bus.ui, jitter(&mut rng, 0.05)),
                 ));
             }
             Sfx::Invalid => {
                 commands.spawn((
                     AudioPlayer::new(assets.invalid.clone()),
-                    one_shot(UI_VOL, jitter(&mut rng, 0.03)),
+                    one_shot(UI_VOL * bus.ui, jitter(&mut rng, 0.03)),
                 ));
             }
             // World sounds — spatialized at the event point.
@@ -307,37 +403,37 @@ fn play_sfx(
                 fire_voices += 1;
                 commands.spawn((
                     AudioPlayer::new(assets.fire.clone()),
-                    one_shot_spatial(*pos, 0.32, jitter(&mut rng, 0.15)),
+                    one_shot_spatial(*pos, 0.32 * bus.sfx, jitter(&mut rng, 0.15)),
                 ));
             }
             Sfx::ImpactWall(pos) => {
                 commands.spawn((
                     AudioPlayer::new(assets.wall.clone()),
-                    one_shot_spatial(*pos, 0.4, jitter(&mut rng, 0.12)),
+                    one_shot_spatial(*pos, 0.4 * bus.sfx, jitter(&mut rng, 0.12)),
                 ));
             }
             // Flesh hits, enemy bursts, and unit crunches are gory now (see `gore`).
             Sfx::ImpactFlesh(pos) => {
                 commands.spawn((
                     AudioPlayer::new(assets.splat.clone()),
-                    one_shot_spatial(*pos, 0.55, jitter(&mut rng, 0.12)),
+                    one_shot_spatial(*pos, 0.55 * bus.sfx, jitter(&mut rng, 0.12)),
                 ));
             }
             Sfx::EnemyDeath(pos) => {
                 commands.spawn((
                     AudioPlayer::new(assets.squelch.clone()),
-                    one_shot_spatial(*pos, 0.7, jitter(&mut rng, 0.08)),
+                    one_shot_spatial(*pos, 0.7 * bus.sfx, jitter(&mut rng, 0.08)),
                 ));
             }
             Sfx::UnitDeath(pos) => {
                 commands.spawn((
                     AudioPlayer::new(assets.crunch.clone()),
-                    one_shot_spatial(*pos, 0.85, jitter(&mut rng, 0.06)),
+                    one_shot_spatial(*pos, 0.85 * bus.sfx, jitter(&mut rng, 0.06)),
                 ));
                 // A crunched unit layers a bone snap over the wet crunch, same spot.
                 commands.spawn((
                     AudioPlayer::new(assets.bone_snap.clone()),
-                    one_shot_spatial(*pos, 0.7, jitter(&mut rng, 0.1)),
+                    one_shot_spatial(*pos, 0.7 * bus.sfx, jitter(&mut rng, 0.1)),
                 ));
             }
         }
@@ -352,10 +448,12 @@ fn play_sfx(
 fn footsteps(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    bus: Res<AudioBus>,
     time: Res<Time>,
     units: Query<&Velocity, With<Unit>>,
     mut timer: Local<f32>,
     mut rng: Local<u32>,
+    mut last: Local<usize>,
 ) {
     let movers = units
         .iter()
@@ -371,10 +469,10 @@ fn footsteps(
     *timer += time.delta_secs();
     if *timer >= interval {
         *timer = 0.0;
-        let idx = (next_u32(&mut rng) as usize) % assets.footsteps.len();
+        let idx = pick_variant(&mut rng, assets.footsteps.len(), &mut last);
         commands.spawn((
             AudioPlayer::new(assets.footsteps[idx].clone()),
-            one_shot(FOOT_VOL, jitter(&mut rng, 0.08)),
+            one_shot(FOOT_VOL * bus.sfx, jitter(&mut rng, 0.08)),
         ));
     }
 }
@@ -387,6 +485,7 @@ fn footsteps(
 fn crab_squitter(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    bus: Res<AudioBus>,
     time: Res<Time>,
     crabs: Query<&Transform, With<Crab>>,
     units: Query<&Transform, (With<Unit>, Without<Crab>)>,
@@ -418,23 +517,26 @@ fn crab_squitter(
         let centroid = sum / near as f32;
         commands.spawn((
             AudioPlayer::new(assets.squitter.clone()),
-            one_shot_spatial(centroid, SQUITTER_VOL, jitter(&mut rng, 0.12)),
+            one_shot_spatial(centroid, SQUITTER_VOL * bus.sfx, jitter(&mut rng, 0.12)),
         ));
     }
 }
 
 /// Growl when a *visible* enemy first crosses inside [`GROWL_RANGE`] of any unit. Edge-triggered per
 /// enemy so it stings once on sighting, not every frame, and re-arms when the enemy leaves range.
-/// Spatialized at the growling enemy — an off-screen growth that pans and swells as the threat nears.
+/// Spatialized at the growling enemy, round-robined over the growl set (no immediate repeat), and it
+/// ducks the beds — a fresh growl is a loud stinger that should punch through.
 fn growl_stinger(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    mut bus: ResMut<AudioBus>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
     enemies: Query<(Entity, &Transform), With<Enemy>>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
     mut near: Local<HashMap<Entity, bool>>,
     mut rng: Local<u32>,
+    mut last: Local<usize>,
 ) {
     let live: HashSet<Entity> = enemies.iter().map(|(e, _)| e).collect();
 
@@ -448,23 +550,76 @@ fn growl_stinger(
         let is_near = visible && nearest <= GROWL_RANGE;
         let was_near = near.insert(entity, is_near).unwrap_or(false);
         if is_near && !was_near {
+            let idx = pick_variant(&mut rng, assets.growls.len(), &mut last);
             commands.spawn((
-                AudioPlayer::new(assets.growl.clone()),
-                one_shot_spatial(etf.translation, GROWL_VOL, jitter(&mut rng, 0.1)),
+                AudioPlayer::new(assets.growls[idx].clone()),
+                one_shot_spatial(etf.translation, GROWL_VOL * bus.sfx, jitter(&mut rng, 0.1)),
             ));
+            bus.duck = (bus.duck + DUCK_ATTACK).min(1.0);
         }
     }
 
     near.retain(|e, _| live.contains(e));
 }
 
+/// Sparse randomized ambient one-shots (creaks, drips, a distant clock) scattered around the squad
+/// over the wind bed, so the dungeon reads as a living space rather than a looping WAV. The interval
+/// is re-randomized after every event and the clip is round-robined, so it never becomes a tell; an
+/// irregular creak from off in the dark is a low-grade expectancy violation (unease). Placed
+/// `AMBIENT_RADIUS` out from the squad centroid on a random bearing, spatialized. Silent with no squad.
+fn ambient_oneshots(
+    mut commands: Commands,
+    assets: Res<AudioAssets>,
+    bus: Res<AudioBus>,
+    time: Res<Time>,
+    units: Query<&Transform, With<Unit>>,
+    mut timer: Local<f32>,
+    mut gap: Local<f32>,
+    mut rng: Local<u32>,
+    mut last: Local<usize>,
+) {
+    // Squad centroid to scatter events around; nothing to anchor to ⇒ stay silent.
+    let mut sum = Vec3::ZERO;
+    let mut n = 0u32;
+    for tf in &units {
+        sum += tf.translation;
+        n += 1;
+    }
+    if n == 0 {
+        *timer = 0.0;
+        return;
+    }
+    // First run (gap still 0): arm a randomized interval.
+    if *gap <= 0.0 {
+        *gap = AMBIENT_MIN_GAP + rand01(&mut rng) * (AMBIENT_MAX_GAP - AMBIENT_MIN_GAP);
+    }
+    *timer += time.delta_secs();
+    if *timer < *gap {
+        return;
+    }
+    *timer = 0.0;
+    *gap = AMBIENT_MIN_GAP + rand01(&mut rng) * (AMBIENT_MAX_GAP - AMBIENT_MIN_GAP);
+
+    let centroid = sum / n as f32;
+    // Random bearing on the ground plane, AMBIENT_RADIUS out.
+    let theta = rand01(&mut rng) * std::f32::consts::TAU;
+    let pos = centroid + Vec3::new(theta.cos(), 0.0, theta.sin()) * AMBIENT_RADIUS;
+    let idx = pick_variant(&mut rng, assets.ambient.len(), &mut last);
+    commands.spawn((
+        AudioPlayer::new(assets.ambient[idx].clone()),
+        one_shot_spatial(pos, AMBIENT_VOL * bus.ambience, jitter(&mut rng, 0.06)),
+    ));
+}
+
 /// Adaptive music: crossfade the calm↔combat pair on a continuous **threat scalar** instead of a hard
 /// cut on a boolean. Threat = the max over every *visible* hostile (excluding an inert Nest) of a
 /// proximity ramp to the nearest unit, so the music breathes with how close a fight is, not just
-/// whether one exists. Both loops stay alive; we only move their gains (× master, so they mute on a
-/// live alt-tab — `set_volume` bypasses `GlobalVolume`, which is applied only at a sink's birth).
+/// whether one exists. Both loops stay alive; we only move their gains (× music group × duck × master).
+/// The wind bed rides the same duck × master here so the whole bed layer dips together under action and
+/// mutes on a live alt-tab (`set_volume` bypasses `GlobalVolume`, which is applied only at a sink's birth).
 fn update_music(
     time: Res<Time<Real>>,
+    bus: Res<AudioBus>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
     gv: Res<GlobalVolume>,
@@ -500,11 +655,12 @@ fn update_music(
         (state.intensity - step).max(target)
     };
 
-    // Equal-power crossfade (constant perceived loudness across the blend), muted with the master.
+    // Equal-power crossfade (constant perceived loudness across the blend), ducked and muted.
     let angle = state.intensity * std::f32::consts::FRAC_PI_2;
-    let calm_g = Volume::Linear(angle.cos() * MUSIC_VOL) * gv.volume;
-    let combat_g = Volume::Linear(angle.sin() * MUSIC_VOL) * gv.volume;
-    let wind_g = Volume::Linear(WIND_VOL) * gv.volume;
+    let duck_factor = 1.0 - bus.duck * DUCK_DEPTH;
+    let calm_g = Volume::Linear(angle.cos() * MUSIC_VOL * bus.music * duck_factor) * gv.volume;
+    let combat_g = Volume::Linear(angle.sin() * MUSIC_VOL * bus.music * duck_factor) * gv.volume;
+    let wind_g = Volume::Linear(WIND_VOL * bus.ambience * duck_factor) * gv.volume;
 
     // Guard each: the `AudioSink` component only exists once the sink is created (a frame or two after
     // spawn), so early frames simply no-op — no unwrap, no panic.
@@ -548,4 +704,20 @@ fn looped(vol: f32) -> PlaybackSettings {
 /// A playback-speed multiplier of `1.0 ± amount`, so repeated one-shots don't sound identical.
 fn jitter(state: &mut u32, amount: f32) -> f32 {
     1.0 + (rand01(state) * 2.0 - 1.0) * amount
+}
+
+/// Round-robin pick over `len` variants with **no immediate repeat**: never returns the same index
+/// twice in a row (unless there's only one), so a repeatedly-triggered sound cycles instead of
+/// stamping one clip. `last` is the caller's running memory of the previous pick. Panic-free.
+fn pick_variant(rng: &mut u32, len: usize, last: &mut usize) -> usize {
+    if len <= 1 {
+        *last = 0;
+        return 0;
+    }
+    let mut idx = (next_u32(rng) as usize) % len;
+    if idx == *last {
+        idx = (idx + 1) % len;
+    }
+    *last = idx;
+    idx
 }
