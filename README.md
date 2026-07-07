@@ -1,17 +1,19 @@
 ## ISSUES
-- Furniture spawns outside of wall boundaries.
-- Furniture spawns halfway through walls
-- Toliet and sink need rules to be together, and close to the walls
+- Toliet and sink need rules to be together, and close to the walls _(partial: generic `AgainstWall` wall-affinity applies, but no rule groups the two together — pieces are actively spread apart)_
 - TV, lamps, small potted plants all need to stack on tables and desks
 - The wall cutaways don't change when the player rotates the map
 
 
 ### TODO
-- Ensure the crabs have flocking like behaviors and don't pile up
 - Make blood pools relate to the size of the mesh and/or weight of the mesh
 - **Stealth pounce:** gate the leap on the target's facing — stalk to the blind side and only pounce when prey isn't looking. (Now: range + cooldown only.)
 - **Dynamic castes:** let crabs re-role between scout and assault as swarm needs shift. (Now: fixed at birth.)
 
+## DONE
+- Furniture spawns outside of wall boundaries. — room interior bounds inset by wall thickness, MH proposals hard-clamped, quadratic out-of-bounds penalty; WFC emits only in-region cells; furnish rejects non-floor centers (`src/placement/solvers/metropolis.rs`, `wfc.rs`, `furnish.rs`).
+- Furniture spawns halfway through walls — footprints inset from the wall slab (`WALL_INSET = WALL_THICKNESS`) and furniture–furniture overlap penalized (`src/placement/solvers/metropolis.rs`).
+- Ensure the crabs have flocking like behaviors and don't pile up — Reynolds separation steering over a spatial-hash of neighbors (`CRAB_SEP_RADIUS`/`CRAB_SEP_STRENGTH`), applied as real positional displacement across all movement modes (`src/crab.rs`).
+- 
 ## Crabs
 
 Wall-climbing swarm — ~40 to start, breed up to ~5000, from 4 nests in far rooms. One crab dies to a shot or two; the threat is the mass. They climb walls like floors, so geometry won't corner them.
