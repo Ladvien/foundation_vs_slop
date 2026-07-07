@@ -29,8 +29,8 @@ impl FieldId {
     /// Meat trail — carryable gibs emit it; foraging crabs climb its gradient toward food.
     pub const MEAT: FieldId = FieldId(3);
     /// Alarm — a **wounded crab** floods this locally; nearby crabs read it and muster (converge on the
-    /// squad) instead of fleeing. The retaliatory, *local* twin of the global nest berserk (`NestAlarm`):
-    /// nest hit → whole-swarm berserk, crab hit → a one-room alarm bloom. Models alarm-pheromone
+    /// squad) instead of fleeing. The nest floods this *same local* channel when hit (`nest::nest_alarm`):
+    /// a nest hit → a stronger, wider bloom, a crab hit → a one-room bloom. Models alarm-pheromone
     /// recruitment to defense in social insects — a stigmergic "warning cry" (Heylighen, "Stigmergy as a
     /// universal coordination mechanism", Cognitive Systems Research 2016). Deposited by
     /// `crab::crab_alarm_on_damage`; read by the brain as `Fact::AlarmHere` (gates Muster on, Flee off).
@@ -112,8 +112,7 @@ impl Stig {
         c.x >= 0 && c.y >= 0 && (c.x as usize) < self.width && (c.y as usize) < self.height
     }
 
-    /// Point read at a world position (query). Off-grid reads as 0. (Consumed by steering in Phase 3.)
-    #[allow(dead_code)]
+    /// Point read at a world position (query). Off-grid reads as 0.
     pub fn sample(&self, field: FieldId, dungeon: &Dungeon, pos: Vec3) -> f32 {
         let c = dungeon.world_to_cell(pos);
         if self.in_grid(c) {
@@ -124,8 +123,7 @@ impl Stig {
     }
 
     /// Direction (world XZ) of *increasing* value, magnitude ≈ the local slope. Central differences on
-    /// the 4-neighbour cells; `FollowGradient` uses `+`, `FleeGradient` uses `-`. (Used in Phase 3.)
-    #[allow(dead_code)]
+    /// the 4-neighbour cells; `FollowGradient` uses `+`, `FleeGradient` uses `-`.
     pub fn gradient(&self, field: FieldId, dungeon: &Dungeon, pos: Vec3) -> Vec2 {
         let c = dungeon.world_to_cell(pos);
         let at = |dx: i32, dy: i32| -> f32 {

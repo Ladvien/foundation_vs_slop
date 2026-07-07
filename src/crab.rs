@@ -46,7 +46,7 @@ const CRAB_WALL_CLUSTERS: usize = 2;
 const CRAB_MIN_SPAWN_DIST: f32 = 8.0;
 const CRAB_CLUSTER_SEP: f32 = 5.0;
 
-/// Weak individually: 1–2 laser hits (see `laser::LASER_DAMAGE`).
+/// Weak individually: ~3 laser hits (see `laser::LASER_DAMAGE`).
 const CRAB_HP: f32 = 25.0;
 /// Base bite DPS, scaled up **super-linearly** by how many crabs pile on one unit (see
 /// `crab_contact_damage`): total = `CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`. One crab is a nuisance
@@ -57,10 +57,6 @@ const CRAB_CONTACT_DPS: f32 = 3.0;
 const DAMAGE_EXPONENT: f32 = 1.5;
 /// Planar bite margin beyond the unit's body radius — a crab this close (in XZ) to a unit is feeding.
 const CRAB_CONTACT_RADIUS: f32 = 0.2;
-/// Critical mass: this many crabs must be biting one target before the swarm deals ANY damage. Below it
-/// the swarm is milling/building up (it can't overcome the squad); at/above it the super-linear bite
-/// kicks in. A nest under attack (berserk) waives this. Playtest dial for how big a swarm must gather.
-const MASS_MIN: usize = 5;
 /// Pounce tuning. A crab lunges at a unit within `JUMP_LEN` (≈10 body lengths; a crab renders ~0.19 wide,
 /// so ~1.9 world units) but not one already in its face (`JUMP_MIN`). It hunkers for `JUMP_HUNKER`s, then
 /// arcs over `JUMP_AIR`s to `JUMP_ARC` peak height, biting `JUMP_DAMAGE` on landing, then waits out
@@ -108,18 +104,22 @@ const CRAB_JITTER_FREQ: f32 = 2.3;
 
 /// Alarm-pheromone recruitment to defense. When a crab is wounded it floods the local ALARM channel
 /// (see `crate::ai::field::FieldId::ALARM` / `crab_alarm_on_damage`) so nearby crabs muster and converge
-/// on the squad instead of fleeing — the retaliatory, *local* twin of the nest berserk alarm (nest hit →
-/// global berserk, crab hit → a one-room alarm bloom). Peak value deposited at the wound; it falls off
+/// on the squad instead of fleeing — the retaliatory, *local* twin of the nest's own alarm (nest hit →
+/// a stronger, wider bloom, crab hit → a one-room alarm bloom). Peak value deposited at the wound; it falls off
 /// over the channel's ~one-room `deposit_radius` and evaporates over a couple seconds. Heylighen,
 /// "Stigmergy as a universal coordination mechanism", Cognitive Systems Research 2016 (a warning-cry).
 const ALARM_DEPOSIT: f32 = 2.0;
 /// Speed multiplier while mustering — an alarmed crab charges noticeably faster than a calm forage, so a
 /// bolt into a pack reads as a scary surge boiling toward the shooter rather than a leisurely approach.
 const MUSTER_SPEED_MUL: f32 = 1.4;
+/// How fast an actively-biting crab drains its HUNGER drive (per second). Well above HUNGER's 0.03/s rise
+/// so feeding meaningfully sates — a fed crab's forage/latch weighting drops and it peels off, leaving the
+/// hungry crabs to press. Turns HUNGER from a uniform saturating ramp into a real per-agent motivator.
+const HUNGER_SATE_RATE: f32 = 0.3;
 
 /// Scout recon tuning (the swarm's ~20% roaming recruiters; see [`Scout`] / `scout_sense_and_report`).
 /// Fraction of crabs tagged as scouts at spawn (deterministic by spatial hash, so newborns split the
-/// same way). ~1 in 5 gives recon coverage while leaving ~80% as the assault mass (`MASS_MIN`).
+/// same way). ~1 in 5 gives recon coverage while leaving ~80% as the assault mass that does the killing.
 const SCOUT_FRACTION: f32 = 0.20;
 /// A roaming scout "spots" any prey within this planar range (world units) — it then tracks and marks it.
 const SCOUT_SIGHT: f32 = 5.0;
@@ -182,8 +182,6 @@ struct CrabMotion {
     climb_bias: f32,
     /// Per-crab preferred angular slot `[0,1]` around the body (mapped across `BACK_SPREAD`).
     angle_bias: f32,
-    /// Whether the crab is currently latched onto a unit (vs. free-roaming the floor/walls).
-    latched: bool,
     /// Body-relative angle (radians) of the crab's slot around its host, `0` = dead-centre back. Set
     /// once on latching so the crab holds that spot and rides along as the host turns and walks.
     latch_rel: f32,
@@ -334,8 +332,11 @@ impl Plugin for CrabPlugin {
             .init_resource::<CrabSpawnSeq>()
             // Graph and anim resources must exist before crabs are spawned/snapped to patches.
             .add_systems(Startup, (build_surface_graph, build_crab_anim, spawn_crabs).chain())
+            // Pinned crab simulation on `FixedUpdate` — locomotion, jumping, carry economy, combat,
+            // deposits, and reproduction. All the `.after(AiSet::…)` / inter-system orderings stay valid
+            // because `AiSet` and every one of these systems now live on `FixedUpdate` together.
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     rebuild_crab_field,
                     // Enlist foraging crabs onto specific gibs before locomotion reads their targets.
@@ -347,7 +348,7 @@ impl Plugin for CrabPlugin {
                     release_uncommitted_carriers
                         .after(crate::ai::AiSet::Think)
                         .before(carry_gibs),
-                    // Move after the brain has chosen this frame's mode (see `crate::ai`).
+                    // Move after the brain has chosen this tick's mode (see `crate::ai`).
                     crab_locomotion
                         .after(rebuild_crab_field)
                         .after(crate::ai::AiSet::Think),
@@ -357,21 +358,23 @@ impl Plugin for CrabPlugin {
                     carry_gibs
                         .after(crab_locomotion)
                         .after(assign_meat_targets),
-                    attach_crab_animation,
-                    drive_crab_animation,
                     crab_contact_damage,
                     // Flood the local ALARM channel when a crab is wounded, before the deposits drain so
-                    // the muster bloom is live this frame (mirrors `scout_mark_prey`'s ordering).
+                    // the muster bloom is live this tick (mirrors `scout_mark_prey`'s ordering).
                     crab_alarm_on_damage.before(crate::ai::AiSet::Deposits),
+                    // Sate HUNGER after the brain has consumed this tick's drive values.
+                    crab_feeding_sates_hunger.after(crate::ai::AiSet::Think),
                     crab_despawn_dead,
                     deposit_crab_density,
                     deposit_meat_scent,
                     // Scout detection + rally-pheromone deposit: before the rally deposits drain so the
-                    // beacon is live this frame, and before Think so the tracking state feeds the scout brain.
+                    // beacon is live this tick, and before Think so the tracking state feeds the scout brain.
                     scout_mark_prey.before(crate::ai::AiSet::Deposits),
                     nest_reproduce,
                 ),
-            );
+            )
+            // Cosmetic: skeletal animation attach/drive stays on `Update`.
+            .add_systems(Update, (attach_crab_animation, drive_crab_animation));
     }
 }
 
@@ -584,7 +587,10 @@ fn spawn_crab_on_patch(
             Hostile,
             Health::new(CRAB_HP),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)
-            crate::ai::drives::Drives::new(), // needs the utility brain weighs (hunger/fear/…)
+            // Seed a per-crab starting HUNGER (salt 6, decorrelated from the other draws) so the swarm
+            // begins differentiated — hungry crabs press to feed, sated ones forage — instead of a uniform
+            // ramp where every crab hits HUNGER==1 in lockstep. Feeding sates it (`crab_feeding_sates_hunger`).
+            crate::ai::drives::Drives::seeded(crate::ai::drives::DriveId::HUNGER, 0.2 + 0.6 * draw(6)),
             brain_id,
             crate::ai::brain::ActiveBehavior::new(rand_seed),
             crate::ai::brain::ThinkTimer::staggered(rand_seed),
@@ -612,12 +618,23 @@ fn spawn_crab_on_patch(
                 heading,
                 climb_bias: draw(4),
                 angle_bias: draw(5),
-                latched: false,
                 latch_rel: 0.0,
             },
             CrabState::Idle,
-            Mesh3d(collider.clone()),
-            Transform::from_translation(seat).with_rotation(surface_orientation(heading, normal)),
+            // Sphere collider mesh paired with its CPU laser hit-volume (same radius, sphere = zero-height
+            // capsule) so bolts test against the crab headlessly + deterministically.
+            (
+                Mesh3d(collider.clone()),
+                crate::laser::LaserTarget { radius: CRAB_COLLIDER_R, half_height: 0.0 },
+            ),
+            // Render-only: smooth the crab's 60 Hz movement + surface rotation across the display refresh
+            // (see `lib::run`). Grouped with `Transform` so the spawn tuple stays within Bevy's 15-element
+            // Bundle limit.
+            (
+                Transform::from_translation(seat).with_rotation(surface_orientation(heading, normal)),
+                // Component + plugin come from avian's `bevy_transform_interpolation` integration.
+                avian3d::prelude::TransformInterpolation,
+            ),
             Visibility::Inherited,
         ));
     ec.with_child((
@@ -696,6 +713,10 @@ fn crab_locomotion(
         ),
         With<Crab>,
     >,
+    // Reused across frames: a fresh HashMap + a Vec per occupied cell every frame (40-90 crabs on the
+    // hottest per-crab path) churned dozens of small allocations. Held in a Local and cleared in place
+    // (keys + Vec capacities retained, bounded by the fixed dungeon), so steady state is allocation-free.
+    mut hash: Local<HashMap<IVec2, Vec<Vec3>>>,
 ) {
     let Some(graph) = graph else { return };
     let Some(field) = crab_field.field.as_ref() else {
@@ -713,8 +734,11 @@ fn crab_locomotion(
         })
         .collect();
 
-    // Spatial hash of crab positions (3D) keyed by floor cell, for O(n·k) separation.
-    let mut hash: HashMap<IVec2, Vec<Vec3>> = HashMap::new();
+    // Spatial hash of crab positions (3D) keyed by floor cell, for O(n·k) separation. Clear in place
+    // (retain the buckets + each cell's Vec capacity) rather than reallocating the map every frame.
+    for v in hash.values_mut() {
+        v.clear();
+    }
     for (motion, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
@@ -747,14 +771,12 @@ fn crab_locomotion(
         }
 
         // Nearest unit on the ground plane (the brain decides *whether* to latch; this is *which* unit).
-        let (_ndist, nunit) = unit_data.iter().fold((f32::MAX, None), |(bd, bu), &(e, up, fwd)| {
-            let d = (up.xz() - motion.pos.xz()).length();
-            if d < bd {
-                (d, Some((e, up, fwd)))
-            } else {
-                (bd, bu)
-            }
-        });
+        // Payload carries the entity + precomputed forward vector; the shared ranking returns the winner.
+        let nunit = crate::util::nearest_planar(
+            motion.pos,
+            unit_data.iter().map(|&(e, up, fwd)| ((e, fwd), up)),
+        )
+        .map(|((e, fwd), up, _d)| (e, up, fwd));
         let t = (NORMAL_EASE * dt).min(1.0);
 
         // The brain (see `crate::ai`) chose the mode; the surface/piranha *mechanics* below are
@@ -781,11 +803,12 @@ fn crab_locomotion(
         let want = if latching && let Some((host, u, fwd)) = nunit {
             // --- PIRANHA MODE: climb onto the unit and cover its body, biting from a free slot. ---
             {
-                // On first latching, claim a body-relative slot: fanned across the unit's REAR (where
-                // the host's own forward-firing gun can't reach), spread by this crab's `angle_bias`.
-                // Held thereafter, so the crab clings to that spot and rides along as the host walks.
-                if !motion.latched {
-                    motion.latched = true;
+                // On first latching (no host yet), claim a body-relative slot: fanned across the unit's
+                // REAR (where the host's own forward-firing gun can't reach), spread by this crab's
+                // `angle_bias`. Held thereafter, so the crab clings to that spot and rides along as the
+                // host walks. `attached.host.is_none()` IS the "not yet latched" gate (host is the single
+                // source of truth for latched-ness).
+                if attached.host.is_none() {
                     motion.latch_rel = (motion.angle_bias - 0.5) * BACK_SPREAD;
                 }
                 attached.host = Some(host);
@@ -821,25 +844,21 @@ fn crab_locomotion(
             }
         } else if fleeing {
             // --- FLEE: panic away from the THREAT gradient (the frenzy→scatter payoff). ---
-            motion.latched = false;
             attached.host = None;
             crab_flee(&mut motion, &stig, &dungeon, &graph, sep, dt, t)
         } else if rallying {
             // --- RALLY: mass on the scout's marked sighting by following the local rally-pheromone
             // vector (Tang et al. 2019) — it already points at the (moving) prey, no gradient needed. ---
-            motion.latched = false;
             attached.host = None;
             crab_rally(&mut motion, &rally, &dungeon, &graph, sep, dt, t)
         } else if scouting && let Some(scout) = scout.as_deref_mut() {
             // --- SCOUT ROAM: aggressive wander across floor + walls hunting for prey to mark. ---
-            motion.latched = false;
             attached.host = None;
             crab_scout_roam(&mut motion, scout, &graph, &dungeon, sep, dt, t)
         } else if marking {
             // --- MARK: track the spotted prey — approach its position so the scout stays in sensing
             // range and `scout_mark_prey` keeps laying the rally pheromone toward its live cell. No
             // final-approach snap (home = None); falls back to holding heading if the sighting is gone. ---
-            motion.latched = false;
             attached.host = None;
             let prey_pos = active.target;
             let desired = prey_pos.map(|p| p - motion.pos).unwrap_or(motion.heading);
@@ -850,7 +869,6 @@ fn crab_locomotion(
             }
         } else if seeking {
             // --- SEEK MEAT: steer to the committed gib, or climb the MEAT gradient toward a pile. ---
-            motion.latched = false;
             attached.host = None;
             // Coarse fallback = the MEAT hotspot the brain aimed at; a hauling carrier hugs its chunk.
             let coarse = active.target;
@@ -861,7 +879,6 @@ fn crab_locomotion(
         } else {
             // --- SURFACE MODE: shared flow-field pursuit across floor + walls. ---
             {
-                motion.latched = false;
                 attached.host = None;
                 let p = graph.patch(motion.patch);
                 let flow = field.flow(motion.patch);
@@ -977,18 +994,13 @@ fn drive_crab_animation(
 }
 
 /// Nearest prey position + planar distance to `pos` (read-only over the pounce system's prey query).
+/// Thin wrapper over [`crate::util::nearest_planar`] — the shared ranking; here the payload is unit `()`.
 fn nearest_prey_pos(
     prey: &Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
     pos: Vec3,
 ) -> Option<(Vec3, f32)> {
-    let mut best: Option<(Vec3, f32)> = None;
-    for (ptf, _) in prey.iter() {
-        let d = (ptf.translation.xz() - pos.xz()).length();
-        if best.is_none_or(|(_, bd)| d < bd) {
-            best = Some((ptf.translation, d));
-        }
-    }
-    best
+    crate::util::nearest_planar(pos, prey.iter().map(|(ptf, _)| ((), ptf.translation)))
+        .map(|((), p, d)| (p, d))
 }
 
 /// Pounce attack: a grounded, hunting crab hunkers down, then leaps a ballistic arc (~10 body lengths)
@@ -999,7 +1011,6 @@ fn crab_jump(
     time: Res<Time>,
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
-    alarm: Res<crate::nest::NestAlarm>,
     mut crabs: Query<
         (
             &mut CrabMotion,
@@ -1014,11 +1025,6 @@ fn crab_jump(
 ) {
     let Some(graph) = graph else { return };
     let dt = time.delta_secs().min(MAX_FRAME_DT);
-    let berserk = alarm.0 > 0.0;
-    // Planar positions of every crab this frame, for the pounce-landing critical-mass check below
-    // (immutable borrow of the same query before the mutable pass — the pouncer is included, matching
-    // how `crab_contact_damage` counts). Mirrors that system's gate so a lone leaper can't chip a unit.
-    let crab_cells: Vec<Vec2> = crabs.iter().map(|(m, _, _, _, _)| m.pos.xz()).collect();
 
     for (mut motion, mut state, mut jump, mut tf, active) in &mut crabs {
         match jump.phase {
@@ -1028,9 +1034,16 @@ fn crab_jump(
                     continue;
                 }
                 // Only pounce while hunting units (approaching prey), and only at a unit in the band.
+                // Muster (alarm surge) and Rally (scout-recruited surge) are aggressive presses too — a
+                // charging crab must be able to leap, or the surge reads as a plain walk-up. Without them
+                // a mustering crab crosses the whole pounce band (JUMP_MIN..JUMP_LEN) before flipping to
+                // Latch at dist<1.2 (already inside JUMP_MIN), so it would never lunge.
                 let aggressive = matches!(
                     active.mode,
-                    crate::ai::utility::Mode::Latch | crate::ai::utility::Mode::Forage
+                    crate::ai::utility::Mode::Latch
+                        | crate::ai::utility::Mode::Forage
+                        | crate::ai::utility::Mode::Muster
+                        | crate::ai::utility::Mode::Rally
                 );
                 if !aggressive {
                     continue;
@@ -1081,23 +1094,16 @@ fn crab_jump(
                 tf.rotation = surface_orientation(motion.heading, motion.normal);
                 *state = CrabState::Attack;
                 if jump.timer <= 0.0 {
-                    // Land: clamp onto the patch and bite the nearest prey in reach.
+                    // Land: clamp onto the patch and bite the nearest prey in reach. A pounce is a
+                    // committed lunge, so it always bites on landing — a flat, reliable JUMP_DAMAGE hit
+                    // (the super-linear pile bonus lives in `crab_contact_damage`). No critical-mass gate:
+                    // the old MASS_MIN check made a lone leap deal zero, so a pouncing crab read as a
+                    // harmless hop; a lunge that connects should hurt.
                     motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
                     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS + 0.2).powi(2);
-                    let mass_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS).powi(2);
                     for (ptf, mut hp) in &mut prey {
                         if (ptf.translation.xz() - motion.pos.xz()).length_squared() <= reach_sq {
-                            // Critical-mass gate (same rule as `crab_contact_damage`): a pounce only
-                            // bites if the swarm has reached MASS_MIN on this unit, or a nest is berserk.
-                            // Below that the pounce lands but deals no damage — one path for "a handful
-                            // of crabs can't overcome the squad", by contact OR by leap.
-                            let count = crab_cells
-                                .iter()
-                                .filter(|c| (**c - ptf.translation.xz()).length_squared() <= mass_sq)
-                                .count();
-                            if count >= MASS_MIN || (berserk && count > 0) {
-                                hp.current -= JUMP_DAMAGE;
-                            }
+                            hp.current -= JUMP_DAMAGE;
                             break;
                         }
                     }
@@ -1111,8 +1117,8 @@ fn crab_jump(
 
 /// Alarm-pheromone recruitment to defense: a wounded crab floods the local ALARM channel so every crab
 /// within ~one room reads `Fact::AlarmHere`, musters (converges on the squad), and stops fleeing — the
-/// fix for "shoot the crabs and they just scatter". This is the retaliatory, *local* twin of the nest
-/// berserk alarm (`nest::nest_alarm`): nest hit → whole-swarm berserk, crab hit → a one-room alarm bloom
+/// fix for "shoot the crabs and they just scatter". This is the retaliatory, *local* twin of the nest's
+/// own alarm (`nest::nest_alarm`): nest hit → a stronger, wider bloom, crab hit → a one-room alarm bloom
 /// that self-limits as the field evaporates. Detection mirrors `nest_alarm`'s idiom — a crab whose
 /// `Health` changed this frame and now sits below full was just hit (crabs never heal), so it deposits.
 /// A stigmergic warning cry (Heylighen, "Stigmergy as a universal coordination mechanism", CSR 2016).
@@ -1133,17 +1139,36 @@ fn crab_alarm_on_damage(
     }
 }
 
+/// Feeding sates hunger: an actively-biting crab (`CrabState::Attack`) drains its HUNGER drive, so a fed
+/// crab's forage/latch/seek weighting falls and it peels off while hungrier crabs press. Without this,
+/// HUNGER only ever rises (nothing consumed it), saturating every crab at 1.0 within ~33 s — a uniform
+/// constant that cancels out of the utility maths and gives zero per-agent differentiation. Pairs with
+/// the per-crab HUNGER seed at spawn.
+fn crab_feeding_sates_hunger(
+    time: Res<Time>,
+    mut crabs: Query<(&CrabState, &mut crate::ai::drives::Drives), With<Crab>>,
+) {
+    let dt = time.delta_secs();
+    for (state, mut drives) in &mut crabs {
+        if *state == CrabState::Attack {
+            let h = drives.get(crate::ai::drives::DriveId::HUNGER);
+            drives.set(crate::ai::drives::DriveId::HUNGER, h - HUNGER_SATE_RATE * dt);
+        }
+    }
+}
+
 /// Feeding frenzy: damage to a unit grows **super-linearly** with how many crabs are on it
-/// (`CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`), so one crab is a nuisance but a pile shreds it. Counts
-/// by PLANAR distance so a crab clinging high on the body still feeds.
+/// (`CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`), so one crab is a real nuisance and a pile shreds it —
+/// a smooth ramp with NO critical-mass cliff (1 crab ≈ 3 DPS, 3 ≈ 15, 5 ≈ 33, 10 ≈ 95). The old hard
+/// `MASS_MIN` gate made 1–4 crabs deal literally zero damage, so a thinned/split swarm played harmless;
+/// the super-linear curve already makes a lone crab weak and a pile terrifying without a dead zone.
+/// Counts by PLANAR distance so a crab clinging high on the body still feeds.
 fn crab_contact_damage(
     time: Res<Time>,
-    alarm: Res<crate::nest::NestAlarm>,
     crabs: Query<&Transform, (With<Crab>, Without<Prey>)>,
     mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
 ) {
     let dt = time.delta_secs();
-    let berserk = alarm.0 > 0.0;
     // Reach = body radius + a little, so anything latched onto the cylinder counts (units and the boss).
     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS).powi(2);
     for (unit_tf, mut hp) in &mut prey {
@@ -1151,9 +1176,7 @@ fn crab_contact_damage(
             .iter()
             .filter(|c| (c.translation.xz() - unit_tf.translation.xz()).length_squared() <= reach_sq)
             .count();
-        // Mass gate: a handful of crabs can't overcome the squad — the swarm must reach critical mass on
-        // a target before its (super-linear) bite bites. A nest under attack (berserk) waives the gate.
-        if count >= MASS_MIN || (berserk && count > 0) {
+        if count > 0 {
             hp.current -= CRAB_CONTACT_DPS * (count as f32).powf(DAMAGE_EXPONENT) * dt;
         }
     }
@@ -1522,6 +1545,13 @@ fn assign_meat_targets(
         }
     }
 
+    // No meat on the floor → nothing to enlist crews for. Skip the caps/committed/snapshot/seeker
+    // allocations entirely (the common case once a pile is cleared); the stale-target release above has
+    // already run, so carriers are freed regardless.
+    if gibs.is_empty() {
+        return;
+    }
+
     // Snapshot per-crab capacity — summing a gib's committed crew capacity needs every carrier's value.
     let caps: HashMap<Entity, f32> = crabs.iter().map(|(e, _, c, _)| (e, c.capacity)).collect();
 
@@ -1876,19 +1906,10 @@ fn scout_mark_prey(
         let pos = tf.translation;
         scout.report_cooldown = (scout.report_cooldown - dt).max(0.0);
 
-        // Nearest prey on the ground plane, within sight.
-        let mut best = f32::MAX;
-        let mut spotted = None;
-        for pt in &prey {
-            let d = (pt.translation.xz() - pos.xz()).length();
-            if d < best {
-                best = d;
-                spotted = Some(pt.translation);
-            }
-        }
-
-        match spotted.filter(|_| best <= SCOUT_SIGHT) {
-            Some(prey_pos) => {
+        // Nearest prey on the ground plane, within sight (the shared ranking; payload is unit `()`).
+        let hit = crate::util::nearest_planar(pos, prey.iter().map(|pt| ((), pt.translation)));
+        match hit.filter(|(_, _, d)| *d <= SCOUT_SIGHT) {
+            Some(((), prey_pos, best)) => {
                 scout.state = ScoutState::Tracking { prey_pos };
                 // Deposit an intermediate-vector pointing at the prey (Tang's `s`), throttled so a cell
                 // isn't saturated frame-by-frame. Strength eases with proximity so nearer marks weigh more.

@@ -2,7 +2,7 @@
 //! `assets/shaders/nest.wgsl`) that crabs haul scavenged meat into; a full hoard births new crabs
 //! (see `crab::nest_reproduce`). The dome is a true **hemisphere** ([`nest_dome_mesh`]): its flat rim
 //! seats flush on a wall's room-side face and it bulges into the room like a pimple. Because no geometry
-//! sits behind that face, the camera-side wall cutaway (see `occlusion`) can never reveal a "back"
+//! sits behind that face, the camera-side wall cutaway (the dungeon's knee-wall squash) can never reveal a "back"
 //! poking through the thin (`WALL_THICKNESS`) slab — the failure mode of the earlier squashed full sphere.
 //!
 //! A nest is a valid squad target: it carries `Hostile` + `Health`, so lasers can destroy it (killing
@@ -37,14 +37,11 @@ const NEST_WALL_HEIGHT: f32 = crate::dungeon::WALL_HEIGHT * 0.5;
 /// Nest hit points. Sized so a focused squad razes it in a few seconds at the current nerfed
 /// `LASER_DAMAGE` (see `laser.rs`); raise alongside laser power for a longer siege.
 const NEST_HP: f32 = 60.0;
-/// Seconds the swarm stays berserk (fearless, attacking the squad) after a nest is last hit.
-const ALARM_DURATION: f32 = 4.0;
-
-/// Berserk timer: seconds remaining during which the crab swarm ignores fear (won't flee gunfire) and
-/// presses the squad, because a nest is under attack. Refreshed on every nest hit, decays otherwise.
-/// Read by the crab brain (`ai::brain::think`).
-#[derive(Resource, Default)]
-pub struct NestAlarm(pub f32);
+/// Strength of the ALARM pheromone a nest floods its surroundings with per hit. Stronger than a single
+/// crab's wound deposit (see `crab::ALARM_DEPOSIT`) so the whole ~one-room radius clears `ALARM_MIN` —
+/// the colony rallying to defend its breeding portal. Deposited into `FieldId::ALARM` at the nest, so it
+/// is spatially LOCAL (only crabs near the sieged nest muster) rather than a global mapwide berserk.
+const NEST_ALARM_DEPOSIT: f32 = 4.0;
 
 /// GPU uniform — must byte-match `NestSettings` in `nest.wgsl`.
 #[derive(Clone, ShaderType)]
@@ -127,11 +124,15 @@ pub fn spawn_nest(
                 respawn_timer: 0.0,
                 spawn_boost: 0.0,
             },
-            // Squad-killable: Hostile makes it a laser raycast target, Health gives it durability +
-            // a floating health bar so the player can see the siege progress.
+            // Squad-killable: Hostile makes it a laser target, Health gives it durability + a floating
+            // health bar so the player can see the siege progress. The CPU laser hit-volume (a sphere the
+            // size of the dome rim) is paired with the dome mesh so bolts test it headlessly.
             Hostile,
             Health::new(NEST_HP),
-            Mesh3d(dome),
+            (
+                Mesh3d(dome),
+                crate::laser::LaserTarget { radius: NEST_RADIUS, half_height: 0.0 },
+            ),
             MeshMaterial3d(material),
             Transform::from_translation(center)
                 .with_rotation(rotation)
@@ -188,24 +189,37 @@ pub struct NestPlugin;
 impl Plugin for NestPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<NestMaterial>::default())
-            .init_resource::<NestAlarm>()
-            .add_systems(Update, (update_nests, nest_alarm, despawn_dead_nests));
+            // Deposit the nest-defense alarm before the stig deposits drain, so the bloom is live this
+            // frame (mirrors `crab::crab_alarm_on_damage` ordering).
+            // Pinned sim (alarm deposit ordered before the stig drain, death) on `FixedUpdate`; the
+            // material/visual refresh stays on `Update`.
+            .add_systems(
+                FixedUpdate,
+                (nest_alarm.before(crate::ai::AiSet::Deposits), despawn_dead_nests),
+            )
+            .add_systems(Update, update_nests);
     }
 }
 
-/// Raise the swarm's berserk alarm whenever a nest takes damage (its `Health` changes below full), and
-/// let it decay over `ALARM_DURATION` once the attack stops. Uses change-detection so a hit this frame
-/// refreshes the timer.
-fn nest_alarm(time: Res<Time>, mut alarm: ResMut<NestAlarm>, nests: Query<Ref<Health>, With<Nest>>) {
-    let was = alarm.0;
-    alarm.0 = (alarm.0 - time.delta_secs()).max(0.0);
-    for hp in &nests {
+/// Flood the LOCAL ALARM pheromone around a nest whenever it takes damage (its `Health` changes below
+/// full), so nearby crabs muster to defend it (stop fleeing, converge on the squad) — the same
+/// `FieldId::ALARM` channel a wounded crab uses (`crab::crab_alarm_on_damage`), just a stronger, wider
+/// deposit. This replaces the old GLOBAL `NestAlarm` berserk flag, which turned every crab mapwide
+/// fearless on any nest hit; the deposit is spatially scoped, so poking one nest only rouses its own
+/// swarm. The field's evaporation is the automatic call-off (no explicit timer). Change-detection means a
+/// hit this frame re-floods it. A stigmergic colony-defense recruitment (Heylighen, CSR 2016).
+fn nest_alarm(
+    nests: Query<(Ref<Health>, &Transform), With<Nest>>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    for (hp, tf) in &nests {
         if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
-            alarm.0 = ALARM_DURATION;
+            deposits.0.push(crate::ai::field::Deposit {
+                pos: tf.translation,
+                field: crate::ai::field::FieldId::ALARM,
+                amount: NEST_ALARM_DEPOSIT,
+            });
         }
-    }
-    if crate::ai::diag::AI_DIAG && was <= 0.0 && alarm.0 > 0.0 {
-        info!("nest: ALARM — swarm goes berserk (a nest is under attack)");
     }
 }
 

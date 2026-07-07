@@ -27,12 +27,14 @@ impl DriveId {
     pub const BLOODLUST: DriveId = DriveId(3); // boss: drawn to the biggest blood/scent frenzy
     #[allow(dead_code)]
     pub const LIBIDO: DriveId = DriveId(4); // reproduction: well-fed → spawn
-    #[allow(dead_code)]
-    pub const CROWDING: DriveId = DriveId(5); // territorial: reads CRAB_DENSITY
+    // NOTE: a CROWDING drive (tracking CRAB_DENSITY) was removed — it was updated every tick for every
+    // crab but read by no behaviour (pure waste), and Reynolds separation in `crab_locomotion` already
+    // provides the physical dispersal it was meant to model. Breeding reads the CRAB_DENSITY *field*
+    // directly (`nest_reproduce`), not a per-agent drive.
 }
 
 /// Number of drive slots. Bump when adding a [`DriveId`].
-pub const DRIVE_COUNT: usize = 6;
+pub const DRIVE_COUNT: usize = 5;
 
 /// Per-agent need scalars, each clamped to `[0, 1]`. Every creature carries the full array; a brain
 /// reads only the drives its behaviours reference.
@@ -47,9 +49,22 @@ impl Drives {
             v: [0.0; DRIVE_COUNT],
         }
     }
+    /// Construct with one drive pre-seeded (the rest zero) — used to spread crabs' starting HUNGER so the
+    /// swarm isn't a lock-stepped uniform ramp (some spawn hungry and press, some spawn sated and forage).
+    pub fn seeded(id: DriveId, value: f32) -> Self {
+        let mut d = Self::new();
+        d.v[id.0] = value.clamp(0.0, 1.0);
+        d
+    }
     #[inline]
     pub fn get(&self, id: DriveId) -> f32 {
         self.v[id.0]
+    }
+    /// Set one drive, clamped to `[0,1]`. Used by gameplay systems that sate/spike a need directly (e.g.
+    /// feeding draining HUNGER), separate from the per-tick `DriveRule` updates.
+    #[inline]
+    pub fn set(&mut self, id: DriveId, value: f32) {
+        self.v[id.0] = value.clamp(0.0, 1.0);
     }
 }
 

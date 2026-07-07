@@ -55,8 +55,6 @@ pub enum Fact {
     MeatHotspot,
     /// 1.0 while this crab is hauling a lifted gib (latches the Carry behaviour).
     CarryingMeat,
-    /// 1.0 while a nest is under attack — the swarm goes berserk and ignores fear.
-    Berserk,
     /// 1.0 while this scout is holding a live prey sighting (latches Mark, so it tracks + marks the prey).
     PreySpotted,
     /// Magnitude of the vectorial rally pheromone sampled at the agent's OWN cell — a *local* read (not a
@@ -66,14 +64,17 @@ pub enum Fact {
     /// only crabs within ~one room of a casualty muster (gates Muster on) and press through fire (gates
     /// Flee off). Fades as the alarm evaporates, so fear resumes once the retaliation window closes.
     AlarmHere,
+    /// 1.0 while the agent's own cell is in the squad's *live* line of sight (fog-of-war). The boss reads
+    /// this so it pursues whenever it is visible AT ANY RANGE, not only inside the distance leash — a slow
+    /// boss shot from across the room must still advance, not drift into Wander.
+    SeenBySquad,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
 #[derive(Clone, Copy)]
 pub enum Input {
-    #[allow(dead_code)] // drive inputs (hunger/fear) land with the crab brain (Phase 4)
     Drive(DriveId),
-    #[allow(dead_code)] // field-at-self inputs land with the crab brain (Phase 4)
+    #[allow(dead_code)] // no behaviour reads a raw field-at-self yet (drives cover it via TrackField)
     Field(FieldId),
     Perc(Fact),
 }
@@ -86,11 +87,9 @@ pub enum Curve {
     /// `k * x^exp`, clamped — sharp ramp / diminishing returns.
     #[allow(dead_code)]
     Power { k: f32, exp: f32 },
-    /// Logistic `1/(1+e^-k(x-x0))` — a soft threshold (fear turning on). (Crab Flee, Phase 4.)
-    #[allow(dead_code)]
+    /// Logistic `1/(1+e^-k(x-x0))` — a soft threshold (fear turning on).
     Logistic { k: f32, x0: f32 },
     /// Hard threshold: `x >= threshold ? above : below`.
-    #[allow(dead_code)]
     Step { threshold: f32, below: f32, above: f32 },
 }
 
@@ -176,8 +175,6 @@ pub struct Perception {
     pub meat_val: f32,
     /// 1.0 while this crab is hauling a lifted gib.
     pub carrying: f32,
-    /// 1.0 while a nest is under attack (berserk — suppresses fear/flee).
-    pub berserk: f32,
     /// 1.0 while this scout has a sighting to report (drives Report over roam).
     pub prey_spotted: f32,
     /// Magnitude of the vectorial rally pheromone at the agent's own cell (a local read — see
@@ -186,6 +183,9 @@ pub struct Perception {
     /// ALARM field at the agent's own cell (a local read — see [`Fact::AlarmHere`]; gates Muster on and
     /// Flee off only for crabs within ~one room of a wounded crab).
     pub alarm_val: f32,
+    /// 1.0 while this agent's cell is in the squad's live LOS (see [`Fact::SeenBySquad`]); the boss's
+    /// "pursue whenever seen, at any range" aggro term.
+    pub seen_by_squad: f32,
 }
 
 impl Perception {
@@ -199,10 +199,10 @@ impl Perception {
             Input::Perc(Fact::SelfHealthFrac) => self.health_frac,
             Input::Perc(Fact::MeatHotspot) => self.meat_val,
             Input::Perc(Fact::CarryingMeat) => self.carrying,
-            Input::Perc(Fact::Berserk) => self.berserk,
             Input::Perc(Fact::PreySpotted) => self.prey_spotted,
             Input::Perc(Fact::RallyHere) => self.rally_val,
             Input::Perc(Fact::AlarmHere) => self.alarm_val,
+            Input::Perc(Fact::SeenBySquad) => self.seen_by_squad,
         }
     }
 }
@@ -251,4 +251,176 @@ pub fn decide(behaviors: &[Behavior], perc: &Perception, rng: &mut u32) -> usize
         }
     }
     last
+}
+
+#[cfg(test)]
+mod tests {
+    // Pure decision logic — no App, no ECS (mirrors the seed-in/assert-out convention in
+    // `wfc.rs`/`autogib.rs`). Locks the response curves and the dual-utility bucket + weighted-random
+    // selection so a silent change to either is caught (Dill, "Dual-Utility Reasoning").
+    use super::*;
+
+    /// A neutral perception; each test overrides only the fields its behaviours read.
+    fn zeroed() -> Perception {
+        Perception {
+            pos: Vec3::ZERO,
+            nearest_unit: None,
+            nearest_dist: 0.0,
+            health_frac: 0.0,
+            drives: [0.0; DRIVE_COUNT],
+            scent_hotspot: Vec3::ZERO,
+            scent_val: 0.0,
+            threat_here: 0.0,
+            meat_hotspot: Vec3::ZERO,
+            meat_val: 0.0,
+            carrying: 0.0,
+            prey_spotted: 0.0,
+            rally_val: 0.0,
+            alarm_val: 0.0,
+            seen_by_squad: 0.0,
+        }
+    }
+
+    fn behavior(mode: Mode, rank: u8, considerations: Vec<Consideration>) -> Behavior {
+        Behavior { mode, rank, considerations, target: TargetKind::None }
+    }
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1.0e-5, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn curve_linear_clamps_to_unit_range() {
+        let c = Curve::Linear { m: 1.0, b: 0.0 };
+        approx(c.eval(0.5), 0.5);
+        approx(c.eval(2.0), 1.0); // clamped high
+        approx(c.eval(-1.0), 0.0); // clamped low
+    }
+
+    #[test]
+    fn curve_power_and_logistic_and_step() {
+        approx(Curve::Power { k: 1.0, exp: 2.0 }.eval(0.5), 0.25);
+        // Logistic is exactly 0.5 at its midpoint x0, for any slope k.
+        approx(Curve::Logistic { k: 10.0, x0: 0.5 }.eval(0.5), 0.5);
+        let step = Curve::Step { threshold: 0.5, below: 0.0, above: 1.0 };
+        approx(step.eval(0.499), 0.0);
+        approx(step.eval(0.5), 1.0); // boundary is inclusive (>=)
+    }
+
+    #[test]
+    fn higher_rank_bucket_wins_outright() {
+        // b0 = unconditional Wander (rank 0, score 1.0); b1 = Flee (rank 2) scoring health_frac.
+        let behaviors = vec![
+            behavior(Mode::Wander, 0, vec![]),
+            behavior(
+                Mode::Flee,
+                2,
+                vec![Consideration {
+                    input: Input::Perc(Fact::SelfHealthFrac),
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
+                }],
+            ),
+        ];
+        let mut perc = zeroed();
+        perc.health_frac = 0.9; // Flee scores 0.9 >= MIN_SCORE and outranks Wander
+        // rng is irrelevant when the winning bucket has a single member.
+        let mut rng = 12345u32;
+        assert_eq!(decide(&behaviors, &perc, &mut rng), 1);
+    }
+
+    #[test]
+    fn sub_threshold_high_rank_is_screened_out() {
+        // Flee's score (0.05) is below MIN_SCORE (0.1), so it must NOT claim its rank — the
+        // unconditional low-rank default wins instead. This is the exact tail-screening Dill warns about.
+        let behaviors = vec![
+            behavior(Mode::Wander, 0, vec![]),
+            behavior(
+                Mode::Flee,
+                2,
+                vec![Consideration {
+                    input: Input::Perc(Fact::SelfHealthFrac),
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
+                }],
+            ),
+        ];
+        let mut perc = zeroed();
+        perc.health_frac = 0.05;
+        let mut rng = 1u32;
+        assert_eq!(decide(&behaviors, &perc, &mut rng), 0);
+    }
+
+    #[test]
+    fn nothing_scoring_returns_safety_default() {
+        // Single behaviour whose consideration reads 0 → screened out entirely → decide falls back to
+        // index 0 (the documented "caller's first behaviour is the safety default").
+        let behaviors = vec![behavior(
+            Mode::Flee,
+            2,
+            vec![Consideration {
+                input: Input::Perc(Fact::SelfHealthFrac),
+                curve: Curve::Linear { m: 1.0, b: 0.0 },
+            }],
+        )];
+        let perc = zeroed(); // health_frac = 0.0
+        let mut rng = 7u32;
+        assert_eq!(decide(&behaviors, &perc, &mut rng), 0);
+    }
+
+    #[test]
+    fn weighted_random_within_bucket_tracks_scores() {
+        // Two same-rank behaviours scoring 0.9 and 0.1 → over many draws the 0.9 option is picked ~90%.
+        // Threads one LCG state across calls (the production pattern: a per-agent `rng` field).
+        let behaviors = vec![
+            behavior(
+                Mode::Chase,
+                1,
+                vec![Consideration {
+                    input: Input::Perc(Fact::ScentHotspot),
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
+                }],
+            ),
+            behavior(
+                Mode::SeekMeat,
+                1,
+                vec![Consideration {
+                    input: Input::Perc(Fact::MeatHotspot),
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
+                }],
+            ),
+        ];
+        let mut perc = zeroed();
+        perc.scent_val = 0.9;
+        perc.meat_val = 0.1;
+        let mut rng = 0u32;
+        let n = 5000;
+        let chase = (0..n).filter(|_| decide(&behaviors, &perc, &mut rng) == 0).count();
+        let frac = chase as f32 / n as f32;
+        assert!((frac - 0.9).abs() < 0.05, "expected ~0.9 Chase share, got {frac}");
+    }
+
+    #[test]
+    fn decide_is_deterministic_for_a_seed() {
+        let behaviors = vec![
+            behavior(Mode::Wander, 0, vec![]),
+            behavior(
+                Mode::Chase,
+                1,
+                vec![Consideration {
+                    input: Input::Perc(Fact::ScentHotspot),
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
+                }],
+            ),
+        ];
+        let mut perc = zeroed();
+        perc.scent_val = 0.5;
+        let a = {
+            let mut r = 999u32;
+            decide(&behaviors, &perc, &mut r)
+        };
+        let b = {
+            let mut r = 999u32;
+            decide(&behaviors, &perc, &mut r)
+        };
+        assert_eq!(a, b);
+    }
 }

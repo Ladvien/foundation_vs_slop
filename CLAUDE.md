@@ -2,6 +2,21 @@
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
 - Leave academic paper references in comments, if a paper was used in writing the code.
 
+## Testing
+
+**Read `TESTING.md` before writing or running tests** — it documents the whole system (what exists, how to
+run it, how to add to it). The one-liners:
+
+- `cargo test` — deterministic-core layer (RNG/WFC/utility/ORCA/laser). Fast, GPU-free, the CI hard gate.
+- `cargo test --features test-harness -- --test-threads=1` — headless replay / liveness / SSIM. Boots the
+  real game with no window; **needs a GPU**.
+
+Non-negotiables (details in `TESTING.md`): exact-hash only the **physics-off** core
+(`SimConfig::deterministic_core()`) — the Avian solver is not bit-reproducible, so physics-on runs use
+**liveness** oracles; hold `serial_guard()` in every harness test; new systems go on `FixedUpdate` if they
+touch pinned state (would appear in `snapshot_hash`), else `Update`. Strategy, oracle rules, and the full
+invariant list live in `TESTING.md` (see its "Strategy" and "Invariants & determinism rules" sections).
+
 ## Additional Game Assets
 - Additional games assets are cataloged at /mnt/codex_fs/game_assets/CATALOG.md, feel free to use any of these.
 

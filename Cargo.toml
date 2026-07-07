@@ -3,6 +3,12 @@ name = "foundation_vs_slop"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Opt-in test/replay scaffolding: gates the headless `sim_harness`, the deterministic snapshot/hash
+# accessors, and any test-only visual-decoupling hooks. Off by default so the shipped binary carries
+# none of it. Enable with `cargo test --features test-harness`.
+test-harness = ["bevy/debug"]
+
 [dependencies]
 avian3d = "0.7.0"
 bevy = "0.19.0"

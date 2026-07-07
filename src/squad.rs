@@ -176,16 +176,13 @@ pub struct SquadPlugin;
 
 impl Plugin for SquadPlugin {
     fn build(&self, app: &mut App) {
-        // `unit_movement` runs after `command_input` so a move order issued this frame is followed
-        // the same frame (Bevy inserts a command sync point for the ordering), not one frame late.
-        app.add_systems(Startup, spawn_squad).add_systems(
-            Update,
-            (
-                recolor_units,
-                unit_movement.after(crate::selection::command_input),
-                despawn_dead_units,
-            ),
-        );
+        // `unit_movement` and death are PINNED sim → `FixedUpdate` (fixed dt, frame-rate independent).
+        // `command_input` stays on `Update` (it reads mouse/cursor input, which is a per-frame concern);
+        // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
+        // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
+        app.add_systems(Startup, spawn_squad)
+            .add_systems(FixedUpdate, (unit_movement, despawn_dead_units))
+            .add_systems(Update, recolor_units);
     }
 }
 
@@ -212,6 +209,9 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
                 Transform::from_translation(dungeon.cell_center(cell))
                     .with_scale(Vec3::splat(FIGURINE_SCALE)),
+                // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
+                // Component + plugin come from avian's `bevy_transform_interpolation` integration.
+                avian3d::prelude::TransformInterpolation,
             ))
             // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
             .with_child((

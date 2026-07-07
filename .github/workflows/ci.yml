@@ -1,0 +1,97 @@
+name: CI
+
+# Pure-CPU gate: the deterministic test suite (RNG guard, WFC pin, utility/ORCA goldens, and — once
+# landed — the headless replay/liveness harness). This is the hard gate on every push.
+#
+# `cargo fmt --check` and `cargo clippy` run as ADVISORY steps (continue-on-error): the codebase predates
+# any rustfmt/clippy enforcement (no rustfmt.toml; wider-than-default line width; ~26 standing clippy
+# lints), so blocking on them today would fail on untouched code. They surface drift without gating until
+# a dedicated cleanup pass lands. Determinism is pinned on this single target (ubuntu-latest) — f32
+# gameplay math may diverge on other CPUs/compilers, so treat other platforms with tolerance.
+#
+# The GPU/visual-regression lane (SSIM over devshot screenshots) is intentionally NOT here; it needs a
+# real GPU / software renderer and runs separately.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (pure-CPU, hard gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bevy's Linux build needs ALSA / udev / windowing dev headers even though the tests never open a
+      # window (they only compile the binary target). No GPU is used by the pure-CPU test suite.
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Hard gate — the deterministic suite must pass. Default features only: the `test-harness` replay /
+      # liveness tests bring up a headless render device (Metal/Vulkan) and need a GPU, so they run in a
+      # separate GPU lane (or locally), NOT here. `#![cfg(feature = "test-harness")]` keeps them out of
+      # this compile entirely.
+      - name: Test (deterministic core, GPU-free)
+        run: cargo test
+
+      # Advisory — reports style/lint drift without blocking (see header note).
+      - name: Format check (advisory)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --all-targets --all-features
+
+  # Best-effort GPU lane: the headless replay/liveness harness needs a render device. On CI we try a
+  # software rasteriser (Mesa lavapipe / llvmpipe). `continue-on-error` so a runner without working
+  # software-GL never reddens the build — locally these run on the real GPU. This is also where a future
+  # SSIM visual-regression pass over `devshot` screenshots would live.
+  harness:
+    name: replay + liveness (headless GPU / software-GL)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy + software-GL dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test (harness — replay + liveness + ssim, single-threaded)
+        env:
+          # Force the software Vulkan ICD; keep tests serial (headless Apps must not overlap).
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          WGPU_BACKEND: vulkan
+        run: cargo test --features test-harness -- --test-threads=1

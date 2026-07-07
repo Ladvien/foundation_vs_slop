@@ -33,7 +33,6 @@ Is cow like. It should have a saddish look on its face, until it sees a squad me
 - https://www.shadertoy.com/view/4tSXWt
 - https://www.shadertoy.com/view/XfXGz4
 - https://www.shadertoy.com/view/XsXGRS
-- https://www.shadertoy.com/view/4slGzn
 - https://www.shadertoy.com/view/fljBWc
 - https://www.shadertoy.com/view/WtSBzh
 - https://www.shadertoy.com/view/l3cfW4

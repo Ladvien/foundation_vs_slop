@@ -20,6 +20,11 @@ struct SmileySettings {
     menace: f32,
     // 0 = normal, 1 = full panic: pin-prick pupils + a cold, drained pallor as the swarm overwhelms it.
     panic: f32,
+    // 0 = neutral, 1 = full "saddish" idle: the lonely watcher waiting — desaturated, dimmed, and cooled
+    // toward a grey-blue pallor. The lonely-idle read the README asks for (emotional loneliness / the need
+    // to belong: Weiss 1973; Baumeister & Leary 1995). Distinct from `panic` (fear) — this is desolation,
+    // not terror — so it only cools + dims, it does not shrink the pupils.
+    sad: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: SmileySettings;
@@ -215,5 +220,10 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     col = vec4<f32>(mix(col.rgb, vec3<f32>(0.85, 0.05, 0.05), material.menace * col.a), col.a);
     // Panic: drain the face toward a cold, sickly pallor (over coverage so the outside stays clear).
     col = vec4<f32>(mix(col.rgb, vec3<f32>(0.75, 0.82, 0.92), material.panic * 0.7 * col.a), col.a);
+    // Sad idle: desaturate toward luminance, dim, and cool toward grey-blue — the lonely watcher waiting.
+    // Applied last so it colours whatever expression is showing; gated by coverage so the quad stays clear.
+    let lum = dot(col.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let melancholy = mix(vec3<f32>(lum), vec3<f32>(0.34, 0.40, 0.52), 0.5) * 0.8;
+    col = vec4<f32>(mix(col.rgb, melancholy, material.sad * col.a), col.a);
     return col;
 }

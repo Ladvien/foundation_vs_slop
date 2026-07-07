@@ -91,7 +91,6 @@ const SIGHT_FAR: f32 = 12.0;
 const ENEMY_MENACE: f32 = 0.3;
 /// Clamp per-frame dt so a hitch can't tunnel an enemy through a wall (mirrors squad movement).
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
-/// Aggro leash: an enemy actively pursues while its nearest unit is within this planar distance
 /// Seconds a wandering enemy holds a random heading before re-rolling a new one.
 const WANDER_INTERVAL: f32 = 2.5;
 /// Enemies closer than this (centre distance) push apart, so a crowd chasing one unit never
@@ -111,7 +110,6 @@ const SPIN_TIME: f32 = 1.0; // seconds of whirling (and eating)
 const SPIN_RATE: f32 = 22.0; // rad/s the face rolls while spinning — a fast blur
 const EAT_RADIUS: f32 = 1.4; // crabs within this of the boss centre are devoured in the chomp
 const EAT_MAX: usize = 6; // most crabs one chomp can devour — bounds the swarm hit so it can't wipe it
-const HEAL_PER_CRAB: f32 = 30.0; // HP regained per crab eaten (its whole-pack health tops up)
 const PANIC_COOLDOWN: f32 = 4.0; // seconds it must stay calm before it can panic again
 
 /// Marker for an enemy root entity (also the raycast collider — carries the capsule mesh).
@@ -208,22 +206,24 @@ impl Plugin for EnemyPlugin {
         app.add_plugins(MaterialPlugin::<SmileyMaterial>::default())
             .init_resource::<EnemyField>()
             .add_systems(Startup, spawn_enemies)
+            // Pinned sim (movement/combat/AI-driven) on `FixedUpdate`; the `.after(AiSet::Think)` ordering
+            // stays valid because `AiSet` is configured on `FixedUpdate` too.
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
-                    // Rebuild the pursuit field before enemies read it this frame.
+                    // Rebuild the pursuit field before enemies read it this tick.
                     rebuild_enemy_field,
-                    // Move after the brain has chosen this frame's mode (see `crate::ai`).
+                    // Move after the brain has chosen this tick's mode (see `crate::ai`).
                     enemy_seek
                         .after(rebuild_enemy_field)
                         .after(crate::ai::AiSet::Think),
                     enemy_contact_damage,
                     smiley_predation,
-                    hide_enemies_in_fog,
-                    update_smiley_faces,
                     despawn_dead,
                 ),
-            );
+            )
+            // Cosmetic: fog visibility toggle + face material updates stay on `Update`.
+            .add_systems(Update, (hide_enemies_in_fog, update_smiley_faces));
     }
 }
 
@@ -305,11 +305,18 @@ fn spawn_enemies(
                         ^ (cell.y as u32).wrapping_mul(19_349_663))
                         | 1,
                 },
-                // Material-less capsule: invisible, but a valid ray-cast collider.
-                Mesh3d(capsule.clone()),
+                // Material-less capsule: invisible, but a valid ray-cast collider. Paired with its CPU
+                // hit-volume (same dimensions) so laser bolts test against it headlessly + deterministically.
+                (
+                    Mesh3d(capsule.clone()),
+                    crate::laser::LaserTarget { radius: CAPSULE_RADIUS, half_height: CAPSULE_LENGTH * 0.5 },
+                ),
                 Transform::from_translation(pos),
                 // Explicit so `hide_enemies_in_fog` can toggle it; Hidden propagates to the face child.
                 Visibility::Inherited,
+                // Render-only: smooth the boss's 60 Hz movement across the display refresh (see `lib::run`).
+                // Component + plugin come from avian's `bevy_transform_interpolation` integration.
+                avian3d::prelude::TransformInterpolation,
             ))
             .with_child((
                 SmileyFace,
@@ -343,11 +350,12 @@ fn rebuild_enemy_field(
     enemy_field.last_cells = cells;
 }
 
-/// Momentum chase with a leash. An enemy PURSUES its nearest unit — steering along the shared flow
-/// field so it routes around walls — while that unit is within [`CHASE_TILES`] or the enemy stands
-/// in the squad's live LOS; otherwise it drifts in a slow WANDER. In both modes a Reynolds
-/// separation push keeps enemies from stacking onto one point (so a kill never reveals a
-/// full-health "twin"). Speed builds on a held heading and resets to a crawl on a turn
+/// Momentum chase, driven by the brain. An enemy PURSUES its nearest unit — steering along the shared
+/// flow field so it routes around walls — whenever the decision layer picks `Chase`/`HuntBlood`
+/// (`smiley_brain`: within the distance leash OR standing in the squad's live LOS at any range);
+/// otherwise it drifts in a slow WANDER. In both modes a Reynolds separation push keeps enemies from
+/// stacking onto one point (so a kill never reveals a full-health "twin"). Speed builds on a held
+/// heading and resets to a crawl on a turn
 /// (steering-with-acceleration; Wang, Kearney, Cremer & Willemsen, "Steering Behaviors for
 /// Autonomous Vehicles in Virtual Environments", IEEE VR 2006, DOI 10.1109/vr.2005.69).
 fn enemy_seek(
@@ -614,19 +622,22 @@ fn despawn_dead(
 }
 
 /// Anti-swarm behaviour: when enough crabs pile onto the boss it panics, then whirls and devours the
-/// crabs clinging to it, healing per crab eaten. A small Calm→Panic→Spin→Calm state machine. Crabs count
-/// as "on it" via `CrabAttached.host` (the crab swarm now treats the boss as prey and latches on).
-/// Emergent predator/prey reversal — the hunted swarm becomes food when it overcommits.
+/// crabs clinging to it. A small Calm→Panic→Spin→Calm state machine. Crabs count as "on it" via
+/// `CrabAttached.host` (the crab swarm treats the boss as prey and latches on). Emergent predator/prey
+/// reversal — the hunted swarm becomes food when it overcommits, thinning a pile that over-commits to
+/// the boss. The chomp does NOT heal the boss: healing per crab turned a boss idling near a nest into a
+/// self-sustaining ~30 HP/s fountain (the nest breeds crabs → boss farms them → un-killable), so the
+/// bite is now purely a defensive cull, not sustain.
 fn smiley_predation(
     time: Res<Time>,
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut smileys: Query<(Entity, &Transform, &mut Health, &mut SmileyPredator), With<Enemy>>,
+    mut smileys: Query<(Entity, &Transform, &mut SmileyPredator), With<Enemy>>,
     crabs: Query<(Entity, &Transform, &crate::crab::CrabAttached), With<crate::crab::Crab>>,
 ) {
     let dt = time.delta_secs();
-    for (se, stf, mut hp, mut pred) in &mut smileys {
+    for (se, stf, mut pred) in &mut smileys {
         pred.cooldown = (pred.cooldown - dt).max(0.0);
         let riders = crabs.iter().filter(|(_, _, a)| a.host == Some(se)).count();
 
@@ -666,10 +677,12 @@ fn smiley_predation(
                         }
                     }
                     if eaten > 0 {
-                        hp.current = (hp.current + eaten as f32 * HEAL_PER_CRAB).min(hp.max);
+                        // Defensive cull only — no self-heal (see the doc above: healing made the boss a
+                        // crab-farming HP fountain). The bite thins the pile; killing the boss stays the
+                        // squad's job.
                         sfx.write(Sfx::ImpactFlesh);
                         if crate::ai::diag::AI_DIAG {
-                            info!("smiley: chomped {eaten} crabs, hp now {:.0}", hp.current);
+                            info!("smiley: chomped {eaten} crabs (no heal)");
                         }
                     }
                     pred.mood = SmileyMood::Spin;
@@ -690,19 +703,15 @@ fn smiley_predation(
     }
 }
 
-/// Nearest unit position to `from` (XZ+Y distance is fine — units and enemies share the ground).
+/// Nearest unit position to `from`, by planar (XZ) distance via the shared [`crate::util::nearest_planar`]
+/// ranking. Planar is equivalent to full-3D here because every `Unit` sits at Y=0.0 (`Dungeon::cell_center`
+/// seats them there and `squad::resolve_move` only slides X/Z), so the Y term is a constant added to every
+/// candidate — it changes neither the argmin nor any tie. Enemies carry a non-floor Y, but an enemy is
+/// never a *candidate* here (callers scan `With<Unit>`), only the `from` origin, where the constant lands.
+/// NOTE: if units ever leave the floor (jump-pads, flying units), revisit — the metric would then matter.
 fn nearest_unit<F: bevy::ecs::query::QueryFilter>(
     from: Vec3,
     units: &Query<&Transform, F>,
 ) -> Option<Vec3> {
-    let mut best = f32::MAX;
-    let mut nearest = None;
-    for u in units {
-        let d = u.translation.distance_squared(from);
-        if d < best {
-            best = d;
-            nearest = Some(u.translation);
-        }
-    }
-    nearest
+    crate::util::nearest_planar(from, units.iter().map(|t| ((), t.translation))).map(|((), p, _)| p)
 }

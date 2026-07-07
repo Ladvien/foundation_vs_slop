@@ -286,3 +286,73 @@ fn linear_program3(lines: &[Line], num_obstacle: usize, begin_line: usize, radiu
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Pure ORCA math — no App, no ECS. Locks the reciprocal-velocity-obstacle contract (van den Berg
+    // et al. 2011): the returned velocity is always inside the speed disc and, given an obstructing
+    // neighbour, diverges from the preferred velocity (it actually avoids).
+    use super::*;
+
+    fn agent(pos: Vec2, vel: Vec2) -> Agent {
+        Agent { pos, vel, radius: 0.5, avoids: true }
+    }
+
+    #[test]
+    fn free_agent_keeps_its_preferred_velocity() {
+        // No neighbours, no walls: ORCA has nothing to constrain, so it returns pref_vel unchanged.
+        let a = agent(Vec2::ZERO, Vec2::ZERO);
+        let pref = Vec2::new(1.0, 0.0);
+        let v = new_velocity(&a, pref, &[], &[], 2.0, 1.0 / 60.0, 2.0);
+        assert!((v - pref).length() < 1.0e-4, "expected {pref}, got {v}");
+    }
+
+    #[test]
+    fn output_is_clamped_to_max_speed() {
+        // A preferred velocity faster than max_speed is projected onto the speed disc.
+        let a = agent(Vec2::ZERO, Vec2::ZERO);
+        let max_speed = 1.5;
+        let v = new_velocity(&a, Vec2::new(10.0, 0.0), &[], &[], 2.0, 1.0 / 60.0, max_speed);
+        assert!(v.length() <= max_speed + 1.0e-4, "speed {} exceeds max {max_speed}", v.length());
+        assert!((v.length() - max_speed).abs() < 1.0e-3, "should saturate the disc, got {}", v.length());
+    }
+
+    #[test]
+    fn head_on_pair_deflects_instead_of_colliding() {
+        // A and B close head-on. ORCA must return something other than "barrel straight ahead", and it
+        // must stay within the speed disc. (Symmetry makes the deflection SIDE ambiguous, so we assert
+        // divergence + the speed bound, not a specific y sign.)
+        let a = agent(Vec2::new(-1.0, 0.0), Vec2::new(1.0, 0.0));
+        let b = agent(Vec2::new(1.0, 0.0), Vec2::new(-1.0, 0.0));
+        let pref = Vec2::new(1.0, 0.0);
+        let max_speed = 1.5;
+        let v = new_velocity(&a, pref, &[b], &[], 2.0, 1.0 / 60.0, max_speed);
+        assert!(v.length() <= max_speed + 1.0e-4);
+        assert!((v - pref).length() > 1.0e-3, "expected avoidance, but velocity stayed at pref {pref}");
+    }
+
+    #[test]
+    fn speed_bound_holds_across_many_configurations() {
+        // Property: for any neighbour placement the result never exceeds max_speed (the disc is a hard
+        // constraint carried through every projection). Deterministic sweep — no RNG crate.
+        let max_speed = 2.0;
+        for i in 0..40u32 {
+            // Deterministic pseudo-positions from a cheap hash, no entropy source.
+            let hx = crate::util::hash_f32(i.wrapping_mul(0x9E37_79B1)) * 4.0 - 2.0;
+            let hy = crate::util::hash_f32(i.wrapping_mul(0x85EB_CA6B).wrapping_add(1)) * 4.0 - 2.0;
+            let a = agent(Vec2::ZERO, Vec2::new(1.0, 0.0));
+            let b = agent(Vec2::new(hx, hy), Vec2::new(-0.5, 0.2));
+            let v = new_velocity(&a, Vec2::new(1.5, 0.5), &[b], &[], 2.0, 1.0 / 60.0, max_speed);
+            assert!(v.is_finite(), "non-finite velocity for config {i}: {v}");
+            assert!(v.length() <= max_speed + 1.0e-4, "config {i}: speed {} > max {max_speed}", v.length());
+        }
+    }
+
+    #[test]
+    fn deterministic_for_identical_input() {
+        let a = agent(Vec2::new(-1.0, 0.0), Vec2::new(1.0, 0.0));
+        let b = agent(Vec2::new(1.0, 0.3), Vec2::new(-1.0, 0.0));
+        let call = || new_velocity(&a, Vec2::new(1.0, 0.0), &[b], &[], 2.0, 1.0 / 60.0, 1.5);
+        assert_eq!(call(), call());
+    }
+}

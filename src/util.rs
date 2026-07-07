@@ -1,5 +1,31 @@
 //! Small shared numeric helpers — the project's hand-rolled RNG/hash surface, kept in one place so the
-//! same generators aren't copy-pasted across modules (there is deliberately **no RNG crate**).
+//! same generators aren't copy-pasted across modules (there is deliberately **no RNG crate**). Also the
+//! home of [`nearest_planar`], the one ranking every "nearest target" scan shares.
+
+use bevy::math::{Vec3, Vec3Swizzles};
+
+/// Nearest candidate to `origin` by planar (XZ) distance. Generic over a per-candidate payload (entity,
+/// forward vector, or `()`), so every "nearest target" scan across the AI shares ONE ranking + tie-break
+/// instead of hand-rolling the loop five times (a targeting-policy change — LOS, ignore near-dead prey,
+/// tie-break by health — is then a single edit here). Takes an `IntoIterator<Item = (T, Vec3)>` rather
+/// than a `&Query`, so it serves both live queries and a precomputed `Vec` (and needs no ECS imports);
+/// each caller `.map`s its candidates to `(payload, position)`. Strict `<` keeps the FIRST candidate on a
+/// tie, matching every scan it replaced.
+pub fn nearest_planar<T>(
+    origin: Vec3,
+    candidates: impl IntoIterator<Item = (T, Vec3)>,
+) -> Option<(T, Vec3, f32)> {
+    let o = origin.xz();
+    let mut best: Option<(T, Vec3, f32)> = None;
+    for (payload, pos) in candidates {
+        let d = (pos.xz() - o).length();
+        // `.as_ref()` is load-bearing: `T` may be non-`Copy`, so we must not move `best` out to read `bd`.
+        if best.as_ref().is_none_or(|(_, _, bd)| d < *bd) {
+            best = Some((payload, pos, d));
+        }
+    }
+    best
+}
 
 /// Advance a linear congruential generator (Numerical Recipes constants) and return the new state.
 #[inline]

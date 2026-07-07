@@ -3,6 +3,8 @@
 //! floor). The [`Dungeon`] resource is the single source of truth for walkability (used by
 //! player collision and fog).
 
+use std::collections::HashMap;
+
 use avian3d::prelude::*;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
@@ -98,8 +100,16 @@ pub struct DungeonConfig {
     pub coarse_h: usize,
     /// Fine tiles (= metres) per coarse slot side. Rooms float inside their block (the Backrooms void).
     pub block: usize,
-    /// Corridor width in tiles (2 = today's carve: the block-centre lane plus `corridor_width - 1` more).
+    /// Corridor width in tiles — the *minimum* of the per-corridor width range. Each corridor draws a
+    /// width uniformly in `[corridor_width, corridor_width_max]`, so passages vary from tight to broad
+    /// instead of every corridor being identical.
     pub corridor_width: usize,
+    /// Upper bound of the per-corridor width range (tiles). `#[serde(default)]` → `None` means "no
+    /// spread": every corridor is exactly `corridor_width`. When set it must be `>= corridor_width` and
+    /// `<= block` (validated at load). This is the single width-variation knob (one path — the draw always
+    /// runs; an unset/collapsed range just yields a constant width).
+    #[serde(default)]
+    pub corridor_width_max: Option<usize>,
     pub seed: u64,
     /// WFC restart budget before a convergence failure panics (loud, one-path).
     pub max_attempts: u32,
@@ -110,6 +120,10 @@ pub struct DungeonConfig {
     pub wfc_weights: WfcWeights,
     /// Weighted room classes with realistic metric footprints (Merrell 2011: per-room area + aspect).
     pub room_types: Vec<RoomType>,
+    /// Corner-notching (room-shape complexity). `#[serde(default)]` → `None` means every room is a plain
+    /// rectangle (4 corners). When set, eligible rooms are cut into L/T/plus shapes with up to 12 corners.
+    #[serde(default)]
+    pub notch: Option<NotchConfig>,
     /// Coarse layout selector. `#[serde(default)]` → the shipped RON (no `topology` field) stays `Grid`,
     /// so there is no behaviour change until a config opts in.
     #[serde(default)]
@@ -138,6 +152,35 @@ pub struct RoomType {
     pub aspect_min: f32,
     pub aspect_max: f32,
     pub weight: f64,
+    /// Spacious types (halls, large living rooms) set this: below liminality 1.0 they grow toward *all
+    /// four* block edges to dominate their slot, so they read as large anchor spaces. Compact types leave
+    /// it `false` and keep their drawn footprint (position still jitters), preserving the size hierarchy —
+    /// a tiny bathroom stays tiny next to a sprawling hall. `#[serde(default)]` so only large types opt in.
+    #[serde(default)]
+    pub expands: bool,
+}
+
+/// Corner-notching: turns rectangular rooms into rectilinear polygons (L / T / Z / U / plus shapes) by
+/// biting rectangular chunks out of a room's corners. Each notched corner adds two vertices, so a room
+/// goes 4 → 6 → 8 → 10 → 12 corners as 0–4 corners are cut. Every notch stays strictly inside its own
+/// corner quadrant — it never touches the room's centre row or column — so the central "cross" of floor
+/// is always intact: the room stays connected, the block-centre corridor still lands on floor, and the
+/// doorway derivation is unchanged. Purely a shape knob; walls/fog/collision/nav follow the per-cell
+/// walkable mask and need no changes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotchConfig {
+    /// Probability an *eligible* room (min side ≥ `min_side`) gets any notches at all.
+    pub chance: f64,
+    /// Upper bound on how many distinct corners to cut (1..=4). A room draws `1..=max_corners` corners;
+    /// 4 yields a 12-corner plus/cross. Values above 4 are rejected at load (a rect has four corners).
+    pub max_corners: usize,
+    /// Notch extent as a fraction of the corner's available quadrant (the space between the room edge and
+    /// its centre row/column). Drawn per notch in `[depth_min, depth_max]`; larger = deeper bites.
+    pub depth_min: f32,
+    pub depth_max: f32,
+    /// Only rooms whose shorter side is at least this many tiles are notched, so tiny rooms (bathrooms)
+    /// stay clean rectangles and notches only shape the larger, more legible rooms.
+    pub min_side: usize,
 }
 
 /// Minimum room side in tiles, so a tiny-area type (a ~3 m² bathroom) never rounds to a degenerate
@@ -165,6 +208,14 @@ pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
             cfg.corridor_width
         ));
     }
+    if let Some(max) = cfg.corridor_width_max {
+        if max < cfg.corridor_width || max > cfg.block {
+            return Err(format!(
+                "corridor_width_max must be in corridor_width..=block ({}..={}), got {}",
+                cfg.corridor_width, cfg.block, max
+            ));
+        }
+    }
     if !(0.0..=1.0).contains(&cfg.liminality) {
         return Err(format!("liminality must be in [0,1] (got {})", cfg.liminality));
     }
@@ -187,6 +238,49 @@ pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
     }
     if cfg.room_types.iter().map(|t| t.weight).sum::<f64>() <= 0.0 {
         return Err("room_types weights must sum to > 0".into());
+    }
+    if let Some(n) = &cfg.notch {
+        if !(0.0..=1.0).contains(&n.chance) {
+            return Err(format!("notch.chance must be in [0,1] (got {})", n.chance));
+        }
+        if n.max_corners == 0 || n.max_corners > 4 {
+            return Err(format!("notch.max_corners must be in 1..=4 (got {})", n.max_corners));
+        }
+        if !(0.0..=1.0).contains(&n.depth_min)
+            || !(0.0..=1.0).contains(&n.depth_max)
+            || n.depth_max < n.depth_min
+        {
+            return Err(format!(
+                "notch depth must satisfy 0 <= depth_min <= depth_max <= 1 (got {}..={})",
+                n.depth_min, n.depth_max
+            ));
+        }
+        if n.min_side < ROOM_FLOOR {
+            return Err(format!("notch.min_side must be >= {ROOM_FLOOR} (got {})", n.min_side));
+        }
+    }
+    // The six coarse WFC prototype weights feed the Grid collapse (`wfc::collapse_one`). A NaN makes the
+    // `r <= 0.0` pick never match, silently collapsing every cell to the highest-index prototype; a
+    // non-positive sum forces the lowest-index (all-rock) prototype. Reject both at the door (mirrors the
+    // `link_weights` check below), so a bad shape distribution never degenerates or fails to converge.
+    let wfc_w = [
+        cfg.wfc_weights.rock,
+        cfg.wfc_weights.dead_end,
+        cfg.wfc_weights.corridor,
+        cfg.wfc_weights.corner,
+        cfg.wfc_weights.tee,
+        cfg.wfc_weights.cross,
+    ];
+    if wfc_w.iter().any(|w| !w.is_finite() || *w < 0.0) {
+        return Err("wfc_weights must all be finite and >= 0".into());
+    }
+    if wfc_w.iter().sum::<f64>() <= 0.0 {
+        return Err("wfc_weights must sum to > 0".into());
+    }
+    // `rock` is negative space: a config with only `rock` non-zero collapses to an all-solid, floorless
+    // (unplayable) dungeon. Require some weight on a non-rock prototype so a playable floor set exists.
+    if wfc_w[1..].iter().sum::<f64>() <= 0.0 {
+        return Err("wfc_weights must give weight to a non-rock prototype (else the dungeon has no floor)".into());
     }
     if let Topology::Graph { site_spacing, link_weights } = &cfg.topology {
         // Lower bound keeps per-site bounds large enough that rooms provably never overlap (the sizing
@@ -230,8 +324,8 @@ pub struct Tile {
     pub cell: IVec2,
 }
 
-/// Marks a tile entity as a wall (not a floor). Both carry [`Tile`], so the camera-side
-/// cutaway in `occlusion` needs this to target walls only.
+/// Marks a tile entity as a wall (not a floor). Both carry [`Tile`], so the camera-side knee-wall
+/// squash (see `CAMERA_WALL_FRACTION`) needs this to target walls only.
 #[derive(Component)]
 pub struct Wall;
 
@@ -274,7 +368,7 @@ impl Plugin for DungeonPlugin {
 
 // ── Topology-agnostic coarse layer ───────────────────────────────────────────────────────────────
 // Both dungeon topologies — the fixed grid lattice and (Phase 3) the Poisson/Delaunay graph — produce
-// a `CoarseLayout` and hand it to the single fine carver `expand_to_fine`, so furnish/nav/fog/occlusion
+// a `CoarseLayout` and hand it to the single fine carver `expand_to_fine`, so furnish/nav/fog
 // never depend on which topology ran. The grid front-end (`grid_layout`) is a byte-identical restatement
 // of the old carve's coarse phase (Step-0 golden gate); the graph front-end is added later.
 
@@ -463,22 +557,15 @@ fn expand_to_fine(
     let mut walkable = vec![false; width * height];
     let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
 
-    // Per-site incidence, derived from adjacency once (no RNG). `site_dirs[si][dir]` drives expansion-
-    // to-touch; `incident[si]` (sorted by (dir, neighbour)) drives the opening/necking pass in the same
-    // N,E,S,W order the pre-refactor four-direction scan used. Each undirected edge contributes its
-    // cardinal to one endpoint and the opposite to the other, reconstructing the old per-slot
-    // `linked(dir)` for all four directions (socket-rule symmetry).
-    let mut site_dirs = vec![[false; 4]; layout.sites.len()];
-    // `incident[si]` = (sort_dir, neighbour, is_first). `is_first` marks the FIRST endpoint of the edge
-    // (carve_corridor runs the horizontal leg from the first endpoint, the vertical leg into the second),
-    // which the opening pass needs to derive each doorway from the real L geometry. `sort_dir` (centres
-    // only — rects aren't built yet) fixes a stable order matching the grid's N,E,S,W scan; it drives
-    // expansion-to-touch too (a soft dial), while the recorded opening dir is the exact carved wall.
+    // Per-site incidence, derived from adjacency once (no RNG). `incident[si]` = (sort_dir, neighbour,
+    // is_first), sorted by (dir, neighbour) to drive the opening/necking pass in the same N,E,S,W order the
+    // pre-refactor four-direction scan used. `is_first` marks the FIRST endpoint of the edge (carve_corridor
+    // runs the horizontal leg from the first endpoint, the vertical leg into the second), which the opening
+    // pass needs to derive each doorway from the real L geometry. Each undirected edge contributes its
+    // cardinal to one endpoint and the opposite to the other (socket-rule symmetry).
     let mut incident: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); layout.sites.len()];
     for &(a, b) in &layout.adjacency {
         let (da, db) = corridor_exit_dirs(layout.sites[a].center, layout.sites[b].center);
-        site_dirs[a][da] = true;
-        site_dirs[b][db] = true;
         incident[a].push((da, b, true));
         incident[b].push((db, a, false));
     }
@@ -494,30 +581,28 @@ fn expand_to_fine(
         let (bmin, bmax) = (site.bounds.min, site.bounds.max);
         let (bw, bh) = ((bmax[0] - bmin[0]) as usize, (bmax[1] - bmin[1]) as usize);
         let max_side = bw.min(bh).saturating_sub(2); // keep a >=1-tile rock margin inside the block
-        let (rw, rh, tag) = pick_room(config, max_side, rng);
+        let (rw, rh, tag, expands) = pick_room(config, max_side, rng);
         let (bx, by) = (site.center.x, site.center.y);
         let cox = bmin[0] as usize + (bw - rw) / 2;
         let coy = bmin[1] as usize + (bh - rh) / 2;
         let ox = jitter_origin(cox, rw, bmin[0] as usize, bw, bx as usize, t, rng);
         let oy = jitter_origin(coy, rh, bmin[1] as usize, bh, by as usize, t, rng);
 
-        // Expansion-to-touch: grow each LINKED edge toward the block boundary, capped one cell short (so
-        // a >=2-cell doorway gap always remains). No RNG — liminality 1.0 (t=0) stays byte-identical.
+        // Expansion-to-touch (spacious types only, per `RoomType::expands`): a hall/large room grows toward
+        // *all four* block edges — by fraction `t` of the gap — so it fills its slot and dominates as an
+        // anchor space. Compact types don't grow, keeping their realistic drawn footprint so the size
+        // hierarchy survives (tiny bathroom beside a sprawling hall). Growth is capped one cell short of the
+        // block wall (a >=2-cell doorway gap always remains) and draws no RNG — liminality 1.0 (t=0) is a
+        // no-op, and the block centre stays interior so every corridor still connects.
         let toward = |near: i32, cap: i32| near + ((cap - near) as f32 * t).round() as i32;
         let mut left = ox as i32;
         let mut right = (ox + rw) as i32;
         let mut top = oy as i32;
         let mut bot = (oy + rh) as i32;
-        if site_dirs[si][W] {
+        if expands {
             left = toward(left, bmin[0] + 1);
-        }
-        if site_dirs[si][E] {
             right = toward(right, bmax[0] - 1);
-        }
-        if site_dirs[si][N] {
             top = toward(top, bmin[1] + 1);
-        }
-        if site_dirs[si][S] {
             bot = toward(bot, bmax[1] - 1);
         }
         let (ox, rw) = (left as usize, (right - left) as usize);
@@ -526,6 +611,13 @@ fn expand_to_fine(
             for x in ox..ox + rw {
                 walkable[y * width + x] = true;
             }
+        }
+
+        // Corner-notching (shape complexity): bite chunks out of the room's corners so it reads as an
+        // L / T / plus (6–12 corners) instead of a plain box. Draws RNG in site order like the rest of the
+        // room pass, so replays stay deterministic; `None` (no `notch` in the config) leaves rooms rectangular.
+        if let Some(nc) = &config.notch {
+            notch_room(&mut walkable, width, ox, oy, rw, rh, bx as usize, by as usize, nc, rng);
         }
 
         regions.push(Region {
@@ -542,15 +634,22 @@ fn expand_to_fine(
         });
     }
 
-    // Corridor pass — one `corridor_width`-wide corridor per adjacency edge, between the site centres.
+    // Corridor pass — each adjacency edge draws its own width in `[corridor_width, corridor_width_max]`
+    // (uniform, from the carve RNG in adjacency order) so passages vary from tight to broad instead of
+    // being identical. The drawn width is stashed per unordered edge so the necking pass below can reuse
+    // the exact same value. The draw always runs (one path); a collapsed range just yields a constant.
+    let (cw_min, cw_max) = (config.corridor_width, config.corridor_width_max.unwrap_or(config.corridor_width));
+    let mut edge_width: HashMap<(usize, usize), usize> = HashMap::new();
     for &(a, b) in &layout.adjacency {
+        let w = cw_min + rng.below(cw_max - cw_min + 1);
+        edge_width.insert((a.min(b), a.max(b)), w);
         carve_corridor(
             &mut walkable,
             width,
             height,
             layout.sites[a].center,
             layout.sites[b].center,
-            config.corridor_width,
+            w,
         );
     }
 
@@ -565,7 +664,10 @@ fn expand_to_fine(
             let (dir, cell) = derive_opening(sc, layout.sites[nb].center, rect, is_first);
             regions[si].adjacency.push(nb as u32);
             regions[si].openings.push(Opening { dir, cell });
-            for lane in 1..config.corridor_width as i32 {
+            // Same width the corridor was carved at (looked up per unordered edge), so the doorway necks
+            // down from this corridor's real width — not a global constant — to the single centre lane.
+            let cw = edge_width.get(&(si.min(nb), si.max(nb))).copied().unwrap_or(cw_min);
+            for lane in 1..cw as i32 {
                 let neck = match dir {
                     E => IVec2::new(cell[0] + 1, cell[1] + lane),
                     W => IVec2::new(cell[0] - 1, cell[1] + lane),
@@ -1200,8 +1302,9 @@ impl Dungeon {
 /// Pick a weighted room type and draw its footprint in tiles (Merrell 2011: per-room area + aspect).
 /// Deterministic — draws type, area, aspect, then orientation from the carve RNG in a fixed order.
 /// Dimensions round to whole tiles and clamp to `[ROOM_FLOOR, max_side]` so the room fits its block with
-/// a rock margin. Returns `(width, depth, type_tag)`.
-fn pick_room(config: &DungeonConfig, max_side: usize, rng: &mut impl DetRng) -> (usize, usize, String) {
+/// a rock margin. Returns `(width, depth, type_tag, expands)` — `expands` is the type's spacious flag,
+/// which drives the all-edge expansion in `expand_to_fine`.
+fn pick_room(config: &DungeonConfig, max_side: usize, rng: &mut impl DetRng) -> (usize, usize, String, bool) {
     let ty = weighted_room_type(&config.room_types, rng);
     let area = rand_range_f32(rng, ty.area_min, ty.area_max);
     let aspect = rand_range_f32(rng, ty.aspect_min, ty.aspect_max);
@@ -1212,7 +1315,58 @@ fn pick_room(config: &DungeonConfig, max_side: usize, rng: &mut impl DetRng) -> 
     let cap = max_side.max(ROOM_FLOOR); // guard clamp's min <= max even for a tiny block
     let rw = (w_f.round() as usize).clamp(ROOM_FLOOR, cap);
     let rh = (h_f.round() as usize).clamp(ROOM_FLOOR, cap);
-    (rw, rh, ty.tag.clone())
+    (rw, rh, ty.tag.clone(), ty.expands)
+}
+
+/// Cut rectangular bites from a filled room's corners, turning it into a rectilinear polygon (L / T / Z /
+/// U / plus — 6 to 12 corners) by clearing cells in `walkable`. `(bx, by)` is the block-centre cell, which
+/// is interior to the room; every notch stays strictly inside its own corner quadrant relative to
+/// `(bx, by)`, so the centre cross (row `by`, column `bx`) is never cut — the room stays connected, the
+/// block-centre corridor still meets floor, and `derive_opening` is unaffected. Deterministic: it draws
+/// the chance roll, the corner count, a Fisher–Yates corner order (three swaps, always), then one depth per
+/// cut — a fixed sequence for a given room size, so replays stay byte-stable.
+#[allow(clippy::too_many_arguments)]
+fn notch_room(
+    walkable: &mut [bool],
+    width: usize,
+    ox: usize,
+    oy: usize,
+    rw: usize,
+    rh: usize,
+    bx: usize,
+    by: usize,
+    cfg: &NotchConfig,
+    rng: &mut impl DetRng,
+) {
+    if rw.min(rh) < cfg.min_side || rng.unit() >= cfg.chance {
+        return; // too small to shape, or the chance roll declined — stays a clean rectangle
+    }
+    let count = 1 + rng.below(cfg.max_corners); // 1..=max_corners distinct corners
+    // Fisher–Yates over the four corners (0=NW,1=NE,2=SW,3=SE); always three swaps so the draw count is
+    // independent of `count`, then take the first `count`.
+    let mut order = [0usize, 1, 2, 3];
+    for i in (1..4).rev() {
+        order.swap(i, rng.below(i + 1));
+    }
+    for &corner in order.iter().take(count) {
+        let depth = cfg.depth_min + rng.unit() as f32 * (cfg.depth_max - cfg.depth_min);
+        let (is_left, is_top) = (corner == 0 || corner == 2, corner == 0 || corner == 1);
+        // Available quadrant between the room edge and the centre cross (exclusive of the centre row/col).
+        let avail_w = if is_left { bx - ox } else { (ox + rw - 1) - bx };
+        let avail_h = if is_top { by - oy } else { (oy + rh - 1) - by };
+        if avail_w == 0 || avail_h == 0 {
+            continue; // room hugs the centre on this side — no room for a corner bite here
+        }
+        let nw = ((depth * avail_w as f32).round() as usize).clamp(1, avail_w);
+        let nh = ((depth * avail_h as f32).round() as usize).clamp(1, avail_h);
+        let x0 = if is_left { ox } else { ox + rw - nw };
+        let y0 = if is_top { oy } else { oy + rh - nh };
+        for y in y0..y0 + nh {
+            for x in x0..x0 + nw {
+                walkable[y * width + x] = false;
+            }
+        }
+    }
 }
 
 /// Weighted choice of a room type (same idiom as `wfc::collapse_grid`'s prototype pick). `types` is
@@ -1552,7 +1706,7 @@ fn spawn_tiles(
 
     // Doorway lintels: a short wall header above each 1-tile doorway (region opening), so the wall
     // reads as one continuous run from above — the door tucks under it. Placed on the doorway cell's
-    // open wall edge, raised to `DOORWAY_HEIGHT`. Tagged like a wall (fog reveal + occlusion cutaway).
+    // open wall edge, raised to `DOORWAY_HEIGHT`. Tagged like a wall (fog reveal + knee-wall squash).
     let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
     let header_mesh = meshes.add(wall_mesh(header_size));
     for region in &dungeon.regions {
@@ -1584,6 +1738,7 @@ mod tests {
             coarse_h: 4,
             block: 16,
             corridor_width: 2,
+            corridor_width_max: Some(4),
             seed: 0x5C0_9191,
             max_attempts: 20,
             liminality: 1.0,
@@ -1596,10 +1751,11 @@ mod tests {
                 cross: 0.6,
             },
             room_types: vec![
-                RoomType { tag: "bathroom".into(), area_min: 3.0, area_max: 6.0, aspect_min: 1.0, aspect_max: 1.6, weight: 0.8 },
-                RoomType { tag: "bedroom".into(), area_min: 9.0, area_max: 20.0, aspect_min: 1.0, aspect_max: 1.5, weight: 1.5 },
-                RoomType { tag: "living".into(), area_min: 16.0, area_max: 40.0, aspect_min: 1.0, aspect_max: 1.7, weight: 1.6 },
+                RoomType { tag: "bathroom".into(), area_min: 3.0, area_max: 6.0, aspect_min: 1.0, aspect_max: 1.6, weight: 0.8, expands: false },
+                RoomType { tag: "bedroom".into(), area_min: 9.0, area_max: 20.0, aspect_min: 1.0, aspect_max: 1.5, weight: 1.5, expands: false },
+                RoomType { tag: "living".into(), area_min: 16.0, area_max: 40.0, aspect_min: 1.0, aspect_max: 1.7, weight: 1.6, expands: true },
             ],
+            notch: None,
             topology: Topology::Grid,
         }
     }
@@ -1612,6 +1768,74 @@ mod tests {
         let d = Dungeon::generate(&config).expect("must generate at least one room");
         assert!(!d.regions.is_empty(), "shipped config must produce rooms");
         assert!(d.walkable.iter().any(|&w| w), "dungeon must have floor");
+    }
+
+    #[test]
+    fn notching_carves_deterministic_non_rectangular_rooms() {
+        // Rooms big enough to notch: one spacious type that fills its block at liminality 0, with notching
+        // forced on for all four corners. Every room should become a rectilinear polygon (a plus/cross).
+        let mut cfg = test_config();
+        cfg.liminality = 0.0;
+        cfg.room_types = vec![RoomType {
+            tag: "hall".into(),
+            area_min: 60.0,
+            area_max: 120.0,
+            aspect_min: 1.0,
+            aspect_max: 1.4,
+            weight: 1.0,
+            expands: true,
+        }];
+        cfg.notch = Some(NotchConfig {
+            chance: 1.0,
+            max_corners: 4,
+            depth_min: 0.4,
+            depth_max: 0.5,
+            min_side: 4,
+        });
+
+        let a = Dungeon::generate(&cfg).expect("gen a");
+        let b = Dungeon::generate(&cfg).expect("gen b");
+        assert_eq!(a.walkable, b.walkable, "notching must be deterministic for a (config, seed)");
+
+        // A plain rectangle has every bounding-box cell as floor; a notched room has non-floor bites in
+        // its bbox. At least one room must be non-rectangular.
+        let non_rect = a.regions.iter().filter(|r| {
+            let (mn, mx) = (r.rect.min, r.rect.max);
+            (mn[1]..mx[1]).any(|y| (mn[0]..mx[0]).any(|x| !a.is_floor(IVec2::new(x, y))))
+        });
+        assert!(non_rect.count() > 0, "expected at least one notched (non-rectangular) room");
+    }
+
+    #[test]
+    fn notching_never_severs_a_room_from_its_corridors() {
+        // The notch invariant: the block-centre cross is never cut, so every walkable cell stays reachable.
+        // A full flood-fill from the spawn must still cover every floor cell (no notch orphans a region).
+        let mut cfg = test_config();
+        cfg.notch = Some(NotchConfig {
+            chance: 1.0,
+            max_corners: 4,
+            depth_min: 0.4,
+            depth_max: 0.6,
+            min_side: 4,
+        });
+        let d = Dungeon::generate(&cfg).expect("gen");
+        let idx = |c: IVec2| (c.y as usize) * d.width + c.x as usize;
+        let mut seen = vec![false; d.width * d.height];
+        let mut stack = vec![d.spawn];
+        seen[idx(d.spawn)] = true;
+        while let Some(c) = stack.pop() {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = IVec2::new(c.x + dx, c.y + dy);
+                if n.x >= 0 && n.y >= 0 && (n.x as usize) < d.width && (n.y as usize) < d.height
+                    && d.is_floor(n) && !seen[idx(n)]
+                {
+                    seen[idx(n)] = true;
+                    stack.push(n);
+                }
+            }
+        }
+        let unreached = (0..d.width * d.height).filter(|&i| d.walkable[i] && !seen[i]).count();
+        assert_eq!(unreached, 0, "notching orphaned {unreached} floor cells from the spawn");
     }
 
     #[test]
@@ -1679,6 +1903,39 @@ mod tests {
             liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
             room_types:[])"#;
         assert!(parse_config(empty_types).is_err(), "empty room_types must be rejected");
+    }
+
+    #[test]
+    fn config_validation_rejects_bad_wfc_weights() {
+        // The grid WFC weights feed `collapse_one`; a NaN, a negative, a zero sum, or an all-rock
+        // (floorless) distribution must fail at the door rather than silently degenerate the dungeon.
+        let with_wfc = |wfc: &str| {
+            format!(
+                r#"(coarse_w:6,coarse_h:6,block:32,corridor_width:2,seed:1,max_attempts:20,
+                liminality:1.0,wfc_weights:{wfc},
+                room_types:[(tag:"a",area_min:3.0,area_max:6.0,aspect_min:1.0,aspect_max:1.6,weight:1.0)])"#
+            )
+        };
+        assert!(
+            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:NaN,corner:2.5,tee:1.2,cross:0.6)")).is_err(),
+            "a NaN wfc_weight must be rejected"
+        );
+        assert!(
+            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:-2.5,corner:2.5,tee:1.2,cross:0.6)")).is_err(),
+            "a negative wfc_weight must be rejected"
+        );
+        assert!(
+            parse_config(&with_wfc("(rock:0.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)")).is_err(),
+            "a zero-sum wfc_weights must be rejected"
+        );
+        assert!(
+            parse_config(&with_wfc("(rock:6.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)")).is_err(),
+            "an all-rock (floorless) wfc_weights must be rejected"
+        );
+        assert!(
+            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6)")).is_ok(),
+            "a valid wfc_weights distribution must parse"
+        );
     }
 
     #[test]
@@ -1895,21 +2152,22 @@ mod tests {
         assert!(Dungeon::generate(&cfg).is_ok(), "valid graph config must generate");
     }
 
-    // ---- Phase 3 Step-0 golden: lock the current carve output so the `CoarseLayout` + `expand_to_fine`
-    // refactor (and the `wfc.rs` shared-helper extraction) stay byte-identical for the Grid topology.
-    // Captured from pre-refactor code. FNV-1a over the FULL Dungeon output (dims, walkable mask, spawn,
-    // and every region's rect/tags/adjacency/openings) so any drift in geometry, RNG draw order, or
-    // region-link order flips the hash. Uses `test_config()` (self-contained) rather than the shipped
-    // RON so the gate is stable even while `assets/dungeon.ron` is temporarily edited for devshot.
+    // ---- Dungeon carve golden: locks the full Grid carve output so unintended drift in geometry, RNG
+    // draw order, or region-link order flips the hash. FNV-1a over the FULL Dungeon output (dims, walkable
+    // mask, spawn, and every region's rect/tags/adjacency/openings). Uses `test_config()` (self-contained)
+    // rather than the shipped RON so the gate is stable even while `assets/dungeon.ron` is edited.
     // Order: liminality 1.0 for seeds [1,2,3], then liminality 0.0 for seeds [1,2,3] (1.0 draws zero
     // jitter RNG, so 0.0 must be covered too to exercise the `jitter_origin` draw path).
+    // Re-pinned for the layout-diversity work: per-corridor width variation (`corridor_width_max`) and
+    // type-aware expansion (`RoomType::expands`) deliberately change the carve — a legitimate worldgen
+    // change with sign-off, not accidental drift.
     const GOLDEN_DUNGEON: [u64; 6] = [
-        6957523862328423815,
-        11240897994882043585,
-        561762913735026758,
-        1697550422418485487,
-        8957626850529888883,
-        532801744308618758,
+        2568236482067835968,
+        5241347363305519598,
+        7950630862814937742,
+        2581036281007484390,
+        9682684589496540033,
+        18361432492331364935,
     ];
 
     /// FNV-1a accumulator — deterministic across runs (unlike `DefaultHasher`'s per-process seed).
@@ -1980,10 +2238,11 @@ mod tests {
 
     #[test]
     fn golden_dungeon_snapshot_is_stable() {
-        // Byte-identical gate for the Phase 3 grid refactor. If this fails after a change that was meant
-        // to be behavior-neutral, the carve drifted — see slop/research/2026-07-06-phase3-graph-wfc-plan.
+        // Byte-identical gate for the Grid carve. If this fails after a change meant to be behaviour-
+        // neutral, the carve drifted; if the change was intentional (a worldgen tweak), re-pin from the
+        // printed value with sign-off.
         let fps = golden_fingerprints();
         println!("GOLDEN_DUNGEON = {fps:?}");
-        assert_eq!(fps.as_slice(), &GOLDEN_DUNGEON, "dungeon carve output changed (Phase 3 Step 0)");
+        assert_eq!(fps.as_slice(), &GOLDEN_DUNGEON, "dungeon carve output changed");
     }
 }

@@ -3,8 +3,8 @@
 //! the squad crosses cell boundaries we recompute the visible set as the union of every unit's
 //! LOS disc (walls block sight — see `Dungeon::line_of_sight`); cells that leave LOS fall back to
 //! `Explored`. Reveal of a cell's tiles (`Visibility::Hidden`→`Visible`) is one-way; the
-//! bright/dim distinction is a floor-material swap (walls stay lit once seen, so they never fight
-//! the occlusion system's ownership of wall materials).
+//! bright/dim distinction is a floor-material swap; walls stay lit once seen and fog never touches
+//! wall materials (the dungeon's knee-wall squash owns camera-facing walls).
 
 use std::collections::HashMap;
 
@@ -77,6 +77,14 @@ impl FogGrid {
     }
 }
 
+/// System set for `update_los`, the sole writer of [`FogGrid`]. Its `FixedUpdate` readers —
+/// `brain::think` (`seen_by_squad`) and `laser::fire_laser` (the LOS target gate) — order themselves
+/// `.after(LosWritten)` so they read the current tick's visibility, not last tick's. Without this the
+/// multithreaded executor is free to run a reader before the writer, so aggro/auto-aim would engage or
+/// drop one fixed tick late on the tick the squad first sees (or loses sight of) a target.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LosWritten;
+
 pub struct FogPlugin;
 
 impl Plugin for FogPlugin {
@@ -87,7 +95,12 @@ impl Plugin for FogPlugin {
             .expect("FogPlugin requires DungeonPlugin to be registered first");
         let fog = FogGrid::new(dungeon.width, dungeon.height);
         app.insert_resource(fog)
-            .add_systems(Update, (update_los, apply_floor_fog).chain());
+            // `update_los` is PINNED gameplay: the visibility grid it writes gates laser targeting and
+            // the crabs' `seen_by_squad` perception, so it must advance on the fixed timestep (and at the
+            // same rate as the systems that read it, or fast-forward would change what's visible when).
+            .add_systems(FixedUpdate, update_los.in_set(LosWritten))
+            // `apply_floor_fog` only tints floor tiles from that grid — cosmetic, so it stays on `Update`.
+            .add_systems(Update, apply_floor_fog);
     }
 }
 
@@ -155,7 +168,8 @@ fn update_los(
 }
 
 /// After a visibility change, tint floor tiles: bright where a unit currently sees them, dim where
-/// only explored. Walls are left to the occlusion system (they stay lit once revealed).
+/// only explored. Walls are handled by the dungeon's knee-wall squash and stay lit once revealed, so
+/// this query is floor-only (`Without<Wall>`).
 fn apply_floor_fog(
     mut fog: ResMut<FogGrid>,
     mats: Res<FloorMaterials>,

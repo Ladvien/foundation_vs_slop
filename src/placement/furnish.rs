@@ -150,6 +150,9 @@ fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3
             if cx != mn[0] && cx != mx[0] - 1 && cz != mn[1] && cz != mx[1] - 1 {
                 continue; // interior cell — no bounding wall
             }
+            if !dungeon.is_floor(IVec2::new(cx, cz)) {
+                continue; // a notched-out corner of a non-rectangular room — no real wall here
+            }
             let center = dungeon.cell_center(IVec2::new(cx, cz));
             for (face, normal) in dungeon.wall_faces_near(center) {
                 if !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(normal) {
@@ -159,6 +162,27 @@ fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3
         }
     }
     faces
+}
+
+/// Nearest floor cell to `start` within a region's bounding rect (Chebyshev distance). Non-rectangular
+/// rooms can have a non-floor bounding-box centre (a notched corner or a plus-shape's arm gap), so anchors
+/// that key off `rect.center_cell()` resolve through this to a real floor cell. `None` only if the rect
+/// holds no floor at all (never for a real room).
+fn nearest_floor_cell(dungeon: &Dungeon, rect: &crate::placement::ir::Rect2, start: IVec2) -> Option<IVec2> {
+    let mut best: Option<(i32, IVec2)> = None;
+    for cz in rect.min[1]..rect.max[1] {
+        for cx in rect.min[0]..rect.max[0] {
+            let c = IVec2::new(cx, cz);
+            if !dungeon.is_floor(c) {
+                continue;
+            }
+            let d = (cx - start.x).abs().max((cz - start.y).abs());
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, c));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
 }
 
 /// Furnish every region. Parallel solve → serial spawn.
@@ -189,8 +213,11 @@ pub fn furnish_regions(
             // Pass 1 — anchors.
             if let Some(item) = ceiling.first() {
                 let c = region.rect.center_cell();
-                let pos = dungeon.cell_center(IVec2::new(c[0], c[1])).with_y(WALL_HEIGHT);
-                out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_x(PI) });
+                // Resolve to a real floor cell — a notched room's bounding-box centre can be non-floor.
+                if let Some(cell) = nearest_floor_cell(&dungeon, &region.rect, IVec2::new(c[0], c[1])) {
+                    let pos = dungeon.cell_center(cell).with_y(WALL_HEIGHT);
+                    out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_x(PI) });
+                }
             }
             // No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still
             // frames each with a header lintel, so it reads as a doorway, just without a door).
@@ -221,7 +248,13 @@ pub fn furnish_regions(
                 shuffle_placements(&mut placed, &mut rng);
                 for p in placed.into_iter().take(TILED_PER_ROOM) {
                     if let Some(item) = tiled.get(p.candidate) {
-                        let pos = dungeon.cell_center(IVec2::new(p.pos[0] as i32, p.pos[2] as i32));
+                        let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
+                        // The WFC solver scatters over the bounding rect; skip any slot that fell in a
+                        // notched-out corner (non-floor) of a non-rectangular room.
+                        if !dungeon.is_floor(cell) {
+                            continue;
+                        }
+                        let pos = dungeon.cell_center(cell);
                         out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
                     }
                 }
@@ -242,6 +275,11 @@ pub fn furnish_regions(
                     if let Some(item) = profile.get(p.candidate) {
                         // Freestanding solver works in world/tile coords already.
                         let pos = Vec3::new(p.pos[0], 0.0, p.pos[2]);
+                        // Metropolis samples the bounding rect; drop anything centred on a notched-out
+                        // (non-floor) cell so freestanding furniture never lands inside a wall.
+                        if !dungeon.is_floor(dungeon.world_to_cell(pos)) {
+                            continue;
+                        }
                         out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
                     }
                 }

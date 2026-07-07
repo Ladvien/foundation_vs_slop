@@ -51,8 +51,12 @@ impl Plugin for AiPlugin {
             .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()
             .init_resource::<ScentNav>()
+            // The AI pipeline is PINNED simulation: it runs on `FixedUpdate` so it advances by a fixed
+            // timestep independent of frame rate (the repeatability precondition — the harness and the
+            // live game then share one fixed sub-step). Every creature-decision/movement system in the
+            // other plugins that orders against these sets is likewise on `FixedUpdate`.
             .configure_sets(
-                Update,
+                FixedUpdate,
                 (
                     AiSet::Deposits,
                     AiSet::FieldUpdate,
@@ -66,8 +70,9 @@ impl Plugin for AiPlugin {
                 Startup,
                 (tuning::load_tuning, init_fields, init_drives, brain::init_brains).chain(),
             )
+            // Pinned AI simulation on `FixedUpdate`.
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     field::drain_deposits.in_set(AiSet::Deposits),
                     field::drain_rally_deposits.in_set(AiSet::Deposits),
@@ -78,7 +83,16 @@ impl Plugin for AiPlugin {
                         .in_set(AiSet::FieldUpdate)
                         .after(brain::update_hotspots),
                     drives::update_drives.in_set(AiSet::Drives),
-                    brain::think.in_set(AiSet::Think),
+                    // `think` reads the LOS grid (`seen_by_squad`), so it must run after `update_los`
+                    // writes it this tick (see `fog::LosWritten`), not race it in the multithreaded build.
+                    brain::think.in_set(AiSet::Think).after(crate::fog::LosWritten),
+                ),
+            )
+            // Diagnostics are cosmetic logging — they read the fields but never feed the pinned hash, so
+            // they stay on `Update` (variable dt is fine).
+            .add_systems(
+                Update,
+                (
                     diag::log_fields,
                     diag::log_drives,
                     diag::log_boss,
@@ -112,15 +126,6 @@ fn init_drives(mut commands: Commands) {
                 rule: DriveRule::TrackField {
                     field: FieldId::THREAT,
                     gain: 0.2,
-                },
-            },
-            // Crowding tracks the CRAB_DENSITY field — a territorial pressure a developer can weigh in
-            // a "disperse" behaviour (already read directly by `crab_reproduce` to gate breeding).
-            DriveDef {
-                id: DriveId::CROWDING,
-                rule: DriveRule::TrackField {
-                    field: FieldId::CRAB_DENSITY,
-                    gain: 0.25,
                 },
             },
         ],

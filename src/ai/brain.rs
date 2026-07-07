@@ -58,8 +58,7 @@ pub struct AiBrains {
 #[derive(Component, Clone, Copy)]
 pub enum BrainId {
     Smiley,
-    /// Attached to crabs in Phase 4.
-    #[allow(dead_code)]
+    /// Attached to the ~80% assault crabs (the killing swarm).
     Crab,
     /// Attached to the ~20% of crabs that are scouts (roam/report recon).
     Scout,
@@ -152,7 +151,7 @@ pub fn think(
     dungeon: Res<Dungeon>,
     hotspots: Res<FieldHotspots>,
     brains: Res<AiBrains>,
-    alarm: Res<crate::nest::NestAlarm>,
+    fog: Res<crate::fog::FogGrid>,
     units: Query<&Transform, With<Unit>>,
     // Prey = units + the smiley boss. Crabs hunt any prey (nearest wins); the boss hunts only units
     // (it is Prey itself, so scanning Prey would make it target its own position).
@@ -180,38 +179,26 @@ pub fn think(
         timer.0 = THINK_INTERVAL;
 
         let pos = tf.translation;
-        let mut nearest_dist = f32::MAX;
-        let mut nearest_unit = None;
-        // Crabs scan all prey (units + boss); the boss scans only units (never itself).
-        let mut scan = |t: &Transform| {
-            let d = (t.translation.xz() - pos.xz()).length();
-            if d < nearest_dist {
-                nearest_dist = d;
-                nearest_unit = Some(t.translation);
-            }
-        };
-        match brain_id {
-            // Crabs and scouts both scan all prey (units + boss); the boss scans only units.
+        // Nearest target via the shared ranking. Crabs and scouts scan all prey (units + boss); the boss
+        // scans only units (never itself). The `999.0` sentinel (a "no target, effectively infinite
+        // distance" signal for the distance-falloff curves) is applied here on the None arm.
+        let hit = match brain_id {
             BrainId::Crab | BrainId::Scout => {
-                for t in &prey {
-                    scan(t);
-                }
+                crate::util::nearest_planar(pos, prey.iter().map(|t| ((), t.translation)))
             }
             BrainId::Smiley => {
-                for t in &units {
-                    scan(t);
-                }
+                crate::util::nearest_planar(pos, units.iter().map(|t| ((), t.translation)))
             }
-        }
+        };
+        let (nearest_unit, nearest_dist) = match hit {
+            Some(((), tpos, d)) => (Some(tpos), d),
+            None => (None, 999.0),
+        };
 
         let perc = Perception {
             pos,
             nearest_unit,
-            nearest_dist: if nearest_unit.is_some() {
-                nearest_dist
-            } else {
-                999.0
-            },
+            nearest_dist,
             health_frac: if health.max > 0.0 {
                 (health.current / health.max).clamp(0.0, 1.0)
             } else {
@@ -228,7 +215,6 @@ pub fn think(
             } else {
                 0.0
             },
-            berserk: if alarm.0 > 0.0 { 1.0 } else { 0.0 },
             prey_spotted: if scout.is_some_and(|s| s.prey_spotted()) {
                 1.0
             } else {
@@ -240,6 +226,13 @@ pub fn think(
             // LOCAL ALARM at this crab's cell — the "wounded kin" warning cry. Only crabs within ~one room
             // of a casualty read it, so only they muster and press through fire (see `Fact::AlarmHere`).
             alarm_val: stig.sample(FieldId::ALARM, &dungeon, pos),
+            // Is this agent in the squad's live LOS? The boss's "pursue whenever seen, at any range" term
+            // (see `Fact::SeenBySquad` / `smiley_brain`) — restores the aggro leash the seek rewrite dropped.
+            seen_by_squad: if fog.visible_at(dungeon.world_to_cell(pos)) {
+                1.0
+            } else {
+                0.0
+            },
         };
 
         let brain = match brain_id {
@@ -292,6 +285,26 @@ fn smiley_brain() -> Brain {
                     },
                 }],
             },
+            // Aggro leash by LINE OF SIGHT, not just distance. A slow boss (MAX_SPEED < a unit) shot from
+            // across the room is otherwise un-pursued: past CHASE_TILES the distance-Chase above scores 0
+            // and decide() falls to Wander, so it drifts while being plinked — exactly the "walk up and it
+            // ignores you" complaint. This twin Chase (same rank/target) fires whenever the boss stands in
+            // the squad's live LOS, so being seen ALWAYS forces pursuit at any range (the OR the seek
+            // rewrite dropped when it deleted `d <= CHASE_TILES || fog.visible_at(cell)`). Fuzzy-LOS aggro
+            // is standard for partially-observable RTS AI (Yang, Xie & Peng, IEEE Access 2019).
+            Behavior {
+                mode: Mode::Chase,
+                rank: 1,
+                target: TargetKind::NearestUnit,
+                considerations: vec![Consideration {
+                    input: Input::Perc(Fact::SeenBySquad),
+                    curve: Curve::Step {
+                        threshold: 0.5,
+                        below: 0.0,
+                        above: 1.0,
+                    },
+                }],
+            },
             Behavior {
                 mode: Mode::HuntBlood,
                 rank: 1,
@@ -326,7 +339,7 @@ fn smiley_brain() -> Brain {
 /// resumes. Nobody scripted "scatter". Rally sits *below* the attack: a scout's beacon redirects a
 /// far/idle crab toward the sighting (beats plain Forage), but the moment it reaches a unit, Latch (and
 /// the pounce) take over — so the recruited swarm actually *bites* instead of milling on the beacon cell.
-/// A live rally *also* gates Flee off (like the nest-berserk gate), so a recruited swarm presses through
+/// A live rally *also* gates Flee off (like the ALARM muster gate), so a recruited swarm presses through
 /// gunfire to the sighting; fear resumes once the beacon evaporates.
 ///
 /// **Muster** (rank 1, Rally's twin) closes the "shoot the crabs and they just run" gap: when a crab is
@@ -458,7 +471,8 @@ fn crab_brain() -> Brain {
                 }],
             },
             // Panic: flee down the THREAT gradient when afraid — outranks everything (drops the load).
-            // Suppressed while berserk (a nest under attack): the swarm ignores fear and presses the squad.
+            // Suppressed locally by a live rally beacon OR a nearby alarm bloom (a scout sighting or a
+            // wounded neighbour / sieged nest): the recruited swarm presses the squad instead of fleeing.
             Behavior {
                 mode: Mode::Flee,
                 rank: 4,
@@ -467,15 +481,6 @@ fn crab_brain() -> Brain {
                     Consideration {
                         input: Input::Drive(DriveId::FEAR),
                         curve: Curve::Logistic { k: 10.0, x0: 0.45 }, // soft threshold ~0.45
-                    },
-                    Consideration {
-                        // Berserk → 0, calm → 1: a nest under attack turns off flight entirely.
-                        input: Input::Perc(Fact::Berserk),
-                        curve: Curve::Step {
-                            threshold: 0.5,
-                            below: 1.0,
-                            above: 0.0,
-                        },
                     },
                     Consideration {
                         // Local rally live → 0: a recruited crab standing in a marked sighting presses

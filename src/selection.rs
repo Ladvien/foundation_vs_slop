@@ -29,16 +29,22 @@ pub struct SelectionPlugin;
 
 impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
+        // Order-issuing input runs in `RunFixedMainLoop` *before* the fixed step, not in `Update`. `Update`
+        // runs after the fixed loop, so a `MoveOrder` inserted there wasn't seen by `unit_movement` (on
+        // `FixedUpdate`) until the next frame — a one-frame lag. `BeforeFixedMainLoop` flushes the command
+        // ahead of the loop's exclusive runner, so the mover consumes it the same frame. It still runs once
+        // per frame on fresh `PreUpdate` input, so left-click edge-detection is unaffected.
         app.add_systems(
-            Update,
+            RunFixedMainLoop,
             (
                 // Guarantee the whole squad is selected before anything reads the selection this frame.
                 keep_squad_selected.before(command_input),
                 command_input,
-                draw_selection_rings,
-                update_cursor,
-            ),
+            )
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         );
+        // Cosmetic only — ring gizmos + cursor icon read state but feed nothing pinned, so they stay on `Update`.
+        app.add_systems(Update, (draw_selection_rings, update_cursor));
     }
 }
 

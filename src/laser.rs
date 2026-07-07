@@ -10,9 +10,7 @@
 //! Balancing in Serious Games", IEEE Trans. Games 2018, DOI 10.1109/tg.2018.2791019). Only firing at
 //! enemies in live line of sight follows from RTS partial observability (see `fog` / `enemy`).
 
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
-use std::collections::HashSet;
 
 use crate::ai::field::{Deposit, FieldId, StigDeposits};
 use crate::audio::Sfx;
@@ -36,7 +34,7 @@ const LASER_LIFE: f32 = 1.2;
 /// stops on the room-side wall face rather than passing through the slab.
 const LASER_HALF: f32 = 0.02;
 /// Hit points removed from an enemy per bolt.
-const LASER_DAMAGE: f32 = 0.2; // 1/50 power so the swarm survives to be watched (restore 10.0 for real combat)
+const LASER_DAMAGE: f32 = 10.0; // full combat power (~3 hits to down a 25 HP crab); drop to ~0.2 (1/50) to keep the swarm alive for observation
 /// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
 /// for hits against the small enemy hitbox.
 const BASE_SPREAD: f32 = 0.06;
@@ -78,6 +76,36 @@ struct LaserAssets {
 #[derive(Resource)]
 struct FireCooldown(Timer);
 
+/// Deterministic laser RNG state, held as a resource rather than per-system `Local<u32>` so it is part
+/// of the simulation state — snapshotable and reset per run (a `Local` lives outside every component and
+/// cannot be captured, which would break replay). Two independent LCG streams so the aim-scatter draws
+/// (in `fire_laser`) and the friendly-fire rolls (in `update_lasers`) never interleave regardless of
+/// system order — the result is the same whichever runs first.
+#[derive(Resource)]
+pub struct LaserRng {
+    /// Aim-cone scatter stream (`fire_laser`).
+    aim: u32,
+    /// Friendly-fire roll stream (`update_lasers`).
+    friendly: u32,
+}
+
+impl Default for LaserRng {
+    fn default() -> Self {
+        // Fixed, non-zero seeds — deterministic across runs. (Distinct so the two streams decorrelate.)
+        Self { aim: 0x1234_5678, friendly: 0x9ABC_DEF0 }
+    }
+}
+
+/// A hostile's hit volume for the CPU bolt cast: a vertical capsule (a sphere when `half_height == 0`)
+/// whose core is centred on the entity's `Transform.translation`. Sized to the entity's actual collider
+/// (enemy capsule r=0.18/half-len 0.45; crab sphere r=0.30; nest dome r=0.40) so bolts connect the same
+/// way the old `MeshRayCast` did — but on the CPU, with no render dependency and fully deterministic.
+#[derive(Component)]
+pub struct LaserTarget {
+    pub radius: f32,
+    pub half_height: f32,
+}
+
 pub struct LaserPlugin;
 
 impl Plugin for LaserPlugin {
@@ -86,8 +114,15 @@ impl Plugin for LaserPlugin {
             FIRE_INTERVAL,
             TimerMode::Repeating,
         )))
+        .init_resource::<LaserRng>()
         .add_systems(Startup, setup_laser_assets)
-        .add_systems(Update, (fire_laser, update_lasers));
+        // Pinned sim: firing + bolt motion/hits advance on the fixed timestep (deterministic, frame-rate
+        // independent — the CPU raycast and `LaserRng` make this reproducible). `fire_laser` gates on the
+        // LOS grid, so it must run after `update_los` writes it this tick (see `fog::LosWritten`).
+        .add_systems(
+            FixedUpdate,
+            (fire_laser.after(crate::fog::LosWritten), update_lasers),
+        );
     }
 }
 
@@ -115,7 +150,7 @@ fn fire_laser(
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
     mut cooldown: ResMut<FireCooldown>,
-    mut rng: Local<u32>,
+    mut lrng: ResMut<LaserRng>,
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<StigDeposits>,
@@ -165,7 +200,7 @@ fn fire_laser(
         let move_frac = (velocity.0.length() / UNIT_SPEED).clamp(0.0, 1.0);
         let dist_frac = ((target - muzzle).length() / DIST_SPREAD_RANGE).clamp(0.0, 1.0);
         let spread = BASE_SPREAD + MOVE_SPREAD * move_frac + DIST_SPREAD * dist_frac;
-        let forward = scatter(*aim, spread, &mut rng);
+        let forward = scatter(*aim, spread, &mut lrng.aim);
         commands.spawn((
             Laser {
                 velocity: forward * LASER_SPEED,
@@ -174,6 +209,9 @@ fn fire_laser(
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
             Transform::from_translation(muzzle).looking_to(forward, Vec3::Y),
+            // Render-only: smooth fast bolt motion across the display refresh (see `lib::run`). Translation
+            // only — bolts don't rotate in flight. Component + plugin from avian's interpolation integration.
+            avian3d::prelude::TranslationInterpolation,
         ));
         sfx.write(Sfx::Fire);
         // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
@@ -192,78 +230,76 @@ fn update_lasers(
     mut impacts: ResMut<ImpactQueue>,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut ray_cast: MeshRayCast,
-    enemy_ids: Query<Entity, With<Hostile>>,
+    // Every hostile's hit volume (enemy capsule / crab & nest sphere) for the CPU bolt cast.
+    // `With<Hostile>` keeps this provably disjoint from the `Without<Hostile>` `lasers` query below
+    // (both touch `Transform`), which Bevy's borrow checker requires.
+    targets: Query<(Entity, &Transform, &LaserTarget), With<Hostile>>,
     // Nests are `Hostile` (siege-killable) but are stone structures, not flesh — used to suppress the
     // blood/squelch/THREAT reactions on a nest hit while still letting the bolt damage it.
     nests: Query<Entity, With<crate::nest::Nest>>,
     mut healths: Query<&mut Health, With<Hostile>>,
     attached: Query<&CrabAttached>,
     mut unit_healths: Query<&mut Health, (With<Unit>, Without<Hostile>)>,
-    mut lasers: Query<(Entity, &mut Transform, &mut Laser)>,
+    mut lasers: Query<(Entity, &mut Transform, &mut Laser), Without<Hostile>>,
     mut deposits: ResMut<StigDeposits>,
-    mut rng: Local<u32>,
+    mut lrng: ResMut<LaserRng>,
 ) {
     let dt = time.delta_secs();
-    // Restrict ray hits to enemy collider meshes (the material-less capsules on enemy roots).
-    let enemy_set: HashSet<Entity> = enemy_ids.iter().collect();
-    let is_enemy = |e: Entity| enemy_set.contains(&e);
 
     for (entity, mut transform, mut laser) in &mut lasers {
         let prev = transform.translation;
         transform.translation += laser.velocity * dt;
         laser.life -= dt;
 
-        // Enemy hit: cast a ray along exactly this frame's motion segment against enemy capsules.
-        // `RayCastVisibility::Any` so the (undrawn) collider still registers. A hit damages that
-        // enemy, spawns an impact burst at the strike point, and consumes the bolt.
-        let step = transform.translation - prev;
-        if let Ok(dir) = Dir3::new(step) {
-            let travelled = step.length();
-            let settings = MeshRayCastSettings::default()
-                .with_visibility(RayCastVisibility::Any)
-                .with_filter(&is_enemy)
-                .always_early_exit();
-            if let Some((hit_entity, hit)) = ray_cast.cast_ray(Ray3d::new(prev, dir), &settings).first()
-                && hit.distance <= travelled
+        // Enemy hit: sweep this frame's motion segment against every hostile hit-volume on the CPU and
+        // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
+        // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
+        let mut best: Option<(Entity, f32, Vec3)> = None;
+        for (te, tt, tv) in &targets {
+            if let Some((s, point)) =
+                segment_capsule_hit(prev, transform.translation, tt.translation, tv.half_height, tv.radius)
+                && best.is_none_or(|(_, bs, _)| s < bs)
             {
-                if let Ok(mut hp) = healths.get_mut(*hit_entity) {
-                    hp.current -= LASER_DAMAGE;
-                }
-                // A nest is a stone structure, not flesh: it takes the damage above but must NOT emit the
-                // blood spray, fleshy squelch, or a MEAT/THREAT feeding scent. The flesh reactions below
-                // are gated on this so only a real creature bleeds.
-                let is_nest = nests.contains(*hit_entity);
-                // Friendly fire: shooting a crab that's latched onto a squad member risks putting the
-                // round through it into your own guy (rule 4). Rolls per hit. (A nest has no host.)
-                if let Ok(att) = attached.get(*hit_entity)
-                    && let Some(host) = att.host
-                    && rand01(&mut rng) < FRIENDLY_FIRE_CHANCE
-                    && let Ok(mut host_hp) = unit_healths.get_mut(host)
-                {
-                    host_hp.current -= FRIENDLY_FIRE_DAMAGE;
-                }
-                if !is_nest {
-                    // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the
-                    // spark burst via `ImpactQueue` below — one job per queue, see `gore`).
-                    gore.0.push(GoreEvent {
-                        pos: hit.point,
-                        kind: GoreKind::FleshHit,
-                        tint: Color::srgb(0.7, 0.05, 0.05),
-                        gib: None,
-                        intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
-                    });
-                    sfx.write(Sfx::ImpactFlesh);
-                    // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
-                    deposits.0.push(Deposit {
-                        pos: hit.point,
-                        field: FieldId::THREAT,
-                        amount: THREAT_PER_SHOT,
-                    });
-                }
-                commands.entity(entity).despawn();
-                continue;
+                best = Some((te, s, point));
             }
+        }
+        if let Some((hit_entity, _, hit_point)) = best {
+            if let Ok(mut hp) = healths.get_mut(hit_entity) {
+                hp.current -= LASER_DAMAGE;
+            }
+            // A nest is a stone structure, not flesh: it takes the damage above but must NOT emit the
+            // blood spray, fleshy squelch, or a MEAT/THREAT feeding scent. The flesh reactions below are
+            // gated on this so only a real creature bleeds.
+            let is_nest = nests.contains(hit_entity);
+            // Friendly fire: shooting a crab latched onto a squad member risks putting the round through
+            // it into your own guy (rule 4). Rolls per hit. (A nest has no host.)
+            if let Ok(att) = attached.get(hit_entity)
+                && let Some(host) = att.host
+                && rand01(&mut lrng.friendly) < FRIENDLY_FIRE_CHANCE
+                && let Ok(mut host_hp) = unit_healths.get_mut(host)
+            {
+                host_hp.current -= FRIENDLY_FIRE_DAMAGE;
+            }
+            if !is_nest {
+                // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the spark
+                // burst via `ImpactQueue` below — one job per queue, see `gore`).
+                gore.0.push(GoreEvent {
+                    pos: hit_point,
+                    kind: GoreKind::FleshHit,
+                    tint: Color::srgb(0.7, 0.05, 0.05),
+                    gib: None,
+                    intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
+                });
+                sfx.write(Sfx::ImpactFlesh);
+                // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
+                deposits.0.push(Deposit {
+                    pos: hit_point,
+                    field: FieldId::THREAT,
+                    amount: THREAT_PER_SHOT,
+                });
+            }
+            commands.entity(entity).despawn();
+            continue;
         }
 
         // Wall block: sweep this frame's motion against the wall slabs with `resolve_move`, which stops
@@ -309,6 +345,143 @@ fn scatter(dir: Vec3, spread: f32, rng: &mut u32) -> Vec3 {
         dir
     } else {
         jittered
+    }
+}
+
+/// Does the bolt's motion segment `p0 → p1` pierce a vertical capsule (a sphere when `half_h == 0`) of
+/// the given `radius` centred on `center`? Returns `Some((entry, point))` where `entry ∈ [0,1]` is the
+/// fraction along the bolt where it *first enters* the volume (surface entry — used to pick the frontmost
+/// hostile, so overlapping volumes resolve to the one the bolt reaches first) and `point` is that entry
+/// point for FX placement. Pure math: the closest distance between the bolt segment and the capsule's core
+/// segment (Ericson, *Real-Time Collision Detection*, §5.1.9 closest-point of two segments) gives the hit
+/// test; the entry fraction is the closest-approach parameter minus the half-chord (§5.3.2 ray-vs-sphere).
+/// Deterministic and render-free — the CPU replacement for the old `MeshRayCast`.
+fn segment_capsule_hit(p0: Vec3, p1: Vec3, center: Vec3, half_h: f32, radius: f32) -> Option<(f32, Vec3)> {
+    const EPS: f32 = 1.0e-8;
+    let q0 = center - Vec3::Y * half_h;
+    let q1 = center + Vec3::Y * half_h;
+    let d1 = p1 - p0; // bolt segment
+    let d2 = q1 - q0; // capsule core
+    let r = p0 - q0;
+    let a = d1.dot(d1);
+    let e = d2.dot(d2);
+    let f = d2.dot(r);
+
+    let (s, t);
+    if a <= EPS {
+        // Degenerate bolt (no motion this frame): treat as a point vs the core segment.
+        s = 0.0;
+        t = if e <= EPS { 0.0 } else { (f / e).clamp(0.0, 1.0) };
+    } else {
+        let c = d1.dot(r);
+        if e <= EPS {
+            // Sphere (zero-length core): closest point on the bolt to the centre.
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.dot(d2);
+            let denom = a * e - b * b;
+            let s0 = if denom > EPS { ((b * f - c * e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let t0 = (b * s0 + f) / e;
+            // Clamp `t` to the core segment and re-derive `s` for that end, per Ericson.
+            if t0 < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t0 > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            } else {
+                t = t0;
+                s = s0;
+            }
+        }
+    }
+
+    let closest_bolt = p0 + d1 * s;
+    let closest_core = q0 + d2 * t;
+    let dist2 = (closest_bolt - closest_core).length_squared();
+    if dist2 <= radius * radius {
+        // Order hits by SURFACE-ENTRY fraction, not closest approach: when two hostile hit-volumes both
+        // overlap one bolt segment, the bolt must damage the one it geometrically reaches first. The entry
+        // root of the ray-vs-sphere quadratic is the closest-approach parameter `s` minus the half-chord
+        // `sqrt(radius² − dist²) / |d1|` (Ericson, §5.3.2). Exact for the sphere/cap branches and for a bolt
+        // perpendicular to the capsule axis (this game's near-horizontal bolts vs vertical capsules).
+        let entry = if a <= EPS {
+            s // Degenerate bolt (no motion this frame): entry coincides with closest approach.
+        } else {
+            let half = (radius * radius - dist2).max(0.0).sqrt() / a.sqrt();
+            (s - half).clamp(0.0, 1.0)
+        };
+        Some((entry, p0 + d1 * entry))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Pure CPU-raycast geometry — no App. Locks the segment-vs-capsule hit test the bolts use so the
+    // headless/deterministic laser path can't silently regress (it replaced the render-coupled
+    // `MeshRayCast`).
+    use super::*;
+
+    #[test]
+    fn bolt_through_sphere_center_reports_surface_entry() {
+        // Sphere r=0.3 at the origin; a bolt spanning x=-1..1 (length 2) passing through the centre must
+        // report the SURFACE-ENTRY fraction (where it first crosses the sphere at x=-0.3 → 0.35), not the
+        // mid-segment closest approach (0.5). The returned point is that near-face entry point.
+        let hit = segment_capsule_hit(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 0.0, 0.3);
+        let (entry, point) = hit.expect("a bolt through the centre must hit");
+        assert!((entry - 0.35).abs() < 1.0e-4, "entry should be at the near surface, got {entry}");
+        assert!((point.x + 0.3).abs() < 1.0e-4, "entry point should be the sphere's near face, got {}", point.x);
+    }
+
+    #[test]
+    fn overlapping_targets_resolve_to_the_one_entered_first() {
+        // Regression for the max-review finding: two hostiles straddle one bolt segment. The old code
+        // ordered by closest-approach-to-CENTER and could pick the target whose centre projects earlier
+        // even when the bolt's surface reaches the other first. `segment_capsule_hit` now returns the
+        // ENTRY fraction, so the smaller value is the target the bolt truly pierces first (the selection
+        // loop keeps the min). Bolt travels +X from the origin (x = 4·fraction).
+        let p0 = Vec3::new(0.0, 0.0, 0.0);
+        let p1 = Vec3::new(4.0, 0.0, 0.0);
+        // Big target Y: bolt passes through its centre; near surface at x≈0.70 → entry ≈ 0.175.
+        let (entry_y, _) = segment_capsule_hit(p0, p1, Vec3::new(1.6, 0.0, 0.0), 0.0, 0.9).expect("Y must hit");
+        // Small target X: its centre projects earlier (x=1.3 → old `s`=0.325 < Y's 0.4, so the OLD metric
+        // picked X), but its near surface (x≈1.19) is *behind* Y's → entry ≈ 0.298.
+        let (entry_x, _) = segment_capsule_hit(p0, p1, Vec3::new(1.3, 0.28, 0.0), 0.0, 0.3).expect("X must hit");
+        assert!(
+            entry_y < entry_x,
+            "bolt enters the big front target first (entry_y={entry_y}) despite the small target's centre \
+             projecting earlier (entry_x={entry_x})"
+        );
+    }
+
+    #[test]
+    fn bolt_missing_sphere_returns_none() {
+        // Same bolt, but the sphere is 1 unit off the line and only 0.3 across → clean miss.
+        assert!(
+            segment_capsule_hit(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0), Vec3::ZERO, 0.0, 0.3)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn capsule_body_is_taller_than_a_sphere() {
+        // Enemy capsule: r=0.18, half-height 0.45, centred at y=0.63 (core spans y 0.18..1.08). A bolt at
+        // y=1.0 grazes the capsule but would miss a bare 0.18 sphere at the centre.
+        let center = Vec3::new(0.0, 0.63, 0.0);
+        let a = Vec3::new(-1.0, 1.0, 0.0);
+        let b = Vec3::new(1.0, 1.0, 0.0);
+        assert!(segment_capsule_hit(a, b, center, 0.45, 0.18).is_some(), "capsule flank should be hit");
+        assert!(segment_capsule_hit(a, b, center, 0.0, 0.18).is_none(), "a point-sphere would miss high");
+    }
+
+    #[test]
+    fn hit_is_deterministic() {
+        let call =
+            || segment_capsule_hit(Vec3::new(-1.0, 0.2, 0.1), Vec3::new(1.0, 0.1, -0.1), Vec3::ZERO, 0.3, 0.3);
+        assert_eq!(call(), call());
     }
 }
 

@@ -129,9 +129,23 @@ impl Plugin for GameAudioPlugin {
             .add_systems(Startup, load_audio)
             .add_systems(
                 Update,
-                (play_sfx, footsteps, crab_squitter, growl_stinger, update_music),
+                (play_sfx, footsteps, crab_squitter, growl_stinger, update_music, mute_when_background),
             );
     }
+}
+
+/// Silence the whole mix whenever the game is in the **background** — its window unfocused (alt-tabbed,
+/// another Space, minimised) or absent entirely (a headless run: the sim harness, a background/CI
+/// session, or a devshot capture). Restores `MASTER_VOLUME` the instant the window regains focus. One
+/// cheap resource write per frame; no per-sound bookkeeping. This is why running the game in the
+/// background — as this project does for `devshot` screenshots — makes no noise.
+fn mute_when_background(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut volume: ResMut<GlobalVolume>,
+) {
+    // No primary window at all (headless) ⇒ treat as background ⇒ muted.
+    let focused = windows.iter().next().is_some_and(|w| w.focused);
+    volume.volume = Volume::Linear(if focused { MASTER_VOLUME } else { 0.0 });
 }
 
 /// Load every handle, start the always-on wind bed, and start the calm music loop.
