@@ -249,12 +249,15 @@ pub fn furnish_regions(
                 for p in placed.into_iter().take(TILED_PER_ROOM) {
                     if let Some(item) = tiled.get(p.candidate) {
                         let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
-                        // The WFC solver scatters over the bounding rect; skip any slot that fell in a
-                        // notched-out corner (non-floor) of a non-rectangular room.
-                        if !dungeon.is_floor(cell) {
+                        let pos = dungeon.cell_center(cell);
+                        // Footprint-aware containment: the WFC solver scatters over the bounding rect,
+                        // so reject any slot whose *body* would cross a wall or fall in a notched-out
+                        // corner of a non-rectangular room — not just a center-cell test (README
+                        // ISSUES 1 & 2). Merrell et al. 2011 free-configuration-space non-penetration.
+                        let half = footprint_half(item);
+                        if !dungeon.footprint_on_floor(pos, half, p.yaw) {
                             continue;
                         }
-                        let pos = dungeon.cell_center(cell);
                         out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
                     }
                 }
@@ -275,9 +278,12 @@ pub fn furnish_regions(
                     if let Some(item) = profile.get(p.candidate) {
                         // Freestanding solver works in world/tile coords already.
                         let pos = Vec3::new(p.pos[0], 0.0, p.pos[2]);
-                        // Metropolis samples the bounding rect; drop anything centred on a notched-out
-                        // (non-floor) cell so freestanding furniture never lands inside a wall.
-                        if !dungeon.is_floor(dungeon.world_to_cell(pos)) {
+                        // Footprint-aware containment: Metropolis optimizes within the bounding rect,
+                        // so on a notched (L/T/plus) room a piece can drift into a carved-out area.
+                        // Reject any whose *body* crosses a wall so freestanding furniture never lands
+                        // inside or half-through a wall (README ISSUES 1 & 2). Merrell et al. 2011.
+                        let half = footprint_half(item);
+                        if !dungeon.footprint_on_floor(pos, half, p.yaw) {
                             continue;
                         }
                         out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
@@ -421,6 +427,16 @@ pub fn furniture_room_visibility(
             *vis = Visibility::Visible;
         }
     }
+}
+
+/// A manifest item's footprint half-extents (½ width, ½ depth) in rendered (scaled) metres — the
+/// form [`Dungeon::footprint_on_floor`] and the solvers reason about. Kept in one place so the
+/// footprint↔scale agreement (see `FURNITURE_SCALE`) holds for every containment test.
+fn footprint_half(item: &ManifestItem) -> Vec2 {
+    Vec2::new(
+        item.footprint.0 * 0.5 * FURNITURE_SCALE,
+        item.footprint.1 * 0.5 * FURNITURE_SCALE,
+    )
 }
 
 /// Map a manifest entry to an IR candidate (asset key + role + footprint + affordances).

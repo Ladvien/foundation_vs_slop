@@ -1057,6 +1057,38 @@ impl Dungeon {
             || (self.walled(cell, S) && lz > inner)
     }
 
+    /// Does a yaw-snapped furniture footprint centred at `center` with pre-rotation half-extents
+    /// `half` (½ width, ½ depth) rest **entirely on open floor** — no part outside the room and no
+    /// part inside a wall slab? This is the footprint-aware containment gate the placement pass uses
+    /// so a piece is rejected when its *body* — not merely its centre — crosses a wall or a
+    /// notched-out corner of a non-rectangular room. It is the discrete analogue of the
+    /// free-configuration-space non-penetration test of Merrell, Schkufza, Li, Agrawala & Koltun,
+    /// "Interactive Furniture Layout Using Interior Design Guidelines" (SIGGRAPH 2011): a placement is
+    /// legal iff its footprint lies in `C_free`. [`Self::is_solid`] is the ground truth (true outside
+    /// the room or within a wall band), so a single solid sample means the piece would clip geometry.
+    ///
+    /// Quarter-turn furniture swaps width/depth at 90°/270°. The footprint is sampled on a lattice
+    /// fine enough (≤ ½ [`WALL_THICKNESS`]) that a wall band can never slip between samples.
+    pub fn footprint_on_floor(&self, center: Vec3, half: Vec2, yaw: f32) -> bool {
+        // Quarter-turn yaw: at 90°/270° the footprint's width and depth swap.
+        let quarter = (yaw / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
+        let (hx, hz) = if quarter % 2 == 1 { (half.y, half.x) } else { (half.x, half.y) };
+        // Sample step finer than the wall band so a thin wall slab can't hide between samples.
+        let step = (WALL_THICKNESS * 0.5).max(0.05);
+        let nx = (hx / step).ceil().max(1.0) as i32;
+        let nz = (hz / step).ceil().max(1.0) as i32;
+        for ix in -nx..=nx {
+            let x = center.x + (ix as f32 / nx as f32) * hx;
+            for iz in -nz..=nz {
+                let z = center.z + (iz as f32 / nz as f32) * hz;
+                if self.is_solid(x, z) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Build a `Dungeon` directly from a row-major `walkable` mask, for tests that need a
     /// deterministic hand-crafted layout without running WFC generation.
     #[cfg(test)]
@@ -2244,5 +2276,37 @@ mod tests {
         let fps = golden_fingerprints();
         println!("GOLDEN_DUNGEON = {fps:?}");
         assert_eq!(fps.as_slice(), &GOLDEN_DUNGEON, "dungeon carve output changed");
+    }
+
+    /// Footprint-aware containment (README ISSUES 1 & 2): a piece is legal only when its whole body
+    /// lies on floor, never when it overhangs a wall or a notched-out corner — the discrete
+    /// `C_free` non-penetration test (Merrell et al. 2011).
+    #[test]
+    fn footprint_on_floor_rejects_wall_overhang() {
+        // A 3×3 floor room (cells (1,1)..=(3,3)) walled in by rock in a 5×5 grid.
+        let mut mask = vec![false; 5 * 5];
+        for y in 1..4 {
+            for x in 1..4 {
+                mask[y * 5 + x] = true;
+            }
+        }
+        let d = Dungeon::from_walkable(5, 5, mask);
+
+        // A small piece dead-centre in the interior cell (2,2) is fully clear.
+        assert!(d.footprint_on_floor(Vec3::new(2.0, 0.0, 2.0), Vec2::new(0.1, 0.1), 0.0));
+
+        // A large piece at a corner cell (1,1) overhangs the N and W walls → rejected. Its old
+        // center-only `is_floor` check would have wrongly accepted it.
+        assert!(d.is_floor(IVec2::new(1, 1)));
+        assert!(!d.footprint_on_floor(Vec3::new(1.0, 0.0, 1.0), Vec2::new(0.4, 0.4), 0.0));
+
+        // A piece centred on a rock cell (outside the room) is rejected outright.
+        assert!(!d.footprint_on_floor(Vec3::new(0.0, 0.0, 0.0), Vec2::new(0.1, 0.1), 0.0));
+
+        // Quarter-turn: a long-thin piece at edge cell (2,1) (walled on N) clears at yaw 0 (long axis
+        // runs along X, away from the wall) but overhangs once rotated 90° (long axis into the N wall).
+        let half = Vec2::new(0.4, 0.1); // 0.8 (w) × 0.2 (d)
+        assert!(d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, 0.0));
+        assert!(!d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, std::f32::consts::FRAC_PI_2));
     }
 }
