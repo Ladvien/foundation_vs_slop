@@ -11,8 +11,10 @@ use bevy::time::Real;
 use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
 
-/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt.
-const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
+/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt. `pub` so the
+/// audio spatial listener can recover the ground focus point (`camera_pos - ISO_OFFSET`) to anchor
+/// itself on the plane instead of ~20 units up at the camera (see `audio::sync_listener`).
+pub const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
 /// Peak screen-shake offset (world units) at full trauma. Applied as `SHAKE_MAX * trauma²`.
 const SHAKE_MAX: f32 = 0.85;
 /// Peak shake roll (radians) at full trauma — a small camera twist for extra kick.

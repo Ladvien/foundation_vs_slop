@@ -230,7 +230,7 @@ fn fire_laser(
             // only — bolts don't rotate in flight. Component + plugin from avian's interpolation integration.
             avian3d::prelude::TranslationInterpolation,
         ));
-        sfx.write(Sfx::Fire);
+        sfx.write(Sfx::Fire(muzzle));
         // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
         deposits.0.push(Deposit {
             pos: unit.translation,
@@ -323,7 +323,7 @@ fn update_lasers(
                     gib: None,
                     intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
                 });
-                sfx.write(Sfx::ImpactFlesh);
+                sfx.write(Sfx::ImpactFlesh(hit_point));
                 // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
                 deposits.0.push(Deposit {
                     pos: hit_point,
@@ -355,7 +355,7 @@ fn update_lasers(
             // Only a real collision (not a mid-air timeout) spawns an impact burst (see `impact_fx`).
             if hit_wall {
                 impacts.0.push(transform.translation);
-                sfx.write(Sfx::ImpactWall);
+                sfx.write(Sfx::ImpactWall(transform.translation));
             }
             commands.entity(entity).despawn();
         }
