@@ -30,9 +30,11 @@ const ZOOM_STEP: f32 = 2.0;
 const PAN_SPEED: f32 = 16.0;
 const DRAG_SCALE: f32 = 0.03;
 /// Discrete rotation detents in a full turn — Q/E snap the yaw by `TAU / ROTATION_STEPS` per press
-/// (8 → 45° clicks). The iso pitch is a true ~35° and is preserved at every stop, since yawing about
-/// the world Y axis never changes the offset's height-to-horizontal ratio.
-const ROTATION_STEPS: u32 = 8;
+/// (4 → 90° clicks). Each stop is a true iso *corner* view: the camera looks down one of the four
+/// (±X,±Z) diagonals, so exactly two adjacent wall edges face it — the pair the knee-wall cutaway
+/// squashes (see `dungeon::update_cutaway`). The ~35° iso pitch is preserved at every stop, since
+/// yawing about world Y never changes the offset's height-to-horizontal ratio.
+const ROTATION_STEPS: u32 = 4;
 /// Exponential-smoothing rate for the yaw ease toward `target_yaw`; higher = snappier settle.
 /// Frame-rate independent via `1 − exp(−k·dt)` (Holmér, "Lerp smoothing is broken", 2023).
 const ROTATE_SMOOTHING: f32 = 9.0;
@@ -54,6 +56,16 @@ struct CameraRig {
     target_yaw: f32,
 }
 
+/// Published each frame for the dungeon's view-relative wall cutaway. `to_camera` is the horizontal
+/// direction from the focus toward the camera (the yawed iso diagonal); a wall's inner face is toward
+/// the camera — and so occludes the room and should be squashed — when its outward normal has a
+/// positive dot with this. Only the per-axis sign matters at the 90° detents, but it's kept continuous
+/// so the cutaway can ease across a turn (see `dungeon::update_cutaway`).
+#[derive(Resource, Default)]
+pub struct CameraView {
+    pub to_camera: Vec3,
+}
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
@@ -64,6 +76,7 @@ impl Plugin for CameraPlugin {
             yaw: 0.0,
             target_yaw: 0.0,
         })
+        .init_resource::<CameraView>()
         .add_systems(Startup, setup_camera)
         .add_systems(Update, drive_camera);
     }
@@ -75,9 +88,17 @@ fn shake_noise(t: f32, seed: f32) -> f32 {
     (t * 37.0 + seed).sin() * 0.6 + (t * 91.0 + seed * 2.3).sin() * 0.4
 }
 
-fn setup_camera(mut commands: Commands, dungeon: Res<Dungeon>, mut rig: ResMut<CameraRig>) {
+fn setup_camera(
+    mut commands: Commands,
+    dungeon: Res<Dungeon>,
+    mut rig: ResMut<CameraRig>,
+    mut view: ResMut<CameraView>,
+) {
     // Start focused on the squad's spawn so there is no opening lurch.
     rig.focus = dungeon.spawn_world();
+    // yaw = 0 ⇒ camera looks from (+X,+Z); seed the cutaway so the E/S near walls are already knee-high
+    // on the first rendered frame (no startup squash animation).
+    view.to_camera = Vec3::new(1.0, 0.0, 1.0);
     commands.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -101,6 +122,7 @@ fn drive_camera(
     mouse_motion: Res<AccumulatedMouseMotion>,
     trauma: Res<Trauma>,
     mut rig: ResMut<CameraRig>,
+    mut view: ResMut<CameraView>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
     if scroll.delta.y != 0.0 {
@@ -131,6 +153,8 @@ fn drive_camera(
     let yaw_rot = Quat::from_rotation_y(rig.yaw);
     let screen_forward = yaw_rot * SCREEN_FORWARD;
     let screen_right = yaw_rot * SCREEN_RIGHT;
+    // Publish the horizontal camera direction (the yawed iso diagonal) for the wall cutaway.
+    view.to_camera = yaw_rot * Vec3::new(1.0, 0.0, 1.0);
 
     // Pan on REAL time, not the sim clock: keyboard panning must feel the same at ×1, ×64, or paused.
     // (Reading the generic `Time` here would resolve to `Time<Virtual>` and scale pan speed with the
