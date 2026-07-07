@@ -40,7 +40,7 @@ use bevy::time::Real;
 
 use crate::crab::Crab;
 use crate::dungeon::Dungeon;
-use crate::enemy::{Enemy, Hostile};
+use crate::enemy::{Enemy, Hostile, SmileyState};
 use crate::fog::FogGrid;
 use crate::squad::{Unit, Velocity};
 use crate::util::{next_u32, rand01, smoothstep};
@@ -122,6 +122,13 @@ const MAX_FIRE_VOICES: usize = 4;
 const GROWL_RANGE: f32 = 3.0;
 const GROWL_VOL: f32 = 0.6;
 
+/// The watcher's mask-off reveal: a sharp horror sting fired the instant it flips from concealed
+/// (`Watching`/`Scared`) to `Unleashing`. Percussiveness with a sharp attack spikes skin conductance
+/// *below the conscious threshold* (van der Zwaag, Westerink & van den Broek 2011) — exactly the
+/// subconscious startle horror wants, timed to the frame the concealment cracks (see `enemy::SmileyMood`).
+/// Loud, and it ducks the whole bed to full so the reveal lands in the clear.
+const WATCHER_REVEAL_VOL: f32 = 0.85;
+
 /// A discrete sound request. Gameplay systems elsewhere write these; [`play_sfx`] consumes them.
 ///
 /// World variants carry the world-space [`Vec3`] where the event happened, so [`play_sfx`] can spawn
@@ -176,6 +183,8 @@ struct AudioAssets {
     /// Monster growls — round-robined (no immediate repeat) so a repeatedly-sighted enemy doesn't
     /// stamp the same clip (Böttcher & Serafin — sample variation is the first rung against repetition).
     growls: [Handle<AudioSource>; 4],
+    /// Sharp horror sting for the watcher's mask-off reveal (see `watcher_stinger`).
+    watcher_reveal: Handle<AudioSource>,
     /// Dry insectoid chitter for the crab swarm (shared throttled voice, see `crab_squitter`).
     squitter: Handle<AudioSource>,
     footsteps: [Handle<AudioSource>; 4],
@@ -253,6 +262,7 @@ impl Plugin for GameAudioPlugin {
                     footsteps,
                     crab_squitter,
                     growl_stinger,
+                    watcher_stinger,
                     ambient_oneshots,
                     update_music,
                     mute_when_background,
@@ -295,6 +305,7 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
             assets.load("audio/enemy/growl_3.ogg"),
             assets.load("audio/enemy/growl_4.ogg"),
         ],
+            watcher_reveal: assets.load("audio/enemy/watcher_reveal.ogg"),
         squitter: assets.load("audio/enemy/squitter.ogg"),
         footsteps: [
             assets.load("audio/foot/carpet_1.ogg"),
@@ -560,6 +571,38 @@ fn growl_stinger(
     }
 
     near.retain(|e, _| live.contains(e));
+}
+
+/// Percussive stinger the instant a watcher drops its mask — the `is_angry` false→true edge
+/// (`Watching`/`Scared` → `Unleashing`). Edge-tracked per watcher so it hits once on the reveal, not
+/// every frame it stays angry, and re-arms when it calms down. Spatialized at the watcher and ducks the
+/// bed to full: this is the subconscious-startle beat (percussiveness → skin conductance, van der Zwaag
+/// et al. 2011), timed to the concealment cracking. Only the smiley boss carries `SmileyState`, so the
+/// query naturally filters to watchers.
+fn watcher_stinger(
+    mut commands: Commands,
+    assets: Res<AudioAssets>,
+    mut bus: ResMut<AudioBus>,
+    watchers: Query<(Entity, &Transform, &SmileyState)>,
+    mut angry: Local<HashMap<Entity, bool>>,
+    mut rng: Local<u32>,
+) {
+    let live: HashSet<Entity> = watchers.iter().map(|(e, _, _)| e).collect();
+
+    for (entity, tf, state) in &watchers {
+        let is_angry = state.is_angry();
+        let was_angry = angry.insert(entity, is_angry).unwrap_or(false);
+        if is_angry && !was_angry {
+            commands.spawn((
+                AudioPlayer::new(assets.watcher_reveal.clone()),
+                one_shot_spatial(tf.translation, WATCHER_REVEAL_VOL * bus.sfx, jitter(&mut rng, 0.05)),
+            ));
+            // The mask cracking gets the whole bed out of the way for the reveal.
+            bus.duck = 1.0;
+        }
+    }
+
+    angry.retain(|e, _| live.contains(e));
 }
 
 /// Sparse randomized ambient one-shots (creaks, drips, a distant clock) scattered around the squad
