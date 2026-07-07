@@ -120,7 +120,11 @@ impl Solver for MetropolisSolver {
         }
     }
 
-    fn solve(&self, problem: &PlacementProblem, rng: &mut ChaCha8Rng) -> Result<Outcome, SolveError> {
+    fn solve(
+        &self,
+        problem: &PlacementProblem,
+        rng: &mut ChaCha8Rng,
+    ) -> Result<Outcome, SolveError> {
         let objs_meta: Vec<&Candidate> = problem.candidates.iter().collect();
         let n = objs_meta.len();
         if n == 0 {
@@ -139,7 +143,13 @@ impl Solver for MetropolisSolver {
                 let hw = c.footprint[0] * 0.5;
                 let hd = c.footprint[1] * 0.5;
                 let yaw = (rng.below(4) as f32) * FRAC_PI_2;
-                let mut o = Obj { x: 0.0, z: 0.0, yaw, hw, hd };
+                let mut o = Obj {
+                    x: 0.0,
+                    z: 0.0,
+                    yaw,
+                    hw,
+                    hd,
+                };
                 let b = obj_bounds(&o, rx0, rx1, rz0, rz1);
                 o.x = rand_range(rng, b.xmin, b.xmax);
                 o.z = rand_range(rng, b.zmin, b.zmax);
@@ -152,7 +162,10 @@ impl Solver for MetropolisSolver {
         let mut best_cost = cur_cost;
 
         let iters = self.weights.iterations.max(1);
-        let (t0, t1) = (self.weights.temp_start.max(1e-6), self.weights.temp_end.max(1e-6));
+        let (t0, t1) = (
+            self.weights.temp_start.max(1e-6),
+            self.weights.temp_end.max(1e-6),
+        );
         for step in 0..iters {
             // Geometric annealing from t0 → t1.
             let frac = step as f64 / iters as f64;
@@ -173,8 +186,8 @@ impl Solver for MetropolisSolver {
             cur[i].z = cur[i].z.clamp(b.zmin, b.zmax);
 
             let cand_cost = self.cost(&cur, problem, rx0, rx1, rz0, rz1);
-            let accept = cand_cost <= cur_cost
-                || rng.unit() < (-(cand_cost - cur_cost) / temp).exp();
+            let accept =
+                cand_cost <= cur_cost || rng.unit() < (-(cand_cost - cur_cost) / temp).exp();
             if accept {
                 cur_cost = cand_cost;
                 if cur_cost < best_cost {
@@ -208,14 +221,25 @@ impl Solver for MetropolisSolver {
         if unsatisfied.is_empty() {
             Ok(Outcome::Ranked(vec![(best_cost, placed)]))
         } else {
-            Ok(Outcome::Partial { placed, unsatisfied })
+            Ok(Outcome::Partial {
+                placed,
+                unsatisfied,
+            })
         }
     }
 }
 
 impl MetropolisSolver {
     /// Total layout cost (Merrell 2011 density function): the weighted sum of interior-design terms.
-    fn cost(&self, objs: &[Obj], problem: &PlacementProblem, rx0: f32, rx1: f32, rz0: f32, rz1: f32) -> f64 {
+    fn cost(
+        &self,
+        objs: &[Obj],
+        problem: &PlacementProblem,
+        rx0: f32,
+        rx1: f32,
+        rz0: f32,
+        rz1: f32,
+    ) -> f64 {
         let w = &self.weights;
         let mut overlap = 0.0;
         let mut bounds = 0.0;
@@ -423,7 +447,10 @@ mod tests {
     fn region() -> Region {
         Region {
             id: 0,
-            rect: Rect2 { min: [0, 0], max: [5, 5] }, // 5×5 room
+            rect: Rect2 {
+                min: [0, 0],
+                max: [5, 5],
+            }, // 5×5 room
             openings: Vec::new(),
             adjacency: Vec::new(),
             props: PropertyBag::default(),
@@ -434,7 +461,11 @@ mod tests {
             asset: "x".into(),
             role: Role::Freestanding,
             footprint: [w, d],
-            dof: Dof { translate: true, rotate_quarter: true, rotate_free: false },
+            dof: Dof {
+                translate: true,
+                rotate_quarter: true,
+                rotate_free: false,
+            },
             affordances: Vec::new(),
         }
     }
@@ -462,13 +493,25 @@ mod tests {
             .iter()
             .map(|p| {
                 let c = &problem.candidates[p.candidate];
-                Obj { x: p.pos[0], z: p.pos[2], yaw: p.yaw, hw: c.footprint[0] * 0.5, hd: c.footprint[1] * 0.5 }
+                Obj {
+                    x: p.pos[0],
+                    z: p.pos[2],
+                    yaw: p.yaw,
+                    hw: c.footprint[0] * 0.5,
+                    hd: c.footprint[1] * 0.5,
+                }
             })
             .collect();
         for o in &objs {
             let (hw, hd) = o.half_extents();
-            assert!(o.x - hw >= rx0 - 0.05 && o.x + hw <= rx1 + 0.05, "x out of bounds");
-            assert!(o.z - hd >= rz0 - 0.05 && o.z + hd <= rz1 + 0.05, "z out of bounds");
+            assert!(
+                o.x - hw >= rx0 - 0.05 && o.x + hw <= rx1 + 0.05,
+                "x out of bounds"
+            );
+            assert!(
+                o.z - hd >= rz0 - 0.05 && o.z + hd <= rz1 + 0.05,
+                "z out of bounds"
+            );
         }
         // Overlap should be driven near zero by the optimizer.
         let mut total = 0.0;
@@ -506,7 +549,13 @@ mod tests {
                 Outcome::Partial { placed, .. } => placed,
             };
             let p = placed[0];
-            let o = Obj { x: p.pos[0], z: p.pos[2], yaw: p.yaw, hw: 0.2, hd: 0.3 };
+            let o = Obj {
+                x: p.pos[0],
+                z: p.pos[2],
+                yaw: p.yaw,
+                hw: 0.2,
+                hd: 0.3,
+            };
             let (hw, hd) = o.half_extents();
             let (rx0, rx1, rz0, rz1) = room_world_bounds(&r);
             let d = ((o.x - hw) - rx0)
@@ -514,7 +563,10 @@ mod tests {
                 .min((o.z - hd) - rz0)
                 .min(rz1 - (o.z + hd))
                 .max(0.0);
-            assert!(d < 0.12, "seed {seed}: fixture should sit flush to a wall, got d={d}");
+            assert!(
+                d < 0.12,
+                "seed {seed}: fixture should sit flush to a wall, got d={d}"
+            );
         }
     }
 
@@ -530,7 +582,11 @@ mod tests {
         let run = || {
             let mut rng = seeded(11);
             match solver.solve(&problem, &mut rng).expect("solve") {
-                Outcome::Ranked(v) => v[0].1.iter().map(|p| (p.pos[0].to_bits(), p.pos[2].to_bits())).collect::<Vec<_>>(),
+                Outcome::Ranked(v) => v[0]
+                    .1
+                    .iter()
+                    .map(|p| (p.pos[0].to_bits(), p.pos[2].to_bits()))
+                    .collect::<Vec<_>>(),
                 _ => panic!("expected ranked"),
             }
         };

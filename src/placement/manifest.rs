@@ -32,6 +32,11 @@ pub struct ManifestItem {
     // (e.g. a bathroom's toilet + sink). Opaque like `tags`/`affordances` — matched, never interpreted.
     #[serde(default)]
     pub group: Option<String>,
+    // Overall height in metres (top of the piece's bounding box). For a `support`-affording piece this
+    // is the surface `Scatter` props rest on — vertical placement falls out of it (Tutenel et al. 2010).
+    // Defaults to 0 for pieces whose height no rule needs (floor props, anchors).
+    #[serde(default)]
+    pub height: f32,
 }
 
 /// A parsed furniture manifest.

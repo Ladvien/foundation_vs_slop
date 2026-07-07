@@ -26,12 +26,12 @@ use crate::fog::FogGrid;
 use crate::rng::{seeded, DetRng};
 
 use super::ir::{
-    Candidate, Constraint, Dof, Host, Modality, Outcome, Placement, PlacementProblem,
-    Predicate, Region, RegionId, Role, Scope,
+    Candidate, Constraint, Dof, Host, Modality, Outcome, Placement, PlacementProblem, Predicate,
+    Region, RegionId, Role, Scope,
 };
 use super::manifest::{FurnitureManifest, ManifestItem};
+use super::scatter;
 use super::{splitmix64, PlacedIn, PlacementSolvers, PLACEMENT_SEED};
-
 
 /// Global furniture scale. The kit is authored in real-world metres and the dungeon now has ~8 ft
 /// (`WALL_HEIGHT` = 2.4 m) ceilings, so furniture renders at native 1:1 — a 2.05 m door and 2.15 m
@@ -57,6 +57,13 @@ const FREESTANDING_MIN_GAP: f32 = 1.5;
 /// sit adjacent (overlap is prevented separately by the solver's `w_overlap`), smaller than
 /// `FREESTANDING_MIN_GAP` so grouping wins over the default spread.
 const GROUP_NEAR_MAX: f32 = 1.2;
+
+/// Cap on scatter props (lamp/plant/TV) rested on support surfaces per room, so a desk isn't buried.
+const SCATTER_PER_ROOM: usize = 3;
+
+/// Inset (metres) from a support surface's footprint edge to the usable top, so a rested prop doesn't
+/// perch flush with the edge and read as about to fall off.
+const SURFACE_INSET: f32 = 0.08;
 
 /// Wall lights placed per room — a sparse accent on a full-height wall (see the wall-anchor pass).
 const WALL_LIGHTS_PER_ROOM: usize = 1;
@@ -161,7 +168,8 @@ fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3
             }
             let center = dungeon.cell_center(IVec2::new(cx, cz));
             for (face, normal) in dungeon.wall_faces_near(center) {
-                if !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(normal) {
+                if !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(normal)
+                {
                     faces.push((face, normal));
                 }
             }
@@ -174,7 +182,11 @@ fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3
 /// rooms can have a non-floor bounding-box centre (a notched corner or a plus-shape's arm gap), so anchors
 /// that key off `rect.center_cell()` resolve through this to a real floor cell. `None` only if the rect
 /// holds no floor at all (never for a real room).
-fn nearest_floor_cell(dungeon: &Dungeon, rect: &crate::placement::ir::Rect2, start: IVec2) -> Option<IVec2> {
+fn nearest_floor_cell(
+    dungeon: &Dungeon,
+    rect: &crate::placement::ir::Rect2,
+    start: IVec2,
+) -> Option<IVec2> {
     let mut best: Option<(i32, IVec2)> = None;
     for cz in rect.min[1]..rect.max[1] {
         for cx in rect.min[0]..rect.max[0] {
@@ -191,6 +203,44 @@ fn nearest_floor_cell(dungeon: &Dungeon, rect: &crate::placement::ir::Rect2, sta
     best.map(|(_, c)| c)
 }
 
+/// The catalogue partitioned by placement `Role` — computed once, shared read-only across every
+/// region's parallel solve. Holds borrows into the `FurnitureManifest`, so it lives only as long as
+/// the manifest resource does.
+struct RolePartitions<'a> {
+    ceiling: Vec<&'a ManifestItem>,
+    wall_lights: Vec<&'a ManifestItem>,
+    tiled: Vec<&'a ManifestItem>,
+    tiled_candidates: Arc<[Candidate]>,
+    freestanding: Vec<&'a ManifestItem>,
+    scatter: Vec<&'a ManifestItem>,
+}
+
+impl<'a> RolePartitions<'a> {
+    fn from_catalogue(catalogue: &'a FurnitureManifest) -> Self {
+        let tiled = catalogue.by_role(|r| matches!(r, Role::Tiled));
+        let tiled_candidates: Arc<[Candidate]> = tiled
+            .iter()
+            .map(|it| to_candidate(it))
+            .collect::<Vec<_>>()
+            .into();
+        RolePartitions {
+            ceiling: catalogue.by_role(|r| {
+                matches!(
+                    r,
+                    Role::Anchor {
+                        host: Host::Ceiling
+                    }
+                )
+            }),
+            wall_lights: catalogue.by_role(|r| matches!(r, Role::Anchor { host: Host::Wall })),
+            tiled,
+            tiled_candidates,
+            freestanding: catalogue.by_role(|r| matches!(r, Role::Freestanding)),
+            scatter: catalogue.by_role(|r| matches!(r, Role::Scatter { .. })),
+        }
+    }
+}
+
 /// Furnish every region. Parallel solve → serial spawn.
 pub fn furnish_regions(
     mut commands: Commands,
@@ -199,105 +249,14 @@ pub fn furnish_regions(
     manifest: Res<Manifest>,
     assets: Res<AssetServer>,
 ) {
-    let catalogue = &manifest.0;
-    let ceiling = catalogue.by_role(|r| matches!(r, Role::Anchor { host: Host::Ceiling }));
-    let wall_lights = catalogue.by_role(|r| matches!(r, Role::Anchor { host: Host::Wall }));
-    let tiled = catalogue.by_role(|r| matches!(r, Role::Tiled));
-    let tiled_candidates: Arc<[Candidate]> =
-        tiled.iter().map(|it| to_candidate(it)).collect::<Vec<_>>().into();
-    let freestanding = catalogue.by_role(|r| matches!(r, Role::Freestanding));
+    let parts = RolePartitions::from_catalogue(&manifest.0);
 
     // ---- Parallel solve: each region is independent, so fan out over rayon. ----
     let orchestrator = &solvers.0;
     let requests: Vec<SpawnReq> = dungeon
         .regions
         .par_iter()
-        .flat_map_iter(|region| {
-            let mut rng = seeded(PLACEMENT_SEED ^ splitmix64(region.id as u64));
-            let mut out: Vec<SpawnReq> = Vec::new();
-
-            // Pass 1 — anchors.
-            if let Some(item) = ceiling.first() {
-                let c = region.rect.center_cell();
-                // Resolve to a real floor cell — a notched room's bounding-box centre can be non-floor.
-                if let Some(cell) = nearest_floor_cell(&dungeon, &region.rect, IVec2::new(c[0], c[1])) {
-                    let pos = dungeon.cell_center(cell).with_y(WALL_HEIGHT);
-                    out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_x(PI) });
-                }
-            }
-            // No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still
-            // frames each with a header lintel, so it reads as a doorway, just without a door).
-
-            // Pass 1b — wall lights: sconces on the room's full-height walls. Kit-agnostic — any
-            // manifest item with role Anchor{Wall} is placed here, so an asset kit lights its rooms
-            // with zero code changes (the Stage-5 asset-swap contract). Camera-facing knee walls are
-            // skipped (see `full_height_wall_faces`) so a light never floats in the cutaway gap.
-            if let Some(light) = wall_lights.first() {
-                let faces = full_height_wall_faces(&dungeon, region);
-                let n = faces.len();
-                for i in 0..WALL_LIGHTS_PER_ROOM.min(n) {
-                    // Space the lights evenly along the collected faces (mid-wall for a single light).
-                    let (face, normal) = faces[(i * n + n / 2) / WALL_LIGHTS_PER_ROOM.max(1)];
-                    let pos = face.with_y(WALL_LIGHT_HEIGHT) + normal * 0.02;
-                    // Yaw the sconce so its front points into the room along the inward normal.
-                    let yaw = normal.x.atan2(normal.z);
-                    out.push(SpawnReq { region: region.id, glb: light.glb.clone(), pos, rot: Quat::from_rotation_y(yaw) });
-                }
-            }
-
-            // Pass 2 — tiled scatter (→ WfcSolver). WFC returns a sparse fill in row-major order, so
-            // taking the first N would bunch the props in the room's min (upper-left) corner; shuffle
-            // first, then take, to spread the kept props across the whole floor.
-            if !tiled_candidates.is_empty() {
-                let problem = PlacementProblem { region, candidates: tiled_candidates.clone(), constraints: Vec::new() };
-                let mut placed = solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled");
-                shuffle_placements(&mut placed, &mut rng);
-                for p in placed.into_iter().take(TILED_PER_ROOM) {
-                    if let Some(item) = tiled.get(p.candidate) {
-                        let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
-                        let pos = dungeon.cell_center(cell);
-                        // Footprint-aware containment: the WFC solver scatters over the bounding rect,
-                        // so reject any slot whose *body* would cross a wall or fall in a notched-out
-                        // corner of a non-rectangular room — not just a center-cell test (README
-                        // ISSUES 1 & 2). Merrell et al. 2011 free-configuration-space non-penetration.
-                        let half = footprint_half(item);
-                        if !dungeon.footprint_on_floor(pos, half, p.yaw) {
-                            continue;
-                        }
-                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
-                    }
-                }
-            }
-
-            // Pass 3 — freestanding furniture (→ MetropolisSolver). Kit-agnostic: the set is drawn
-            // from the manifest's Freestanding items by semantic room-type tags, never hardcoded asset
-            // keys, so any asset kit furnishes rooms with zero code changes (Tutenel et al. semantic
-            // room classes; Merrell et al. 2011 — the Stage-5 asset-swap contract).
-            let profile =
-                room_profile(region.id, &region.props.tags, &freestanding, FREESTANDING_PER_ROOM);
-            if !profile.is_empty() {
-                let candidates: Arc<[Candidate]> =
-                    profile.iter().map(|it| to_candidate(it)).collect::<Vec<_>>().into();
-                let constraints = freestanding_constraints(&profile);
-                let problem = PlacementProblem { region, candidates, constraints };
-                for p in solve_placements(orchestrator, &problem, &mut rng, region.id, "freestanding") {
-                    if let Some(item) = profile.get(p.candidate) {
-                        // Freestanding solver works in world/tile coords already.
-                        let pos = Vec3::new(p.pos[0], 0.0, p.pos[2]);
-                        // Footprint-aware containment: Metropolis optimizes within the bounding rect,
-                        // so on a notched (L/T/plus) room a piece can drift into a carved-out area.
-                        // Reject any whose *body* crosses a wall so freestanding furniture never lands
-                        // inside or half-through a wall (README ISSUES 1 & 2). Merrell et al. 2011.
-                        let half = footprint_half(item);
-                        if !dungeon.footprint_on_floor(pos, half, p.yaw) {
-                            continue;
-                        }
-                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
-                    }
-                }
-            }
-            out
-        })
+        .flat_map_iter(|region| furnish_region(&dungeon, orchestrator, region, &parts))
         .collect();
 
     // ---- Serial spawn. ----
@@ -313,6 +272,190 @@ pub fn furnish_regions(
             Visibility::Hidden,
         ));
     }
+}
+
+/// Compute the furniture to spawn in one region (all four passes) as a list of [`SpawnReq`]s. Pure and
+/// engine-free apart from the `Dungeon` geometry it reads — no `Commands`, no `AssetServer` — so it is
+/// deterministic under the region's seeded sub-stream and unit-testable without a GPU. `furnish_regions`
+/// fans this out over `rayon`; the serial ECS spawn happens in the caller.
+fn furnish_region(
+    dungeon: &Dungeon,
+    orchestrator: &super::solver::Orchestrator,
+    region: &Region,
+    parts: &RolePartitions,
+) -> Vec<SpawnReq> {
+    let RolePartitions {
+        ceiling,
+        wall_lights,
+        tiled,
+        tiled_candidates,
+        freestanding,
+        scatter,
+    } = parts;
+    let mut rng = seeded(PLACEMENT_SEED ^ splitmix64(region.id as u64));
+    let mut out: Vec<SpawnReq> = Vec::new();
+
+    // Pass 1 — anchors.
+    if let Some(item) = ceiling.first() {
+        let c = region.rect.center_cell();
+        // Resolve to a real floor cell — a notched room's bounding-box centre can be non-floor.
+        if let Some(cell) = nearest_floor_cell(&dungeon, &region.rect, IVec2::new(c[0], c[1])) {
+            let pos = dungeon.cell_center(cell).with_y(WALL_HEIGHT);
+            out.push(SpawnReq {
+                region: region.id,
+                glb: item.glb.clone(),
+                pos,
+                rot: Quat::from_rotation_x(PI),
+            });
+        }
+    }
+    // No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still
+    // frames each with a header lintel, so it reads as a doorway, just without a door).
+
+    // Pass 1b — wall lights: sconces on the room's full-height walls. Kit-agnostic — any
+    // manifest item with role Anchor{Wall} is placed here, so an asset kit lights its rooms
+    // with zero code changes (the Stage-5 asset-swap contract). Camera-facing knee walls are
+    // skipped (see `full_height_wall_faces`) so a light never floats in the cutaway gap.
+    if let Some(light) = wall_lights.first() {
+        let faces = full_height_wall_faces(&dungeon, region);
+        let n = faces.len();
+        for i in 0..WALL_LIGHTS_PER_ROOM.min(n) {
+            // Space the lights evenly along the collected faces (mid-wall for a single light).
+            let (face, normal) = faces[(i * n + n / 2) / WALL_LIGHTS_PER_ROOM.max(1)];
+            let pos = face.with_y(WALL_LIGHT_HEIGHT) + normal * 0.02;
+            // Yaw the sconce so its front points into the room along the inward normal.
+            let yaw = normal.x.atan2(normal.z);
+            out.push(SpawnReq {
+                region: region.id,
+                glb: light.glb.clone(),
+                pos,
+                rot: Quat::from_rotation_y(yaw),
+            });
+        }
+    }
+
+    // Pass 2 — tiled scatter (→ WfcSolver). WFC returns a sparse fill in row-major order, so
+    // taking the first N would bunch the props in the room's min (upper-left) corner; shuffle
+    // first, then take, to spread the kept props across the whole floor.
+    if !tiled_candidates.is_empty() {
+        let problem = PlacementProblem {
+            region,
+            candidates: tiled_candidates.clone(),
+            constraints: Vec::new(),
+        };
+        let mut placed = solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled");
+        shuffle_placements(&mut placed, &mut rng);
+        for p in placed.into_iter().take(TILED_PER_ROOM) {
+            if let Some(item) = tiled.get(p.candidate) {
+                let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
+                let pos = dungeon.cell_center(cell);
+                // Footprint-aware containment: the WFC solver scatters over the bounding rect,
+                // so reject any slot whose *body* would cross a wall or fall in a notched-out
+                // corner of a non-rectangular room — not just a center-cell test (README
+                // ISSUES 1 & 2). Merrell et al. 2011 free-configuration-space non-penetration.
+                let half = footprint_half(item);
+                if !dungeon.footprint_on_floor(pos, half, p.yaw) {
+                    continue;
+                }
+                out.push(SpawnReq {
+                    region: region.id,
+                    glb: item.glb.clone(),
+                    pos,
+                    rot: Quat::from_rotation_y(p.yaw),
+                });
+            }
+        }
+    }
+
+    // Pass 3 — freestanding furniture (→ MetropolisSolver). Kit-agnostic: the set is drawn
+    // from the manifest's Freestanding items by semantic room-type tags, never hardcoded asset
+    // keys, so any asset kit furnishes rooms with zero code changes (Tutenel et al. semantic
+    // room classes; Merrell et al. 2011 — the Stage-5 asset-swap contract).
+    // Placed support pieces (desk/table/drawer) with their world pose — the surfaces Pass 4
+    // rests scatter props on. Collected here so scatter runs after the freestanding layout.
+    let mut placed_supports: Vec<(&ManifestItem, Vec3, f32)> = Vec::new();
+    let profile = room_profile(
+        region.id,
+        &region.props.tags,
+        &freestanding,
+        FREESTANDING_PER_ROOM,
+    );
+    if !profile.is_empty() {
+        let candidates: Arc<[Candidate]> = profile
+            .iter()
+            .map(|it| to_candidate(it))
+            .collect::<Vec<_>>()
+            .into();
+        let constraints = freestanding_constraints(&profile);
+        let problem = PlacementProblem {
+            region,
+            candidates,
+            constraints,
+        };
+        for p in solve_placements(orchestrator, &problem, &mut rng, region.id, "freestanding") {
+            if let Some(item) = profile.get(p.candidate) {
+                // Freestanding solver works in world/tile coords already.
+                let pos = Vec3::new(p.pos[0], 0.0, p.pos[2]);
+                // Footprint-aware containment: Metropolis optimizes within the bounding rect,
+                // so on a notched (L/T/plus) room a piece can drift into a carved-out area.
+                // Reject any whose *body* crosses a wall so freestanding furniture never lands
+                // inside or half-through a wall (README ISSUES 1 & 2). Merrell et al. 2011.
+                let half = footprint_half(item);
+                if !dungeon.footprint_on_floor(pos, half, p.yaw) {
+                    continue;
+                }
+                out.push(SpawnReq {
+                    region: region.id,
+                    glb: item.glb.clone(),
+                    pos,
+                    rot: Quat::from_rotation_y(p.yaw),
+                });
+                if affords(item, "support") {
+                    placed_supports.push((*item, pos, p.yaw));
+                }
+            }
+        }
+    }
+
+    // Pass 4 — scatter props (lamp/plant/TV) on support surfaces (README ISSUE 4). The fine
+    // level of the two-level grid: each support's top is subdivided into an inner 9×9 lattice
+    // and props are dropped into free sub-cells (see `scatter::scatter_on_surfaces`). Runs last
+    // because it reads the just-placed supports (Tutenel et al. 2010: support is a surface
+    // feature, so a prop's height falls out of the surface it rests on).
+    if !scatter.is_empty() {
+        let surfaces: Vec<scatter::SupportSurface> = placed_supports
+            .iter()
+            .filter_map(|(item, pos, yaw)| support_surface(item, *pos, *yaw))
+            .collect();
+        if !surfaces.is_empty() {
+            // A small, region-rotated set of props so same-type rooms don't get identical tops.
+            let start = region.id as usize % scatter.len();
+            let chosen: Vec<&ManifestItem> = (0..scatter.len().min(SCATTER_PER_ROOM))
+                .map(|k| scatter[(start + k) % scatter.len()])
+                .collect();
+            let props: Vec<scatter::ScatterProp> = chosen
+                .iter()
+                .enumerate()
+                .map(|(i, it)| scatter::ScatterProp {
+                    candidate: i,
+                    half_x: it.footprint.0 * 0.5 * FURNITURE_SCALE,
+                    half_z: it.footprint.1 * 0.5 * FURNITURE_SCALE,
+                })
+                .collect();
+            for pl in scatter::scatter_on_surfaces(&surfaces, &props, &mut rng) {
+                if let Some(item) = chosen.get(pl.candidate) {
+                    let pos = Vec3::new(pl.pos[0], pl.pos[1], pl.pos[2]);
+                    out.push(SpawnReq {
+                        region: region.id,
+                        glb: item.glb.clone(),
+                        pos,
+                        rot: Quat::from_rotation_y(pl.yaw),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Deterministic Fisher–Yates shuffle of solver placements via the region's seeded RNG. Used to spread
@@ -335,7 +478,11 @@ fn solve_placements(
     match orchestrator.solve_group(problem, rng) {
         Ok(Outcome::Assignment(p)) => p,
         Ok(Outcome::Partial { placed, .. }) => placed,
-        Ok(Outcome::Ranked(ranked)) => ranked.into_iter().next().map(|(_, p)| p).unwrap_or_default(),
+        Ok(Outcome::Ranked(ranked)) => ranked
+            .into_iter()
+            .next()
+            .map(|(_, p)| p)
+            .unwrap_or_default(),
         Err(e) => {
             warn!("placement: region {region} {label} pass unsolved: {e}");
             Vec::new()
@@ -464,14 +611,42 @@ fn footprint_half(item: &ManifestItem) -> Vec2 {
     )
 }
 
+/// The usable top of a placed support piece as a [`scatter::SupportSurface`], or `None` if the piece
+/// has no authored height (nothing to rest a prop on). The usable area is the footprint (yaw-aware,
+/// so a rotated table swaps width/depth) inset by [`SURFACE_INSET`] so props don't perch on the edge;
+/// `top_y` is the piece's height, the plane props rest on (Tutenel et al. 2010 surface feature).
+fn support_surface(item: &ManifestItem, pos: Vec3, yaw: f32) -> Option<scatter::SupportSurface> {
+    if item.height <= 0.0 {
+        return None;
+    }
+    let hw = item.footprint.0 * 0.5 * FURNITURE_SCALE;
+    let hd = item.footprint.1 * 0.5 * FURNITURE_SCALE;
+    let quarter = (yaw / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
+    let (hx, hz) = if quarter % 2 == 1 { (hd, hw) } else { (hw, hd) };
+    Some(scatter::SupportSurface {
+        cx: pos.x,
+        cz: pos.z,
+        half_x: (hx - SURFACE_INSET).max(0.02),
+        half_z: (hz - SURFACE_INSET).max(0.02),
+        top_y: item.height * FURNITURE_SCALE,
+    })
+}
+
 /// Map a manifest entry to an IR candidate (asset key + role + footprint + affordances).
 fn to_candidate(item: &ManifestItem) -> Candidate {
     Candidate {
         asset: item.key.clone(),
         role: item.role.clone(),
         // Footprints in rendered (scaled) units so the layout solver reasons at the size we draw.
-        footprint: [item.footprint.0 * FURNITURE_SCALE, item.footprint.1 * FURNITURE_SCALE],
-        dof: Dof { translate: true, rotate_quarter: true, rotate_free: false },
+        footprint: [
+            item.footprint.0 * FURNITURE_SCALE,
+            item.footprint.1 * FURNITURE_SCALE,
+        ],
+        dof: Dof {
+            translate: true,
+            rotate_quarter: true,
+            rotate_free: false,
+        },
         affordances: item.affordances.clone(),
     }
 }
@@ -491,6 +666,7 @@ mod tests {
             footprint: (1.0, 1.0),
             affordances: affs.iter().map(|s| s.to_string()).collect(),
             group: None,
+            height: 0.0,
         }
     }
 
@@ -541,7 +717,11 @@ mod tests {
             k.sort_unstable();
             k
         };
-        assert_ne!(keys(0), keys(4), "two living rooms should not get an identical set");
+        assert_ne!(
+            keys(0),
+            keys(4),
+            "two living rooms should not get an identical set"
+        );
     }
 
     #[test]
@@ -557,7 +737,10 @@ mod tests {
         let office = vec!["room".to_string(), "office".to_string()];
         let profile = room_profile(7, &office, &refs, 1);
         assert_eq!(profile.len(), 1);
-        assert_eq!(profile[0].key, "desk", "office room must prefer the office-tagged desk");
+        assert_eq!(
+            profile[0].key, "desk",
+            "office room must prefer the office-tagged desk"
+        );
     }
 
     #[test]
@@ -593,22 +776,42 @@ mod tests {
 
         let against = |i: usize| {
             cs.iter()
-                .find(|c| matches!(c.scope, Scope::Object(x) if x == i)
-                    && matches!(c.predicate, Predicate::AgainstWall))
+                .find(|c| {
+                    matches!(c.scope, Scope::Object(x) if x == i)
+                        && matches!(c.predicate, Predicate::AgainstWall)
+                })
                 .unwrap_or_else(|| panic!("no AgainstWall for object {i}"))
         };
-        assert!(matches!(against(0).modality, Modality::Hard), "toilet must be HARD against-wall");
-        assert!(matches!(against(1).modality, Modality::Hard), "sink must be HARD against-wall");
-        assert!(matches!(against(2).modality, Modality::Soft(_)), "sofa stays a soft preference");
+        assert!(
+            matches!(against(0).modality, Modality::Hard),
+            "toilet must be HARD against-wall"
+        );
+        assert!(
+            matches!(against(1).modality, Modality::Hard),
+            "sink must be HARD against-wall"
+        );
+        assert!(
+            matches!(against(2).modality, Modality::Soft(_)),
+            "sofa stays a soft preference"
+        );
 
         let pair = |i: usize, j: usize| {
             cs.iter()
                 .find(|c| matches!(c.scope, Scope::Pair(a, b) if a == i && b == j))
                 .unwrap_or_else(|| panic!("no pair constraint for ({i},{j})"))
         };
-        assert!(matches!(pair(0, 1).predicate, Predicate::Near(_)), "toilet+sink grouped by Near");
-        assert!(matches!(pair(0, 2).predicate, Predicate::MinDistance(_)), "toilet↔sofa spread apart");
-        assert!(matches!(pair(1, 2).predicate, Predicate::MinDistance(_)), "sink↔sofa spread apart");
+        assert!(
+            matches!(pair(0, 1).predicate, Predicate::Near(_)),
+            "toilet+sink grouped by Near"
+        );
+        assert!(
+            matches!(pair(0, 2).predicate, Predicate::MinDistance(_)),
+            "toilet↔sofa spread apart"
+        );
+        assert!(
+            matches!(pair(1, 2).predicate, Predicate::MinDistance(_)),
+            "sink↔sofa spread apart"
+        );
     }
 
     #[test]
@@ -626,9 +829,70 @@ mod tests {
             "a seat + screen (by affordance) should emit a Facing relation regardless of asset keys"
         );
         assert!(
-            cs.iter().any(|c| matches!(c.predicate, Predicate::MinDistance(_))),
+            cs.iter()
+                .any(|c| matches!(c.predicate, Predicate::MinDistance(_))),
             "freestanding pairs should be spread apart"
         );
     }
-}
 
+    /// End-to-end: run the whole per-region pipeline (all four passes) on a hand-built room with the
+    /// SHIPPED manifest + real solvers, GPU-free. Proves the Phase 1–3 wiring composes: nothing floor
+    /// furniture escapes the room (containment), and a scatter prop rests on the desk (surface stacking).
+    #[test]
+    fn furnish_region_end_to_end_stacks_props_and_contains_furniture() {
+        use crate::dungeon::Dungeon;
+        use crate::placement::ir::{PropertyBag, Rect2, Region};
+        use crate::placement::manifest::load_manifest;
+        use crate::placement::solver::Orchestrator;
+        use crate::placement::solvers::constraint::ConstraintSolver;
+        use crate::placement::solvers::metropolis::{MetropolisSolver, MetropolisWeights};
+        use crate::placement::solvers::wfc::WfcSolver;
+
+        // 8×8 grid with a 6×6 floor room (cells (1,1)..=(6,6)) walled in by rock.
+        let (w, h) = (8usize, 8usize);
+        let mut mask = vec![false; w * h];
+        for y in 1..7 {
+            for x in 1..7 {
+                mask[y * w + x] = true;
+            }
+        }
+        let mut dungeon = Dungeon::from_walkable(w, h, mask);
+        // An "office" room → room_profile prefers the desk, which affords "support" (a surface).
+        dungeon.regions.push(Region {
+            id: 0,
+            rect: Rect2 { min: [1, 1], max: [7, 7] },
+            openings: Vec::new(),
+            adjacency: Vec::new(),
+            props: PropertyBag { tags: vec!["room".into(), "office".into()] },
+        });
+
+        let catalogue = load_manifest("assets/placement/furniture.ron").expect("shipped manifest");
+        let parts = RolePartitions::from_catalogue(&catalogue);
+        let weights: MetropolisWeights =
+            ron::from_str(&std::fs::read_to_string("assets/placement/metropolis.ron").expect("weights"))
+                .expect("parse weights");
+        let mut orch = Orchestrator::new();
+        orch.register(Box::new(WfcSolver));
+        orch.register(Box::new(MetropolisSolver::new(weights)));
+        orch.register(Box::new(ConstraintSolver));
+
+        let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts);
+        assert!(!reqs.is_empty(), "the office room should be furnished");
+
+        // Phase 3: at least one scatter prop rests on the desk surface. Floor furniture sits at y≈0, the
+        // ceiling light at WALL_HEIGHT (2.4), a wall sconce at 1.8 — a rested prop is the only 0<y<1 case.
+        let on_surface = reqs.iter().filter(|r| r.pos.y > 0.05 && r.pos.y < 1.0).count();
+        assert!(on_surface >= 1, "a scatter prop should rest on the desk (found {on_surface})");
+
+        // Phase 1: every floor-level piece (y≈0) sits on real floor — nothing escaped into a wall/void.
+        for r in &reqs {
+            if r.pos.y.abs() < 1e-3 {
+                assert!(
+                    dungeon.is_floor(dungeon.world_to_cell(r.pos)),
+                    "floor furniture at {:?} escaped the room floor",
+                    r.pos
+                );
+            }
+        }
+    }
+}
