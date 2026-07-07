@@ -6,6 +6,7 @@
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
+use bevy::time::Real;
 
 use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
@@ -72,7 +73,10 @@ fn setup_camera(mut commands: Commands, dungeon: Res<Dungeon>, mut rig: ResMut<C
 }
 
 fn drive_camera(
+    // `time` (virtual) drives only the gameplay-feel screen shake below; the human camera controls
+    // (pan) run on `real` so they feel identical at any game speed — including paused (see `real` use).
     time: Res<Time>,
+    real: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -85,7 +89,11 @@ fn drive_camera(
         rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    let dt = time.delta_secs();
+    // Pan on REAL time, not the sim clock: keyboard panning must feel the same at ×1, ×64, or paused.
+    // (Reading the generic `Time` here would resolve to `Time<Virtual>` and scale pan speed with the
+    // game-speed multiplier — flying at high speed, dead when paused. Zoom/drag below already use raw
+    // per-frame input deltas, so they're speed-independent without needing `dt`.)
+    let dt = real.delta_secs();
     // WASD (and arrow keys) scroll the map along the screen axes.
     let mut pan = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {

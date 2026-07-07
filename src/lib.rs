@@ -20,6 +20,7 @@ pub mod autogib;
 pub mod blood_lens;
 pub mod ai;
 pub mod camera;
+pub mod config;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
@@ -100,9 +101,13 @@ pub fn run() {
         // `FixedFirst` *before* each tick, so movers that integrate `transform.translation` don't drift.
         // The exact-hash harness runs physics-off (no `PhysicsPlugins`), so interpolation is absent there
         // and the opt-in components stay inert — `snapshot_hash` reads authoritative transforms.
-        // DungeonPlugin must precede FogPlugin: it inserts the `Dungeon` resource in
-        // its `build`, which FogPlugin reads at build time to size the fog grid.
+        // ConfigPlugin must precede every consumer: it loads + validates the unified
+        // `assets/config/config.ron` and inserts the `GameConfig` resource in its `build`, which the
+        // dungeon/placement/ai/gore/impact_fx/vhs plugins each read at build time to pull their slice.
+        // DungeonPlugin in turn precedes FogPlugin: it inserts the `Dungeon` resource in its `build`,
+        // which FogPlugin reads at build time to size the fog grid.
         .add_plugins((
+            config::ConfigPlugin,
             (dungeon::DungeonPlugin, placement::PlacementPlugin),
             world::WorldPlugin,
             camera::CameraPlugin,

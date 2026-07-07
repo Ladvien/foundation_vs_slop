@@ -70,7 +70,7 @@ fn rotate_cw(open: [bool; 4]) -> [bool; 4] {
 fn build_prototypes(base: &[f64; 6]) -> Vec<Prototype> {
     // (base link pattern [N,E,S,W], kind, weight-per-rotation). Weights come from
     // `DungeonConfig.wfc_weights` (order: rock, dead_end, corridor, corner, tee, cross) so the
-    // dungeon's shape distribution is data-driven via `assets/dungeon.ron`, not hardcoded here.
+    // dungeon's shape distribution is data-driven via the `dungeon:` config slice, not hardcoded here.
     let bases: &[([bool; 4], CellKind, f64)] = &[
         ([false, false, false, false], CellKind::Solid, base[0]), // empty rock
         ([true, false, false, false], CellKind::Floor, base[1]),  // dead-end room (1 link)
@@ -142,7 +142,7 @@ fn boundary_initial(protos: &[Prototype], width: usize, height: usize) -> Vec<u3
 /// and an unconvergeable generation is a bug to surface, not to paper over. (This is the *substrate*
 /// pass; the placement-grammar furniture pass degrades to `Outcome::Partial` instead — see
 /// `crate::placement::solvers::wfc`.) `base_weights` is the shape distribution (rock, dead_end,
-/// corridor, corner, tee, cross) from `assets/dungeon.ron`.
+/// corridor, corner, tee, cross) from the `dungeon:` slice of `assets/config/config.ron`.
 pub fn generate(
     width: usize,
     height: usize,

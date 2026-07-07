@@ -8,7 +8,7 @@
 //! samples low-cost layouts. Per-region, seeded, and reproducible; the paper needed a GPU only for
 //! interactive re-suggestion, not the one-shot offline layout we do here.
 //!
-//! Weights live in `assets/placement/metropolis.ron` so layout is re-tunable with no code change
+//! Weights live in the `placement.metropolis` slice of `assets/config/config.ron` so layout is re-tunable with no code change
 //! (Merrell 2011 reports robustness to ~2× weight perturbation).
 
 use std::f32::consts::{FRAC_PI_2, TAU};

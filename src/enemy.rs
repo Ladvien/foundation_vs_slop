@@ -45,17 +45,17 @@ const ENEMY_COUNT: usize = 1;
 /// it back to a crawl — so a committed straight-line pursuer becomes fast and dangerous, a wanderer
 /// stays slow.
 const MIN_SPEED: f32 = 0.4; // a slow crawl — the boss lumbers
-const MAX_SPEED: f32 = 2.5; // deliberately well under a unit's 6.0 cruise: a lumbering boss you can
-                            // kite, but that flattens anything it corners (see `CONTACT_DPS`)
+const MAX_SPEED: f32 = 2.5; // deliberately well under a unit's 6.0 cruise: a lumbering boss you can kite
 const ACCEL: f32 = 0.4; // world units / s² — a long, low ramp so it never lunges
 /// Heading is "unchanged" while the new desired direction is within ~30° of the current one.
 const TURN_COS: f32 = 0.87;
-/// Centre distance at which an enemy is "in contact" with a unit and starts gnawing on it. A little
-/// longer than a unit's so the slow boss can still land hits before it's kited out of reach.
+/// Centre distance at which the boss counts as "in contact" — NO LONGER a damage radius (the contact-gnaw
+/// was removed for the watcher rework), it now only tunes the separation/ring behaviour in `enemy_seek`
+/// (so arrivers ring the standoff instead of stacking to a point).
 const CONTACT_RADIUS: f32 = 1.2;
-/// Damage per second an in-contact enemy deals to a unit (a unit has 100 HP → ~1.4 s to kill). This
-/// is the whole pack's bite on one body: being cornered by the boss is near-instant death, so the
-/// squad must keep it at range and never let it close.
+/// Legacy "bite" DPS — the boss does NOT deal contact damage any more (it's a neutral watcher). This
+/// value survives ONLY as the "mass" weight for its own death camera-kick (`gore::death_intensity` in
+/// `despawn_dead`): the boss is the heaviest thing in the level, so its death should kick the camera hard.
 const CONTACT_DPS: f32 = 72.0;
 /// Collision box half-extents for wall-sliding ([`Dungeon::resolve_move`]). Matched to the squad's
 /// `0.27` so an enemy fits every corridor a unit fits (a 1-wide walled cell has only
@@ -117,8 +117,9 @@ const OBSERVE_DIST: f32 = 3.0;
 /// Cañigueral, "The Role of Eye Gaze During Natural Social Interactions", Front. Psychol. 2019,
 /// DOI 10.3389/fpsyg.2019.00560).
 const LOOK_COS: f32 = 0.88;
-/// Range (tiles) a unit's gaze reaches the watcher (mirrors the fog vision radius, `fog::VISION_RADIUS`).
-const LOOK_RANGE: f32 = 8.0;
+/// Range (cells) a unit's gaze reaches the watcher — the SAME radius the squad can actually see (single
+/// source of truth: `fog::VISION_RADIUS`), so it can only provoke/observe what is in the squad's vision.
+const LOOK_RANGE: f32 = crate::fog::VISION_RADIUS as f32;
 /// Seconds after a hit the watcher stays "attacked", so the reaction persists past the single damage
 /// tick. Short — this is a reflex, not a mood.
 const HIT_MEMORY: f32 = 0.6;
@@ -127,17 +128,31 @@ const SCARED_TIME: f32 = 1.6;
 /// Lightning cadence: seconds between instakill bolts while unleashing (one victim per bolt, "if that
 /// was the last enemy" it relaxes).
 const ZAP_CADENCE: f32 = 0.35;
-/// Range (world units) within which it can smite an attacker with lightning.
-const ZAP_RANGE: f32 = 16.0;
-/// Reach (world units) at which a crab counts as *biting* the watcher — used to attribute a hit to the
-/// swarm (zap the crab) vs. a unit's laser (zap the oblique shooter). Matches the crab contact reach.
-const BITE_REACH: f32 = 0.9;
-/// How fast the attack-sphere "true form" fades in (charge units/s) once unleashing.
-const CHARGE_RATE: f32 = 6.0;
+/// Range (world units) within which it can smite an attacker with lightning. Clamped to the gaze/vision
+/// range so it can never zap a unit beyond the distance at which that unit could ever see it (and thus
+/// de-escalate it into cowering) — no deaths to an enemy you can neither see nor stop.
+const ZAP_RANGE: f32 = LOOK_RANGE;
+/// Duration (seconds) of the "true form" flash on each lightning strike — the ~180 ms glimpse of the
+/// fractal sphere the player asked for. Shorter than `ZAP_CADENCE`, so between strikes the angry face
+/// shows and only the strike reveals what it is.
+const FLASH_TIME: f32 = 0.18;
 /// Flee speed while scared — faster than its lumber so it actually breaks away.
 const FLEE_SPEED: f32 = 3.2;
 /// Seconds a lightning-beam VFX stays on screen.
 const LIGHTNING_LIFE: f32 = 0.12;
+/// --- Bounded self-defence (a *coexisting god*, never a normal boss) ---
+/// It is intentionally un-killable-by-default and is NOT a required objective, so "leave it alone and it
+/// just watches you" is always a valid resolution — no soft-lock. Game balance tolerates deliberate
+/// unkillability (Jaffe et al., "Evaluating Game Balance with Restricted Play", AIIDE 2012) as long as
+/// nothing forces an inert *stuck* state (a logical bug that renders a game unplayable — Bergdahl et al.,
+/// "Augmenting Automated Game Testing with Deep RL", 2021). But the crab swarm treats it as `Prey`, so
+/// without a defence a pile would free-farm it to death (review finding #7). It therefore reflexively
+/// culls an over-committed crab pile — a mundane swat of bugs, NOT the concealed lightning, so it never
+/// reveals the true form — with NO heal (the old heal turned it into a crab-farming HP fountain).
+const CULL_THRESHOLD: usize = 4; // biting crabs before it swats
+const CULL_RADIUS: f32 = 1.4; // crabs within this of its centre are eaten
+const CULL_MAX: usize = 6; // most crabs one swat removes (bounds the swarm hit)
+const CULL_COOLDOWN: f32 = 2.0; // seconds between swats
 
 /// Marker for an enemy root entity (also the raycast collider — carries the capsule mesh).
 #[derive(Component)]
@@ -160,6 +175,12 @@ pub struct SmileyState {
     zap_cooldown: f32,
     /// Remaining flee time while scared (re-armed each hit-while-watched).
     flee_timer: f32,
+    /// Counts down while the "true form" is flashed on a bolt: for `FLASH_TIME` after each lightning
+    /// strike the face flips to the fractal sphere, then snaps back to the angry face. A ~180 ms glimpse
+    /// of what it really is — the concealment cracking for a frame as it strikes.
+    flash_timer: f32,
+    /// Countdown between anti-swarm crab culls (see `smiley_defense` / `CULL_COOLDOWN`).
+    cull_cooldown: f32,
 }
 
 impl SmileyState {
@@ -170,8 +191,30 @@ impl SmileyState {
             since_hit: HIT_MEMORY, // start un-attacked
             zap_cooldown: 0.0,
             flee_timer: 0.0,
+            flash_timer: 0.0,
+            cull_cooldown: 0.0,
         }
     }
+
+    /// Is it in its hostile "angry" state right now? The squad only opens fire on the watcher once this is
+    /// true (see `laser::fire_laser`) — otherwise it's a neutral entity you coexist with, not a target.
+    pub fn is_angry(&self) -> bool {
+        matches!(self.mood, SmileyMood::Unleashing)
+    }
+}
+
+/// The watcher's memory of **who actually just hit it** — a working-memory fact (source + recency) in the
+/// F.E.A.R. sense (Orkin, "Agent Architecture Considerations for Real-Time Planning in Games", AIIDE 2005:
+/// sensors cache facts with a source and an update time). `smiley_zap` retaliates against *this* entity,
+/// not against whatever is geometrically nearest — so it can only ever kill the unit or crab that truly
+/// attacked it, never a bystander walking past. The two damage sites write it (guarded to the boss):
+/// `laser::update_lasers` (the bolt's shooter) and `crab::crab_contact_damage` (the biting crab).
+#[derive(Component, Default)]
+pub struct LastAttacker {
+    /// The entity that most recently damaged the watcher (`None` once the memory goes stale or is spent).
+    pub entity: Option<Entity>,
+    /// Seconds since it was recorded; cleared once older than `HIT_MEMORY` so a stale attacker isn't zapped.
+    pub age: f32,
 }
 
 /// The watcher's three reflex moods. `Watching` is the default sad-lonely-observer; the other two are
@@ -302,25 +345,14 @@ impl Material for SmileyMaterial {
     }
 }
 
-/// GPU uniform for the attack-sphere "true form" — mirrors `AttackSphereSettings` in
-/// `attack_sphere.wgsl`. Padded to 16 bytes (the health-bar pattern).
-#[derive(Clone, ShaderType)]
-struct AttackSphereUniform {
-    /// 0 = invisible, 1 = fully powered up. Ramped by `update_smiley_faces` while unleashing.
-    charge: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
-}
-
 /// The "true form" material: a ray-marched fractal sphere (`attack_sphere.wgsl`, ported CC0 from Otavio
 /// Good). The watcher's face **flips to this** the instant it is attacked while unobserved — the concealed
-/// power revealed only when no one is watching (audience effect: Hamilton & Cañigueral 2019).
-#[derive(Asset, TypePath, AsBindGroup, Clone)]
-struct AttackSphereMaterial {
-    #[uniform(0)]
-    settings: AttackSphereUniform,
-}
+/// power revealed only when no one is watching (audience effect: Hamilton & Cañigueral 2019). It carries
+/// no uniforms: the orb is a hard on/off keyed purely on `Visibility` (which also skips the expensive
+/// ray-march while hidden), so there is nothing to fade (the old `charge` uniform was redundant with the
+/// `Visibility` cut and never produced a partial value).
+#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
+struct AttackSphereMaterial {}
 
 impl Material for AttackSphereMaterial {
     fn fragment_shader() -> ShaderRef {
@@ -354,6 +386,8 @@ impl Plugin for EnemyPlugin {
                     smiley_reflex.after(crate::ai::AiSet::Think),
                     // Smite attackers while unleashing (instakill = pinned state → FixedUpdate).
                     smiley_zap.after(smiley_reflex),
+                    // Bounded no-heal crab cull so the swarm can't free-farm the coexisting god.
+                    smiley_defense,
                     // Move after the brain chose this tick's mode and the reflex set the mood.
                     enemy_seek
                         .after(rebuild_enemy_field)
@@ -425,15 +459,14 @@ fn spawn_enemies(
             },
         });
         // The "true form" material, hidden until it unleashes (charge 0 = fully faded out).
-        let attack_material = attack_materials.add(AttackSphereMaterial {
-            settings: AttackSphereUniform { charge: 0.0, _pad0: 0.0, _pad1: 0.0, _pad2: 0.0 },
-        });
+        let attack_material = attack_materials.add(AttackSphereMaterial {});
         commands
             .spawn((
                 Enemy,
                 Hostile,
                 crate::squad::Prey, // crabs swarm the boss too (nearest-prey targeting)
                 SmileyState::new(START_HP),
+                LastAttacker::default(), // who last hit it (written by the laser + crab damage sites)
                 Health::new(START_HP),
                 crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
                 crate::ai::brain::BrainId::Smiley,
@@ -607,10 +640,10 @@ fn enemy_seek(
 
         // Observation standoff: once within `OBSERVE_DIST` of the unit it's watching, stop closing and
         // just stare. It no longer gnaws on contact (see the removed `enemy_contact_damage`) — it wants
-        // to keep you around to watch, so it holds at a creepy distance rather than pinning you.
-        let (base, engaged) = if matches!(active.mode, Mode::Chase)
-            && nearest_dist.is_some_and(|d| d <= OBSERVE_DIST)
-        {
+        // to keep you around to watch, so it holds at a creepy distance rather than pinning you. Applies
+        // whenever it is *approaching a unit* — both plain `Chase` AND blood-drawn `HuntBlood` (which also
+        // homes on a nearby unit), so blood near a unit doesn't make it forget the standoff and pin them.
+        let (base, engaged) = if within_standoff(active.mode, nearest_dist) {
             (Vec2::ZERO, false)
         } else {
             (base, engaged)
@@ -706,7 +739,6 @@ fn hide_enemies_in_fog(
 /// form". Reads the reflex `SmileyState.mood` (`smiley_reflex`). Cosmetic → `Update`.
 #[allow(clippy::type_complexity)]
 fn update_smiley_faces(
-    time: Res<Time>,
     camera: Single<&GlobalTransform, With<Camera3d>>,
     enemies: Query<(&Transform, &Children, &SmileyState), With<Enemy>>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
@@ -715,13 +747,11 @@ fn update_smiley_faces(
         (With<SmileyFace>, Without<Enemy>, Without<Unit>, Without<AttackSphereFace>),
     >,
     mut orbs: Query<
-        (&mut Transform, &mut Visibility, &MeshMaterial3d<AttackSphereMaterial>),
+        (&mut Transform, &mut Visibility),
         (With<AttackSphereFace>, Without<Enemy>, Without<Unit>, Without<SmileyFace>),
     >,
     mut face_mats: ResMut<Assets<SmileyMaterial>>,
-    mut orb_mats: ResMut<Assets<AttackSphereMaterial>>,
 ) {
-    let dt = time.delta_secs();
     let cam_rot = camera.rotation();
     // Face-space axes: since the quad takes the camera rotation, its local right/up are the
     // camera's right/up — project the world glance direction onto those to get the shader `look`.
@@ -729,8 +759,14 @@ fn update_smiley_faces(
     let up = camera.up();
 
     for (etf, children, state) in &enemies {
-        let unleashing = state.mood == SmileyMood::Unleashing;
+        let angry = state.is_angry();
         let scared = state.mood == SmileyMood::Scared;
+        // The "true form" is a BRIEF FLASH synced to each strike (~FLASH_TIME), not a sustained orb — AND
+        // gated on the *current* mood, so if a gaze snaps it back to Watching/Scared mid-flash the fractal
+        // orb can't leak onto a boss the logic now treats as innocent (derive the visual state from the
+        // authoritative gameplay state — GameAIPro2 Ch.12 "Separation of Concerns for AI & Animation"; the
+        // "turn to look and it's just smiling at you" beat holds).
+        let flashing = orb_visible(angry, state.flash_timer);
 
         // Watch the nearest unit: eyes glance toward it, and the grin SWELLS the closer it is — uncanny
         // fixation, a predator locking on, not warmth (Trevisan 2017; Mori's uncanny valley).
@@ -744,21 +780,22 @@ fn update_smiley_faces(
             None => (Vec2::ZERO, 0.0),
         };
 
-        // Mood → face uniforms. Scared = the existing panic face (pin-prick pupils, cold pallor).
-        // Watching = sad/lonely when it has no one to fixate on, warming into the swelling grin as a unit
-        // nears. With nothing to watch, the eyes cast down (a desolate, lonely stare).
+        // Mood → face uniforms. Angry = a hostile red frown (between strikes). Scared = the panic face
+        // (pin-prick pupils, cold pallor). Watching = sad/lonely with no one to fixate on, warming into
+        // the swelling grin as a unit nears (eyes cast down when it has nothing to watch).
         let panic = if scared { 1.0 } else { 0.0 };
-        let sad = if scared { 0.0 } else { (1.0 - grin).clamp(0.0, 1.0) };
-        if !scared && grin < 0.01 {
+        let menace = if angry { 1.0 } else { 0.0 };
+        let sad = if scared || angry { 0.0 } else { (1.0 - grin).clamp(0.0, 1.0) };
+        if !scared && !angry && grin < 0.01 {
             look.y = -LOOK_AMOUNT * 0.5;
         }
-        let smile = grin * (1.0 - panic);
+        let smile = if angry { 0.0 } else { grin * (1.0 - panic) };
 
         for &child in children {
             if let Ok((mut ftf, mut vis, mat)) = faces.get_mut(child) {
                 ftf.rotation = cam_rot; // billboard
-                // Shown while Watching/Scared; hidden while the true form is out.
-                let want = if unleashing { Visibility::Hidden } else { Visibility::Inherited };
+                // The face shows in every mood EXCEPT the brief real-form flash.
+                let want = if flashing { Visibility::Hidden } else { Visibility::Inherited };
                 if *vis != want {
                     *vis = want;
                 }
@@ -766,20 +803,16 @@ fn update_smiley_faces(
                     m.settings.look = look;
                     m.settings.smile = smile;
                     m.settings.panic = panic;
-                    m.settings.menace = 0.0; // idle reads *sad*, not hostile; the orb carries the menace
+                    m.settings.menace = menace;
                     m.settings.sad = sad;
                 }
-            } else if let Ok((mut otf, mut vis, mat)) = orbs.get_mut(child) {
+            } else if let Ok((mut otf, mut vis)) = orbs.get_mut(child) {
                 otf.rotation = cam_rot; // billboard
-                let want = if unleashing { Visibility::Inherited } else { Visibility::Hidden };
+                // The orb shows ONLY during the flash — a hard `Visibility` cut on/off (which also skips
+                // its expensive ray-march while hidden). No fade: the flash is only ~FLASH_TIME long.
+                let want = if flashing { Visibility::Inherited } else { Visibility::Hidden };
                 if *vis != want {
                     *vis = want;
-                }
-                if let Some(mut m) = orb_mats.get_mut(&mat.0) {
-                    // Fade the orb in as it powers up, snap it out on relax.
-                    let target = if unleashing { 1.0 } else { 0.0 };
-                    let step = CHARGE_RATE * dt;
-                    m.settings.charge += (target - m.settings.charge).clamp(-step, step);
                 }
             }
         }
@@ -825,12 +858,11 @@ fn despawn_dead(
     }
 }
 
-/// cos of the gun's front arc — a unit could be shooting whatever sits within this of its forward.
-/// Mirrors the private `laser::FRONT_ARC_COS` (cos 75° ≈ 0.26); kept local to avoid making that pub.
-const SHOOT_ARC_COS: f32 = 0.26;
-
 /// Pure gaze test: is `target` within `look_cos` of `unit_forward` (a tight "looking directly at it"
-/// cone)? Planar (XZ). The caller adds the range + clear-line-of-sight checks. Unit-tested.
+/// cone)? Planar (XZ). The caller adds the range + clear-line-of-sight checks. Unit-tested. Because units
+/// now pivot to face their fire target (`squad::unit_movement` reads `AimTarget`), body-forward equals
+/// aim — so this test matches what the player sees a unit looking at (Rabin, "Vision Zones", GameAIPro2
+/// Ch.4: perception must key off the agent's actual view direction).
 fn unit_is_facing(unit_pos: Vec3, unit_forward: Vec3, target_pos: Vec3, look_cos: f32) -> bool {
     let bearing = (target_pos - unit_pos).with_y(0.0).normalize_or_zero();
     if bearing == Vec3::ZERO {
@@ -840,17 +872,19 @@ fn unit_is_facing(unit_pos: Vec3, unit_forward: Vec3, target_pos: Vec3, look_cos
     bearing.dot(fwd) >= look_cos
 }
 
-/// Pure test: is the watcher in this unit's *firing* arc (it could be shooting it) but OUTSIDE its tight
-/// gaze cone — i.e. an attacker plinking it from an oblique angle it isn't looking straight at? That is
-/// exactly the unobserved attacker it retaliates against. Unit-tested.
-fn is_oblique_shooter(unit_pos: Vec3, unit_forward: Vec3, smiley_pos: Vec3, look_cos: f32, arc_cos: f32) -> bool {
-    let bearing = (smiley_pos - unit_pos).with_y(0.0).normalize_or_zero();
-    if bearing == Vec3::ZERO {
-        return false;
-    }
-    let fwd = unit_forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
-    let d = bearing.dot(fwd);
-    d >= arc_cos && d < look_cos
+/// Pure gate for the "true form" flash: the fractal orb is visible ONLY while the watcher is actually
+/// angry (`Unleashing`) AND inside a strike's flash window. Deriving the visual from the authoritative
+/// mood is what stops the orb leaking onto a boss a gaze has snapped back to innocence (Separation of
+/// Concerns; GameAIPro2 Ch.12). Unit-tested.
+fn orb_visible(angry: bool, flash_timer: f32) -> bool {
+    angry && flash_timer > 0.0
+}
+
+/// Pure test: should the watcher hold its observation standoff this tick? True while *approaching a unit*
+/// — plain `Chase` OR blood-drawn `HuntBlood` (both home on a nearby unit) — and already within
+/// `OBSERVE_DIST`. Keeps it staring at a creepy distance instead of pinning the unit. Unit-tested.
+fn within_standoff(mode: Mode, nearest_dist: Option<f32>) -> bool {
+    matches!(mode, Mode::Chase | Mode::HuntBlood) && nearest_dist.is_some_and(|d| d <= OBSERVE_DIST)
 }
 
 /// Planar (XZ) distance — the game's actors all sit on the ground plane, so this is the right metric.
@@ -865,10 +899,18 @@ fn smiley_reflex(
     time: Res<Time>,
     dungeon: Res<Dungeon>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
-    mut smileys: Query<(&Transform, &Health, &mut SmileyState), With<Enemy>>,
+    mut smileys: Query<(&Transform, &Health, &mut SmileyState, &mut LastAttacker), With<Enemy>>,
 ) {
     let dt = time.delta_secs();
-    for (stf, hp, mut state) in &mut smileys {
+    for (stf, hp, mut state, mut attacker) in &mut smileys {
+        // Tick down the "true form" flash from the last strike (set by `smiley_zap`).
+        state.flash_timer = (state.flash_timer - dt).max(0.0);
+        // Age the last-attacker working-memory fact; forget it once stale so a long-gone attacker is never
+        // retaliated against (Orkin 2005 — perceptions carry an update time and decay).
+        attacker.age += dt;
+        if attacker.age > HIT_MEMORY {
+            attacker.entity = None;
+        }
         // Attacked = an HP drop since last tick (order-independent, unlike change-detection). The memory
         // window makes the reaction persist past the single damage tick — and, because ongoing bites keep
         // refreshing it, it stays `Unleashing` until ~HIT_MEMORY after the LAST attacker dies (that is the
@@ -903,7 +945,7 @@ fn smiley_reflex(
         state.mood = next_mood(attacked, looked_at, fleeing);
 
         // Count the zap cadence down only while unleashing (so the first bolt fires promptly on the flip).
-        if state.mood == SmileyMood::Unleashing {
+        if state.is_angry() {
             state.zap_cooldown = (state.zap_cooldown - dt).max(0.0);
         } else {
             state.zap_cooldown = 0.0;
@@ -918,65 +960,95 @@ fn smiley_reflex(
 /// no RNG.
 #[allow(clippy::type_complexity)]
 fn smiley_zap(
-    dungeon: Res<Dungeon>,
     mut lightning: ResMut<LightningQueue>,
     mut impacts: ResMut<ImpactQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
-    mut crabs: Query<(Entity, &Transform, &mut Health), (With<crate::crab::Crab>, Without<Unit>, Without<Enemy>)>,
-    mut units: Query<(Entity, &Transform, &mut Health), (With<Unit>, Without<crate::crab::Crab>, Without<Enemy>)>,
+    mut smileys: Query<(&Transform, &mut SmileyState, &LastAttacker), With<Enemy>>,
+    mut crabs: Query<(&Transform, &mut Health), (With<crate::crab::Crab>, Without<Unit>, Without<Enemy>)>,
+    mut units: Query<(&Transform, &mut Health), (With<Unit>, Without<crate::crab::Crab>, Without<Enemy>)>,
 ) {
-    for (stf, mut state) in &mut smileys {
-        if state.mood != SmileyMood::Unleashing || state.zap_cooldown > 0.0 {
+    for (stf, mut state, attacker) in &mut smileys {
+        if !state.is_angry() || state.zap_cooldown > 0.0 {
             continue;
         }
         let spos = stf.translation;
-        let scell = dungeon.world_to_cell(spos);
 
-        // Attribute the hit: a crab within bite reach ⇒ the swarm did it (zap the crab); otherwise it was
-        // a unit's laser (zap the oblique shooter). This is the geometric stand-in for attacker tracking.
-        let biting = crabs.iter().any(|(_, ctf, _)| planar_dist(ctf.translation, spos) <= BITE_REACH);
-
-        let victim: Option<(Entity, Vec3)> = if biting {
-            let cand: Vec<(Entity, Vec3)> = crabs
-                .iter()
-                .filter(|(_, ctf, _)| planar_dist(ctf.translation, spos) <= ZAP_RANGE)
-                .map(|(e, ctf, _)| (e, ctf.translation))
-                .collect();
-            crate::util::nearest_planar(spos, cand.iter().map(|(e, p)| (*e, *p))).map(|(e, p, _)| (e, p))
+        // Retaliate against the entity that ACTUALLY hit it (its `LastAttacker` working-memory fact;
+        // Orkin 2005), never whatever is geometrically nearest — so a bystander unit is never struck. The
+        // attacker is a crab or a unit; strike it iff it still exists and is within `ZAP_RANGE`.
+        let Some(victim) = attacker.entity else {
+            continue; // no recorded attacker → nothing to smite (relaxes as the hit-memory expires)
+        };
+        let struck = if let Ok((vtf, mut hp)) = crabs.get_mut(victim) {
+            let vpos = vtf.translation;
+            (planar_dist(vpos, spos) <= ZAP_RANGE).then(|| {
+                hp.current = 0.0; // instant kill — the crab's own despawn does gore/SCENT/SFX next tick
+                vpos
+            })
+        } else if let Ok((vtf, mut hp)) = units.get_mut(victim) {
+            let vpos = vtf.translation;
+            (planar_dist(vpos, spos) <= ZAP_RANGE).then(|| {
+                hp.current = 0.0; // a unit that attacked it unobserved (rare, and always the real shooter)
+                vpos
+            })
         } else {
-            let cand: Vec<(Entity, Vec3)> = units
-                .iter()
-                .filter(|(_, utf, _)| {
-                    let fwd = utf.rotation * Vec3::NEG_Z;
-                    let ucell = dungeon.world_to_cell(utf.translation);
-                    planar_dist(utf.translation, spos) <= ZAP_RANGE
-                        && is_oblique_shooter(utf.translation, fwd, spos, LOOK_COS, SHOOT_ARC_COS)
-                        && dungeon.line_of_sight(ucell, scell)
-                })
-                .map(|(e, utf, _)| (e, utf.translation))
-                .collect();
-            crate::util::nearest_planar(spos, cand.iter().map(|(e, p)| (*e, *p))).map(|(e, p, _)| (e, p))
+            None // the attacker already despawned
         };
-
-        let Some((victim, vpos)) = victim else {
-            continue; // nothing in range to smite this tick — hold (relaxes when the hit-memory expires)
+        let Some(vpos) = struck else {
+            continue;
         };
-
-        // Instant kill: the victim's own despawn system does the gore/SCENT/SFX next tick.
-        if biting {
-            if let Ok((_, _, mut hp)) = crabs.get_mut(victim) {
-                hp.current = 0.0;
-            }
-        } else if let Ok((_, _, mut hp)) = units.get_mut(victim) {
-            hp.current = 0.0;
-        }
 
         // Beam from up the watcher's body to the victim + a bright spark at the strike + a sharp report.
         lightning.0.push((spos + Vec3::Y * 0.9, vpos));
         impacts.0.push(vpos);
         sfx.write(Sfx::ImpactWall); // a sharp crack — stands in for a dedicated thunder clip
         state.zap_cooldown = ZAP_CADENCE;
+        state.flash_timer = FLASH_TIME; // flip to the "true form" for ~180 ms as the bolt strikes
+    }
+}
+
+/// Bounded, no-heal self-defence so the crab swarm can't free-farm the coexisting god (review #7). When
+/// an over-committed pile (≥ `CULL_THRESHOLD`) presses against it and its swat is off cooldown, it culls
+/// up to `CULL_MAX` of them — a mundane devour of bugs, run regardless of observation (it is NOT the
+/// concealed lightning, so it never reveals the true form or breaks concealment). NO heal: the old
+/// per-crab heal turned it into a crab-farming HP fountain. Deterministic: crabs are taken in stable
+/// query-iteration order, no RNG. Emits green ichor gore directly (no SCENT deposit — a scent bloom here
+/// would just magnet more crabs into a feedback loop).
+fn smiley_defense(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut gore: ResMut<GoreQueue>,
+    mut sfx: MessageWriter<Sfx>,
+    mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
+    crabs: Query<(Entity, &Transform), With<crate::crab::Crab>>,
+) {
+    let dt = time.delta_secs();
+    for (stf, mut state) in &mut smileys {
+        state.cull_cooldown = (state.cull_cooldown - dt).max(0.0);
+        if state.cull_cooldown > 0.0 {
+            continue;
+        }
+        let spos = stf.translation;
+        let biters: Vec<(Entity, Vec3)> = crabs
+            .iter()
+            .filter(|(_, ctf)| planar_dist(ctf.translation, spos) <= CULL_RADIUS)
+            .map(|(e, ctf)| (e, ctf.translation))
+            .collect();
+        if biters.len() < CULL_THRESHOLD {
+            continue;
+        }
+        for (ce, cpos) in biters.into_iter().take(CULL_MAX) {
+            commands.entity(ce).despawn();
+            gore.0.push(GoreEvent {
+                pos: cpos,
+                kind: GoreKind::EnemySplat,
+                tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
+                gib: None,
+                intensity: 0.2,
+            });
+        }
+        sfx.write(Sfx::ImpactFlesh);
+        state.cull_cooldown = CULL_COOLDOWN;
     }
 }
 
@@ -1072,24 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn oblique_shooter_sits_between_the_arcs() {
-        // 45° off: 0.26 (arc/75°) ≤ 0.707 < 0.88 (gaze/28°) → shooting it, but not looking straight at it.
-        assert!(is_oblique_shooter(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(-5.0, 0.0, -5.0), LOOK_COS, SHOOT_ARC_COS));
-    }
-
-    #[test]
-    fn dead_on_shooter_is_not_oblique() {
-        // Straight ahead is a *direct gaze* (it would flee), not an oblique shot.
-        assert!(!is_oblique_shooter(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, -5.0), LOOK_COS, SHOOT_ARC_COS));
-    }
-
-    #[test]
-    fn behind_is_not_a_shooter() {
-        // It can't even bring the gun to bear → not an attacker to retaliate against.
-        assert!(!is_oblique_shooter(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, 5.0), LOOK_COS, SHOOT_ARC_COS));
-    }
-
-    #[test]
     fn watched_and_hit_cowers_never_unleashes() {
         assert_eq!(next_mood(true, true, false), SmileyMood::Scared);
         assert_eq!(next_mood(true, true, true), SmileyMood::Scared);
@@ -1113,5 +1167,32 @@ mod tests {
     #[test]
     fn idle_when_unobserved_and_unhit() {
         assert_eq!(next_mood(false, false, false), SmileyMood::Watching);
+    }
+
+    // The "true form" never leaks onto an innocent boss: the orb is gated on the CURRENT mood, so a stale
+    // flash timer alone can't show it (review finding #4 — the concealment-cracking beat).
+    #[test]
+    fn orb_shows_only_while_angry_and_flashing() {
+        assert!(orb_visible(true, 0.1)); // angry + mid-flash → the fractal sphere shows
+        assert!(!orb_visible(false, 0.1)); // gaze snapped it back to innocence mid-flash → NO leak
+        assert!(!orb_visible(true, 0.0)); // angry but between strikes → the angry face, not the orb
+        assert!(!orb_visible(false, 0.0));
+    }
+
+    // The observation standoff holds while approaching a unit in BOTH Chase and HuntBlood (review #5), and
+    // not in other modes / when still far.
+    #[test]
+    fn standoff_covers_chase_and_huntblood_when_close() {
+        assert!(within_standoff(Mode::Chase, Some(OBSERVE_DIST - 0.5)));
+        assert!(within_standoff(Mode::HuntBlood, Some(OBSERVE_DIST - 0.5))); // the fix: HuntBlood too
+        assert!(!within_standoff(Mode::HuntBlood, Some(OBSERVE_DIST + 5.0))); // still far → keep closing
+        assert!(!within_standoff(Mode::Wander, Some(0.5))); // not approaching a unit → no standoff
+        assert!(!within_standoff(Mode::Chase, None)); // no unit at all
+    }
+
+    // The zap can never reach past the range at which a unit could see/de-escalate it (review #9).
+    #[test]
+    fn zap_range_never_exceeds_vision() {
+        assert!(ZAP_RANGE <= LOOK_RANGE, "ZAP_RANGE {ZAP_RANGE} must not exceed gaze/vision {LOOK_RANGE}");
     }
 }

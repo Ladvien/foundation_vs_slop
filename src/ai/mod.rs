@@ -10,7 +10,7 @@
 //! Everything is a small composable unit over shared fields (the modularity principle of Colledanchise
 //! & Ögren, "Behavior Trees: An Introduction", 2017): channels, drives, steering behaviours, and
 //! decision behaviours are all data literals extended by adding one const/registry entry. Numeric
-//! knobs live in `ai_tuning.ron` (hot-reload); structure lives in code.
+//! knobs live in the `ai_tuning:` slice of `assets/config/config.ron`; structure lives in code.
 
 use bevy::prelude::*;
 
@@ -46,7 +46,10 @@ pub struct AiPlugin;
 
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AiTuning>()
+        // Required config — one path, no fallback. The `ai_tuning:` slice comes from the unified
+        // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
+        let tuning = app.world().resource::<crate::config::GameConfig>().ai_tuning;
+        app.insert_resource(tuning)
             .init_resource::<StigDeposits>()
             .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()
@@ -65,10 +68,11 @@ impl Plugin for AiPlugin {
                 )
                     .chain(),
             )
-            // Load tuning, then allocate the fields + build the drive registry + brains from it.
+            // Tuning is already inserted (from GameConfig) above; allocate the fields + build the drive
+            // registry + brains from it.
             .add_systems(
                 Startup,
-                (tuning::load_tuning, init_fields, init_drives, brain::init_brains).chain(),
+                (init_fields, init_drives, brain::init_brains).chain(),
             )
             // Pinned AI simulation on `FixedUpdate`.
             .add_systems(
@@ -111,7 +115,7 @@ fn init_fields(mut commands: Commands, dungeon: Res<Dungeon>, tuning: Res<AiTuni
 }
 
 /// Build the active drive set. **This is the drive extension point** — add a `DriveDef` literal here
-/// (numeric knobs will migrate to `ai_tuning.ron`). Every agent with a `Drives` component gets these.
+/// (numeric knobs will migrate to the `ai_tuning:` config slice). Every agent with a `Drives` component gets these.
 fn init_drives(mut commands: Commands) {
     commands.insert_resource(DriveRegistry {
         defs: vec![

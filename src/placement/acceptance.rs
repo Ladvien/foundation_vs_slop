@@ -143,10 +143,14 @@ fn axis1_backend_swap_same_grammar() {
 
 #[test]
 fn axis2_asset_swap_manifest_only() {
-    // Both manifests are consumed by the identical code path (`load_manifest`); the only thing that
-    // differs is which RON file we name.
-    let furniture = load_manifest("assets/placement/furniture.ron").expect("kit A parses");
-    let kenney = load_manifest("assets/placement/furniture_kenney.ron").expect("kit B parses");
+    // Kit A is the shipped furniture manifest, now the `placement.furniture` slice of the unified
+    // config; kit B is the standalone asset-swap fixture. Both are `FurnitureManifest`s parsed by the
+    // identical schema/code path — the only thing that differs is the asset kit they name.
+    let furniture = crate::config::load_game_config()
+        .expect("shipped config.ron must be valid")
+        .placement
+        .furniture;
+    let kenney = load_manifest("assets/config/furniture_kenney.ron").expect("kit B parses");
 
     // Different kits → different GLB paths, same schema and roles. Both kits carry a wall-anchored
     // light (an `Anchor(Wall)`) pointing at their own asset, so the swap is manifest-only.

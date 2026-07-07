@@ -21,7 +21,7 @@ target
 #.idea/
 screenshot.png
 screenshot.request
-impact_fx.ron
-vhs_fx.ron
-gore.ron
 fx*.png
+
+# Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
+.claude/

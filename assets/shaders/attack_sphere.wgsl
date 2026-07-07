@@ -21,15 +21,8 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::globals
 
-struct AttackSphereSettings {
-    // 0 = fully faded out (invisible), 1 = fully powered up. Ramped by the reflex on flip / relax.
-    charge: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
-};
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: AttackSphereSettings;
+// No material uniforms: the orb is a hard on/off keyed on the entity's `Visibility` (Rust side), so there
+// is nothing to fade — the fragment just outputs coverage-as-alpha.
 
 const RECURSION_LEVELS: i32 = 4;
 const inner: f32 = 0.333;
@@ -272,5 +265,5 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let outCol = sqrt(clamp(finalColor, vec3<f32>(0.0), vec3<f32>(1.0)));
-    return vec4<f32>(outCol, alpha * clamp(material.charge, 0.0, 1.0));
+    return vec4<f32>(outCol, alpha);
 }

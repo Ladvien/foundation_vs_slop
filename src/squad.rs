@@ -71,6 +71,14 @@ impl MoveOrder {
 #[derive(Component)]
 pub struct Velocity(pub Vec2);
 
+/// The world position this unit's gun is currently aimed at — the nearest enemy it can shoot, written
+/// every tick by `laser::fire_laser` (`None` when holding fire). `unit_facing` turns the figurine to look
+/// at it, so a unit visibly faces what it shoots (combat readability) and the smiley watcher's gaze test
+/// (`enemy::unit_is_facing`) matches what the player sees — body facing == aim (Rabin, "Vision Zones",
+/// GameAIPro2 Ch.4).
+#[derive(Component, Default)]
+pub struct AimTarget(pub Option<Vec3>);
+
 /// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors) and so
 /// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture.
 #[derive(Component)]
@@ -181,7 +189,9 @@ impl Plugin for SquadPlugin {
         // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
         app.add_systems(Startup, spawn_squad)
-            .add_systems(FixedUpdate, (unit_movement, despawn_dead_units))
+            // `unit_facing` after `unit_movement` so it turns units (moving OR idle) toward their aim/travel
+            // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
+            .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
             .add_systems(Update, recolor_units);
     }
 }
@@ -204,6 +214,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 Prey, // crabs may swarm/bite units (nearest-prey targeting)
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
+                AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
                 Health::new(UNIT_HP),
                 Outfit(outfit),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
@@ -467,11 +478,36 @@ fn unit_movement(
             continue;
         }
 
-        // Face travel direction (local -Z toward the step), slerped for a smooth turn.
-        let step = Vec3::new(new_vel.x, 0.0, new_vel.y);
-        if step.length_squared() > 1e-6 {
+        // Facing is handled centrally by `unit_facing` (below) for ALL units — moving OR idle — so a
+        // stationary unit still turns to look at what it is shooting.
+    }
+}
+
+/// Turn each unit to face what it is shooting (its `AimTarget`, set by `laser::fire_laser`), or its
+/// travel direction when not engaging — slerped for a smooth turn. Runs for EVERY unit (unlike the old
+/// facing in `unit_movement`, which only turned commanded/moving units), so a stationary unit visibly
+/// pivots to aim. This is why the smiley watcher's "is a unit looking at it" gaze test (which reads body
+/// facing) matches what the player sees: body facing == aim (Rabin, "Vision Zones", GameAIPro2 Ch.4).
+fn unit_facing(time: Res<Time>, mut units: Query<(&mut Transform, &Velocity, &AimTarget), With<Unit>>) {
+    let dt = time.delta_secs().min(MAX_FRAME_DT);
+    if dt <= 0.0 {
+        return;
+    }
+    for (mut transform, velocity, aim) in &mut units {
+        // Prefer the fire target (flattened to the unit's own height so it yaws, never pitches); else the
+        // travel direction. `None` on both ⇒ hold the current facing.
+        let target = aim
+            .0
+            .map(|t| Vec3::new(t.x, transform.translation.y, t.z))
+            .or_else(|| {
+                let v = Vec3::new(velocity.0.x, 0.0, velocity.0.y);
+                (v.length_squared() > 1.0e-6).then_some(transform.translation + v)
+            });
+        if let Some(target) = target
+            && (target - transform.translation).length_squared() > 1.0e-6
+        {
             let facing = Transform::from_translation(transform.translation)
-                .looking_at(transform.translation + step, Vec3::Y)
+                .looking_at(target, Vec3::Y)
                 .rotation;
             transform.rotation = transform.rotation.slerp(facing, (TURN_SPEED * dt).min(1.0));
         }

@@ -13,8 +13,9 @@ use bevy::prelude::*;
 use crate::dungeon::{Dungeon, FloorMaterials, Tile, Wall};
 use crate::squad::Unit;
 
-/// How many cells out from a unit can be seen (subject to line of sight).
-const VISION_RADIUS: i32 = 8;
+/// How many cells out from a unit can be seen (subject to line of sight). `pub` so the smiley watcher's
+/// gaze range reuses it (single source of truth — see `enemy::LOOK_RANGE`) instead of a copied literal.
+pub const VISION_RADIUS: i32 = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CellVis {

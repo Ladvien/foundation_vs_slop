@@ -16,12 +16,12 @@ use crate::ai::field::{Deposit, FieldId, StigDeposits};
 use crate::audio::Sfx;
 use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
-use crate::enemy::Hostile;
+use crate::enemy::{Hostile, LastAttacker, SmileyState};
 use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
-use crate::squad::{Unit, Velocity, UNIT_SPEED};
+use crate::squad::{AimTarget, Unit, Velocity, UNIT_SPEED};
 use crate::util::rand01;
 
 /// Seconds between shots while Space is held (fixed fire rate).
@@ -57,11 +57,14 @@ const FRIENDLY_FIRE_DAMAGE: f32 = 5.0;
 /// as danger and (once it has a fear drive) scatters from sustained fire.
 const THREAT_PER_SHOT: f32 = 0.6;
 
-/// A live laser bolt: its constant velocity and remaining lifetime (seconds).
+/// A live laser bolt: its constant velocity, remaining lifetime (seconds), and the unit that fired it
+/// (so a bolt that strikes the smiley watcher can attribute the hit to its real shooter — the watcher
+/// only ever retaliates against who actually attacked it; see `enemy::LastAttacker`).
 #[derive(Component)]
 struct Laser {
     velocity: Vec3,
     life: f32,
+    shooter: Entity,
 }
 
 /// Shared bolt mesh + emissive material, built once so every bolt is a cheap handle clone.
@@ -154,26 +157,32 @@ fn fire_laser(
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<StigDeposits>,
-    shooters: Query<(&Transform, &Velocity), (With<Unit>, Without<Hostile>)>,
-    enemies: Query<&Transform, (With<Hostile>, Without<Unit>)>,
+    mut shooters: Query<(Entity, &Transform, &Velocity, &mut AimTarget), (With<Unit>, Without<Hostile>)>,
+    // `Option<&SmileyState>` marks the smiley boss among hostiles: the squad leaves the neutral watcher
+    // alone and only fires on it once it turns angry (crabs/nests have no `SmileyState` → always targeted).
+    enemies: Query<(&Transform, Option<&SmileyState>), (With<Hostile>, Without<Unit>)>,
 ) {
-    // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. A unit with no
-    // visible enemy still holds fire (see the per-unit loop below).
+    // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. Target selection runs
+    // EVERY tick (so each unit's `AimTarget` — hence its facing, `squad::unit_movement` — stays fresh and
+    // it visibly looks at what it shoots), but a bolt only *spawns* on the cooldown wrap tick.
     cooldown.0.tick(time.delta());
-    if !cooldown.0.just_finished() {
-        return;
-    }
+    let firing = cooldown.0.just_finished();
 
     // Auto-aim: each unit locks the nearest enemy it can currently SEE (fog-hidden enemies aren't
     // targeted — RTS partial observability) and fires from its muzzle toward it, scattered by a cone
     // that widens with the unit's speed. A unit with no visible enemy holds fire — one path.
-    for (unit, velocity) in &shooters {
+    for (unit_entity, unit, velocity, mut aim_target) in &mut shooters {
         let muzzle = unit.transform_point(crate::squad::MUZZLE_LOCAL);
         // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
         let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let mut best = f32::MAX;
         let mut target = None;
-        for enemy in &enemies {
+        for (enemy, smiley) in &enemies {
+            // Leave the uncanny watcher alone until it reveals itself: only target the smiley boss while
+            // it is angry (unleashing). Crabs/nests have no `SmileyState`, so they stay fair game.
+            if smiley.is_some_and(|s| !s.is_angry()) {
+                continue;
+            }
             if !fog.visible_at(dungeon.world_to_cell(enemy.translation)) {
                 continue; // can't shoot what the squad can't see
             }
@@ -189,9 +198,16 @@ fn fire_laser(
                 target = Some(enemy.translation);
             }
         }
+        // Face what we shoot (drives the unit's facing in `squad::unit_movement`) — refreshed every tick.
+        if aim_target.0 != target {
+            aim_target.0 = target;
+        }
         let Some(target) = target else {
             continue;
         };
+        if !firing {
+            continue; // aiming stays fresh, but only fire on the cooldown wrap tick
+        }
         let Ok(aim) = Dir3::new(target - muzzle) else {
             continue;
         };
@@ -205,6 +221,7 @@ fn fire_laser(
             Laser {
                 velocity: forward * LASER_SPEED,
                 life: LASER_LIFE,
+                shooter: unit_entity,
             },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
@@ -232,8 +249,14 @@ fn update_lasers(
     mut sfx: MessageWriter<Sfx>,
     // Every hostile's hit volume (enemy capsule / crab & nest sphere) for the CPU bolt cast.
     // `With<Hostile>` keeps this provably disjoint from the `Without<Hostile>` `lasers` query below
-    // (both touch `Transform`), which Bevy's borrow checker requires.
-    targets: Query<(Entity, &Transform, &LaserTarget), With<Hostile>>,
+    // (both touch `Transform`), which Bevy's borrow checker requires. `Option<&SmileyState>` marks the
+    // boss: a NON-angry watcher is intangible to bolts (they pass through the neutral entity) so a stray
+    // shot aimed at a crab can't provoke it — the "leave it alone" rule is enforced at the DAMAGE layer,
+    // not just target selection (stimulus gating; GameAIPro2 Ch.27).
+    targets: Query<(Entity, &Transform, &LaserTarget, Option<&SmileyState>), With<Hostile>>,
+    // The boss's `LastAttacker` working-memory fact — a bolt that hits it records its real shooter here so
+    // `enemy::smiley_zap` retaliates against the actual attacker, never a bystander (Orkin 2005).
+    mut attackers: Query<&mut LastAttacker>,
     // Nests are `Hostile` (siege-killable) but are stone structures, not flesh — used to suppress the
     // blood/squelch/THREAT reactions on a nest hit while still letting the bolt damage it.
     nests: Query<Entity, With<crate::nest::Nest>>,
@@ -255,7 +278,11 @@ fn update_lasers(
         // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
         // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
         let mut best: Option<(Entity, f32, Vec3)> = None;
-        for (te, tt, tv) in &targets {
+        for (te, tt, tv, smiley) in &targets {
+            // A neutral (non-angry) watcher is intangible — bolts pass through it (no damage, no provoke).
+            if smiley.is_some_and(|s| !s.is_angry()) {
+                continue;
+            }
             if let Some((s, point)) =
                 segment_capsule_hit(prev, transform.translation, tt.translation, tv.half_height, tv.radius)
                 && best.is_none_or(|(_, bs, _)| s < bs)
@@ -266,6 +293,12 @@ fn update_lasers(
         if let Some((hit_entity, _, hit_point)) = best {
             if let Ok(mut hp) = healths.get_mut(hit_entity) {
                 hp.current -= LASER_DAMAGE;
+            }
+            // If we hit the watcher, record WHO fired this bolt so it retaliates against the real shooter
+            // (only the boss carries `LastAttacker`, so this no-ops for crabs/nests).
+            if let Ok(mut la) = attackers.get_mut(hit_entity) {
+                la.entity = Some(laser.shooter);
+                la.age = 0.0;
             }
             // A nest is a stone structure, not flesh: it takes the damage above but must NOT emit the
             // blood spray, fleshy squelch, or a MEAT/THREAT feeding scent. The flesh reactions below are

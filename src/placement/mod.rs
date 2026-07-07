@@ -31,11 +31,6 @@ use solvers::wfc::WfcSolver;
 /// Base seed for placement RNG. Per-region sub-seeds derive from `PLACEMENT_SEED ^ splitmix64(id)`.
 const PLACEMENT_SEED: u64 = 0x0050_1ACE;
 
-/// Path to the furniture manifest (the asset adapter). Editing it changes placement with no code diff.
-const MANIFEST_PATH: &str = "assets/placement/furniture.ron";
-/// Path to the Metropolis layout weights (re-tunable with no code change).
-const METROPOLIS_PATH: &str = "assets/placement/metropolis.ron";
-
 /// Mix an integer into a 64-bit seed (SplitMix64 finalizer, Steele et al. 2014). Used to derive a
 /// per-region sub-seed so each region gets an independent, reproducible RNG stream that does not
 /// depend on iteration or thread order.
@@ -73,16 +68,14 @@ pub struct PlacementPlugin;
 
 impl Plugin for PlacementPlugin {
     fn build(&self, app: &mut App) {
-        // Required config — one path, no fallback. A missing/malformed manifest or weights file is a
-        // loud startup failure, not a silent empty/default world.
-        let weights_text = std::fs::read_to_string(METROPOLIS_PATH)
-            .unwrap_or_else(|e| panic!("placement: cannot read {METROPOLIS_PATH}: {e}"));
-        let weights: MetropolisWeights = ron::from_str(&weights_text)
-            .unwrap_or_else(|e| panic!("placement: {METROPOLIS_PATH} parse error: {e}"));
+        // Required config — one path, no fallback. The `placement:` slice (furniture manifest + layout
+        // weights) comes from the unified `assets/config/config.ron`, loaded + validated once by
+        // `ConfigPlugin` (registered first): a missing/malformed file already failed loudly there.
+        let (weights, catalogue) = {
+            let cfg = app.world().resource::<crate::config::GameConfig>();
+            (cfg.placement.metropolis.clone(), cfg.placement.furniture.clone())
+        };
         app.insert_resource(PlacementSolvers(build_solvers(weights)));
-
-        let catalogue = manifest::load_manifest(MANIFEST_PATH)
-            .unwrap_or_else(|e| panic!("placement: {e}"));
         app.insert_resource(furnish::Manifest(catalogue));
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).

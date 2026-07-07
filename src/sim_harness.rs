@@ -32,9 +32,13 @@ pub fn serial_guard() -> MutexGuard<'static, ()> {
 pub struct SimConfig {
     /// Simulation step in seconds. The whole pinned sim advances by exactly this each `step` tick.
     pub fixed_dt: f32,
-    /// Wall-speed multiplier applied via `Time<Virtual>::set_relative_speed`. Does NOT affect
-    /// determinism — it only scales how much virtual time each real second maps to; the harness drives
-    /// virtual time directly, so the sequence of steps is identical at any speed.
+    /// Wall-speed multiplier for headless runs, realized by advancing **real** time manually: each
+    /// `app.update()` advances `fixed_dt * speed`, so `speed` fixed sub-steps run per update (see the
+    /// `TimeUpdateStrategy::ManualDuration` setup in [`build_headless_app`]). Deliberately **not** via
+    /// `Time<Virtual>::set_relative_speed` — that clock is owned in the windowed game by the single
+    /// writer `juice::tick_hitstop`, and driving real time here sidesteps its per-frame re-assertion.
+    /// Does NOT affect determinism: each fixed sub-step still sees exactly `fixed_dt`, so the step
+    /// sequence is identical at any speed.
     pub speed: f32,
     /// Include the Avian physics layer (gib chunks). Physics floats are **not** bit-reproducible (a
     /// documented invariant — see `CLAUDE.md` / the testing strategy), so a run with `physics = true` is
@@ -122,6 +126,9 @@ pub fn build_headless_app(cfg: &SimConfig) -> App {
     // too — they run harmlessly headless and keep the plugin graph identical, which matters because some
     // sim systems are ordered relative to them.
     app.add_plugins((
+        // ConfigPlugin first: it loads + validates the unified `assets/config/config.ron` and inserts
+        // the `GameConfig` resource that every consumer plugin below reads at build time.
+        crate::config::ConfigPlugin,
         (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,

@@ -1,6 +1,14 @@
+## ISSUES
+- Furniture spawns outside of wall boundaries.
+- Furniture spawns halfway through walls
+- Toliet and sink need rules to be together, and close to the walls
+- TV, lamps, small potted plants all need to stack on tables and desks
+- The wall cutaways don't change when the player rotates the map
+
 
 ### TODO
-- 
+- Ensure the crabs have flocking like behaviors and don't pile up
+- Make blood pools relate to the size of the mesh and/or weight of the mesh
 - **Stealth pounce:** gate the leap on the target's facing — stalk to the blind side and only pounce when prey isn't looking. (Now: range + cooldown only.)
 - **Dynamic castes:** let crabs re-role between scout and assault as swarm needs shift. (Now: fixed at birth.)
 

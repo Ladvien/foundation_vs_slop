@@ -52,6 +52,10 @@ impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Trauma>()
             .init_resource::<Hitstop>()
+            // `tick_hitstop` reads `GameSpeed`; init it here too (idempotent with `TimeControlPlugin`)
+            // so `JuicePlugin` stays self-contained and can't panic on a missing resource if it is ever
+            // added without `TimeControlPlugin` (e.g. an isolated hitstop test).
+            .init_resource::<GameSpeed>()
             .add_systems(Update, (tick_hitstop, decay_trauma));
     }
 }
@@ -71,11 +75,17 @@ fn tick_hitstop(
     mut vtime: ResMut<Time<Virtual>>,
 ) {
     let base = if speed.paused { 0.0 } else { speed.base };
-    let target = if real.elapsed_secs() < hitstop.until_real {
+    let raw = if real.elapsed_secs() < hitstop.until_real {
         base * FROZEN_SPEED
     } else {
         base
     };
+    // `set_relative_speed` asserts the ratio is finite and >= 0 (bevy_time `virt.rs`), so a stray
+    // NaN/inf/negative in `GameSpeed.base` (a pub field an RL/inspection tool may write) would panic.
+    // Clamp defensively to keep the one-path speed authority crash-proof (repo no-panic rule). Sanitizing
+    // to a finite value also keeps the `abs() > 1e-4` guard below meaningful — a NaN target would make it
+    // always-false and silently freeze the clock at its previous speed.
+    let target = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
     if (vtime.relative_speed() - target).abs() > 1e-4 {
         vtime.set_relative_speed(target);
     }

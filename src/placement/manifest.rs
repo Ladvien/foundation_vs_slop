@@ -55,6 +55,14 @@ pub const MAX_TILED_PROTOTYPES: usize = 31;
 pub fn parse_manifest(text: &str) -> Result<FurnitureManifest, String> {
     let manifest =
         ron::from_str::<FurnitureManifest>(text).map_err(|e| format!("manifest parse error: {e}"))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Enforce the WFC [`MAX_TILED_PROTOTYPES`] cap on an already-deserialized manifest. Split from
+/// [`parse_manifest`] so the unified config loader (`crate::config::load_game_config`) can validate the
+/// `placement.furniture` slice it deserializes as part of the master `GameConfig` — one path, no fallback.
+pub fn validate_manifest(manifest: &FurnitureManifest) -> Result<(), String> {
     let tiled = manifest
         .items
         .iter()
@@ -66,7 +74,7 @@ pub fn parse_manifest(text: &str) -> Result<FurnitureManifest, String> {
              {MAX_TILED_PROTOTYPES} (its u32 prototype mask). Reduce the Tiled set or retag items."
         ));
     }
-    Ok(manifest)
+    Ok(())
 }
 
 /// Read + parse a manifest file. One path: a missing or malformed manifest is a hard, loud error

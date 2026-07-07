@@ -9,8 +9,8 @@
 //! `ShaderType` settings component on the camera and the fragment shader (`assets/shaders/vhs.wgsl`).
 //! The shader cross-fades base→VHS by `intensity`, so `intensity == 0` is an exact passthrough.
 //!
-//! Tuned via the `vhs_fx.ron` file, read once at startup. Edit the RON and relaunch to change the
-//! look — there is no in-game panel.
+//! Tuned via the `vhs:` slice of the unified `assets/config/config.ron`, read once at startup. Edit the
+//! RON and relaunch to change the look — there is no in-game panel.
 
 use bevy::core_pipeline::fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin};
 use bevy::prelude::*;
@@ -18,8 +18,6 @@ use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
 use bevy::shader::ShaderRef;
 use serde::{Deserialize, Serialize};
-
-const CONFIG_PATH: &str = "vhs_fx.ron";
 
 /// Per-camera VHS uniform. Extracted to the render world and uploaded as the `@binding(2)`
 /// uniform; the field order/types must byte-match `struct VhsSettings` in `vhs.wgsl`
@@ -45,9 +43,10 @@ impl FullscreenMaterial for VhsSettings {
     // Defaults: runs in `Core3d`, `Core3dSystems::PostProcess`, before tonemapping.
 }
 
-/// Human-facing, RON-persisted tunables: the fade cycle timing plus each effect's strength.
+/// Human-facing, RON-persisted tunables: the fade cycle timing plus each effect's strength. A field of
+/// the unified `crate::config::GameConfig` (the `vhs:` slice of `assets/config/config.ron`).
 #[derive(Resource, Serialize, Deserialize, Clone)]
-struct VhsConfig {
+pub struct VhsConfig {
     /// Always-on texture floor (0 = off) — the constant analog grain/scanline the picture always
     /// carries. Distortions spike on top of this; see `drive_fade`.
     base_level: f32,
@@ -86,19 +85,12 @@ pub struct VhsPlugin;
 
 impl Plugin for VhsPlugin {
     fn build(&self, app: &mut App) {
+        // Required config — one path, no fallback. The `vhs:` slice comes from the unified
+        // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
+        let config = app.world().resource::<crate::config::GameConfig>().vhs.clone();
         app.add_plugins(FullscreenMaterialPlugin::<VhsSettings>::default())
-            .init_resource::<VhsConfig>()
-            .add_systems(Startup, load_config)
+            .insert_resource(config)
             .add_systems(Update, (ensure_camera_settings, drive_fade));
-    }
-}
-
-/// Load persisted config at startup if present; otherwise keep the defaults (one path, no
-/// fallback file is written here).
-fn load_config(mut config: ResMut<VhsConfig>) {
-    if let Some(loaded) = read_config() {
-        info!("vhs: loaded {CONFIG_PATH}");
-        *config = loaded;
     }
 }
 
@@ -155,22 +147,3 @@ fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, mut cameras: Query<&mut V
     }
 }
 
-fn read_config() -> Option<VhsConfig> {
-    let text = match std::fs::read_to_string(CONFIG_PATH) {
-        Ok(text) => text,
-        // Optional override file; absence means "use the built-in defaults".
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            error!("vhs: {CONFIG_PATH} exists but could not be read: {e}");
-            std::process::exit(1);
-        }
-    };
-    match ron::from_str(&text) {
-        Ok(config) => Some(config),
-        // Fail loud on a malformed override rather than silently running on defaults (one-path rule).
-        Err(e) => {
-            error!("vhs: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
-            std::process::exit(1);
-        }
-    }
-}
