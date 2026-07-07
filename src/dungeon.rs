@@ -65,6 +65,105 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
     wall_pos.x - cell_center.x > CAMERA_FACING_EPS || wall_pos.z - cell_center.z > CAMERA_FACING_EPS
 }
 
+// ── View-relative knee-wall cutaway ──────────────────────────────────────────────────────────────
+// The knee-wall cutaway used to be baked once at spawn for the fixed (+X,+Z) iso view. With Q/E map
+// rotation the camera can look from any of four corners, so *which* walls occlude a room changes with
+// the view. These components + `update_cutaway` make the squash follow the camera: it is a purely
+// *visual* effect — collision, navigation (`surface_nav`), and prop/nest/splat placement stay baked to
+// the canonical orientation, so the camera never changes gameplay (it stays deterministic at every
+// angle; only the rendered geometry re-poses).
+
+/// Ease rate for the cutaway height/scale lerp — matched to the camera's own rotation smoothing so a
+/// wall grows or shrinks over the same turn. Frame-rate independent via `1 − exp(−k·dt)`.
+const CUTAWAY_SMOOTHING: f32 = 9.0;
+
+/// How a spawned tile participates in the cutaway: floors don't; walls squash to knee height on the
+/// near edge; wall-mounted lintels hide on the near edge. Passed to the tile spawner so the tag and
+/// the initial (yaw=0) pose are set in one place.
+#[derive(Clone, Copy)]
+enum Cutaway {
+    None,
+    Wall,
+    Mounted,
+}
+
+/// A wall that participates in the view-relative cutaway. `outward` is its outward-facing horizontal
+/// normal (±X/±Z). The wall is squashed to `CAMERA_WALL_FRACTION` whenever that normal faces the
+/// camera (its inner face then occludes the room). Full walls and corner arms both stand 0→`WALL_HEIGHT`.
+#[derive(Component)]
+pub struct CutawayWall {
+    pub outward: Vec3,
+}
+
+/// A decoration mounted on a wall face (doorway lintel; wall-hung prop). `outward` is the host wall's
+/// outward normal; the item is scaled to zero — hidden — while that wall is a near knee wall, so it
+/// never floats in the cutaway gap above the squashed wall. `base_scale` is its shown scale. Hiding
+/// rides `scale`, not `Visibility`, so it composes with the fog reveal (which owns `Visibility`).
+#[derive(Component)]
+pub struct CutawayMounted {
+    pub outward: Vec3,
+    pub base_scale: Vec3,
+}
+
+/// A wall's outward horizontal normal (±X/±Z), derived from its offset off the cell centre. Straight
+/// walls sit ~0.4 along one axis; corner arms likewise, each dominant on a single axis — so the larger
+/// component names the edge. The single classifier for both [`CutawayWall`] tagging and initial squash.
+pub fn wall_outward(wall_pos: Vec3, cell_center: Vec3) -> Vec3 {
+    let dx = wall_pos.x - cell_center.x;
+    let dz = wall_pos.z - cell_center.z;
+    if dx.abs() >= dz.abs() {
+        Vec3::new(dx.signum(), 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, dz.signum())
+    }
+}
+
+/// True when an outward-facing wall normal points toward the camera — its inner face occludes the room,
+/// so the wall should be a knee wall. At the four 90° detents exactly the two adjacent edges qualify.
+fn faces_camera(outward: Vec3, to_camera: Vec3) -> bool {
+    outward.dot(to_camera) > 0.0
+}
+
+/// `(scale.y, translation.y)` for a wall standing 0→`WALL_HEIGHT`: knee-high and reseated on the floor
+/// when near the camera, full height and centred otherwise.
+fn wall_pose(near: bool) -> (f32, f32) {
+    if near {
+        (CAMERA_WALL_FRACTION, WALL_HEIGHT * CAMERA_WALL_FRACTION * 0.5)
+    } else {
+        (1.0, WALL_HEIGHT * 0.5)
+    }
+}
+
+/// Ease every cutaway wall's height and every wall-mounted decoration's scale toward the pose implied
+/// by the current camera direction, so the knee-wall cutaway rotates with the Q/E view. Visual only —
+/// see the module comment above; nothing here touches nav, placement, or the fog's `Visibility`.
+fn update_cutaway(
+    time: Res<Time<bevy::time::Real>>,
+    view: Res<crate::camera::CameraView>,
+    mut walls: Query<(&CutawayWall, &mut Transform), Without<CutawayMounted>>,
+    mut mounted: Query<(&CutawayMounted, &mut Transform), Without<CutawayWall>>,
+) {
+    if view.to_camera == Vec3::ZERO {
+        return; // not yet seeded by the camera (first frame ordering) — leave the baked pose.
+    }
+    let ease = 1.0 - (-CUTAWAY_SMOOTHING * time.delta_secs()).exp();
+    for (wall, mut tf) in &mut walls {
+        let (scale_y, y) = wall_pose(faces_camera(wall.outward, view.to_camera));
+        let (cur_scale, cur_y) = (tf.scale.y, tf.translation.y);
+        tf.scale.y = cur_scale + (scale_y - cur_scale) * ease;
+        tf.translation.y = cur_y + (y - cur_y) * ease;
+    }
+    for (deco, mut tf) in &mut mounted {
+        let target = if faces_camera(deco.outward, view.to_camera) {
+            Vec3::ZERO
+        } else {
+            deco.base_scale
+        };
+        let cur = tf.scale;
+        tf.scale = cur + (target - cur) * ease;
+    }
+}
+
 // Coarse WFC operates on room slots; each expands to a `block`×`block` patch of fine tiles. At 1 tile =
 // 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. When `block` is
 // vastly larger than the rooms each floats in deep negative space — the liminal look — so the
@@ -363,6 +462,9 @@ impl Plugin for DungeonPlugin {
         // cross-plugin ordering games. A zero-room generation is a loud, one-path failure.
         app.insert_resource(Dungeon::generate(&config).unwrap_or_else(|e| panic!("dungeon: {e}")));
         app.add_systems(Startup, spawn_tiles);
+        // The knee-wall cutaway follows the Q/E camera rotation (visual only). Runs on `Update` — it
+        // re-poses render geometry from the camera direction and touches no pinned sim state.
+        app.add_systems(Update, update_cutaway);
     }
 }
 
@@ -1631,17 +1733,28 @@ fn spawn_tiles(
                           mesh: Handle<Mesh>,
                           material: Handle<StandardMaterial>,
                           mut transform: Transform,
-                          wall_size: Option<Vec3>| {
-        // Knee-wall mode: any wall on the camera-facing (E/S) edge is squashed vertically to
-        // `CAMERA_WALL_FRACTION` and reseated on the floor, so the camera sees over it. Classified by
-        // the wall's offset from its cell centre (+X ⇒ E edge, +Z ⇒ S edge); floors sit at the centre
-        // and are never squashed. Scaling the transform scales its collider to match.
-        if SHORT_CAMERA_WALLS && wall_size.is_some() {
-            let cx = cell.x as f32 * TILE_SIZE;
-            let cz = cell.y as f32 * TILE_SIZE;
-            if is_camera_facing_pos(transform.translation, Vec3::new(cx, 0.0, cz)) {
-                transform.scale.y = CAMERA_WALL_FRACTION;
-                transform.translation.y = WALL_HEIGHT * CAMERA_WALL_FRACTION * 0.5;
+                          wall_size: Option<Vec3>,
+                          cutaway: Cutaway| {
+        // The knee-wall cutaway is view-relative (see `update_cutaway`). We only *seed* the pose here for
+        // the opening yaw=0 view (camera from +X,+Z ⇒ E/S near); the per-frame system re-poses it from
+        // the live camera direction. A `Wall` (squashed) reseats to knee height on its near edge; a
+        // `Mounted` decoration (doorway lintel) hides — scale 0 — on its near edge so it never floats.
+        let outward = match cutaway {
+            Cutaway::None => Vec3::ZERO,
+            Cutaway::Wall | Cutaway::Mounted => {
+                let center = Vec3::new(cell.x as f32 * TILE_SIZE, 0.0, cell.y as f32 * TILE_SIZE);
+                wall_outward(transform.translation, center)
+            }
+        };
+        if SHORT_CAMERA_WALLS && faces_camera(outward, Vec3::new(1.0, 0.0, 1.0)) {
+            match cutaway {
+                Cutaway::Wall => {
+                    let (scale_y, y) = wall_pose(true);
+                    transform.scale.y = scale_y;
+                    transform.translation.y = y;
+                }
+                Cutaway::Mounted => transform.scale = Vec3::ZERO,
+                Cutaway::None => {}
             }
         }
         let mut entity = commands.spawn((
@@ -1651,10 +1764,27 @@ fn spawn_tiles(
             transform,
             Visibility::Hidden,
         ));
+        // Both walls and lintels carry `Wall` so the fog reveal treats them as walls (not floors); only
+        // solid walls get a physics collider (lintels are cosmetic — gibs pass under the ceiling beam).
+        if matches!(cutaway, Cutaway::Wall | Cutaway::Mounted) {
+            entity.insert(Wall);
+        }
         if let Some(size) = wall_size {
             // avian `Collider::cuboid` takes FULL side lengths; the wall mesh is an origin-centred
             // `Cuboid` of the same size, so the collider lines up exactly under the transform.
-            entity.insert((Wall, RigidBody::Static, Collider::cuboid(size.x, size.y, size.z)));
+            entity.insert((RigidBody::Static, Collider::cuboid(size.x, size.y, size.z)));
+        }
+        match cutaway {
+            Cutaway::Wall => {
+                entity.insert(CutawayWall { outward });
+            }
+            Cutaway::Mounted => {
+                entity.insert(CutawayMounted {
+                    outward,
+                    base_scale: Vec3::ONE,
+                });
+            }
+            Cutaway::None => {}
         }
     };
 
@@ -1671,6 +1801,7 @@ fn spawn_tiles(
                 floor_mat.clone(),
                 Transform::from_translation(dungeon.cell_center(cell)),
                 None,
+                Cutaway::None,
             );
 
             // Which of this cell's edges border rock / off-grid → need a wall.
@@ -1683,8 +1814,8 @@ fn spawn_tiles(
             for (a, b, turns) in CORNERS {
                 if walled[a] && walled[b] {
                     let (full, short) = corner_arms(cell, turns);
-                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, Some(full_size));
-                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, Some(short_size));
+                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, Some(full_size), Cutaway::Wall);
+                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, Some(short_size), Cutaway::Wall);
                     walled[a] = false;
                     walled[b] = false;
                 }
@@ -1698,6 +1829,7 @@ fn spawn_tiles(
                         wall_mat.clone(),
                         straight_wall(cell, dir),
                         Some(full_size),
+                        Cutaway::Wall,
                     );
                 }
             }
@@ -1706,22 +1838,22 @@ fn spawn_tiles(
 
     // Doorway lintels: a short wall header above each 1-tile doorway (region opening), so the wall
     // reads as one continuous run from above — the door tucks under it. Placed on the doorway cell's
-    // open wall edge, raised to `DOORWAY_HEIGHT`. Tagged like a wall (fog reveal + knee-wall squash).
+    // open wall edge, raised to `DOORWAY_HEIGHT`. A lintel is a `Cutaway::Mounted` decoration: it shows
+    // only while its wall is far/full and hides (scale 0) when that wall becomes a near knee wall, so it
+    // never floats in the cutaway gap. All four edges are spawned (the pose seeds E/S hidden at yaw=0);
+    // rotation reveals the pair on whichever wall is currently full-height.
     let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
     let header_mesh = meshes.add(wall_mesh(header_size));
     for region in &dungeon.regions {
         for op in &region.openings {
-            // No lintel over an opening in a knee-high camera-facing (E/S) wall — it would float.
-            if SHORT_CAMERA_WALLS && (op.dir == E || op.dir == S) {
-                continue;
-            }
             let cell = IVec2::new(op.cell[0], op.cell[1]);
             spawn_tile(
                 cell,
                 header_mesh.clone(),
                 wall_mat.clone(),
                 header_wall(cell, op.dir),
-                Some(header_size),
+                None,
+                Cutaway::Mounted,
             );
         }
     }

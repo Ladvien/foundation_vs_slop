@@ -68,6 +68,10 @@ struct SpawnReq {
     glb: String,
     pos: Vec3,
     rot: Quat,
+    /// Set for a wall-mounted prop (a sconce): its host wall's outward normal. The serial spawn tags it
+    /// `CutawayMounted` so it hides when Q/E rotation makes that wall a near knee wall — otherwise the
+    /// sconce would float in the cutaway gap. `None` for floor/ceiling props (unaffected by the cutaway).
+    cutaway_outward: Option<Vec3>,
 }
 
 /// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
@@ -216,7 +220,7 @@ pub fn furnish_regions(
                 // Resolve to a real floor cell — a notched room's bounding-box centre can be non-floor.
                 if let Some(cell) = nearest_floor_cell(&dungeon, &region.rect, IVec2::new(c[0], c[1])) {
                     let pos = dungeon.cell_center(cell).with_y(WALL_HEIGHT);
-                    out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_x(PI) });
+                    out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_x(PI), cutaway_outward: None });
                 }
             }
             // No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still
@@ -235,7 +239,9 @@ pub fn furnish_regions(
                     let pos = face.with_y(WALL_LIGHT_HEIGHT) + normal * 0.02;
                     // Yaw the sconce so its front points into the room along the inward normal.
                     let yaw = normal.x.atan2(normal.z);
-                    out.push(SpawnReq { region: region.id, glb: light.glb.clone(), pos, rot: Quat::from_rotation_y(yaw) });
+                    // Tag with the host wall's outward normal (opposite the inward face) so the sconce
+                    // hides when rotation squashes that wall to knee height.
+                    out.push(SpawnReq { region: region.id, glb: light.glb.clone(), pos, rot: Quat::from_rotation_y(yaw), cutaway_outward: Some(-normal) });
                 }
             }
 
@@ -255,7 +261,7 @@ pub fn furnish_regions(
                             continue;
                         }
                         let pos = dungeon.cell_center(cell);
-                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
+                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw), cutaway_outward: None });
                     }
                 }
             }
@@ -280,7 +286,7 @@ pub fn furnish_regions(
                         if !dungeon.is_floor(dungeon.world_to_cell(pos)) {
                             continue;
                         }
-                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw) });
+                        out.push(SpawnReq { region: region.id, glb: item.glb.clone(), pos, rot: Quat::from_rotation_y(p.yaw), cutaway_outward: None });
                     }
                 }
             }
@@ -291,7 +297,7 @@ pub fn furnish_regions(
     // ---- Serial spawn. ----
     for req in requests {
         let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(req.glb));
-        commands.spawn((
+        let mut entity = commands.spawn((
             PlacedIn(req.region),
             WorldAssetRoot(scene),
             Transform::from_translation(req.pos)
@@ -300,6 +306,15 @@ pub fn furnish_regions(
             // Starts hidden; `furniture_room_visibility` shows it only while the squad is in its room.
             Visibility::Hidden,
         ));
+        // A wall-mounted prop rides the view-relative cutaway: it hides (scale → 0) whenever Q/E
+        // rotation makes its host wall a near knee wall, so it never floats above the squash. Cutaway
+        // hiding uses `scale`; fog reveal owns `Visibility`; the two compose (see `dungeon`).
+        if let Some(outward) = req.cutaway_outward {
+            entity.insert(crate::dungeon::CutawayMounted {
+                outward,
+                base_scale: Vec3::splat(FURNITURE_SCALE),
+            });
+        }
     }
 }
 
