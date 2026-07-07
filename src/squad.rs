@@ -271,7 +271,7 @@ fn despawn_dead_units(
                     // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
                     intensity: 0.6,
                 });
-                sfx.write(Sfx::UnitDeath);
+                sfx.write(Sfx::UnitDeath(transform.translation));
                 commands.entity(entity).despawn();
                 removable -= 1;
             } else {

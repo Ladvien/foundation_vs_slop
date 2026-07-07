@@ -27,6 +27,15 @@ pub fn nearest_planar<T>(
     best
 }
 
+/// GLSL-style `smoothstep` (Hermite ramp), clamped to `[0, 1]`. When `edge0 > edge1` the ramp is
+/// reversed, so `smoothstep(FAR, NEAR, d)` rises from 0 at `d = FAR` to 1 at `d = NEAR` — a shared
+/// proximity curve (the smiley's grin in `enemy`, the audio threat scalar in `audio`).
+#[inline]
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Advance a linear congruential generator (Numerical Recipes constants) and return the new state.
 #[inline]
 pub fn next_u32(state: &mut u32) -> u32 {

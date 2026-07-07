@@ -32,7 +32,7 @@ use crate::impact_fx::ImpactQueue;
 use crate::ai::brain::ActiveBehavior;
 use crate::ai::utility::Mode;
 use crate::squad::Unit;
-use crate::util::rand01;
+use crate::util::{rand01, smoothstep};
 
 /// How many enemies to place at startup. Exactly one — a single boss smiley that is as strong as a
 /// whole pack combined (see `START_HP` / `CONTACT_DPS`). There is no respawn, so this is one for the
@@ -200,6 +200,14 @@ impl SmileyState {
     /// true (see `laser::fire_laser`) — otherwise it's a neutral entity you coexist with, not a target.
     pub fn is_angry(&self) -> bool {
         matches!(self.mood, SmileyMood::Unleashing)
+    }
+
+    /// Is it in its default sad-lonely-observer state — the *concealed* calm, before any mask cracks?
+    /// The audio layer reads this to swell a legato "uncanny calm" pad while the watcher is quietly
+    /// staring (van der Zwaag et al. 2011 — legato → tenderness/sadness), the counterpart to the sharp
+    /// percussive reveal when it flips to `Unleashing`.
+    pub fn is_watching(&self) -> bool {
+        matches!(self.mood, SmileyMood::Watching)
     }
 }
 
@@ -820,13 +828,6 @@ fn update_smiley_faces(
 }
 
 
-/// GLSL-style `smoothstep` (Hermite ramp), clamped. When `edge0 > edge1` the ramp is reversed, so
-/// `smoothstep(FAR, NEAR, d)` rises from 0 at `d = FAR` to 1 at `d = NEAR` — closer ⇒ bigger grin.
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// Despawn enemies whose health has run out, with a parting impact burst (reuses the laser VFX).
 fn despawn_dead(
     mut commands: Commands,
@@ -852,7 +853,7 @@ fn despawn_dead(
                 field: crate::ai::field::FieldId::SCENT,
                 amount: crate::ai::field::BLOOD_SCENT,
             });
-            sfx.write(Sfx::EnemyDeath);
+            sfx.write(Sfx::EnemyDeath(tf.translation));
             commands.entity(entity).despawn();
         }
     }
@@ -1001,7 +1002,7 @@ fn smiley_zap(
         // Beam from up the watcher's body to the victim + a bright spark at the strike + a sharp report.
         lightning.0.push((spos + Vec3::Y * 0.9, vpos));
         impacts.0.push(vpos);
-        sfx.write(Sfx::ImpactWall); // a sharp crack — stands in for a dedicated thunder clip
+        sfx.write(Sfx::ImpactWall(vpos)); // a sharp crack — stands in for a dedicated thunder clip
         state.zap_cooldown = ZAP_CADENCE;
         state.flash_timer = FLASH_TIME; // flip to the "true form" for ~180 ms as the bolt strikes
     }
@@ -1047,7 +1048,7 @@ fn smiley_defense(
                 intensity: 0.2,
             });
         }
-        sfx.write(Sfx::ImpactFlesh);
+        sfx.write(Sfx::ImpactFlesh(spos));
         state.cull_cooldown = CULL_COOLDOWN;
     }
 }

@@ -1220,7 +1220,7 @@ fn crab_despawn_dead(
                 field: crate::ai::field::FieldId::SCENT,
                 amount: crate::ai::field::BLOOD_SCENT,
             });
-            sfx.write(Sfx::EnemyDeath);
+            sfx.write(Sfx::EnemyDeath(tf.translation));
             commands.entity(entity).despawn();
         }
     }
