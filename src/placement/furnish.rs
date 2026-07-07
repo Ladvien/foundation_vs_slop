@@ -52,6 +52,12 @@ const FREESTANDING_PER_ROOM: usize = 2;
 /// solver honors via `w_min_distance` — sparseness, independent of the `coherence` arrangement knob.
 const FREESTANDING_MIN_GAP: f32 = 1.5;
 
+/// Maximum centre-to-centre distance (metres) a `Near` grouping band pulls same-`group` pieces to, so
+/// a bathroom's toilet + sink cluster on one wall instead of scattering. Larger than the pieces so they
+/// sit adjacent (overlap is prevented separately by the solver's `w_overlap`), smaller than
+/// `FREESTANDING_MIN_GAP` so grouping wins over the default spread.
+const GROUP_NEAR_MAX: f32 = 1.2;
+
 /// Wall lights placed per room — a sparse accent on a full-height wall (see the wall-anchor pass).
 const WALL_LIGHTS_PER_ROOM: usize = 1;
 
@@ -346,24 +352,43 @@ fn solve_placements(
 fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     let mut id = 0u32;
-    for (i, _) in profile.iter().enumerate() {
+    // Back-to-wall: HARD for pieces that must sit flush to a wall (plumbing fixtures, a fridge —
+    // tagged `back_to_wall`), so the solver seats them against the perimeter with the correct facing;
+    // SOFT (a mild perimeter preference) for everything else. One clear intent per item, keyed by
+    // affordance so it survives an asset-kit swap (README ISSUE 3).
+    for (i, it) in profile.iter().enumerate() {
+        let modality = if affords(it, "back_to_wall") {
+            Modality::Hard
+        } else {
+            Modality::Soft(1.0)
+        };
         constraints.push(Constraint {
             id,
             scope: Scope::Object(i),
             predicate: Predicate::AgainstWall,
-            modality: Modality::Soft(1.0),
+            modality,
             guard: None,
         });
         id += 1;
     }
-    // Spread: keep every pair of pieces at least `FREESTANDING_MIN_GAP` apart so a room reads sparse
-    // (backrooms) rather than clumped. Soft — tuned by the solver's `w_min_distance`.
+    // Pairwise spacing: pieces sharing a `group` (e.g. a bathroom's toilet + sink) are drawn TOGETHER
+    // by a `Near` band so they read as one plumbed wall; every other pair is pushed APART by
+    // `MinDistance` so a room reads as sparse scatter rather than a clump. Both Soft.
     for i in 0..profile.len() {
         for j in (i + 1)..profile.len() {
+            let same_group = matches!(
+                (&profile[i].group, &profile[j].group),
+                (Some(a), Some(b)) if a == b
+            );
+            let predicate = if same_group {
+                Predicate::Near(GROUP_NEAR_MAX)
+            } else {
+                Predicate::MinDistance(FREESTANDING_MIN_GAP)
+            };
             constraints.push(Constraint {
                 id,
                 scope: Scope::Pair(i, j),
-                predicate: Predicate::MinDistance(FREESTANDING_MIN_GAP),
+                predicate,
                 modality: Modality::Soft(1.0),
                 guard: None,
             });
@@ -465,6 +490,7 @@ mod tests {
             role: Role::Freestanding,
             footprint: (1.0, 1.0),
             affordances: affs.iter().map(|s| s.to_string()).collect(),
+            group: None,
         }
     }
 
@@ -549,6 +575,40 @@ mod tests {
             !profile.is_empty(),
             "a room with no type match must still get furniture via top-up"
         );
+    }
+
+    #[test]
+    fn fixtures_get_hard_against_wall_and_group_pull() {
+        // README ISSUE 3: plumbing fixtures back onto a wall (HARD), and a shared `group` draws the
+        // toilet + sink together (Near) while unrelated pieces stay spread (MinDistance).
+        use crate::placement::ir::{Modality, Scope};
+        let mut toilet = item("toilet", &["bathroom"], &["hygiene", "back_to_wall"]);
+        toilet.group = Some("bath".into());
+        let mut sink = item("sink", &["bathroom"], &["hygiene", "back_to_wall"]);
+        sink.group = Some("bath".into());
+        let sofa = item("sofa", &["living"], &["sit"]); // not back_to_wall, no group
+        let items = vec![toilet, sink, sofa];
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let cs = freestanding_constraints(&refs);
+
+        let against = |i: usize| {
+            cs.iter()
+                .find(|c| matches!(c.scope, Scope::Object(x) if x == i)
+                    && matches!(c.predicate, Predicate::AgainstWall))
+                .unwrap_or_else(|| panic!("no AgainstWall for object {i}"))
+        };
+        assert!(matches!(against(0).modality, Modality::Hard), "toilet must be HARD against-wall");
+        assert!(matches!(against(1).modality, Modality::Hard), "sink must be HARD against-wall");
+        assert!(matches!(against(2).modality, Modality::Soft(_)), "sofa stays a soft preference");
+
+        let pair = |i: usize, j: usize| {
+            cs.iter()
+                .find(|c| matches!(c.scope, Scope::Pair(a, b) if a == i && b == j))
+                .unwrap_or_else(|| panic!("no pair constraint for ({i},{j})"))
+        };
+        assert!(matches!(pair(0, 1).predicate, Predicate::Near(_)), "toilet+sink grouped by Near");
+        assert!(matches!(pair(0, 2).predicate, Predicate::MinDistance(_)), "toilet↔sofa spread apart");
+        assert!(matches!(pair(1, 2).predicate, Predicate::MinDistance(_)), "sink↔sofa spread apart");
     }
 
     #[test]

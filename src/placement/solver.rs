@@ -82,7 +82,10 @@ fn predicate_locality(p: &Predicate) -> Locality {
         // Purely local: satisfiable looking only at a cell and its immediate neighbours.
         Predicate::Clearance(_) | Predicate::AgainstWall => Locality::Local,
         // Relational: couples two objects across the region.
-        Predicate::Facing(_) | Predicate::MinDistance(_) | Predicate::Aligned(_) => Locality::Relational,
+        Predicate::Facing(_)
+        | Predicate::MinDistance(_)
+        | Predicate::Near(_)
+        | Predicate::Aligned(_) => Locality::Relational,
         // Global: reasons over the whole region at once.
         Predicate::Count { .. } => Locality::Global,
         // Unknown custom predicates are conservatively treated as global (route to the most capable).

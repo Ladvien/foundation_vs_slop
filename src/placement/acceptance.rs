@@ -36,6 +36,9 @@ fn test_weights() -> MetropolisWeights {
         w_min_distance: 2.0,
         w_facing: 1.5,
         w_clearance: 2.0,
+        w_hard: 12.0,
+        w_wall_angle: 1.0,
+        w_group: 1.5,
         coherence: 0.3,
     }
 }

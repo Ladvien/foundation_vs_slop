@@ -28,6 +28,10 @@ pub struct ManifestItem {
     pub footprint: (f32, f32),
     #[serde(default)]
     pub affordances: Vec<String>,
+    // Optional grouping token: items sharing a `group` are drawn together by a soft `Near` relation
+    // (e.g. a bathroom's toilet + sink). Opaque like `tags`/`affordances` — matched, never interpreted.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// A parsed furniture manifest.

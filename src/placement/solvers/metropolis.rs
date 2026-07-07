@@ -42,6 +42,14 @@ pub struct MetropolisWeights {
     pub w_min_distance: f64,
     pub w_facing: f64,
     pub w_clearance: f64,
+    /// Multiplier applied to a **Hard** constraint's cost so the sampler drives it to satisfaction
+    /// rather than treating it as one soft term among many (e.g. a fixture's back-to-wall rule).
+    pub w_hard: f64,
+    /// Angular wall-snap strength (Merrell 2011 `m_wa`): rewards a wall-backed piece for orienting so
+    /// its back faces the nearest wall (front into the room). Applied to Hard `AgainstWall` fixtures.
+    pub w_wall_angle: f64,
+    /// Grouping strength for the `Near` band that draws same-group pieces together (toilet + sink).
+    pub w_group: f64,
     /// How coherently related furniture is arranged, in [0, 1]. Scales the `Facing` relation (a seat
     /// facing its screen): 0 = pieces ignore each other (sparse, backrooms-random), 1 = fully arranged
     /// (sofa firmly faces the TV). Tunable independently of the raw `w_facing` strength.
@@ -101,7 +109,10 @@ impl Solver for MetropolisSolver {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            hardness: Hardness::Soft,
+            // Both: soft interior-design terms PLUS hard per-piece rules the annealer drives to
+            // satisfaction via `w_hard` (e.g. a plumbing fixture's back-to-wall association). A layout
+            // that still violates a hard term after the budget degrades to `Outcome::Partial`.
+            hardness: Hardness::Both,
             locality: Locality::Relational,
             cardinality: false,
             deterministic: true,
@@ -227,7 +238,9 @@ impl MetropolisSolver {
         for c in &problem.constraints {
             let weight = match c.modality {
                 Modality::Soft(wt) => wt,
-                Modality::Hard => 1.0, // hard terms enter the cost heavily via their per-predicate weight
+                // Hard terms are scaled by `w_hard` so the annealer drives them to satisfaction rather
+                // than trading them off against the soft terms one-for-one.
+                Modality::Hard => w.w_hard,
             };
             constraint_cost += weight * self.constraint_cost(c, objs, (rx0, rx1, rz0, rz1));
         }
@@ -287,16 +300,47 @@ impl MetropolisSolver {
                 w.w_facing * a.yaw.sin().abs() as f64
             }
             (Scope::Object(i), Predicate::AgainstWall) => {
-                // Distance from object i's footprint to the nearest wall (minimize → back to wall).
+                // Distance from object i's footprint to each of the four walls (≥0 inside the room);
+                // minimizing the nearest one seats the back against a wall.
                 let Some(a) = objs.get(*i) else { return 0.0 };
                 let (ahw, ahd) = a.half_extents();
                 let (rx0, rx1, rz0, rz1) = bounds;
-                let d = ((a.x - ahw) - rx0)
-                    .min(rx1 - (a.x + ahw))
-                    .min((a.z - ahd) - rz0)
-                    .min(rz1 - (a.z + ahd))
-                    .max(0.0);
-                w.w_wall * d as f64
+                let dw = ((a.x - ahw) - rx0).max(0.0); // to the west wall (inward normal +X)
+                let de = (rx1 - (a.x + ahw)).max(0.0); // to the east wall (inward normal -X)
+                let dn = ((a.z - ahd) - rz0).max(0.0); // to the north wall (inward normal +Z)
+                let ds = (rz1 - (a.z + ahd)).max(0.0); // to the south wall (inward normal -Z)
+                let d = dw.min(de).min(dn).min(ds);
+                let mut cost = w.w_wall * d as f64;
+                // Angular wall-snap (Merrell 2011 m_wa), applied to HARD fixtures (toilet/sink/fridge):
+                // reward the piece for facing INTO the room along the nearest wall's inward normal, so
+                // its back — not its side — sits against the wall. `forward = (sin yaw, cos yaw)` matches
+                // the convention the `Facing` term and the wall-light yaw (`furnish.rs`) already use.
+                if matches!(c.modality, Modality::Hard) {
+                    let (nx, nz) = if dw <= de && dw <= dn && dw <= ds {
+                        (1.0, 0.0)
+                    } else if de <= dn && de <= ds {
+                        (-1.0, 0.0)
+                    } else if dn <= ds {
+                        (0.0, 1.0)
+                    } else {
+                        (0.0, -1.0)
+                    };
+                    let (fx, fz) = (a.yaw.sin(), a.yaw.cos());
+                    let align = 1.0 - (fx * nx + fz * nz); // 0 when the back faces the nearest wall
+                    cost += w.w_wall_angle * align as f64;
+                }
+                cost
+            }
+            (Scope::Pair(i, j), Predicate::Near(max)) => {
+                // Grouping band: draw the pair within `max` metres of each other (toilet + sink on the
+                // same wall). Zero once they're close; grows with the excess distance. Overlap is
+                // handled separately by the layout's overlap term, so this only needs the near side.
+                if let (Some(a), Some(b)) = (objs.get(*i), objs.get(*j)) {
+                    let d = ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt();
+                    w.w_group * over(d - max) as f64
+                } else {
+                    0.0
+                }
             }
             _ => 0.0,
         }
@@ -370,6 +414,9 @@ mod tests {
             w_min_distance: 2.0,
             w_facing: 1.5,
             w_clearance: 2.0,
+            w_hard: 12.0,
+            w_wall_angle: 1.0,
+            w_group: 1.5,
             coherence: 0.3,
         }
     }
@@ -431,6 +478,44 @@ mod tests {
             }
         }
         assert!(total < 0.25, "residual overlap too high: {total}");
+    }
+
+    #[test]
+    fn hard_against_wall_seats_a_fixture_flush() {
+        // README ISSUE 3: a HARD AgainstWall fixture is driven to sit flush against a wall (not merely
+        // pulled toward it as a soft preference), with its back — the -forward side — to that wall.
+        let r = region(); // 5×5
+        let problem = PlacementProblem {
+            region: &r,
+            candidates: vec![item(0.4, 0.6)].into(), // toilet-sized
+            constraints: vec![Constraint {
+                id: 0,
+                scope: Scope::Object(0),
+                predicate: Predicate::AgainstWall,
+                modality: Modality::Hard,
+                guard: None,
+            }],
+        };
+        let solver = MetropolisSolver::new(weights());
+        // Deterministic: a handful of seeds must all seat the fixture flush.
+        for seed in [1u64, 7, 42] {
+            let mut rng = seeded(seed);
+            let placed = match solver.solve(&problem, &mut rng).expect("solve") {
+                Outcome::Ranked(mut v) => v.remove(0).1,
+                Outcome::Assignment(p) => p,
+                Outcome::Partial { placed, .. } => placed,
+            };
+            let p = placed[0];
+            let o = Obj { x: p.pos[0], z: p.pos[2], yaw: p.yaw, hw: 0.2, hd: 0.3 };
+            let (hw, hd) = o.half_extents();
+            let (rx0, rx1, rz0, rz1) = room_world_bounds(&r);
+            let d = ((o.x - hw) - rx0)
+                .min(rx1 - (o.x + hw))
+                .min((o.z - hd) - rz0)
+                .min(rz1 - (o.z + hd))
+                .max(0.0);
+            assert!(d < 0.12, "seed {seed}: fixture should sit flush to a wall, got d={d}");
+        }
     }
 
     #[test]

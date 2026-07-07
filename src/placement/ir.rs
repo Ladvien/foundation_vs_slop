@@ -166,6 +166,11 @@ pub enum Predicate {
     Facing(CandidateIx),
     /// Keep at least this far (metres) from the paired candidate.
     MinDistance(f32),
+    /// Keep the paired candidates *within* this distance (metres) of each other — a soft grouping
+    /// band that draws related pieces together (e.g. a bathroom's toilet + sink hugging the same
+    /// wall). The inverse of `MinDistance`; overlap is already prevented by the layout's overlap term.
+    /// Merrell et al. 2011 formulate pairwise grouping as a distance band; this is its near side.
+    Near(f32),
     /// Exactly `count` placed candidates carrying `tag` (cardinality — risk R2).
     Count { tag: String, count: usize },
     /// Aligned to a named region feature — the one-predicate domain-swap test (`aligned(a,"road")`).
