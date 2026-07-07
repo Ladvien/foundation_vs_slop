@@ -63,8 +63,8 @@ These are the hard-won constraints. Violating any one either flakes the suite or
    via `rand_chacha`), pinned in `tests/rng_guard.rs`. **Never** introduce `thread_rng`, `getrandom`,
    `OsRng`, or `from_entropy`. The **one sanctioned use of the `rand` ecosystem** is the placement-grammar
    solver (`src/placement/`), which draws from a **seeded** `rand_chacha::ChaCha8Rng` — no entropy, fully
-   reproducible. (`Cargo.toml` also declares `bevy_rand`, currently unused in `src/`.) New per-agent
-   randomness threads a `u32` seed through `util::rand01`, or a seeded resource (see `LaserRng`).
+   reproducible. New per-agent randomness threads a `u32` seed through `util::rand01`, or a seeded
+   resource (see `LaserRng`).
 4. **One App at a time.** Two headless Apps in one process share Bevy's global task pool + the GPU device
    and interfere. Every harness test takes `let _serial = serial_guard();` first and holds it for the App's
    lifetime. (`--test-threads=1` in CI is belt-and-suspenders; `serial_guard` alone is sufficient.)

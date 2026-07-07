@@ -207,7 +207,6 @@ pub fn think(
             drives: drives.v,
             scent_hotspot: hotspots.scent.0,
             scent_val: hotspots.scent.1,
-            threat_here: stig.sample(FieldId::THREAT, &dungeon, pos),
             meat_hotspot: hotspots.meat.0,
             meat_val: hotspots.meat.1,
             carrying: if carry.is_some_and(|c| c.hauling) {

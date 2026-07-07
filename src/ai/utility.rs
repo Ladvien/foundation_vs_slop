@@ -11,7 +11,6 @@ use bevy::math::Vec3;
 use bevy::prelude::Component;
 
 use super::drives::{DriveId, DRIVE_COUNT};
-use super::field::FieldId;
 use crate::util::rand01;
 
 /// The executable outcome of a decision — read by the (wrapped) locomotion systems to select which
@@ -46,9 +45,6 @@ pub enum Fact {
     NearestUnitDist,
     /// Peak value of the SCENT field anywhere (global "is there a frenzy" signal).
     ScentHotspot,
-    /// SCENT/THREAT sampled at the agent's own position.
-    #[allow(dead_code)]
-    ThreatHere,
     /// Agent health fraction `[0,1]`.
     SelfHealthFrac,
     /// Peak value of the MEAT field anywhere (is there a pile worth foraging).
@@ -74,8 +70,6 @@ pub enum Fact {
 #[derive(Clone, Copy)]
 pub enum Input {
     Drive(DriveId),
-    #[allow(dead_code)] // no behaviour reads a raw field-at-self yet (drives cover it via TrackField)
-    Field(FieldId),
     Perc(Fact),
 }
 
@@ -84,9 +78,6 @@ pub enum Input {
 pub enum Curve {
     /// `m*x + b`, clamped.
     Linear { m: f32, b: f32 },
-    /// `k * x^exp`, clamped — sharp ramp / diminishing returns.
-    #[allow(dead_code)]
-    Power { k: f32, exp: f32 },
     /// Logistic `1/(1+e^-k(x-x0))` — a soft threshold (fear turning on).
     Logistic { k: f32, x0: f32 },
     /// Hard threshold: `x >= threshold ? above : below`.
@@ -97,7 +88,6 @@ impl Curve {
     pub fn eval(&self, x: f32) -> f32 {
         let y = match *self {
             Curve::Linear { m, b } => m * x + b,
-            Curve::Power { k, exp } => k * x.max(0.0).powf(exp),
             Curve::Logistic { k, x0 } => 1.0 / (1.0 + (-k * (x - x0)).exp()),
             Curve::Step {
                 threshold,
@@ -170,7 +160,6 @@ pub struct Perception {
     pub drives: [f32; DRIVE_COUNT],
     pub scent_hotspot: Vec3,
     pub scent_val: f32,
-    pub threat_here: f32,
     pub meat_hotspot: Vec3,
     pub meat_val: f32,
     /// 1.0 while this crab is hauling a lifted gib.
@@ -192,10 +181,8 @@ impl Perception {
     fn read(&self, input: Input) -> f32 {
         match input {
             Input::Drive(id) => self.drives[id.0],
-            Input::Field(_) => self.threat_here, // only THREAT-at-self is used so far
             Input::Perc(Fact::NearestUnitDist) => self.nearest_dist,
             Input::Perc(Fact::ScentHotspot) => self.scent_val,
-            Input::Perc(Fact::ThreatHere) => self.threat_here,
             Input::Perc(Fact::SelfHealthFrac) => self.health_frac,
             Input::Perc(Fact::MeatHotspot) => self.meat_val,
             Input::Perc(Fact::CarryingMeat) => self.carrying,
@@ -270,7 +257,6 @@ mod tests {
             drives: [0.0; DRIVE_COUNT],
             scent_hotspot: Vec3::ZERO,
             scent_val: 0.0,
-            threat_here: 0.0,
             meat_hotspot: Vec3::ZERO,
             meat_val: 0.0,
             carrying: 0.0,
@@ -298,8 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn curve_power_and_logistic_and_step() {
-        approx(Curve::Power { k: 1.0, exp: 2.0 }.eval(0.5), 0.25);
+    fn curve_logistic_and_step() {
         // Logistic is exactly 0.5 at its midpoint x0, for any slope k.
         approx(Curve::Logistic { k: 10.0, x0: 0.5 }.eval(0.5), 0.5);
         let step = Curve::Step { threshold: 0.5, below: 0.0, above: 1.0 };

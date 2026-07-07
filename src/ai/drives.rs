@@ -1,12 +1,11 @@
-//! Drives — the per-agent **needs** a utility brain weighs (hunger, fear, fatigue, and esoteric
-//! extra-dimensional urges). Drives are an **open, data-defined set**, not a hardcoded struct: a drive
-//! is an index newtype ([`DriveId`]) into a fixed-width array, and its update behaviour is a
-//! [`DriveRule`] in a registry. Built-in rules cover the common shapes; [`DriveRule::Custom`] is the
-//! escape hatch (a plain `fn`, no alloc, one path) for arbitrary/esoteric drives.
+//! Drives — the per-agent **needs** a utility brain weighs (hunger, fear). Drives are an **open,
+//! data-defined set**, not a hardcoded struct: a drive is an index newtype ([`DriveId`]) into a
+//! fixed-width array, and its update behaviour is a [`DriveRule`] in a registry. Built-in rules cover the
+//! shapes the current drives need.
 //!
 //! Adding a drive = a `DriveId` const + bump [`DRIVE_COUNT`] + one `DriveDef` literal in the registry
 //! builder (`super::init_drives`) + optional RON knobs. Nothing else changes — considerations read it
-//! by id, and every creature carries the full array (unused slots are simply never read).
+//! by id, and every creature carries the full array.
 
 use bevy::prelude::*;
 
@@ -20,13 +19,6 @@ pub struct DriveId(pub usize);
 impl DriveId {
     pub const HUNGER: DriveId = DriveId(0);
     pub const FEAR: DriveId = DriveId(1);
-    // Wired by later phases (registered in `init_drives` as their behaviours land).
-    #[allow(dead_code)]
-    pub const FATIGUE: DriveId = DriveId(2);
-    #[allow(dead_code)]
-    pub const BLOODLUST: DriveId = DriveId(3); // boss: drawn to the biggest blood/scent frenzy
-    #[allow(dead_code)]
-    pub const LIBIDO: DriveId = DriveId(4); // reproduction: well-fed → spawn
     // NOTE: a CROWDING drive (tracking CRAB_DENSITY) was removed — it was updated every tick for every
     // crab but read by no behaviour (pure waste), and Reynolds separation in `crab_locomotion` already
     // provides the physical dispersal it was meant to model. Breeding reads the CRAB_DENSITY *field*
@@ -34,7 +26,7 @@ impl DriveId {
 }
 
 /// Number of drive slots. Bump when adding a [`DriveId`].
-pub const DRIVE_COUNT: usize = 5;
+pub const DRIVE_COUNT: usize = 2;
 
 /// Per-agent need scalars, each clamped to `[0, 1]`. Every creature carries the full array; a brain
 /// reads only the drives its behaviours reference.
@@ -72,28 +64,12 @@ impl Drives {
 /// believable rise-lag and a decay when the danger evaporates.
 const TRACK_EASE: f32 = 3.0;
 
-/// Read-only context a [`DriveRule::Custom`] sees. No `&mut world`, so custom rules are pure and
-/// deterministic. Extend with more perception as esoteric drives need it. (Consumed once a `Custom`
-/// drive is registered — the escape hatch is part of the public extension surface.)
-#[allow(dead_code)]
-pub struct DriveCtx<'a> {
-    pub prev: f32,
-    pub dt: f32,
-    pub stig: &'a Stig,
-    pub dungeon: &'a Dungeon,
-    pub pos: Vec3,
-}
-
 /// A pluggable update rule for one drive. `fn` pointers (not `Box<dyn>`) keep it type-safe + alloc-free.
 pub enum DriveRule {
-    /// Accumulate over time toward 1 (hunger, fatigue).
+    /// Accumulate over time toward 1 (hunger).
     RiseOverTime { rate: f32 },
-    /// Ease toward `min(field_sample * gain, 1)` — fear←THREAT, bloodlust←SCENT, crowding←CRAB_DENSITY.
+    /// Ease toward `min(field_sample * gain, 1)` — fear←THREAT.
     TrackField { field: FieldId, gain: f32 },
-    /// Arbitrary rule for esoteric extra-dimensional drives; returns the new clamped value. The
-    /// escape hatch — part of the extension surface, exercised as custom drives are added.
-    #[allow(dead_code)]
-    Custom(fn(&DriveCtx) -> f32),
 }
 
 /// One drive's identity + update rule. Numeric knobs (rate/gain) come from the `ai_tuning:` config slice later.
@@ -127,13 +103,6 @@ pub fn update_drives(
                     let target = (stig.sample(field, &dungeon, tf.translation) * gain).min(1.0);
                     prev + (target - prev) * (TRACK_EASE * dt).min(1.0)
                 }
-                DriveRule::Custom(f) => f(&DriveCtx {
-                    prev,
-                    dt,
-                    stig: &stig,
-                    dungeon: &dungeon,
-                    pos: tf.translation,
-                }),
             };
             drives.v[def.id.0] = next.clamp(0.0, 1.0);
         }
