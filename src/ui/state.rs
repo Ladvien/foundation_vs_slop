@@ -38,6 +38,10 @@ pub enum MenuState {
     Pause,
     Settings,
     Roster,
+    /// A modal dialogue exchange is in progress (see `crate::dialogue`). Blocking like the other
+    /// overlays — it freezes the sim via [`sync_sim_blocked`] — but spawns no dim overlay of its own,
+    /// so the in-world bubbles read over the live (frozen) scene.
+    Conversation,
 }
 
 impl MenuState {

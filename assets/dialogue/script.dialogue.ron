@@ -1,0 +1,55 @@
+// Authored dialogue. One RON file, loaded + validated once at startup (see `dialogue::load`).
+// Speakers are squad-member indices 0..=4 (0 = leader). `kind` defaults to Speech; `emotion`
+// defaults to Neutral. `Line` advances to `next` (None ends the conversation); `Choice` presents
+// clickable option bubbles above the leader and branches on the pick.
+(
+    conversations: {
+        "intro": (
+            start: "open",
+            nodes: {
+                "open": Line(
+                    speaker: 0,
+                    kind: Speech,
+                    text: "Foundation, we're through the airlock. Containment breach ahead.",
+                    next: Some("dread"),
+                ),
+                "dread": Line(
+                    speaker: 1,
+                    kind: Thought,
+                    emotion: Fear,
+                    text: "Whatever SCP-9191 made... it's still in here with us.",
+                    next: Some("ask"),
+                ),
+                "ask": Choice(
+                    speaker: 0,
+                    prompt: "How do we play this?",
+                    options: [
+                        (text: "Push forward, weapons hot.", next: "push"),
+                        (text: "Hold and sweep the room first.", next: "hold"),
+                    ],
+                ),
+                "push": Line(
+                    speaker: 0,
+                    kind: Speech,
+                    emotion: Anger,
+                    text: "Copy. Stack up and move — don't give it time to think.",
+                    next: Some("close"),
+                ),
+                "hold": Line(
+                    speaker: 0,
+                    kind: Speech,
+                    emotion: Calm,
+                    text: "Smart. Eyes on the corners. Nobody moves until it's clear.",
+                    next: Some("close"),
+                ),
+                "close": Line(
+                    speaker: 1,
+                    kind: Thought,
+                    emotion: Calm,
+                    text: "Okay. Stay sharp. We've got this.",
+                    next: None,
+                ),
+            },
+        ),
+    },
+)

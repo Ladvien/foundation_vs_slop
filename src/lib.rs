@@ -24,6 +24,7 @@ pub mod config;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
+pub mod dialogue;
 pub mod dungeon;
 pub mod enemy;
 pub mod flowfield;
@@ -135,9 +136,11 @@ pub fn run() {
             ),
             audio::GameAudioPlugin,
             (vhs::VhsPlugin, blood_lens::BloodLensPlugin),
-            // Windowed game-system UI (HUD, menus, state machine). Registered only here, never in
-            // the headless harness, so it stays outside the deterministic core (see `ui` docs).
-            ui::UiPlugin,
+            // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
+            // Both registered only here, never in the headless harness, so they stay outside the
+            // deterministic core (see `ui` docs). Dialogue needs `MenuState` (from `UiPlugin`) for the
+            // sim-freeze during a modal exchange; it is cosmetic/`Update`, never `FixedUpdate`.
+            (ui::UiPlugin, dialogue::DialoguePlugin),
         ));
 
     // Pinned simulation runs on `FixedUpdate` at a fixed 60 Hz, so gameplay advances at the same rate

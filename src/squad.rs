@@ -32,6 +32,17 @@ use crate::squad_ai::role::RoleId;
 #[derive(Component)]
 pub struct Unit;
 
+/// Stable 0-based identity of a squad member (matches its `OUTFITS`/spawn index). Lets systems that
+/// key on "who" — dialogue speakers, roster chips — resolve a member to its `Entity` without
+/// comparing float colors. Assigned once at spawn; never reused.
+#[derive(Component)]
+pub struct SquadMember(pub usize);
+
+/// Marks the one unit that anchors leader-facing UI (the choice bubbles of a dialogue exchange).
+/// Exactly one living unit carries it — [`ensure_leader`] reassigns it if the current leader dies.
+#[derive(Component)]
+pub struct Leader;
+
 /// Shared marker for anything the crab swarm treats as prey to swarm/latch/bite — squad units AND the
 /// smiley boss (`crate::enemy`). Crab targeting keys on `Prey` (nearest wins), so the same forage/latch
 /// code path drives crabs onto whichever prey is closest, without knowing its type.
@@ -200,6 +211,13 @@ impl Plugin for SquadPlugin {
             // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
             .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
             .add_systems(Update, recolor_units);
+        // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
+        // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
+        // two archetypes and make the pinned iteration order (ORCA in `unit_movement`, crab nearest-prey
+        // tiebreaks) archetype-dependent — breaking `deterministic_core_is_bit_identical`. It's a
+        // windowed-only, dialogue-facing concern, so `DialoguePlugin` owns it (registered in `lib::run`
+        // only, never in the headless harness). `SquadMember` stays here: it's on *every* unit, so it
+        // keeps them in one archetype and is determinism-neutral. See TESTING.md.
     }
 }
 
@@ -221,9 +239,9 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
         // Per-unit decision seed from the spawn index (deterministic; never from position, mirroring
         // the crab/scout convention in `ai::brain`).
         let seed = (i as u32).wrapping_add(1);
-        commands
-            .spawn((
+        let mut unit = commands.spawn((
                 Unit,
+                SquadMember(i),
                 Prey, // crabs may swarm/bite units (nearest-prey targeting)
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
@@ -248,15 +266,38 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
                 // Component + plugin come from avian's `bevy_transform_interpolation` integration.
                 avian3d::prelude::TransformInterpolation,
-            ))
-            // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
-            .with_child((
-                GunModel,
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
-                Transform::from_translation(GUN_OFFSET)
-                    .with_scale(Vec3::splat(GUN_SCALE))
-                    .with_rotation(Quat::from_rotation_y(GUN_YAW)),
             ));
+        // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
+        // not here — putting it on one unit in the headless core would split the hashed archetype.
+        // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
+        unit.with_child((
+            GunModel,
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
+            Transform::from_translation(GUN_OFFSET)
+                .with_scale(Vec3::splat(GUN_SCALE))
+                .with_rotation(Quat::from_rotation_y(GUN_YAW)),
+        ));
+    }
+}
+
+/// Keep exactly one living unit tagged [`Leader`]. Runs on the initial frame (no leader yet →
+/// promotes [`SquadMember`] 0) and again whenever the leader dies (removed by [`despawn_dead_units`]),
+/// promoting the surviving member with the lowest [`SquadMember`] index so leader-anchored UI
+/// (dialogue choices) always has a target. Cheap: only acts when the tag is missing.
+///
+/// Windowed-only — registered by `crate::dialogue::DialoguePlugin`, never the headless harness. The
+/// `Leader` marker splits the hashed `Unit` archetype, so it must stay out of the deterministic core
+/// (see `SquadPlugin::build`).
+pub(crate) fn ensure_leader(
+    mut commands: Commands,
+    leaders: Query<(), (With<Unit>, With<Leader>)>,
+    members: Query<(Entity, &SquadMember), With<Unit>>,
+) {
+    if !leaders.is_empty() {
+        return;
+    }
+    if let Some((entity, _)) = members.iter().min_by_key(|(_, m)| m.0) {
+        commands.entity(entity).insert(Leader);
     }
 }
 
