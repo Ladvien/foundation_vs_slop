@@ -1165,19 +1165,32 @@ fn crab_feeding_sates_hunger(
 /// Counts by PLANAR distance so a crab clinging high on the body still feeds.
 fn crab_contact_damage(
     time: Res<Time>,
-    crabs: Query<&Transform, (With<Crab>, Without<Prey>)>,
-    mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+    crabs: Query<(Entity, &Transform), (With<Crab>, Without<Prey>)>,
+    // `Option<&mut LastAttacker>` is present only on the smiley watcher: a crab biting it records itself as
+    // the attacker so the watcher retaliates against the swarm (not a bystander unit) — see `enemy::smiley_zap`.
+    mut prey: Query<(&Transform, &mut Health, Option<&mut crate::enemy::LastAttacker>), (With<Prey>, Without<Crab>)>,
 ) {
     let dt = time.delta_secs();
     // Reach = body radius + a little, so anything latched onto the cylinder counts (units and the boss).
     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS).powi(2);
-    for (unit_tf, mut hp) in &mut prey {
-        let count = crabs
-            .iter()
-            .filter(|c| (c.translation.xz() - unit_tf.translation.xz()).length_squared() <= reach_sq)
-            .count();
+    for (prey_tf, mut hp, last_attacker) in &mut prey {
+        // Count biters and remember the first one (stable query order → deterministic attribution).
+        let mut count = 0usize;
+        let mut biter: Option<Entity> = None;
+        for (ce, ctf) in &crabs {
+            if (ctf.translation.xz() - prey_tf.translation.xz()).length_squared() <= reach_sq {
+                count += 1;
+                if biter.is_none() {
+                    biter = Some(ce);
+                }
+            }
+        }
         if count > 0 {
             hp.current -= CRAB_CONTACT_DPS * (count as f32).powf(DAMAGE_EXPONENT) * dt;
+            if let Some(mut la) = last_attacker {
+                la.entity = biter;
+                la.age = 0.0;
+            }
         }
     }
 }
@@ -1207,7 +1220,7 @@ fn crab_despawn_dead(
                 field: crate::ai::field::FieldId::SCENT,
                 amount: crate::ai::field::BLOOD_SCENT,
             });
-            sfx.write(Sfx::EnemyDeath);
+            sfx.write(Sfx::EnemyDeath(tf.translation));
             commands.entity(entity).despawn();
         }
     }

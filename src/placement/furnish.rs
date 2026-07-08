@@ -842,10 +842,9 @@ mod tests {
     fn furnish_region_end_to_end_stacks_props_and_contains_furniture() {
         use crate::dungeon::Dungeon;
         use crate::placement::ir::{PropertyBag, Rect2, Region};
-        use crate::placement::manifest::load_manifest;
         use crate::placement::solver::Orchestrator;
         use crate::placement::solvers::constraint::ConstraintSolver;
-        use crate::placement::solvers::metropolis::{MetropolisSolver, MetropolisWeights};
+        use crate::placement::solvers::metropolis::MetropolisSolver;
         use crate::placement::solvers::wfc::WfcSolver;
 
         // 8×8 grid with a 6×6 floor room (cells (1,1)..=(6,6)) walled in by rock.
@@ -866,11 +865,11 @@ mod tests {
             props: PropertyBag { tags: vec!["room".into(), "office".into()] },
         });
 
-        let catalogue = load_manifest("assets/placement/furniture.ron").expect("shipped manifest");
+        // Load the shipped placement slice from the unified game config (manifest + solver weights).
+        let cfg = crate::config::load_game_config().expect("shipped game config");
+        let catalogue = cfg.placement.furniture.clone();
         let parts = RolePartitions::from_catalogue(&catalogue);
-        let weights: MetropolisWeights =
-            ron::from_str(&std::fs::read_to_string("assets/placement/metropolis.ron").expect("weights"))
-                .expect("parse weights");
+        let weights = cfg.placement.metropolis.clone();
         let mut orch = Orchestrator::new();
         orch.register(Box::new(WfcSolver));
         orch.register(Box::new(MetropolisSolver::new(weights)));

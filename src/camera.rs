@@ -6,12 +6,15 @@
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
+use bevy::time::Real;
 
 use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
 
-/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt.
-const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
+/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt. `pub` so the
+/// audio spatial listener can recover the ground focus point (`camera_pos - ISO_OFFSET`) to anchor
+/// itself on the plane instead of ~20 units up at the camera (see `audio::sync_listener`).
+pub const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
 /// Peak screen-shake offset (world units) at full trauma. Applied as `SHAKE_MAX * trauma²`.
 const SHAKE_MAX: f32 = 0.85;
 /// Peak shake roll (radians) at full trauma — a small camera twist for extra kick.
@@ -72,7 +75,10 @@ fn setup_camera(mut commands: Commands, dungeon: Res<Dungeon>, mut rig: ResMut<C
 }
 
 fn drive_camera(
+    // `time` (virtual) drives only the gameplay-feel screen shake below; the human camera controls
+    // (pan) run on `real` so they feel identical at any game speed — including paused (see `real` use).
     time: Res<Time>,
+    real: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -85,7 +91,11 @@ fn drive_camera(
         rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    let dt = time.delta_secs();
+    // Pan on REAL time, not the sim clock: keyboard panning must feel the same at ×1, ×64, or paused.
+    // (Reading the generic `Time` here would resolve to `Time<Virtual>` and scale pan speed with the
+    // game-speed multiplier — flying at high speed, dead when paused. Zoom/drag below already use raw
+    // per-frame input deltas, so they're speed-independent without needing `dt`.)
+    let dt = real.delta_secs();
     // WASD (and arrow keys) scroll the map along the screen axes.
     let mut pan = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {

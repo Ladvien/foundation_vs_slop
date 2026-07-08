@@ -45,8 +45,6 @@ use crate::blood_lens::BloodLens;
 use crate::dungeon::Dungeon;
 use crate::juice::{Hitstop, Trauma};
 
-const CONFIG_PATH: &str = "gore.ron";
-
 /// What kind of gore to spawn — scales counts/sizes and gates the gib shatter.
 #[derive(Clone, Copy)]
 pub enum GoreKind {
@@ -303,7 +301,7 @@ impl GibRing {
     }
 }
 
-/// Human-facing, serializable knobs saved to / loaded from `gore.ron`.
+/// Human-facing, serializable knobs — the `gore:` slice of the unified `assets/config/config.ron`.
 #[derive(Resource, Serialize, Deserialize, Clone)]
 pub struct GoreSettings {
     // Blood spray.
@@ -446,14 +444,17 @@ pub struct GorePlugin;
 
 impl Plugin for GorePlugin {
     fn build(&self, app: &mut App) {
+        // Required config — one path, no fallback. The `gore:` slice comes from the unified
+        // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
+        let settings = app.world().resource::<crate::config::GameConfig>().gore.clone();
         app.add_plugins(MaterialPlugin::<BloodSprayMaterial>::default())
             .add_plugins(MaterialPlugin::<BloodPoolMaterial>::default())
             .init_resource::<GoreQueue>()
             .init_resource::<PoolRing>()
             .init_resource::<GibRing>()
             .init_resource::<MeatVolumes>()
-            .insert_resource(GoreSettings::default())
-            .add_systems(Startup, (setup_gore_assets, load_settings_at_startup))
+            .insert_resource(settings)
+            .add_systems(Startup, setup_gore_assets)
             .add_systems(
                 Update,
                 (
@@ -531,13 +532,6 @@ fn setup_gore_assets(
         blood_base: asset_server.load("textures/blood/blood_base.png"),
         blood_normal: asset_server.load("textures/blood/blood_normal.png"),
     });
-}
-
-fn load_settings_at_startup(mut settings: ResMut<GoreSettings>) {
-    if let Some(loaded) = read_settings() {
-        *settings = loaded;
-        info!("gore: loaded settings from {CONFIG_PATH}");
-    }
 }
 
 /// Service every queued gore request: spray (all), pool (all), and gibs (unit crunch only).
@@ -1277,33 +1271,16 @@ fn despawn_gore(mut commands: Commands, time: Res<Time>, fx: Query<(Entity, &Gor
     }
 }
 
-fn read_settings() -> Option<GoreSettings> {
-    let text = match std::fs::read_to_string(CONFIG_PATH) {
-        Ok(text) => text,
-        // Optional override file; absence means "use the built-in defaults".
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            error!("gore: {CONFIG_PATH} exists but could not be read: {e}");
-            std::process::exit(1);
-        }
-    };
-    let settings: GoreSettings = match ron::from_str(&text) {
-        Ok(settings) => settings,
-        // Fail loud on a malformed override rather than silently running on defaults — a designer's
-        // broken edit must not look like it simply "had no effect" (one-path rule).
-        Err(e) => {
-            error!("gore: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
-            std::process::exit(1);
-        }
-    };
-    // Validate at the door: `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which
-    // panics when `min > max`. Reject an inverted pair loudly here instead of crashing later mid-combat.
+/// Validate an already-deserialized [`GoreSettings`]. Called by the unified config loader
+/// (`crate::config::load_game_config`) on the `gore:` slice of the master `GameConfig` — one path, no
+/// fallback. `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which panics when
+/// `min > max`; reject an inverted pair loudly at the door instead of crashing later mid-combat.
+pub fn validate_settings(settings: &GoreSettings) -> Result<(), String> {
     if settings.autogib_min_pieces > settings.autogib_max_pieces {
-        error!(
-            "gore: {CONFIG_PATH} has autogib_min_pieces ({}) > autogib_max_pieces ({}) — fix the RON",
+        return Err(format!(
+            "gore: autogib_min_pieces ({}) > autogib_max_pieces ({}) — fix the RON",
             settings.autogib_min_pieces, settings.autogib_max_pieces
-        );
-        std::process::exit(1);
+        ));
     }
-    Some(settings)
+    Ok(())
 }

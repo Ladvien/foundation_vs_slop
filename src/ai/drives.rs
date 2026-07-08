@@ -96,7 +96,7 @@ pub enum DriveRule {
     Custom(fn(&DriveCtx) -> f32),
 }
 
-/// One drive's identity + update rule. Numeric knobs (rate/gain) come from `ai_tuning.ron` later.
+/// One drive's identity + update rule. Numeric knobs (rate/gain) come from the `ai_tuning:` config slice later.
 pub struct DriveDef {
     pub id: DriveId,
     pub rule: DriveRule,

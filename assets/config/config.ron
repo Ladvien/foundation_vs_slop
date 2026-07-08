@@ -1,0 +1,306 @@
+// Unified game configuration — the single source of truth for every data-driven knob in the game
+// (see `GameConfig` in src/config.rs). REQUIRED at startup: a missing or malformed file is a loud
+// panic — one path, no fallback. `ConfigPlugin` loads + validates this once and inserts `GameConfig`;
+// each subsystem pulls its own slice out of that resource at plugin-build time.
+//
+// Sections: dungeon (generation) · placement (furniture manifest + layout weights) · gore · impact_fx
+// · ai_tuning · vhs. Edit and relaunch to retune — there is no in-game panel.
+//
+// (The asset-swap fixture assets/config/furniture_kenney.ron stays a standalone file: it exists only to
+// prove the furniture kit is swappable by swapping one file, and is loaded directly by the acceptance
+// test.)
+(
+    // =============================================================================================
+    // dungeon — coarse WFC, room sizing, and the liminality dial (see `DungeonConfig`).
+    // 1 tile = 1 m. Room footprints are real residential metric ranges (Merrell, Schkufza & Koltun,
+    // "Computer-Generated Residential Building Layouts"; Smelik et al. survey, cgf.12276). `area` is in
+    // m² (= tiles²); `aspect` = long/short side ratio (>= 1). `weight` biases how often a type is chosen.
+    // =============================================================================================
+    dungeon: (
+        coarse_w: 6,
+        coarse_h: 6,
+        block: 32,
+        corridor_width: 2,          // minimum corridor width (block-centre lane + 1 more)
+        corridor_width_max: Some(5), // each corridor draws its width in 2..=5 tiles, so passages vary from
+                                    // tight squeezes to broad halls instead of every corridor being identical
+        seed: 0x5C09191,            // nods to SCP-9191, the slop generator
+        max_attempts: 20,
+
+        // Liminality dial: 1.0 = sparse Backrooms boxes adrift in the void; 0.0 = realistic contiguous
+        // rooms sharing walls. At 0.5 every room's origin jitters ~50% of its slack off the rigid lattice
+        // (breaking the grid feel), and the spacious `expands` types (living, hall) grow ~50% toward their
+        // block edges to become large anchor spaces — while compact types keep their small drawn footprints.
+        // The result is a strong size hierarchy (tiny bathroom beside a sprawling hall) instead of uniform
+        // centred boxes, while staying liminal.
+        liminality: 1.0,
+
+        // The six coarse WFC prototype weights (shape distribution). Lowered `rock` (6→3) so fewer blocks
+        // are empty void, and raised the junction prototypes (`tee`, `cross`) so the graph branches into
+        // hubs instead of long linear runs — denser, more interconnected, less uniform, still liminal.
+        wfc_weights: (
+            rock: 3.0, dead_end: 1.2, corridor: 2.5, corner: 2.5, tee: 2.0, cross: 1.2,
+        ),
+
+        // Weighted room classes. Sized by TYPE, not one uniform draw — a 3 m² bathroom next to a 40 m²
+        // living room reads at believable human scale. Furniture couples to these tags at generation time.
+        // `expands: true` marks the spacious anchor types (living, hall): below liminality 1.0 they grow to
+        // fill their block and dominate. Compact types keep their drawn footprint (they still jitter off the
+        // lattice), so the size hierarchy — tiny bathroom beside a sprawling hall — survives.
+        room_types: [
+            ( tag: "bathroom", area_min: 3.0,  area_max: 6.0,   aspect_min: 1.0, aspect_max: 1.6, weight: 0.8 ),
+            ( tag: "bedroom",  area_min: 9.0,  area_max: 20.0,  aspect_min: 1.0, aspect_max: 1.5, weight: 1.5 ),
+            ( tag: "office",   area_min: 9.0,  area_max: 16.0,  aspect_min: 1.0, aspect_max: 1.5, weight: 1.0 ),
+            ( tag: "kitchen",  area_min: 9.0,  area_max: 18.0,  aspect_min: 1.0, aspect_max: 1.5, weight: 1.0 ),
+            ( tag: "living",   area_min: 16.0, area_max: 40.0,  aspect_min: 1.0, aspect_max: 1.7, weight: 1.6, expands: true ),
+            ( tag: "hall",     area_min: 60.0, area_max: 250.0, aspect_min: 1.2, aspect_max: 3.0, weight: 1.0, expands: true ),
+        ],
+
+        // Corner-notching (room-shape complexity). Turns rectangular rooms into rectilinear polygons —
+        // L / T / Z / U / plus shapes — by biting rectangular chunks out of their corners. Each notched
+        // corner adds two vertices, so a room runs 4 → 6 → 8 → 10 → 12 corners as 0–4 corners are cut
+        // (`max_corners: 4` → up to a 12-corner plus). Every notch stays inside its own corner quadrant and
+        // never touches the room's centre cross, so connectivity, corridors, and doorways are unaffected;
+        // walls/fog/nav follow the per-cell mask automatically. Remove this block (→ None) for plain
+        // rectangles. Knobs: `chance` (P a big-enough room is shaped), `depth_min/max` (bite size as a
+        // fraction of the corner quadrant), `min_side` (only rooms this wide are shaped — small rooms stay
+        // clean boxes).
+        notch: Some((
+            chance: 0.8,
+            max_corners: 4,
+            depth_min: 0.3,
+            depth_max: 0.65,
+            min_side: 4,
+        )),
+    ),
+
+    // =============================================================================================
+    // placement — the furniture/prop placement grammar (see src/placement/).
+    //   furniture: the asset adapter manifest (see manifest.rs). Each item maps an opaque `key` to a
+    //     GLB plus a placement `role`, `footprint` (w, d in metres = tiles), and `affordances`. Roles:
+    //       Anchor(host: Ceiling|Wall|Opening|Floor) — deterministically attached (lights, doors)
+    //       Tiled        — WFC-scattered floor props
+    //       Freestanding — relationally arranged by the Metropolis solver
+    //   metropolis: layout solver weights (Merrell et al. SIGGRAPH 2011 density terms).
+    // =============================================================================================
+    placement: (
+        furniture: (
+            items: [
+                // ---- Anchors: deterministic host attachment ----
+                ( key: "ceiling_light", glb: "low_poly_furniture/glb/Lights/Ceiling Light.glb",
+                  category: "light", tags: ["ceiling"], role: Anchor(host: Ceiling),
+                  footprint: (0.62, 0.62), affordances: ["emit"] ),
+                ( key: "wall_light", glb: "low_poly_furniture/glb/Lights/Wall Light.glb",
+                  category: "light", tags: ["wall"], role: Anchor(host: Wall),
+                  footprint: (0.38, 0.20), affordances: ["emit"] ),
+
+                // ---- Tiled: small floor props scattered by WFC (Stage 2) ----
+                ( key: "bin", glb: "low_poly_furniture/glb/Miscellaneous/Bin.glb",
+                  category: "bin", tags: ["decor"], role: Tiled, footprint: (0.40, 0.40),
+                  affordances: ["store"] ),
+                ( key: "globe", glb: "low_poly_furniture/glb/Miscellaneous/Globe.glb",
+                  category: "decor", tags: ["decor"], role: Tiled, footprint: (0.33, 0.28),
+                  affordances: ["decor"] ),
+
+                // ---- Scatter: small props that rest ON a support surface (desk/table/drawer), placed by
+                // the furnish scatter pass on the inner 9×9 lattice (Stage 3). `surface: "support"` targets
+                // the `support` affordance; `height` is cosmetic (vertical position comes from the surface).
+                ( key: "plant_a", glb: "low_poly_furniture/glb/Miscellaneous/Plant A.glb",
+                  category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.52, 0.55),
+                  affordances: ["decor"], height: 0.50 ),
+                ( key: "plant_b", glb: "low_poly_furniture/glb/Miscellaneous/Plant B.glb",
+                  category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.18, 0.18),
+                  affordances: ["decor"], height: 0.25 ),
+                ( key: "lamp", glb: "low_poly_furniture/glb/Lights/Lamp C.glb",
+                  category: "light", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.32, 0.32),
+                  affordances: ["emit"], height: 0.40 ),
+
+                // ---- Freestanding: placed against walls with clearance by the Metropolis solver (Stage 3).
+                ( key: "bed_double", glb: "low_poly_furniture/glb/Beds/Bed Double.glb",
+                  category: "bed", tags: ["bedroom"], role: Freestanding, footprint: (1.72, 2.22),
+                  affordances: ["sleep", "support"], height: 0.55 ),
+                ( key: "sofa", glb: "low_poly_furniture/glb/Sofas/Sofa A.glb",
+                  category: "seating", tags: ["living"], role: Freestanding, footprint: (2.08, 0.88),
+                  affordances: ["sit"] ),
+                ( key: "table", glb: "low_poly_furniture/glb/Tables/Table A.glb",
+                  category: "table", tags: ["living", "dining"], role: Freestanding, footprint: (1.66, 0.71),
+                  affordances: ["support"], height: 0.74 ),
+                ( key: "chair", glb: "low_poly_furniture/glb/Chairs/Chair A.glb",
+                  category: "seating", tags: ["dining"], role: Freestanding, footprint: (0.41, 0.51),
+                  affordances: ["sit"] ),
+                ( key: "drawer", glb: "low_poly_furniture/glb/Drawers/Drawer A.glb",
+                  category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (1.55, 0.60),
+                  affordances: ["store", "support"], height: 0.80 ),
+                // Shelf A's source FBX is malformed (~10 m of stray geometry that survives conversion); use
+                // Shelf D, which measures a correct 1.23 × 0.38 × 2.15 m.
+                ( key: "shelf", glb: "low_poly_furniture/glb/Shelves/Shelf D.glb",
+                  category: "storage", tags: ["living"], role: Freestanding, footprint: (1.23, 0.38),
+                  affordances: ["store"] ),
+                // A fridge stands boxed in against a wall — `back_to_wall` seats it flush to the perimeter.
+                ( key: "fridge", glb: "low_poly_furniture/glb/Kitchen/Fridge A.glb",
+                  category: "appliance", tags: ["kitchen"], role: Freestanding, footprint: (0.88, 0.61),
+                  affordances: ["store", "back_to_wall"] ),
+                // A TV rests on a media unit / table — a Scatter prop; footprint is the flatscreen STAND's
+                // shallow contact area so it seats on a ~0.6 m-deep desk without overhanging.
+                ( key: "tv", glb: "low_poly_furniture/glb/Electronics/TV A.glb",
+                  category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.30),
+                  affordances: ["emit"], height: 0.50 ),
+
+                // Office — a desk so "office"-tagged rooms (a generation-time room type) read as workspaces.
+                ( key: "desk", glb: "low_poly_furniture/glb/Tables/Desk.glb",
+                  category: "table", tags: ["office"], role: Freestanding, footprint: (1.20, 0.60),
+                  affordances: ["support"], height: 0.74 ),
+
+                // Bathroom fixtures for "bathroom"-tagged rooms. Plumbing backs onto a wall (`back_to_wall`),
+                // and the toilet + sink cluster together (`group: "bath"`) so they read as a plumbed wall.
+                ( key: "toilet", glb: "low_poly_furniture/glb/Bathroom/Toilet.glb",
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.40, 0.60),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
+                ( key: "sink", glb: "low_poly_furniture/glb/Bathroom/Sink.glb",
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.50, 0.42),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
+                ( key: "bath", glb: "low_poly_furniture/glb/Bathroom/Bath.glb",
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (1.70, 0.70),
+                  affordances: ["hygiene", "back_to_wall"] ),
+            ],
+        ),
+
+        // Metropolis furniture-layout weights (see src/placement/solvers/metropolis.rs).
+        // Ported from the density-function terms of Merrell et al., "Interactive Furniture Layout Using
+        // Interior Design Guidelines" (ACM TOG / SIGGRAPH 2011). Merrell 2011 found the layout robust to
+        // ~2× weight perturbation.
+        metropolis: (
+            // Metropolis–Hastings schedule.
+            iterations: 4000,
+            temp_start: 1.0,
+            temp_end: 0.02,
+            translate_sigma: 0.6,   // metres; std-dev of a translate proposal
+            rotate_prob: 0.35,      // fraction of proposals that are a quarter-turn instead of a translate
+
+            // Cost weights (higher = stronger).
+            w_overlap: 10.0,        // pairwise footprint overlap — keep furniture from interpenetrating
+            w_bounds: 25.0,         // stay inside the room walls
+            w_wall: 1.2,            // back-to-wall attraction (furniture lines the perimeter of small rooms)
+            w_min_distance: 2.0,    // honor explicit MinDistance constraints
+            w_facing: 1.5,          // honor explicit Facing constraints (e.g. sofa faces TV)
+            w_clearance: 2.0,       // honor explicit Clearance constraints
+            w_hard: 12.0,           // multiplier on HARD constraints so the annealer drives them to
+                                    // satisfaction (e.g. a plumbing fixture's back-to-wall association)
+            w_wall_angle: 1.0,      // angular wall-snap: a wall-backed fixture orients its back to the wall
+            w_group: 1.5,           // grouping band pulling same-group pieces together (toilet + sink)
+            coherence: 0.3,         // [0,1] how coherently related furniture is arranged (scales Facing):
+                                    // 0 = backrooms-random, 1 = sofa firmly faces the TV
+        ),
+    ),
+
+    // =============================================================================================
+    // gore — blood spray, floor pools, gib chunks, meat chunks, and droplets (see src/gore.rs, dialed to 11).
+    // =============================================================================================
+    gore: (
+        // Blood spray (quick muzzle-flash mist billboard; droplets do the real airborne work).
+        spray_color_a: (0.45, 0.0, 0.0),
+        spray_color_b: (0.85, 0.08, 0.05),
+        spray_intensity: 1.0,
+        spray_spread: 0.9,
+        spray_speed: 1.0,
+        spray_particle_size: 7.0,
+        spray_gravity: 0.9,
+        spray_duration: 0.28,
+        spray_quad_size: 1.5,
+        spray_count_hit: 8,
+        spray_count_death: 30,
+
+        // Blood pool (flat floor decal, permanent + capped). Dries to matte maroon over dry_time.
+        pool_color: (0.42, 0.02, 0.0),
+        pool_grow_time: 0.45,
+        pool_gloss: 0.9,
+        pool_size_hit: 0.7,
+        pool_size_death: 1.7,
+        wall_splat_size: 0.7,
+        dry_time: 22.0,
+        max_pools: 300,
+
+        // Gib physics (avian) — launch + material for autogib fragments and meat chunks.
+        // Gravity is global (see main::GIB_GRAVITY).
+        gib_speed: 4.0,
+        chunk_restitution: 0.45,   // avian Restitution (bounciness)
+        gib_friction: 0.7,         // avian Friction (higher = settles sooner)
+
+        // Autogib (squad crunch: the figurine mesh sliced into flying fragments with meat cut-faces).
+        autogib_pieces_base: 14,   // fragments at autogib_ref_extent; scales with mesh size
+        autogib_ref_extent: 0.5,
+        autogib_min_pieces: 6,
+        autogib_max_pieces: 40,
+        autogib_min_fraction: 0.18,
+        autogib_speed_mult: 0.8,
+
+        // Meat chunks (any death) + overall physics-chunk cap (fragments + guns + meat).
+        meat_count: 5,
+        meat_size: 0.17,
+        max_gibs: 200,
+
+        // Airborne blood droplets (arc + splat on contact) — many tiny drops = real splatter.
+        droplet_count_hit: 18,
+        droplet_count_death: 90,
+        droplet_speed: 5.5,
+        droplet_gravity: 20.0,
+        droplet_size: 0.022,
+        droplet_life: 2.0,
+        droplet_splat_size: 0.12,
+    ),
+
+    // =============================================================================================
+    // impact_fx — laser-impact particle burst (see src/impact_fx.rs).
+    // =============================================================================================
+    impact_fx: (
+        particle_count: 2,
+        color_a: (1.0, 0.5000001, 0.14999998),
+        color_b: (1.0, 0.85, 0.39999998),
+        intensity: 0.45,
+        spread: 1.5,
+        speed: 1.0,
+        particle_size: 10.0,
+        gravity: 0.0,
+        duration: 0.3,
+        quad_size: 1.9,
+    ),
+
+    // =============================================================================================
+    // ai_tuning — hot-tunable AI knobs (see src/ai/tuning.rs). Structure is code; only these numbers
+    // are data.
+    // =============================================================================================
+    ai_tuning: (
+        fields: (
+            // evaporate: fraction lost per second. diffuse: 0..1 blur to neighbours. deposit_radius: world units.
+            scent:        ( evaporate: 0.25, diffuse: 0.15, deposit_radius: 1.5 ),
+            threat:       ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
+            crab_density: ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
+            meat:         ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
+            // Alarm: a wounded crab floods this ~one room (deposit_radius) so nearby crabs muster instead of
+            // fleeing. No diffusion (stays a local bloom); evaporate over ~2–3 s so the surge is a sharp
+            // retaliation, not permanent aggro. Radius is the "how far the alarm carries" dial.
+            alarm:        ( evaporate: 0.5,  diffuse: 0.0,  deposit_radius: 5.0 ),
+        ),
+        // Vectorial rally pheromone (Tang et al. 2019): scouts deposit direction vectors toward live prey;
+        // the swarm reads the local bearing and masses on it. decay = call-off rate, accumulate = deposit
+        // gain, deposit_radius = smear (world units).
+        rally: ( decay: 0.3, accumulate: 0.5, deposit_radius: 2.0 ),
+    ),
+
+    // =============================================================================================
+    // vhs — full-screen VHS post-process pass (see src/vhs.rs). Values are the module's built-in
+    // baseline (the effect previously had no file and always ran on these defaults).
+    // =============================================================================================
+    vhs: (
+        base_level: 0.15,       // always-on texture floor (0 = off)
+        cycle_period: 45.0,     // seconds between glitches (start-to-start of the spike envelope)
+        fade_in: 0.5,           // spike envelope: ramp up, hold at full, ramp down (seconds)
+        hold: 1.5,
+        fade_out: 0.5,
+        // Per-effect strengths (0 = off), fed into the shader uniform.
+        chroma: 1.0,
+        wave: 1.0,
+        scanline: 1.0,
+        noise_amt: 1.0,
+        bloom: 1.0,
+    ),
+)

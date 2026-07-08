@@ -1,6 +1,6 @@
 //! Laser-impact particle burst: a custom additive `Material` (see `assets/shaders/impact_fx.wgsl`)
 //! played on a camera-facing quad wherever a bolt hits a wall. Every knob is loaded once at startup
-//! from `impact_fx.ron` (see `read_settings`); there is no in-game panel.
+//! from the `impact_fx:` slice of the unified `assets/config/config.ron`; there is no in-game panel.
 //!
 //! Decoupled trigger: anything that wants a burst pushes a world position into [`ImpactQueue`]
 //! (the laser does this on wall hits); this plugin drains the queue and spawns the effect. So a
@@ -11,8 +11,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use serde::Deserialize;
-
-const CONFIG_PATH: &str = "impact_fx.ron";
 
 /// World positions where an impact burst should play this frame (drained each frame).
 #[derive(Resource, Default)]
@@ -52,10 +50,11 @@ impl Material for ImpactMaterial {
     }
 }
 
-/// The impact-burst knobs, deserialized once at startup from `impact_fx.ron` (read-only — there is no
-/// in-game panel and nothing serializes these back out).
+/// The impact-burst knobs, deserialized once at startup from the `impact_fx:` slice of the unified
+/// `assets/config/config.ron` (read-only — there is no in-game panel and nothing serializes these back
+/// out). A field of `crate::config::GameConfig`.
 #[derive(Resource, Deserialize, Clone)]
-struct ImpactFxSettings {
+pub struct ImpactFxSettings {
     particle_count: i32,
     color_a: [f32; 3],
     color_b: [f32; 3],
@@ -119,10 +118,13 @@ pub struct ImpactFxPlugin;
 
 impl Plugin for ImpactFxPlugin {
     fn build(&self, app: &mut App) {
+        // Required config — one path, no fallback. The `impact_fx:` slice comes from the unified
+        // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
+        let settings = app.world().resource::<crate::config::GameConfig>().impact_fx.clone();
         app.add_plugins(MaterialPlugin::<ImpactMaterial>::default())
             .init_resource::<ImpactQueue>()
-            .insert_resource(ImpactFxSettings::default())
-            .add_systems(Startup, (setup_impact_assets, load_settings_at_startup))
+            .insert_resource(settings)
+            .add_systems(Startup, setup_impact_assets)
             .add_systems(Update, (drain_impacts, despawn_impacts));
     }
 }
@@ -131,13 +133,6 @@ fn setup_impact_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>)
     commands.insert_resource(ImpactAssets {
         quad: meshes.add(Rectangle::new(1.0, 1.0)),
     });
-}
-
-fn load_settings_at_startup(mut settings: ResMut<ImpactFxSettings>) {
-    if let Some(loaded) = read_settings() {
-        *settings = loaded;
-        info!("impact_fx: loaded settings from {CONFIG_PATH}");
-    }
 }
 
 /// Spawn a burst for each queued impact position, oriented to face the (fixed) iso camera.
@@ -183,28 +178,6 @@ fn despawn_impacts(mut commands: Commands, time: Res<Time>, bursts: Query<(Entit
     for (entity, fx) in &bursts {
         if now >= fx.despawn_at {
             commands.entity(entity).despawn();
-        }
-    }
-}
-
-fn read_settings() -> Option<ImpactFxSettings> {
-    let text = match std::fs::read_to_string(CONFIG_PATH) {
-        Ok(text) => text,
-        // Optional override file; absence means "use the built-in defaults".
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        // Present but unreadable is a real error — fail loud rather than silently running on defaults.
-        Err(e) => {
-            error!("impact_fx: {CONFIG_PATH} exists but could not be read: {e}");
-            std::process::exit(1);
-        }
-    };
-    match ron::from_str(&text) {
-        Ok(settings) => Some(settings),
-        // Fail loud on a malformed override rather than silently defaulting (one-path rule): a
-        // designer's broken retune must not look like it simply had no effect.
-        Err(e) => {
-            error!("impact_fx: {CONFIG_PATH} is present but failed to parse — fix the RON: {e}");
-            std::process::exit(1);
         }
     }
 }

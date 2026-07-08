@@ -68,9 +68,11 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
 // Coarse WFC operates on room slots; each expands to a `block`×`block` patch of fine tiles. At 1 tile =
 // 1 m the sizes read at real, Backrooms-like human scale under 2.4 m (8 ft) ceilings. When `block` is
 // vastly larger than the rooms each floats in deep negative space — the liminal look — so the
-// generation shape is data-driven via `assets/dungeon.ron` (see `DungeonConfig`), not hardcoded here.
+// generation shape is data-driven via the `dungeon:` slice of `assets/config/config.ron` (see
+// `DungeonConfig`), not hardcoded here.
 
-/// Generation parameters loaded from `assets/dungeon.ron` — the single source of truth for the coarse
+/// Generation parameters — the `dungeon:` slice of `assets/config/config.ron`, the single source of
+/// truth for the coarse
 /// WFC, room sizing, and (Phase 2) the liminality dial. 1 tile = 1 m. This is the *dungeon shape* knob;
 /// physical wall/tile dimensions stay compile-time `const`s above, since they are consumed by `const`
 /// initializers in other modules (`squad`, `metropolis`, `nest`) and are a world-physics contract, not
@@ -188,14 +190,21 @@ pub struct NotchConfig {
 const ROOM_FLOOR: usize = 2;
 
 /// Path to the required dungeon generation config (mirrors the placement RON load contract).
-const DUNGEON_CONFIG_PATH: &str = "assets/dungeon.ron";
-
-/// Parse + validate a [`DungeonConfig`] from RON text. Returns a descriptive error rather than
-/// panicking — the caller decides how loudly (mirrors `placement::manifest::parse_manifest`). Validates
-/// every invariant generation relies on, so a bad config fails at the door, not mid-carve.
+/// Parse + validate a [`DungeonConfig`] from standalone RON text (used by tests that build a config
+/// inline). The shipped game reads its `dungeon:` slice from the unified `assets/config/config.ron`
+/// via [`crate::config::load_game_config`]; both paths funnel through [`validate_config`]. Returns a
+/// descriptive error rather than panicking — the caller decides how loudly.
 pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
     let cfg: DungeonConfig =
-        ron::from_str(text).map_err(|e| format!("{DUNGEON_CONFIG_PATH} parse error: {e}"))?;
+        ron::from_str(text).map_err(|e| format!("dungeon config parse error: {e}"))?;
+    validate_config(&cfg)?;
+    Ok(cfg)
+}
+
+/// Validate every invariant generation relies on, on an already-deserialized [`DungeonConfig`]. Split
+/// from [`parse_config`] so the unified config loader (`crate::config::load_game_config`) can validate
+/// the `dungeon:` slice it deserializes as part of the master `GameConfig` — one path, no fallback.
+pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
     if cfg.coarse_w == 0 || cfg.coarse_h == 0 {
         return Err("coarse_w and coarse_h must be > 0".into());
     }
@@ -320,14 +329,7 @@ pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
             return Err("topology Graph: link_weights must sum to > 0".into());
         }
     }
-    Ok(cfg)
-}
-
-/// Read + parse the dungeon config file. One path: a missing or malformed config is a hard error the
-/// caller surfaces loudly (there is no default generation to fall back to).
-fn load_config(path: &str) -> Result<DungeonConfig, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    parse_config(&text)
+    Ok(())
 }
 
 // CC0 Backrooms textures (see assets/textures/CREDITS.md). Seamless 1024² diffuse maps;
@@ -373,9 +375,14 @@ pub struct DungeonPlugin;
 
 impl Plugin for DungeonPlugin {
     fn build(&self, app: &mut App) {
-        // Required config — one path, no fallback (mirrors `PlacementPlugin`). A missing or malformed
-        // `assets/dungeon.ron` is a loud startup failure, not a silent default world.
-        let config = load_config(DUNGEON_CONFIG_PATH).unwrap_or_else(|e| panic!("dungeon: {e}"));
+        // Required config — one path, no fallback. The `dungeon:` slice comes from the unified
+        // `assets/config/config.ron`, loaded and validated once by `ConfigPlugin` (registered first);
+        // a missing or malformed file is already a loud startup failure there, not a silent default world.
+        let config = app
+            .world()
+            .resource::<crate::config::GameConfig>()
+            .dungeon
+            .clone();
         // Generation is pure CPU work with no asset dependency, so build the grid and insert the
         // resource now — it is then available to every Startup system (player spawn, fog init) without
         // cross-plugin ordering games. A zero-room generation is a loud, one-path failure.
@@ -1900,9 +1907,11 @@ mod tests {
 
     #[test]
     fn shipped_config_parses_and_generates() {
-        // The real assets/dungeon.ron must parse, validate, and generate a non-empty dungeon.
-        let text = std::fs::read_to_string(DUNGEON_CONFIG_PATH).expect("read dungeon.ron");
-        let config = parse_config(&text).expect("dungeon.ron must be valid");
+        // The shipped assets/config/config.ron `dungeon:` slice must parse, validate, and generate a
+        // non-empty dungeon (loaded + validated through the unified loader, one path).
+        let config = crate::config::load_game_config()
+            .expect("shipped config.ron must be valid")
+            .dungeon;
         let d = Dungeon::generate(&config).expect("must generate at least one room");
         assert!(!d.regions.is_empty(), "shipped config must produce rooms");
         assert!(d.walkable.iter().any(|&w| w), "dungeon must have floor");
@@ -2363,13 +2372,9 @@ mod tests {
 
     #[test]
     fn topology_defaults_to_grid_when_absent() {
-        // The shipped RON has no `topology` field → serde default → Grid (no behaviour change).
-        let text = std::fs::read_to_string(DUNGEON_CONFIG_PATH).expect("read dungeon.ron");
-        let config = parse_config(&text).expect("valid");
-        assert!(
-            matches!(config.topology, Topology::Grid),
-            "absent topology must default to Grid"
-        );
+        // The shipped config.ron `dungeon:` slice has no `topology` field → serde default → Grid.
+        let config = crate::config::load_game_config().expect("valid").dungeon;
+        assert!(matches!(config.topology, Topology::Grid), "absent topology must default to Grid");
     }
 
     #[test]
@@ -2405,7 +2410,7 @@ mod tests {
     // ---- Dungeon carve golden: locks the full Grid carve output so unintended drift in geometry, RNG
     // draw order, or region-link order flips the hash. FNV-1a over the FULL Dungeon output (dims, walkable
     // mask, spawn, and every region's rect/tags/adjacency/openings). Uses `test_config()` (self-contained)
-    // rather than the shipped RON so the gate is stable even while `assets/dungeon.ron` is edited.
+    // rather than the shipped RON so the gate is stable even while `assets/config/config.ron` is edited.
     // Order: liminality 1.0 for seeds [1,2,3], then liminality 0.0 for seeds [1,2,3] (1.0 draws zero
     // jitter RNG, so 0.0 must be covered too to exercise the `jitter_origin` draw path).
     // Re-pinned for the layout-diversity work: per-corridor width variation (`corridor_width_max`) and
