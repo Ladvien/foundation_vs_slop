@@ -81,6 +81,10 @@ struct SpawnReq {
     glb: String,
     pos: Vec3,
     rot: Quat,
+    /// Set for a wall-mounted prop (a sconce): its host wall's outward normal. The serial spawn tags it
+    /// `CutawayMounted` so it hides when Q/E rotation makes that wall a near knee wall — otherwise the
+    /// sconce would float in the cutaway gap. `None` for floor/ceiling props (unaffected by the cutaway).
+    cutaway_outward: Option<Vec3>,
 }
 
 /// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
@@ -262,7 +266,7 @@ pub fn furnish_regions(
     // ---- Serial spawn. ----
     for req in requests {
         let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(req.glb));
-        commands.spawn((
+        let mut entity = commands.spawn((
             PlacedIn(req.region),
             WorldAssetRoot(scene),
             Transform::from_translation(req.pos)
@@ -271,6 +275,15 @@ pub fn furnish_regions(
             // Starts hidden; `furniture_room_visibility` shows it only while the squad is in its room.
             Visibility::Hidden,
         ));
+        // A wall-mounted prop rides the view-relative cutaway: it hides (scale → 0) whenever Q/E
+        // rotation makes its host wall a near knee wall, so it never floats above the squash. Cutaway
+        // hiding uses `scale`; fog reveal owns `Visibility`; the two compose (see `dungeon`).
+        if let Some(outward) = req.cutaway_outward {
+            entity.insert(crate::dungeon::CutawayMounted {
+                outward,
+                base_scale: Vec3::splat(FURNITURE_SCALE),
+            });
+        }
     }
 }
 
@@ -306,6 +319,7 @@ fn furnish_region(
                 glb: item.glb.clone(),
                 pos,
                 rot: Quat::from_rotation_x(PI),
+                cutaway_outward: None,
             });
         }
     }
@@ -330,6 +344,10 @@ fn furnish_region(
                 glb: light.glb.clone(),
                 pos,
                 rot: Quat::from_rotation_y(yaw),
+                // Tag with the host wall's outward normal (opposite the inward face) so the sconce
+                // hides when Q/E rotation squashes that wall to knee height — otherwise it would
+                // float in the cutaway gap.
+                cutaway_outward: Some(-normal),
             });
         }
     }
@@ -362,6 +380,7 @@ fn furnish_region(
                     glb: item.glb.clone(),
                     pos,
                     rot: Quat::from_rotation_y(p.yaw),
+                    cutaway_outward: None,
                 });
             }
         }
@@ -409,6 +428,7 @@ fn furnish_region(
                     glb: item.glb.clone(),
                     pos,
                     rot: Quat::from_rotation_y(p.yaw),
+                    cutaway_outward: None,
                 });
                 if affords(item, "support") {
                     placed_supports.push((*item, pos, p.yaw));
@@ -450,6 +470,7 @@ fn furnish_region(
                         glb: item.glb.clone(),
                         pos,
                         rot: Quat::from_rotation_y(pl.yaw),
+                        cutaway_outward: None,
                     });
                 }
             }
