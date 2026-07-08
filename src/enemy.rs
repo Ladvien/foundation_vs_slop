@@ -1026,15 +1026,19 @@ fn smiley_defense(
         let spos = stf.translation;
         // Only LIVE crabs are cull candidates — a crab already at 0 HP (a laser or `smiley_zap` kill this
         // tick) is left to `crab_despawn_dead`'s normal death path, so the two never both claim one crab.
-        let biters: Vec<Entity> = crabs
+        let mut biters: Vec<(Entity, Vec3)> = crabs
             .iter()
             .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= CULL_RADIUS)
-            .map(|(e, _, _)| e)
+            .map(|(e, ctf, _)| (e, ctf.translation))
             .collect();
         if biters.len() < CULL_THRESHOLD {
             continue;
         }
-        for ce in biters.into_iter().take(CULL_MAX) {
+        // Deterministic: cull the first `CULL_MAX` in a STABLE order (by world position), not query
+        // order — WHICH crabs die feeds Health/despawn and must not depend on unstable entity ordering
+        // (query order is not reproducible across same-seed runs; see `util::nearest_planar`).
+        biters.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+        for (ce, _) in biters.into_iter().take(CULL_MAX) {
             if let Ok((_, _, mut hp)) = crabs.get_mut(ce) {
                 hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
             }

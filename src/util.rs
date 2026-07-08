@@ -31,12 +31,25 @@ pub fn nearest_planar<T>(
     origin: Vec3,
     candidates: impl IntoIterator<Item = (T, Vec3)>,
 ) -> Option<(T, Vec3, f32)> {
+    // DETERMINISM: rank by `(planar distance, position bits)`, not a plain `d < bd` that keeps whichever
+    // candidate the iterator yielded first. Entity query order is NOT stable across two same-seed runs
+    // (GLB scene-child instantiation + entity-id reuse permute it), so an exact distance tie broken by
+    // iteration order flips WHICH target is chosen — and that flip cascades into the physics-free replay
+    // hash (`deterministic_core_is_bit_identical`). The position fallback (a stable geometric key) makes
+    // the pick depend only on geometry. `d.to_bits()` is monotonic in `d` for finite non-negative d.
     let o = origin.xz();
     let mut best: Option<(T, Vec3, f32)> = None;
     for (payload, pos) in candidates {
         let d = (pos.xz() - o).length();
-        // `.as_ref()` is load-bearing: `T` may be non-`Copy`, so we must not move `best` out to read `bd`.
-        if best.as_ref().is_none_or(|(_, _, bd)| d < *bd) {
+        // `.as_ref()` is load-bearing: `T` may be non-`Copy`, so we must not move `best` out to read it.
+        let take = match best.as_ref() {
+            None => true,
+            Some((_, bpos, bd)) => {
+                (d.to_bits(), pos.x.to_bits(), pos.y.to_bits(), pos.z.to_bits())
+                    < (bd.to_bits(), bpos.x.to_bits(), bpos.y.to_bits(), bpos.z.to_bits())
+            }
+        };
+        if take {
             best = Some((payload, pos, d));
         }
     }

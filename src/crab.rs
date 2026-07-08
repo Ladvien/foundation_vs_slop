@@ -1358,14 +1358,24 @@ fn crab_contact_damage(
     // Reach = body radius + a little, so anything latched onto the cylinder counts (units and the boss).
     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS).powi(2);
     for (prey_tf, mut hp, last_attacker) in &mut prey {
-        // Count biters and remember the first one (stable query order → deterministic attribution).
+        // Count biters and attribute the bite to ONE of them for the boss's retaliation. WHICH biter is
+        // recorded (`LastAttacker`, which `enemy::smiley_zap` instakills) must not depend on query order
+        // — it is not reproducible across same-seed runs (see `util::nearest_planar`) — so pick the
+        // lowest world position among the biters, a stable geometric key.
         let mut count = 0usize;
         let mut biter: Option<Entity> = None;
+        let mut biter_key: Option<(u32, u32, u32)> = None;
         for (ce, ctf) in &crabs {
             if (ctf.translation.xz() - prey_tf.translation.xz()).length_squared() <= reach_sq {
                 count += 1;
-                if biter.is_none() {
+                let key = (
+                    ctf.translation.x.to_bits(),
+                    ctf.translation.y.to_bits(),
+                    ctf.translation.z.to_bits(),
+                );
+                if biter_key.is_none_or(|bk| key < bk) {
                     biter = Some(ce);
+                    biter_key = Some(key);
                 }
             }
         }
@@ -1777,7 +1787,7 @@ fn assign_meat_targets(
     // Snapshot each gib: position, weight, whether it's already being hauled, and its current committed
     // capacity. `committed` is mutated as we enlist crabs this tick so several seekers don't over-crew.
     let mut committed: HashMap<Entity, f32> = HashMap::new();
-    let gib_snap: Vec<(Entity, Vec3, f32, bool)> = gibs
+    let mut gib_snap: Vec<(Entity, Vec3, f32, bool)> = gibs
         .iter()
         .map(|(e, tf, c)| {
             let sum: f32 = c.carriers.iter().filter_map(|x| caps.get(x)).sum();
@@ -1785,15 +1795,27 @@ fn assign_meat_targets(
             (e, tf.translation, c.weight, c.phase == crate::gore::CarryPhase::Hauling)
         })
         .collect();
+    // Determinism: gib enumeration follows entity spawn / ID-reuse order, which is NOT a stable
+    // semantic ordering — two same-seed runs can produce the *same* set of chunks in a different query
+    // order. The nearest-chunk pick below keeps the FIRST gib at the minimum distance (`d < bd`), so on
+    // an exact distance tie it would commit a crab to a different chunk per run, diverging crab targets
+    // and cascading into the physics-free replay hash (`deterministic_core_is_bit_identical`). Sort by
+    // world position — a stable key independent of entity order — so the choice depends only on geometry.
+    gib_snap.sort_unstable_by_key(|(_, p, _, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
 
-    // Seeking crabs that still need a chunk.
-    let seekers: Vec<(Entity, Vec3)> = crabs
+    // Seeking crabs that still need a chunk. Sorted by world position: the enlist loop below is greedy
+    // and stateful (each commit bumps `committed`, so who picks first decides who gets the last slot on a
+    // contested chunk), so processing seekers in crab QUERY order would make the assignment depend on
+    // entity order — not reproducible across same-seed runs (see `util::nearest_planar`). A stable
+    // position order makes the crew assignment deterministic.
+    let mut seekers: Vec<(Entity, Vec3)> = crabs
         .iter()
         .filter(|(_, _, c, ab)| {
             matches!(ab.mode, crate::ai::utility::Mode::SeekMeat) && c.target.is_none()
         })
         .map(|(e, m, _, _)| (e, m.pos))
         .collect();
+    seekers.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
 
     for (crab_e, cpos) in seekers {
         let mut best: Option<(Entity, f32)> = None;
