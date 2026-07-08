@@ -14,6 +14,7 @@ use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
 use std::sync::Arc;
 
 use crate::audio::Sfx;
+use crate::dialogue::ConversationLock;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::squad::{MoveOrder, Selected, Unit};
@@ -39,7 +40,11 @@ impl Plugin for SelectionPlugin {
             (
                 // Guarantee the whole squad is selected before anything reads the selection this frame.
                 keep_squad_selected.before(command_input),
-                command_input,
+                // While a dialogue exchange owns the left-click (choice picks / line advance), don't
+                // also issue move orders. `ConversationLock` exists only during a conversation and only
+                // in the windowed build (dialogue plugin), so the harness is unaffected — one owner of
+                // the click at a time (see `dialogue::runtime`).
+                command_input.run_if(not(resource_exists::<ConversationLock>)),
             )
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         );

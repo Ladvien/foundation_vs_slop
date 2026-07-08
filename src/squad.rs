@@ -25,6 +25,17 @@ use crate::orca::{self, Agent};
 #[derive(Component)]
 pub struct Unit;
 
+/// Stable 0-based identity of a squad member (matches its `OUTFITS`/spawn index). Lets systems that
+/// key on "who" — dialogue speakers, roster chips — resolve a member to its `Entity` without
+/// comparing float colors. Assigned once at spawn; never reused.
+#[derive(Component)]
+pub struct SquadMember(pub usize);
+
+/// Marks the one unit that anchors leader-facing UI (the choice bubbles of a dialogue exchange).
+/// Exactly one living unit carries it — [`ensure_leader`] reassigns it if the current leader dies.
+#[derive(Component)]
+pub struct Leader;
+
 /// Shared marker for anything the crab swarm treats as prey to swarm/latch/bite — squad units AND the
 /// smiley boss (`crate::enemy`). Crab targeting keys on `Prey` (nearest wins), so the same forage/latch
 /// code path drives crabs onto whichever prey is closest, without knowing its type.
@@ -192,7 +203,9 @@ impl Plugin for SquadPlugin {
             // `unit_facing` after `unit_movement` so it turns units (moving OR idle) toward their aim/travel
             // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
             .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
-            .add_systems(Update, recolor_units);
+            // `ensure_leader` is a cheap cosmetic-adjacent maintainer (adds a marker only when the
+            // leader is missing); it touches no pinned state, so it rides `Update`.
+            .add_systems(Update, (recolor_units, ensure_leader));
     }
 }
 
@@ -208,9 +221,9 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
 
     for (i, &cell) in cells.iter().enumerate() {
         let outfit = OUTFITS[i];
-        commands
-            .spawn((
+        let mut unit = commands.spawn((
                 Unit,
+                SquadMember(i),
                 Prey, // crabs may swarm/bite units (nearest-prey targeting)
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
@@ -223,15 +236,36 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
                 // Component + plugin come from avian's `bevy_transform_interpolation` integration.
                 avian3d::prelude::TransformInterpolation,
-            ))
-            // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
-            .with_child((
-                GunModel,
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
-                Transform::from_translation(GUN_OFFSET)
-                    .with_scale(Vec3::splat(GUN_SCALE))
-                    .with_rotation(Quat::from_rotation_y(GUN_YAW)),
             ));
+        // The first spawned member anchors leader-facing UI (dialogue choice bubbles).
+        if i == 0 {
+            unit.insert(Leader);
+        }
+        // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
+        unit.with_child((
+            GunModel,
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
+            Transform::from_translation(GUN_OFFSET)
+                .with_scale(Vec3::splat(GUN_SCALE))
+                .with_rotation(Quat::from_rotation_y(GUN_YAW)),
+        ));
+    }
+}
+
+/// Keep exactly one living unit tagged [`Leader`]. If the leader died (removed by
+/// [`despawn_dead_units`]), promote the surviving member with the lowest [`SquadMember`] index so
+/// leader-anchored UI (dialogue choices) always has a target. Cheap: only acts when the tag is
+/// missing.
+fn ensure_leader(
+    mut commands: Commands,
+    leaders: Query<(), (With<Unit>, With<Leader>)>,
+    members: Query<(Entity, &SquadMember), With<Unit>>,
+) {
+    if !leaders.is_empty() {
+        return;
+    }
+    if let Some((entity, _)) = members.iter().min_by_key(|(_, m)| m.0) {
+        commands.entity(entity).insert(Leader);
     }
 }
 
