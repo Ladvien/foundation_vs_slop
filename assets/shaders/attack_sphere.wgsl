@@ -126,7 +126,14 @@ fn GetEnvColor2(rayDir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
     if ((rayDir.y > abs(rayDir.x) * 1.0) && (rayDir.y > abs(rayDir.z * 0.25))) {
         env = vec3<f32>(2.0) * rayDir.y;
     }
-    let roundBox = length(max(abs(rayDir.xz / max(0.0, rayDir.y)) - vec2<f32>(0.9, 4.0), vec2<f32>(0.0))) - 0.1;
+    // Overhead softbox, projected onto the xz plane by dividing through rayDir.y. Only upward rays
+    // can catch it; for downward/horizon rays (rayDir.y <= 0) the old `max(0.0, rayDir.y)` denominator
+    // was exactly 0, so axis-aligned rays hit 0.0/0.0 = NaN (a stray speckle). Gate the box on upward
+    // rays instead: downward rays get a huge roundBox and contribute nothing, matching the intent.
+    var roundBox = 1.0e9;
+    if (rayDir.y > 1.0e-4) {
+        roundBox = length(max(abs(rayDir.xz) / rayDir.y - vec2<f32>(0.9, 4.0), vec2<f32>(0.0))) - 0.1;
+    }
     env = env + vec3<f32>(0.8) * pow(sat(1.0 - roundBox * 0.5), 6.0);
     // purple lights from side
     env = env + vec3<f32>(8.0, 6.0, 7.0) * sat(0.001 / (1.0 - abs(rayDir.x)));

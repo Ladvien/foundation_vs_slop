@@ -89,6 +89,37 @@ pub struct Stig {
     scratch: Vec<f32>,
 }
 
+/// Walk the floor cells within `radius` (in cells) of `pos`, calling `emit(cell_index, falloff)` with the
+/// linear falloff `1 - dist/radius` (1.0 when `radius == 0`). The shared deposit kernel — the disc walk,
+/// the `in_grid && is_floor` wall mask, and the falloff math — used by both the scalar [`Stig`] and the
+/// vectorial [`RallyField`] deposit paths, which differ only in what they accumulate per cell.
+fn deposit_disc(
+    width: usize,
+    height: usize,
+    dungeon: &Dungeon,
+    pos: Vec3,
+    radius: f32,
+    mut emit: impl FnMut(usize, f32),
+) {
+    let radius = radius.max(0.0);
+    let center = dungeon.world_to_cell(pos);
+    let r = radius.ceil() as i32;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let cell = center + IVec2::new(dx, dy);
+            if !crate::util::in_grid(cell, width, height) || !dungeon.is_floor(cell) {
+                continue;
+            }
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist > radius {
+                continue;
+            }
+            let falloff = if radius > 0.0 { 1.0 - dist / radius } else { 1.0 };
+            emit(crate::util::row_major(cell, width), falloff);
+        }
+    }
+}
+
 impl Stig {
     /// Allocate empty grids sized to the dungeon. `defs` come from tuning.
     pub fn new(dungeon: &Dungeon, defs: [ChannelDef; CHANNEL_COUNT]) -> Self {
@@ -104,12 +135,12 @@ impl Stig {
 
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     #[inline]
     fn in_grid(&self, c: IVec2) -> bool {
-        c.x >= 0 && c.y >= 0 && (c.x as usize) < self.width && (c.y as usize) < self.height
+        crate::util::in_grid(c, self.width, self.height)
     }
 
     /// Point read at a world position (query). Off-grid reads as 0.
@@ -140,28 +171,11 @@ impl Stig {
     /// Add `amount` at `pos`, smeared over the channel's `deposit_radius` with linear falloff. Only
     /// floor cells receive value (deposits don't bleed into rock).
     fn deposit(&mut self, field: FieldId, dungeon: &Dungeon, pos: Vec3, amount: f32) {
-        let radius = self.defs[field.0].deposit_radius.max(0.0);
-        let center = dungeon.world_to_cell(pos);
-        let r = radius.ceil() as i32;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let cell = center + IVec2::new(dx, dy);
-                if !self.in_grid(cell) || !dungeon.is_floor(cell) {
-                    continue;
-                }
-                let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                if dist > radius {
-                    continue;
-                }
-                let falloff = if radius > 0.0 {
-                    1.0 - dist / radius
-                } else {
-                    1.0
-                };
-                let i = self.index(cell);
-                self.channels[field.0][i] += amount * falloff;
-            }
-        }
+        let (w, h) = (self.width, self.height);
+        let channel = &mut self.channels[field.0];
+        deposit_disc(w, h, dungeon, pos, self.defs[field.0].deposit_radius, |i, falloff| {
+            channel[i] += amount * falloff;
+        });
     }
 
     /// One evaporation + diffusion step for every channel (Ch.29 diffusion, ACO evaporation). `dt` in
@@ -304,12 +318,12 @@ impl RallyField {
 
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     #[inline]
     fn in_grid(&self, c: IVec2) -> bool {
-        c.x >= 0 && c.y >= 0 && (c.x as usize) < self.width && (c.y as usize) < self.height
+        crate::util::in_grid(c, self.width, self.height)
     }
 
     /// Local vectorial read at a world position (query). Off-grid reads as `Vec2::ZERO`. Magnitude ≈ the
@@ -326,24 +340,12 @@ impl RallyField {
     /// Accumulate a deposited intermediate-vector `s` (Tang's `c_a·s` term), smeared over `deposit_radius`
     /// with linear falloff. Only floor cells receive value (deposits don't bleed into rock).
     fn deposit(&mut self, dungeon: &Dungeon, pos: Vec3, s: Vec2) {
-        let radius = self.deposit_radius.max(0.0);
-        let center = dungeon.world_to_cell(pos);
-        let r = radius.ceil() as i32;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let cell = center + IVec2::new(dx, dy);
-                if !self.in_grid(cell) || !dungeon.is_floor(cell) {
-                    continue;
-                }
-                let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                if dist > radius {
-                    continue;
-                }
-                let falloff = if radius > 0.0 { 1.0 - dist / radius } else { 1.0 };
-                let i = self.index(cell);
-                self.grid[i] += s * (self.accumulate * falloff);
-            }
-        }
+        let (w, h) = (self.width, self.height);
+        let accumulate = self.accumulate;
+        let grid = &mut self.grid;
+        deposit_disc(w, h, dungeon, pos, self.deposit_radius, |i, falloff| {
+            grid[i] += s * (accumulate * falloff);
+        });
     }
 
     /// One evaporation step: decay every cell toward zero (the `(1 - c_d)` term / the automatic call-off).

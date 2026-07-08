@@ -112,11 +112,15 @@ const SEP_STRENGTH: f32 = 2.5;
 const OBSERVE_DIST: f32 = 3.0;
 /// A unit is "looking directly at" the watcher when the watcher sits within this cosine of the unit's
 /// forward AND within `LOOK_RANGE` with a clear line (see `unit_is_facing`). cos(28°) ≈ 0.88 — a tight,
-/// deliberate gaze, tighter than the gun's 75° front arc (`laser::FRONT_ARC_COS`). So a unit can be
-/// shooting it from an oblique angle *without* "looking directly at it" — which is exactly the moment it
-/// unleashes. The audience effect keys on *believed direct gaze*, not mere presence (Hamilton &
-/// Cañigueral, "The Role of Eye Gaze During Natural Social Interactions", Front. Psychol. 2019,
-/// DOI 10.3389/fpsyg.2019.00560).
+/// deliberate gaze, tighter than the gun's 75° front arc (`laser::FRONT_ARC_COS`). `looked_at` gates the
+/// mood (`next_mood`): hit WHILE looked at → Scared (it conceals under a believed gaze); hit while NOT
+/// looked at → Unleashing. The audience effect keys on *believed direct gaze*, not mere presence
+/// (Hamilton & Cañigueral, "The Role of Eye Gaze During Natural Social Interactions", Front. Psychol.
+/// 2019, DOI 10.3389/fpsyg.2019.00560).
+/// NOTE: today the only hit that can provoke it is a crab bite (`crab::crab_contact_damage`) — the squad's
+/// bolts pass through a Watching boss (intangible until angry; see `laser::update_lasers`), so a unit
+/// cannot yet provoke it. A squad-initiated "forced fire" provoke is a planned future command,
+/// deliberately not wired here (one path: no half-built provoke sitting dormant).
 const LOOK_COS: f32 = 0.88;
 /// Range (cells) a unit's gaze reaches the watcher — the SAME radius the squad can actually see (single
 /// source of truth: `fog::VISION_RADIUS`), so it can only provoke/observe what is in the squad's vision.
@@ -537,17 +541,15 @@ fn rebuild_enemy_field(
     units: Query<&Transform, With<Unit>>,
     mut enemy_field: ResMut<EnemyField>,
 ) {
-    let mut cells: Vec<IVec2> = units
-        .iter()
-        .map(|t| dungeon.world_to_cell(t.translation))
-        .collect();
-    cells.sort_unstable_by_key(|c| (c.x, c.y));
-    cells.dedup();
-    if cells == enemy_field.last_cells {
-        return;
-    }
-    enemy_field.field = FlowField::build_from(&dungeon, &cells).map(Arc::new);
-    enemy_field.last_cells = cells;
+    let enemy_field = &mut *enemy_field;
+    crate::pathfind::rebuild_on_cell_change(
+        units.iter().map(|t| dungeon.world_to_cell(t.translation)),
+        &mut enemy_field.last_cells,
+        false,
+        |cells| {
+            enemy_field.field = FlowField::build_from(&dungeon, cells).map(Arc::new);
+        },
+    );
 }
 
 /// Momentum chase, driven by the brain. An enemy PURSUES its nearest unit — steering along the shared
@@ -941,11 +943,12 @@ fn smiley_reflex(
     }
 }
 
-/// While unleashing, smite the attacker with an instant-kill lightning bolt on a short cadence — a crab
-/// biting it, or (per the locked design) a unit plinking it from an unobserved angle. The victim's own
-/// per-type despawn system (crab/unit) then removes it with the correct death VFX; here we only set
-/// `hp = 0` (pinned) and queue the beam VFX (cosmetic). Deterministic: nearest-by-planar, first-on-tie,
-/// no RNG.
+/// While unleashing, smite the attacker with an instant-kill lightning bolt on a short cadence. The victim
+/// is the boss's real `LastAttacker`: a crab that bit it (crab contact is what provokes it in the first
+/// place), or a unit that shot it AFTER it was already unleashing (squad bolts land only once it is
+/// angry — a Watching boss is intangible). The victim's own per-type despawn system (crab/unit) then
+/// removes it with the correct death VFX; here we only set `hp = 0` (pinned) and queue the beam VFX
+/// (cosmetic). Deterministic: single recorded attacker, no RNG.
 #[allow(clippy::type_complexity)]
 fn smiley_zap(
     mut lightning: ResMut<LightningQueue>,
@@ -976,7 +979,7 @@ fn smiley_zap(
         } else if let Ok((vtf, mut hp)) = units.get_mut(victim) {
             let vpos = vtf.translation;
             (planar_dist(vpos, spos) <= ZAP_RANGE).then(|| {
-                hp.current = 0.0; // a unit that attacked it unobserved (rare, and always the real shooter)
+                hp.current = 0.0; // the unit that shot it once it was unleashing (its real attacker, not a bystander)
                 vpos
             })
         } else {
@@ -1000,15 +1003,19 @@ fn smiley_zap(
 /// up to `CULL_MAX` of them — a mundane devour of bugs, run regardless of observation (it is NOT the
 /// concealed lightning, so it never reveals the true form or breaks concealment). NO heal: the old
 /// per-crab heal turned it into a crab-farming HP fountain. Deterministic: crabs are taken in stable
-/// query-iteration order, no RNG. Emits green ichor gore directly (no SCENT deposit — a scent bloom here
-/// would just magnet more crabs into a feedback loop).
+/// query-iteration order, no RNG.
+///
+/// The cull zeroes each victim's HP and tags it `crate::crab::Culled`, then lets the ONE crab-death
+/// despawner (`crab::crab_despawn_dead`) remove it. A single despawn owner means a crab that is also
+/// killed by a laser or `smiley_zap` the same tick can't be double-despawned / double-gored (the two
+/// systems are unordered across plugins). The `Culled` tag tells that despawner to emit the green-ichor
+/// swat gore but NO SCENT bloom — a scent here would just magnet more crabs into a feedback loop.
 fn smiley_defense(
     time: Res<Time>,
     mut commands: Commands,
-    mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
     mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
-    crabs: Query<(Entity, &Transform), With<crate::crab::Crab>>,
+    mut crabs: Query<(Entity, &Transform, &mut Health), With<crate::crab::Crab>>,
 ) {
     let dt = time.delta_secs();
     for (stf, mut state) in &mut smileys {
@@ -1017,23 +1024,21 @@ fn smiley_defense(
             continue;
         }
         let spos = stf.translation;
-        let biters: Vec<(Entity, Vec3)> = crabs
+        // Only LIVE crabs are cull candidates — a crab already at 0 HP (a laser or `smiley_zap` kill this
+        // tick) is left to `crab_despawn_dead`'s normal death path, so the two never both claim one crab.
+        let biters: Vec<Entity> = crabs
             .iter()
-            .filter(|(_, ctf)| planar_dist(ctf.translation, spos) <= CULL_RADIUS)
-            .map(|(e, ctf)| (e, ctf.translation))
+            .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= CULL_RADIUS)
+            .map(|(e, _, _)| e)
             .collect();
         if biters.len() < CULL_THRESHOLD {
             continue;
         }
-        for (ce, cpos) in biters.into_iter().take(CULL_MAX) {
-            commands.entity(ce).despawn();
-            gore.0.push(GoreEvent {
-                pos: cpos,
-                kind: GoreKind::EnemySplat,
-                tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
-                gib: None,
-                intensity: 0.2,
-            });
+        for ce in biters.into_iter().take(CULL_MAX) {
+            if let Ok((_, _, mut hp)) = crabs.get_mut(ce) {
+                hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
+            }
+            commands.entity(ce).insert(crate::crab::Culled);
         }
         sfx.write(Sfx::ImpactFlesh(spos));
         state.cull_cooldown = CULL_COOLDOWN;

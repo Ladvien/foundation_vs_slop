@@ -50,7 +50,7 @@ impl FogGrid {
 
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     /// Is cell `c` in a unit's *live* line of sight right now? (Not merely explored-and-remembered.)
@@ -129,7 +129,10 @@ fn update_los(
         .collect();
     cells.sort_unstable_by_key(|c| (c.x, c.y));
     if cells == fog.last_cells {
-        fog.dirty = false;
+        // Unit cells unchanged this sub-step: nothing to recompute. Do NOT clear `dirty` here —
+        // FixedUpdate can run several sub-steps per rendered frame, and an earlier sub-step in this
+        // same frame may have set `dirty` for a real visibility change. `apply_floor_fog` (Update)
+        // is the single consumer and clears it once per frame after the material swap.
         return;
     }
     fog.last_cells = cells.clone();

@@ -15,12 +15,10 @@ bevy = "0.19.0"
 ron = "0.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 # Placement grammar (see slop/research/2026-07-05-placement-grammar-implementation.md):
-# one reproducible RNG family across the solver stack. rand/rand_chacha/bevy_rand all resolve to
-# rand_core 0.10, and bevy_rand 0.15 targets bevy 0.19 — so there is a single rand_core and a single
-# Bevy in the tree. rayon parallelises per-region-independent MCMC (Stage 3).
+# one reproducible RNG family across the solver stack. rand + rand_chacha resolve to a single rand_core
+# 0.10 in the tree. rayon parallelises per-region-independent MCMC (Stage 3).
 rand = "0.10"
 rand_chacha = "0.10"
-bevy_rand = "0.15"
 rayon = "1"
 
 # Bevy's recommended dev compile-speed profile: keep our own crate light so

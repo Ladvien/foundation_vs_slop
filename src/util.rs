@@ -2,7 +2,23 @@
 //! same generators aren't copy-pasted across modules (there is deliberately **no RNG crate**). Also the
 //! home of [`nearest_planar`], the one ranking every "nearest target" scan shares.
 
-use bevy::math::{Vec3, Vec3Swizzles};
+use bevy::math::{IVec2, Vec3, Vec3Swizzles};
+
+/// Row-major index of grid cell `c` in a `width`-wide grid (`c.y * width + c.x`). The single indexing
+/// convention every fixed grid in the project shares — `FlowField`, `FogGrid`, `Stig`, `RallyField`, and
+/// `Dungeon` all delegate their `index` here so the row-major layout lives in exactly one place. Assumes
+/// `c` is in-bounds; gate with [`in_grid`] first when the cell may be off-grid.
+#[inline]
+pub fn row_major(c: IVec2, width: usize) -> usize {
+    c.y as usize * width + c.x as usize
+}
+
+/// Is cell `c` inside a `width`×`height` grid (non-negative and below both extents)? The bounds check
+/// paired with [`row_major`], shared by the same grids.
+#[inline]
+pub fn in_grid(c: IVec2, width: usize, height: usize) -> bool {
+    c.x >= 0 && c.y >= 0 && (c.x as usize) < width && (c.y as usize) < height
+}
 
 /// Nearest candidate to `origin` by planar (XZ) distance. Generic over a per-candidate payload (entity,
 /// forward vector, or `()`), so every "nearest target" scan across the AI shares ONE ranking + tie-break

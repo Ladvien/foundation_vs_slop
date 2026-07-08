@@ -36,6 +36,7 @@ pub mod impact_fx;
 pub mod laser;
 pub mod nest;
 pub mod orca;
+pub mod pathfind;
 pub mod placement;
 pub mod rng;
 pub mod selection;
