@@ -9,10 +9,24 @@
 //! One path per configuration (per the project's no-fallback rule): a build selects a policy; there
 //! is no runtime "try RL, fall back to utility".
 
+use bevy::prelude::Resource;
+
 use crate::ai::drives::DRIVE_COUNT;
 use crate::ai::utility::{decide, Behavior, Mode, Perception, TargetKind};
 
 use super::role::RoleId;
+
+/// The selected decision policy for the whole squad, inserted at startup by config (one path — no
+/// runtime fallback). `squad_think` routes every unit's decision through it, so a build swaps the
+/// hand-authored [`UtilityPolicy`] for a learned controller without touching perception or execution.
+#[derive(Resource)]
+pub struct ActivePolicy(pub Box<dyn SquadPolicy>);
+
+impl Default for ActivePolicy {
+    fn default() -> Self {
+        ActivePolicy(Box::new(UtilityPolicy))
+    }
+}
 
 /// Distance normaliser for the observation vector (world units → ~[0,1] over a room-ish span).
 const DIST_SCALE: f32 = 32.0;

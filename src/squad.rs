@@ -20,6 +20,11 @@ use crate::flowfield::FlowField;
 use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::orca::{self, Agent};
+use crate::ai::brain::{ActiveBehavior, ThinkTimer};
+use crate::ai::drives::Drives;
+use crate::squad_ai::cohesion::DesiredMove;
+use crate::squad_ai::persona::default_personas;
+use crate::squad_ai::role::RoleId;
 
 /// Marker for a squad member (the RTS unit; replaces the old single-agent `Player`).
 #[derive(Component)]
@@ -206,8 +211,14 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
         .take(5)
         .collect();
 
+    // The role + persona roster, index-matched to spawn order (member i plays role i).
+    let personas = default_personas();
+
     for (i, &cell) in cells.iter().enumerate() {
         let outfit = OUTFITS[i];
+        // Per-unit decision seed from the spawn index (deterministic; never from position, mirroring
+        // the crab/scout convention in `ai::brain`).
+        let seed = (i as u32).wrapping_add(1);
         commands
             .spawn((
                 Unit,
@@ -217,6 +228,16 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
                 Health::new(UNIT_HP),
                 Outfit(outfit),
+                // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
+                // decision + think throttle, and the autonomous movement goal (see `squad_ai`).
+                (
+                    RoleId::ALL[i],
+                    personas[i].clone(),
+                    Drives::new(),
+                    ActiveBehavior::new(seed),
+                    ThinkTimer::staggered(seed),
+                    DesiredMove::default(),
+                ),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
                 Transform::from_translation(dungeon.cell_center(cell))
                     .with_scale(Vec3::splat(FIGURINE_SCALE)),
@@ -329,8 +350,12 @@ fn recolor_units(
     }
 }
 
-/// Advance each commanded unit: preferred velocity from the shared flow field → ORCA around the
-/// other units → wall collision. Idle units hold position but are still avoided.
+/// Advance each unit: preferred velocity → ORCA around the other units → wall collision. The
+/// preferred velocity comes from *either* an authoritative player [`MoveOrder`] (flow-field steer,
+/// the original path — unchanged) *or*, for an order-less unit, the squad AI's [`DesiredMove`] goal
+/// (a straight steer toward the goal; walls are handled by `resolve_move`). A unit with neither holds
+/// position. This is the single hook where the autonomous role/cohesion layer feeds the same ORCA
+/// pipeline the player commands use (see `squad_ai::perception::squad_think`).
 fn unit_movement(
     mut commands: Commands,
     time: Res<Time>,
@@ -342,6 +367,7 @@ fn unit_movement(
             &MoveSpeed,
             &mut Velocity,
             Option<&mut MoveOrder>,
+            Option<&mut crate::squad_ai::cohesion::DesiredMove>,
         ),
         With<Unit>,
     >,
@@ -362,41 +388,47 @@ fn unit_movement(
     }
 
     // Snapshot every unit as an ORCA agent using last frame's velocity (synchronous update: all
-    // solves see the same prior state). A unit with an order `avoids` — it reciprocates; an idle
-    // unit does not, so movers take full responsibility going around it.
+    // solves see the same prior state). A unit that is moving — under a player order OR an AI goal —
+    // `avoids` (it reciprocates); a truly idle unit does not, so movers take full responsibility
+    // going around it.
     let agents: Vec<(Entity, Agent)> = units
         .iter()
-        .map(|(e, t, _, v, order)| {
+        .map(|(e, t, _, v, order, desired)| {
+            let moving = order.is_some() || desired.is_some_and(|d| d.goal.is_some());
             (
                 e,
                 Agent {
                     pos: t.translation.xz(),
                     vel: v.0,
                     radius: ORCA_RADIUS,
-                    avoids: order.is_some(),
+                    avoids: moving,
                 },
             )
         })
         .collect();
 
-    for (entity, mut transform, speed, mut velocity, order) in &mut units {
-        let Some(mut order) = order else {
-            velocity.0 = Vec2::ZERO; // idle → at rest (still advertised to ORCA next frame)
-            continue;
-        };
-
+    for (entity, mut transform, speed, mut velocity, mut order, mut desired) in &mut units {
         let pos = transform.translation;
         let self_pos = pos.xz();
-        let goal_xz = dungeon.cell_center(order.field.goal()).xz();
-        let goal_dist = (goal_xz - self_pos).length();
 
         // Encumbrance: crabs clinging to this unit drag its top speed down (never to a dead stop).
         let crabs = crab_load.get(&entity).copied().unwrap_or(0);
         let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * CRAB_DRAG)).max(MIN_ENCUMBER);
 
-        // Preferred velocity: steer toward the flow-field look-ahead point on the cell centerline
-        // (keeps the unit centered in corridors so its body fits through), at full (encumbered) speed.
-        let pref = order.field.steer(&dungeon, pos) * max_speed;
+        // Preferred velocity + goal from the authoritative source. Player order first (unchanged flow-
+        // field steer); else the AI goal (straight steer); else hold.
+        let (pref, goal_xz) = if let Some(order) = &order {
+            // Flow-field look-ahead on the cell centerline (keeps the unit centered in corridors).
+            let g = dungeon.cell_center(order.field.goal()).xz();
+            (order.field.steer(&dungeon, pos) * max_speed, g)
+        } else if let Some(goal) = desired.as_ref().and_then(|d| d.goal) {
+            let g = goal.xz();
+            ((g - self_pos).normalize_or_zero() * max_speed, g)
+        } else {
+            velocity.0 = Vec2::ZERO; // idle → at rest (still advertised to ORCA next frame)
+            continue;
+        };
+        let goal_dist = (goal_xz - self_pos).length();
 
         // ORCA neighbors, plus: is a *settled* unit (no order) sitting just ahead of me toward the
         // goal? If so and I can't progress, I've reached the back of the arrived blob and pack in.
@@ -454,28 +486,35 @@ fn unit_movement(
         // Integrate the ORCA velocity against walls (unit↔wall is the resolver's job, not ORCA's).
         let delta = Vec3::new(new_vel.x, 0.0, new_vel.y) * dt;
         transform.translation = dungeon.resolve_move(pos, delta, UNIT_HALF_EXTENTS);
-
-        // Progress-based stall: the timer only resets when the unit gets genuinely closer to the
-        // goal, so a unit shoved in circles at non-zero speed still eventually counts as stalled.
         let new_goal_dist = (goal_xz - transform.translation.xz()).length();
-        if new_goal_dist < order.best_dist - PROGRESS_EPS {
-            order.best_dist = new_goal_dist;
-            order.no_progress_time = 0.0;
-        } else {
-            order.no_progress_time += dt;
-        }
 
-        // Arrival: reached the goal, or packed in — stalled *and* either right at the goal or wedged
-        // behind the settled blob. Because settled units exist only at the goal (no mid-route give-up),
-        // `blocked_by_settled` can only become true once a unit reaches the back of that blob, so the
-        // blob grows outward from the goal and never nucleates a stall in the middle of a hallway.
-        let packed = order.no_progress_time >= PACK_STUCK_TIME
-            && (goal_dist < PACK_RADIUS || blocked_by_settled);
-        let arrived = goal_dist < ARRIVE_RADIUS || packed;
-        if arrived {
-            commands.entity(entity).remove::<MoveOrder>();
+        if let Some(order) = order.as_mut() {
+            // --- Player-order arrival (unchanged): progress-based stall + packed-in blob. ---
+            // The timer only resets when the unit gets genuinely closer to the goal, so a unit shoved
+            // in circles at non-zero speed still eventually counts as stalled.
+            if new_goal_dist < order.best_dist - PROGRESS_EPS {
+                order.best_dist = new_goal_dist;
+                order.no_progress_time = 0.0;
+            } else {
+                order.no_progress_time += dt;
+            }
+            // Arrival: reached the goal, or packed in — stalled *and* either right at the goal or
+            // wedged behind the settled blob. Because settled units exist only at the goal (no mid-
+            // route give-up), `blocked_by_settled` can only become true once a unit reaches the back
+            // of that blob, so the blob grows outward from the goal and never nucleates a stall mid-hall.
+            let packed = order.no_progress_time >= PACK_STUCK_TIME
+                && (goal_dist < PACK_RADIUS || blocked_by_settled);
+            if goal_dist < ARRIVE_RADIUS || packed {
+                commands.entity(entity).remove::<MoveOrder>();
+                velocity.0 = Vec2::ZERO;
+            }
+        } else if new_goal_dist < ARRIVE_RADIUS {
+            // --- AI-goal arrival: reached the cohesion/role goal → clear it and hold (no blob/stall
+            // logic; autonomous goals are short-range and re-planned each think). ---
+            if let Some(d) = desired.as_mut() {
+                d.goal = None;
+            }
             velocity.0 = Vec2::ZERO;
-            continue;
         }
 
         // Facing is handled centrally by `unit_facing` (below) for ALL units — moving OR idle — so a

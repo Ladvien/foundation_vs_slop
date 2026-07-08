@@ -15,21 +15,43 @@
 
 use bevy::prelude::*;
 
+pub mod cohesion;
+pub mod perception;
 pub mod persona;
 pub mod policy;
 pub mod role;
 
+use cohesion::{SquadAnchor, SquadControlMode};
+use policy::ActivePolicy;
 use role::RoleBrains;
 
 pub struct SquadAiPlugin;
 
 impl Plugin for SquadAiPlugin {
     fn build(&self, app: &mut App) {
-        // The role repertoires are built once at startup (mirrors `ai::brain::init_brains`). RON
-        // overrides from `assets/config/roles.ron` are overlaid here when present — a missing file is
-        // not an error (the code-literal defaults are a complete, playable set), but a malformed file
-        // fails loudly rather than silently shipping bad brains (no fallback path).
-        app.add_systems(Startup, init_role_brains);
+        app
+            // Selected decision policy (default = the hand-authored dual-utility role brain) and the
+            // control mode (default = fully autonomous; a one-line change flips to between-orders).
+            .init_resource::<ActivePolicy>()
+            .init_resource::<SquadControlMode>()
+            .init_resource::<SquadAnchor>()
+            // The role repertoires are built once at startup (mirrors `ai::brain::init_brains`). RON
+            // overrides from `assets/config/roles.ron` are overlaid here when present — a missing file
+            // is not an error (the code-literal defaults are a complete, playable set), but a malformed
+            // file fails loudly rather than silently shipping bad brains (no fallback path).
+            .add_systems(Startup, init_role_brains)
+            // Pinned squad AI on `FixedUpdate`: recompute the group anchor before the squad decides,
+            // then decide + resolve movement goals in `AiSet::Think` (after the fog LOS this tick, like
+            // the creature `think`). `squad::unit_movement` consumes the resulting `DesiredMove`.
+            .add_systems(
+                FixedUpdate,
+                (
+                    cohesion::update_anchor.before(crate::ai::AiSet::Think),
+                    perception::squad_think
+                        .in_set(crate::ai::AiSet::Think)
+                        .after(crate::fog::LosWritten),
+                ),
+            );
     }
 }
 
