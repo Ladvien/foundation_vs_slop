@@ -540,17 +540,15 @@ fn rebuild_enemy_field(
     units: Query<&Transform, With<Unit>>,
     mut enemy_field: ResMut<EnemyField>,
 ) {
-    let mut cells: Vec<IVec2> = units
-        .iter()
-        .map(|t| dungeon.world_to_cell(t.translation))
-        .collect();
-    cells.sort_unstable_by_key(|c| (c.x, c.y));
-    cells.dedup();
-    if cells == enemy_field.last_cells {
-        return;
-    }
-    enemy_field.field = FlowField::build_from(&dungeon, &cells).map(Arc::new);
-    enemy_field.last_cells = cells;
+    let enemy_field = &mut *enemy_field;
+    crate::pathfind::rebuild_on_cell_change(
+        units.iter().map(|t| dungeon.world_to_cell(t.translation)),
+        &mut enemy_field.last_cells,
+        false,
+        |cells| {
+            enemy_field.field = FlowField::build_from(&dungeon, cells).map(Arc::new);
+        },
+    );
 }
 
 /// Momentum chase, driven by the brain. An enemy PURSUES its nearest unit — steering along the shared

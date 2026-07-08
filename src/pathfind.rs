@@ -11,8 +11,29 @@
 
 use std::collections::BinaryHeap;
 
+use bevy::math::IVec2;
+
 /// Cost of a node no source can reach. The shared sentinel both fields test against.
 pub const UNREACHABLE: u32 = u32::MAX;
+
+/// The shared pursuit-field rebuild gate. Collects `cells`, canonicalizes them (sort by `(x, y)` +
+/// dedup), and — if the set changed since `last`, or `force` is set (e.g. the field isn't built yet) —
+/// calls `build(&cells)` and stores the new set in `last`. Keeps the "tracked cells unchanged ⇒ skip the
+/// O(cells) rebuild" policy (the fog system's trick) in one place for both the crab surface field and the
+/// enemy flow field, which otherwise hand-rolled the same collect/sort/dedup/compare/store boilerplate.
+pub fn rebuild_on_cell_change<F>(cells: impl Iterator<Item = IVec2>, last: &mut Vec<IVec2>, force: bool, build: F)
+where
+    F: FnOnce(&[IVec2]),
+{
+    let mut current: Vec<IVec2> = cells.collect();
+    current.sort_unstable_by_key(|c| (c.x, c.y));
+    current.dedup();
+    if !force && current == *last {
+        return;
+    }
+    build(&current);
+    *last = current;
+}
 
 /// Min-heap entry ordered so [`BinaryHeap`] pops the lowest cost first (reversed `Ord`). It compares on
 /// `cost` only — the produced cost array does not depend on how equal-cost ties pop, so this stays

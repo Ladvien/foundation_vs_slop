@@ -669,23 +669,22 @@ fn rebuild_crab_field(
 ) {
     let Some(graph) = graph else { return };
 
-    let mut cells: Vec<IVec2> = units
-        .iter()
-        .map(|t| dungeon.world_to_cell(t.translation))
-        .collect();
-    cells.sort_by(|a, b| (a.x, a.y).cmp(&(b.x, b.y)));
-    cells.dedup();
-
-    if cells == crab_field.last_cells && crab_field.field.is_some() {
-        return;
-    }
-
-    let sources: Vec<u32> = cells
-        .iter()
-        .filter_map(|&c| graph.floor_patch_cell(c))
-        .collect();
-    crab_field.field = SurfaceField::build(&graph, &sources).map(Arc::new);
-    crab_field.last_cells = cells;
+    let crab_field = &mut *crab_field;
+    // `force` when the field isn't built yet, so a first run (or a graph that wasn't ready) still builds
+    // even though the unit cells haven't moved — matches the old `&& field.is_some()` skip guard.
+    let force = crab_field.field.is_none();
+    crate::pathfind::rebuild_on_cell_change(
+        units.iter().map(|t| dungeon.world_to_cell(t.translation)),
+        &mut crab_field.last_cells,
+        force,
+        |cells| {
+            let sources: Vec<u32> = cells
+                .iter()
+                .filter_map(|&c| graph.floor_patch_cell(c))
+                .collect();
+            crab_field.field = SurfaceField::build(&graph, &sources).map(Arc::new);
+        },
+    );
 }
 
 /// Move every crab one step along the surface toward the nearest unit, transferring between patches and
