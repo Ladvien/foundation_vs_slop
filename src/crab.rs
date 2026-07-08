@@ -1404,41 +1404,51 @@ fn crab_despawn_dead(
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
-    crabs: Query<(Entity, &Health, &Transform, Option<&Culled>), With<Crab>>,
+    crabs: Query<(Entity, &Health, &Transform, Option<&Culled>, &CrabSeed), With<Crab>>,
 ) {
-    for (entity, hp, tf, culled) in &crabs {
-        if hp.current <= 0.0 {
-            if culled.is_some() {
-                // Boss cull (`smiley_defense`): green-ichor swat, and deliberately NO SCENT deposit — a
-                // scent bloom here would magnet more crabs into a feeding feedback loop. No per-crab death
-                // sfx either (the boss already played one batched swat for the whole cull).
-                gore.0.push(GoreEvent {
-                    pos: tf.translation,
-                    kind: GoreKind::EnemySplat,
-                    tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
-                    gib: None,
-                    intensity: 0.2,
-                });
-            } else {
-                gore.0.push(GoreEvent {
-                    pos: tf.translation,
-                    kind: GoreKind::EnemySplat,
-                    tint: Color::srgb(0.35, 0.6, 0.15), // sickly green crab ichor
-                    gib: None,
-                    // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
-                    // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
-                    intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
-                });
-                // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
-                deposits.0.push(crate::ai::field::Deposit {
-                    pos: tf.translation,
-                    field: crate::ai::field::FieldId::SCENT,
-                    amount: crate::ai::field::BLOOD_SCENT,
-                });
-                sfx.write(Sfx::EnemyDeath(tf.translation));
-            }
-            commands.entity(entity).despawn();
+    // Emit gore + despawn deaths in a STABLE order (by `CrabSeed`, unique+deterministic), NOT crab query
+    // order — which is not reproducible across same-seed runs (see `util::nearest_planar`). The gore
+    // drain stamps each meat chunk with a per-event seed counter, and the ECS entity free-list reuses
+    // these just-freed ids; both depend on THIS order, so an unsorted pass gives meat chunks
+    // nondeterministic spawn params AND a nondeterministic gib table/query order, which then makes the
+    // crab foraging assignment (`assign_meat_targets`) diverge and breaks the physics-free replay hash.
+    let mut dead: Vec<(u32, Entity, Vec3, bool)> = crabs
+        .iter()
+        .filter(|(_, hp, _, _, _)| hp.current <= 0.0)
+        .map(|(e, _, tf, culled, seed)| (seed.0, e, tf.translation, culled.is_some()))
+        .collect();
+    dead.sort_unstable_by_key(|(seed, _, _, _)| *seed);
+    for (_, entity, pos, culled) in dead {
+        if culled {
+            // Boss cull (`smiley_defense`): green-ichor swat, and deliberately NO SCENT deposit — a
+            // scent bloom here would magnet more crabs into a feeding feedback loop. No per-crab death
+            // sfx either (the boss already played one batched swat for the whole cull).
+            gore.0.push(GoreEvent {
+                pos,
+                kind: GoreKind::EnemySplat,
+                tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
+                gib: None,
+                intensity: 0.2,
+            });
+        } else {
+            gore.0.push(GoreEvent {
+                pos,
+                kind: GoreKind::EnemySplat,
+                tint: Color::srgb(0.35, 0.6, 0.15), // sickly green crab ichor
+                gib: None,
+                // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
+                // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
+                intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
+            });
+            // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
+            deposits.0.push(crate::ai::field::Deposit {
+                pos,
+                field: crate::ai::field::FieldId::SCENT,
+                amount: crate::ai::field::BLOOD_SCENT,
+            });
+            sfx.write(Sfx::EnemyDeath(pos));
         }
+        commands.entity(entity).despawn();
     }
 }
 
@@ -1756,8 +1766,17 @@ fn crab_seek_meat(
 /// are the ONLY mutators of `Carryable.carriers` (one-path ownership). Holland & Melhuish 1999
 /// (stigmergic clustering); Dorigo ACO (recruitment by trail).
 fn assign_meat_targets(
-    mut crabs: Query<(Entity, &CrabMotion, &mut CrabCarry, &crate::ai::brain::ActiveBehavior), With<Crab>>,
-    mut gibs: Query<(Entity, &Transform, &mut crate::gore::Carryable)>,
+    mut crabs: Query<
+        (
+            Entity,
+            &CrabMotion,
+            &mut CrabCarry,
+            &crate::ai::brain::ActiveBehavior,
+            &CrabSeed,
+        ),
+        With<Crab>,
+    >,
+    mut gibs: Query<(Entity, &Transform, &mut crate::gore::Carryable, &crate::gore::GibKey)>,
 ) {
     // Drop targets whose gib no longer exists (e.g. capped out of the ring mid-haul) so the crab
     // re-forages. Clearing `hauling` alongside `target` is essential: a lone `target = None` strands a
@@ -1765,7 +1784,7 @@ fn assign_meat_targets(
     // mode — latched with no chunk to carry. The brain then never leaves Carry, so it steers nowhere
     // (`target` is None), `release_uncommitted_carriers` can't recover it (Carry counts as
     // "committed"), and `carry_gibs` never touches it (the gib is gone) — the crab freezes forever.
-    for (_, _, mut cc, _) in &mut crabs {
+    for (_, _, mut cc, _, _) in &mut crabs {
         if let Some(g) = cc.target {
             if gibs.get(g).is_err() {
                 cc.target = None;
@@ -1782,17 +1801,23 @@ fn assign_meat_targets(
     }
 
     // Snapshot per-crab capacity — summing a gib's committed crew capacity needs every carrier's value.
-    let caps: HashMap<Entity, f32> = crabs.iter().map(|(e, _, c, _)| (e, c.capacity)).collect();
+    let caps: HashMap<Entity, f32> = crabs.iter().map(|(e, _, c, _, _)| (e, c.capacity)).collect();
 
     // Snapshot each gib: position, weight, whether it's already being hauled, and its current committed
     // capacity. `committed` is mutated as we enlist crabs this tick so several seekers don't over-crew.
     let mut committed: HashMap<Entity, f32> = HashMap::new();
-    let mut gib_snap: Vec<(Entity, Vec3, f32, bool)> = gibs
+    let mut gib_snap: Vec<(Entity, Vec3, f32, bool, u64)> = gibs
         .iter()
-        .map(|(e, tf, c)| {
-            let sum: f32 = c.carriers.iter().filter_map(|x| caps.get(x)).sum();
+        .map(|(e, tf, c, key)| {
+            // Sum the crew's capacities in a canonical (ascending) order, NOT `carriers` Vec order. The
+            // sum feeds the `committed >= weight` lift/commit gate below, and float addition is
+            // non-associative, so summing in enumeration order lets a carrier-order difference flip that
+            // gate at the boundary — diverging which crab commits, and the physics-free replay hash.
+            let mut caps_v: Vec<u32> = c.carriers.iter().filter_map(|x| caps.get(x)).map(|v| v.to_bits()).collect();
+            caps_v.sort_unstable();
+            let sum: f32 = caps_v.into_iter().map(f32::from_bits).sum();
             committed.insert(e, sum);
-            (e, tf.translation, c.weight, c.phase == crate::gore::CarryPhase::Hauling)
+            (e, tf.translation, c.weight, c.phase == crate::gore::CarryPhase::Hauling, key.0)
         })
         .collect();
     // Determinism: gib enumeration follows entity spawn / ID-reuse order, which is NOT a stable
@@ -1801,25 +1826,27 @@ fn assign_meat_targets(
     // an exact distance tie it would commit a crab to a different chunk per run, diverging crab targets
     // and cascading into the physics-free replay hash (`deterministic_core_is_bit_identical`). Sort by
     // world position — a stable key independent of entity order — so the choice depends only on geometry.
-    gib_snap.sort_unstable_by_key(|(_, p, _, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    gib_snap.sort_unstable_by_key(|&(_, p, _, _, key)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), key));
 
-    // Seeking crabs that still need a chunk. Sorted by world position: the enlist loop below is greedy
-    // and stateful (each commit bumps `committed`, so who picks first decides who gets the last slot on a
-    // contested chunk), so processing seekers in crab QUERY order would make the assignment depend on
-    // entity order — not reproducible across same-seed runs (see `util::nearest_planar`). A stable
-    // position order makes the crew assignment deterministic.
-    let mut seekers: Vec<(Entity, Vec3)> = crabs
+    // Seeking crabs that still need a chunk. The enlist loop below is greedy and stateful (each commit
+    // bumps `committed`, so who picks first decides who gets the last slot on a contested chunk), and it
+    // pushes carriers whose per-crab (±20%) capacities are then summed non-associatively — so the
+    // processing order must be a STABLE TOTAL order. Crab QUERY order isn't reproducible across same-seed
+    // runs (see `util::nearest_planar`); world position alone still ties when two crabs sit on the exact
+    // same point (early, pre-dispersal), and `sort_unstable` would then break that tie by unstable entity
+    // order. Fall back to the stable, unique `CrabSeed` so the whole assignment is deterministic.
+    let mut seekers: Vec<(Entity, Vec3, u32)> = crabs
         .iter()
-        .filter(|(_, _, c, ab)| {
+        .filter(|(_, _, c, ab, _)| {
             matches!(ab.mode, crate::ai::utility::Mode::SeekMeat) && c.target.is_none()
         })
-        .map(|(e, m, _, _)| (e, m.pos))
+        .map(|(e, m, _, _, seed)| (e, m.pos, seed.0))
         .collect();
-    seekers.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    seekers.sort_unstable_by_key(|(_, p, seed)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed));
 
-    for (crab_e, cpos) in seekers {
+    for (crab_e, cpos, _) in seekers {
         let mut best: Option<(Entity, f32)> = None;
-        for &(ge, gpos, weight, hauling) in &gib_snap {
+        for &(ge, gpos, weight, hauling, _) in &gib_snap {
             if hauling {
                 continue;
             }
@@ -1837,7 +1864,7 @@ fn assign_meat_targets(
         let Some((ge, _)) = best else { continue };
 
         // Commit: enlist on the gib and record the target on the crab.
-        if let Ok((_, _, mut carry)) = gibs.get_mut(ge) {
+        if let Ok((_, _, mut carry, _)) = gibs.get_mut(ge) {
             if !carry.carriers.contains(&crab_e) {
                 carry.carriers.push(crab_e);
             }
@@ -1845,7 +1872,7 @@ fn assign_meat_targets(
                 carry.phase = crate::gore::CarryPhase::Crewing;
             }
         }
-        if let Ok((_, _, mut cc, _)) = crabs.get_mut(crab_e) {
+        if let Ok((_, _, mut cc, _, _)) = crabs.get_mut(crab_e) {
             cc.target = Some(ge);
         }
         // Count this crab's capacity so later seekers this tick see the fuller crew.
@@ -1931,16 +1958,24 @@ fn carry_gibs(
         // carrier — that's what sustains an in-progress haul (a chaser lagging a little mustn't drop it).
         // Requiring the gathered capacity (not the whole roster) to lift avoids a deadlock where one
         // straggler that can't path to the chunk keeps a full-strength crew from ever lifting.
-        let mut cap_here = 0.0;
-        let mut cap_total = 0.0;
+        // Sum crew capacities in a canonical (ascending) order, NOT `carriers` Vec order: these feed the
+        // `cap_here >= weight` lift gate, and float addition is non-associative, so an enumeration-order
+        // difference would flip the lift at the boundary and diverge the replay hash (see
+        // `assign_meat_targets`).
+        let mut here_caps: Vec<u32> = Vec::new();
+        let mut total_caps: Vec<u32> = Vec::new();
         for &c in &carry.carriers {
             if let Ok((ctf, cc)) = crabs.get(c) {
-                cap_total += cc.capacity;
+                total_caps.push(cc.capacity.to_bits());
                 if ctf.translation.xz().distance(gtf.translation.xz()) <= GRAB_RANGE {
-                    cap_here += cc.capacity;
+                    here_caps.push(cc.capacity.to_bits());
                 }
             }
         }
+        total_caps.sort_unstable();
+        here_caps.sort_unstable();
+        let cap_total: f32 = total_caps.into_iter().map(f32::from_bits).sum();
+        let cap_here: f32 = here_caps.into_iter().map(f32::from_bits).sum();
         let has_crew = !carry.carriers.is_empty();
 
         match carry.phase {
@@ -1958,11 +1993,21 @@ fn carry_gibs(
                     // home) uses `nest.pos`; ranking by the dome could commit the haul to a nest whose
                     // delivery cell is across a wall, so the flow field returns nothing and the chunk
                     // gets dragged straight through it. Match the deliver check's horizontal distance.
-                    let mut best_d = f32::INFINITY;
+                    // Determinism: break an exact distance tie by the nest's delivery position, not the
+                    // nest query order (unstable across same-seed runs — see `util::nearest_planar`); the
+                    // chosen nest sets the haul destination and steers the whole crew.
+                    let mut best: Option<(f32, Vec3)> = None;
                     for (ne, _ntf, nest) in nests.iter() {
                         let d = (nest.pos - gtf.translation).with_y(0.0).length();
-                        if d < best_d {
-                            best_d = d;
+                        let better = match best {
+                            None => true,
+                            Some((bd, bp)) => {
+                                (d.to_bits(), nest.pos.x.to_bits(), nest.pos.z.to_bits())
+                                    < (bd.to_bits(), bp.x.to_bits(), bp.z.to_bits())
+                            }
+                        };
+                        if better {
+                            best = Some((d, nest.pos));
                             dest = Some(ne);
                         }
                     }
@@ -2141,12 +2186,20 @@ fn deposit_meat_scent(
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
 ) {
     let amount = MEAT_RATE * time.delta_secs();
-    for (tf, carry) in &gibs {
-        if carry.phase == crate::gore::CarryPhase::Hauling {
-            continue; // in-transit chunk — don't trail meat scent to the nest
-        }
+    // Determinism: gibs enumerate in unstable entity order (see `util::nearest_planar`). Each MEAT
+    // deposit spreads over a disc, so overlapping chunks accumulate into shared field cells; pushing
+    // them in enumeration order makes the summed gradient depend on that order (float `+=` is
+    // non-associative), drifting swarm steering enough to break the replay hash. Emit in a stable
+    // position order so the MEAT field depends only on WHERE the chunks are.
+    let mut positions: Vec<Vec3> = gibs
+        .iter()
+        .filter(|(_, carry)| carry.phase != crate::gore::CarryPhase::Hauling)
+        .map(|(tf, _)| tf.translation)
+        .collect();
+    positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
-            pos: tf.translation,
+            pos,
             field: crate::ai::field::FieldId::MEAT,
             amount,
         });
