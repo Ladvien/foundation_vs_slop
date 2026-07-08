@@ -1,0 +1,50 @@
+//! Squad AI — SCP Mobile-Task-Force **roles** on top of the shared dual-utility engine (`crate::ai`).
+//!
+//! The engine (`ai::utility` decide + `ai::brain` glue) already drives crabs and the boss; this plugin
+//! gives the player squad the same treatment, specialised into stereotyped-but-customisable roles, plus
+//! the squad-only concerns the creatures don't need:
+//!   - **[`role`]** — the five role repertoires (data literals + `roles.ron` overrides).
+//!   - **[`persona`]** — speaker identity for dialogue.
+//!   - **[`policy`]** — the `(Observation, Action)` seam so a learned controller can replace the
+//!     hand-authored brain (RL-readiness; Bergdahl et al. 2021, Wu et al. 2019).
+//!
+//! Design lineage is the same layered-hybrid as `ai::mod` (Dill utility + Colledanchise & Ögren
+//! modularity + Reynolds/Game-AI-Pro group navigation for cohesion). Perception, decision, cohesion,
+//! actions, dialogue, and the RL/QD harness land as the plugin grows; this module currently wires the
+//! role/persona data model and the policy seam.
+
+use bevy::prelude::*;
+
+pub mod persona;
+pub mod policy;
+pub mod role;
+
+use role::RoleBrains;
+
+pub struct SquadAiPlugin;
+
+impl Plugin for SquadAiPlugin {
+    fn build(&self, app: &mut App) {
+        // The role repertoires are built once at startup (mirrors `ai::brain::init_brains`). RON
+        // overrides from `assets/config/roles.ron` are overlaid here when present — a missing file is
+        // not an error (the code-literal defaults are a complete, playable set), but a malformed file
+        // fails loudly rather than silently shipping bad brains (no fallback path).
+        app.add_systems(Startup, init_role_brains);
+    }
+}
+
+/// Insert the role-brain registry, overlaying any `assets/config/roles.ron` overrides.
+fn init_role_brains(mut commands: Commands) {
+    let mut brains = RoleBrains::defaults();
+    match std::fs::read_to_string("assets/config/roles.ron") {
+        Ok(src) => match role::parse_roles_ron(&src) {
+            Ok(defs) => brains.overlay(defs),
+            // Malformed override is a loud error, not a silent fallback — the author asked for a change
+            // and must see it failed. The defaults still load so the game runs.
+            Err(e) => error!("assets/config/roles.ron is malformed, using role defaults: {e}"),
+        },
+        // No override file → defaults only (the expected common case; not logged as an error).
+        Err(_) => {}
+    }
+    commands.insert_resource(brains);
+}

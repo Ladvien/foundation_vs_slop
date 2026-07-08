@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use super::drives::{DriveId, Drives};
 use super::field::{FieldId, Stig};
 use super::utility::{
-    decide, Behavior, Consideration, Curve, Fact, Input, Mode, Perception, TargetKind,
+    decide, Behavior, Consideration, Curve, Fact, Input, Mode, Perception, SquadFields, TargetKind,
 };
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
@@ -232,6 +232,9 @@ pub fn think(
             } else {
                 0.0
             },
+            // Crabs and the boss have no squad context — neutral unit fields (the squad brains never
+            // run here; `think` is `Without<Unit>`).
+            squad: SquadFields::neutral(),
         };
 
         let brain = match brain_id {
@@ -254,6 +257,11 @@ pub fn think(
             // toward its current position). Rally movement itself reads the local vector in `crab_rally`,
             // so the Rally behaviour needs no aim point here.
             TargetKind::TrackedPrey => scout.and_then(|s| s.tracked_prey()),
+            // Squad-unit targets are resolved by `squad_ai::squad_think`, never by a crab/boss brain.
+            TargetKind::SquadAnchor
+            | TargetKind::NearestExaminable
+            | TargetKind::NearestWoundedAlly
+            | TargetKind::TrackedThreat => None,
         };
     }
 }

@@ -48,6 +48,7 @@ pub mod sim_harness;
 #[cfg(feature = "test-harness")]
 pub mod visual_regression;
 pub mod squad;
+pub mod squad_ai;
 pub mod surface_nav;
 pub mod time_control;
 pub mod ui;
@@ -114,7 +115,7 @@ pub fn run() {
             (dungeon::DungeonPlugin, placement::PlacementPlugin),
             world::WorldPlugin,
             camera::CameraPlugin,
-            squad::SquadPlugin,
+            (squad::SquadPlugin, squad_ai::SquadAiPlugin),
             selection::SelectionPlugin,
             fog::FogPlugin,
             health::HealthPlugin,

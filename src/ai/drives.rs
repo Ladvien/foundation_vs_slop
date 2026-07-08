@@ -8,12 +8,14 @@
 //! by id, and every creature carries the full array.
 
 use bevy::prelude::*;
+use serde::Deserialize;
 
 use super::field::{FieldId, Stig};
 use crate::dungeon::Dungeon;
 
 /// A need, addressed by a stable slot index. Extend by adding a const + bumping [`DRIVE_COUNT`].
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `Deserialize` so squad role brains can name a drive (`Drive((2))` = CURIOSITY) in `roles.ron`.
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct DriveId(pub usize);
 
 impl DriveId {
@@ -23,10 +25,19 @@ impl DriveId {
     // crab but read by no behaviour (pure waste), and Reynolds separation in `crab_locomotion` already
     // provides the physical dispersal it was meant to model. Breeding reads the CRAB_DENSITY *field*
     // directly (`nest_reproduce`), not a per-agent drive.
+
+    // --- Squad-unit drives (used by role brains; crabs & the boss carry the slots but ignore them). ---
+    /// Rises near unexamined things → pushes the Researcher to Examine.
+    pub const CURIOSITY: DriveId = DriveId(2);
+    /// Rises with distance from the squad anchor → pulls a strayed unit to Regroup.
+    pub const COHESION: DriveId = DriveId(3);
+    /// Squad morale; damped by fear, restored by the Psionic's Ward and by regrouping.
+    pub const MORALE: DriveId = DriveId(4);
 }
 
-/// Number of drive slots. Bump when adding a [`DriveId`].
-pub const DRIVE_COUNT: usize = 2;
+/// Number of drive slots. Bump when adding a [`DriveId`]. Slots 2–4 are squad-unit drives; crabs and
+/// the boss carry the wider array but their brains reference only HUNGER/FEAR.
+pub const DRIVE_COUNT: usize = 5;
 
 /// Per-agent need scalars, each clamped to `[0, 1]`. Every creature carries the full array; a brain
 /// reads only the drives its behaviours reference.
