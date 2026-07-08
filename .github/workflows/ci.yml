@@ -75,12 +75,20 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install Bevy + software-GL dependencies
+      - name: Install Bevy + software-Vulkan (lavapipe) dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # NOTE: no --no-install-recommends here — mesa-vulkan-drivers pulls the lavapipe ICD +
+          # runtime via recommends; stripping them is what left the loader with "Found no drivers".
+          sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             mesa-vulkan-drivers libvulkan1 vulkan-tools
+      - name: Sanity-check the software Vulkan device is discoverable
+        # If this can't see lavapipe (reports device "llvmpipe"), the harness step below will fail with
+        # "Unable to find a GPU" — surface *why* here rather than deep in a bevy panic.
+        run: |
+          ls -l /usr/share/vulkan/icd.d/
+          vulkaninfo --summary | grep -i llvmpipe
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
@@ -91,7 +99,9 @@ jobs:
           key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (harness — replay + liveness + ssim, single-threaded)
         env:
-          # Force the software Vulkan ICD; keep tests serial (headless Apps must not overlap).
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          # Do NOT pin VK_ICD_FILENAMES: the Vulkan loader auto-discovers the only ICD present on the
+          # runner (lavapipe) by scanning /usr/share/vulkan/icd.d/. Pinning an exact path that shifts
+          # across Mesa releases is what produced "Failed to open JSON file … lvp_icd.x86_64.json".
+          # Keep tests serial — headless Apps must not overlap.
           WGPU_BACKEND: vulkan
         run: cargo test --features test-harness -- --test-threads=1
