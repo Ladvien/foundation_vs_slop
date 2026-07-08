@@ -1017,12 +1017,12 @@ impl Dungeon {
 
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     #[inline]
     pub fn in_bounds(&self, c: IVec2) -> bool {
-        c.x >= 0 && c.y >= 0 && (c.x as usize) < self.width && (c.y as usize) < self.height
+        crate::util::in_grid(c, self.width, self.height)
     }
 
     pub fn is_floor(&self, c: IVec2) -> bool {

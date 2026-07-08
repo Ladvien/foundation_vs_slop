@@ -22,12 +22,13 @@
 //! back-to-back thin wall a crab could crawl *over the top* to a far room. Wall patches therefore model
 //! the full climbable face (Y 0→`WALL_HEIGHT`) but emit no top-crossing edges — the geometry admits none.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
 use crate::crab::CRAB_COLLIDER_R;
 use crate::dungeon::{Dungeon, TILE_SIZE, WALL_HEIGHT, WALL_THICKNESS};
+use crate::pathfind::{dijkstra_multi_source, UNREACHABLE};
 use crate::wfc::{E, N, S, W};
 
 /// Slot 0 in the patch index is a cell's floor patch; slots 1..=4 are its N/E/S/W wall faces.
@@ -385,31 +386,6 @@ fn edge_cost(a: &Patch, b: &Patch) -> u32 {
     (((a.center - b.center).length() * 10.0).round() as u32).max(1)
 }
 
-/// Min-heap entry for the Dijkstra expansion, ordered so `BinaryHeap` pops the lowest cost (mirrors
-/// `flowfield::Node`).
-struct Node {
-    cost: u32,
-    patch: u32,
-}
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-    }
-}
-impl Eq for Node {}
-impl Ord for Node {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.cost.cmp(&self.cost) // reversed → min-heap
-    }
-}
-impl PartialOrd for Node {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-const UNREACHABLE: u32 = u32::MAX;
-
 /// A goal-directed field over the surface graph: per-patch cost to the nearest source and the
 /// down-gradient neighbour a crab should head to (with the gate to steer at). Shared read-only via
 /// `Arc` by the whole swarm.
@@ -427,33 +403,19 @@ impl SurfaceField {
             return None;
         }
         let n = graph.patches.len();
-        let mut cost = vec![UNREACHABLE; n];
-        let mut heap = BinaryHeap::new();
-        for &s in sources {
-            let si = s as usize;
-            if si < n && cost[si] != 0 {
-                cost[si] = 0;
-                heap.push(Node { cost: 0, patch: s });
-            }
-        }
 
-        while let Some(Node { cost: c, patch }) = heap.pop() {
-            let pi = patch as usize;
-            if c > cost[pi] {
-                continue; // stale
-            }
-            for a in &graph.adj[pi] {
-                let ni = a.to as usize;
-                let nc = c + a.cost;
-                if nc < cost[ni] {
-                    cost[ni] = nc;
-                    heap.push(Node {
-                        cost: nc,
-                        patch: a.to,
-                    });
+        // Uniform-cost multi-source Dijkstra over the patch graph; the only field-specific part is that
+        // successors come from `graph.adj` edges (with precomputed edge costs) rather than a grid.
+        // Sources are bounds-filtered to valid patch indices, as the hand-rolled seed loop did.
+        let cost = dijkstra_multi_source(
+            n,
+            sources.iter().filter_map(|&s| ((s as usize) < n).then_some(s as usize)),
+            |patch, relax| {
+                for a in &graph.adj[patch] {
+                    relax(a.to as usize, a.cost);
                 }
-            }
-        }
+            },
+        );
 
         // Steepest descent: each patch points at the neighbour of strictly-lower cost, aiming at that
         // edge's gate. Sources and unreachable patches point at themselves (no flow).

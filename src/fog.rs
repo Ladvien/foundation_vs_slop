@@ -50,7 +50,7 @@ impl FogGrid {
 
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     /// Is cell `c` in a unit's *live* line of sight right now? (Not merely explored-and-remembered.)

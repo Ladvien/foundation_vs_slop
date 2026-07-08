@@ -12,19 +12,15 @@
 //! and Steering Using Flow Field Tiles" (Game AI Pro). Local collision avoidance between units is a
 //! separate layer (see `orca`); this module only decides *where each cell wants to go*.
 
-use std::collections::BinaryHeap;
-
 use bevy::prelude::*;
 
 use crate::dungeon::Dungeon;
+use crate::pathfind::{dijkstra_multi_source, UNREACHABLE};
 
 /// Integer step costs (×10) so the integration field orders on `u32` — matches the octile costs the
 /// old A\* used (`CARDINAL`/`DIAGONAL`) and the no-corner-cutting rule in `dungeon::line_of_sight`.
 const CARDINAL: u32 = 10;
 const DIAGONAL: u32 = 14; // ≈ √2 · 10
-
-/// Unreachable / non-floor cells carry this sentinel cost.
-const UNREACHABLE: u32 = u32::MAX;
 
 /// 8-connected neighbor offsets with their step cost. Diagonals are gated by the no-corner-cutting
 /// rule at relaxation time (both shared orthogonal cells must be floor).
@@ -38,28 +34,6 @@ const NEIGHBORS: [(i32, i32, u32); 8] = [
     (-1, 1, DIAGONAL),
     (-1, -1, DIAGONAL),
 ];
-
-/// Min-heap entry for the Dijkstra expansion, ordered so `BinaryHeap` pops the lowest cost.
-struct Node {
-    cost: u32,
-    cell: IVec2,
-}
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-    }
-}
-impl Eq for Node {}
-impl Ord for Node {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.cost.cmp(&self.cost) // reversed → min-heap
-    }
-}
-impl PartialOrd for Node {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 /// A goal-directed navigation field over the whole fine grid. Shared read-only by all units that
 /// were given the same move command.
@@ -77,7 +51,7 @@ pub struct FlowField {
 impl FlowField {
     #[inline]
     fn index(&self, c: IVec2) -> usize {
-        c.y as usize * self.width + c.x as usize
+        crate::util::row_major(c, self.width)
     }
 
     /// Build the integration + flow field for a move toward `goal`. Returns `None` only if `goal`
@@ -95,41 +69,31 @@ impl FlowField {
     pub fn build_from(dungeon: &Dungeon, sources: &[IVec2]) -> Option<FlowField> {
         let width = dungeon.width;
         let height = dungeon.height;
-        let mut cost = vec![UNREACHABLE; width * height];
 
-        // Seed the min-heap with every floor source at cost 0; the expansion then computes, for each
-        // cell, the exact cost to the nearest source (uniform-cost multi-source Dijkstra).
-        let mut heap = BinaryHeap::new();
-        let mut first: Option<IVec2> = None;
+        // Seed indices for every floor source; the first floor source also becomes `goal`. `goal` is only
+        // meaningful for a single-source field; for multi-source it records the first source (enemies
+        // steer by flow and never read `goal()`). `None` ⇒ no floor source at all.
+        let mut goal: Option<IVec2> = None;
+        let mut source_idx: Vec<usize> = Vec::new();
         for &s in sources {
             if !dungeon.is_floor(s) {
                 continue;
             }
-            let si = s.y as usize * width + s.x as usize;
-            if cost[si] == 0 {
-                continue; // duplicate source cell already seeded
-            }
-            cost[si] = 0;
-            heap.push(Node { cost: 0, cell: s });
-            first.get_or_insert(s);
+            source_idx.push(crate::util::row_major(s, width));
+            goal.get_or_insert(s);
         }
-        // `goal` is only meaningful for a single-source field; for multi-source it records the first
-        // source (enemies steer by flow and never read `goal()`). `None` ⇒ no floor source at all.
-        let goal = first?;
+        let goal = goal?;
 
-        while let Some(Node { cost: c, cell }) = heap.pop() {
-            let ci = cell.y as usize * width + cell.x as usize;
-            // Lazy deletion: skip a stale entry we've already beaten.
-            if c > cost[ci] {
-                continue;
-            }
+        // Uniform-cost multi-source Dijkstra: exact cost from each cell to the nearest source. The 8-way
+        // grid successor (with the no-corner-cutting diagonal rule, identical to the A\* rule and the
+        // collision resolver's void-corner rule) is the only field-specific part.
+        let cost = dijkstra_multi_source(width * height, source_idx, |node, relax| {
+            let cell = IVec2::new((node % width) as i32, (node / width) as i32);
             for (dx, dy, step) in NEIGHBORS {
                 let n = IVec2::new(cell.x + dx, cell.y + dy);
                 if !dungeon.is_floor(n) {
                     continue;
                 }
-                // No corner cutting: a diagonal is legal only if both shared orthogonal cells are
-                // floor (identical to the A\* rule and the collision resolver's void-corner rule).
                 if dx != 0
                     && dy != 0
                     && (!dungeon.is_floor(IVec2::new(cell.x + dx, cell.y))
@@ -137,21 +101,16 @@ impl FlowField {
                 {
                     continue;
                 }
-                let ni = n.y as usize * width + n.x as usize;
-                let nc = c + step;
-                if nc < cost[ni] {
-                    cost[ni] = nc;
-                    heap.push(Node { cost: nc, cell: n });
-                }
+                relax(crate::util::row_major(n, width), step);
             }
-        }
+        });
 
         // Flow vectors: each cell points toward its lowest-cost admissible neighbor (steepest
         // descent of the integration field). The goal and unreachable cells stay `ZERO`.
         let mut flow = vec![Vec2::ZERO; width * height];
         for y in 0..height as i32 {
             for x in 0..width as i32 {
-                let ci = y as usize * width + x as usize;
+                let ci = crate::util::row_major(IVec2::new(x, y), width);
                 if cost[ci] == UNREACHABLE || cost[ci] == 0 {
                     continue;
                 }
@@ -169,7 +128,7 @@ impl FlowField {
                     {
                         continue;
                     }
-                    let ni = n.y as usize * width + n.x as usize;
+                    let ni = crate::util::row_major(n, width);
                     if cost[ni] < best {
                         best = cost[ni];
                         dir = Vec2::new(dx as f32, dy as f32);
