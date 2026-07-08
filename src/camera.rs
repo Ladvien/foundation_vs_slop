@@ -13,6 +13,7 @@ use std::f32::consts::TAU;
 
 use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
+use crate::time_control::SimBlocked;
 
 /// World-space camera offset from the focus point. Equal-ish axes give the iso tilt. `pub` so the
 /// audio spatial listener can recover the ground focus point (`camera_pos - ISO_OFFSET`) to anchor
@@ -78,7 +79,13 @@ impl Plugin for CameraPlugin {
         })
         .init_resource::<CameraView>()
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, drive_camera);
+        // Read `SimBlocked` only after its sole writer has settled this frame, so opening/closing a
+        // menu never leaks or drops a frame of pan. (No-op in the headless harness, where
+        // `sync_sim_blocked` isn't registered — an `.after` on an absent system is simply ignored.)
+        .add_systems(
+            Update,
+            drive_camera.after(crate::ui::state::sync_sim_blocked),
+        );
     }
 }
 
@@ -121,10 +128,20 @@ fn drive_camera(
     scroll: Res<AccumulatedMouseScroll>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     trauma: Res<Trauma>,
+    // A blocking UI screen (boot/title/pause/settings/roster) is up: the WASD/arrow keys double as
+    // that menu's navigation, so suppress *panning* while it's open — but keep zoom, Q/E rotate, and
+    // middle-drag live, since none of those collide with the menu keys and the player still wants to
+    // inspect the frozen scene behind the overlay (honoring the `time_control` invariant that pausing
+    // never changes how the mouse/other keys respond). This is *not* gated on the `0`-key `UserPaused`
+    // — panning while that tactical pause is active is intentional (see below). Stays `false` in the
+    // headless harness, so camera control there is unchanged.
+    sim_blocked: Res<SimBlocked>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
+    let allow_pan = !sim_blocked.0;
+
     if scroll.delta.y != 0.0 {
         rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
@@ -161,19 +178,22 @@ fn drive_camera(
     // game-speed multiplier — flying at high speed, dead when paused. Zoom/drag below already use raw
     // per-frame input deltas, so they're speed-independent without needing `dt`.)
     let dt = real.delta_secs();
-    // WASD (and arrow keys) scroll the map along the screen axes.
+    // WASD (and arrow keys) scroll the map along the screen axes — unless a menu is open, in which
+    // case those keys belong to menu navigation.
     let mut pan = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        pan += screen_forward;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        pan -= screen_forward;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        pan += screen_right;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        pan -= screen_right;
+    if allow_pan {
+        if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+            pan += screen_forward;
+        }
+        if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+            pan -= screen_forward;
+        }
+        if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+            pan += screen_right;
+        }
+        if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+            pan -= screen_right;
+        }
     }
     if let Some(dir) = pan.try_normalize() {
         rig.focus += dir * PAN_SPEED * dt;

@@ -176,7 +176,7 @@ fn fire_laser(
         // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
         let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let mut best = f32::MAX;
-        let mut target = None;
+        let mut target: Option<Vec3> = None;
         for (enemy, smiley) in &enemies {
             // Leave the uncanny watcher alone until it reveals itself: only target the smiley boss while
             // it is angry (unleashing). Crabs/nests have no `SmileyState`, so they stay fair game.
@@ -193,9 +193,20 @@ fn fire_laser(
                 continue;
             }
             let d = enemy.translation.distance_squared(muzzle);
-            if d < best {
+            // Deterministic tie-break: on an exact distance tie prefer the lower world position, not
+            // whichever enemy the query yielded first — query order isn't stable across same-seed runs
+            // (see `util::nearest_planar`), and a flipped target aims the bolt at a different hostile.
+            let et = enemy.translation;
+            let better = match target {
+                None => true,
+                Some(bt) => {
+                    (d.to_bits(), et.x.to_bits(), et.y.to_bits(), et.z.to_bits())
+                        < (best.to_bits(), bt.x.to_bits(), bt.y.to_bits(), bt.z.to_bits())
+                }
+            };
+            if better {
                 best = d;
-                target = Some(enemy.translation);
+                target = Some(et);
             }
         }
         // Face what we shoot (drives the unit's facing in `squad::unit_movement`) — refreshed every tick.
@@ -285,9 +296,20 @@ fn update_lasers(
             }
             if let Some((s, point)) =
                 segment_capsule_hit(prev, transform.translation, tt.translation, tv.half_height, tv.radius)
-                && best.is_none_or(|(_, bs, _)| s < bs)
             {
-                best = Some((te, s, point));
+                // Deterministic tie-break: equal parametric `s` on two overlapping hostiles resolves by
+                // the strike point, not query order (unstable across same-seed runs — see
+                // `util::nearest_planar`); a flip changes WHICH hostile the bolt damages.
+                let better = match best {
+                    None => true,
+                    Some((_, bs, bp)) => {
+                        (s.to_bits(), point.x.to_bits(), point.y.to_bits(), point.z.to_bits())
+                            < (bs.to_bits(), bp.x.to_bits(), bp.y.to_bits(), bp.z.to_bits())
+                    }
+                };
+                if better {
+                    best = Some((te, s, point));
+                }
             }
         }
         if let Some((hit_entity, _, hit_point)) = best {
