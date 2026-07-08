@@ -27,6 +27,7 @@ use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
+use crate::util::unit_is_facing;
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
 use crate::ai::brain::ActiveBehavior;
@@ -857,20 +858,6 @@ fn despawn_dead(
             commands.entity(entity).despawn();
         }
     }
-}
-
-/// Pure gaze test: is `target` within `look_cos` of `unit_forward` (a tight "looking directly at it"
-/// cone)? Planar (XZ). The caller adds the range + clear-line-of-sight checks. Unit-tested. Because units
-/// now pivot to face their fire target (`squad::unit_movement` reads `AimTarget`), body-forward equals
-/// aim — so this test matches what the player sees a unit looking at (Rabin, "Vision Zones", GameAIPro2
-/// Ch.4: perception must key off the agent's actual view direction).
-fn unit_is_facing(unit_pos: Vec3, unit_forward: Vec3, target_pos: Vec3, look_cos: f32) -> bool {
-    let bearing = (target_pos - unit_pos).with_y(0.0).normalize_or_zero();
-    if bearing == Vec3::ZERO {
-        return true; // on top of the unit — treat as looked at
-    }
-    let fwd = unit_forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
-    bearing.dot(fwd) >= look_cos
 }
 
 /// Pure gate for the "true form" flash: the fractal orb is visible ONLY while the watcher is actually
