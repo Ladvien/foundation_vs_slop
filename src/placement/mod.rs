@@ -18,6 +18,7 @@ mod acceptance;
 pub mod furnish;
 pub mod ir;
 pub mod manifest;
+pub mod scatter;
 pub mod solver;
 pub mod solvers;
 

@@ -94,67 +94,73 @@
                   footprint: (0.38, 0.20), affordances: ["emit"] ),
 
                 // ---- Tiled: small floor props scattered by WFC (Stage 2) ----
-                ( key: "plant_a", glb: "low_poly_furniture/glb/Miscellaneous/Plant A.glb",
-                  category: "plant", tags: ["decor"], role: Tiled, footprint: (0.52, 0.55),
-                  affordances: ["decor"] ),
-                ( key: "plant_b", glb: "low_poly_furniture/glb/Miscellaneous/Plant B.glb",
-                  category: "plant", tags: ["decor"], role: Tiled, footprint: (0.18, 0.18),
-                  affordances: ["decor"] ),
                 ( key: "bin", glb: "low_poly_furniture/glb/Miscellaneous/Bin.glb",
                   category: "bin", tags: ["decor"], role: Tiled, footprint: (0.40, 0.40),
                   affordances: ["store"] ),
                 ( key: "globe", glb: "low_poly_furniture/glb/Miscellaneous/Globe.glb",
                   category: "decor", tags: ["decor"], role: Tiled, footprint: (0.33, 0.28),
                   affordances: ["decor"] ),
+
+                // ---- Scatter: small props that rest ON a support surface (desk/table/drawer), placed by
+                // the furnish scatter pass on the inner 9×9 lattice (Stage 3). `surface: "support"` targets
+                // the `support` affordance; `height` is cosmetic (vertical position comes from the surface).
+                ( key: "plant_a", glb: "low_poly_furniture/glb/Miscellaneous/Plant A.glb",
+                  category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.52, 0.55),
+                  affordances: ["decor"], height: 0.50 ),
+                ( key: "plant_b", glb: "low_poly_furniture/glb/Miscellaneous/Plant B.glb",
+                  category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.18, 0.18),
+                  affordances: ["decor"], height: 0.25 ),
                 ( key: "lamp", glb: "low_poly_furniture/glb/Lights/Lamp C.glb",
-                  category: "light", tags: ["decor"], role: Tiled, footprint: (0.32, 0.32),
-                  affordances: ["emit"] ),
+                  category: "light", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.32, 0.32),
+                  affordances: ["emit"], height: 0.40 ),
 
                 // ---- Freestanding: placed against walls with clearance by the Metropolis solver (Stage 3).
-                // Catalogued now so the manifest is complete; the Stage-2 furnish pass does not yet place them.
                 ( key: "bed_double", glb: "low_poly_furniture/glb/Beds/Bed Double.glb",
                   category: "bed", tags: ["bedroom"], role: Freestanding, footprint: (1.72, 2.22),
-                  affordances: ["sleep", "support"] ),
+                  affordances: ["sleep", "support"], height: 0.55 ),
                 ( key: "sofa", glb: "low_poly_furniture/glb/Sofas/Sofa A.glb",
                   category: "seating", tags: ["living"], role: Freestanding, footprint: (2.08, 0.88),
                   affordances: ["sit"] ),
                 ( key: "table", glb: "low_poly_furniture/glb/Tables/Table A.glb",
                   category: "table", tags: ["living", "dining"], role: Freestanding, footprint: (1.66, 0.71),
-                  affordances: ["support"] ),
+                  affordances: ["support"], height: 0.74 ),
                 ( key: "chair", glb: "low_poly_furniture/glb/Chairs/Chair A.glb",
                   category: "seating", tags: ["dining"], role: Freestanding, footprint: (0.41, 0.51),
                   affordances: ["sit"] ),
                 ( key: "drawer", glb: "low_poly_furniture/glb/Drawers/Drawer A.glb",
                   category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (1.55, 0.60),
-                  affordances: ["store", "support"] ),
+                  affordances: ["store", "support"], height: 0.80 ),
                 // Shelf A's source FBX is malformed (~10 m of stray geometry that survives conversion); use
                 // Shelf D, which measures a correct 1.23 × 0.38 × 2.15 m.
                 ( key: "shelf", glb: "low_poly_furniture/glb/Shelves/Shelf D.glb",
                   category: "storage", tags: ["living"], role: Freestanding, footprint: (1.23, 0.38),
                   affordances: ["store"] ),
+                // A fridge stands boxed in against a wall — `back_to_wall` seats it flush to the perimeter.
                 ( key: "fridge", glb: "low_poly_furniture/glb/Kitchen/Fridge A.glb",
                   category: "appliance", tags: ["kitchen"], role: Freestanding, footprint: (0.88, 0.61),
-                  affordances: ["store"] ),
+                  affordances: ["store", "back_to_wall"] ),
+                // A TV rests on a media unit / table — a Scatter prop; footprint is the flatscreen STAND's
+                // shallow contact area so it seats on a ~0.6 m-deep desk without overhanging.
                 ( key: "tv", glb: "low_poly_furniture/glb/Electronics/TV A.glb",
-                  category: "appliance", tags: ["living"], role: Freestanding, footprint: (0.88, 0.80),
-                  affordances: ["emit"] ),
+                  category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.30),
+                  affordances: ["emit"], height: 0.50 ),
 
                 // Office — a desk so "office"-tagged rooms (a generation-time room type) read as workspaces.
                 ( key: "desk", glb: "low_poly_furniture/glb/Tables/Desk.glb",
                   category: "table", tags: ["office"], role: Freestanding, footprint: (1.20, 0.60),
-                  affordances: ["support"] ),
+                  affordances: ["support"], height: 0.74 ),
 
-                // Bathroom fixtures for "bathroom"-tagged rooms. Footprints are approximate metre bounds of the
-                // kit's GLBs; `hygiene` is a domain affordance no layout rule targets (harmless, themed intent).
+                // Bathroom fixtures for "bathroom"-tagged rooms. Plumbing backs onto a wall (`back_to_wall`),
+                // and the toilet + sink cluster together (`group: "bath"`) so they read as a plumbed wall.
                 ( key: "toilet", glb: "low_poly_furniture/glb/Bathroom/Toilet.glb",
                   category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.40, 0.60),
-                  affordances: ["hygiene"] ),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
                 ( key: "sink", glb: "low_poly_furniture/glb/Bathroom/Sink.glb",
                   category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.50, 0.42),
-                  affordances: ["hygiene"] ),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
                 ( key: "bath", glb: "low_poly_furniture/glb/Bathroom/Bath.glb",
                   category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (1.70, 0.70),
-                  affordances: ["hygiene"] ),
+                  affordances: ["hygiene", "back_to_wall"] ),
             ],
         ),
 
@@ -177,6 +183,10 @@
             w_min_distance: 2.0,    // honor explicit MinDistance constraints
             w_facing: 1.5,          // honor explicit Facing constraints (e.g. sofa faces TV)
             w_clearance: 2.0,       // honor explicit Clearance constraints
+            w_hard: 12.0,           // multiplier on HARD constraints so the annealer drives them to
+                                    // satisfaction (e.g. a plumbing fixture's back-to-wall association)
+            w_wall_angle: 1.0,      // angular wall-snap: a wall-backed fixture orients its back to the wall
+            w_group: 1.5,           // grouping band pulling same-group pieces together (toilet + sink)
             coherence: 0.3,         // [0,1] how coherently related furniture is arranged (scales Facing):
                                     // 0 = backrooms-random, 1 = sofa firmly faces the TV
         ),

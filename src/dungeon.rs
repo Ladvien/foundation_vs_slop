@@ -226,7 +226,10 @@ pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
         }
     }
     if !(0.0..=1.0).contains(&cfg.liminality) {
-        return Err(format!("liminality must be in [0,1] (got {})", cfg.liminality));
+        return Err(format!(
+            "liminality must be in [0,1] (got {})",
+            cfg.liminality
+        ));
     }
     if cfg.room_types.is_empty() {
         return Err("room_types must be non-empty".into());
@@ -253,7 +256,10 @@ pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
             return Err(format!("notch.chance must be in [0,1] (got {})", n.chance));
         }
         if n.max_corners == 0 || n.max_corners > 4 {
-            return Err(format!("notch.max_corners must be in 1..=4 (got {})", n.max_corners));
+            return Err(format!(
+                "notch.max_corners must be in 1..=4 (got {})",
+                n.max_corners
+            ));
         }
         if !(0.0..=1.0).contains(&n.depth_min)
             || !(0.0..=1.0).contains(&n.depth_max)
@@ -265,7 +271,10 @@ pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
             ));
         }
         if n.min_side < ROOM_FLOOR {
-            return Err(format!("notch.min_side must be >= {ROOM_FLOOR} (got {})", n.min_side));
+            return Err(format!(
+                "notch.min_side must be >= {ROOM_FLOOR} (got {})",
+                n.min_side
+            ));
         }
     }
     // The six coarse WFC prototype weights feed the Grid collapse (`wfc::collapse_one`). A NaN makes the
@@ -289,15 +298,24 @@ pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
     // `rock` is negative space: a config with only `rock` non-zero collapses to an all-solid, floorless
     // (unplayable) dungeon. Require some weight on a non-rock prototype so a playable floor set exists.
     if wfc_w[1..].iter().sum::<f64>() <= 0.0 {
-        return Err("wfc_weights must give weight to a non-rock prototype (else the dungeon has no floor)".into());
+        return Err(
+            "wfc_weights must give weight to a non-rock prototype (else the dungeon has no floor)"
+                .into(),
+        );
     }
-    if let Topology::Graph { site_spacing, link_weights } = &cfg.topology {
+    if let Topology::Graph {
+        site_spacing,
+        link_weights,
+    } = &cfg.topology
+    {
         // Lower bound keeps per-site bounds large enough that rooms provably never overlap (the sizing
         // needs the nearest-neighbour Chebyshev distance ≥ ~4 tiles, i.e. Poisson radius ≥ ~5.66).
         let min_spacing = ROOM_FLOOR as f32 + 4.0;
         let level = (cfg.coarse_w.min(cfg.coarse_h) * cfg.block) as f32;
         if !site_spacing.is_finite() || *site_spacing < min_spacing {
-            return Err(format!("topology Graph: site_spacing must be >= {min_spacing} (got {site_spacing})"));
+            return Err(format!(
+                "topology Graph: site_spacing must be >= {min_spacing} (got {site_spacing})"
+            ));
         }
         if *site_spacing >= level {
             return Err(format!(
@@ -492,7 +510,10 @@ fn grid_layout(
             }
             slot_site[cy * cw + cx] = Some(sites.len());
             sites.push(Site {
-                center: IVec2::new((cx * block + block / 2) as i32, (cy * block + block / 2) as i32),
+                center: IVec2::new(
+                    (cx * block + block / 2) as i32,
+                    (cy * block + block / 2) as i32,
+                ),
                 bounds: Rect2 {
                     min: [(cx * block) as i32, (cy * block) as i32],
                     max: [((cx + 1) * block) as i32, ((cy + 1) * block) as i32],
@@ -624,7 +645,18 @@ fn expand_to_fine(
         // L / T / plus (6–12 corners) instead of a plain box. Draws RNG in site order like the rest of the
         // room pass, so replays stay deterministic; `None` (no `notch` in the config) leaves rooms rectangular.
         if let Some(nc) = &config.notch {
-            notch_room(&mut walkable, width, ox, oy, rw, rh, bx as usize, by as usize, nc, rng);
+            notch_room(
+                &mut walkable,
+                width,
+                ox,
+                oy,
+                rw,
+                rh,
+                bx as usize,
+                by as usize,
+                nc,
+                rng,
+            );
         }
 
         regions.push(Region {
@@ -645,7 +677,10 @@ fn expand_to_fine(
     // (uniform, from the carve RNG in adjacency order) so passages vary from tight to broad instead of
     // being identical. The drawn width is stashed per unordered edge so the necking pass below can reuse
     // the exact same value. The draw always runs (one path); a collapsed range just yields a constant.
-    let (cw_min, cw_max) = (config.corridor_width, config.corridor_width_max.unwrap_or(config.corridor_width));
+    let (cw_min, cw_max) = (
+        config.corridor_width,
+        config.corridor_width_max.unwrap_or(config.corridor_width),
+    );
     let mut edge_width: HashMap<(usize, usize), usize> = HashMap::new();
     for &(a, b) in &layout.adjacency {
         let w = cw_min + rng.below(cw_max - cw_min + 1);
@@ -673,7 +708,10 @@ fn expand_to_fine(
             regions[si].openings.push(Opening { dir, cell });
             // Same width the corridor was carved at (looked up per unordered edge), so the doorway necks
             // down from this corridor's real width — not a global constant — to the single centre lane.
-            let cw = edge_width.get(&(si.min(nb), si.max(nb))).copied().unwrap_or(cw_min);
+            let cw = edge_width
+                .get(&(si.min(nb), si.max(nb)))
+                .copied()
+                .unwrap_or(cw_min);
             for lane in 1..cw as i32 {
                 let neck = match dir {
                     E => IVec2::new(cell[0] + 1, cell[1] + lane),
@@ -702,7 +740,14 @@ fn expand_to_fine(
 /// identical to the pre-refactor E/S carve. Diagonal graph routes carve an L (both legs), keeping each
 /// room-mouth segment axis-aligned so necking/openings still apply. Writes are bounds-checked (a no-op
 /// for in-bounds grid corridors) so a wide/edge diagonal can never index out of the mask.
-fn carve_corridor(walkable: &mut [bool], width: usize, height: usize, a: IVec2, b: IVec2, lanes: usize) {
+fn carve_corridor(
+    walkable: &mut [bool],
+    width: usize,
+    height: usize,
+    a: IVec2,
+    b: IVec2,
+    lanes: usize,
+) {
     let carve_h = |walkable: &mut [bool], x0: i32, x1: i32, y: i32| {
         for x in x0.min(x1)..=x0.max(x1) {
             for lane in 0..lanes as i32 {
@@ -746,7 +791,10 @@ fn graph_layout(
     site_spacing: f32,
     link_weights: &[f64],
 ) -> Result<CoarseLayout, String> {
-    let (width, height) = (config.coarse_w * config.block, config.coarse_h * config.block);
+    let (width, height) = (
+        config.coarse_w * config.block,
+        config.coarse_h * config.block,
+    );
 
     // Poisson sites, from their own RNG sub-stream (independent of the carve RNG). The rect is inset by
     // a small margin so every site sits at least `ROOM_FLOOR + 1` tiles from the level edge — that lets
@@ -955,9 +1003,10 @@ impl Dungeon {
         // yield a usable dungeon — then carve the fine grid through the single shared `expand_to_fine`.
         let layout = match &config.topology {
             Topology::Grid => Self::grid_coarse_layout(config)?,
-            Topology::Graph { site_spacing, link_weights } => {
-                graph_layout(config, *site_spacing, link_weights)?
-            }
+            Topology::Graph {
+                site_spacing,
+                link_weights,
+            } => graph_layout(config, *site_spacing, link_weights)?,
         };
 
         // The carve RNG is seeded here (separately from the coarse seed) and drawn only inside
@@ -1064,11 +1113,51 @@ impl Dungeon {
             || (self.walled(cell, S) && lz > inner)
     }
 
+    /// Does a yaw-snapped furniture footprint centred at `center` with pre-rotation half-extents
+    /// `half` (½ width, ½ depth) rest **entirely on open floor** — no part outside the room and no
+    /// part inside a wall slab? This is the footprint-aware containment gate the placement pass uses
+    /// so a piece is rejected when its *body* — not merely its centre — crosses a wall or a
+    /// notched-out corner of a non-rectangular room. It is the discrete analogue of the
+    /// free-configuration-space non-penetration test of Merrell, Schkufza, Li, Agrawala & Koltun,
+    /// "Interactive Furniture Layout Using Interior Design Guidelines" (SIGGRAPH 2011): a placement is
+    /// legal iff its footprint lies in `C_free`. [`Self::is_solid`] is the ground truth (true outside
+    /// the room or within a wall band), so a single solid sample means the piece would clip geometry.
+    ///
+    /// Quarter-turn furniture swaps width/depth at 90°/270°. The footprint is sampled on a lattice
+    /// fine enough (≤ ½ [`WALL_THICKNESS`]) that a wall band can never slip between samples.
+    pub fn footprint_on_floor(&self, center: Vec3, half: Vec2, yaw: f32) -> bool {
+        // Quarter-turn yaw: at 90°/270° the footprint's width and depth swap.
+        let quarter = (yaw / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
+        let (hx, hz) = if quarter % 2 == 1 {
+            (half.y, half.x)
+        } else {
+            (half.x, half.y)
+        };
+        // Sample step finer than the wall band so a thin wall slab can't hide between samples.
+        let step = (WALL_THICKNESS * 0.5).max(0.05);
+        let nx = (hx / step).ceil().max(1.0) as i32;
+        let nz = (hz / step).ceil().max(1.0) as i32;
+        for ix in -nx..=nx {
+            let x = center.x + (ix as f32 / nx as f32) * hx;
+            for iz in -nz..=nz {
+                let z = center.z + (iz as f32 / nz as f32) * hz;
+                if self.is_solid(x, z) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Build a `Dungeon` directly from a row-major `walkable` mask, for tests that need a
     /// deterministic hand-crafted layout without running WFC generation.
     #[cfg(test)]
     pub(crate) fn from_walkable(width: usize, height: usize, walkable: Vec<bool>) -> Self {
-        assert_eq!(walkable.len(), width * height, "walkable mask size mismatch");
+        assert_eq!(
+            walkable.len(),
+            width * height,
+            "walkable mask size mismatch"
+        );
         Dungeon {
             width,
             height,
@@ -1130,14 +1219,14 @@ impl Dungeon {
             }
             max
         };
-        let axis = Vec4::new(cast(1.0, 0.0), cast(-1.0, 0.0), cast(0.0, 1.0), cast(0.0, -1.0));
-        let r = std::f32::consts::FRAC_1_SQRT_2;
-        let diag = Vec4::new(
-            cast(r, r),
-            cast(-r, r),
-            cast(r, -r),
-            cast(-r, -r),
+        let axis = Vec4::new(
+            cast(1.0, 0.0),
+            cast(-1.0, 0.0),
+            cast(0.0, 1.0),
+            cast(0.0, -1.0),
         );
+        let r = std::f32::consts::FRAC_1_SQRT_2;
+        let diag = Vec4::new(cast(r, r), cast(-r, r), cast(r, -r), cast(-r, -r));
         (axis, diag)
     }
 
@@ -1311,14 +1400,22 @@ impl Dungeon {
 /// Dimensions round to whole tiles and clamp to `[ROOM_FLOOR, max_side]` so the room fits its block with
 /// a rock margin. Returns `(width, depth, type_tag, expands)` — `expands` is the type's spacious flag,
 /// which drives the all-edge expansion in `expand_to_fine`.
-fn pick_room(config: &DungeonConfig, max_side: usize, rng: &mut impl DetRng) -> (usize, usize, String, bool) {
+fn pick_room(
+    config: &DungeonConfig,
+    max_side: usize,
+    rng: &mut impl DetRng,
+) -> (usize, usize, String, bool) {
     let ty = weighted_room_type(&config.room_types, rng);
     let area = rand_range_f32(rng, ty.area_min, ty.area_max);
     let aspect = rand_range_f32(rng, ty.aspect_min, ty.aspect_max);
     let long = (area * aspect).sqrt();
     let short = (area / aspect).sqrt();
     // Randomly orient the long axis to x or y so rooms aren't all landscape.
-    let (w_f, h_f) = if rng.unit() < 0.5 { (long, short) } else { (short, long) };
+    let (w_f, h_f) = if rng.unit() < 0.5 {
+        (long, short)
+    } else {
+        (short, long)
+    };
     let cap = max_side.max(ROOM_FLOOR); // guard clamp's min <= max even for a tiny block
     let rw = (w_f.round() as usize).clamp(ROOM_FLOOR, cap);
     let rh = (h_f.round() as usize).clamp(ROOM_FLOOR, cap);
@@ -1349,8 +1446,8 @@ fn notch_room(
         return; // too small to shape, or the chance roll declined — stays a clean rectangle
     }
     let count = 1 + rng.below(cfg.max_corners); // 1..=max_corners distinct corners
-    // Fisher–Yates over the four corners (0=NW,1=NE,2=SW,3=SE); always three swaps so the draw count is
-    // independent of `count`, then take the first `count`.
+                                                // Fisher–Yates over the four corners (0=NW,1=NE,2=SW,3=SE); always three swaps so the draw count is
+                                                // independent of `count`, then take the first `count`.
     let mut order = [0usize, 1, 2, 3];
     for i in (1..4).rev() {
         order.swap(i, rng.below(i + 1));
@@ -1549,7 +1646,8 @@ fn wall_mesh(size: Vec3) -> Mesh {
     ) = (
         mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned(),
         mesh.attribute(Mesh::ATTRIBUTE_NORMAL).cloned(),
-    ) else {
+    )
+    else {
         return mesh;
     };
     let half = size * 0.5;
@@ -1661,7 +1759,11 @@ fn spawn_tiles(
         if let Some(size) = wall_size {
             // avian `Collider::cuboid` takes FULL side lengths; the wall mesh is an origin-centred
             // `Cuboid` of the same size, so the collider lines up exactly under the transform.
-            entity.insert((Wall, RigidBody::Static, Collider::cuboid(size.x, size.y, size.z)));
+            entity.insert((
+                Wall,
+                RigidBody::Static,
+                Collider::cuboid(size.x, size.y, size.z),
+            ));
         }
     };
 
@@ -1690,8 +1792,20 @@ fn spawn_tiles(
             for (a, b, turns) in CORNERS {
                 if walled[a] && walled[b] {
                     let (full, short) = corner_arms(cell, turns);
-                    spawn_tile(cell, wall_full.clone(), wall_mat.clone(), full, Some(full_size));
-                    spawn_tile(cell, wall_short.clone(), wall_mat.clone(), short, Some(short_size));
+                    spawn_tile(
+                        cell,
+                        wall_full.clone(),
+                        wall_mat.clone(),
+                        full,
+                        Some(full_size),
+                    );
+                    spawn_tile(
+                        cell,
+                        wall_short.clone(),
+                        wall_mat.clone(),
+                        short,
+                        Some(short_size),
+                    );
                     walled[a] = false;
                     walled[b] = false;
                 }
@@ -1758,9 +1872,33 @@ mod tests {
                 cross: 0.6,
             },
             room_types: vec![
-                RoomType { tag: "bathroom".into(), area_min: 3.0, area_max: 6.0, aspect_min: 1.0, aspect_max: 1.6, weight: 0.8, expands: false },
-                RoomType { tag: "bedroom".into(), area_min: 9.0, area_max: 20.0, aspect_min: 1.0, aspect_max: 1.5, weight: 1.5, expands: false },
-                RoomType { tag: "living".into(), area_min: 16.0, area_max: 40.0, aspect_min: 1.0, aspect_max: 1.7, weight: 1.6, expands: true },
+                RoomType {
+                    tag: "bathroom".into(),
+                    area_min: 3.0,
+                    area_max: 6.0,
+                    aspect_min: 1.0,
+                    aspect_max: 1.6,
+                    weight: 0.8,
+                    expands: false,
+                },
+                RoomType {
+                    tag: "bedroom".into(),
+                    area_min: 9.0,
+                    area_max: 20.0,
+                    aspect_min: 1.0,
+                    aspect_max: 1.5,
+                    weight: 1.5,
+                    expands: false,
+                },
+                RoomType {
+                    tag: "living".into(),
+                    area_min: 16.0,
+                    area_max: 40.0,
+                    aspect_min: 1.0,
+                    aspect_max: 1.7,
+                    weight: 1.6,
+                    expands: true,
+                },
             ],
             notch: None,
             topology: Topology::Grid,
@@ -1804,7 +1942,10 @@ mod tests {
 
         let a = Dungeon::generate(&cfg).expect("gen a");
         let b = Dungeon::generate(&cfg).expect("gen b");
-        assert_eq!(a.walkable, b.walkable, "notching must be deterministic for a (config, seed)");
+        assert_eq!(
+            a.walkable, b.walkable,
+            "notching must be deterministic for a (config, seed)"
+        );
 
         // A plain rectangle has every bounding-box cell as floor; a notched room has non-floor bites in
         // its bbox. At least one room must be non-rectangular.
@@ -1812,7 +1953,10 @@ mod tests {
             let (mn, mx) = (r.rect.min, r.rect.max);
             (mn[1]..mx[1]).any(|y| (mn[0]..mx[0]).any(|x| !a.is_floor(IVec2::new(x, y))))
         });
-        assert!(non_rect.count() > 0, "expected at least one notched (non-rectangular) room");
+        assert!(
+            non_rect.count() > 0,
+            "expected at least one notched (non-rectangular) room"
+        );
     }
 
     #[test]
@@ -1835,16 +1979,25 @@ mod tests {
         while let Some(c) = stack.pop() {
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 let n = IVec2::new(c.x + dx, c.y + dy);
-                if n.x >= 0 && n.y >= 0 && (n.x as usize) < d.width && (n.y as usize) < d.height
-                    && d.is_floor(n) && !seen[idx(n)]
+                if n.x >= 0
+                    && n.y >= 0
+                    && (n.x as usize) < d.width
+                    && (n.y as usize) < d.height
+                    && d.is_floor(n)
+                    && !seen[idx(n)]
                 {
                     seen[idx(n)] = true;
                     stack.push(n);
                 }
             }
         }
-        let unreached = (0..d.width * d.height).filter(|&i| d.walkable[i] && !seen[i]).count();
-        assert_eq!(unreached, 0, "notching orphaned {unreached} floor cells from the spawn");
+        let unreached = (0..d.width * d.height)
+            .filter(|&i| d.walkable[i] && !seen[i])
+            .count();
+        assert_eq!(
+            unreached, 0,
+            "notching orphaned {unreached} floor cells from the spawn"
+        );
     }
 
     #[test]
@@ -1852,7 +2005,10 @@ mod tests {
         let config = test_config();
         let a = Dungeon::generate(&config).expect("gen a");
         let b = Dungeon::generate(&config).expect("gen b");
-        assert_eq!(a.walkable, b.walkable, "same (config, seed) → same walkable mask");
+        assert_eq!(
+            a.walkable, b.walkable,
+            "same (config, seed) → same walkable mask"
+        );
         assert_eq!(a.spawn, b.spawn);
         assert_eq!(a.regions.len(), b.regions.len());
         for (ra, rb) in a.regions.iter().zip(&b.regions) {
@@ -1867,7 +2023,11 @@ mod tests {
         let type_tags: Vec<&str> = config.room_types.iter().map(|t| t.tag.as_str()).collect();
         let d = Dungeon::generate(&config).expect("gen");
         for r in &d.regions {
-            assert!(r.props.has("room"), "region {} missing base 'room' tag", r.id);
+            assert!(
+                r.props.has("room"),
+                "region {} missing base 'room' tag",
+                r.id
+            );
             assert!(
                 r.props.tags.iter().any(|t| type_tags.contains(&t.as_str())),
                 "region {} has no room-type tag: {:?}",
@@ -1884,8 +2044,14 @@ mod tests {
         let d = Dungeon::generate(&config).expect("gen");
         for r in &d.regions {
             let (w, h) = (r.rect.width(), r.rect.height());
-            assert!(w >= ROOM_FLOOR as i32 && w <= max_side, "room width {w} out of range");
-            assert!(h >= ROOM_FLOOR as i32 && h <= max_side, "room height {h} out of range");
+            assert!(
+                w >= ROOM_FLOOR as i32 && w <= max_side,
+                "room width {w} out of range"
+            );
+            assert!(
+                h >= ROOM_FLOOR as i32 && h <= max_side,
+                "room height {h} out of range"
+            );
         }
     }
 
@@ -1907,11 +2073,17 @@ mod tests {
         let bad_liminality = r#"(coarse_w:6,coarse_h:6,block:32,corridor_width:2,seed:1,max_attempts:20,
             liminality:2.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
             room_types:[(tag:"a",area_min:3.0,area_max:6.0,aspect_min:1.0,aspect_max:1.6,weight:1.0)])"#;
-        assert!(parse_config(bad_liminality).is_err(), "liminality > 1 must be rejected");
+        assert!(
+            parse_config(bad_liminality).is_err(),
+            "liminality > 1 must be rejected"
+        );
         let empty_types = r#"(coarse_w:6,coarse_h:6,block:32,corridor_width:2,seed:1,max_attempts:20,
             liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
             room_types:[])"#;
-        assert!(parse_config(empty_types).is_err(), "empty room_types must be rejected");
+        assert!(
+            parse_config(empty_types).is_err(),
+            "empty room_types must be rejected"
+        );
     }
 
     #[test]
@@ -1926,23 +2098,38 @@ mod tests {
             )
         };
         assert!(
-            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:NaN,corner:2.5,tee:1.2,cross:0.6)")).is_err(),
+            parse_config(&with_wfc(
+                "(rock:6.0,dead_end:1.2,corridor:NaN,corner:2.5,tee:1.2,cross:0.6)"
+            ))
+            .is_err(),
             "a NaN wfc_weight must be rejected"
         );
         assert!(
-            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:-2.5,corner:2.5,tee:1.2,cross:0.6)")).is_err(),
+            parse_config(&with_wfc(
+                "(rock:6.0,dead_end:1.2,corridor:-2.5,corner:2.5,tee:1.2,cross:0.6)"
+            ))
+            .is_err(),
             "a negative wfc_weight must be rejected"
         );
         assert!(
-            parse_config(&with_wfc("(rock:0.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)")).is_err(),
+            parse_config(&with_wfc(
+                "(rock:0.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)"
+            ))
+            .is_err(),
             "a zero-sum wfc_weights must be rejected"
         );
         assert!(
-            parse_config(&with_wfc("(rock:6.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)")).is_err(),
+            parse_config(&with_wfc(
+                "(rock:6.0,dead_end:0.0,corridor:0.0,corner:0.0,tee:0.0,cross:0.0)"
+            ))
+            .is_err(),
             "an all-rock (floorless) wfc_weights must be rejected"
         );
         assert!(
-            parse_config(&with_wfc("(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6)")).is_ok(),
+            parse_config(&with_wfc(
+                "(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6)"
+            ))
+            .is_ok(),
             "a valid wfc_weights distribution must parse"
         );
     }
@@ -1958,8 +2145,16 @@ mod tests {
         for r in &d.regions {
             let w = r.rect.width() as usize;
             let h = r.rect.height() as usize;
-            assert_eq!(r.rect.min[0] as usize % block, (block - w) / 2, "room not x-centred");
-            assert_eq!(r.rect.min[1] as usize % block, (block - h) / 2, "room not y-centred");
+            assert_eq!(
+                r.rect.min[0] as usize % block,
+                (block - w) / 2,
+                "room not x-centred"
+            );
+            assert_eq!(
+                r.rect.min[1] as usize % block,
+                (block - h) / 2,
+                "room not y-centred"
+            );
         }
     }
 
@@ -1980,7 +2175,10 @@ mod tests {
             r.rect.min[0] as usize % block != (block - w) / 2
                 || r.rect.min[1] as usize % block != (block - h) / 2
         });
-        assert!(any_offset, "liminality 0 should slide at least one room off-centre");
+        assert!(
+            any_offset,
+            "liminality 0 should slide at least one room off-centre"
+        );
     }
 
     #[test]
@@ -1995,7 +2193,12 @@ mod tests {
         };
         for (i, a) in d.regions.iter().enumerate() {
             for b in &d.regions[i + 1..] {
-                assert!(!overlaps(&a.rect, &b.rect), "regions {} and {} overlap", a.id, b.id);
+                assert!(
+                    !overlaps(&a.rect, &b.rect),
+                    "regions {} and {} overlap",
+                    a.id,
+                    b.id
+                );
             }
         }
     }
@@ -2045,9 +2248,8 @@ mod tests {
         let seen = reachable_from_spawn(d);
         let w = d.width;
         for r in &d.regions {
-            let reached = (r.rect.min[1]..r.rect.max[1]).any(|y| {
-                (r.rect.min[0]..r.rect.max[0]).any(|x| seen[y as usize * w + x as usize])
-            });
+            let reached = (r.rect.min[1]..r.rect.max[1])
+                .any(|y| (r.rect.min[0]..r.rect.max[0]).any(|x| seen[y as usize * w + x as usize]));
             assert!(reached, "region {} has no floor reachable from spawn", r.id);
         }
     }
@@ -2058,7 +2260,12 @@ mod tests {
         };
         for (i, a) in d.regions.iter().enumerate() {
             for b in &d.regions[i + 1..] {
-                assert!(!overlaps(&a.rect, &b.rect), "graph regions {} and {} overlap", a.id, b.id);
+                assert!(
+                    !overlaps(&a.rect, &b.rect),
+                    "graph regions {} and {} overlap",
+                    a.id,
+                    b.id
+                );
             }
         }
     }
@@ -2104,10 +2311,28 @@ mod tests {
             for o in &r.openings {
                 let [cx, cy] = o.cell;
                 match o.dir {
-                    N => assert_eq!(cy, r.rect.min[1], "N opening off the N wall of region {}", r.id),
-                    S => assert_eq!(cy, r.rect.max[1] - 1, "S opening off the S wall of region {}", r.id),
-                    E => assert_eq!(cx, r.rect.max[0] - 1, "E opening off the E wall of region {}", r.id),
-                    W => assert_eq!(cx, r.rect.min[0], "W opening off the W wall of region {}", r.id),
+                    N => assert_eq!(
+                        cy, r.rect.min[1],
+                        "N opening off the N wall of region {}",
+                        r.id
+                    ),
+                    S => assert_eq!(
+                        cy,
+                        r.rect.max[1] - 1,
+                        "S opening off the S wall of region {}",
+                        r.id
+                    ),
+                    E => assert_eq!(
+                        cx,
+                        r.rect.max[0] - 1,
+                        "E opening off the E wall of region {}",
+                        r.id
+                    ),
+                    W => assert_eq!(
+                        cx, r.rect.min[0],
+                        "W opening off the W wall of region {}",
+                        r.id
+                    ),
                     _ => unreachable!(),
                 }
                 let (ox, oy) = match o.dir {
@@ -2117,7 +2342,11 @@ mod tests {
                     W => (cx - 1, cy),
                     _ => unreachable!(),
                 };
-                assert!(ox >= 0 && oy >= 0 && ox < w && oy < h, "opening mouth off-grid on region {}", r.id);
+                assert!(
+                    ox >= 0 && oy >= 0 && ox < w && oy < h,
+                    "opening mouth off-grid on region {}",
+                    r.id
+                );
                 assert!(
                     d.walkable[oy as usize * d.width + ox as usize],
                     "region {} opening (dir {}) faces a wall, not a corridor",
@@ -2133,7 +2362,10 @@ mod tests {
         let config = graph_test_config();
         let a = Dungeon::generate(&config).expect("gen a");
         let b = Dungeon::generate(&config).expect("gen b");
-        assert_eq!(a.walkable, b.walkable, "same graph config + seed → same walkable mask");
+        assert_eq!(
+            a.walkable, b.walkable,
+            "same graph config + seed → same walkable mask"
+        );
         assert_eq!(a.spawn, b.spawn);
         assert_eq!(a.regions.len(), b.regions.len());
     }
@@ -2151,13 +2383,28 @@ mod tests {
             liminality:1.0,wfc_weights:(rock:6.0,dead_end:1.2,corridor:2.5,corner:2.5,tee:1.2,cross:0.6),
             room_types:[(tag:"a",area_min:3.0,area_max:6.0,aspect_min:1.0,aspect_max:1.6,weight:1.0)],"#;
         // NB: serde encodes `[f64; 6]` as a *tuple*, so RON writes `link_weights` with `(...)`, not `[...]`.
-        let small = format!("{base}topology:Graph(site_spacing:3.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))");
-        assert!(parse_config(&small).is_err(), "site_spacing below the floor must be rejected");
-        let zero = format!("{base}topology:Graph(site_spacing:14.0,link_weights:(0.0,0.0,0.0,0.0,0.0,0.0)))");
-        assert!(parse_config(&zero).is_err(), "zero-sum link_weights must be rejected");
-        let ok = format!("{base}topology:Graph(site_spacing:14.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))");
+        let small = format!(
+            "{base}topology:Graph(site_spacing:3.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))"
+        );
+        assert!(
+            parse_config(&small).is_err(),
+            "site_spacing below the floor must be rejected"
+        );
+        let zero = format!(
+            "{base}topology:Graph(site_spacing:14.0,link_weights:(0.0,0.0,0.0,0.0,0.0,0.0)))"
+        );
+        assert!(
+            parse_config(&zero).is_err(),
+            "zero-sum link_weights must be rejected"
+        );
+        let ok = format!(
+            "{base}topology:Graph(site_spacing:14.0,link_weights:(0.05,1.2,2.5,1.2,0.6,0.6)))"
+        );
         let cfg = parse_config(&ok).expect("valid graph config must parse");
-        assert!(Dungeon::generate(&cfg).is_ok(), "valid graph config must generate");
+        assert!(
+            Dungeon::generate(&cfg).is_ok(),
+            "valid graph config must generate"
+        );
     }
 
     // ---- Dungeon carve golden: locks the full Grid carve output so unintended drift in geometry, RNG
@@ -2251,6 +2498,42 @@ mod tests {
         // printed value with sign-off.
         let fps = golden_fingerprints();
         println!("GOLDEN_DUNGEON = {fps:?}");
-        assert_eq!(fps.as_slice(), &GOLDEN_DUNGEON, "dungeon carve output changed");
+        assert_eq!(
+            fps.as_slice(),
+            &GOLDEN_DUNGEON,
+            "dungeon carve output changed"
+        );
+    }
+
+    /// Footprint-aware containment (README ISSUES 1 & 2): a piece is legal only when its whole body
+    /// lies on floor, never when it overhangs a wall or a notched-out corner — the discrete
+    /// `C_free` non-penetration test (Merrell et al. 2011).
+    #[test]
+    fn footprint_on_floor_rejects_wall_overhang() {
+        // A 3×3 floor room (cells (1,1)..=(3,3)) walled in by rock in a 5×5 grid.
+        let mut mask = vec![false; 5 * 5];
+        for y in 1..4 {
+            for x in 1..4 {
+                mask[y * 5 + x] = true;
+            }
+        }
+        let d = Dungeon::from_walkable(5, 5, mask);
+
+        // A small piece dead-centre in the interior cell (2,2) is fully clear.
+        assert!(d.footprint_on_floor(Vec3::new(2.0, 0.0, 2.0), Vec2::new(0.1, 0.1), 0.0));
+
+        // A large piece at a corner cell (1,1) overhangs the N and W walls → rejected. Its old
+        // center-only `is_floor` check would have wrongly accepted it.
+        assert!(d.is_floor(IVec2::new(1, 1)));
+        assert!(!d.footprint_on_floor(Vec3::new(1.0, 0.0, 1.0), Vec2::new(0.4, 0.4), 0.0));
+
+        // A piece centred on a rock cell (outside the room) is rejected outright.
+        assert!(!d.footprint_on_floor(Vec3::new(0.0, 0.0, 0.0), Vec2::new(0.1, 0.1), 0.0));
+
+        // Quarter-turn: a long-thin piece at edge cell (2,1) (walled on N) clears at yaw 0 (long axis
+        // runs along X, away from the wall) but overhangs once rotated 90° (long axis into the N wall).
+        let half = Vec2::new(0.4, 0.1); // 0.8 (w) × 0.2 (d)
+        assert!(d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, 0.0));
+        assert!(!d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, std::f32::consts::FRAC_PI_2));
     }
 }
