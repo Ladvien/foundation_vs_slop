@@ -19,6 +19,7 @@ use bevy::prelude::*;
 pub mod boot;
 pub mod hud;
 pub mod pause;
+pub mod settings_menu;
 pub mod state;
 pub mod theme;
 pub mod title;
@@ -34,13 +35,17 @@ impl Plugin for UiPlugin {
             .add_sub_state::<MenuState>()
             .add_sub_state::<TitleMenu>()
             .add_plugins((
+                crate::settings::SettingsPlugin,
                 theme::UiThemePlugin,
                 boot::BootScreenPlugin,
                 title::TitlePlugin,
                 pause::PauseMenuPlugin,
+                settings_menu::SettingsMenuPlugin,
                 hud::HudPlugin,
             ))
             // Sole writer of `SimBlocked`: freeze the sim under any blocking screen.
-            .add_systems(Update, state::sync_sim_blocked);
+            .add_systems(Update, state::sync_sim_blocked)
+            // Hover feedback for all themed menu buttons.
+            .add_systems(Update, widgets::style_menu_buttons);
     }
 }

@@ -39,6 +39,7 @@ pub mod orca;
 pub mod placement;
 pub mod rng;
 pub mod selection;
+pub mod settings;
 /// Headless deterministic replay/liveness harness — opt-in so it never enters the shipped binary.
 #[cfg(feature = "test-harness")]
 pub mod sim_harness;

@@ -1,12 +1,13 @@
-//! Title screen. Minimal for now — a CRT title card that starts the game on Enter/click. The full
-//! New Run / Continue / Settings / Quit menu (with seed entry) lands in the menus phase; this
-//! establishes the real `Title → InGame` transition the rest of the UI builds on.
+//! Title screen — CRT title card with New Run / Settings / Quit. Seed entry and Continue (which
+//! needs the save system) come with their gated phases; this is the real main menu the rest of the
+//! flow hangs off.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::Activate;
 
-use super::state::AppState;
+use super::state::{AppState, TitleMenu};
 use super::theme::{FontAssets, UiTheme, Z_MENU};
-use super::widgets::{text_colored, text};
+use super::widgets::{button_visual, text, text_colored};
 
 /// Root marker for the title screen (despawned on exit).
 #[derive(Component)]
@@ -21,7 +22,10 @@ impl Plugin for TitlePlugin {
                 OnExit(AppState::Title),
                 super::state::despawn_scoped::<TitleRoot>,
             )
-            .add_systems(Update, start_on_input.run_if(in_state(AppState::Title)));
+            .add_systems(
+                Update,
+                start_on_enter_key.run_if(in_state(TitleMenu::Root)),
+            );
     }
 }
 
@@ -56,24 +60,46 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                 theme.font_body,
                 theme.text_muted,
             ));
-            p.spawn(text(
-                &theme,
-                &fonts,
-                "[ PRESS ENTER OR CLICK TO BEGIN ]",
-                theme.font_body,
-            ));
+
+            // New Run
+            p.spawn(button_visual(&theme))
+                .with_children(|b| {
+                    b.spawn(text(&theme, &fonts, "NEW RUN", theme.font_body));
+                })
+                .observe(
+                    |_: On<Activate>, mut next: ResMut<NextState<AppState>>| {
+                        next.set(AppState::InGame);
+                    },
+                );
+
+            // Settings
+            p.spawn(button_visual(&theme))
+                .with_children(|b| {
+                    b.spawn(text(&theme, &fonts, "SETTINGS", theme.font_body));
+                })
+                .observe(
+                    |_: On<Activate>, mut next: ResMut<NextState<TitleMenu>>| {
+                        next.set(TitleMenu::Settings);
+                    },
+                );
+
+            // Quit
+            p.spawn(button_visual(&theme))
+                .with_children(|b| {
+                    b.spawn(text(&theme, &fonts, "QUIT", theme.font_body));
+                })
+                .observe(|_: On<Activate>, mut exit: MessageWriter<AppExit>| {
+                    exit.write(AppExit::Success);
+                });
         });
 }
 
-fn start_on_input(
+/// Convenience: `Enter` starts a new run from the root title (not while the settings panel is up).
+fn start_on_enter_key(
     keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    if keys.just_pressed(KeyCode::Enter)
-        || keys.just_pressed(KeyCode::NumpadEnter)
-        || mouse.just_pressed(MouseButton::Left)
-    {
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
         next.set(AppState::InGame);
     }
 }
