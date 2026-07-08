@@ -242,6 +242,15 @@ pub struct Carryable {
     pub crew_timer: f32,
 }
 
+/// A **stable, deterministic** identity for a meat chunk, derived at spawn from the death origin + the
+/// chunk index — NOT from entity id or the gore seed counter (both vary between two same-seed runs).
+/// The crab foraging assignment ([`crate::crab::assign_meat_targets`]) sorts candidate chunks by
+/// `(position, GibKey)`; two chunks that settle at a bit-identical spot would otherwise be ordered by
+/// unstable entity order, and since their weights differ the greedy would fill them in different orders
+/// per run — flipping a crab's commit and breaking the physics-free replay hash.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub struct GibKey(pub u64);
+
 /// Lifecycle of a carryable chunk.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CarryPhase {
@@ -862,13 +871,21 @@ fn spawn_fragments(
         // milling around them. Weight ∝ the piece's (fractionally-filled) box volume, clamped haulable.
         let vol = 2.0 * half.x * 2.0 * half.y * 2.0 * half.z;
         let weight = (MEAT_DENSITY * vol * FRAG_FILL).clamp(FRAG_WEIGHT_MIN, FRAG_WEIGHT_MAX);
-        commands.entity(id).insert(Carryable {
-            weight,
-            carriers: Vec::new(),
-            phase: CarryPhase::Resting,
-            nest: None,
-            crew_timer: 0.0,
-        });
+        // Deterministic identity from the (deterministic) death origin + fragment index — see [`GibKey`].
+        let mut key = origin.x.to_bits() as u64;
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.y.to_bits() as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.z.to_bits() as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0x5000_0000 + i as u64);
+        commands.entity(id).insert((
+            Carryable {
+                weight,
+                carriers: Vec::new(),
+                phase: CarryPhase::Resting,
+                nest: None,
+                crew_timer: 0.0,
+            },
+            GibKey(key),
+        ));
         commands.entity(id).with_children(|parent| {
             let child_scale = Transform::from_scale(Vec3::splat(scale));
             if let Some(outer) = &frag.outer_mesh {
@@ -924,9 +941,17 @@ fn spawn_meat_chunks(
     origin: Vec3,
     seed: u32,
 ) {
+    // Determinism: seed each chunk's randomization (velocity, mesh, size → weight) from the DETERMINISTIC
+    // death origin, NOT the caller's `seed` — which comes from the gore drain's shared `Local` event
+    // counter and so varies between two same-seed runs (it advances on every blood/flesh event, many of
+    // which are pushed in nondeterministic entity order). A nondeterministic weight would flip the crab
+    // crew's `committed >= weight` lift gate and break the physics-free replay hash. `seed` still drives
+    // the purely-cosmetic droplets, which never enter the hash.
+    let det = origin.x.to_bits() ^ origin.y.to_bits().rotate_left(11) ^ origin.z.to_bits().rotate_left(22);
+    let _ = seed;
     for i in 0..settings.meat_count.max(0) {
-        // Offset the seed base from the fragments so meat directions don't mirror the mesh chunks.
-        let base = seed
+        // Offset the base from the fragments so meat directions don't mirror the mesh chunks.
+        let base = det
             .wrapping_mul(2_246_822_519)
             .wrapping_add((i as u32).wrapping_mul(3_266_489_917))
             .wrapping_add(0xA5A5_A5A5);
@@ -964,12 +989,14 @@ fn spawn_meat_chunks(
         // so an unguarded NaN would yield a NaN weight that no crew's `Σcapacity ≥ weight` check can
         // ever satisfy — the chunk would litter the floor forever, denying the nest that food. Treat a
         // non-finite / non-positive volume exactly like an un-loaded one: fall back to the unit box.
-        let unit_vol = volumes
-            .unit
-            .get(idx)
-            .copied()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(1.0);
+        // Determinism: the per-mesh GLB volume (`volumes.unit`) is filled ASYNCHRONOUSLY, so at the tick a
+        // chunk spawns it is present in one same-seed run and still the 1.0 fallback in another — a
+        // nondeterministic weight that flips the crab crew's `committed >= weight` lift gate and breaks
+        // the physics-free replay hash. Use a fixed unit-volume fraction (the ~0.1–0.5 GLB range's
+        // midpoint) so weight depends only on the deterministic chunk `side`; the per-chunk size variety
+        // still comes from `half`. `volumes` stays wired for the (hash-free) visual scale.
+        let _ = volumes;
+        let unit_vol = 0.3;
         // Clamp to the same liftable band as fragments. Without it, an un-loaded `unit_vol` fallback
         // (1.0 vs the real ~0.1-0.5, before the GLB volumes finish computing) or an oversized chunk
         // yields a weight no crew can gather enough capacity to lift — the chunk then sits stuck until
@@ -980,13 +1007,21 @@ fn spawn_meat_chunks(
         }
         let pos = origin + Vec3::Y * 0.2;
         let id = spawn_gib_body(commands, gib_ring, settings, pos, Vec3::splat(half), velocity, spin);
-        commands.entity(id).insert(Carryable {
-            weight,
-            carriers: Vec::new(),
-            phase: CarryPhase::Resting,
-            nest: None,
-            crew_timer: 0.0,
-        });
+        // Deterministic identity from the (deterministic) death origin + chunk index — see [`GibKey`].
+        let mut key = origin.x.to_bits() as u64;
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.y.to_bits() as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.z.to_bits() as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(i as u64);
+        commands.entity(id).insert((
+            Carryable {
+                weight,
+                carriers: Vec::new(),
+                phase: CarryPhase::Resting,
+                nest: None,
+                crew_timer: 0.0,
+            },
+            GibKey(key),
+        ));
         commands.entity(id).with_children(|parent| {
             parent.spawn((
                 Mesh3d(mesh),

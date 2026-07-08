@@ -46,6 +46,34 @@ fn deterministic_core_is_bit_identical() {
 }
 
 #[test]
+fn deterministic_core_is_bit_identical_across_many_builds() {
+    // Stronger guard than the two-build check above. Entity enumeration order is NOT stable across
+    // same-seed `App` instances in one process (GLB scene-child instantiation + entity-id reuse permute
+    // it), so any gameplay decision that keys on iteration order — a "keep the first on a tie" pick, a
+    // non-associative float sum over an entity list, a value fed by an async-loaded asset — diverges
+    // only intermittently. The two-build test catches such a bug just ~1% of the time, so it slipped
+    // through for months; building MANY apps and hashing each makes a per-instance-order dependence fail
+    // reliably. Keep N high enough that a ~1%-per-build regression is caught essentially every run.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+
+    let mut reference: Option<u64> = None;
+    for build in 0..24 {
+        let mut app = build_headless_app(&cfg);
+        step(&mut app, &cfg, 180);
+        let h = snapshot_hash(&mut app);
+        match reference {
+            None => reference = Some(h),
+            Some(r) => assert_eq!(
+                h, r,
+                "physics-free core diverged on build {build}: gameplay must not depend on entity \
+                 enumeration order (see util::nearest_planar / crab::assign_meat_targets)"
+            ),
+        }
+    }
+}
+
+#[test]
 fn core_state_evolves_over_time() {
     // Guards against a dead sim silently "passing" repeatability: state after 180 ticks must differ from
     // the freshly-spawned state (things actually moved / fought / were born). Physics-free so it's stable.
