@@ -35,7 +35,15 @@ impl Plugin for DialoguePlugin {
             .add_systems(Startup, bubble::setup_bubble_assets)
             .add_systems(
                 Update,
-                (bubble::track_bubbles, bubble::expire_bubbles, demo_input),
+                // `ensure_leader` lives here (not in `SquadPlugin`) so the `Leader` marker — which
+                // splits the hashed `Unit` archetype and would break the deterministic core — exists
+                // only in the windowed build. It anchors the leader-facing choice bubbles.
+                (
+                    crate::squad::ensure_leader,
+                    bubble::track_bubbles,
+                    bubble::expire_bubbles,
+                    demo_input,
+                ),
             );
         runtime::plugin(app);
     }

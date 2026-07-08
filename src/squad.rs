@@ -203,9 +203,14 @@ impl Plugin for SquadPlugin {
             // `unit_facing` after `unit_movement` so it turns units (moving OR idle) toward their aim/travel
             // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
             .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
-            // `ensure_leader` is a cheap cosmetic-adjacent maintainer (adds a marker only when the
-            // leader is missing); it touches no pinned state, so it rides `Update`.
-            .add_systems(Update, (recolor_units, ensure_leader));
+            .add_systems(Update, recolor_units);
+        // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
+        // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
+        // two archetypes and make the pinned iteration order (ORCA in `unit_movement`, crab nearest-prey
+        // tiebreaks) archetype-dependent — breaking `deterministic_core_is_bit_identical`. It's a
+        // windowed-only, dialogue-facing concern, so `DialoguePlugin` owns it (registered in `lib::run`
+        // only, never in the headless harness). `SquadMember` stays here: it's on *every* unit, so it
+        // keeps them in one archetype and is determinism-neutral. See TESTING.md.
     }
 }
 
@@ -237,10 +242,8 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 // Component + plugin come from avian's `bevy_transform_interpolation` integration.
                 avian3d::prelude::TransformInterpolation,
             ));
-        // The first spawned member anchors leader-facing UI (dialogue choice bubbles).
-        if i == 0 {
-            unit.insert(Leader);
-        }
+        // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
+        // not here — putting it on one unit in the headless core would split the hashed archetype.
         // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
         unit.with_child((
             GunModel,
@@ -252,11 +255,15 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
     }
 }
 
-/// Keep exactly one living unit tagged [`Leader`]. If the leader died (removed by
-/// [`despawn_dead_units`]), promote the surviving member with the lowest [`SquadMember`] index so
-/// leader-anchored UI (dialogue choices) always has a target. Cheap: only acts when the tag is
-/// missing.
-fn ensure_leader(
+/// Keep exactly one living unit tagged [`Leader`]. Runs on the initial frame (no leader yet →
+/// promotes [`SquadMember`] 0) and again whenever the leader dies (removed by [`despawn_dead_units`]),
+/// promoting the surviving member with the lowest [`SquadMember`] index so leader-anchored UI
+/// (dialogue choices) always has a target. Cheap: only acts when the tag is missing.
+///
+/// Windowed-only — registered by `crate::dialogue::DialoguePlugin`, never the headless harness. The
+/// `Leader` marker splits the hashed `Unit` archetype, so it must stay out of the deterministic core
+/// (see `SquadPlugin::build`).
+pub(crate) fn ensure_leader(
     mut commands: Commands,
     leaders: Query<(), (With<Unit>, With<Leader>)>,
     members: Query<(Entity, &SquadMember), With<Unit>>,
