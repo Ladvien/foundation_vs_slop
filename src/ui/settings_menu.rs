@@ -3,6 +3,7 @@
 //! groups are live; **Controls** and **Audio** are shown disabled with a "pending" note until their
 //! gated phases (keybind remap / audio overhaul) land.
 
+use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
@@ -50,7 +51,34 @@ impl Plugin for SettingsMenuPlugin {
                 Update,
                 refresh_setting_labels
                     .run_if(in_state(TitleMenu::Settings).or_else(in_state(MenuState::Settings))),
+            )
+            // Esc backs out to wherever Settings was opened from, so a keyboard-only player is never
+            // trapped here (there is no camera Esc handler while a blocking screen is up). Which
+            // system runs is decided by the active state, matching the "BACK" button's target.
+            .add_systems(
+                Update,
+                settings_escape_to_title.run_if(in_state(TitleMenu::Settings)),
+            )
+            .add_systems(
+                Update,
+                settings_escape_to_pause.run_if(in_state(MenuState::Settings)),
             );
+    }
+}
+
+/// Esc from the title-opened Settings returns to the title root (mirrors the "BACK" button).
+fn settings_escape_to_title(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<TitleMenu>>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        next.set(TitleMenu::Root);
+    }
+}
+
+/// Esc from the pause-opened Settings returns to the pause menu (mirrors the "BACK" button).
+/// `pause::toggle_pause` also sees this Esc but ignores it while `MenuState::Settings`, so there is
+/// no double handling.
+fn settings_escape_to_pause(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<MenuState>>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        next.set(MenuState::Pause);
     }
 }
 
@@ -77,6 +105,8 @@ fn spawn_settings(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets, 
             },
             BackgroundColor(theme.bg),
             GlobalZIndex(Z_MENU),
+            // Scopes keyboard nav to this panel's toggles + Back (their `TabIndex` is inert without it).
+            TabGroup::new(0),
         ))
         .with_children(|root| {
             root.spawn(text_colored(theme, fonts, "SETTINGS", theme.font_title * 0.6, theme.accent));
