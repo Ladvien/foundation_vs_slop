@@ -122,6 +122,82 @@ fn ui_never_leaks_into_deterministic_core() {
 }
 
 #[test]
+fn ui_screens_spawn_and_pause_blocks_the_sim() {
+    // OPERABILITY liveness (Game-UI Guidance §1.5): boot the *real* windowed UI headless and prove
+    // the screens actually spawn and the state flow works — the substitute for a pixel screenshot,
+    // which this headless env can't produce (no monitor → black drawable). Not a determinism test:
+    // it builds its own UI-inclusive app; the core reference app (`build_headless_app`) is untouched.
+    use bevy::prelude::*;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    use foundation_vs_slop::time_control::SimBlocked;
+    use foundation_vs_slop::ui::hud::{HudRoot, SpeedText};
+    use foundation_vs_slop::ui::pause::PauseRoot;
+    use foundation_vs_slop::ui::state::{AppState, MenuState};
+    use foundation_vs_slop::ui::UiPlugin;
+
+    let _serial = serial_guard();
+    // Redirect settings IO to a temp dir so the test never writes the real user config.
+    // SAFETY: `serial_guard` is held, so this is the only thread touching the environment.
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("fvs_ui_liveness"));
+    }
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app_unfinished(&cfg);
+    app.add_plugins(UiPlugin);
+    app.finish();
+    app.cleanup();
+
+    // Boot gates to the title (font-ready or its frame cap) within a few dozen frames.
+    for _ in 0..40 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<State<AppState>>().get(),
+        &AppState::Title,
+        "boot should reach the title screen"
+    );
+    assert!(
+        app.world().resource::<SimBlocked>().0,
+        "the title screen must block the sim underneath it"
+    );
+
+    // Enter the game → HUD spawns, sim unblocks.
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InGame);
+    app.update();
+    app.update();
+    assert!(
+        !app.world().resource::<SimBlocked>().0,
+        "in-game with no menu open must unblock the sim"
+    );
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<HudRoot>>();
+        assert_eq!(q.iter(app.world()).count(), 1, "HUD root should spawn on entering the game");
+    }
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<SpeedText>>();
+        assert!(q.iter(app.world()).next().is_some(), "HUD speed readout should exist");
+    }
+
+    // Open the pause menu → overlay spawns, sim blocks again.
+    app.world_mut()
+        .resource_mut::<NextState<MenuState>>()
+        .set(MenuState::Pause);
+    app.update();
+    app.update();
+    assert!(
+        app.world().resource::<SimBlocked>().0,
+        "the pause menu must block the sim"
+    );
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<PauseRoot>>();
+        assert!(q.iter(app.world()).next().is_some(), "pause overlay should spawn");
+    }
+}
+
+#[test]
 fn full_sim_stays_live() {
     // Full physics-inclusive sim (the real production plugin set). Not exact-hashable (Avian isn't
     // bit-reproducible), so we assert LIVENESS every 30 ticks over ~5 s: no panic, no NaN transforms, no
