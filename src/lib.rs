@@ -40,6 +40,7 @@ pub mod pathfind;
 pub mod placement;
 pub mod rng;
 pub mod selection;
+pub mod settings;
 /// Headless deterministic replay/liveness harness — opt-in so it never enters the shipped binary.
 #[cfg(feature = "test-harness")]
 pub mod sim_harness;
@@ -49,6 +50,7 @@ pub mod visual_regression;
 pub mod squad;
 pub mod surface_nav;
 pub mod time_control;
+pub mod ui;
 pub mod util;
 pub mod vhs;
 pub mod wfc;
@@ -132,6 +134,9 @@ pub fn run() {
             ),
             audio::GameAudioPlugin,
             (vhs::VhsPlugin, blood_lens::BloodLensPlugin),
+            // Windowed game-system UI (HUD, menus, state machine). Registered only here, never in
+            // the headless harness, so it stays outside the deterministic core (see `ui` docs).
+            ui::UiPlugin,
         ));
 
     // Pinned simulation runs on `FixedUpdate` at a fixed 60 Hz, so gameplay advances at the same rate

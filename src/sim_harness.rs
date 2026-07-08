@@ -62,8 +62,10 @@ impl SimConfig {
     }
 }
 
-/// Build a headless `App` running the full game simulation with no window.
-pub fn build_headless_app(cfg: &SimConfig) -> App {
+/// Build a headless `App` running the full game simulation with no window, **before** `finish()`.
+/// Split out so UI liveness tests can add `ui::UiPlugin` before finish (plugins can't be added
+/// after). The determinism path uses [`build_headless_app`], which never adds the UI.
+pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // Force the GLOBAL compute pool to a single thread BEFORE any plugin touches it. Bevy runs parallel
     // queries / systems (and Avian's solver) on this pool; with >1 worker the float reductions and
     // command ordering are non-deterministic, so two same-seed runs diverge. `get_or_init` is a global
@@ -165,12 +167,18 @@ pub fn build_headless_app(cfg: &SimConfig) -> App {
     app.insert_resource(Time::<bevy::time::Fixed>::from_duration(fixed));
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(advance));
 
+    app
+}
+
+/// Build + finish the headless deterministic-sim app (no UI) — the replay/determinism reference.
+/// `ui::UiPlugin` must never be added here (guarded by `ui_never_leaks_into_deterministic_core`).
+pub fn build_headless_app(cfg: &SimConfig) -> App {
+    let mut app = build_headless_app_unfinished(cfg);
     // Run plugin `finish`/`cleanup` now (creates the headless render device etc.) so the render-world
     // resources every PBR system validates against exist before the first `step`. `update()` skips
     // re-running these once done.
     app.finish();
     app.cleanup();
-
     app
 }
 
