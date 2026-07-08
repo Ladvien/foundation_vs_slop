@@ -9,13 +9,16 @@
 
 use bevy::math::Vec3;
 use bevy::prelude::Component;
+use serde::Deserialize;
 
 use super::drives::{DriveId, DRIVE_COUNT};
 use crate::util::rand01;
 
 /// The executable outcome of a decision — read by the (wrapped) locomotion systems to select which
-/// movement mechanic runs this tick.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+/// movement mechanic runs this tick. `Deserialize` so squad **role** repertoires are authored as data
+/// in `assets/config/roles.ron` (Jacopin, "Optimizing Practical Planning for Game AI", Game AI Pro 2
+/// Ch.13 — actions as text files); the crab/boss brains stay code literals.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 pub enum Mode {
     Forage,
     Latch,
@@ -36,10 +39,38 @@ pub enum Mode {
     /// Muster: a nearby crab was just wounded — converge on the squad and press (a retaliatory surge,
     /// driven by the local ALARM pheromone). The twin of Rally, but recruited by kin damage, not a scout.
     Muster,
+
+    // --- Squad role actions (units only). Each is one entry in the shared action vocabulary, so it
+    // doubles as the discrete high-level action of an RL policy (Wu et al., "Hierarchical Macro Strategy
+    // Model for MOBA Game AI", AAAI 2019 — the RL "option" level). Executed by `squad_ai::actions`.
+    /// Researcher: study the nearest unexamined furniture / creature / corpse and narrate a finding.
+    Examine,
+    /// Gunman: hold position and priority-fire on threats (drives `AimTarget`; no advance).
+    Overwatch,
+    /// Gunman: advance to contact on the nearest threat.
+    Engage,
+    /// Gunman: lay suppressing fire toward a threat bearing.
+    Suppress,
+    /// Psionic: sense anomalies / threat bearings through walls (reveals perception, not movement).
+    PsiScan,
+    /// Psionic: commune with the watcher (read the boss's state/mood).
+    Commune,
+    /// Psionic: raise a local ward that steadies squad morale / damps fear.
+    Ward,
+    /// Medic: move to and heal the nearest wounded ally.
+    TendWounded,
+    /// Engineer: secure / breach the nearest door.
+    SecureDoor,
+    /// Engineer: deploy a sensor that extends the squad's line of sight.
+    DeploySensor,
+    /// Any role: return toward the squad anchor when it has strayed past the leash (the cohesion pull).
+    Regroup,
+    /// Any role: loosely follow the moving squad anchor (default in-formation drift).
+    FollowAnchor,
 }
 
 /// A perception fact the brain reads (extend freely).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize)]
 pub enum Fact {
     /// Distance to the nearest unit (large when none).
     NearestUnitDist,
@@ -64,17 +95,33 @@ pub enum Fact {
     /// this so it pursues whenever it is visible AT ANY RANGE, not only inside the distance leash — a slow
     /// boss shot from across the room must still advance, not drift into Wander.
     SeenBySquad,
+
+    // --- Squad-unit facts (built by `squad_ai::perception`). Neutral (0 / far) for crabs & the boss. ---
+    /// Planar distance from this unit to the squad anchor (large when no anchor). Drives Regroup.
+    AnchorDist,
+    /// Distance to the nearest examinable (furniture / creature / corpse) the unit can see (large when none).
+    NearestExaminableDist,
+    /// 1.0 while an *unexamined* examinable is within the Researcher's study range (latches Examine).
+    HasUnexaminedNearby,
+    /// Distance to the nearest wounded ally (large when none) — the Medic's TendWounded target.
+    NearestWoundedAllyDist,
+    /// 1.0 while any ally's health is critical within support range (gates the Medic's response).
+    AllyDownNearby,
+    /// 1.0 while a hostile bearing is known to this unit (a live threat to Overwatch / Engage / Suppress).
+    ThreatBearingKnown,
+    /// 1.0 while psychic residue (an anomaly signature) is sensed nearby — the Psionic's PsiScan hook.
+    AnomalyResidueNearby,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize)]
 pub enum Input {
     Drive(DriveId),
     Perc(Fact),
 }
 
 /// Parametric response curve mapping a raw input to a `[0,1]` utility. Params are RON-tunable.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize)]
 pub enum Curve {
     /// `m*x + b`, clamped.
     Linear { m: f32, b: f32 },
@@ -106,13 +153,14 @@ impl Curve {
 }
 
 /// One scoring factor: read an input, shape it with a curve.
+#[derive(Deserialize)]
 pub struct Consideration {
     pub input: Input,
     pub curve: Curve,
 }
 
 /// Where a chosen behaviour aims (resolved from perception when the behaviour is selected).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 pub enum TargetKind {
     None,
     NearestUnit,
@@ -124,9 +172,19 @@ pub enum TargetKind {
     /// A marking scout's live prey sighting — it approaches this to keep the rally pheromone fresh
     /// (resolved from the scout's stored sighting, not from the field).
     TrackedPrey,
+    // --- Squad-unit targets (resolved by `squad_ai::perception`/`squad_think`). ---
+    /// The squad anchor position (Regroup / FollowAnchor destination).
+    SquadAnchor,
+    /// The nearest examinable entity the unit can see (Examine destination).
+    NearestExaminable,
+    /// The nearest wounded ally (Medic's TendWounded destination).
+    NearestWoundedAlly,
+    /// The nearest known hostile (Gunman's Engage destination / Psionic's Commune subject).
+    TrackedThreat,
 }
 
 /// A complete behaviour: a small data literal.
+#[derive(Deserialize)]
 pub struct Behavior {
     pub mode: Mode,
     /// Dual-utility priority bucket — a higher rank with any positive score wins outright over lower.
@@ -175,6 +233,51 @@ pub struct Perception {
     /// 1.0 while this agent's cell is in the squad's live LOS (see [`Fact::SeenBySquad`]); the boss's
     /// "pursue whenever seen, at any range" aggro term.
     pub seen_by_squad: f32,
+
+    /// Squad-unit perception (built by `squad_ai::perception`). Crab/boss `think` splats one neutral
+    /// value: `squad: SquadFields::neutral()`.
+    pub squad: SquadFields,
+}
+
+/// The squad-only slice of a [`Perception`], grouped so non-squad builders (crab/boss) splat one
+/// neutral value instead of listing every unit field. A plain struct (not `Default`-derived) so the
+/// sentinel distances (`999.0`, not `0.0`) are explicit — a `0.0` distance would falsely fire the
+/// distance-falloff curves.
+pub struct SquadFields {
+    /// Squad anchor position + planar distance to it (see [`Fact::AnchorDist`]); `999.0` when no anchor.
+    pub anchor: Option<Vec3>,
+    pub anchor_dist: f32,
+    /// The nearest examinable entity's position + distance, and whether an *unexamined* one is in range.
+    pub nearest_examinable: Option<Vec3>,
+    pub examinable_dist: f32,
+    pub has_unexamined: f32,
+    /// The nearest wounded ally's position + distance (Medic), and whether an ally is critical in range.
+    pub nearest_wounded_ally: Option<Vec3>,
+    pub wounded_ally_dist: f32,
+    pub ally_down: f32,
+    /// The nearest known hostile's position, plus gate flags for threat-driven and psi behaviours.
+    pub tracked_threat: Option<Vec3>,
+    pub threat_bearing_known: f32,
+    pub anomaly_residue: f32,
+}
+
+impl SquadFields {
+    /// The no-squad-context base (crabs, the boss, and every test's starting point).
+    pub fn neutral() -> Self {
+        SquadFields {
+            anchor: None,
+            anchor_dist: 999.0,
+            nearest_examinable: None,
+            examinable_dist: 999.0,
+            has_unexamined: 0.0,
+            nearest_wounded_ally: None,
+            wounded_ally_dist: 999.0,
+            ally_down: 0.0,
+            tracked_threat: None,
+            threat_bearing_known: 0.0,
+            anomaly_residue: 0.0,
+        }
+    }
 }
 
 impl Perception {
@@ -190,6 +293,13 @@ impl Perception {
             Input::Perc(Fact::RallyHere) => self.rally_val,
             Input::Perc(Fact::AlarmHere) => self.alarm_val,
             Input::Perc(Fact::SeenBySquad) => self.seen_by_squad,
+            Input::Perc(Fact::AnchorDist) => self.squad.anchor_dist,
+            Input::Perc(Fact::NearestExaminableDist) => self.squad.examinable_dist,
+            Input::Perc(Fact::HasUnexaminedNearby) => self.squad.has_unexamined,
+            Input::Perc(Fact::NearestWoundedAllyDist) => self.squad.wounded_ally_dist,
+            Input::Perc(Fact::AllyDownNearby) => self.squad.ally_down,
+            Input::Perc(Fact::ThreatBearingKnown) => self.squad.threat_bearing_known,
+            Input::Perc(Fact::AnomalyResidueNearby) => self.squad.anomaly_residue,
         }
     }
 }
@@ -264,6 +374,7 @@ mod tests {
             rally_val: 0.0,
             alarm_val: 0.0,
             seen_by_squad: 0.0,
+            squad: SquadFields::neutral(),
         }
     }
 
