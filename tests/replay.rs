@@ -92,6 +92,36 @@ fn speed_setting_is_deterministic_and_has_effect() {
 }
 
 #[test]
+fn ui_never_leaks_into_deterministic_core() {
+    // Determinism firewall. The windowed `UiPlugin` (states, HUD, menus) is registered only in
+    // `lib::run`, never in the harness — so its `AppState` must be absent here. The pause resources
+    // `UserPaused`/`SimBlocked` DO exist (owned by `TimeControlPlugin`), but the UI is their only
+    // writer, so in the headless core they must stay at their inert `false` defaults. A stray
+    // `SimBlocked=true` would freeze replay; this asserts that can't happen.
+    use bevy::prelude::State;
+    use foundation_vs_slop::time_control::{SimBlocked, UserPaused};
+    use foundation_vs_slop::ui::state::AppState;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 5);
+
+    assert!(
+        app.world().get_resource::<State<AppState>>().is_none(),
+        "UI AppState must not exist in the headless deterministic core"
+    );
+    assert!(
+        !app.world().resource::<SimBlocked>().0,
+        "SimBlocked must stay false in the core (no UI writer present)"
+    );
+    assert!(
+        !app.world().resource::<UserPaused>().0,
+        "UserPaused must stay false in the core (no key input present)"
+    );
+}
+
+#[test]
 fn full_sim_stays_live() {
     // Full physics-inclusive sim (the real production plugin set). Not exact-hashable (Avian isn't
     // bit-reproducible), so we assert LIVENESS every 30 ticks over ~5 s: no panic, no NaN transforms, no

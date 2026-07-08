@@ -59,6 +59,25 @@ impl Default for GameSpeed {
     }
 }
 
+/// Player-toggled pause (the `0` key). Kept separate from [`SimBlocked`] so the two independent
+/// pause sources compose through a *single* writer of [`GameSpeed::paused`] ([`compose_pause`])
+/// instead of racing to set it. Defaults `false`.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct UserPaused(pub bool);
+
+/// Set by the windowed UI while a blocking screen (boot, title, pause, settings, roster) is open,
+/// to freeze the sim underneath it. The headless replay harness never registers the UI plugin, so
+/// nothing ever writes this — it stays `false` and the deterministic core is unperturbed.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SimBlocked(pub bool);
+
+/// Pure pause-composition rule, factored out for a unit test: the sim is frozen if the player
+/// paused **or** a blocking UI screen is open.
+#[inline]
+pub fn paused_from(user_paused: bool, sim_blocked: bool) -> bool {
+    user_paused || sim_blocked
+}
+
 /// Discrete speed presets bound to number keys `1..=9` (index 0..=8). Index 2 (`×1.0`) is real time;
 /// left of it slows down, right of it speeds up.
 pub const SPEED_LADDER: [f32; 9] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
@@ -84,21 +103,63 @@ pub struct TimeControlPlugin;
 impl Plugin for TimeControlPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GameSpeed>()
-            .add_systems(Update, read_speed_input);
+            .init_resource::<UserPaused>()
+            .init_resource::<SimBlocked>()
+            // `read_speed_input` writes `UserPaused`; `compose_pause` then folds `UserPaused` +
+            // `SimBlocked` into the single `GameSpeed::paused` write. `.chain()` keeps that order so
+            // a key press and its resulting pause state land in the same frame.
+            .add_systems(Update, (read_speed_input, compose_pause).chain());
     }
 }
 
 /// Number-key presets: `1..=9` pick a rung of [`SPEED_LADDER`] (and un-pause), `0` toggles pause.
 /// Uses `just_pressed` so a held key changes speed once. Digits don't collide with the camera
 /// controls (WASD / arrows / scroll / middle-drag — see `camera::drive_camera`).
-fn read_speed_input(keys: Res<ButtonInput<KeyCode>>, mut speed: ResMut<GameSpeed>) {
+///
+/// Pause is written to [`UserPaused`], not `GameSpeed` directly, so it composes with the UI's
+/// [`SimBlocked`] through the single writer [`compose_pause`].
+fn read_speed_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut speed: ResMut<GameSpeed>,
+    mut user_paused: ResMut<UserPaused>,
+) {
     for (&mult, key) in SPEED_LADDER.iter().zip(DIGIT_KEYS) {
         if keys.just_pressed(key) {
             speed.base = mult;
-            speed.paused = false;
+            user_paused.0 = false;
         }
     }
     if keys.just_pressed(KeyCode::Digit0) {
-        speed.paused = !speed.paused;
+        user_paused.0 = !user_paused.0;
+    }
+}
+
+/// The **sole writer** of [`GameSpeed::paused`]: the sim freezes if the player paused
+/// ([`UserPaused`]) or a blocking UI screen is open ([`SimBlocked`]). Keeping a single writer
+/// preserves the one-writer discipline `juice::tick_hitstop` (the virtual-clock writer) relies on.
+/// In the headless harness both inputs stay `false`, so `paused` stays `false` and `FixedUpdate`
+/// keeps stepping bit-identically — the deterministic core is untouched.
+fn compose_pause(
+    user_paused: Res<UserPaused>,
+    sim_blocked: Res<SimBlocked>,
+    mut speed: ResMut<GameSpeed>,
+) {
+    let paused = paused_from(user_paused.0, sim_blocked.0);
+    // Guard the write so `GameSpeed` isn't needlessly marked changed every frame.
+    if speed.paused != paused {
+        speed.paused = paused;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pause_composition_is_logical_or() {
+        assert!(!paused_from(false, false));
+        assert!(paused_from(true, false), "player pause freezes the sim");
+        assert!(paused_from(false, true), "an open menu freezes the sim");
+        assert!(paused_from(true, true));
     }
 }
