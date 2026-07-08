@@ -34,7 +34,7 @@ use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::{Health, NoHealthBar};
 use crate::squad::{Prey, Unit};
 use crate::surface_nav::{SurfaceField, SurfaceGraph};
-use crate::util::{hash01_u32, rand01};
+use crate::util::{hash01_u32, rand01, unit_is_facing};
 
 /// Total crabs across the level, split into `CRAB_CLUSTERS` nests in far rooms.
 const CRAB_COUNT: usize = 40;
@@ -66,6 +66,18 @@ const JUMP_LEN: f32 = 1.9;
 /// so the jump reads as a dramatic lunge rather than a tiny hop.
 const JUMP_MIN: f32 = 1.15;
 const JUMP_HUNKER: f32 = 0.3;
+/// Stealth-pounce gate: a crab only commits its leap from the prey's **blind side** — it must sit
+/// outside the prey's facing cone (README: "stalk to the blind side and only pounce when prey isn't
+/// looking"). `cos(60°)` ⇒ the prey "sees" a ±60° front arc (120° total); a crab anywhere in the rear
+/// 240° may pounce. Units pivot to face their fire target, so a swarm's non-targeted crabs fall in the
+/// blind arc and still get to leap — the gate mainly stops a head-on lunge into a unit staring it down.
+const POUNCE_BLIND_COS: f32 = 0.5;
+/// Blind-side stalk (README "stalk to the blind side"): while a foraging/mustering crab closes to
+/// within `STALK_BAND` of a unit that is *facing* it, it arcs tangentially toward that unit's rear
+/// instead of charging its guns, until it slips into the blind arc where the pounce gate lets it leap.
+/// Pure geometry (deterministic). `STRENGTH` is the sidestep speed as a fraction of the pursue speed.
+const STALK_BAND: f32 = 3.5;
+const CRAB_STALK_STRENGTH: f32 = 0.8;
 const JUMP_AIR: f32 = 0.35;
 const JUMP_ARC: f32 = 0.9;
 const JUMP_COOLDOWN: f32 = 2.5;
@@ -370,6 +382,10 @@ impl Plugin for CrabPlugin {
                     // Scout detection + rally-pheromone deposit: before the rally deposits drain so the
                     // beacon is live this tick, and before Think so the tracking state feeds the scout brain.
                     scout_mark_prey.before(crate::ai::AiSet::Deposits),
+                    // Dynamic castes: re-role scouts↔assault off the fresh fields, before the brains think.
+                    re_role_crabs
+                        .after(crate::ai::AiSet::FieldUpdate)
+                        .before(crate::ai::AiSet::Think),
                     nest_reproduce,
                 ),
             )
@@ -641,6 +657,9 @@ fn spawn_crab_on_patch(
         WorldAssetRoot(scene.clone()),
         Transform::from_translation(Vec3::Y * CRAB_MODEL_Y).with_scale(Vec3::splat(CRAB_RENDER_SCALE)),
     ));
+    // Caste hysteresis timer + the immortal spawn seed, so `re_role_crabs` can flip this crab's role
+    // deterministically as the swarm's needs shift (see that system's determinism note).
+    ec.insert((Caste { cooldown: 0.0 }, CrabSeed(rand_seed)));
     if is_scout {
         ec.insert(Scout::new(rand_seed));
     }
@@ -895,7 +914,28 @@ fn crab_locomotion(
                 let jitter = side * (phase.sin() * CRAB_JITTER_STRENGTH);
                 // Mustered (alarmed) crabs surge faster than a calm forage — the scary charge.
                 let pursue_speed = if mustering { CRAB_SPEED * MUSTER_SPEED_MUL } else { CRAB_SPEED };
+                // Blind-side stalk: if the nearest unit is close and looking at this crab, arc around
+                // toward its rear (tangential to the bearing, on the side that heads for its back) rather
+                // than charging head-on — until the crab clears the facing cone and the pounce gate opens.
+                let stalk = match nunit {
+                    Some((_, upos, ufwd))
+                        if {
+                            let d = (upos - motion.pos).with_y(0.0).length();
+                            d > JUMP_MIN
+                                && d < STALK_BAND
+                                && unit_is_facing(upos, ufwd, motion.pos, POUNCE_BLIND_COS)
+                        } =>
+                    {
+                        let bearing = (upos - motion.pos).with_y(0.0).normalize_or_zero();
+                        let tang = Vec3::new(-bearing.z, 0.0, bearing.x); // perpendicular, ground plane
+                        let sign = if tang.dot(ufwd) >= 0.0 { 1.0 } else { -1.0 }; // toward the unit's rear
+                        project_tangent(tang * sign, p.normal).normalize_or_zero()
+                            * (pursue_speed * CRAB_STALK_STRENGTH)
+                    }
+                    _ => Vec3::ZERO,
+                };
                 let move_vec = tangent * pursue_speed
+                    + stalk
                     + jitter
                     + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
                 let moving = move_vec.length_squared() > 1.0e-6;
@@ -993,14 +1033,156 @@ fn drive_crab_animation(
     }
 }
 
-/// Nearest prey position + planar distance to `pos` (read-only over the pounce system's prey query).
-/// Thin wrapper over [`crate::util::nearest_planar`] — the shared ranking; here the payload is unit `()`.
-fn nearest_prey_pos(
+/// Nearest prey: its position, its planar **forward** (`rotation * −Z`, for the blind-side pounce gate),
+/// and the planar distance to `pos`. Read-only over the pounce system's prey query; a thin wrapper over
+/// [`crate::util::nearest_planar`] (the shared ranking) carrying the forward vector as the payload.
+fn nearest_prey(
     prey: &Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
     pos: Vec3,
-) -> Option<(Vec3, f32)> {
-    crate::util::nearest_planar(pos, prey.iter().map(|(ptf, _)| ((), ptf.translation)))
-        .map(|((), p, d)| (p, d))
+) -> Option<(Vec3, Vec3, f32)> {
+    crate::util::nearest_planar(
+        pos,
+        prey.iter()
+            .map(|(ptf, _)| (ptf.rotation * Vec3::NEG_Z, ptf.translation)),
+    )
+    .map(|(fwd, p, d)| (p, fwd, d))
+}
+
+/// Per-crab caste-swap cooldown (hysteresis) so a crab can't re-role again until it counts down —
+/// stops castes chattering tick-to-tick. Not itself in `snapshot_hash` (crabs hash by Transform+Health);
+/// see the determinism note on [`re_role_crabs`].
+#[derive(Component)]
+struct Caste {
+    cooldown: f32,
+}
+
+/// The crab's immortal spawn seed, kept so a promotion re-seeds [`Scout::new`] deterministically and so
+/// re-role's per-tick flip budget selects the SAME crabs regardless of ECS iteration order (sort key).
+#[derive(Component, Clone, Copy)]
+struct CrabSeed(u32);
+
+/// Dynamic-caste policy + bounds (README "let crabs re-role between scout and assault as swarm needs
+/// shift"). Live scouts are held in `[SCOUT_MIN_FRAC, SCOUT_MAX_FRAC]` of the swarm; a crab is promoted
+/// to scout when its neighbourhood is crowded with no live rally beacon (spare bodies → more recon) and
+/// demoted when a beacon is up or it's under alarm (the swarm needs fighters, not scouts). Separate
+/// promote/demote signals + a per-crab [`CASTE_COOLDOWN`] give hysteresis.
+const CASTE_COOLDOWN: f32 = 4.0;
+/// Max caste flips serviced per tick across the whole swarm — keeps the population easing, not lurching.
+const CASTE_FLIPS_PER_TICK: usize = 2;
+const RALLY_LIVE: f32 = 0.15; // rally-vector length above this = a live beacon nearby
+const ALARM_HIGH: f32 = 0.5; // local ALARM above this = defense press (hold fighters)
+const PROMOTE_DENSITY: f32 = 3.0; // local CRAB_DENSITY above this = crowded (spare a scout)
+const SCOUT_MIN_FRAC: f32 = 0.10;
+const SCOUT_MAX_FRAC: f32 = 0.30;
+
+/// One crab's re-role verdict this tick (pure; unit-tested).
+#[derive(PartialEq, Debug)]
+enum Rerole {
+    Promote,
+    Demote,
+    Hold,
+}
+
+/// Pure caste decision from the local stigmergic picture (cooldown gating handled by the caller):
+/// a scout demotes when the swarm is already converging (live beacon) or pressed (alarm); an assault
+/// crab promotes when it's crowded with no beacon (recon is the marginal need). Everything else holds.
+fn caste_decision(is_scout: bool, beacon: bool, density: f32, alarm: f32) -> Rerole {
+    if is_scout {
+        if beacon || alarm > ALARM_HIGH {
+            Rerole::Demote
+        } else {
+            Rerole::Hold
+        }
+    } else if !beacon && density > PROMOTE_DENSITY {
+        Rerole::Promote
+    } else {
+        Rerole::Hold
+    }
+}
+
+/// Dynamic castes: re-role crabs between scout and assault as the swarm's needs shift, instead of the
+/// birth-fixed split. Runs on `FixedUpdate` after the stigmergic fields refresh and before the brains
+/// think, so a flipped crab runs its new brain next tick.
+///
+/// **Determinism (per `TESTING.md`).** No RNG entropy: the decision is a pure function of deterministic
+/// field samples + the fixed [`CrabSeed`]; the per-tick flip budget picks crabs in `CrabSeed` order
+/// (order-independent of ECS iteration); a promotion re-seeds `Scout::new` from the stored seed. So
+/// two same-seed runs make identical flips and `deterministic_core_is_bit_identical` holds by
+/// construction (no committed crab hash to re-pin). `BrainId` and the `Scout` component are always
+/// changed **together** so the brain (keys off `BrainId`) and the scout systems (key off `Scout`) never
+/// desync.
+fn re_role_crabs(
+    time: Res<Time>,
+    stig: Res<crate::ai::field::Stig>,
+    rally: Res<crate::ai::field::RallyField>,
+    dungeon: Res<Dungeon>,
+    mut commands: Commands,
+    mut crabs: Query<(Entity, &CrabMotion, &mut Caste, Option<&Scout>, &CrabSeed)>,
+) {
+    let dt = time.delta_secs().min(MAX_FRAME_DT);
+    let total = crabs.iter().count();
+    if total == 0 {
+        return;
+    }
+
+    let mut scouts = 0usize;
+    let mut promotes: Vec<(Entity, u32)> = Vec::new();
+    let mut demotes: Vec<(Entity, u32)> = Vec::new();
+    for (e, motion, mut caste, scout, seed) in &mut crabs {
+        caste.cooldown = (caste.cooldown - dt).max(0.0);
+        let is_scout = scout.is_some();
+        if is_scout {
+            scouts += 1;
+        }
+        if caste.cooldown > 0.0 {
+            continue; // hysteresis: recently flipped, leave it be
+        }
+        let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, motion.pos);
+        let beacon = rally.sample(&dungeon, motion.pos).length() > RALLY_LIVE;
+        let alarm = stig.sample(crate::ai::field::FieldId::ALARM, &dungeon, motion.pos);
+        match caste_decision(is_scout, beacon, density, alarm) {
+            Rerole::Promote => promotes.push((e, seed.0)),
+            Rerole::Demote => demotes.push((e, seed.0)),
+            Rerole::Hold => {}
+        }
+    }
+
+    let min_scouts = (total as f32 * SCOUT_MIN_FRAC).round() as usize;
+    let max_scouts = (total as f32 * SCOUT_MAX_FRAC).round() as usize;
+    // Deterministic tiebreak: same crabs flip regardless of iteration order.
+    promotes.sort_unstable_by_key(|&(_, s)| s);
+    demotes.sort_unstable_by_key(|&(_, s)| s);
+
+    let mut budget = CASTE_FLIPS_PER_TICK;
+    for &(e, seed) in &promotes {
+        if budget == 0 || scouts >= max_scouts {
+            break;
+        }
+        // Promote in lockstep: assault brain → scout brain + insert the Scout component + arm cooldown.
+        // `try_insert`: a targeted crab can be shot dead this same tick before the command applies —
+        // skip it silently rather than panic on a despawned entity (the count stays deterministic since
+        // the death is deterministic).
+        commands.entity(e).try_insert((
+            crate::ai::brain::BrainId::Scout,
+            Scout::new(seed),
+            Caste { cooldown: CASTE_COOLDOWN },
+        ));
+        scouts += 1;
+        budget -= 1;
+    }
+    for &(e, _) in &demotes {
+        if budget == 0 || scouts <= min_scouts {
+            break;
+        }
+        // Demote in lockstep: drop the Scout component AND switch the brain back to assault. `try_*` for
+        // the same same-tick-death reason as the promote path above.
+        commands
+            .entity(e)
+            .try_remove::<Scout>()
+            .try_insert((crate::ai::brain::BrainId::Crab, Caste { cooldown: CASTE_COOLDOWN }));
+        scouts -= 1;
+        budget -= 1;
+    }
 }
 
 /// Pounce attack: a grounded, hunting crab hunkers down, then leaps a ballistic arc (~10 body lengths)
@@ -1048,8 +1230,11 @@ fn crab_jump(
                 if !aggressive {
                     continue;
                 }
-                if let Some((tpos, d)) = nearest_prey_pos(&prey, motion.pos) {
-                    if d > JUMP_MIN && d < JUMP_LEN {
+                if let Some((tpos, tfwd, d)) = nearest_prey(&prey, motion.pos) {
+                    // Blind-side gate: only commit the leap from outside the prey's facing cone, so a
+                    // crab pounces when the unit isn't looking rather than lunging head-on into its guns.
+                    let in_blind_spot = !unit_is_facing(tpos, tfwd, motion.pos, POUNCE_BLIND_COS);
+                    if d > JUMP_MIN && d < JUMP_LEN && in_blind_spot {
                         jump.phase = JumpPhase::Hunker;
                         jump.timer = JUMP_HUNKER;
                         jump.from = motion.pos;
@@ -1064,7 +1249,7 @@ fn crab_jump(
                 tf.translation = motion.pos + motion.normal * (CRAB_BODY_CENTER * 0.4);
                 if jump.timer <= 0.0 {
                     // Launch toward the prey's CURRENT position.
-                    if let Some((tpos, _)) = nearest_prey_pos(&prey, motion.pos) {
+                    if let Some((tpos, _, _)) = nearest_prey(&prey, motion.pos) {
                         jump.to = tpos;
                     }
                     jump.from = motion.pos;
@@ -2050,6 +2235,28 @@ mod tests {
     use crate::dungeon::{Dungeon, TILE_SIZE, WALL_THICKNESS};
     use crate::surface_nav::SurfaceGraph;
     use crate::wfc::{E, N, S, W};
+
+    #[test]
+    fn caste_policy_promotes_and_demotes_on_the_right_signals() {
+        // Assault crab, crowded, no beacon → promote to scout (spare a body for recon).
+        assert_eq!(
+            caste_decision(false, false, PROMOTE_DENSITY + 1.0, 0.0),
+            Rerole::Promote
+        );
+        // Assault crab but a beacon is live → hold (the swarm is already converging; stay a fighter).
+        assert_eq!(
+            caste_decision(false, true, PROMOTE_DENSITY + 1.0, 0.0),
+            Rerole::Hold
+        );
+        // Assault crab, uncrowded → hold.
+        assert_eq!(caste_decision(false, false, 0.0, 0.0), Rerole::Hold);
+        // Scout with a live beacon → demote (recon done, become a fighter).
+        assert_eq!(caste_decision(true, true, 0.0, 0.0), Rerole::Demote);
+        // Scout under alarm → demote (defense press).
+        assert_eq!(caste_decision(true, false, 0.0, ALARM_HIGH + 0.1), Rerole::Demote);
+        // Scout, calm, no beacon → hold (keep ranging).
+        assert_eq!(caste_decision(true, false, 0.0, 0.0), Rerole::Hold);
+    }
 
     /// The wall's inner (room-facing) face, from cell centre — the ground-truth threshold
     /// `Dungeon::is_solid` uses. A crab body must stay short of this by its radius.

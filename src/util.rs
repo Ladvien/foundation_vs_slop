@@ -78,3 +78,18 @@ pub fn hash_f32(x: u32) -> f32 {
     h = (h >> 22) ^ h;
     (h as f32) / (u32::MAX as f32)
 }
+
+/// Pure gaze/facing test: is `target` within the `look_cos` cone of `forward` as seen from `pos`? Planar
+/// (XZ); the caller adds range + line-of-sight. Shared perception primitive: the smiley watcher uses it
+/// to know when a unit is *looking directly at it* (`enemy.rs`), and the crab swarm uses the negation to
+/// pounce only from a prey's blind side (`crab.rs`) — one cone test, so "what counts as facing" is a
+/// single edit (Rabin, "Vision Zones", GameAIPro2 Ch.4: perception keys off the agent's actual view
+/// direction). A target on top of `pos` is treated as faced.
+pub(crate) fn unit_is_facing(pos: Vec3, forward: Vec3, target: Vec3, look_cos: f32) -> bool {
+    let bearing = (target - pos).with_y(0.0).normalize_or_zero();
+    if bearing == Vec3::ZERO {
+        return true; // on top of it — treat as faced
+    }
+    let fwd = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+    bearing.dot(fwd) >= look_cos
+}
