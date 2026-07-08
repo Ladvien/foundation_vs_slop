@@ -2,6 +2,7 @@
 //! (via [`super::state::sync_sim_blocked`] → `SimBlocked`) and dims the world. Restart Run waits on
 //! the run-state/save phase (there's no world teardown yet).
 
+use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
@@ -17,6 +18,9 @@ pub struct PauseMenuPlugin;
 
 impl Plugin for PauseMenuPlugin {
     fn build(&self, app: &mut App) {
+        // Keyboard navigation and focus cleanup are handled globally in `UiPlugin` for every menu
+        // screen; this plugin only owns the Esc toggle and the overlay's own lifecycle. Its buttons
+        // live inside a `TabGroup` (see `spawn_pause`) so the shared nav can reach them.
         app.add_systems(Update, toggle_pause.run_if(in_state(AppState::InGame)))
             .add_systems(OnEnter(MenuState::Pause), spawn_pause)
             .add_systems(
@@ -71,6 +75,8 @@ fn spawn_pause(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                 BackgroundColor(theme.panel),
                 super::widgets::border_all(theme.panel_border),
                 GlobalZIndex(Z_MENU),
+                // Scopes keyboard nav to this overlay's buttons (their `TabIndex` is inert without it).
+                TabGroup::new(0),
             ))
             .with_children(|c| {
                 c.spawn(text_colored(
