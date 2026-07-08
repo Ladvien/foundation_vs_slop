@@ -45,7 +45,19 @@ impl Plugin for UiPlugin {
             ))
             // Sole writer of `SimBlocked`: freeze the sim under any blocking screen.
             .add_systems(Update, state::sync_sim_blocked)
-            // Hover feedback for all themed menu buttons.
-            .add_systems(Update, widgets::style_menu_buttons);
+            // Shared menu behavior for every screen — registered once, globally. Each no-ops when no
+            // menu is open, so a new screen needs no per-screen nav/focus wiring (and none can be
+            // forgotten): hover/keyboard/NumpadEnter selection, the hover+focus tint, and dropping
+            // stale focus when the last menu closes.
+            .add_systems(
+                Update,
+                (
+                    widgets::style_menu_buttons,
+                    widgets::menu_keyboard_nav,
+                    widgets::focus_hovered_menu_button,
+                    widgets::menu_activate_numpad_enter,
+                    widgets::clear_menu_focus_when_empty,
+                ),
+            );
     }
 }

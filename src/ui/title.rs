@@ -2,6 +2,7 @@
 //! needs the save system) come with their gated phases; this is the real main menu the rest of the
 //! flow hangs off.
 
+use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
@@ -17,15 +18,13 @@ pub struct TitlePlugin;
 
 impl Plugin for TitlePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Title), spawn_title)
-            .add_systems(
-                OnExit(AppState::Title),
-                super::state::despawn_scoped::<TitleRoot>,
-            )
-            .add_systems(
-                Update,
-                start_on_enter_key.run_if(in_state(TitleMenu::Root)),
-            );
+        // Keyboard navigation (Up/Down/W-S to move, Enter/Space/NumpadEnter to activate) and focus
+        // cleanup are handled globally in `UiPlugin` for every menu screen — this screen only needs
+        // to spawn its buttons inside a `TabGroup` (see `spawn_title`).
+        app.add_systems(OnEnter(AppState::Title), spawn_title).add_systems(
+            OnExit(AppState::Title),
+            super::state::despawn_scoped::<TitleRoot>,
+        );
     }
 }
 
@@ -44,6 +43,8 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
             },
             BackgroundColor(theme.bg),
             GlobalZIndex(Z_MENU),
+            // Scopes keyboard nav to this screen's buttons (their `TabIndex` is inert without it).
+            TabGroup::new(0),
         ))
         .with_children(|p| {
             p.spawn(text_colored(
@@ -92,14 +93,4 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                     exit.write(AppExit::Success);
                 });
         });
-}
-
-/// Convenience: `Enter` starts a new run from the root title (not while the settings panel is up).
-fn start_on_enter_key(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut next: ResMut<NextState<AppState>>,
-) {
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
-        next.set(AppState::InGame);
-    }
 }
