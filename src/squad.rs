@@ -22,7 +22,9 @@ use crate::health::Health;
 use crate::orca::{self, Agent};
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
 use crate::ai::drives::Drives;
+use crate::squad_ai::actions::UtterCooldown;
 use crate::squad_ai::cohesion::DesiredMove;
+use crate::squad_ai::dialogue::MemoryStream;
 use crate::squad_ai::persona::default_personas;
 use crate::squad_ai::role::RoleId;
 
@@ -237,6 +239,8 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     ActiveBehavior::new(seed),
                     ThinkTimer::staggered(seed),
                     DesiredMove::default(),
+                    UtterCooldown::default(),
+                    MemoryStream::default(),
                 ),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
                 Transform::from_translation(dungeon.cell_center(cell))
