@@ -92,6 +92,30 @@ pub fn death_intensity(hp_max: f32, dps: f32) -> f32 {
     ((hp_max + dps * 4.0) / REFERENCE_MASS).clamp(0.03, 1.0)
 }
 
+/// Blood-pool size factor so a pool relates to the dead thing's size/weight (README): a swarm crab
+/// leaves a small mark, the boss a wide slick — instead of every death stamping the same 1.7-unit disc.
+/// Driven by [`GoreEvent::intensity`] (a normalized mass proxy in `[0.03, 1.0]`, present for **every**
+/// kind), with a small nudge from the unit's render `gib.scale` when present (a direct mesh-*size*
+/// signal, only on `UnitCrunch`). Clamped so a crab still marks the floor and the boss can't overflow.
+fn pool_scale(intensity: f32, gib_scale: Option<f32>) -> f32 {
+    // Mass → multiplier. Linear (not eased) so the swarm's crabs stay genuinely small — 40+ of them
+    // must not flood the floor — while heavier deaths grow toward MAX.
+    let t = intensity.clamp(0.0, 1.0);
+    let mut f = POOL_SCALE_MIN + (POOL_SCALE_MAX - POOL_SCALE_MIN) * t;
+    // A larger-than-standard figurine widens its own pool a touch; a smaller one tightens it.
+    if let Some(s) = gib_scale {
+        f *= 1.0 + (s - 1.0) * POOL_GIB_SCALE_WEIGHT;
+    }
+    f.clamp(POOL_SCALE_MIN, POOL_SCALE_MAX)
+}
+
+/// Blood-pool size multiplier at the extremes of [`pool_scale`]: `MIN` at a featherweight crab
+/// (`intensity ≈ 0.03`), `MAX` at the boss (`intensity = 1`). `WEIGHT` is how strongly a `UnitCrunch`'s
+/// render scale nudges the factor around 1.0. Tuning taste — eyeball a crab vs a boss death.
+const POOL_SCALE_MIN: f32 = 0.35;
+const POOL_SCALE_MAX: f32 = 2.0;
+const POOL_GIB_SCALE_WEIGHT: f32 = 0.5;
+
 /// World gore requests to service this frame (drained by [`drain_gore`]).
 #[derive(Resource, Default)]
 pub struct GoreQueue(pub Vec<GoreEvent>);
@@ -660,6 +684,8 @@ fn drain_gore(
 
         // --- Blood pool on the floor (flat XZ decal, lifted to avoid z-fighting with floor tiles;
         //     same orientation as the selection ring in `selection.rs`). Permanent, but capped.
+        // Scale the base pool by the dead thing's mass/size so a crab's mark ≠ the boss's slick.
+        let pool_size = pool_size * pool_scale(ev.intensity, ev.gib.as_ref().map(|g| g.scale));
         let floor_pos = Vec3::new(ev.pos.x, 0.02, ev.pos.z);
         // Clip the pool to the surrounding walls so it can't seep through them. `p` spans the quad
         // in [-1,1], so a world clear-distance maps to p-units by dividing by the quad half-size.
@@ -1283,4 +1309,37 @@ pub fn validate_settings(settings: &GoreSettings) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pool_scale, POOL_SCALE_MAX, POOL_SCALE_MIN};
+
+    #[test]
+    fn pool_scale_grows_with_mass_and_stays_bounded() {
+        // A featherweight crab (intensity floor 0.03) still leaves a visible mark, but a small one.
+        let crab = pool_scale(0.03, None);
+        assert!(crab > 0.0, "crab pool must not vanish, got {crab}");
+        assert!(crab < 0.6, "crab pool should stay small, got {crab}");
+
+        // The boss (intensity 1.0) hits the ceiling.
+        let boss = pool_scale(1.0, None);
+        assert!((boss - POOL_SCALE_MAX).abs() < 1e-6, "boss should be MAX, got {boss}");
+
+        // Monotonic in intensity.
+        assert!(pool_scale(0.1, None) < pool_scale(0.5, None));
+        assert!(pool_scale(0.5, None) < pool_scale(0.9, None));
+
+        // Always clamped to [MIN, MAX], even with an extreme gib scale.
+        for &(i, g) in &[(0.0, Some(0.0)), (1.0, Some(10.0)), (0.5, Some(-5.0))] {
+            let f = pool_scale(i, g);
+            assert!(
+                (POOL_SCALE_MIN..=POOL_SCALE_MAX).contains(&f),
+                "factor {f} out of [{POOL_SCALE_MIN}, {POOL_SCALE_MAX}] for intensity {i}, gib {g:?}"
+            );
+        }
+
+        // A bigger figurine widens its own pool vs the standard scale=1.0.
+        assert!(pool_scale(0.5, Some(1.5)) > pool_scale(0.5, Some(1.0)));
+    }
 }
