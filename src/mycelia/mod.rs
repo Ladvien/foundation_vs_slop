@@ -107,6 +107,12 @@ pub struct MyceliaConfig {
     /// Side length (texels) of the square world-space mold field. Must be a multiple of [`WORKGROUP_SIZE`].
     /// 1024² over the 192 m footprint ≈ 5.3 texels/tile. The dominant perf dial (cost scales with area).
     pub field_size: u32,
+    /// How many simulation ticks per second the mold advances. **Not a performance dial — a biology dial.**
+    /// The compute chain used to dispatch once per rendered frame, so at 60 fps agents crossed ~11 world
+    /// units per second and Gray-Scott took 60 reaction steps per second. That is a flow rate, and it made
+    /// the mold read as a river of liquid no matter how the surface was shaded. Growth must be *alien fast*,
+    /// not fluid: a handful of ticks per second.
+    pub sim_hz: f32,
     /// Number of walking agents. Sparse on purpose (≈0.05/texel at 1024²) so the trail forms legible
     /// foraging *channels* rather than flooding to uniform saturation. An aesthetic ceiling, not a
     /// performance one — the GPU handles far more.
@@ -158,18 +164,23 @@ pub struct MyceliaConfig {
     pub chemo_gain: f32,
     /// How strongly a squad unit's immediate presence disturbs the mold, scattering agents away.
     pub disturbance_gain: f32,
-    /// How strongly non-walkable void repels agents. Rather than hard-blocking movement — which would
-    /// strand every agent that seeded inside a wall, forever — the void is merely *unattractive*. Agents on
-    /// the floor hug it and thread down corridors; the few that start in the void steer themselves onto the
-    /// nearest floor within a second. One path, self-healing.
+    /// How strongly rock repels agents *at sensor range*. Movement into rock is hard-blocked in
+    /// `agent_step`, but a sensor reaches ~1.7 cells ahead — this is what lets an agent see a wall coming
+    /// and turn early rather than driving into the face and bouncing. It steers; it does not gate. Without
+    /// it the mold piles against every wall.
     pub wall_repel: f32,
     /// How strongly the damp, dark, sheltered floor beside a wall *attracts* foraging agents. Real mold
     /// pools in corners; without this the `wall_repel` term alone drives it toward corridor centres, which
     /// is exactly backwards. Note this is an attraction to wall-adjacent *floor*, not to the wall cell
     /// itself — the two terms together make agents hug the wall face rather than enter or flee it.
     pub wall_affinity: f32,
-    /// How far (in cells) the wall's influence reaches out across the floor. `1` = only the cells touching a
-    /// wall; larger values pull mold in from further out.
+    /// How violently biomass nucleates on carrion. Blood and nests merely *attract* the mold (`chemo_gain`
+    /// steers agents); meat is FOOD, so where the chemoattractant is strong the flesh blooms directly,
+    /// without waiting for a vein to establish. This is what makes a fresh gib erupt.
+    pub carrion_bloom: f32,
+    /// How far (in **world units**) the wall's influence reaches out across the floor. Measured from the
+    /// slab surface by an exact distance transform at field resolution, so sub-tile values are meaningful:
+    /// `0.6` keeps the pull to roughly the near half of the adjoining tile.
     pub wall_reach: f32,
     /// Habituation gained per second while a cell is watched.
     pub hab_rate: f32,
@@ -195,11 +206,36 @@ pub struct MyceliaConfig {
     /// Strength of the normal perturbation derived from the mold's thickness field. This is what stops the
     /// coating reading as a flat decal: the biomass becomes a lumpy, lit surface. `0` = perfectly flat.
     pub normal_strength: f32,
-    /// Perceptual roughness where the mold is thickest. The carpet is `0.95`; a wet biofilm is far glossier,
-    /// so a low value here is what sells "wet" under the directional light.
+    /// Perceptual roughness in the **vein cores only** — the mat itself stays matte (~0.92). Mycelium is a
+    /// fibrous, light-scattering felt, not a fluid: a low roughness applied across the whole sheet is
+    /// precisely what makes it read as spilled liquid.
     pub wet_roughness: f32,
     /// How far (world units) the mold creeps up a wall from the floor before fading out. Walls are 2.4 tall.
     pub climb_height: f32,
+    /// Spatial frequency of the hyphal filament noise, in cycles per world unit. Higher = finer strands.
+    pub fiber_scale: f32,
+    /// How hard the filaments carve the surface normal. This supplies the high-frequency structure that the
+    /// smooth 1024² field cannot, so `normal_strength` can stay low and stop producing liquid meniscus lobes.
+    pub fiber_strength: f32,
+    /// How much fbm breaks up the colony's outer contour. `0` = a smooth iso-contour (a meniscus, i.e. a
+    /// puddle); higher = the feathery dendritic advancing margin of a real fungal colony. Single strongest
+    /// "that is a fungus" cue.
+    pub margin_roughness: f32,
+    /// Strength of the grazing-angle fuzz rim. Stands in for a sheen/fuzz BRDF lobe, which bevy's
+    /// `StandardMaterial` does not have.
+    pub sheen_strength: f32,
+    /// Strength of the cavity ambient occlusion written into `diffuse_occlusion`. Load-bearing: the scene's
+    /// ambient is a bright *uniform* fill, which ignores surface normals entirely, so without an occlusion
+    /// term the filaments render flat no matter how hard the normal is perturbed.
+    pub ao_strength: f32,
+}
+
+/// Whether the compute chain advances this frame. The mold runs on its own slow clock (`sim_hz`), not the
+/// render clock; on frames where this is `false` the render node skips every pass and leaves the ping-pong
+/// parity alone, so the display texture simply persists.
+#[derive(Resource, Clone, Copy, ExtractResource, Default)]
+pub struct MoldStep {
+    pub step: bool,
 }
 
 /// Validate the `mycelia:` slice. One path: any violation is an `Err` that [`crate::config`] surfaces as a
@@ -248,11 +284,20 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     non_negative("hab_recover", c.hab_recover)?;
     non_negative("normal_strength", c.normal_strength)?;
     non_negative("climb_height", c.climb_height)?;
+    non_negative("fiber_strength", c.fiber_strength)?;
+    non_negative("sheen_strength", c.sheen_strength)?;
     positive("wall_reach", c.wall_reach)?;
+    positive("sim_hz", c.sim_hz)?;
+    non_negative("carrion_bloom", c.carrion_bloom)?;
+    // A zero fiber frequency collapses the filament noise to a single constant sample: no strands at all.
+    positive("fiber_scale", c.fiber_scale)?;
 
     unit("hab_strength", c.hab_strength)?;
     unit("intensity", c.intensity)?;
     unit("diffuse_weight", c.diffuse_weight)?;
+    unit("ao_strength", c.ao_strength)?;
+    // Above 1.0 the margin noise swamps the coat term entirely and mold appears in bare corridors.
+    unit("margin_roughness", c.margin_roughness)?;
     // Bevy clamps roughness into [0.089, 1.0]; anything outside is a config mistake, not an intent.
     if !(0.089..=1.0).contains(&c.wet_roughness) {
         return Err(format!("mycelia.wet_roughness must be in 0.089..=1.0, got {}", c.wet_roughness));
@@ -377,6 +422,8 @@ pub struct MoldParams {
     pub wall_repel: f32,
     /// Attraction to wall-adjacent floor (the static wall-proximity field).
     pub wall_affinity: f32,
+    /// Direct biomass nucleation rate on carrion (control `R`). See [`MyceliaConfig::carrion_bloom`].
+    pub carrion_bloom: f32,
     /// Trail value at which a vein begins to show (drives biomass nucleation).
     pub vein_lo: f32,
     /// Trail value at which a vein is fully lit.
@@ -398,12 +445,15 @@ impl Plugin for MyceliaPlugin {
             ExtractResourcePlugin::<MoldImages>::default(),
             ExtractResourcePlugin::<MoldBuffers>::default(),
             ExtractResourcePlugin::<MoldParams>::default(),
+            ExtractResourcePlugin::<MoldStep>::default(),
             ExtractResourcePlugin::<control::MoldControlImage>::default(),
         ))
         // `setup_mycelia` binds the control texture into the floor material, so the control textures must
         // exist first.
+        .init_resource::<MoldStep>()
         .add_systems(Startup, (control::setup_control, setup_mycelia).chain())
-        .add_systems(Update, (advance_mold_time, control::write_control, coat_walls));
+        .init_resource::<CoatedFurniture>()
+        .add_systems(Update, (advance_mold_time, control::write_control, coat_walls, coat_furniture));
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than
@@ -416,16 +466,33 @@ impl Plugin for MyceliaPlugin {
 
 /// Create the field textures + GPU buffers, seed the shared params, and spawn the floor overlay that
 /// samples the mold field by world XZ. Runs once at startup on the main world.
+///
+/// Takes [`Dungeon`] because agents must be seeded on floor (see [`agents::seed_agents`]). That resource is
+/// inserted in `DungeonPlugin::build`, before any schedule runs, so it is available to every `Startup`
+/// system regardless of plugin order.
 fn setup_mycelia(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
+    dungeon: Res<crate::dungeon::Dungeon>,
     control: Res<control::MoldControlImage>,
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MoldFloorMaterial>>,
-) {
+) -> Result<(), BevyError> {
     let size = cfg.field_size;
+
+    // The control texture is one texel per dungeon cell, and every texel<->cell map in the compute chain
+    // assumes that exactly. A dungeon sized differently would silently sample a misaligned control texture,
+    // so refuse to start rather than render a plausible lie.
+    if dungeon.width != CONTROL_SIZE as usize || dungeon.height != CONTROL_SIZE as usize {
+        return Err(format!(
+            "mycelia: CONTROL_SIZE is {CONTROL_SIZE} but the dungeon is {}x{}; the control texture is one \
+             texel per cell, so these must match",
+            dungeon.width, dungeon.height
+        )
+        .into());
+    }
 
     // Five RGBA16F field textures (composited display + trail and biomass ping-pong pairs), each usable as
     // both a compute storage-write target and a sampled read. `display` is the one shared with the material.
@@ -435,9 +502,16 @@ fn setup_mycelia(
     let biomass_a = images.add(field::field_texture(size));
     let biomass_b = images.add(field::field_texture(size));
 
-    // Agent population (seeded once) + zeroed deposit accumulator (one slot per field texel). Both are
-    // `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the compute chain needs.
-    let agents = buffers.add(ShaderBuffer::from(agents::seed_agents(size as f32, cfg.agent_count)));
+    // Agent population (seeded once, on floor only) + zeroed deposit accumulator (one slot per field texel).
+    // Both are `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the chain needs.
+    let walkable: Vec<bool> = (0..dungeon.height)
+        .flat_map(|y| {
+            (0..dungeon.width).map(move |x| IVec2::new(x as i32, y as i32))
+        })
+        .map(|c| dungeon.is_floor(c))
+        .collect();
+    let seeded = agents::seed_agents(size, cfg.agent_count, &walkable, CONTROL_SIZE)?;
+    let agents = buffers.add(ShaderBuffer::from(seeded));
     let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (size * size) as usize]));
 
     commands
@@ -470,6 +544,7 @@ fn setup_mycelia(
         disturbance_gain: cfg.disturbance_gain,
         wall_repel: cfg.wall_repel,
         wall_affinity: cfg.wall_affinity,
+        carrion_bloom: cfg.carrion_bloom,
         vein_lo: cfg.vein_lo,
         vein_hi: cfg.vein_hi,
     });
@@ -493,6 +568,8 @@ fn setup_mycelia(
         MeshMaterial3d(material),
         Transform::from_translation(center),
     ));
+
+    Ok(())
 }
 
 /// Advance the shared sim clock on the main world each frame; the value is extracted into the render
@@ -501,8 +578,26 @@ fn setup_mycelia(
 /// Uses **real** time (not `Time<Virtual>`), so the mold keeps breathing while the game is paused or at
 /// the menu — matching the repo's other cosmetic shaders (`nest`, `vhs`) which animate off `globals.time`.
 /// The mold is ambience; it should never freeze with a gameplay pause.
-fn advance_mold_time(time: Res<Time<Real>>, mut params: ResMut<MoldParams>) {
+fn advance_mold_time(
+    time: Res<Time<Real>>,
+    cfg: Res<MyceliaConfig>,
+    mut params: ResMut<MoldParams>,
+    mut step: ResMut<MoldStep>,
+    mut accum: Local<f32>,
+) {
     params.time = time.elapsed_secs();
+
+    // Fixed-rate sim clock, decoupled from the render clock. `Time<Real>` so the mold keeps breathing while
+    // the game is paused (matching the rest of this module). One tick per period at most: if the frame rate
+    // collapses we drop ticks rather than fast-forwarding the mold in a visible surge.
+    let period = 1.0 / cfg.sim_hz;
+    *accum += time.delta_secs();
+    if *accum >= period {
+        *accum = (*accum - period).min(period);
+        step.step = true;
+    } else {
+        step.step = false;
+    }
 }
 
 /// Swap every wall's `StandardMaterial` for a mold-aware [`MoldWallMaterial`], once, as soon as the dungeon
@@ -564,6 +659,7 @@ mod tests {
     fn valid() -> MyceliaConfig {
         MyceliaConfig {
             field_size: 1024,
+            sim_hz: 6.0,
             agent_count: 55_000,
             sense_angle: 0.40,
             sense_dist: 9.0,
@@ -584,17 +680,23 @@ mod tests {
             disturbance_gain: 5.0,
             wall_repel: 12.0,
             wall_affinity: 5.0,
-            wall_reach: 2.5,
+            carrion_bloom: 0.30,
+            wall_reach: 0.6,
             hab_rate: 0.35,
             hab_recover: 0.08,
             hab_strength: 0.75,
-            glow_gain: 1.0,
+            glow_gain: 1.35,
             intensity: 1.0,
             vein_lo: 3.0,
             vein_hi: 12.0,
-            normal_strength: 6.0,
-            wet_roughness: 0.22,
+            normal_strength: 1.1,
+            wet_roughness: 0.42,
             climb_height: 0.85,
+            fiber_scale: 8.0,
+            fiber_strength: 1.6,
+            margin_roughness: 0.55,
+            sheen_strength: 0.18,
+            ao_strength: 0.75,
         }
     }
 
@@ -690,3 +792,67 @@ mod tests {
     }
 }
 
+
+/// Marks a mesh whose `StandardMaterial` has already been swapped for a mold-aware one, so `coat_furniture`
+/// never reprocesses it.
+#[derive(Component)]
+struct MoldCoated;
+
+/// Cache of `StandardMaterial` → coated `MoldWallMaterial`. A dungeon full of couches shares a handful of
+/// glTF materials; without this we would mint one extended material per mesh instance.
+#[derive(Resource, Default)]
+struct CoatedFurniture(std::collections::HashMap<AssetId<StandardMaterial>, Handle<MoldWallMaterial>>);
+
+/// Let the mold climb furniture, using the very same material that climbs walls.
+///
+/// The wall shader asks only two things of a surface: that it stands on the floor at `y = 0` (so world Y is
+/// climb height) and that its outward normal points away from the mold pooled at its foot. A couch satisfies
+/// both, so no new shader is needed — a table leg is a very short wall.
+///
+/// Furniture is instantiated from glTF **asynchronously**, so this cannot be a run-once startup system: it
+/// polls, and each mesh is coated exactly once (guarded by [`MoldCoated`]).
+#[allow(clippy::too_many_arguments)]
+fn coat_furniture(
+    mut commands: Commands,
+    cfg: Res<MyceliaConfig>,
+    images: Res<MoldImages>,
+    control: Res<control::MoldControlImage>,
+    roots: Query<Entity, With<crate::placement::PlacedIn>>,
+    children: Query<&Children>,
+    painted: Query<&MeshMaterial3d<StandardMaterial>, Without<MoldCoated>>,
+    std_materials: Res<Assets<StandardMaterial>>,
+    mut wall_materials: ResMut<Assets<MoldWallMaterial>>,
+    mut cache: ResMut<CoatedFurniture>,
+) {
+    for root in &roots {
+        for entity in children.iter_descendants(root) {
+            let Ok(mat) = painted.get(entity) else {
+                continue;
+            };
+            let id = mat.0.id();
+            let coated = match cache.0.get(&id) {
+                Some(handle) => handle.clone(),
+                None => {
+                    // The glTF material may not have finished loading; try again next frame.
+                    let Some(base) = std_materials.get(&mat.0) else {
+                        continue;
+                    };
+                    let handle = wall_materials.add(MoldWallMaterial {
+                        base: base.clone(),
+                        extension: material::MoldWallExt::new(
+                            &cfg,
+                            images.display.clone(),
+                            control.dynamic.clone(),
+                        ),
+                    });
+                    cache.0.insert(id, handle.clone());
+                    handle
+                }
+            };
+            commands
+                .entity(entity)
+                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .insert((MeshMaterial3d(coated), MoldCoated));
+        }
+    }
+}

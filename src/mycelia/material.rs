@@ -48,10 +48,22 @@ pub struct MoldSurfaceParams {
     vein_hi: f32,
     /// Strength of the thickness-derived normal perturbation. `0` = flat.
     normal_strength: f32,
-    /// Perceptual roughness where the mold is thickest (wet).
+    /// Perceptual roughness in the **vein cores only**. The body of the mat stays matte.
     wet_roughness: f32,
     /// How far up a wall the mold climbs before fading out (world units).
     climb_height: f32,
+    /// Spatial frequency of the hyphal filament noise, in cycles per world unit.
+    fiber_scale: f32,
+    /// How hard the filaments carve the surface normal.
+    fiber_strength: f32,
+    /// How much fbm breaks up the colony's outer contour. `0` = a smooth iso-contour meniscus (reads as
+    /// liquid); higher = a feathery, dendritic advancing margin (reads as a fungus).
+    margin_roughness: f32,
+    /// Strength of the grazing-angle fuzz rim that stands in for a sheen lobe.
+    sheen_strength: f32,
+    /// Strength of the cavity ambient occlusion written into `diffuse_occlusion`. Without this the scene's
+    /// bright uniform ambient fills every crevice and the filaments render flat regardless of the normal.
+    ao_strength: f32,
 }
 
 impl MoldSurfaceParams {
@@ -67,6 +79,11 @@ impl MoldSurfaceParams {
             normal_strength: cfg.normal_strength,
             wet_roughness: cfg.wet_roughness,
             climb_height: cfg.climb_height,
+            fiber_scale: cfg.fiber_scale,
+            fiber_strength: cfg.fiber_strength,
+            margin_roughness: cfg.margin_roughness,
+            sheen_strength: cfg.sheen_strength,
+            ao_strength: cfg.ao_strength,
         }
     }
 }

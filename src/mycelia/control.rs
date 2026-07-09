@@ -5,16 +5,18 @@
 //! # Channels (`Rgba8Unorm`)
 //! | Ch | Meaning | Source |
 //! |----|---------|--------|
-//! | `R` | chemoattractant | blood pools + nests — the mold forages toward carnage and hoards |
+//! | `R` | chemoattractant | blood, nests, and **meat chunks** — carnage to forage on and feed from |
 //! | `G` | light / gaze repellent | cells a squad unit currently sees, attenuated by habituation |
 //! | `B` | disturbance repellent | squad unit proximity — footsteps scatter the mold |
-//! | `A` | substrate mask | `0` = void · `0.5` = floor, never seen · `1` = floor, explored |
+//! | `A` | substrate mask | `0` void · `0.33` floor never seen · `0.67` remembered · `1` visible |
 //!
-//! # Why `A` is three-state, not a bool
+//! # Why `A` is four-state, not a bool
 //! The mold *grows* on any floor, seen or not — a room you have never entered is exactly where it should be
 //! ripest. But it must not be *drawn* on floor the player has never explored, or the coating would trace
-//! the corridor layout straight through the fog of war and leak the map. So growth keys off "is floor"
-//! (`A >= 0.25`) while rendering keys off "is explored" (`A >= 0.75`). One channel, two thresholds.
+//! the corridor layout straight through the fog of war and leak the map. And it must not be *lit* on floor
+//! the squad cannot currently see, or a remembered room's mold glows through the dark while the floor under
+//! it is dimmed. So growth keys off "is floor", rendering off "is explored", and brightness off "is
+//! visible". One channel, three thresholds.
 //!
 //! # Habituation
 //! `G` is not simply "is this cell watched". Each watched cell accumulates habituation and its repellent
@@ -29,7 +31,7 @@ use bevy::render::extract_resource::ExtractResource;
 
 use crate::dungeon::Dungeon;
 use crate::fog::FogGrid;
-use crate::gore::BloodPool;
+use crate::gore::{BloodPool, GibChunk};
 use crate::nest::Nest;
 use crate::squad::Unit;
 
@@ -41,14 +43,18 @@ const NEST_RADIUS_CELLS: f32 = 2.5;
 const UNIT_RADIUS_CELLS: f32 = 2.0;
 /// Floor on a blood pool's splat radius (cells), so even a small stain is smelled.
 const BLOOD_MIN_RADIUS_CELLS: f32 = 1.0;
+/// Chemoattractant splat radius (cells) around a meat chunk. Tight: a gib is a point source of food, and a
+/// wide splat would smear the bloom instead of erupting from the chunk itself.
+const MEAT_RADIUS_CELLS: f32 = 1.6;
 
 /// The control texture handles, extracted so the render world can bind them.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct MoldControlImage {
     /// Rewritten every `Update` (chemo / light / disturbance / substrate).
     pub dynamic: Handle<Image>,
-    /// Written **once**, when the dungeon first exists. `R` = wall proximity (1 on floor touching a wall,
-    /// falling to 0 over `wall_reach` cells). The dungeon never regenerates, so this never changes.
+    /// Written **once**, when the dungeon first exists. At **field** resolution, not cell resolution:
+    /// `R` = wall proximity (1 hard against a wall surface, falling to 0 over `wall_reach` world units).
+    /// The dungeon never regenerates, so this never changes.
     pub wall: Handle<Image>,
 }
 
@@ -71,9 +77,17 @@ impl MoldControl {
 }
 
 /// Create the control textures and their CPU mirrors. Runs once at `Startup`.
-pub(super) fn setup_control(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+///
+/// The two textures are deliberately different sizes: `dynamic` is one texel per dungeon cell (world state
+/// is per-cell), while `wall` is at **field** resolution so the mold's contact ridge can land on the wall
+/// surface rather than the cell centre.
+pub(super) fn setup_control(
+    mut commands: Commands,
+    cfg: Res<MyceliaConfig>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let dynamic = images.add(field::control_texture(CONTROL_SIZE));
-    let wall = images.add(field::control_texture(CONTROL_SIZE));
+    let wall = images.add(field::control_texture(cfg.field_size));
     commands.insert_resource(MoldControlImage { dynamic: dynamic.clone(), wall: wall.clone() });
     commands.insert_resource(MoldControl {
         dynamic,
@@ -84,57 +98,142 @@ pub(super) fn setup_control(mut commands: Commands, mut images: ResMut<Assets<Im
     });
 }
 
-/// Compute, once, how close each floor cell sits to a wall.
+/// Stand-in for infinity in the distance transform. A true `f32::INFINITY` makes the parabola-intersection
+/// arithmetic below evaluate `inf - inf` and produce `NaN`; a large finite value keeps it well-defined.
+/// Far larger than any squared distance on a 1024² grid (max ≈ 2·1024² ≈ 2.1e6).
+const DT_FAR: f32 = 1.0e20;
+
+/// Exact 1-D squared distance transform of a sampled function, in place over `f` → `d`.
 ///
-/// Walls in this dungeon are thin slabs on the *edge* between a floor cell and a rock cell, so "distance to
-/// a wall" is just the distance from a floor cell to the nearest non-floor cell. A multi-source BFS seeded
-/// from every non-floor cell gives that for all 36,864 cells in one sweep — trivially cheap, and the result
-/// never changes because the dungeon is generated once.
-///
-/// Returned as `R` bytes: `1.0` on floor immediately touching a wall, falling linearly to `0.0` at
-/// `wall_reach` cells away. Non-floor cells are `0` (they are not somewhere the mold can pool).
-fn compute_wall_proximity(dungeon: &Dungeon, wall_reach: f32, cpu: &mut [u8]) {
-    let size = CONTROL_SIZE as i32;
-    let n = (size * size) as usize;
-    // `u16::MAX` = unreached. Seed the queue with every non-floor cell at distance 0.
-    let mut dist = vec![u16::MAX; n];
-    let mut queue = std::collections::VecDeque::new();
-    for y in 0..size {
-        for x in 0..size {
-            if !dungeon.is_floor(IVec2::new(x, y)) {
-                let i = (y * size + x) as usize;
-                dist[i] = 0;
-                queue.push_back((x, y));
+/// Felzenszwalb & Huttenlocher (2012), "Distance Transforms of Sampled Functions", *Theory of Computing*
+/// 8(19):415–428, doi:10.4086/toc.2012.v008a019. O(n): sweeps the lower envelope of the parabolas rooted at
+/// each sample. `v` and `z` are caller-owned scratch (length `n` and `n+1`) so the 2-D driver can reuse them
+/// across every row and column instead of reallocating 2048 times.
+fn dt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    // Index of the rightmost parabola in the lower envelope so far.
+    let mut k: usize = 0;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+
+    for q in 1..n {
+        let qf = q as f32;
+        // Intersection of the parabola from `q` with the one currently rightmost. Walk left while `q`'s
+        // parabola dominates. `z[0]` is -inf and `s` is always finite, so `k` can never underflow past 0.
+        let mut s;
+        loop {
+            let vk = v[k] as f32;
+            s = ((f[q] + qf * qf) - (f[v[k]] + vk * vk)) / (2.0 * qf - 2.0 * vk);
+            if s <= z[k] && k > 0 {
+                k -= 1;
+            } else {
+                break;
             }
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f32::INFINITY;
+    }
+
+    k = 0;
+    for (q, slot) in d.iter_mut().enumerate().take(n) {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let delta = q as f32 - v[k] as f32;
+        *slot = delta * delta + f[v[k]];
+    }
+}
+
+/// Is the FIELD texel at (`tx`, `ty`) inside solid matter — rock, or the band a wall slab occupies?
+///
+/// Walls are thin cuboids standing on cell *edges*, inset so their outer face is flush with the boundary.
+/// Marking that band (not merely the cell boundary) is what puts the mold's contact ridge on the surface
+/// the player actually sees.
+fn texel_is_solid(dungeon: &Dungeon, tx: u32, ty: u32, texel_world: f32) -> bool {
+    // World XZ of this texel's centre. `super::WORLD_ORIGIN` is the world position of the field's corner.
+    let wx = super::WORLD_ORIGIN.x + (tx as f32 + 0.5) * texel_world;
+    let wz = super::WORLD_ORIGIN.y + (ty as f32 + 0.5) * texel_world;
+
+    // Cells are centred on integers and span ±0.5, so `round` maps a world point to its cell.
+    let cell = IVec2::new((wx + 0.5).floor() as i32, (wz + 0.5).floor() as i32);
+    if !dungeon.is_floor(cell) {
+        return true;
+    }
+
+    // Offset within the cell, in [-0.5, 0.5).
+    let lx = wx - cell.x as f32;
+    let lz = wz - cell.y as f32;
+    let band = 0.5 - crate::dungeon::WALL_THICKNESS;
+
+    // A wall stands on an edge exactly when the neighbour across it is not floor.
+    let walled = |dx: i32, dz: i32| !dungeon.is_floor(cell + IVec2::new(dx, dz));
+    (lx >= band && walled(1, 0))
+        || (lx <= -band && walled(-1, 0))
+        || (lz >= band && walled(0, 1))
+        || (lz <= -band && walled(0, -1))
+}
+
+/// Compute, once, how close each **field texel** sits to a wall surface.
+///
+/// Previously this ran a cell-resolution BFS, so `wall_prox` was uniform across a whole wall-adjacent cell;
+/// bilinearly sampled, its ridge landed at the *cell centre* — half a tile away from the wall. That reads as
+/// a stripe hovering beside the wall rather than mold hugging it. At field resolution (≈5.3 texels per tile)
+/// the ridge sits on the slab face.
+///
+/// Written as `R` bytes: `1.0` immediately against a wall surface, falling linearly to `0.0` at `wall_reach`
+/// **world units** away. Solid texels are `0` — rock is not somewhere the mold pools.
+fn compute_wall_proximity(dungeon: &Dungeon, field_size: u32, wall_reach: f32, cpu: &mut [u8]) {
+    let n = (field_size * field_size) as usize;
+    let texel_world = super::WORLD_EXTENT.x / field_size as f32;
+
+    // Seed: 0 inside solids, "infinitely far" everywhere else.
+    let mut sq: Vec<f32> = Vec::with_capacity(n);
+    for ty in 0..field_size {
+        for tx in 0..field_size {
+            sq.push(if texel_is_solid(dungeon, tx, ty, texel_world) { 0.0 } else { DT_FAR });
         }
     }
 
-    // 8-connected BFS so the falloff is round rather than diamond-shaped.
-    const NEIGHBORS: [(i32, i32); 8] =
-        [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
-    while let Some((x, y)) = queue.pop_front() {
-        let d = dist[(y * size + x) as usize];
-        for (dx, dy) in NEIGHBORS {
-            let (nx, ny) = (x + dx, y + dy);
-            if nx < 0 || ny < 0 || nx >= size || ny >= size {
-                continue;
-            }
-            let ni = (ny * size + nx) as usize;
-            if dist[ni] == u16::MAX {
-                dist[ni] = d.saturating_add(1);
-                queue.push_back((nx, ny));
-            }
+    let dim = field_size as usize;
+    let mut col = vec![0.0f32; dim];
+    let mut out = vec![0.0f32; dim];
+    let mut v = vec![0usize; dim];
+    let mut z = vec![0.0f32; dim + 1];
+
+    // Separable exact EDT: transform down every column, then across every row.
+    for x in 0..dim {
+        for (y, slot) in col.iter_mut().enumerate() {
+            *slot = sq[y * dim + x];
+        }
+        dt_1d(&col, &mut out, &mut v, &mut z);
+        for (y, &d) in out.iter().enumerate() {
+            sq[y * dim + x] = d;
         }
     }
+    for y in 0..dim {
+        let row = &sq[y * dim..(y + 1) * dim];
+        col.copy_from_slice(row);
+        dt_1d(&col, &mut out, &mut v, &mut z);
+        sq[y * dim..(y + 1) * dim].copy_from_slice(&out);
+    }
 
-    let reach = wall_reach.max(1.0);
-    for (i, &d) in dist.iter().enumerate() {
-        // d == 0 means the cell IS rock; d == 1 means floor touching a wall.
-        let prox = if d == 0 || d == u16::MAX {
-            0.0
-        } else {
-            (1.0 - (f32::from(d) - 1.0) / reach).clamp(0.0, 1.0)
-        };
+    // Squared texel distance → world distance → proximity ramp.
+    //
+    // The transform measures centre-to-centre, so the free texel hard against a wall reports a full texel of
+    // separation. Half a texel of that is the solid texel's own radius: subtracting it turns "distance to
+    // the nearest solid sample" into "distance to the solid's surface", which is what the shading wants.
+    // Solid texels themselves have `d2 == 0`, so they clamp to 0 and stay distinguishable — rock is not
+    // somewhere the mold pools.
+    let reach = wall_reach.max(texel_world);
+    for (i, &d2) in sq.iter().enumerate() {
+        let dist = (d2.max(0.0).sqrt() - 0.5).max(0.0) * texel_world;
+        let prox = if dist <= 0.0 { 0.0 } else { (1.0 - dist / reach).clamp(0.0, 1.0) };
         cpu[i * field::CONTROL_BYTES_PER_TEXEL] = to_u8(prox);
     }
 }
@@ -152,6 +251,7 @@ pub(super) fn write_control(
     dungeon: Option<Res<Dungeon>>,
     fog: Option<Res<FogGrid>>,
     pools: Query<&Transform, With<BloodPool>>,
+    gibs: Query<&Transform, With<GibChunk>>,
     nests: Query<&Nest>,
     units: Query<&Transform, With<Unit>>,
 ) {
@@ -168,8 +268,9 @@ pub(super) fn write_control(
     // ── Once: the static wall-proximity field ─────────────────────────────────────────────────────────
     // The dungeon is generated once and never regenerates, so this is computed and uploaded a single time.
     if !*wall_written {
-        let mut wall_cpu = vec![0u8; MoldControl::cells() * field::CONTROL_BYTES_PER_TEXEL];
-        compute_wall_proximity(&dungeon, cfg.wall_reach, &mut wall_cpu);
+        let texels = (cfg.field_size as usize) * (cfg.field_size as usize);
+        let mut wall_cpu = vec![0u8; texels * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon, cfg.field_size, cfg.wall_reach, &mut wall_cpu);
         if let Some(mut gpu) = images.get_mut(&*wall) {
             gpu.data = Some(wall_cpu);
             *wall_written = true;
@@ -195,19 +296,24 @@ pub(super) fn write_control(
             let light = if watched { 1.0 - *hab * cfg.hab_strength } else { 0.0 };
 
             // A: three-state substrate mask. Agents grow on any floor; only *explored* floor is drawn.
+            // Four-state substrate. Growth keys off "is floor"; RENDERING keys off explored; and the
+            // mold's brightness keys off *currently visible*, so a remembered room's mold dims exactly like
+            // the floor under it instead of glowing at full strength through the fog.
             let substrate = if !dungeon.is_floor(cell) {
                 0
-            } else if fog.as_ref().is_none_or(|f| f.seen_at(cell)) {
+            } else if fog.as_ref().is_some_and(|f| f.visible_at(cell)) {
                 255
+            } else if fog.as_ref().is_none_or(|f| f.seen_at(cell)) {
+                170
             } else {
-                128
+                85
             };
 
             let base = i * field::CONTROL_BYTES_PER_TEXEL;
             cpu[base] = 0; // R: chemo — accumulated in pass 2
             cpu[base + 1] = to_u8(light); // G: light/gaze
             cpu[base + 2] = 0; // B: disturbance — accumulated in pass 2
-            cpu[base + 3] = substrate; // A: 0 void / 128 unseen floor / 255 explored floor
+            cpu[base + 3] = substrate; // A: 0 void / 85 unseen / 170 remembered / 255 visible
         }
     }
 
@@ -221,6 +327,12 @@ pub(super) fn write_control(
     }
     for nest in &nests {
         splat(cpu, dungeon.world_to_cell(nest.pos), NEST_RADIUS_CELLS, 0);
+    }
+    // Meat chunks are the mold's food, not merely its scent. The `R` splat both steers agents here (via
+    // `chemo_gain`) and nucleates biomass directly (via `carrion_bloom` in the `field` pass), so a fresh gib
+    // erupts. Gibs tumble and settle in 3D; splat at their resting XZ.
+    for t in &gibs {
+        splat(cpu, dungeon.world_to_cell(t.translation), MEAT_RADIUS_CELLS, 0);
     }
     for t in &units {
         splat(cpu, dungeon.world_to_cell(t.translation), UNIT_RADIUS_CELLS, 2);
@@ -265,4 +377,107 @@ fn splat(cpu: &mut [u8], center: IVec2, radius_cells: f32, channel: usize) {
 /// Map a `0..=1` strength to a `Rgba8Unorm` byte, clamping out-of-range inputs.
 fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dungeon must be `CONTROL_SIZE`-square for the world↔cell mapping to hold; carve a floor block
+    /// out of solid rock.
+    fn dungeon_with_floor_block(lo: i32, hi: i32) -> Dungeon {
+        let size = CONTROL_SIZE as usize;
+        let mut walkable = vec![false; size * size];
+        for y in lo..=hi {
+            for x in lo..=hi {
+                walkable[y as usize * size + x as usize] = true;
+            }
+        }
+        Dungeon::from_walkable(size, size, walkable)
+    }
+
+    /// Read back the `R` byte of field texel (tx, ty) as a `0..=1` proximity.
+    fn prox_at(cpu: &[u8], field_size: u32, tx: u32, ty: u32) -> f32 {
+        let i = (ty * field_size + tx) as usize;
+        f32::from(cpu[i * field::CONTROL_BYTES_PER_TEXEL]) / 255.0
+    }
+
+    /// Textbook check of the 1-D transform: distance-squared from the single zero at index 0.
+    #[test]
+    fn dt_1d_matches_squared_distance() {
+        let f = vec![0.0, DT_FAR, DT_FAR, DT_FAR];
+        let mut d = vec![0.0; 4];
+        let mut v = vec![0usize; 4];
+        let mut z = vec![0.0f32; 5];
+        dt_1d(&f, &mut d, &mut v, &mut z);
+        assert_eq!(d, vec![0.0, 1.0, 4.0, 9.0]);
+    }
+
+    /// Two sources: every sample takes the nearer one.
+    #[test]
+    fn dt_1d_takes_the_nearest_source() {
+        let f = vec![0.0, DT_FAR, DT_FAR, DT_FAR, 0.0];
+        let mut d = vec![0.0; 5];
+        let mut v = vec![0usize; 5];
+        let mut z = vec![0.0f32; 6];
+        dt_1d(&f, &mut d, &mut v, &mut z);
+        assert_eq!(d, vec![0.0, 1.0, 4.0, 1.0, 0.0]);
+    }
+
+    /// Rock is never a place the mold pools, and the deep interior of a room is out of the wall's reach.
+    #[test]
+    fn wall_proximity_is_zero_in_rock_and_in_open_floor() {
+        let field_size = 768; // 4 texels per tile
+        let dungeon = dungeon_with_floor_block(90, 100);
+        let mut cpu = vec![0u8; (field_size * field_size) as usize * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon, field_size, 0.6, &mut cpu);
+
+        // Texel deep inside rock (cell ~40).
+        assert_eq!(prox_at(&cpu, field_size, 160, 160), 0.0, "rock must not attract mold");
+        // Texel at the centre of the 11-tile room (cell 95), ~5 tiles from any wall.
+        assert_eq!(prox_at(&cpu, field_size, 382, 382), 0.0, "open floor is out of reach");
+    }
+
+    /// The ridge must sit *against the wall*, and fall off monotonically into the room.
+    #[test]
+    fn wall_proximity_peaks_against_the_wall_and_decays_inward() {
+        let field_size = 768;
+        let dungeon = dungeon_with_floor_block(90, 100);
+        let mut cpu = vec![0u8; (field_size * field_size) as usize * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon, field_size, 0.6, &mut cpu);
+
+        // Walk east along the middle row of the room, starting from the west wall.
+        // Cell 90 spans world x in [89.5, 90.5]; texel centres are 0.25 apart.
+        let row = 382; // a texel row inside cell 95
+        let series: Vec<f32> = (359..=366).map(|tx| prox_at(&cpu, field_size, tx, row)).collect();
+
+        // 359 is rock, 360 lies inside the 0.14-thick slab band — both solid, so both zero.
+        assert_eq!(series[0], 0.0, "rock texel");
+        assert_eq!(series[1], 0.0, "texel inside the wall slab");
+
+        // The first free texel is hard against the slab: proximity must be near its maximum.
+        assert!(series[2] > 0.7, "first free texel should hug the wall, got {}", series[2]);
+
+        // ...and it must decay monotonically inward from there.
+        for w in series[2..].windows(2) {
+            assert!(w[0] >= w[1], "proximity must not increase away from the wall: {series:?}");
+        }
+        assert_eq!(*series.last().unwrap_or(&1.0), 0.0, "reach must run out: {series:?}");
+    }
+
+    /// A room one tile wider has its ridge one tile further east — i.e. the ridge tracks the *surface*,
+    /// not the cell grid. This is the regression the cell-resolution BFS could not express.
+    #[test]
+    fn the_ridge_tracks_the_wall_surface_not_the_cell_centre() {
+        let field_size = 768;
+        let mut cpu = vec![0u8; (field_size * field_size) as usize * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon_with_floor_block(90, 100), field_size, 0.6, &mut cpu);
+
+        // Within cell 90 (world x in [89.5, 90.5] -> texels 360..=363), proximity must be strictly
+        // greatest at the texel nearest the west slab, not at the cell's centre texel (361/362).
+        let row = 382;
+        let west = prox_at(&cpu, field_size, 361, row); // nearest free texel to the slab
+        let centre = prox_at(&cpu, field_size, 362, row); // cell interior
+        assert!(west > centre, "ridge sits at the wall face: west={west} centre={centre}");
+    }
 }

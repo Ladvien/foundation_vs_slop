@@ -144,6 +144,7 @@ fn init_mold_pipeline(
 fn advance_state(
     pipeline: Res<MoldPipeline>,
     pipeline_cache: Res<PipelineCache>,
+    step: Res<super::MoldStep>,
     mut state: ResMut<MoldState>,
 ) {
     if !state.ready {
@@ -159,7 +160,10 @@ fn advance_state(
         });
         state.ready = all_ok;
     }
-    if state.ready {
+    // Advance the ping-pong parity ONLY on a sim tick. On skipped frames the read/write pair must stay put,
+    // or `prepare_bind_group` would swap the textures under a pass that never ran and the mold would flicker
+    // between two half-updated fields.
+    if state.ready && step.step {
         state.frame = state.frame.wrapping_add(1);
     }
 }
@@ -241,8 +245,13 @@ fn mold_compute(
     pipeline: Res<MoldPipeline>,
     params: Res<MoldParams>,
     state: Res<MoldState>,
+    step: Res<super::MoldStep>,
 ) {
-    let Some(bind_group) = bind_group.filter(|_| state.ready) else {
+    // The mold advances on its own slow clock (`sim_hz`), not the render clock. Dispatching every rendered
+    // frame ran the agents at ~11 world units/sec and Gray-Scott at 60 reaction steps/sec — a flow rate, not
+    // a growth rate, and the single strongest reason the mold read as liquid. Skipped frames simply resample
+    // the display texture from the previous tick.
+    let Some(bind_group) = bind_group.filter(|_| state.ready && step.step) else {
         return;
     };
     let (Some(clear), Some(agents_pl), Some(diffuse), Some(field)) = (
