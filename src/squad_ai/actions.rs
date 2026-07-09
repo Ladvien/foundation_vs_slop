@@ -15,7 +15,7 @@ use crate::ai::utility::Mode;
 use crate::gore::Carryable;
 use crate::health::Health;
 use crate::placement::PlacedIn;
-use crate::squad::Unit;
+use crate::squad::{MoveOrder, Unit};
 use crate::util::nearest_planar;
 
 use super::dialogue::{ObsEvent, SquadUtterance};
@@ -47,9 +47,12 @@ pub fn unit_actions(
     mut utter: MessageWriter<SquadUtterance>,
     furniture: Query<(Entity, &Transform), (With<PlacedIn>, Without<Examined>)>,
     bodies: Query<(Entity, &Transform), (With<Carryable>, Without<Examined>)>,
+    // A player `MoveOrder` is authoritative — an ordered unit is under FULL player control, so it must
+    // not auto-examine (permanently marking furniture/bodies `Examined` and denying the Researcher the
+    // find), auto-ward, or bark. `Without<MoveOrder>` excludes those units from all action effects.
     mut units: Query<
         (Entity, &Transform, &RoleId, &ActiveBehavior, &mut Drives, &mut UtterCooldown),
-        With<Unit>,
+        (With<Unit>, Without<MoveOrder>),
     >,
 ) {
     let dt = time.delta_secs();
@@ -113,7 +116,9 @@ pub fn unit_actions(
 /// component access doesn't conflict even though both match every unit.
 pub fn medic_heal(
     time: Res<Time>,
-    medics: Query<(&Transform, &ActiveBehavior), With<Unit>>,
+    // A medic under a player `MoveOrder` is being marched by the player, not tending — exclude it so
+    // player-commanded units are genuinely under full control (matches the `unit_actions` gate).
+    medics: Query<(&Transform, &ActiveBehavior), (With<Unit>, Without<MoveOrder>)>,
     mut patients: Query<(&Transform, &mut Health), With<Unit>>,
 ) {
     // Positions of medics currently tending.

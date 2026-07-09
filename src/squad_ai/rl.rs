@@ -17,12 +17,26 @@ use crate::ai::utility::{Behavior, Mode, Perception};
 use super::policy::SquadPolicy;
 
 /// A policy driven by an external reinforcement-learning process. The trainer pushes one action index
-/// per unit per step; between steps (or before the trainer has stepped) the unit **holds** (index 0,
-/// the safety-default behaviour). Holding is a no-op action on the RL path, not a fallback to a
-/// different policy — the one-path rule holds.
+/// per unit per step; between steps (or before the trainer has stepped) the unit **holds** — it
+/// selects the [`Mode::Wander`] safety default, the one behaviour that is a true no-op (`resolve_goal`
+/// maps it to no movement and `unit_actions` fires no effect for it). NOT index 0: in a role brain
+/// index 0 is the rank-4 role DUTY (Examine / TendWounded / SecureDoor …), several of which move and
+/// mutate world state, so "hold = index 0" would make an un-stepped controller silently perform each
+/// unit's primary duty. Holding is a no-op action on the RL path, not a fallback to a different policy
+/// — the one-path rule holds.
 #[derive(Default)]
 pub struct RemotePolicy {
     queue: Mutex<std::collections::VecDeque<usize>>,
+}
+
+/// The behaviour index a held unit selects: the unconditional [`Mode::Wander`] safety default (a true
+/// stationary no-op). Falls back to the last behaviour — the tail's conventional safety-default slot —
+/// only if a brain authors no Wander at all, keeping the return in range without another policy path.
+fn hold_index(behaviors: &[Behavior]) -> usize {
+    behaviors
+        .iter()
+        .position(|b| b.mode == Mode::Wander)
+        .unwrap_or_else(|| behaviors.len().saturating_sub(1))
 }
 
 impl RemotePolicy {
@@ -36,13 +50,12 @@ impl RemotePolicy {
 
 impl SquadPolicy for RemotePolicy {
     fn choose(&self, _perc: &Perception, behaviors: &[Behavior], _rng: &mut u32) -> usize {
-        let idx = self
-            .queue
-            .lock()
-            .ok()
-            .and_then(|mut q| q.pop_front())
-            .unwrap_or(0);
-        idx.min(behaviors.len().saturating_sub(1))
+        match self.queue.lock().ok().and_then(|mut q| q.pop_front()) {
+            // A queued action index, clamped into range.
+            Some(idx) => idx.min(behaviors.len().saturating_sub(1)),
+            // Nothing queued → hold (the Wander no-op), NOT index 0 (a role duty).
+            None => hold_index(behaviors),
+        }
     }
 }
 
@@ -149,15 +162,18 @@ mod tests {
 
     #[test]
     fn remote_policy_replays_queued_actions_then_holds() {
-        let behaviors = default_behaviors_for_test(RoleId::Gunman);
+        let behaviors = default_behaviors_for_test(RoleId::Medic);
         let p = RemotePolicy::default();
         p.push_action(2);
         p.push_action(999); // clamped
         let mut rng = 1u32;
         assert_eq!(p.choose(&perc(), &behaviors, &mut rng), 2);
         assert_eq!(p.choose(&perc(), &behaviors, &mut rng), behaviors.len() - 1);
-        // Empty → hold at the safety default (index 0).
-        assert_eq!(p.choose(&perc(), &behaviors, &mut rng), 0);
+        // Empty → HOLD, which must be the Wander no-op, NOT index 0 (the Medic's index 0 is
+        // TendWounded — walking to and healing an ally — so a held controller must not select it).
+        let held = p.choose(&perc(), &behaviors, &mut rng);
+        assert_eq!(behaviors[held].mode, Mode::Wander, "hold must be the Wander no-op, not a duty");
+        assert_ne!(held, 0, "the Medic's index 0 (TendWounded) is not a hold");
     }
 
     #[test]

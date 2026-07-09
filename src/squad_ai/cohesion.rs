@@ -57,6 +57,28 @@ pub struct DesiredMove {
 /// the group reference is smooth.
 const ANCHOR_EASE: f32 = 4.0;
 
+/// The mean of `positions`, summed in a CANONICAL (value-sorted) order rather than raw iteration order
+/// — `None` if empty. Float addition is non-associative, so summing in entity-iteration order would
+/// make the centroid's low bits depend on ECS iteration order (which can shift between two same-seed
+/// runs as units change archetype). Sorting the addends by bit pattern makes the sum a pure function of
+/// the position SET, so the anchor — which feeds movement goals → hashed Transforms — is reproducible.
+/// Same value-sort determinism idiom as `sim_harness::snapshot_hash`. Pure + unit-tested for exactly
+/// this order-independence.
+fn deterministic_centroid(positions: Vec<Vec3>) -> Option<Vec3> {
+    if positions.is_empty() {
+        return None;
+    }
+    let n = positions.len();
+    let mut keyed: Vec<[u32; 3]> =
+        positions.into_iter().map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).collect();
+    keyed.sort_unstable();
+    let mut sum = Vec3::ZERO;
+    for k in &keyed {
+        sum += Vec3::new(f32::from_bits(k[0]), f32::from_bits(k[1]), f32::from_bits(k[2]));
+    }
+    Some(sum / n as f32)
+}
+
 /// Recompute the squad anchor from the living units' centroid, eased for smoothness. Runs on
 /// `FixedUpdate` before the squad decision (`squad_think`), which reads `anchor_dist`.
 pub fn update_anchor(
@@ -64,17 +86,11 @@ pub fn update_anchor(
     mut anchor: ResMut<SquadAnchor>,
     units: Query<&Transform, With<Unit>>,
 ) {
-    let mut sum = Vec3::ZERO;
-    let mut n = 0u32;
-    for t in &units {
-        sum += t.translation;
-        n += 1;
-    }
-    if n == 0 {
+    let positions: Vec<Vec3> = units.iter().map(|t| t.translation).collect();
+    let Some(centroid) = deterministic_centroid(positions) else {
         anchor.valid = false;
         return;
-    }
-    let centroid = sum / n as f32;
+    };
     if !anchor.valid {
         // First observation: place the anchor on the centroid so it doesn't ease in from the origin.
         anchor.pos = centroid;
@@ -89,5 +105,44 @@ pub fn update_anchor(
     // Smoothed drift (per-second) for alignment consumers.
     if dt > 0.0 {
         anchor.vel = (anchor.pos - prev) / dt;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centroid_is_none_when_empty() {
+        assert_eq!(deterministic_centroid(Vec::new()), None);
+    }
+
+    #[test]
+    fn centroid_is_bit_identical_regardless_of_input_order() {
+        // Values chosen so the naive left-to-right float sum is order-sensitive in its low bits (a big
+        // magnitude next to small ones loses precision differently depending on order). The canonical
+        // value-sort must make every permutation produce the EXACT same bits — the property the
+        // determinism gate relies on for the squad anchor.
+        let base = vec![
+            Vec3::new(1_000_000.0, 0.0, -3.3),
+            Vec3::new(0.1, 2.0, 7.7),
+            Vec3::new(0.2, -5.0, 0.0),
+            Vec3::new(-9.9, 1.0, 1_000_000.0),
+            Vec3::new(0.3, 0.25, -0.75),
+        ];
+        let reference = deterministic_centroid(base.clone()).expect("non-empty");
+        // Every rotation + a reversal must hash-identically to the reference.
+        for shift in 0..base.len() {
+            let mut permuted = base.clone();
+            permuted.rotate_left(shift);
+            let c = deterministic_centroid(permuted).expect("non-empty");
+            assert_eq!(c.to_array().map(f32::to_bits), reference.to_array().map(f32::to_bits),
+                "rotation by {shift} changed the centroid bits");
+        }
+        let mut reversed = base.clone();
+        reversed.reverse();
+        let c = deterministic_centroid(reversed).expect("non-empty");
+        assert_eq!(c.to_array().map(f32::to_bits), reference.to_array().map(f32::to_bits),
+            "reversal changed the centroid bits");
     }
 }

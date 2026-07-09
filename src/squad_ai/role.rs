@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::ai::brain::Brain;
-use crate::ai::drives::DriveId;
+use crate::ai::drives::{DriveId, DRIVE_COUNT};
 use crate::ai::utility::{Behavior, Consideration, Curve, Fact, Input, Mode, TargetKind};
 
 /// Which SCP task-force role a unit plays. `Deserialize`/`Hash`/`Eq` so it keys the `roles.ron` map and
@@ -75,17 +75,57 @@ impl RoleBrains {
     }
 
     pub fn get(&self, role: RoleId) -> &Brain {
-        // Every RoleId is inserted by `defaults()`, so this is always present; fall back to a safety
-        // reference only if a future role is added without a default (kept panic-free per CLAUDE.md).
-        self.brains
-            .get(&role)
-            .unwrap_or_else(|| &self.brains[&RoleId::Gunman])
+        // `defaults()` inserts every `RoleId::ALL` role, and `overlay` only REPLACES existing entries,
+        // so a lookup for any role in ALL is always present. A miss means ALL is out of sync with the
+        // `RoleId` enum (a variant was added without extending ALL): fail loud with a message naming
+        // the cause — never silently substitute another role's brain (a wrong-behaviour bug the
+        // one-path/no-fallback rule forbids) or index-panic on a bare `[]`. This can't fire in the
+        // shipped game (all five roles are in ALL); it is a developer invariant guard.
+        self.brains.get(&role).unwrap_or_else(|| {
+            panic!("no brain registered for {role:?}; RoleId::ALL must list every RoleId variant")
+        })
     }
 }
 
 /// Parse a `roles.ron` document: `{ Gunman: (behaviors: [ ... ]), ... }`.
 pub fn parse_roles_ron(src: &str) -> Result<HashMap<RoleId, RoleDef>, ron::error::SpannedError> {
     ron::from_str(src)
+}
+
+/// Validate parsed `roles.ron` role definitions before they overlay the defaults — the "reject bad
+/// input at the door" gate (per `~/.claude/CLAUDE.md`: fail loudly, one path, no silent defaults).
+/// Two invariants make a data-authored brain safe for the engine, which the code-literal defaults hold
+/// by construction but a hand-edited RON file can break (returns a human-readable error naming the
+/// offending role so the author sees exactly what to fix):
+///
+/// 1. **Non-empty behaviours.** `decide` returns index 0 when nothing scores and `squad_think` indexes
+///    `behaviors[idx]`, so an empty list index-panics on the unit's first think.
+/// 2. **In-range drive indices.** `Perception::read` evaluates `self.drives[id.0]` unchecked; a
+///    `Drive((n))` with `n >= DRIVE_COUNT` (now data-authorable via `Deserialize`) index-panics at the
+///    first decision that scores it.
+pub fn validate_role_defs(defs: &HashMap<RoleId, RoleDef>) -> Result<(), String> {
+    for (role, def) in defs {
+        if def.behaviors.is_empty() {
+            return Err(format!(
+                "role {role:?} has an empty `behaviors` list; a role must define at least one \
+                 behaviour (e.g. a Wander safety default)"
+            ));
+        }
+        for (i, behavior) in def.behaviors.iter().enumerate() {
+            for consideration in &behavior.considerations {
+                if let Input::Drive(id) = consideration.input
+                    && id.0 >= DRIVE_COUNT
+                {
+                    return Err(format!(
+                        "role {role:?} behaviour #{i} references Drive(({})) but only \
+                         {DRIVE_COUNT} drives exist (valid indices 0..{DRIVE_COUNT})",
+                        id.0
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- Shared behaviour fragments (every role carries these tails) ---
@@ -339,6 +379,45 @@ mod tests {
             let p = perc();
             assert_eq!(chosen_mode(role, &p), Mode::FollowAnchor, "role {role:?} should follow");
         }
+    }
+
+    #[test]
+    fn validate_rejects_empty_behaviors() {
+        // A well-formed RON file can still author an unsafe brain: an empty behaviour list would
+        // index-panic on the unit's first think. Validation must reject it at the door (fail loud).
+        let src = r#"{ Gunman: (behaviors: []) }"#;
+        let defs = parse_roles_ron(src).expect("parses (empty list is valid RON)");
+        let err = validate_role_defs(&defs).expect_err("empty behaviors must be rejected");
+        assert!(err.contains("Gunman") && err.contains("empty"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_drive_index() {
+        // `Drive((9))` deserializes fine (any usize) but would index-panic `self.drives[9]` on a
+        // 5-slot array. Validation must catch the out-of-range index before it reaches the engine.
+        let src = r#"{
+            Medic: (behaviors: [
+                (mode: Wander, rank: 0, target: None, considerations: [
+                    (input: Drive((9)), curve: Linear(m: 1.0, b: 0.0)),
+                ]),
+            ]),
+        }"#;
+        let defs = parse_roles_ron(src).expect("parses");
+        let err = validate_role_defs(&defs).expect_err("out-of-range drive must be rejected");
+        assert!(err.contains("Drive((9))"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_override() {
+        let src = r#"{
+            Gunman: (behaviors: [
+                (mode: Wander, rank: 0, target: None, considerations: [
+                    (input: Drive((1)), curve: Linear(m: 1.0, b: 0.0)),
+                ]),
+            ]),
+        }"#;
+        let defs = parse_roles_ron(src).expect("parses");
+        assert!(validate_role_defs(&defs).is_ok(), "a valid override must pass validation");
     }
 
     #[test]

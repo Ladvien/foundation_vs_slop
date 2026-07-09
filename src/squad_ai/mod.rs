@@ -72,18 +72,27 @@ impl Plugin for SquadAiPlugin {
     }
 }
 
-/// Insert the role-brain registry, overlaying any `assets/config/roles.ron` overrides.
+/// Insert the role-brain registry, overlaying any `assets/config/roles.ron` overrides. A missing file
+/// is the normal case (the code-literal defaults are a complete, playable set); a *present but
+/// malformed or invalid* file is a loud startup panic, never a silent fallback to defaults — the
+/// author asked for a change and running the game with their override quietly discarded is exactly the
+/// "magic results that are hard to debug" the one-path rule forbids (mirrors `config::ConfigPlugin`).
 fn init_role_brains(mut commands: Commands) {
-    let mut brains = RoleBrains::defaults();
-    match std::fs::read_to_string("assets/config/roles.ron") {
-        Ok(src) => match role::parse_roles_ron(&src) {
-            Ok(defs) => brains.overlay(defs),
-            // Malformed override is a loud error, not a silent fallback — the author asked for a change
-            // and must see it failed. The defaults still load so the game runs.
-            Err(e) => error!("assets/config/roles.ron is malformed, using role defaults: {e}"),
-        },
-        // No override file → defaults only (the expected common case; not logged as an error).
-        Err(_) => {}
-    }
+    let brains = load_role_brains().unwrap_or_else(|e| panic!("roles.ron: {e}"));
     commands.insert_resource(brains);
+}
+
+/// Build the role-brain registry: defaults, overlaid by a validated `assets/config/roles.ron` when
+/// present. Returns an error (never a silent default) if the file exists but is malformed or authors an
+/// unsafe brain (empty behaviours / out-of-range drive index — see [`role::validate_role_defs`]).
+fn load_role_brains() -> Result<RoleBrains, String> {
+    let mut brains = RoleBrains::defaults();
+    // A present file is parsed, validated, and overlaid; a missing file leaves the defaults untouched
+    // (the expected common case — not an error).
+    if let Ok(src) = std::fs::read_to_string("assets/config/roles.ron") {
+        let defs = role::parse_roles_ron(&src).map_err(|e| format!("malformed: {e}"))?;
+        role::validate_role_defs(&defs)?;
+        brains.overlay(defs);
+    }
+    Ok(brains)
 }
