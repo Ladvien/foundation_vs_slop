@@ -1,58 +1,137 @@
-//! The floor compositing material — samples the GPU-written mold field by **world XZ** and blends it
-//! over the floor. In Phase A this is a standalone `Material` overlay (de-risking the compute→texture→
-//! material path); later phases graduate it to `ExtendedMaterial<StandardMaterial, _>` so the mold layer
-//! sits on the real PBR carpet.
+//! The mold's *shading*. The compute chain produces raw simulation fields; everything about how the mold
+//! looks — lighting, surface normal, wetness, bioluminescence — lives here.
+//!
+//! Both materials are `ExtendedMaterial<StandardMaterial, _>`, so the mold is a genuinely **lit PBR
+//! surface** rather than a flat unlit decal. It picks up the scene's directional key and ambient fill, its
+//! normal is perturbed by the biomass thickness (so it reads as a lumpy wet film), and its roughness drops
+//! where it is thickest (a wet sheen). That is what stops it looking like paint.
+//!
+//! Two surfaces, one field:
+//! - [`MoldFloorMaterial`] on the translucent floor overlay, sampling the field by world XZ.
+//! - [`MoldWallMaterial`] on the wall slabs, sampling the *same* field at the wall's footprint XZ and
+//!   fading with height, so the coating visibly creeps up out of the floor/wall corner.
+//!
+//! Only `fragment_shader()` is overridden, so the prepass keeps `StandardMaterial`'s default — no
+//! `PREPASS_PIPELINE` branching is needed in the WGSL.
 
 use bevy::asset::Asset;
-use bevy::pbr::Material;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
-use super::{WORLD_EXTENT, WORLD_ORIGIN};
+use super::{MyceliaConfig, WORLD_EXTENT, WORLD_ORIGIN};
 
-/// GPU uniform — must byte-match `MoldMatParams` in `mycelia_floor.wgsl`. Carries the same world↔UV
-/// mapping the compute pass uses, so the floor reads exactly where the sim wrote.
+/// The lit floor coating.
+pub type MoldFloorMaterial = ExtendedMaterial<StandardMaterial, MoldFloorExt>;
+/// The lit coating creeping up the walls.
+pub type MoldWallMaterial = ExtendedMaterial<StandardMaterial, MoldWallExt>;
+
+/// GPU uniform shared by both surface shaders — must byte-match `MoldSurfaceParams` in
+/// `mycelia_floor.wgsl` / `mycelia_wall.wgsl`. `vec2`s first so every following scalar is naturally aligned.
 #[derive(Clone, ShaderType)]
-pub struct MoldMatParams {
+pub struct MoldSurfaceParams {
+    /// World XZ of field texel (0,0) — the same mapping the compute chain writes with.
     world_origin: Vec2,
+    /// World-space span the field covers.
     world_extent: Vec2,
+    /// Field resolution in texels (for the finite-difference normal).
+    field_res: Vec2,
+    /// Multiplier on the veins' emissive. The camera is LDR with no bloom, so this stays near 1.
+    glow_gain: f32,
+    /// Master opacity dial.
+    intensity: f32,
+    /// Trail value at which a vein begins to show.
+    vein_lo: f32,
+    /// Trail value at which a vein is fully lit.
+    vein_hi: f32,
+    /// Strength of the thickness-derived normal perturbation. `0` = flat.
+    normal_strength: f32,
+    /// Perceptual roughness where the mold is thickest (wet).
+    wet_roughness: f32,
+    /// How far up a wall the mold climbs before fading out (world units).
+    climb_height: f32,
 }
 
-/// Samples the shared `mold_display` texture (written by the mycelia compute pass) and composites its
-/// grimy bioluminescence over the floor. Bindings deliberately start at 0 (this is a standalone
-/// `Material`, its own bind group) — the `ExtendedMaterial` variant in a later phase will move these to
-/// high indices to avoid clashing with `StandardMaterial`'s bindings.
-#[derive(Asset, TypePath, AsBindGroup, Clone)]
-pub struct MoldFloorMaterial {
-    #[uniform(0)]
-    params: MoldMatParams,
-    /// The compute-written mold field. `Rgba16Float` is filterable, so a linear sampler is valid.
-    #[texture(1)]
-    #[sampler(2)]
-    display: Handle<Image>,
-}
-
-impl MoldFloorMaterial {
-    /// Build the material bound to the shared display texture, seeding the world↔UV mapping from the
-    /// module constants (single source of truth with the compute pass).
-    pub fn new(display: Handle<Image>) -> Self {
+impl MoldSurfaceParams {
+    fn new(cfg: &MyceliaConfig) -> Self {
         Self {
-            params: MoldMatParams { world_origin: WORLD_ORIGIN, world_extent: WORLD_EXTENT },
-            display,
+            world_origin: WORLD_ORIGIN,
+            world_extent: WORLD_EXTENT,
+            field_res: Vec2::splat(cfg.field_size as f32),
+            glow_gain: cfg.glow_gain,
+            intensity: cfg.intensity,
+            vein_lo: cfg.vein_lo,
+            vein_hi: cfg.vein_hi,
+            normal_strength: cfg.normal_strength,
+            wet_roughness: cfg.wet_roughness,
+            climb_height: cfg.climb_height,
         }
     }
 }
 
-impl Material for MoldFloorMaterial {
+/// Floor extension. Bindings start at 100 so they cannot collide with `StandardMaterial`'s own bindings in
+/// the shared material bind group.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct MoldFloorExt {
+    #[uniform(100)]
+    params: MoldSurfaceParams,
+    /// Simulation fields: `R` trail · `G` biomass · `B` wall contact · `A` coverage.
+    #[texture(101)]
+    #[sampler(102)]
+    display: Handle<Image>,
+    /// World state; the material reads `G` (light/gaze) so the mold can conceal its glow when watched.
+    #[texture(103)]
+    #[sampler(104)]
+    control: Handle<Image>,
+}
+
+/// Wall extension — identical bindings, different fragment shader.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct MoldWallExt {
+    #[uniform(100)]
+    params: MoldSurfaceParams,
+    #[texture(101)]
+    #[sampler(102)]
+    display: Handle<Image>,
+    #[texture(103)]
+    #[sampler(104)]
+    control: Handle<Image>,
+}
+
+impl MoldFloorExt {
+    pub fn new(cfg: &MyceliaConfig, display: Handle<Image>, control: Handle<Image>) -> Self {
+        Self { params: MoldSurfaceParams::new(cfg), display, control }
+    }
+}
+
+impl MoldWallExt {
+    pub fn new(cfg: &MyceliaConfig, display: Handle<Image>, control: Handle<Image>) -> Self {
+        Self { params: MoldSurfaceParams::new(cfg), display, control }
+    }
+}
+
+impl MaterialExtension for MoldFloorExt {
     fn fragment_shader() -> ShaderRef {
         "shaders/mycelia_floor.wgsl".into()
     }
+}
 
-    /// Translucent overlay: the mold composites over the underlying floor, transparent where there is no
-    /// biomass. `Blend` (not `Opaque`) so bare carpet shows through.
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+impl MaterialExtension for MoldWallExt {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/mycelia_wall.wgsl".into()
+    }
+}
+
+/// The `StandardMaterial` under the floor overlay: translucent (the carpet shows through where there is no
+/// mold) and non-metallic. The extension fragment supplies base colour, normal, roughness and emissive.
+pub fn floor_base() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
     }
 }

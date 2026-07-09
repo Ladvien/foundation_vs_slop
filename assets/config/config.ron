@@ -345,18 +345,32 @@
         photophobia: 9.0,       // repulsion from cells a unit currently SEES (fog as a gaze proxy)
         chemo_gain: 6.0,        // attraction to blood pools and nests
         disturbance_gain: 5.0,  // repulsion from squad proximity (footsteps scatter it)
-        wall_repel: 12.0,       // repulsion from the void; keeps the coating on the floor
+        wall_repel: 12.0,       // repulsion from solid rock; keeps the coating off the void
+        // wall_affinity is NOT the opposite of wall_repel. wall_repel acts on the non-floor cell the wall
+        // slab stands on; wall_affinity acts on the FLOOR BESIDE IT. Together they park agents hard against
+        // the wall face — where a real mold pools: dark, sheltered, damp. Without it the mold flees to
+        // corridor centres, which is exactly backwards.
+        wall_affinity: 5.0,     // attraction to wall-adjacent floor
+        wall_reach: 2.5,        // how far (cells) the wall's pull reaches across the floor
         // Habituation: a watched cell's fear fades, and recovers once the gaze leaves. Grounded in
         // Boisseau, Vogel & Dussutour (2016), 10.1098/rspb.2016.0446.
         hab_rate: 0.35,         // gained per second while watched (~3 s to fully habituate)
         hab_recover: 0.08,      // lost per second while unwatched (slower: fear returns gradually)
         hab_strength: 0.75,     // ceiling; < 1.0 so the mold gets bolder, never blind
 
-        // ── Appearance. Held dim: the bloom post-process blows out anything brighter, turning the
-        // veins into neon tubes rather than a sickly phosphorescence.
+        // ── Appearance. The mold is a lit PBR surface (ExtendedMaterial<StandardMaterial, _>), not a
+        // flat decal: its normal comes from the biomass thickness and it goes glossy where it is wet.
+        // Emissive is held near 1.0 because the camera is LDR (no hdr, no Bloom) and the scene is
+        // brightly lit (AmbientLight 500 + 2500-lux directional), so the default TonyMcMapface
+        // tonemapper clips anything much brighter straight to white.
         glow_gain: 1.0,         // multiplier on vein bioluminescence
         intensity: 1.0,         // master opacity dial for the whole coating (0 = invisible)
         vein_lo: 3.0,           // trail value at which a vein begins to show
         vein_hi: 12.0,          // trail value at which a vein is fully lit (must exceed vein_lo)
+        // normal_strength too high + wet_roughness too low turns the mold into a chrome puddle: with an
+        // ambient this bright, a near-black albedo shows almost nothing BUT its specular highlight.
+        normal_strength: 2.5,   // thickness -> normal perturbation. 0 = flat decal (the old look)
+        wet_roughness: 0.45,    // roughness where thickest (carpet is 0.95). Lower = wetter, glossier
+        climb_height: 0.85,     // how far (world units) the mold creeps up a wall. Walls are 2.4 tall
     ),
 )

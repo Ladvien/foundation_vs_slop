@@ -39,8 +39,7 @@ struct MoldParams {
     chemo_gain: f32,
     disturbance_gain: f32,
     wall_repel: f32,
-    glow_gain: f32,
-    intensity: f32,
+    wall_affinity: f32,
     vein_lo: f32,
     vein_hi: f32,
 };
@@ -66,6 +65,9 @@ struct Agent {
 // The mold GROWS on any floor (A >= 0.25) but is only DRAWN on explored floor (A >= 0.75) — otherwise the
 // coating would trace the corridor layout through the fog of war and leak the map.
 @group(0) @binding(8) var control: texture_2d<f32>;
+// Static wall-proximity field, written once: R = 1 on floor touching a wall, falling to 0 over `wall_reach`
+// cells. Walls here are thin slabs on cell EDGES, so "near a wall" == "near a non-floor cell".
+@group(0) @binding(9) var wall_prox: texture_2d<f32>;
 
 /// Is this cell floor the mold may grow on? (Seen or not.)
 fn is_walkable(a: f32) -> f32 {
@@ -74,6 +76,29 @@ fn is_walkable(a: f32) -> f32 {
 /// Has the player explored this cell, so the mold may be rendered here?
 fn is_explored(a: f32) -> f32 {
     return step(0.75, a);
+}
+
+/// Bilinearly sample the static wall-proximity field at a float FIELD position. Bilinear (not nearest) so
+/// agents get a smooth gradient to climb toward the wall instead of a blocky per-cell step, and so the
+/// contact shading the material derives from it isn't a staircase.
+fn wall_prox_at(p: vec2<f32>, dim: i32) -> f32 {
+    let uv = vec2<f32>(f32(wrap_i(i32(floor(p.x)), dim)), f32(wrap_i(i32(floor(p.y)), dim)))
+           / params.field_res;
+    let c = uv * params.control_res - vec2<f32>(0.5, 0.5);
+    let base = floor(c);
+    let f = c - base;
+    let hi = params.control_res - vec2<f32>(1.0, 1.0);
+
+    var acc = 0.0;
+    for (var j = 0; j < 2; j++) {
+        for (var i = 0; i < 2; i++) {
+            let q = clamp(base + vec2<f32>(f32(i), f32(j)), vec2<f32>(0.0, 0.0), hi);
+            let wx = select(1.0 - f.x, f.x, i == 1);
+            let wy = select(1.0 - f.y, f.y, j == 1);
+            acc += textureLoad(wall_prox, vec2<i32>(i32(q.x), i32(q.y)), 0).r * wx * wy;
+        }
+    }
+    return acc;
 }
 
 // Integer hash → uniform f32 in [0,1). Cheap per-agent randomness for the "turn away" case.
@@ -114,15 +139,21 @@ fn control_at(p: vec2<f32>, dim: i32) -> vec4<f32> {
     return textureLoad(control, vec2<i32>(cx, cy), 0);
 }
 
-// What an agent's sensor actually perceives at `p`: the scent trail, pulled toward food and pushed away
-// from gaze, footsteps, and the void. All gains are in trail units so they compete directly with scent.
+// What an agent's sensor actually perceives at `p`: the scent trail, pulled toward food and the damp
+// shelter of walls, pushed away from gaze, footsteps, and solid rock. All gains are in trail units so they
+// compete directly with scent.
 //
-// This single expression is where the "sentience" lives — foraging (chemo), photophobia + habituation
-// (light, already habituation-attenuated on the CPU), flinching from the squad (disturbance), and staying
-// on the floor (wall_repel).
+// This single expression is where the "sentience" lives — foraging (chemo), nestling into corners
+// (wall_affinity), photophobia + habituation (light, already habituation-attenuated on the CPU), flinching
+// from the squad (disturbance), and staying off the rock (wall_repel).
+//
+// Note `wall_affinity` and `wall_repel` are NOT opposites. `wall_repel` acts on the *non-floor* cell (the
+// rock the wall slab stands on); `wall_affinity` acts on the *floor beside it*. Together they park agents
+// hard against the wall face — which is where a real mold pools: dark, sheltered, and damp.
 fn sense(p: vec2<f32>, dim: i32) -> f32 {
     let ctl = control_at(p, dim);
-    let attract = ctl.r * params.chemo_gain;
+    let attract = ctl.r * params.chemo_gain
+                + wall_prox_at(p, dim) * params.wall_affinity;
     let repel = ctl.g * params.photophobia
               + ctl.b * params.disturbance_gain
               + (1.0 - is_walkable(ctl.a)) * params.wall_repel;
@@ -287,27 +318,15 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // Grimy-bioluminescent composite. Sickly green/cyan veins glow out of a dark wet biomass film; a faint
     // scent sheen hints at growth even where no vein has established. Alpha stays < 1 throughout so the
     // mold reads as a translucent coating over the carpet, not opaque paint.
-    // The vein window is config-driven (`vein_lo`..`vein_hi`) — reuse the mask computed for nucleation, so
-    // "what nucleates a bloom" and "what lights up" can never drift apart. The sheen sits just under the
-    // window so a faint scent still hints at growth where no channel has established.
-    let veins = vein;
-    let sheen = smoothstep(params.vein_lo * 0.17, params.vein_lo, trail);
-    let bio = smoothstep(0.10, 0.35, v);
-
-    // The mold conceals its bioluminescence under a direct gaze — glow is strongest in the dark. (Slower
-    // structural retreat comes from the agents themselves fleeing the light; this is the instant flinch.)
-    let conceal = 1.0 - 0.7 * ctl.g;
-
-    // Kept deliberately dim: the game's bloom post-process blows out anything brighter, turning the veins
-    // into neon tubes rather than a sickly phosphorescence.
-    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins * conceal * params.glow_gain;
-    let flesh = vec3<f32>(0.045, 0.075, 0.055) * bio;
-    let grime = vec3<f32>(0.015, 0.035, 0.028) * sheen;
-
-    // Masked to *explored* floor: never over the void, and never on ground the player has not yet seen (the
-    // mold still grows there — it just isn't drawn, so it cannot leak the map through the fog). The film
-    // terms are held well under the veins so the network stays legible instead of drowning in a flat wash.
-    let alpha = max(max(veins * 0.80, sheen * 0.12), bio * 0.34)
-              * is_explored(ctl.a) * params.intensity;
-    textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + flesh + grime, alpha));
+    // `display` carries raw SIMULATION FIELDS, not a colour. Shading (lighting, normals, wetness, glow) is
+    // the material's job — that separation is what lets the mold be a lit PBR surface rather than a flat
+    // decal, and lets the wall material reuse the exact same field.
+    //
+    //   R = trail (raw, 0..trail_max)   G = biomass V (0..1)
+    //   B = wall contact (0..1)         A = coverage: 1 only on floor the player has EXPLORED
+    //
+    // Coverage is masked to explored floor: never over the void, and never on ground the player has not yet
+    // seen. The mold still GROWS there — it just isn't drawn, so it cannot leak the map through the fog.
+    let contact = wall_prox_at(vec2<f32>(f32(x), f32(y)), dim);
+    textureStore(display, vec2<i32>(x, y), vec4<f32>(trail, v, contact, is_explored(ctl.a)));
 }

@@ -40,7 +40,9 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::render::RenderApp;
 use serde::Deserialize;
 
-pub use material::MoldFloorMaterial;
+use crate::dungeon::Wall;
+
+pub use material::{MoldFloorMaterial, MoldWallMaterial};
 
 /// Compute workgroup edge (8×8 = 64 threads), matching the Bevy game-of-life reference. `field_size`
 /// must be a whole multiple of this so the dispatch covers every texel exactly (see [`validate_config`]).
@@ -161,6 +163,14 @@ pub struct MyceliaConfig {
     /// the floor hug it and thread down corridors; the few that start in the void steer themselves onto the
     /// nearest floor within a second. One path, self-healing.
     pub wall_repel: f32,
+    /// How strongly the damp, dark, sheltered floor beside a wall *attracts* foraging agents. Real mold
+    /// pools in corners; without this the `wall_repel` term alone drives it toward corridor centres, which
+    /// is exactly backwards. Note this is an attraction to wall-adjacent *floor*, not to the wall cell
+    /// itself — the two terms together make agents hug the wall face rather than enter or flee it.
+    pub wall_affinity: f32,
+    /// How far (in cells) the wall's influence reaches out across the floor. `1` = only the cells touching a
+    /// wall; larger values pull mold in from further out.
+    pub wall_reach: f32,
     /// Habituation gained per second while a cell is watched.
     pub hab_rate: f32,
     /// Habituation lost per second while unwatched — the "spontaneous recovery" of the 2016 result. Slower
@@ -171,8 +181,10 @@ pub struct MyceliaConfig {
     pub hab_strength: f32,
 
     // ── Appearance ────────────────────────────────────────────────────────────────────────────────────
-    /// Multiplier on the veins' bioluminescence. Held low because the game's bloom post-process blows out
-    /// anything brighter, turning the veins into neon tubes rather than a sickly phosphorescence.
+    /// Multiplier on the veins' emissive bioluminescence. Held low because the camera is **LDR** (no `hdr`,
+    /// no `Bloom`) and the scene is brightly lit (`AmbientLight` brightness 500 + a 2500-lux directional),
+    /// so the default TonyMcMapface tonemapper clips anything much above mid-grey straight to white. Emissive
+    /// above ~1.0 stops reading as sickly phosphorescence and becomes a flat white tube.
     pub glow_gain: f32,
     /// Master opacity dial for the whole coating (`0` = invisible, `1` = full).
     pub intensity: f32,
@@ -180,6 +192,14 @@ pub struct MyceliaConfig {
     pub vein_lo: f32,
     /// Trail value at which a vein is fully lit. Must exceed `vein_lo`.
     pub vein_hi: f32,
+    /// Strength of the normal perturbation derived from the mold's thickness field. This is what stops the
+    /// coating reading as a flat decal: the biomass becomes a lumpy, lit surface. `0` = perfectly flat.
+    pub normal_strength: f32,
+    /// Perceptual roughness where the mold is thickest. The carpet is `0.95`; a wet biofilm is far glossier,
+    /// so a low value here is what sells "wet" under the directional light.
+    pub wet_roughness: f32,
+    /// How far (world units) the mold creeps up a wall from the floor before fading out. Walls are 2.4 tall.
+    pub climb_height: f32,
 }
 
 /// Validate the `mycelia:` slice. One path: any violation is an `Err` that [`crate::config`] surfaces as a
@@ -222,13 +242,29 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     non_negative("chemo_gain", c.chemo_gain)?;
     non_negative("disturbance_gain", c.disturbance_gain)?;
     non_negative("wall_repel", c.wall_repel)?;
+    non_negative("wall_affinity", c.wall_affinity)?;
     non_negative("glow_gain", c.glow_gain)?;
     non_negative("hab_rate", c.hab_rate)?;
     non_negative("hab_recover", c.hab_recover)?;
+    non_negative("normal_strength", c.normal_strength)?;
+    non_negative("climb_height", c.climb_height)?;
+    positive("wall_reach", c.wall_reach)?;
 
     unit("hab_strength", c.hab_strength)?;
     unit("intensity", c.intensity)?;
     unit("diffuse_weight", c.diffuse_weight)?;
+    // Bevy clamps roughness into [0.089, 1.0]; anything outside is a config mistake, not an intent.
+    if !(0.089..=1.0).contains(&c.wet_roughness) {
+        return Err(format!("mycelia.wet_roughness must be in 0.089..=1.0, got {}", c.wet_roughness));
+    }
+    // Climbing past the wall top is meaningless; walls are `dungeon::WALL_HEIGHT` tall.
+    if c.climb_height > crate::dungeon::WALL_HEIGHT {
+        return Err(format!(
+            "mycelia.climb_height ({}) exceeds wall height ({})",
+            c.climb_height,
+            crate::dungeon::WALL_HEIGHT
+        ));
+    }
 
     // `decay >= 1` never fades: the trail saturates to `trail_max` everywhere and the network dissolves
     // into a flat flood. `decay <= 0` erases it every tick. Both are degenerate, not merely ugly.
@@ -339,11 +375,9 @@ pub struct MoldParams {
     pub disturbance_gain: f32,
     /// Repulsion from non-walkable void (inverse of control `A`).
     pub wall_repel: f32,
-    /// Multiplier on vein bioluminescence.
-    pub glow_gain: f32,
-    /// Master opacity dial for the whole coating.
-    pub intensity: f32,
-    /// Trail value at which a vein begins to show.
+    /// Attraction to wall-adjacent floor (the static wall-proximity field).
+    pub wall_affinity: f32,
+    /// Trail value at which a vein begins to show (drives biomass nucleation).
     pub vein_lo: f32,
     /// Trail value at which a vein is fully lit.
     pub vein_hi: f32,
@@ -360,13 +394,16 @@ impl Plugin for MyceliaPlugin {
 
         app.add_plugins((
             MaterialPlugin::<MoldFloorMaterial>::default(),
+            MaterialPlugin::<MoldWallMaterial>::default(),
             ExtractResourcePlugin::<MoldImages>::default(),
             ExtractResourcePlugin::<MoldBuffers>::default(),
             ExtractResourcePlugin::<MoldParams>::default(),
             ExtractResourcePlugin::<control::MoldControlImage>::default(),
         ))
-        .add_systems(Startup, (setup_mycelia, control::setup_control))
-        .add_systems(Update, (advance_mold_time, control::write_control));
+        // `setup_mycelia` binds the control texture into the floor material, so the control textures must
+        // exist first.
+        .add_systems(Startup, (control::setup_control, setup_mycelia).chain())
+        .add_systems(Update, (advance_mold_time, control::write_control, coat_walls));
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than
@@ -382,6 +419,7 @@ impl Plugin for MyceliaPlugin {
 fn setup_mycelia(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
+    control: Res<control::MoldControlImage>,
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -431,17 +469,19 @@ fn setup_mycelia(
         chemo_gain: cfg.chemo_gain,
         disturbance_gain: cfg.disturbance_gain,
         wall_repel: cfg.wall_repel,
-        glow_gain: cfg.glow_gain,
-        intensity: cfg.intensity,
+        wall_affinity: cfg.wall_affinity,
         vein_lo: cfg.vein_lo,
         vein_hi: cfg.vein_hi,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the
-    // floor (Y=0) so it composites over the carpet without z-fighting. Sampling by world XZ (in the
-    // shader) is what a per-tile floor material will do later; the overlay proves that path with one mesh.
+    // floor (Y=0) so it composites over the carpet without z-fighting. One mesh, sampled by world XZ, so it
+    // needs no per-tile material and is untouched by the fog's bright/dim floor swap.
     let mesh = meshes.add(Plane3d::default().mesh().size(WORLD_EXTENT.x, WORLD_EXTENT.y));
-    let material = materials.add(MoldFloorMaterial::new(display));
+    let material = materials.add(MoldFloorMaterial {
+        base: material::floor_base(),
+        extension: material::MoldFloorExt::new(&cfg, display, control.dynamic.clone()),
+    });
     let center = Vec3::new(
         WORLD_ORIGIN.x + WORLD_EXTENT.x * 0.5,
         0.02,
@@ -463,6 +503,57 @@ fn setup_mycelia(
 /// The mold is ambience; it should never freeze with a gameplay pause.
 fn advance_mold_time(time: Res<Time<Real>>, mut params: ResMut<MoldParams>) {
     params.time = time.elapsed_secs();
+}
+
+/// Swap every wall's `StandardMaterial` for a mold-aware [`MoldWallMaterial`], once, as soon as the dungeon
+/// has spawned its tiles.
+///
+/// Doing it here rather than in `dungeon::spawn_tiles` keeps `dungeon` from having to know that `mycelia`
+/// exists — the alternative would be an ordering dependency where the dungeon reads a `MoldImages` resource
+/// at startup. The swap preserves the wall's original `StandardMaterial` (wallpaper texture, roughness) as
+/// the `base` of the extension, so the wall still looks exactly like a wall wherever no mold has reached.
+///
+/// Safe because nothing else reads wall materials: the fog reveals walls via `Visibility`, and its
+/// material-swap query is explicitly floor-only (`Without<Wall>`).
+fn coat_walls(
+    mut commands: Commands,
+    mut done: Local<bool>,
+    cfg: Res<MyceliaConfig>,
+    images: Res<MoldImages>,
+    control: Res<control::MoldControlImage>,
+    std_materials: Res<Assets<StandardMaterial>>,
+    mut wall_materials: ResMut<Assets<MoldWallMaterial>>,
+    walls: Query<(Entity, &MeshMaterial3d<StandardMaterial>), With<Wall>>,
+) {
+    if *done {
+        return;
+    }
+    // Every wall shares one `StandardMaterial` handle, so read the base off whichever we see first and
+    // build a single extended material for all of them. If the tiles haven't spawned yet, try again next
+    // frame — this system disables itself the moment it succeeds.
+    let Some((_, first)) = walls.iter().next() else {
+        return;
+    };
+    let Some(base) = std_materials.get(&first.0) else {
+        return;
+    };
+
+    let coated = wall_materials.add(MoldWallMaterial {
+        base: base.clone(),
+        extension: material::MoldWallExt::new(
+            &cfg,
+            images.display.clone(),
+            control.dynamic.clone(),
+        ),
+    });
+
+    for (entity, _) in &walls {
+        commands
+            .entity(entity)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert(MeshMaterial3d(coated.clone()));
+    }
+    *done = true;
 }
 
 #[cfg(test)]
@@ -492,6 +583,8 @@ mod tests {
             chemo_gain: 6.0,
             disturbance_gain: 5.0,
             wall_repel: 12.0,
+            wall_affinity: 5.0,
+            wall_reach: 2.5,
             hab_rate: 0.35,
             hab_recover: 0.08,
             hab_strength: 0.75,
@@ -499,6 +592,9 @@ mod tests {
             intensity: 1.0,
             vein_lo: 3.0,
             vein_hi: 12.0,
+            normal_strength: 6.0,
+            wet_roughness: 0.22,
+            climb_height: 0.85,
         }
     }
 
@@ -537,6 +633,25 @@ mod tests {
         c.d_v = c.d_u;
         assert!(validate_config(&c).is_err());
         c.d_v = c.d_u + 0.01;
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// Climbing past the top of a wall is meaningless, and `wet_roughness` outside Bevy's clamp range is a
+    /// config mistake rather than an intent.
+    #[test]
+    fn surface_dials_are_bounded_by_physical_reality() {
+        let mut c = valid();
+        c.climb_height = crate::dungeon::WALL_HEIGHT + 0.1;
+        assert!(validate_config(&c).is_err());
+
+        for bad in [0.0, 0.05, 1.5] {
+            let mut c = valid();
+            c.wet_roughness = bad;
+            assert!(validate_config(&c).is_err(), "wet_roughness={bad} should be rejected");
+        }
+
+        let mut c = valid();
+        c.wall_reach = 0.0; // a zero reach would divide by zero in the falloff
         assert!(validate_config(&c).is_err());
     }
 
