@@ -38,7 +38,7 @@ use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::ShaderCacheError;
 
 use super::control::MoldControlImage;
-use super::{agents, MoldBuffers, MoldImages, MoldParams, DISPLAY_FORMAT, FIELD_SIZE, WORKGROUP_SIZE};
+use super::{MoldBuffers, MoldImages, MoldParams, DISPLAY_FORMAT, WORKGROUP_SIZE};
 
 /// WGSL source for the compute chain (runtime-loaded from `assets/`, like every other shader here).
 const SHADER_ASSET_PATH: &str = "shaders/mycelia_sim.wgsl";
@@ -234,6 +234,7 @@ fn mold_compute(
     bind_group: Option<Res<MoldBindGroup>>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<MoldPipeline>,
+    params: Res<MoldParams>,
     state: Res<MoldState>,
 ) {
     let Some(bind_group) = bind_group.filter(|_| state.ready) else {
@@ -248,8 +249,11 @@ fn mold_compute(
         return;
     };
 
-    let deposit_slots = FIELD_SIZE * FIELD_SIZE;
-    let field_groups = FIELD_SIZE / WORKGROUP_SIZE;
+    // Dispatch geometry follows the configured field size (validated to be a multiple of `WORKGROUP_SIZE`,
+    // so the 2D passes cover every texel exactly).
+    let field_size = params.field_res.x as u32;
+    let deposit_slots = field_size * field_size;
+    let field_groups = field_size / WORKGROUP_SIZE;
     let bg = &bind_group.0;
 
     let mut dispatch = |pipeline: &bevy::render::render_resource::ComputePipeline, x: u32, y: u32| {
@@ -262,7 +266,7 @@ fn mold_compute(
     };
 
     dispatch(clear, deposit_slots.div_ceil(CLEAR_WORKGROUP), 1);
-    dispatch(agents_pl, agents::AGENT_COUNT.div_ceil(LINEAR_WORKGROUP), 1);
+    dispatch(agents_pl, params.agent_count.div_ceil(LINEAR_WORKGROUP), 1);
     dispatch(diffuse, field_groups, field_groups);
     dispatch(field, field_groups, field_groups);
 }

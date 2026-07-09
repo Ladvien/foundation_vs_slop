@@ -21,6 +21,7 @@ use crate::ai::tuning::AiTuning;
 use crate::dungeon::{self, DungeonConfig};
 use crate::gore::{self, GoreSettings};
 use crate::impact_fx::ImpactFxSettings;
+use crate::mycelia::{self, MyceliaConfig};
 use crate::placement::manifest::{self, FurnitureManifest};
 use crate::placement::solvers::metropolis::MetropolisWeights;
 use crate::vhs::VhsConfig;
@@ -47,6 +48,7 @@ pub struct GameConfig {
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
     pub vhs: VhsConfig,
+    pub mycelia: MyceliaConfig,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
@@ -61,6 +63,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     dungeon::validate_config(&cfg.dungeon)?;
     manifest::validate_manifest(&cfg.placement.furniture)?;
     gore::validate_settings(&cfg.gore)?;
+    mycelia::validate_config(&cfg.mycelia)?;
     Ok(cfg)
 }
 

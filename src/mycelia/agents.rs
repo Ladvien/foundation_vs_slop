@@ -18,22 +18,16 @@ use rand::RngExt;
 
 use crate::rng;
 
-/// Number of walking agents. Kept deliberately sparse (≈0.05 agents/texel over the 1024² field) so the
-/// trail forms legible foraging *channels* rather than flooding to uniform saturation — the network reads
-/// as veins, not a solid film. The GPU can handle far more (2M+ at 120 FPS on a mid-range card,
-/// rechenwerke.com), so this is an aesthetic ceiling, not a performance one; it graduates to config later.
-pub const AGENT_COUNT: u32 = 55_000;
-
 /// Fixed seed for the initial scatter. The mold's opening arrangement is identical every run; divergence
 /// afterward is GPU-side and cosmetic.
 const AGENT_SEED: u64 = 0x_C0FFEE_5EED_0FED;
 
-/// Seed `AGENT_COUNT` agents scattered uniformly across the `field_size`×`field_size` field with random
+/// Seed `count` agents scattered uniformly across the `field_size`×`field_size` field with random
 /// headings, encoded as the flat `u32` bit-buffer described in the module docs (4 words per agent).
-pub fn seed_agents(field_size: f32) -> Vec<u32> {
+pub fn seed_agents(field_size: f32, count: u32) -> Vec<u32> {
     let mut rng = rng::seeded(AGENT_SEED);
-    let mut data = Vec::with_capacity(AGENT_COUNT as usize * 4);
-    for _ in 0..AGENT_COUNT {
+    let mut data = Vec::with_capacity(count as usize * 4);
+    for _ in 0..count {
         let x = rng.random::<f32>() * field_size;
         let y = rng.random::<f32>() * field_size;
         let heading = rng.random::<f32>() * std::f32::consts::TAU;

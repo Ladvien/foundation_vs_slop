@@ -8,7 +8,13 @@
 //! | `R` | chemoattractant | blood pools + nests — the mold forages toward carnage and hoards |
 //! | `G` | light / gaze repellent | cells a squad unit currently sees, attenuated by habituation |
 //! | `B` | disturbance repellent | squad unit proximity — footsteps scatter the mold |
-//! | `A` | walkable mask | `1` on floor, `0` over the void — keeps the coating on the ground |
+//! | `A` | substrate mask | `0` = void · `0.5` = floor, never seen · `1` = floor, explored |
+//!
+//! # Why `A` is three-state, not a bool
+//! The mold *grows* on any floor, seen or not — a room you have never entered is exactly where it should be
+//! ripest. But it must not be *drawn* on floor the player has never explored, or the coating would trace
+//! the corridor layout straight through the fog of war and leak the map. So growth keys off "is floor"
+//! (`A >= 0.25`) while rendering keys off "is explored" (`A >= 0.75`). One channel, two thresholds.
 //!
 //! # Habituation
 //! `G` is not simply "is this cell watched". Each watched cell accumulates habituation and its repellent
@@ -27,16 +33,7 @@ use crate::gore::BloodPool;
 use crate::nest::Nest;
 use crate::squad::Unit;
 
-use super::{field, CONTROL_SIZE};
-
-/// Habituation gained per second while a cell is watched (full habituation in ≈3 s of staring).
-const HAB_RATE: f32 = 0.35;
-/// Habituation lost per second while a cell is unwatched — the "spontaneous recovery" of the 2016 result.
-/// Much slower than `HAB_RATE`, so the mold's fear returns gradually.
-const HAB_RECOVER: f32 = 0.08;
-/// Ceiling on how much habituation can blunt the gaze. Below 1.0 so a watched cell is never *fully*
-/// ignored — the mold gets bolder, not blind.
-const HAB_STRENGTH: f32 = 0.75;
+use super::{field, MyceliaConfig, CONTROL_SIZE};
 
 /// Chemoattractant splat radius (cells) around a nest's floor position.
 const NEST_RADIUS_CELLS: f32 = 2.5;
@@ -82,6 +79,7 @@ pub(super) fn setup_control(mut commands: Commands, mut images: ResMut<Assets<Im
 /// breathing while the game is paused).
 pub(super) fn write_control(
     mut control: ResMut<MoldControl>,
+    cfg: Res<MyceliaConfig>,
     mut images: ResMut<Assets<Image>>,
     time: Res<Time<Real>>,
     dungeon: Option<Res<Dungeon>>,
@@ -109,20 +107,29 @@ pub(super) fn write_control(
             let watched = fog.as_ref().is_some_and(|f| f.visible_at(cell));
             let hab = &mut habituation[i];
             if watched {
-                *hab = (*hab + HAB_RATE * dt).min(1.0);
+                *hab = (*hab + cfg.hab_rate * dt).min(1.0);
             } else {
-                *hab = (*hab - HAB_RECOVER * dt).max(0.0);
+                *hab = (*hab - cfg.hab_recover * dt).max(0.0);
             }
 
             // Only a *currently seen* cell repels. Explored-but-dark and never-seen cells are equally safe
             // — which is exactly the ambience we want: the mold blooms wherever nobody is looking.
-            let light = if watched { 1.0 - *hab * HAB_STRENGTH } else { 0.0 };
+            let light = if watched { 1.0 - *hab * cfg.hab_strength } else { 0.0 };
+
+            // A: three-state substrate mask. Agents grow on any floor; only *explored* floor is drawn.
+            let substrate = if !dungeon.is_floor(cell) {
+                0
+            } else if fog.as_ref().is_none_or(|f| f.seen_at(cell)) {
+                255
+            } else {
+                128
+            };
 
             let base = i * field::CONTROL_BYTES_PER_TEXEL;
             cpu[base] = 0; // R: chemo — accumulated in pass 2
             cpu[base + 1] = to_u8(light); // G: light/gaze
             cpu[base + 2] = 0; // B: disturbance — accumulated in pass 2
-            cpu[base + 3] = if dungeon.is_floor(cell) { 255 } else { 0 }; // A: walkable
+            cpu[base + 3] = substrate; // A: 0 void / 128 unseen floor / 255 explored floor
         }
     }
 

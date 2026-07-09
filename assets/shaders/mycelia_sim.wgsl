@@ -39,6 +39,10 @@ struct MoldParams {
     chemo_gain: f32,
     disturbance_gain: f32,
     wall_repel: f32,
+    glow_gain: f32,
+    intensity: f32,
+    vein_lo: f32,
+    vein_hi: f32,
 };
 
 // MUST byte-match the `u32` encoding in `src/mycelia/agents.rs` (std430 stride 16).
@@ -57,8 +61,20 @@ struct Agent {
 @group(0) @binding(6) var biomass_read: texture_2d<f32>;
 @group(0) @binding(7) var biomass_write: texture_storage_2d<rgba16float, write>;
 // CPU-written world state, one texel per dungeon cell.
-//   R = chemoattractant (blood, nests) · G = light/gaze · B = disturbance (squad) · A = walkable
+//   R = chemoattractant (blood, nests) · G = light/gaze · B = disturbance (squad)
+//   A = substrate mask: 0 = void · 0.5 = floor never seen · 1 = floor explored
+// The mold GROWS on any floor (A >= 0.25) but is only DRAWN on explored floor (A >= 0.75) — otherwise the
+// coating would trace the corridor layout through the fog of war and leak the map.
 @group(0) @binding(8) var control: texture_2d<f32>;
+
+/// Is this cell floor the mold may grow on? (Seen or not.)
+fn is_walkable(a: f32) -> f32 {
+    return step(0.25, a);
+}
+/// Has the player explored this cell, so the mold may be rendered here?
+fn is_explored(a: f32) -> f32 {
+    return step(0.75, a);
+}
 
 // Integer hash → uniform f32 in [0,1). Cheap per-agent randomness for the "turn away" case.
 fn hash_u32(x: u32) -> u32 {
@@ -109,7 +125,7 @@ fn sense(p: vec2<f32>, dim: i32) -> f32 {
     let attract = ctl.r * params.chemo_gain;
     let repel = ctl.g * params.photophobia
               + ctl.b * params.disturbance_gain
-              + (1.0 - ctl.a) * params.wall_repel;
+              + (1.0 - is_walkable(ctl.a)) * params.wall_repel;
     return trail_at(p, dim) + attract - repel;
 }
 
@@ -178,7 +194,7 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     // out in the void (agents that seeded there leave no mark while they steer themselves back to ground).
     let dx = wrap_i(i32(floor(np.x)), dim);
     let dy = wrap_i(i32(floor(np.y)), dim);
-    if (control_at(np, dim).a >= 0.5) {
+    if (is_walkable(control_at(np, dim).a) > 0.5) {
         let idx = u32(dy) * u32(dim) + u32(dx);
         atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
     }
@@ -258,7 +274,7 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // veins by exactly one tick — imperceptible, and it avoids a read-after-write on the same texture.
     let trail = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
     let ctl = control_at(vec2<f32>(f32(x), f32(y)), dim);
-    let vein = smoothstep(4.0, 12.0, trail);
+    let vein = smoothstep(params.vein_lo, params.vein_hi, trail);
 
     // Blooms swell in the unseen dark and shrink under a live gaze — the room you just left goes ripe.
     let dark = 1.0 - ctl.g;
@@ -271,8 +287,11 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // Grimy-bioluminescent composite. Sickly green/cyan veins glow out of a dark wet biomass film; a faint
     // scent sheen hints at growth even where no vein has established. Alpha stays < 1 throughout so the
     // mold reads as a translucent coating over the carpet, not opaque paint.
-    let veins = smoothstep(3.0, 12.0, trail);
-    let sheen = smoothstep(0.5, 3.0, trail);
+    // The vein window is config-driven (`vein_lo`..`vein_hi`) — reuse the mask computed for nucleation, so
+    // "what nucleates a bloom" and "what lights up" can never drift apart. The sheen sits just under the
+    // window so a faint scent still hints at growth where no channel has established.
+    let veins = vein;
+    let sheen = smoothstep(params.vein_lo * 0.17, params.vein_lo, trail);
     let bio = smoothstep(0.10, 0.35, v);
 
     // The mold conceals its bioluminescence under a direct gaze — glow is strongest in the dark. (Slower
@@ -281,12 +300,14 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Kept deliberately dim: the game's bloom post-process blows out anything brighter, turning the veins
     // into neon tubes rather than a sickly phosphorescence.
-    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins * conceal;
+    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins * conceal * params.glow_gain;
     let flesh = vec3<f32>(0.045, 0.075, 0.055) * bio;
     let grime = vec3<f32>(0.015, 0.035, 0.028) * sheen;
 
-    // Masked to walkable floor: the coating is on the ground, never floating over the void. The film terms
-    // are held well under the veins so the network stays legible instead of drowning in a flat wash.
-    let alpha = max(max(veins * 0.80, sheen * 0.12), bio * 0.34) * ctl.a;
+    // Masked to *explored* floor: never over the void, and never on ground the player has not yet seen (the
+    // mold still grows there — it just isn't drawn, so it cannot leak the map through the fog). The film
+    // terms are held well under the veins so the network stays legible instead of drowning in a flat wash.
+    let alpha = max(max(veins * 0.80, sheen * 0.12), bio * 0.34)
+              * is_explored(ctl.a) * params.intensity;
     textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + flesh + grime, alpha));
 }

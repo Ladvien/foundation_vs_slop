@@ -38,15 +38,12 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::{ShaderType, TextureFormat};
 use bevy::render::storage::ShaderBuffer;
 use bevy::render::RenderApp;
+use serde::Deserialize;
 
 pub use material::MoldFloorMaterial;
 
-/// Side length (texels) of the square world-space mold field. 1024² over the 192 m footprint ≈ 5.3
-/// texels/tile — plenty of resolution for veins, and a trivial GPU workload for one fixed world.
-pub const FIELD_SIZE: u32 = 1024;
-
-/// Compute workgroup edge (8×8 = 64 threads), matching the Bevy game-of-life reference. `FIELD_SIZE`
-/// must be a whole multiple of this so the dispatch covers every texel exactly.
+/// Compute workgroup edge (8×8 = 64 threads), matching the Bevy game-of-life reference. `field_size`
+/// must be a whole multiple of this so the dispatch covers every texel exactly (see [`validate_config`]).
 pub const WORKGROUP_SIZE: u32 = 8;
 
 /// World-space footprint the field maps onto. The dungeon is `192×192` tiles at `TILE_SIZE = 1.0`, with
@@ -69,90 +66,188 @@ pub const CONTROL_SIZE: u32 = 192;
 /// by habituation) · `B` = disturbance (squad proximity) · `A` = walkable mask (1 on floor, 0 over void).
 pub const CONTROL_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
-// ── Physarum tuning (Jones three-sensor model) ─────────────────────────────────────────────────────
-// Distances/angles are in field texels (1024² over 192 m ≈ 5.3 texels/m) and radians. These are the
-// aesthetic knobs that decide how the veins forage and branch; they graduate to the RON config in Phase E.
-
-/// Half-angle between the centre sensor and each side sensor. ~23°.
-const SENSE_ANGLE: f32 = 0.40;
-/// How far ahead (texels) the sensors sample the trail.
-const SENSE_DIST: f32 = 9.0;
-/// How sharply an agent turns toward the stronger scent each tick. ~29°.
-const ROTATE_ANGLE: f32 = 0.50;
-/// Texels an agent advances per tick.
-const STEP_SIZE: f32 = 1.0;
-/// Scent laid down per agent per tick (pre-scale), in trail units.
-const DEPOSIT_AMOUNT: f32 = 1.0;
-/// How far the trail is lerped toward its 3×3 mean each tick. This is the *diffusion rate*, NOT a full
-/// blur: replacing the trail outright with its mean (weight 1.0) divides every deposit spike by ~9 each
-/// tick, so no channel can ever accumulate and the network never persists. A small weight lets scent
-/// spread just enough to attract neighbouring agents while the ridge stays sharp.
-const DIFFUSE_WEIGHT: f32 = 0.18;
-/// Multiplicative trail persistence per tick (`<1` so trails fade). Slow, so a route that keeps getting
-/// walked accumulates into a bright durable channel while a route walked once fades back to dark. Together
-/// with `DIFFUSE_WEIGHT` this is the Jones/Lague diffuse→decay formulation.
-const DECAY: f32 = 0.96;
-/// Upper clamp on trail intensity so reinforced hubs can't blow up (decay alone bounds the steady state at
-/// ≈ deposit/(1-decay); this guards against transient spikes / NaNs).
-const TRAIL_MAX: f32 = 24.0;
 /// Fixed-point factor for the integer deposit accumulator: agents `atomicAdd(deposit_amount * SCALE)`, the
 /// diffuse pass reads back `/ SCALE`. Large enough to preserve fractional deposits under heavy overlap.
+/// Not a knob — a numerical detail of the atomic accumulator.
 const DEPOSIT_SCALE: f32 = 1024.0;
 
-// ── Gray-Scott reaction-diffusion (the biomass "flesh") ───────────────────────────────────────────────
-// Two coupled species diffuse and react: U (substrate) is consumed by V (biomass) via the autocatalytic
-// U + 2V → 3V, U is replenished at `FEED`, V is removed at `FEED + KILL`. The classic pattern-forming
-// system behind Turing spots/coral. Here V is nucleated by the Physarum trail, so blooms grow *along the
-// veins* — the transport network literally feeds the flesh.
-//
-// Refs: Turk (1991), "Generating textures on arbitrary surfaces using reaction-diffusion," SIGGRAPH
-// (10.1145/122718.122749) — RD as surface texture synthesis, precisely this use. Leppänen et al. (2004),
-// "Turing systems as models of complex pattern formation" (10.1590/S0103-97332004000300006); Maini &
-// Painter (1997), "Spatial pattern formation in chemical and biological systems" (10.1039/a702602a).
-// Pearson (1993), "Complex patterns in a simple system," Science 261 — the canonical (F, k) regime map.
-// Flow-Lenia (arXiv 2212.07906) is the mass-conserving generalization, deferred past v1.
+/// Every tunable knob of the mold, from the `mycelia:` slice of `assets/config/config.ron`.
+///
+/// Structural constants ([`WORKGROUP_SIZE`], [`WORLD_ORIGIN`]/[`WORLD_EXTENT`], [`CONTROL_SIZE`], the
+/// texture formats) stay in code — they are wired into the dispatch geometry and the world mapping, not
+/// aesthetics. Everything here is an aesthetic or behavioural dial you can retune by editing the RON.
+///
+/// One path, no fallback: there is deliberately **no `Default` impl**. A missing or malformed slice is a
+/// loud startup panic via [`validate_config`], never a silent default mold.
+///
+/// # The three layers
+/// **Transport (the "mind").** Distances/angles are in field texels (1024² over 192 m ≈ 5.3 texels/m) and
+/// radians. Jones' three-sensor model: arXiv 1503.06579 / 10.1162/artl.2010.16.2.16202.
+///
+/// **Field (the "flesh").** Gray-Scott: U (substrate) is consumed by V (biomass) via the autocatalytic
+/// `U + 2V → 3V`; U is replenished at `feed`, V removed at `feed + kill`. `(feed, kill) = (0.036, 0.060)`
+/// sits in the coral-growth regime — blooms creep outward rather than freezing into static spots. V is
+/// nucleated by the trail, so blooms grow *along the veins*.
+/// Refs: Turk (1991) SIGGRAPH 10.1145/122718.122749 (RD as surface texture synthesis, precisely this use);
+/// Leppänen et al. (2004) 10.1590/S0103-97332004000300006; Maini & Painter (1997) 10.1039/a702602a;
+/// Pearson (1993) Science 261 (the canonical `(F, k)` regime map). Flow-Lenia (arXiv 2212.07906) is the
+/// mass-conserving generalization, deferred past v1.
+///
+/// **Reactivity (the "sentience").** Each gain is in trail units, so it competes directly with the scent an
+/// agent senses: an attractant of 6.0 outweighs a mid-strength vein, a repellent of 9.0 overrides a strong
+/// one. Photophobia stands in for Physarum's light-avoidance — the game has no dynamic lights, so
+/// fog-of-war "a unit can see this cell" is the light/gaze proxy. Habituation follows Boisseau, Vogel &
+/// Dussutour (2016), 10.1098/rspb.2016.0446: *P. polycephalum* learns to ignore a repeatedly-presented
+/// *harmless* repellent, showing both responsiveness decline AND spontaneous recovery once it is withheld.
+#[derive(Resource, Deserialize, Clone, Debug)]
+pub struct MyceliaConfig {
+    // ── Field geometry ────────────────────────────────────────────────────────────────────────────────
+    /// Side length (texels) of the square world-space mold field. Must be a multiple of [`WORKGROUP_SIZE`].
+    /// 1024² over the 192 m footprint ≈ 5.3 texels/tile. The dominant perf dial (cost scales with area).
+    pub field_size: u32,
+    /// Number of walking agents. Sparse on purpose (≈0.05/texel at 1024²) so the trail forms legible
+    /// foraging *channels* rather than flooding to uniform saturation. An aesthetic ceiling, not a
+    /// performance one — the GPU handles far more.
+    pub agent_count: u32,
 
-/// Integration step. Gray-Scott with `D_U = 0.16` is stable at `dt = 1` on a unit grid.
-const DT: f32 = 1.0;
-/// Substrate replenishment rate.
-const FEED: f32 = 0.036;
-/// Biomass removal rate. `(FEED, KILL) = (0.036, 0.060)` sits in the coral-growth regime — blooms creep
-/// outward from their seeds rather than freezing into static spots.
-const KILL: f32 = 0.060;
-/// Diffusion rate of the substrate U.
-const D_U: f32 = 0.16;
-/// Diffusion rate of the biomass V (half of U — the ratio is what makes the Turing instability bloom).
-const D_V: f32 = 0.08;
-/// How strongly a strong vein nucleates biomass beneath it each tick. Keeps blooms tethered to the
-/// network instead of appearing at random.
-const BLOOM_SEED: f32 = 0.06;
+    // ── Transport layer (Physarum) ────────────────────────────────────────────────────────────────────
+    /// Half-angle between the centre sensor and each side sensor (radians).
+    pub sense_angle: f32,
+    /// How far ahead (texels) the sensors sample.
+    pub sense_dist: f32,
+    /// How sharply an agent turns toward the stronger signal each tick (radians).
+    pub rotate_angle: f32,
+    /// Texels an agent advances per tick.
+    pub step_size: f32,
+    /// Scent laid down per agent per tick (pre-scale), in trail units.
+    pub deposit_amount: f32,
+    /// How far the trail is lerped toward its 3×3 mean each tick — the *diffusion rate*, NOT a full blur.
+    /// Replacing the trail outright with its mean (weight 1.0) divides every deposit spike by ~9 each tick,
+    /// so no channel can ever accumulate and the network never persists. A small weight lets scent spread
+    /// just enough to attract neighbouring agents while the ridge stays sharp.
+    pub diffuse_weight: f32,
+    /// Multiplicative trail persistence per tick (`<1` so trails fade). Slow, so a route that keeps getting
+    /// walked accumulates into a bright durable channel while a route walked once fades back to dark.
+    /// With `diffuse_weight` this is the Jones/Lague diffuse→decay formulation.
+    pub decay: f32,
+    /// Upper clamp on trail intensity. Decay alone bounds the steady state at ≈ `deposit/(1-decay)`; this
+    /// guards against transient spikes / NaNs.
+    pub trail_max: f32,
 
-// ── Reactivity (the "sentience") ──────────────────────────────────────────────────────────────────────
-// The mold reads the world one-way through the control texture and steers on it. Each gain is expressed in
-// trail units, so it competes directly with the scent an agent senses: an attractant of 6.0 outweighs a
-// mid-strength vein, a repellent of 9.0 overrides even a strong one.
-//
-// Photophobia stands in for Physarum's real light-avoidance; here the fog-of-war "a unit can see this cell"
-// is the light/gaze proxy, since the game has no dynamic lights.
-//
-// The habituation term is grounded in Boisseau, Vogel & Dussutour (2016), "Habituation in non-neural
-// organisms: evidence from slime moulds," Proc. R. Soc. B 283 (10.1098/rspb.2016.0446): P. polycephalum
-// learns to ignore a repeatedly-presented *harmless* repellent (they used quinine/caffeine), showing both
-// responsiveness decline AND spontaneous recovery once the stimulus is withheld. That is exactly the shape
-// of `MoldControl::habituation` — it builds while a cell is watched and decays back when it is not, so a
-// corridor the squad keeps staring down stops scaring the mold, and re-scares it after they leave.
+    // ── Field layer (Gray-Scott) ──────────────────────────────────────────────────────────────────────
+    /// Integration step. Gray-Scott with `d_u = 0.16` is stable at `dt = 1` on a unit grid.
+    pub dt: f32,
+    /// Substrate replenishment rate `F`.
+    pub feed: f32,
+    /// Biomass removal rate `k`.
+    pub kill: f32,
+    /// Diffusion rate of the substrate `U`.
+    pub d_u: f32,
+    /// Diffusion rate of the biomass `V` (half of `U` — the ratio is what makes the Turing instability).
+    pub d_v: f32,
+    /// How strongly a strong vein nucleates biomass beneath it each tick, keeping blooms tethered to the
+    /// network instead of appearing at random.
+    pub bloom_seed: f32,
 
-/// How strongly a cell a unit currently *sees* repels agents (fog-of-war as a light/gaze proxy).
-const PHOTOPHOBIA: f32 = 9.0;
-/// How strongly blood pools and nests attract foraging agents.
-const CHEMO_GAIN: f32 = 6.0;
-/// How strongly a squad unit's immediate presence disturbs the mold, scattering agents away.
-const DISTURBANCE_GAIN: f32 = 5.0;
-/// How strongly non-walkable space (the void beyond the floor) repels agents. Rather than hard-blocking
-/// movement — which would strand every agent that happened to seed inside a wall, forever — this makes the
-/// void merely *unattractive*. Agents on the floor hug it and thread down corridors; the few that start in
-/// the void steer themselves onto the nearest floor within a second. One path, self-healing.
-const WALL_REPEL: f32 = 12.0;
+    // ── Reactivity (the "sentience") ──────────────────────────────────────────────────────────────────
+    /// How strongly a cell a unit currently *sees* repels agents.
+    pub photophobia: f32,
+    /// How strongly blood pools and nests attract foraging agents.
+    pub chemo_gain: f32,
+    /// How strongly a squad unit's immediate presence disturbs the mold, scattering agents away.
+    pub disturbance_gain: f32,
+    /// How strongly non-walkable void repels agents. Rather than hard-blocking movement — which would
+    /// strand every agent that seeded inside a wall, forever — the void is merely *unattractive*. Agents on
+    /// the floor hug it and thread down corridors; the few that start in the void steer themselves onto the
+    /// nearest floor within a second. One path, self-healing.
+    pub wall_repel: f32,
+    /// Habituation gained per second while a cell is watched.
+    pub hab_rate: f32,
+    /// Habituation lost per second while unwatched — the "spontaneous recovery" of the 2016 result. Slower
+    /// than `hab_rate`, so the mold's fear returns gradually.
+    pub hab_recover: f32,
+    /// Ceiling on how much habituation can blunt the gaze. Below 1.0 so a watched cell is never *fully*
+    /// ignored — the mold gets bolder, not blind.
+    pub hab_strength: f32,
+
+    // ── Appearance ────────────────────────────────────────────────────────────────────────────────────
+    /// Multiplier on the veins' bioluminescence. Held low because the game's bloom post-process blows out
+    /// anything brighter, turning the veins into neon tubes rather than a sickly phosphorescence.
+    pub glow_gain: f32,
+    /// Master opacity dial for the whole coating (`0` = invisible, `1` = full).
+    pub intensity: f32,
+    /// Trail value at which a vein begins to show.
+    pub vein_lo: f32,
+    /// Trail value at which a vein is fully lit. Must exceed `vein_lo`.
+    pub vein_hi: f32,
+}
+
+/// Validate the `mycelia:` slice. One path: any violation is an `Err` that [`crate::config`] surfaces as a
+/// loud startup panic — there is no clamping to a "safe" value, because a silently-corrected knob is
+/// exactly the kind of magic result that is hard to trace back.
+pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
+    let positive = |name: &str, v: f32| -> Result<(), String> {
+        if v > 0.0 && v.is_finite() { Ok(()) } else { Err(format!("mycelia.{name} must be > 0, got {v}")) }
+    };
+    let unit = |name: &str, v: f32| -> Result<(), String> {
+        if (0.0..=1.0).contains(&v) { Ok(()) } else { Err(format!("mycelia.{name} must be in 0..=1, got {v}")) }
+    };
+    let non_negative = |name: &str, v: f32| -> Result<(), String> {
+        if v >= 0.0 && v.is_finite() { Ok(()) } else { Err(format!("mycelia.{name} must be >= 0, got {v}")) }
+    };
+
+    if c.field_size == 0 || c.field_size % WORKGROUP_SIZE != 0 {
+        return Err(format!(
+            "mycelia.field_size must be a non-zero multiple of {WORKGROUP_SIZE}, got {}",
+            c.field_size
+        ));
+    }
+    if c.agent_count == 0 {
+        return Err("mycelia.agent_count must be > 0".to_string());
+    }
+    // The deposit accumulator is one u32 per field texel; keep the allocation sane.
+    if c.field_size > 4096 {
+        return Err(format!("mycelia.field_size must be <= 4096, got {}", c.field_size));
+    }
+
+    positive("sense_dist", c.sense_dist)?;
+    positive("step_size", c.step_size)?;
+    positive("deposit_amount", c.deposit_amount)?;
+    positive("trail_max", c.trail_max)?;
+    positive("dt", c.dt)?;
+    non_negative("sense_angle", c.sense_angle)?;
+    non_negative("rotate_angle", c.rotate_angle)?;
+    non_negative("bloom_seed", c.bloom_seed)?;
+    non_negative("photophobia", c.photophobia)?;
+    non_negative("chemo_gain", c.chemo_gain)?;
+    non_negative("disturbance_gain", c.disturbance_gain)?;
+    non_negative("wall_repel", c.wall_repel)?;
+    non_negative("glow_gain", c.glow_gain)?;
+    non_negative("hab_rate", c.hab_rate)?;
+    non_negative("hab_recover", c.hab_recover)?;
+
+    unit("hab_strength", c.hab_strength)?;
+    unit("intensity", c.intensity)?;
+    unit("diffuse_weight", c.diffuse_weight)?;
+
+    // `decay >= 1` never fades: the trail saturates to `trail_max` everywhere and the network dissolves
+    // into a flat flood. `decay <= 0` erases it every tick. Both are degenerate, not merely ugly.
+    if !(c.decay > 0.0 && c.decay < 1.0) {
+        return Err(format!("mycelia.decay must be in (0, 1) exclusive, got {}", c.decay));
+    }
+    // Gray-Scott is only a pattern-former with unequal diffusion; `d_v >= d_u` kills the Turing instability.
+    positive("d_u", c.d_u)?;
+    positive("d_v", c.d_v)?;
+    if c.d_v >= c.d_u {
+        return Err(format!("mycelia.d_v ({}) must be < d_u ({}) for Turing patterns", c.d_v, c.d_u));
+    }
+    positive("feed", c.feed)?;
+    positive("kill", c.kill)?;
+    if c.vein_hi <= c.vein_lo {
+        return Err(format!("mycelia.vein_hi ({}) must exceed vein_lo ({})", c.vein_hi, c.vein_lo));
+    }
+    Ok(())
+}
 
 /// The mold's field textures. Only `display` crosses to the material; the trail and biomass pairs live
 /// purely to feed the compute chain. All are extracted so `prepare_bind_group` can bind them.
@@ -244,12 +339,25 @@ pub struct MoldParams {
     pub disturbance_gain: f32,
     /// Repulsion from non-walkable void (inverse of control `A`).
     pub wall_repel: f32,
+    /// Multiplier on vein bioluminescence.
+    pub glow_gain: f32,
+    /// Master opacity dial for the whole coating.
+    pub intensity: f32,
+    /// Trail value at which a vein begins to show.
+    pub vein_lo: f32,
+    /// Trail value at which a vein is fully lit.
+    pub vein_hi: f32,
 }
 
 pub struct MyceliaPlugin;
 
 impl Plugin for MyceliaPlugin {
     fn build(&self, app: &mut App) {
+        // Required config — one path, no fallback. The `mycelia:` slice comes from the unified
+        // `GameConfig` that `ConfigPlugin` (registered first) has already validated.
+        let config = app.world().resource::<crate::config::GameConfig>().mycelia.clone();
+        app.insert_resource(config);
+
         app.add_plugins((
             MaterialPlugin::<MoldFloorMaterial>::default(),
             ExtractResourcePlugin::<MoldImages>::default(),
@@ -273,23 +381,26 @@ impl Plugin for MyceliaPlugin {
 /// samples the mold field by world XZ. Runs once at startup on the main world.
 fn setup_mycelia(
     mut commands: Commands,
+    cfg: Res<MyceliaConfig>,
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MoldFloorMaterial>>,
 ) {
+    let size = cfg.field_size;
+
     // Five RGBA16F field textures (composited display + trail and biomass ping-pong pairs), each usable as
     // both a compute storage-write target and a sampled read. `display` is the one shared with the material.
-    let display = images.add(field::field_texture(FIELD_SIZE));
-    let trail_a = images.add(field::field_texture(FIELD_SIZE));
-    let trail_b = images.add(field::field_texture(FIELD_SIZE));
-    let biomass_a = images.add(field::field_texture(FIELD_SIZE));
-    let biomass_b = images.add(field::field_texture(FIELD_SIZE));
+    let display = images.add(field::field_texture(size));
+    let trail_a = images.add(field::field_texture(size));
+    let trail_b = images.add(field::field_texture(size));
+    let biomass_a = images.add(field::field_texture(size));
+    let biomass_b = images.add(field::field_texture(size));
 
     // Agent population (seeded once) + zeroed deposit accumulator (one slot per field texel). Both are
     // `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the compute chain needs.
-    let agents = buffers.add(ShaderBuffer::from(agents::seed_agents(FIELD_SIZE as f32)));
-    let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (FIELD_SIZE * FIELD_SIZE) as usize]));
+    let agents = buffers.add(ShaderBuffer::from(agents::seed_agents(size as f32, cfg.agent_count)));
+    let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (size * size) as usize]));
 
     commands
         .insert_resource(MoldImages { display: display.clone(), trail_a, trail_b, biomass_a, biomass_b });
@@ -297,29 +408,33 @@ fn setup_mycelia(
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
         world_extent: WORLD_EXTENT,
-        field_res: Vec2::splat(FIELD_SIZE as f32),
+        field_res: Vec2::splat(size as f32),
         control_res: Vec2::splat(CONTROL_SIZE as f32),
         time: 0.0,
-        agent_count: agents::AGENT_COUNT,
-        sense_angle: SENSE_ANGLE,
-        sense_dist: SENSE_DIST,
-        rotate_angle: ROTATE_ANGLE,
-        step_size: STEP_SIZE,
-        deposit_amount: DEPOSIT_AMOUNT,
-        decay: DECAY,
-        trail_max: TRAIL_MAX,
+        agent_count: cfg.agent_count,
+        sense_angle: cfg.sense_angle,
+        sense_dist: cfg.sense_dist,
+        rotate_angle: cfg.rotate_angle,
+        step_size: cfg.step_size,
+        deposit_amount: cfg.deposit_amount,
+        decay: cfg.decay,
+        trail_max: cfg.trail_max,
         deposit_scale: DEPOSIT_SCALE,
-        dt: DT,
-        feed: FEED,
-        kill: KILL,
-        d_u: D_U,
-        d_v: D_V,
-        bloom_seed: BLOOM_SEED,
-        diffuse_weight: DIFFUSE_WEIGHT,
-        photophobia: PHOTOPHOBIA,
-        chemo_gain: CHEMO_GAIN,
-        disturbance_gain: DISTURBANCE_GAIN,
-        wall_repel: WALL_REPEL,
+        dt: cfg.dt,
+        feed: cfg.feed,
+        kill: cfg.kill,
+        d_u: cfg.d_u,
+        d_v: cfg.d_v,
+        bloom_seed: cfg.bloom_seed,
+        diffuse_weight: cfg.diffuse_weight,
+        photophobia: cfg.photophobia,
+        chemo_gain: cfg.chemo_gain,
+        disturbance_gain: cfg.disturbance_gain,
+        wall_repel: cfg.wall_repel,
+        glow_gain: cfg.glow_gain,
+        intensity: cfg.intensity,
+        vein_lo: cfg.vein_lo,
+        vein_hi: cfg.vein_hi,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the
@@ -350,6 +465,113 @@ fn advance_mold_time(time: Res<Time<Real>>, mut params: ResMut<MoldParams>) {
     params.time = time.elapsed_secs();
 }
 
-/// Guard against a compile-time drift between `FIELD_SIZE` and the workgroup tiling. Dispatch code
-/// assumes exact coverage (`FIELD_SIZE / WORKGROUP_SIZE` workgroups per axis).
-const _: () = assert!(FIELD_SIZE % WORKGROUP_SIZE == 0);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A known-good config, matching the shipped `mycelia:` slice.
+    fn valid() -> MyceliaConfig {
+        MyceliaConfig {
+            field_size: 1024,
+            agent_count: 55_000,
+            sense_angle: 0.40,
+            sense_dist: 9.0,
+            rotate_angle: 0.50,
+            step_size: 1.0,
+            deposit_amount: 1.0,
+            diffuse_weight: 0.18,
+            decay: 0.96,
+            trail_max: 24.0,
+            dt: 1.0,
+            feed: 0.036,
+            kill: 0.060,
+            d_u: 0.16,
+            d_v: 0.08,
+            bloom_seed: 0.06,
+            photophobia: 9.0,
+            chemo_gain: 6.0,
+            disturbance_gain: 5.0,
+            wall_repel: 12.0,
+            hab_rate: 0.35,
+            hab_recover: 0.08,
+            hab_strength: 0.75,
+            glow_gain: 1.0,
+            intensity: 1.0,
+            vein_lo: 3.0,
+            vein_hi: 12.0,
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_validate() {
+        assert!(validate_config(&valid()).is_ok());
+    }
+
+    /// `field_size` must tile the 8×8 workgroup exactly, or the 2D dispatch misses texels.
+    #[test]
+    fn field_size_must_tile_the_workgroup() {
+        let mut c = valid();
+        c.field_size = 1020; // not a multiple of 8 (1020 / 8 = 127.5)
+        assert!(validate_config(&c).is_err());
+        c.field_size = 0;
+        assert!(validate_config(&c).is_err());
+        c.field_size = 8192; // over the allocation cap
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// `decay >= 1` never fades (the trail floods to `trail_max` everywhere and the network dissolves);
+    /// `decay <= 0` erases it every tick. Both are degenerate, so both must be rejected loudly.
+    #[test]
+    fn decay_must_be_strictly_between_zero_and_one() {
+        for bad in [0.0, 1.0, 1.5, -0.1] {
+            let mut c = valid();
+            c.decay = bad;
+            assert!(validate_config(&c).is_err(), "decay={bad} should be rejected");
+        }
+    }
+
+    /// Gray-Scott only forms patterns with *unequal* diffusion: `d_v >= d_u` kills the Turing instability.
+    #[test]
+    fn biomass_must_diffuse_slower_than_substrate() {
+        let mut c = valid();
+        c.d_v = c.d_u;
+        assert!(validate_config(&c).is_err());
+        c.d_v = c.d_u + 0.01;
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// An inverted vein window would make `smoothstep` degenerate.
+    #[test]
+    fn vein_window_must_be_ordered() {
+        let mut c = valid();
+        c.vein_hi = c.vein_lo;
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// Unit-range dials are rejected outside `0..=1` rather than silently clamped.
+    #[test]
+    fn unit_range_dials_are_not_clamped() {
+        for bad in [-0.1, 1.1] {
+            let mut c = valid();
+            c.intensity = bad;
+            assert!(validate_config(&c).is_err(), "intensity={bad} should be rejected");
+
+            let mut c = valid();
+            c.diffuse_weight = bad;
+            assert!(validate_config(&c).is_err(), "diffuse_weight={bad} should be rejected");
+
+            let mut c = valid();
+            c.hab_strength = bad;
+            assert!(validate_config(&c).is_err(), "hab_strength={bad} should be rejected");
+        }
+    }
+
+    /// NaN must not sneak past the comparisons (`v > 0.0` is false for NaN, but be explicit about it).
+    #[test]
+    fn nan_is_rejected() {
+        let mut c = valid();
+        c.sense_dist = f32::NAN;
+        assert!(validate_config(&c).is_err());
+    }
+}
+
