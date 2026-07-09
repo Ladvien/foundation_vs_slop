@@ -123,14 +123,16 @@ pub struct MoldWallExt {
 /// its own copy while the surface dials are shared.
 #[derive(Clone, ShaderType)]
 pub struct MoldFruitParams {
-    /// Rate-limited maturity, `0` = egg white, `1` = the death cap's olive pileus. Not `growth`: the albedo
-    /// shift is throttled so it can never complete faster than the slow-change-blindness window (see
+    /// Rate-limited maturity. `0` = the pale universal veil stretched over a fresh primordium, `1` = the
+    /// mat's own deep flesh showing through an expanded pileus. Not `growth`: the albedo shift is throttled
+    /// so it can never complete faster than the slow-change-blindness window (see
     /// `perceptual::MIN_APPEARANCE_RAMP_SECS`).
     tint: f32,
 }
 
-/// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's hyphal fibre noise, sheen
-/// and cavity AO, and visibly reads as the *same organism* that grew it.
+/// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's palette, hyphal fibre
+/// noise, margin mottle, matte felt roughness, sheen and cavity AO — retuning the mat retunes the mushroom,
+/// and the two visibly read as the *same organism*.
 ///
 /// The mesh's `COLOR_0` is a **part mask**, not artwork: `R` = cap (pileus), `G` = flesh (stipe, gills,
 /// annulus), `B` = volva. Bevy's `StandardMaterial` multiplies base colour by the vertex colour when the

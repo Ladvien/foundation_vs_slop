@@ -171,7 +171,7 @@ mod tests {
 
     const THRESH: f32 = NOMINAL_MOTION_THRESHOLD_DEG_PER_S;
     const FOV: f32 = NOMINAL_SCREEN_FOV_DEG_V;
-    const SHIPPED_SCALE: f32 = 2.5;
+    const SHIPPED_SCALE: f32 = 4.0;
 
     /// **The invariant.** For every morph segment and every zoom the player can reach, the fastest vertex
     /// in the mesh must move no faster than the motion-detection threshold. This is the whole point of the
@@ -220,10 +220,11 @@ mod tests {
         let travel: f32 = STAGE_MAX_DISP.iter().sum();
         assert!((travel - 0.1140).abs() < 1e-4, "travel = {travel}");
 
+        // At the shipped body_scale of 4.0: 0.1140 m x 4 = 45.6 cm of vertex travel.
         let secs = |viewport| egg_to_adult_secs(SHIPPED_SCALE, v_max(THRESH, FOV, viewport));
-        assert!((secs(MIN_ZOOM) - 85.5).abs() < 1.0, "max zoom-in: {}", secs(MIN_ZOOM));
-        assert!((secs(12.0) - 35.6).abs() < 1.0, "startup zoom: {}", secs(12.0));
-        assert!((secs(MAX_ZOOM) - 12.6).abs() < 1.0, "max zoom-out: {}", secs(MAX_ZOOM));
+        assert!((secs(MIN_ZOOM) - 136.8).abs() < 1.0, "max zoom-in: {}", secs(MIN_ZOOM));
+        assert!((secs(12.0) - 57.0).abs() < 1.0, "startup zoom: {}", secs(12.0));
+        assert!((secs(MAX_ZOOM) - 20.1).abs() < 1.0, "max zoom-out: {}", secs(MAX_ZOOM));
     }
 
     /// The asset contract: at most two targets active, weights non-negative, and the basis carries the

@@ -1,7 +1,11 @@
 // MYCELIA fruit body — an ExtendedMaterial<StandardMaterial, MoldFruitExt> fragment for the death cap.
 //
-// The same organism as the mat on the floor, so it reuses that shader's fbm filament chain, sheen rim and
-// cavity AO. What differs is that a mushroom has PARTS, and the mesh tells us which is which.
+// The same organism as the mat on the floor, and it must LOOK like it. It shares the mat's palette
+// (FLESH_DEEP / GLOW / FUZZ), its `fiber_scale` filament gauge, its `margin_roughness` mottle, its matte
+// felt roughness with wetness confined to the vein cores, its cavity AO, its sheen rim, and its
+// conceal-under-gaze reflex — all off the same uniforms, so retuning the mat retunes the mushroom.
+//
+// What differs is that a mushroom has PARTS, and the mesh tells us which is which.
 //
 // `COLOR_0` on this mesh is a **part mask**, not artwork: R = cap (pileus) · G = flesh (stipe, gills,
 // annulus) · B = volva. There are no textures on the asset at all; the mask *is* the material. Bevy's
@@ -49,17 +53,11 @@ struct MoldFruitParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var control_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> fruit: MoldFruitParams;
 
-// Amanita phalloides, from the reference photograph. The cap starts pale — an emerging egg is almost white
-// — and greens toward the species' characteristic olive as the pileus expands.
-const CAP_YOUNG: vec3<f32> = vec3<f32>(0.74, 0.73, 0.62);
-const CAP_OLD: vec3<f32> = vec3<f32>(0.30, 0.38, 0.20);
-// Stipe, gills and annulus: the flesh is white and stays white. This is the part that glows.
-const FLESH: vec3<f32> = vec3<f32>(0.86, 0.85, 0.80);
-// The volva is a torn sac half-buried in the substrate, so it wears the substrate.
-const VOLVA: vec3<f32> = vec3<f32>(0.70, 0.68, 0.62);
-const SUBSTRATE: vec3<f32> = vec3<f32>(0.09, 0.10, 0.07);
-
-// Kept identical to the floor and wall coatings, so mat and mushroom read as one organism.
+// ── Shared with the mat ───────────────────────────────────────────────────────────────────────────────
+// Identical to `mycelia_floor.wgsl` / `mycelia_wall.wgsl`. The fruit body is not a botanical illustration
+// of Amanita phalloides dropped onto the mold — it is the SAME ORGANISM, so it wears the same palette.
+// (An earlier revision used the species' real colours — pale tan cap, white flesh — and the mushroom read
+// as a garden prop standing on an alien mat. Realism lost to family resemblance.)
 const FLESH_DEEP: vec3<f32> = vec3<f32>(0.030, 0.068, 0.040);
 const GLOW: vec3<f32> = vec3<f32>(0.10, 0.46, 0.26);
 const FUZZ: vec3<f32> = vec3<f32>(0.17, 0.26, 0.17);
@@ -67,6 +65,22 @@ const FOG_DIM: vec3<f32> = vec3<f32>(0.30, 0.30, 0.38);
 // A fungus is a dielectric felt and barely reflects; StandardMaterial's default F0 of 0.04 puts a specular
 // sheet over the whole body under this scene's brightness-500 ambient. See `mycelia_wall.wgsl`.
 const MOLD_REFLECTANCE: f32 = 0.08;
+
+// ── The body, in the mat's hue ────────────────────────────────────────────────────────────────────────
+// Everything below is the mold's green-black, lightened by part. The read comes from the bioluminescence,
+// not from albedo — exactly as it does on the floor, where a near-black mat is legible only by its veins.
+//
+// The universal veil is the palest thing on the mushroom: a young cap is a taut membrane stretched over
+// the primordium, so it catches the light. As the pileus expands and thins, the flesh beneath shows
+// through and it sinks toward the mat's own deep flesh.
+const CAP_YOUNG: vec3<f32> = vec3<f32>(0.44, 0.46, 0.36);
+const CAP_OLD: vec3<f32> = vec3<f32>(0.11, 0.17, 0.09);
+// Stipe, gills and annulus: hyphal felt, the fibrous part. Kept the lightest of the mature parts so the
+// body's silhouette still reads at the RTS zoom, and it is where the glow lives.
+const STIPE: vec3<f32> = vec3<f32>(0.20, 0.26, 0.19);
+// The volva is a torn sac half-buried in the substrate, so it wears the substrate.
+const VOLVA: vec3<f32> = vec3<f32>(0.13, 0.15, 0.10);
+const SUBSTRATE: vec3<f32> = vec3<f32>(0.040, 0.055, 0.035);
 
 // How far up the body (world units, from its base) the mat it grew out of still clings. The mold does not
 // climb the whole mushroom — it pools around the volva, exactly where the sac meets the substrate.
@@ -121,17 +135,41 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let flesh = mask.g;
     let volva = mask.b;
 
-    // ── Albedo by part ────────────────────────────────────────────────────────────────────────────────
-    // The pileus greens as it matures; the flesh does not. `tint`, never `growth` — see the header.
-    let pileus = mix(CAP_YOUNG, CAP_OLD, fruit.tint);
-
-    // The volva is a torn sac still half in the ground: fleck it with substrate. Object-space noise so the
-    // flecks sit on the mesh rather than swimming through it as the body rises out of the mat.
+    // ── Surface coordinates ───────────────────────────────────────────────────────────────────────────
+    // The strand frame, established before anything reads it: hyphae run up the body, so the noise is
+    // stretched along its axis. Same `fiber_scale` the mat uses, so the filaments are the same gauge on the
+    // mushroom as on the floor it grew out of.
     let fs = mold.fiber_scale;
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    var tangent = cross(up, n);
+    let tlen = length(tangent);
+    if (tlen > 1e-3) {
+        tangent = tangent / tlen;
+    } else {
+        tangent = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let along = dot(in.world_position.xyz, tangent);
+    let sp = vec2<f32>(along * fs, in.world_position.y * fs * 0.6);
+
+    // The body's own vein network, the same fbm ridge the mat's trail field resolves into. This is what
+    // carries the family resemblance: the veins do not stop at the floor, they climb into the fruit body.
+    let body_vein = smoothstep(0.52, 0.86, fbm(sp * 0.55));
+
+    // ── Albedo by part ────────────────────────────────────────────────────────────────────────────────
+    // The pileus darkens toward the mat's own flesh as the veil thins. `tint`, never `growth` — see header.
+    let pileus = mix(CAP_YOUNG, CAP_OLD, fruit.tint);
+    // Mottle the cap with the same fbm the colony's advancing margin is broken by, so its surface is
+    // dappled like the mat rather than a clean painted dome.
+    let mottle = smoothstep(0.35, 0.78, fbm(sp * 1.3));
+    let cap_col = mix(pileus, FLESH_DEEP, mottle * mold.margin_roughness * 0.55);
+
+    // The volva is a torn sac still half in the ground: fleck it with substrate.
     let grime = fbm(in.world_position.xz * fs * 2.0 + vec2<f32>(in.world_position.y * fs, 0.0));
     let sac = mix(VOLVA, SUBSTRATE, smoothstep(0.45, 0.75, grime) * 0.7);
 
-    var albedo = pileus * cap + FLESH * flesh + sac * volva;
+    var albedo = cap_col * cap + STIPE * flesh + sac * volva;
+    // Veins darken and thicken the flesh they run through, exactly as they do on the mat.
+    albedo = mix(albedo, FLESH_DEEP, body_vein * 0.45 * saturate(flesh + volva));
 
     // ── The mat it grew out of ────────────────────────────────────────────────────────────────────────
     // Sample the mold field directly beneath this body. A mushroom standing in thick biomass is skirted by
@@ -157,30 +195,22 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.base_color = vec4<f32>(albedo * lit, pbr_input.material.base_color.a);
 
     // ── Surface ───────────────────────────────────────────────────────────────────────────────────────
-    // A cap is smooth and slightly waxy; gills and stipe are matte felt; the coated skirt goes wet in its
-    // vein cores like the mat does.
-    let matte = 0.90;
-    let waxy = 0.62;
-    var roughness = mix(matte, waxy, cap);
+    // Matte felt everywhere — a fungus is a light-scattering mat, not a waxy toy. The only wet places are
+    // the vein cores, precisely as on the floor, where `wet_roughness` is confined to the trail ridges.
+    // (The cap was `0.62` "waxy" here before; under a brightness-500 ambient that gave it a plastic
+    // highlight the mat never has, and broke the family resemblance more than the palette did.)
+    var roughness = mix(0.92, 0.88, cap);
+    roughness = mix(roughness, mold.wet_roughness, body_vein * 0.7);
     roughness = mix(roughness, mold.wet_roughness, coat * veins * veins);
     pbr_input.material.perceptual_roughness = roughness;
-    pbr_input.material.reflectance = mix(vec3<f32>(MOLD_REFLECTANCE), vec3<f32>(MOLD_REFLECTANCE), coat);
+    pbr_input.material.reflectance = vec3<f32>(MOLD_REFLECTANCE);
 
-    // ── Filaments, on the flesh only ──────────────────────────────────────────────────────────────────
-    // A cap is a smooth membrane; the stipe and the volva are hyphal felt. Perturb the normal in the plane
-    // perpendicular to the body's axis, which is the direction the strands run.
-    let up = vec3<f32>(0.0, 1.0, 0.0);
-    var tangent = cross(up, n);
-    let tlen = length(tangent);
-    if (tlen > 1e-3) {
-        tangent = tangent / tlen;
-    } else {
-        tangent = vec3<f32>(1.0, 0.0, 0.0);
-    }
-    let fibrous = saturate(flesh + volva);
+    // ── Filaments, over the whole body ────────────────────────────────────────────────────────────────
+    // Stipe and volva are hyphal felt; the cap is a membrane stretched over the same hyphae, so it takes
+    // the same strands at half relief rather than none. Central-difference the noise in the body's own
+    // frame — it has no thickness field of its own to take a gradient of.
+    let fibrous = 1.0 - 0.5 * cap;
     let e = 0.02;
-    let along = dot(in.world_position.xyz, tangent);
-    let sp = vec2<f32>(along * fs, in.world_position.y * fs * 0.6);
     let sa = fbm(sp + vec2<f32>(e * fs, 0.0));
     let sb = fbm(sp - vec2<f32>(e * fs, 0.0));
     let sc = fbm(sp + vec2<f32>(0.0, e * fs * 0.6));
@@ -196,11 +226,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.specular_occlusion = ao;
 
     // ── Bioluminescence ───────────────────────────────────────────────────────────────────────────────
-    // The glow lives in the flesh — gills and stipe — never in the cap's cuticle. It conceals itself under
-    // a live gaze, exactly as the mat does (the same `conceal` term, off the same control channel).
+    // With a near-black albedo, this is what makes the mushroom legible at all — the same bargain the mat
+    // strikes on the floor. The glow lives in the flesh (gills, stipe, annulus) and in the veins climbing
+    // it; the cap's cuticle mostly hides it. It conceals itself under a live gaze, off the same control
+    // channel and with the same `conceal` term as the mat.
+    let lumen = flesh + volva * 0.35 + cap * 0.15;
     let light = textureSampleLevel(control_tex, control_samp, uv, 0.0).g;
     let conceal = 1.0 - 0.7 * light;
-    var emissive = GLOW * flesh * conceal * mold.glow_gain * 0.35 * lit;
+    var emissive = GLOW * lumen * (0.30 + 0.85 * body_vein) * conceal * mold.glow_gain * lit;
+    // The mat's own veins, where they climb the skirt.
     emissive += GLOW * veins * coat * conceal * mold.glow_gain * lit;
     // Fresnel-shaped stand-in for a sheen lobe; folded in before lighting so it respects exposure.
     let ndv = clamp(dot(pbr_input.N, pbr_input.V), 0.0, 1.0);

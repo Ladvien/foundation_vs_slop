@@ -449,8 +449,14 @@ fn drive_morph_weights(
 }
 
 /// Swap the glTF's flat `StandardMaterial`s for the mold-aware fruit material, once each, as the scene's
-/// meshes finish loading. Mirrors `coat_furniture`, but mints one material **per body** so each can carry
-/// its own `tint`.
+/// meshes finish loading. Mirrors `coat_furniture`, but mints **exactly one material per body** so each
+/// mushroom can carry its own `tint`.
+///
+/// The `minted` map is load-bearing, not an optimisation. `commands.insert(FruitMaterial(..))` is deferred
+/// to the end of the schedule, so within a single frame the `Option<&FruitMaterial>` lookup still reports
+/// `None` for every subsequent descendant. The death cap has **three primitives** (cap, flesh, volva); mint
+/// per descendant and you get three materials of which only the last is tracked, and `tint_fruit_bodies`
+/// then updates one of them. The cap keeps `tint = 0` for ever and never greens.
 #[allow(clippy::too_many_arguments)]
 fn coat_fruit_bodies(
     mut commands: Commands,
@@ -463,6 +469,7 @@ fn coat_fruit_bodies(
     std_materials: Res<Assets<StandardMaterial>>,
     mut fruit_materials: ResMut<Assets<MoldFruitMaterial>>,
 ) {
+    let mut minted: HashMap<Entity, Handle<MoldFruitMaterial>> = HashMap::new();
     for (root, body, existing) in &bodies {
         for descendant in children.iter_descendants(root) {
             let Ok(mat) = painted.get(descendant) else {
@@ -472,8 +479,9 @@ fn coat_fruit_bodies(
             let Some(base) = std_materials.get(&mat.0) else {
                 continue;
             };
-            let handle = match existing {
-                Some(FruitMaterial(h)) => h.clone(),
+            let already = existing.map(|f| f.0.clone()).or_else(|| minted.get(&root).cloned());
+            let handle = match already {
+                Some(h) => h,
                 None => {
                     let h = fruit_materials.add(MoldFruitMaterial {
                         base: base.clone(),
@@ -485,6 +493,7 @@ fn coat_fruit_bodies(
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
+                    minted.insert(root, h.clone());
                     h
                 }
             };
@@ -526,7 +535,7 @@ mod tests {
     const FOV: f32 = 30.0;
 
     fn body() -> FruitBody {
-        FruitBody { growth: 0.0, rise: 0.0, scale: 2.5, cell: IVec2::ZERO, veil_triggered: false, tint: 0.0 }
+        FruitBody { growth: 0.0, rise: 0.0, scale: 4.0, cell: IVec2::ZERO, veil_triggered: false, tint: 0.0 }
     }
 
     /// An egg carries no amatoxins; a mature cap carries them all. The threshold is the veil rupture,
