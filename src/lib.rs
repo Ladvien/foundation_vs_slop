@@ -35,6 +35,7 @@ pub mod health;
 pub mod juice;
 pub mod impact_fx;
 pub mod laser;
+pub mod mycelia;
 pub mod nest;
 pub mod orca;
 pub mod pathfind;
@@ -135,7 +136,10 @@ pub fn run() {
                 autogib::AutogibPlugin,
             ),
             audio::GameAudioPlugin,
-            (vhs::VhsPlugin, blood_lens::BloodLensPlugin),
+            // Cosmetic render/FX. Mycelia (GPU-compute mold ambience) lives here — `Update`-only,
+            // carries no `Health`, mutates no actor state, and is registered ONLY here (never in the
+            // headless `sim_harness`), keeping it outside the deterministic core (see `mycelia` docs).
+            (vhs::VhsPlugin, blood_lens::BloodLensPlugin, mycelia::MyceliaPlugin),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
             // deterministic core (see `ui` docs). Dialogue needs `MenuState` (from `UiPlugin`) for the

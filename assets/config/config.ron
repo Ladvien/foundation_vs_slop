@@ -303,4 +303,60 @@
         noise_amt: 1.0,
         bloom: 1.0,
     ),
+
+    // =============================================================================================
+    // mycelia — the GPU "sentient mold" coating the dungeon floor (see src/mycelia/). Three layers:
+    // a Jones multi-agent Physarum transport network (the veins), a Gray-Scott reaction-diffusion
+    // biomass field (the blooms), and a reactivity layer that steers the mold on world state.
+    // Structural constants (workgroup size, world footprint, control resolution) live in code;
+    // everything here is an aesthetic or behavioural dial. Validated loudly at startup — a bad value
+    // is a panic, never a silent clamp.
+    // =============================================================================================
+    mycelia: (
+        // ── Field geometry. field_size must be a multiple of 8 (the workgroup edge) and <= 4096.
+        // This is the dominant perf dial: cost scales with area.
+        field_size: 1024,       // texels across the 192 m footprint (~5.3 texels/tile)
+        agent_count: 55000,     // sparse on purpose: channels form, rather than flooding to saturation
+
+        // ── Transport layer (Physarum, Jones three-sensor rule). Texels and radians.
+        sense_angle: 0.40,      // half-angle between centre and side sensors (~23 deg)
+        sense_dist: 9.0,        // how far ahead the sensors sample
+        rotate_angle: 0.50,     // turn magnitude per tick (~29 deg)
+        step_size: 1.0,         // texels advanced per tick
+        deposit_amount: 1.0,    // scent laid per agent per tick
+        // diffuse_weight is the DIFFUSION RATE, not a full blur. At 1.0 the trail is replaced by its
+        // 3x3 mean each tick, dividing every deposit spike by ~9 so no channel can ever accumulate
+        // and the network never persists. Keep it small.
+        diffuse_weight: 0.18,
+        decay: 0.96,            // trail persistence per tick; must be in (0,1) exclusive
+        trail_max: 24.0,        // clamp; steady state is ~ deposit/(1-decay)
+
+        // ── Field layer (Gray-Scott). (feed, kill) = (0.036, 0.060) is the coral-growth regime.
+        // d_v must be < d_u — unequal diffusion is what creates the Turing instability.
+        dt: 1.0,
+        feed: 0.036,
+        kill: 0.060,
+        d_u: 0.16,
+        d_v: 0.08,
+        bloom_seed: 0.06,       // how strongly a vein nucleates biomass beneath it
+
+        // ── Reactivity (the "sentience"). Gains are in trail units, so they compete directly with
+        // the scent an agent senses: 6.0 outweighs a mid-strength vein, 9.0 overrides a strong one.
+        photophobia: 9.0,       // repulsion from cells a unit currently SEES (fog as a gaze proxy)
+        chemo_gain: 6.0,        // attraction to blood pools and nests
+        disturbance_gain: 5.0,  // repulsion from squad proximity (footsteps scatter it)
+        wall_repel: 12.0,       // repulsion from the void; keeps the coating on the floor
+        // Habituation: a watched cell's fear fades, and recovers once the gaze leaves. Grounded in
+        // Boisseau, Vogel & Dussutour (2016), 10.1098/rspb.2016.0446.
+        hab_rate: 0.35,         // gained per second while watched (~3 s to fully habituate)
+        hab_recover: 0.08,      // lost per second while unwatched (slower: fear returns gradually)
+        hab_strength: 0.75,     // ceiling; < 1.0 so the mold gets bolder, never blind
+
+        // ── Appearance. Held dim: the bloom post-process blows out anything brighter, turning the
+        // veins into neon tubes rather than a sickly phosphorescence.
+        glow_gain: 1.0,         // multiplier on vein bioluminescence
+        intensity: 1.0,         // master opacity dial for the whole coating (0 = invisible)
+        vein_lo: 3.0,           // trail value at which a vein begins to show
+        vein_hi: 12.0,          // trail value at which a vein is fully lit (must exceed vein_lo)
+    ),
 )
