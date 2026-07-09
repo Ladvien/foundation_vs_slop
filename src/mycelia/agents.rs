@@ -18,9 +18,11 @@ use rand::RngExt;
 
 use crate::rng;
 
-/// Number of walking agents. 200k is dense coverage for one 1024² field and a trivial GPU workload — real
-/// single-surface implementations push 2M+ at 120 FPS on a mid-range GPU (rechenwerke.com benchmark).
-pub const AGENT_COUNT: u32 = 200_000;
+/// Number of walking agents. Kept deliberately sparse (≈0.05 agents/texel over the 1024² field) so the
+/// trail forms legible foraging *channels* rather than flooding to uniform saturation — the network reads
+/// as veins, not a solid film. The GPU can handle far more (2M+ at 120 FPS on a mid-range card,
+/// rechenwerke.com), so this is an aesthetic ceiling, not a performance one; it graduates to config later.
+pub const AGENT_COUNT: u32 = 55_000;
 
 /// Fixed seed for the initial scatter. The mold's opening arrangement is identical every run; divergence
 /// afterward is GPU-side and cosmetic.

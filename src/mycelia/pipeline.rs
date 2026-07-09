@@ -119,7 +119,7 @@ fn init_mold_pipeline(
         })
     };
     let clear = queue("clear_deposit");
-    let agents = queue("agents");
+    let agents = queue("agent_step");
     let diffuse = queue("diffuse");
 
     commands.insert_resource(MoldPipeline { layout, clear, agents, diffuse });

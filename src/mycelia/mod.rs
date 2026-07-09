@@ -73,9 +73,10 @@ const ROTATE_ANGLE: f32 = 0.50;
 const STEP_SIZE: f32 = 1.0;
 /// Scent laid down per agent per tick (pre-scale), in trail units.
 const DEPOSIT_AMOUNT: f32 = 1.0;
-/// Multiplicative trail persistence per tick (`<1` so trails fade). Slime networks need slow decay to hold
-/// their shape; 0.90 keeps veins legible while letting abandoned routes dissolve.
-const DECAY: f32 = 0.90;
+/// Multiplicative trail persistence per tick (`<1` so trails fade). Fast enough that lightly-trafficked
+/// cells fade back toward dark between visits (so only reinforced routes stay bright and read as veins),
+/// slow enough that an established channel holds its shape.
+const DECAY: f32 = 0.82;
 /// Upper clamp on trail intensity so reinforced hubs can't blow up (decay alone bounds the steady state,
 /// this guards against transient spikes / NaNs).
 const TRAIL_MAX: f32 = 12.0;

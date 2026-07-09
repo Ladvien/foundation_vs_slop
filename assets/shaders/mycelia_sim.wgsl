@@ -75,8 +75,10 @@ fn clear_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // ── Pass 2: agents sense, steer, step, deposit ───────────────────────────────────────────────────────
+// (Named `agent_step`, not `agents`, so the entry point doesn't collide with the `agents` storage binding
+// — WGSL identifiers are unique module-wide.)
 @compute @workgroup_size(64, 1, 1)
-fn agents(@builtin(global_invocation_id) id: vec3<u32>) {
+fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= params.agent_count) {
         return;
@@ -158,8 +160,13 @@ fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(trail_write, vec2<i32>(x, y), vec4<f32>(v, 0.0, 0.0, 1.0));
 
     // Grimy-bioluminescent composite: sickly green/cyan veins glowing out of a faint dark biomass film.
-    let veins = smoothstep(0.4, 3.0, v);
-    let glow = vec3<f32>(0.06, 0.85, 0.42) * veins;
-    let grime = vec3<f32>(0.010, 0.030, 0.022) * smoothstep(0.05, 1.0, v);
-    textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + grime, veins));
+    // The vein threshold sits well above the wandering-agent noise floor so only reinforced channels light
+    // up; the film is a dim wet sheen that hints at biomass where any scent lingers. Alpha stays < 1 so the
+    // mold reads as a translucent coating over the carpet, not opaque paint.
+    let veins = smoothstep(2.5, 8.0, v);
+    let film = smoothstep(0.3, 2.5, v);
+    let glow = vec3<f32>(0.10, 0.42, 0.24) * veins;
+    let grime = vec3<f32>(0.015, 0.035, 0.028) * film;
+    let alpha = max(veins * 0.85, film * 0.22);
+    textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + grime, alpha));
 }
