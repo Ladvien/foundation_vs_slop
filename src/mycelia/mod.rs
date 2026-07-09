@@ -73,29 +73,67 @@ const ROTATE_ANGLE: f32 = 0.50;
 const STEP_SIZE: f32 = 1.0;
 /// Scent laid down per agent per tick (pre-scale), in trail units.
 const DEPOSIT_AMOUNT: f32 = 1.0;
-/// Multiplicative trail persistence per tick (`<1` so trails fade). Fast enough that lightly-trafficked
-/// cells fade back toward dark between visits (so only reinforced routes stay bright and read as veins),
-/// slow enough that an established channel holds its shape.
-const DECAY: f32 = 0.82;
-/// Upper clamp on trail intensity so reinforced hubs can't blow up (decay alone bounds the steady state,
-/// this guards against transient spikes / NaNs).
-const TRAIL_MAX: f32 = 12.0;
+/// How far the trail is lerped toward its 3×3 mean each tick. This is the *diffusion rate*, NOT a full
+/// blur: replacing the trail outright with its mean (weight 1.0) divides every deposit spike by ~9 each
+/// tick, so no channel can ever accumulate and the network never persists. A small weight lets scent
+/// spread just enough to attract neighbouring agents while the ridge stays sharp.
+const DIFFUSE_WEIGHT: f32 = 0.18;
+/// Multiplicative trail persistence per tick (`<1` so trails fade). Slow, so a route that keeps getting
+/// walked accumulates into a bright durable channel while a route walked once fades back to dark. Together
+/// with `DIFFUSE_WEIGHT` this is the Jones/Lague diffuse→decay formulation.
+const DECAY: f32 = 0.96;
+/// Upper clamp on trail intensity so reinforced hubs can't blow up (decay alone bounds the steady state at
+/// ≈ deposit/(1-decay); this guards against transient spikes / NaNs).
+const TRAIL_MAX: f32 = 24.0;
 /// Fixed-point factor for the integer deposit accumulator: agents `atomicAdd(deposit_amount * SCALE)`, the
 /// diffuse pass reads back `/ SCALE`. Large enough to preserve fractional deposits under heavy overlap.
 const DEPOSIT_SCALE: f32 = 1024.0;
 
-/// The mold's field textures. Only `display` crosses to the material; the trail pair lives purely to feed
-/// the compute chain. All three are extracted so the render world's `prepare_bind_group` can bind them.
+// ── Gray-Scott reaction-diffusion (the biomass "flesh") ───────────────────────────────────────────────
+// Two coupled species diffuse and react: U (substrate) is consumed by V (biomass) via the autocatalytic
+// U + 2V → 3V, U is replenished at `FEED`, V is removed at `FEED + KILL`. The classic pattern-forming
+// system behind Turing spots/coral. Here V is nucleated by the Physarum trail, so blooms grow *along the
+// veins* — the transport network literally feeds the flesh.
+//
+// Refs: Turk (1991), "Generating textures on arbitrary surfaces using reaction-diffusion," SIGGRAPH
+// (10.1145/122718.122749) — RD as surface texture synthesis, precisely this use. Leppänen et al. (2004),
+// "Turing systems as models of complex pattern formation" (10.1590/S0103-97332004000300006); Maini &
+// Painter (1997), "Spatial pattern formation in chemical and biological systems" (10.1039/a702602a).
+// Pearson (1993), "Complex patterns in a simple system," Science 261 — the canonical (F, k) regime map.
+// Flow-Lenia (arXiv 2212.07906) is the mass-conserving generalization, deferred past v1.
+
+/// Integration step. Gray-Scott with `D_U = 0.16` is stable at `dt = 1` on a unit grid.
+const DT: f32 = 1.0;
+/// Substrate replenishment rate.
+const FEED: f32 = 0.036;
+/// Biomass removal rate. `(FEED, KILL) = (0.036, 0.060)` sits in the coral-growth regime — blooms creep
+/// outward from their seeds rather than freezing into static spots.
+const KILL: f32 = 0.060;
+/// Diffusion rate of the substrate U.
+const D_U: f32 = 0.16;
+/// Diffusion rate of the biomass V (half of U — the ratio is what makes the Turing instability bloom).
+const D_V: f32 = 0.08;
+/// How strongly a strong vein nucleates biomass beneath it each tick. Keeps blooms tethered to the
+/// network instead of appearing at random.
+const BLOOM_SEED: f32 = 0.06;
+
+/// The mold's field textures. Only `display` crosses to the material; the trail and biomass pairs live
+/// purely to feed the compute chain. All are extracted so `prepare_bind_group` can bind them.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct MoldImages {
-    /// The composited output the floor material samples. `R` = vein/trail density, `G` = biomass (Phase C),
-    /// `B` = glow/flux, `A` = light — filled progressively across phases. Written by the diffuse pass.
+    /// The composited output the floor material samples: straight premultiplied-ish `RGB` colour plus an
+    /// `A` coverage mask, written by the `field` pass (the last in the chain). Not channel-encoded state —
+    /// the material samples it and blends it over the floor directly.
     pub display: Handle<Image>,
     /// Trail-scent ping-pong pair. Each tick one is the read source (sensed by agents + blurred by
     /// diffuse) and the other the write target; they swap by parity so diffusion never reads what it is
     /// concurrently writing. `R` channel holds trail intensity.
     pub trail_a: Handle<Image>,
     pub trail_b: Handle<Image>,
+    /// Gray-Scott biomass ping-pong pair. `R` = substrate `U`, `G` = biomass `V`. Same parity swap as the
+    /// trail — the reaction-diffusion stencil reads a 3×3 neighbourhood, so it cannot write in place.
+    pub biomass_a: Handle<Image>,
+    pub biomass_b: Handle<Image>,
 }
 
 /// The mold's GPU storage buffers — the agent population and the per-texel deposit accumulator.
@@ -144,6 +182,20 @@ pub struct MoldParams {
     pub trail_max: f32,
     /// Fixed-point factor for the integer deposit accumulator.
     pub deposit_scale: f32,
+    /// Gray-Scott integration step.
+    pub dt: f32,
+    /// Gray-Scott substrate replenishment rate.
+    pub feed: f32,
+    /// Gray-Scott biomass removal rate.
+    pub kill: f32,
+    /// Gray-Scott diffusion rate of substrate `U`.
+    pub d_u: f32,
+    /// Gray-Scott diffusion rate of biomass `V`.
+    pub d_v: f32,
+    /// Per-tick biomass nucleation beneath a strong vein.
+    pub bloom_seed: f32,
+    /// Lerp factor toward the trail's 3×3 mean each tick (the diffusion rate).
+    pub diffuse_weight: f32,
 }
 
 pub struct MyceliaPlugin;
@@ -177,18 +229,21 @@ fn setup_mycelia(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MoldFloorMaterial>>,
 ) {
-    // Three RGBA16F field textures (composited display + trail ping-pong pair), each usable as both a
-    // compute storage-write target and a sampled read. `display` is the one shared with the material.
+    // Five RGBA16F field textures (composited display + trail and biomass ping-pong pairs), each usable as
+    // both a compute storage-write target and a sampled read. `display` is the one shared with the material.
     let display = images.add(field::field_texture(FIELD_SIZE));
     let trail_a = images.add(field::field_texture(FIELD_SIZE));
     let trail_b = images.add(field::field_texture(FIELD_SIZE));
+    let biomass_a = images.add(field::field_texture(FIELD_SIZE));
+    let biomass_b = images.add(field::field_texture(FIELD_SIZE));
 
     // Agent population (seeded once) + zeroed deposit accumulator (one slot per field texel). Both are
     // `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the compute chain needs.
     let agents = buffers.add(ShaderBuffer::from(agents::seed_agents(FIELD_SIZE as f32)));
     let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (FIELD_SIZE * FIELD_SIZE) as usize]));
 
-    commands.insert_resource(MoldImages { display: display.clone(), trail_a, trail_b });
+    commands
+        .insert_resource(MoldImages { display: display.clone(), trail_a, trail_b, biomass_a, biomass_b });
     commands.insert_resource(MoldBuffers { agents, deposit });
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
@@ -204,6 +259,13 @@ fn setup_mycelia(
         decay: DECAY,
         trail_max: TRAIL_MAX,
         deposit_scale: DEPOSIT_SCALE,
+        dt: DT,
+        feed: FEED,
+        kill: KILL,
+        d_u: D_U,
+        d_v: D_V,
+        bloom_seed: BLOOM_SEED,
+        diffuse_weight: DIFFUSE_WEIGHT,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the

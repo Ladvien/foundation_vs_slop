@@ -1,11 +1,16 @@
-// MYCELIA simulation — the Physarum transport network (Phase B). Three compute entry points sharing one
-// bind group, dispatched in order each tick: clear_deposit → agents → diffuse. Agents sense the trail
-// field, steer by Jones' three-sensor rule, step, and deposit scent into an atomic accumulator; diffuse
-// blurs+decays the trail, folds in the deposits, and composites the grimy-bioluminescent display.
+// MYCELIA simulation — a two-layer sentient-mold field. Four compute entry points share one bind group and
+// are dispatched in order each tick: clear_deposit → agent_step → diffuse → field.
 //
-// Ref: Jones (2010), "Characteristics of pattern formation and evolution in approximations of Physarum
-// transport networks," Artificial Life (arXiv 1503.06579). The sense→rotate→move→deposit→diffuse→decay
-// loop is the standard real-time GPU formulation (Jenson; Lague).
+//   Transport layer (the "mind"): agents sense the trail, steer by Jones' three-sensor rule, step, and
+//   deposit scent into an atomic accumulator; `diffuse` blurs+decays the trail and folds the deposits in.
+//   Ref: Jones (2010), "Characteristics of pattern formation and evolution in approximations of Physarum
+//   transport networks," Artificial Life (10.1162/artl.2010.16.2.16202; arXiv 1503.06579). The
+//   sense→rotate→move→deposit→diffuse→decay loop is the standard real-time GPU formulation (Jenson; Lague).
+//
+//   Field layer (the "flesh"): `field` runs one Gray-Scott reaction-diffusion step whose biomass is
+//   nucleated by the veins, then composites veins + biomass into the grimy-bioluminescent display.
+//   Ref: Turk (1991), "Generating textures on arbitrary surfaces using reaction-diffusion," SIGGRAPH
+//   (10.1145/122718.122749); Pearson (1993), Science 261.
 
 // MUST byte-match `MoldParams` in `src/mycelia/mod.rs` (field order + types).
 struct MoldParams {
@@ -22,6 +27,13 @@ struct MoldParams {
     decay: f32,
     trail_max: f32,
     deposit_scale: f32,
+    dt: f32,
+    feed: f32,
+    kill: f32,
+    d_u: f32,
+    d_v: f32,
+    bloom_seed: f32,
+    diffuse_weight: f32,
 };
 
 // MUST byte-match the `u32` encoding in `src/mycelia/agents.rs` (std430 stride 16).
@@ -37,6 +49,8 @@ struct Agent {
 @group(0) @binding(3) var trail_write: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var display: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(5) var<uniform> params: MoldParams;
+@group(0) @binding(6) var biomass_read: texture_2d<f32>;
+@group(0) @binding(7) var biomass_write: texture_storage_2d<rgba16float, write>;
 
 // Integer hash → uniform f32 in [0,1). Cheap per-agent randomness for the "turn away" case.
 fn hash_u32(x: u32) -> u32 {
@@ -142,7 +156,7 @@ fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
     let y = i32(id.y);
 
-    // 3x3 box blur of the read trail (simulates diffusion of the scent — Jenson/Lague mean filter).
+    // 3x3 mean of the read trail (Jenson/Lague mean filter).
     var sum = 0.0;
     for (var oy = -1; oy <= 1; oy++) {
         for (var ox = -1; ox <= 1; ox++) {
@@ -150,23 +164,80 @@ fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let blur = sum * (1.0 / 9.0);
+    let here = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
 
     // This tick's deposits at this texel (fixed-point → float).
     let idx = u32(y) * u32(dim) + u32(x);
     let dep = f32(atomicLoad(&deposit[idx])) / params.deposit_scale;
 
-    // Diffuse + decay, then reinforce with fresh scent. Clamp guards transient spikes.
-    let v = clamp(blur * params.decay + dep, 0.0, params.trail_max);
+    // Diffuse by lerping *toward* the mean (not replacing with it — a full replacement divides every
+    // deposit spike by 9 each tick, so channels could never accumulate), then decay, then reinforce with
+    // this tick's fresh scent. Clamp guards transient spikes.
+    let spread = mix(here, blur, params.diffuse_weight);
+    let v = clamp(spread * params.decay + dep, 0.0, params.trail_max);
     textureStore(trail_write, vec2<i32>(x, y), vec4<f32>(v, 0.0, 0.0, 1.0));
+}
 
-    // Grimy-bioluminescent composite: sickly green/cyan veins glowing out of a faint dark biomass film.
-    // The vein threshold sits well above the wandering-agent noise floor so only reinforced channels light
-    // up; the film is a dim wet sheen that hints at biomass where any scent lingers. Alpha stays < 1 so the
+// ── Pass 4: Gray-Scott biomass step + final display composite ────────────────────────────────────────
+// U (substrate) and V (biomass) diffuse at unequal rates and react via the autocatalytic U + 2V -> 3V.
+// Strong veins nucleate V beneath them, so the blooms grow *along* the transport network. The 9-point
+// Laplacian stencil (orthogonal 0.2, diagonal 0.05, centre -1) is the standard discretization.
+//
+// Refs: Turk (1991) SIGGRAPH 10.1145/122718.122749 (RD as surface texture synthesis); Pearson (1993),
+// Science 261 (the (F,k) regime map); Leppänen et al. 10.1590/S0103-97332004000300006.
+
+fn bio_at(x: i32, y: i32, dim: i32) -> vec2<f32> {
+    return textureLoad(biomass_read, vec2<i32>(wrap_i(x, dim), wrap_i(y, dim)), 0).rg;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn field(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dim = i32(params.field_res.x);
+    if (i32(id.x) >= dim || i32(id.y) >= dim) {
+        return;
+    }
+    let x = i32(id.x);
+    let y = i32(id.y);
+
+    let c = bio_at(x, y, dim);
+    var u = c.x;
+    var v = c.y;
+
+    // 9-point Laplacian of (U, V).
+    var lap = (bio_at(x - 1, y, dim) + bio_at(x + 1, y, dim)
+             + bio_at(x, y - 1, dim) + bio_at(x, y + 1, dim)) * 0.2;
+    lap += (bio_at(x - 1, y - 1, dim) + bio_at(x + 1, y - 1, dim)
+          + bio_at(x - 1, y + 1, dim) + bio_at(x + 1, y + 1, dim)) * 0.05;
+    lap -= c;
+
+    // Gray-Scott reaction.
+    let uvv = u * v * v;
+    u += (params.d_u * lap.x - uvv + params.feed * (1.0 - u)) * params.dt;
+    v += (params.d_v * lap.y + uvv - (params.feed + params.kill) * v) * params.dt;
+
+    // The transport network feeds the flesh: a strong vein seeds biomass beneath itself. `trail_read` is
+    // this tick's source field (the freshly-diffused trail lands in `trail_write`), so the bloom trails the
+    // veins by exactly one tick — imperceptible, and it avoids a read-after-write on the same texture.
+    let trail = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
+    let vein = smoothstep(4.0, 12.0, trail);
+    v += vein * params.bloom_seed * params.dt;
+
+    u = clamp(u, 0.0, 1.0);
+    v = clamp(v, 0.0, 1.0);
+    textureStore(biomass_write, vec2<i32>(x, y), vec4<f32>(u, v, 0.0, 1.0));
+
+    // Grimy-bioluminescent composite. Sickly green/cyan veins glow out of a dark wet biomass film; a faint
+    // scent sheen hints at growth even where no vein has established. Alpha stays < 1 throughout so the
     // mold reads as a translucent coating over the carpet, not opaque paint.
-    let veins = smoothstep(2.5, 8.0, v);
-    let film = smoothstep(0.3, 2.5, v);
-    let glow = vec3<f32>(0.10, 0.42, 0.24) * veins;
-    let grime = vec3<f32>(0.015, 0.035, 0.028) * film;
-    let alpha = max(veins * 0.85, film * 0.22);
-    textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + grime, alpha));
+    let veins = smoothstep(3.0, 12.0, trail);
+    let sheen = smoothstep(0.5, 3.0, trail);
+    let bio = smoothstep(0.10, 0.35, v);
+
+    // Kept deliberately dim: the game's bloom post-process blows out anything brighter, turning the veins
+    // into neon tubes rather than a sickly phosphorescence.
+    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins;
+    let flesh = vec3<f32>(0.045, 0.075, 0.055) * bio;
+    let grime = vec3<f32>(0.015, 0.035, 0.028) * sheen;
+    let alpha = max(max(veins * 0.80, sheen * 0.22), bio * 0.55);
+    textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + flesh + grime, alpha));
 }

@@ -4,16 +4,18 @@
 //! `RenderSystems::PrepareBindGroups`, and the passes are plain systems added to the **`RenderGraph`
 //! schedule** ordered `.before(camera_driver)` (the old `render_graph::Node` trait API is superseded).
 //!
-//! # Phase B — the Physarum transport network
-//! One shader (`mycelia_sim.wgsl`) exposes three entry points that share a single bind group, dispatched
-//! in order each frame as three separate compute passes (so the GPU inserts a memory barrier between them
+//! # The simulation chain
+//! One shader (`mycelia_sim.wgsl`) exposes four entry points that share a single bind group, dispatched
+//! in order each frame as four separate compute passes (so the GPU inserts a memory barrier between them
 //! and each sees the previous one's writes):
 //!   1. `clear_deposit` — zero the per-texel scent accumulator.
-//!   2. `agents`        — each walker senses the trail, steers (Jones three-sensor rule), steps, and
+//!   2. `agent_step`    — each walker senses the trail, steers (Jones three-sensor rule), steps, and
 //!                        `atomicAdd`s scent into the accumulator.
-//!   3. `diffuse`       — blur+decay the trail, fold in this tick's deposits, and composite the result
-//!                        into the shared `display` texture the floor material samples.
-//! The trail ping-pong swaps read/write each frame by parity, so diffusion never reads what it is writing.
+//!   3. `diffuse`       — blur+decay the trail and fold in this tick's deposits (the transport network).
+//!   4. `field`         — one Gray-Scott reaction-diffusion step of the biomass, nucleated by the veins,
+//!                        then composite veins + biomass into the shared `display` the material samples.
+//! The trail and biomass ping-pongs swap read/write each frame by the same parity, so neither stencil ever
+//! reads the texture it is concurrently writing.
 
 use std::borrow::Cow;
 
@@ -65,6 +67,7 @@ struct MoldPipeline {
     clear: CachedComputePipelineId,
     agents: CachedComputePipelineId,
     diffuse: CachedComputePipelineId,
+    field: CachedComputePipelineId,
 }
 
 /// This frame's prepared bind group (the six mold resources, with the trail read/write pair selected by
@@ -105,6 +108,10 @@ fn init_mold_pipeline(
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
                 // 5: shared sim params.
                 uniform_buffer::<MoldParams>(false),
+                // 6: biomass READ (Gray-Scott `U`,`V` source field for this tick's stencil).
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                // 7: biomass WRITE (storage — this tick's reacted field).
+                texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
             ),
         ),
     );
@@ -121,8 +128,9 @@ fn init_mold_pipeline(
     let clear = queue("clear_deposit");
     let agents = queue("agent_step");
     let diffuse = queue("diffuse");
+    let field = queue("field");
 
-    commands.insert_resource(MoldPipeline { layout, clear, agents, diffuse });
+    commands.insert_resource(MoldPipeline { layout, clear, agents, diffuse, field });
 }
 
 /// `RenderSystems::Prepare` — advance the lifecycle. Stay not-ready until ALL three pipelines compile (a
@@ -134,7 +142,7 @@ fn advance_state(
     mut state: ResMut<MoldState>,
 ) {
     if !state.ready {
-        let all_ok = [pipeline.clear, pipeline.agents, pipeline.diffuse].iter().all(|id| {
+        let all_ok = [pipeline.clear, pipeline.agents, pipeline.diffuse, pipeline.field].iter().all(|id| {
             match pipeline_cache.get_compute_pipeline_state(*id) {
                 CachedPipelineState::Ok(_) => true,
                 CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(_)) => false,
@@ -167,10 +175,12 @@ fn prepare_bind_group(
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
 ) {
-    let (Some(display), Some(trail_a), Some(trail_b)) = (
+    let (Some(display), Some(trail_a), Some(trail_b), Some(bio_a), Some(bio_b)) = (
         gpu_images.get(&mold_images.display),
         gpu_images.get(&mold_images.trail_a),
         gpu_images.get(&mold_images.trail_b),
+        gpu_images.get(&mold_images.biomass_a),
+        gpu_images.get(&mold_images.biomass_b),
     ) else {
         return;
     };
@@ -181,9 +191,10 @@ fn prepare_bind_group(
     };
 
     // Parity: even frames read A / write B, odd frames read B / write A. What we write this tick becomes
-    // next tick's read (the parity flips), giving a correct ping-pong.
-    let (read, write) =
-        if state.frame & 1 == 0 { (trail_a, trail_b) } else { (trail_b, trail_a) };
+    // next tick's read (the parity flips), giving a correct ping-pong. Trail and biomass share the parity.
+    let even = state.frame & 1 == 0;
+    let (read, write) = if even { (trail_a, trail_b) } else { (trail_b, trail_a) };
+    let (bio_read, bio_write) = if even { (bio_a, bio_b) } else { (bio_b, bio_a) };
 
     let mut uniform = UniformBuffer::from(params.into_inner().clone());
     uniform.write_buffer(&render_device, &queue);
@@ -198,6 +209,8 @@ fn prepare_bind_group(
             &write.texture_view,
             &display.texture_view,
             &uniform,
+            &bio_read.texture_view,
+            &bio_write.texture_view,
         )),
     );
     commands.insert_resource(MoldBindGroup(bind_group));
@@ -216,10 +229,11 @@ fn mold_compute(
     let Some(bind_group) = bind_group.filter(|_| state.ready) else {
         return;
     };
-    let (Some(clear), Some(agents_pl), Some(diffuse)) = (
+    let (Some(clear), Some(agents_pl), Some(diffuse), Some(field)) = (
         pipeline_cache.get_compute_pipeline(pipeline.clear),
         pipeline_cache.get_compute_pipeline(pipeline.agents),
         pipeline_cache.get_compute_pipeline(pipeline.diffuse),
+        pipeline_cache.get_compute_pipeline(pipeline.field),
     ) else {
         return;
     };
@@ -240,4 +254,5 @@ fn mold_compute(
     dispatch(clear, deposit_slots.div_ceil(CLEAR_WORKGROUP), 1);
     dispatch(agents_pl, agents::AGENT_COUNT.div_ceil(LINEAR_WORKGROUP), 1);
     dispatch(diffuse, field_groups, field_groups);
+    dispatch(field, field_groups, field_groups);
 }
