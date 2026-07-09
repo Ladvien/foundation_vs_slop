@@ -27,15 +27,15 @@
 //! (10.1007/s10462-021-10112-1). Field growth: Gray-Scott / Turing reaction-diffusion; Flow-Lenia
 //! (arXiv 2212.07906) for the mass-conserving multi-species extension (deferred past v1).
 
+mod agents;
+mod field;
 mod material;
 mod pipeline;
 
-use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_resource::{
-    Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
-};
+use bevy::render::render_resource::{ShaderType, TextureFormat};
+use bevy::render::storage::ShaderBuffer;
 use bevy::render::RenderApp;
 
 pub use material::MoldFloorMaterial;
@@ -59,22 +59,62 @@ pub const WORLD_EXTENT: Vec2 = Vec2::splat(192.0);
 /// pass can `textureStore` into it and the floor material can `textureSample` it with linear filtering.
 pub const DISPLAY_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
-/// The shared handle to the composited mold texture — the ONE texture that crosses the main↔render
-/// boundary. The compute pass writes it (render world); the floor material samples it (also resolved in
-/// the render world). Extracted so `prepare_bind_group` in the render world can find it.
+// ── Physarum tuning (Jones three-sensor model) ─────────────────────────────────────────────────────
+// Distances/angles are in field texels (1024² over 192 m ≈ 5.3 texels/m) and radians. These are the
+// aesthetic knobs that decide how the veins forage and branch; they graduate to the RON config in Phase E.
+
+/// Half-angle between the centre sensor and each side sensor. ~23°.
+const SENSE_ANGLE: f32 = 0.40;
+/// How far ahead (texels) the sensors sample the trail.
+const SENSE_DIST: f32 = 9.0;
+/// How sharply an agent turns toward the stronger scent each tick. ~29°.
+const ROTATE_ANGLE: f32 = 0.50;
+/// Texels an agent advances per tick.
+const STEP_SIZE: f32 = 1.0;
+/// Scent laid down per agent per tick (pre-scale), in trail units.
+const DEPOSIT_AMOUNT: f32 = 1.0;
+/// Multiplicative trail persistence per tick (`<1` so trails fade). Slime networks need slow decay to hold
+/// their shape; 0.90 keeps veins legible while letting abandoned routes dissolve.
+const DECAY: f32 = 0.90;
+/// Upper clamp on trail intensity so reinforced hubs can't blow up (decay alone bounds the steady state,
+/// this guards against transient spikes / NaNs).
+const TRAIL_MAX: f32 = 12.0;
+/// Fixed-point factor for the integer deposit accumulator: agents `atomicAdd(deposit_amount * SCALE)`, the
+/// diffuse pass reads back `/ SCALE`. Large enough to preserve fractional deposits under heavy overlap.
+const DEPOSIT_SCALE: f32 = 1024.0;
+
+/// The mold's field textures. Only `display` crosses to the material; the trail pair lives purely to feed
+/// the compute chain. All three are extracted so the render world's `prepare_bind_group` can bind them.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct MoldImages {
-    /// `R` = vein/trail density, `G` = biomass, `B` = glow/flux, `A` = light — filled progressively
-    /// across the implementation phases. In Phase A it just holds an animated plumbing-test gradient.
+    /// The composited output the floor material samples. `R` = vein/trail density, `G` = biomass (Phase C),
+    /// `B` = glow/flux, `A` = light — filled progressively across phases. Written by the diffuse pass.
     pub display: Handle<Image>,
+    /// Trail-scent ping-pong pair. Each tick one is the read source (sensed by agents + blurred by
+    /// diffuse) and the other the write target; they swap by parity so diffusion never reads what it is
+    /// concurrently writing. `R` channel holds trail intensity.
+    pub trail_a: Handle<Image>,
+    pub trail_b: Handle<Image>,
 }
 
-/// Simulation parameters shared (byte-identical) by the compute pass and the floor material. Kept in one
-/// place so the world↔UV mapping can never drift between "where the sim writes" and "where the floor
-/// reads". Extracted into the render world each frame.
+/// The mold's GPU storage buffers — the agent population and the per-texel deposit accumulator.
+#[derive(Resource, Clone, ExtractResource)]
+pub struct MoldBuffers {
+    /// `array<Agent>` (`{ pos: vec2<f32>, heading: f32, _pad }`), updated in place each tick by the
+    /// `agents` pass. Seeded once on the CPU (`agents::seed_agents`); GPU float drift after is cosmetic.
+    pub agents: Handle<ShaderBuffer>,
+    /// `array<atomic<u32>>`, one slot per field texel. The `agents` pass `atomicAdd`s fixed-point scent
+    /// here; the `diffuse` pass reads it back and folds it into the trail; `clear_deposit` zeroes it each
+    /// tick. A storage buffer (not a storage *texture*) because wgpu/Metal has no portable texture atomics.
+    pub deposit: Handle<ShaderBuffer>,
+}
+
+/// Simulation parameters for the compute chain. Field order/types MUST byte-match the `MoldParams` struct
+/// in `mycelia_sim.wgsl`. Laid out `vec2`-first so every field is naturally aligned (the three `vec2`s
+/// occupy 0..24, all scalars follow on 4-byte boundaries) — `ShaderType`/encase computes the std140/std430
+/// padding, and the WGSL struct mirrors the same field order so the layouts agree.
 ///
-/// Field order/types MUST byte-match the `MoldParams` struct in the WGSL shaders (std140 uniform layout:
-/// each `vec2` aligns to 8 bytes → origin@0, extent@8, field_res@16, time@24, pad@28, size 32).
+/// (The floor material has its own separate `MoldMatParams`; this uniform is compute-only.)
 #[derive(Resource, Clone, ExtractResource, ShaderType)]
 pub struct MoldParams {
     /// World XZ of field texel (0,0).
@@ -83,10 +123,26 @@ pub struct MoldParams {
     pub world_extent: Vec2,
     /// Field resolution in texels (as float, for UV↔texel math in-shader).
     pub field_res: Vec2,
-    /// Seconds since startup — drives the animated growth. Advanced on the main world each `Update`.
+    /// Seconds since startup — seeds the agent-steering RNG. Advanced on the main world each `Update`.
     pub time: f32,
-    /// Explicit tail pad so Rust and WGSL agree on the 32-byte std140 size.
-    pub _pad: f32,
+    /// Active agent count (agents beyond this in the buffer are idle).
+    pub agent_count: u32,
+    /// Half-angle between centre and side sensors (radians).
+    pub sense_angle: f32,
+    /// Sensor reach ahead of the agent (texels).
+    pub sense_dist: f32,
+    /// Turn magnitude per tick (radians).
+    pub rotate_angle: f32,
+    /// Advance per tick (texels).
+    pub step_size: f32,
+    /// Scent deposited per agent per tick (pre-scale).
+    pub deposit_amount: f32,
+    /// Trail persistence per tick (`<1`).
+    pub decay: f32,
+    /// Upper clamp on trail intensity.
+    pub trail_max: f32,
+    /// Fixed-point factor for the integer deposit accumulator.
+    pub deposit_scale: f32,
 }
 
 pub struct MyceliaPlugin;
@@ -96,6 +152,7 @@ impl Plugin for MyceliaPlugin {
         app.add_plugins((
             MaterialPlugin::<MoldFloorMaterial>::default(),
             ExtractResourcePlugin::<MoldImages>::default(),
+            ExtractResourcePlugin::<MoldBuffers>::default(),
             ExtractResourcePlugin::<MoldParams>::default(),
         ))
         .add_systems(Startup, setup_mycelia)
@@ -110,33 +167,42 @@ impl Plugin for MyceliaPlugin {
     }
 }
 
-/// Create the shared display texture, seed the shared params, spawn the floor overlay that samples the
-/// mold field by world XZ. Runs once at startup on the main world.
+/// Create the field textures + GPU buffers, seed the shared params, and spawn the floor overlay that
+/// samples the mold field by world XZ. Runs once at startup on the main world.
 fn setup_mycelia(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MoldFloorMaterial>>,
 ) {
-    // One RGBA16F texture, render-world resident, usable as BOTH a compute storage-write target and a
-    // sampled material texture. This is the single image shared across the main↔render boundary.
-    let mut image = Image::new_uninit(
-        Extent3d { width: FIELD_SIZE, height: FIELD_SIZE, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        DISPLAY_FORMAT,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.texture_descriptor.usage =
-        TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
-    let display = images.add(image);
+    // Three RGBA16F field textures (composited display + trail ping-pong pair), each usable as both a
+    // compute storage-write target and a sampled read. `display` is the one shared with the material.
+    let display = images.add(field::field_texture(FIELD_SIZE));
+    let trail_a = images.add(field::field_texture(FIELD_SIZE));
+    let trail_b = images.add(field::field_texture(FIELD_SIZE));
 
-    commands.insert_resource(MoldImages { display: display.clone() });
+    // Agent population (seeded once) + zeroed deposit accumulator (one slot per field texel). Both are
+    // `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the compute chain needs.
+    let agents = buffers.add(ShaderBuffer::from(agents::seed_agents(FIELD_SIZE as f32)));
+    let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (FIELD_SIZE * FIELD_SIZE) as usize]));
+
+    commands.insert_resource(MoldImages { display: display.clone(), trail_a, trail_b });
+    commands.insert_resource(MoldBuffers { agents, deposit });
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
         world_extent: WORLD_EXTENT,
         field_res: Vec2::splat(FIELD_SIZE as f32),
         time: 0.0,
-        _pad: 0.0,
+        agent_count: agents::AGENT_COUNT,
+        sense_angle: SENSE_ANGLE,
+        sense_dist: SENSE_DIST,
+        rotate_angle: ROTATE_ANGLE,
+        step_size: STEP_SIZE,
+        deposit_amount: DEPOSIT_AMOUNT,
+        decay: DECAY,
+        trail_max: TRAIL_MAX,
+        deposit_scale: DEPOSIT_SCALE,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the
