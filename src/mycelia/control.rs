@@ -151,24 +151,29 @@ fn dt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
 }
 
 /// Is the FIELD texel at (`tx`, `ty`) inside solid matter — rock, or the band a wall slab occupies?
-///
-/// Walls are thin cuboids standing on cell *edges*, inset so their outer face is flush with the boundary.
-/// Marking that band (not merely the cell boundary) is what puts the mold's contact ridge on the surface
-/// the player actually sees.
 fn texel_is_solid(dungeon: &Dungeon, tx: u32, ty: u32, texel_world: f32) -> bool {
     // World XZ of this texel's centre. `super::WORLD_ORIGIN` is the world position of the field's corner.
     let wx = super::WORLD_ORIGIN.x + (tx as f32 + 0.5) * texel_world;
     let wz = super::WORLD_ORIGIN.y + (ty as f32 + 0.5) * texel_world;
+    solid_at_world(dungeon, Vec2::new(wx, wz))
+}
 
-    // Cells are centred on integers and span ±0.5, so `round` maps a world point to its cell.
-    let cell = IVec2::new((wx + 0.5).floor() as i32, (wz + 0.5).floor() as i32);
+/// Is this world XZ point inside solid matter — rock, or the band a wall slab occupies?
+///
+/// Walls are thin cuboids standing on cell *edges*, inset so their outer face is flush with the boundary.
+/// Testing that band (not merely the cell boundary) is what puts the mold's contact ridge on the surface
+/// the player actually sees — and, for `fruit::wall_escape`, what lets a mushroom know exactly how far the
+/// slab it must lean away from actually protrudes.
+pub(super) fn solid_at_world(dungeon: &Dungeon, p: Vec2) -> bool {
+    // Cells are centred on integers and span ±0.5, so this maps a world point to its cell.
+    let cell = IVec2::new((p.x + 0.5).floor() as i32, (p.y + 0.5).floor() as i32);
     if !dungeon.is_floor(cell) {
         return true;
     }
 
     // Offset within the cell, in [-0.5, 0.5).
-    let lx = wx - cell.x as f32;
-    let lz = wz - cell.y as f32;
+    let lx = p.x - cell.x as f32;
+    let lz = p.y - cell.y as f32;
     let band = 0.5 - crate::dungeon::WALL_THICKNESS;
 
     // A wall stands on an edge exactly when the neighbour across it is not floor.

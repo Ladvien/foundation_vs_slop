@@ -20,7 +20,11 @@
 
 #import bevy_pbr::pbr_fragment::pbr_input_from_standard_material
 #import bevy_pbr::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing}
-#import bevy_pbr::forward_io::{VertexOutput, FragmentOutput}
+#import bevy_pbr::forward_io::{Vertex, VertexOutput, FragmentOutput}
+#import bevy_pbr::mesh_bindings::mesh
+#import bevy_pbr::mesh_functions
+#import bevy_pbr::morph::{morph_position, morph_normal, morph_tangent}
+#import bevy_pbr::view_transformations::position_world_to_clip
 
 // MUST byte-match `MoldSurfaceParams` in `src/mycelia/material.rs`.
 struct MoldSurfaceParams {
@@ -41,8 +45,10 @@ struct MoldSurfaceParams {
     ao_strength: f32,
 };
 
-// MUST byte-match `MoldFruitParams` in `src/mycelia/material.rs`.
+// MUST byte-match `MoldFruitParams` in `src/mycelia/material.rs`. `vec2` first: it aligns to 8 bytes, so
+// putting the scalar after it costs no padding.
 struct MoldFruitParams {
+    bend: vec2<f32>,
     tint: f32,
 };
 
@@ -85,6 +91,138 @@ const SUBSTRATE: vec3<f32> = vec3<f32>(0.040, 0.055, 0.035);
 // How far up the body (world units, from its base) the mat it grew out of still clings. The mold does not
 // climb the whole mushroom — it pools around the volva, exactly where the sac meets the substrate.
 const SKIRT_HEIGHT: f32 = 0.06;
+
+// ── The bend ──────────────────────────────────────────────────────────────────────────────────────────
+//
+// A mushroom stem curves by *differential cell elongation*, and the extension is concentrated in the upper
+// 20–30% of the stem — cells on the outer flank end up four to five times longer than those on the inner
+// (Greening, Sánchez & Moore 1997, Can. J. Bot. 75:1174, 10.1139/b97-830). This mesh's stipe spans
+// 2.18–11.80 cm, so its upper 30% begins at 8.91 cm and the zone closes at the cap's underside.
+//
+// `bend_profile` is a smoothstep across that zone, so its SLOPE vanishes at both ends. That is not a
+// convenience, it is the anatomy: below the zone the lower stipe and volva stay planted and unsheared;
+// above it the profile has saturated, so the cap translates rigidly and stays LEVEL on the curved stem.
+// The hymenophore is positively gravitropic and re-levels independently of the stem (Moore 1991,
+// New Phytol. 117:3, 10.1111/j.1469-8137.1991.tb00940.x).
+//
+// Because the profile keys off the stipe's *height*, the bend develops as the stem grows into the zone: an
+// egg is perfectly straight and a young button barely leans. That extra vertex travel is charged to the
+// perceptual speed limit on the CPU (`perceptual::STAGE_BEND_FRACTION`), so a leaning mushroom grows
+// slower rather than swinging over where you can see it.
+//
+// MUST match `BEND_LO_M` / `BEND_HI_M` in `src/mycelia/perceptual.rs`, which budgets for this exact curve.
+const BEND_LO: f32 = 0.0891;
+const BEND_HI: f32 = 0.1180;
+
+fn bend_profile(y: f32) -> f32 {
+    let u = clamp((y - BEND_LO) / (BEND_HI - BEND_LO), 0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
+
+/// d(profile)/dy — the local shear, used to tilt the normal with the surface it rides on.
+fn bend_slope(y: f32) -> f32 {
+    let u = clamp((y - BEND_LO) / (BEND_HI - BEND_LO), 0.0, 1.0);
+    return 6.0 * u * (1.0 - u) / (BEND_HI - BEND_LO);
+}
+
+#ifdef MORPH_TARGETS
+// Overriding the vertex stage means Bevy's own `morph_vertex` (which is defined inside `mesh.wgsl`, not
+// exported) no longer runs for this material. Reproduced here verbatim; without it the mushroom would snap
+// back to the sealed-egg basis and never grow at all.
+fn morph_vertex(vertex_in: Vertex, instance_index: u32) -> Vertex {
+    var vertex = vertex_in;
+    let first_vertex = mesh[instance_index].first_vertex_index;
+    let vertex_index = vertex.index - first_vertex;
+
+    let weight_count = bevy_pbr::morph::layer_count(instance_index);
+    for (var i: u32 = 0u; i < weight_count; i ++) {
+        let weight = bevy_pbr::morph::weight_at(i, instance_index);
+        if weight == 0.0 {
+            continue;
+        }
+        vertex.position += weight * morph_position(vertex_index, i, instance_index);
+#ifdef VERTEX_NORMALS
+        vertex.normal += weight * morph_normal(vertex_index, i, instance_index);
+#endif
+#ifdef VERTEX_TANGENTS
+        vertex.tangent += vec4(weight * morph_tangent(vertex_index, i, instance_index), 0.0);
+#endif
+    }
+    return vertex;
+}
+#endif
+
+@vertex
+fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+
+#ifdef MORPH_TARGETS
+    var vertex = morph_vertex(vertex_no_morph, vertex_no_morph.instance_index);
+#else
+    var vertex = vertex_no_morph;
+#endif
+
+    // Curve the stipe. Object space, so this is independent of the body's yaw and scale.
+    let b = vec3<f32>(fruit.bend.x, 0.0, fruit.bend.y);
+    let y = vertex.position.y;
+    vertex.position = vertex.position + b * bend_profile(y);
+
+#ifdef VERTEX_NORMALS
+    // The displacement d(y) = b * p(y) shears the surface, so the normal must tilt with it. For
+    // J = I + p'(y) * b (x) e_y^T, the inverse transpose is I - p'(y) * e_y (x) b^T to first order, which
+    // touches only the normal's Y component. Skipping this leaves the lighting flat on a visibly bent stem.
+    let shear = bend_slope(y) * dot(b.xz, vertex.normal.xz);
+    vertex.normal = normalize(vertex.normal - vec3<f32>(0.0, shear, 0.0));
+#endif
+
+    let mesh_world_from_local = mesh_functions::get_world_from_local(vertex_no_morph.instance_index);
+    // No `SKINNED` branch: the death cap has no joints, and a shader def we do not handle should fail to
+    // compile rather than silently drop the skin.
+    var world_from_local = mesh_world_from_local;
+
+#ifdef VERTEX_NORMALS
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+        vertex.normal,
+        vertex_no_morph.instance_index,
+    );
+#endif
+
+#ifdef VERTEX_POSITIONS
+    out.world_position = mesh_functions::mesh_position_local_to_world(
+        world_from_local,
+        vec4<f32>(vertex.position, 1.0),
+    );
+    out.position = position_world_to_clip(out.world_position.xyz);
+#endif
+
+#ifdef VERTEX_UVS_A
+    out.uv = vertex.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = vertex.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
+        world_from_local,
+        vertex.tangent,
+        vertex_no_morph.instance_index,
+    );
+#endif
+#ifdef VERTEX_COLORS
+    out.color = vertex.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = vertex_no_morph.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
+        vertex_no_morph.instance_index,
+        mesh_world_from_local[3],
+    );
+#endif
+
+    return out;
+}
 
 // ── Procedural noise (see `mycelia_floor.wgsl` for provenance) ────────────────────────────────────────
 fn hash21(p: vec2<f32>) -> f32 {

@@ -62,10 +62,12 @@ use crate::dungeon::Dungeon;
 use crate::fog::FogGrid;
 
 use super::material::{MoldFruitExt, MoldFruitMaterial};
+use super::control::{self, MoldControlImage};
 use super::perceptual::{
-    growth_rate, stage_weights, v_max, EGG_HEIGHT_M, MIN_APPEARANCE_RAMP_SECS, VEIL_RUPTURE_T,
+    growth_rate, stage_weights, v_max, ADULT_HEIGHT_M, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M,
+    MIN_APPEARANCE_RAMP_SECS, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
 };
-use super::{control::MoldControlImage, MoldImages, MyceliaConfig, COARSE_SIZE, WORLD_EXTENT, WORLD_ORIGIN};
+use super::{MoldImages, MyceliaConfig, COARSE_SIZE, WORLD_EXTENT, WORLD_ORIGIN};
 
 /// The death cap, as six morph targets over one `growth` scalar. No animation clips ship with it.
 const DEATH_CAP_GLB: &str = "death_cap/death_cap_growth.glb";
@@ -103,6 +105,16 @@ pub struct FruitBody {
     /// faster than [`MIN_APPEARANCE_RAMP_SECS`]. Motion has its own, far tighter budget; this bounds the
     /// *non-moving* half of the change signal (Simons, Franconeri & Reimer 2000, 10.1068/p3104).
     pub tint: f32,
+    /// Apex deflection of the stipe, in the body's **own object space** and in native-scale metres, so the
+    /// vertex shader can apply it without knowing the entity's yaw or scale. Fixed at spawn; a bent stem
+    /// does not un-bend.
+    ///
+    /// Two things go into it, and both are real tropisms (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x,
+    /// which ranks them thigmotropism < gravitropism < anemotropism < phototropism):
+    /// **thigmotropism** — the stem curves away from what it touches, which is what keeps a 22 cm cap out
+    /// of a wall its 9 cm volva already clears — and a per-body random lean, because no two stems in a
+    /// flush grow alike.
+    pub bend: Vec2,
 }
 
 impl FruitBody {
@@ -246,8 +258,8 @@ fn field_texel_to_world(texel: Vec2, field_size: f32) -> Vec2 {
     WORLD_ORIGIN + (texel + Vec2::splat(0.5)) / field_size * WORLD_EXTENT
 }
 
-/// Integer hash → uniform `f32` in `[0,1)`. Used only to decorrelate each body's yaw, so a flush of
-/// mushrooms does not all face the same way. Seeded from the coarse index, so it is reproducible.
+/// Integer hash → uniform `f32` in `[0,1)`. Decorrelates each body's yaw, lean and scale, so a flush does
+/// not look stamped from one mould. Seeded from the coarse index, so it is reproducible.
 fn hash01(x: u64) -> f32 {
     let mut s = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     s ^= s >> 30;
@@ -256,6 +268,94 @@ fn hash01(x: u64) -> f32 {
     s = s.wrapping_mul(0x94D0_49BB_1331_11EB);
     s ^= s >> 31;
     (s >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// How many rays the wall probe casts around a candidate site.
+const PROBE_RAYS: usize = 24;
+/// Step along each probe ray, world units. Well under `WALL_THICKNESS`, so a slab can never be stepped over.
+const PROBE_STEP: f32 = 0.03;
+/// Breathing room between the volva and the wall face it is nudged clear of, world units.
+const VOLVA_MARGIN: f32 = 0.02;
+/// Peak random lean, as a fraction of adult height — the natural crookedness of a stem with nothing to
+/// avoid. Small: real stipes are near-vertical (negatively gravitropic), just never perfectly so.
+const LEAN_FRACTION: f32 = 0.18;
+/// Per-body size jitter, ±this fraction of `body_scale`. A flush is not a set of clones.
+const SCALE_JITTER: f32 = 0.18;
+
+/// What the geometry around a candidate site demands of a stem planted there.
+struct WallEscape {
+    /// Unit direction away from the nearest solid, or zero if nothing is within reach.
+    away: Vec2,
+    /// Distance (world units) to the nearest solid along any probe ray; infinite in the open.
+    nearest: f32,
+}
+
+/// Probe the solid geometry around `site` and work out which way a stem there would have to lean.
+///
+/// Casts [`PROBE_RAYS`] rays and marches each until it hits a wall slab or rock. Each hit pushes back with
+/// a weight equal to how far it intrudes inside the cap's radius, so a stem in a corner leans out along the
+/// diagonal and a stem in the open leans nowhere. It reads the *slab band* — not the cell boundary —
+/// through `control::solid_at_world`, so the direction it returns points away from the surface the player
+/// actually sees.
+fn wall_escape(dungeon: &Dungeon, site: Vec2, cap_radius: f32) -> WallEscape {
+    let reach = cap_radius + PROBE_STEP;
+    let mut push = Vec2::ZERO;
+    let mut nearest = f32::INFINITY;
+
+    for i in 0..PROBE_RAYS {
+        let angle = std::f32::consts::TAU * (i as f32) / (PROBE_RAYS as f32);
+        let dir = Vec2::from_angle(angle);
+
+        let mut r = PROBE_STEP;
+        while r <= reach {
+            if control::solid_at_world(dungeon, site + dir * r) {
+                nearest = nearest.min(r);
+                // Weight by intrusion: a slab grazing the cap's rim barely steers; one under the stipe
+                // steers hard.
+                push -= dir * (cap_radius - r).max(0.0);
+                break;
+            }
+            r += PROBE_STEP;
+        }
+    }
+
+    WallEscape { away: push.normalize_or_zero(), nearest }
+}
+
+/// Where a body planted near `site` should actually stand, and how far its apex should lean, in **world**
+/// XZ metres.
+///
+/// Thigmotropism first: if the cap would overhang a slab, the stem curves out by exactly the overhang.
+/// Then a per-body random lean on top, so no two stems match. The two are clamped together, because a stem
+/// bent past [`MAX_BEND_M`] reads as snapped rather than curved.
+///
+/// The base nudge is a separate, purely geometric thing: a volva cannot occupy rock. It fires only when the
+/// site sits closer than the sac's own radius to a wall, and moves the body by at most that radius. It is
+/// *not* a keep-out rule — a mushroom may still grow with its sac against the skirting, which is precisely
+/// where the mold pools (`wall_affinity`). Only the cap is carried clear, and by bending.
+fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u64) -> (Vec2, Vec2) {
+    let cap_r = CAP_RADIUS_M * scale;
+    let volva_r = VOLVA_RADIUS_M * scale;
+
+    // A volva cannot grow inside a wall. Push the base out just far enough that it does not.
+    let probe = wall_escape(dungeon, site, cap_r);
+    let want = volva_r + VOLVA_MARGIN;
+    let nudge = if probe.nearest < want { probe.away * (want - probe.nearest) } else { Vec2::ZERO };
+    let base = site + nudge;
+
+    // Re-probe from where the body will actually stand: the nudge changed what it can see.
+    let probe = wall_escape(dungeon, base, cap_r);
+    // Thigmotropic lean: carry the cap's rim back out of the slab it would otherwise pass through.
+    let overhang = if probe.nearest.is_finite() { (cap_r - probe.nearest).max(0.0) } else { 0.0 };
+    let thigmo = probe.away * overhang;
+
+    // ...plus the crookedness every stem has anyway.
+    let angle = hash01(seed ^ 0xA1) * std::f32::consts::TAU;
+    let lean_mag = hash01(seed ^ 0xB2) * LEAN_FRACTION * ADULT_HEIGHT_M * scale;
+    let lean = Vec2::from_angle(angle) * lean_mag;
+
+    let bend = (thigmo + lean).clamp_length_max(MAX_BEND_M * scale);
+    (base, bend)
 }
 
 /// Commit primordia where the mat is thick, the substrate spent, and nothing is watching.
@@ -320,20 +420,34 @@ fn pin_fruit_bodies(
             continue;
         }
 
-        let scale = cfg.body_scale;
-        let yaw = hash01(index as u64) * std::f32::consts::TAU;
+        let seed = index as u64;
+        // Size varies across a flush. Growth time scales with it, since the speed limit bounds vertex
+        // *speed* and a bigger body has further to travel — a large mushroom simply takes longer.
+        let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01(seed ^ 0xC3) - 1.0));
+        let yaw = hash01(seed) * std::f32::consts::TAU;
+
+        // Where it can actually stand, and which way its stem must curve to keep its cap out of the wall.
+        let (base_xz, bend_world) = plan_body(&dungeon, world_xz, scale, seed);
+
+        // The vertex shader bends in object space, so undo the entity's yaw and scale here rather than
+        // handing the GPU a transform it would have to invert per vertex.
+        let bend_local = Quat::from_rotation_y(-yaw) * Vec3::new(bend_world.x, 0.0, bend_world.y);
+        let bend = Vec2::new(bend_local.x, bend_local.z) / scale;
+
+        let base = Vec3::new(base_xz.x, 0.0, base_xz.y);
         commands.spawn((
             Name::new("mycelia_fruit_body"),
             FruitBody {
                 growth: 0.0,
                 rise: 0.0,
                 scale,
-                cell: dcell,
+                cell: dungeon.world_to_cell(base),
                 veil_triggered: false,
                 tint: 0.0,
+                bend,
             },
             // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
-            Transform::from_translation(world - Vec3::Y * (EGG_HEIGHT_M * scale))
+            Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(scale)),
             Visibility::default(),
@@ -380,7 +494,9 @@ fn grow_fruit_bodies(
         // Reabsorption runs the same clock backwards, in the same order, reversed.
         let sink = EGG_HEIGHT_M * body.scale;
         let rise_rate = budget / sink;
-        let morph_rate = growth_rate(body.growth, body.scale, budget);
+        // A bent stem spends growth on curvature, so it crosses its bending segment slower. The bend's
+        // extra vertex travel is charged to the same speed limit as the morph's — see `perceptual`.
+        let morph_rate = growth_rate(body.growth, body.scale, body.bend.length(), budget);
 
         if gate > 0.0 {
             if body.rise < 1.0 {
@@ -462,7 +578,7 @@ fn coat_fruit_bodies(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
     images: Res<MoldImages>,
-    control: Res<MoldControlImage>,
+    control_image: Res<MoldControlImage>,
     bodies: Query<(Entity, &FruitBody, Option<&FruitMaterial>)>,
     children: Query<&Children>,
     painted: Query<&MeshMaterial3d<StandardMaterial>, Without<FruitCoated>>,
@@ -488,8 +604,9 @@ fn coat_fruit_bodies(
                         extension: MoldFruitExt::new(
                             &cfg,
                             images.display.clone(),
-                            control.dynamic.clone(),
+                            control_image.dynamic.clone(),
                             body.tint,
+                            body.bend,
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
@@ -535,7 +652,15 @@ mod tests {
     const FOV: f32 = 30.0;
 
     fn body() -> FruitBody {
-        FruitBody { growth: 0.0, rise: 0.0, scale: 4.0, cell: IVec2::ZERO, veil_triggered: false, tint: 0.0 }
+        FruitBody {
+            growth: 0.0,
+            rise: 0.0,
+            scale: 4.0,
+            cell: IVec2::ZERO,
+            veil_triggered: false,
+            tint: 0.0,
+            bend: Vec2::ZERO,
+        }
     }
 
     /// An egg carries no amatoxins; a mature cap carries them all. The threshold is the veil rupture,
