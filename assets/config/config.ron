@@ -435,10 +435,15 @@
         v_fruit: 0.35,          // biomass V above which a texel may pin. Must leave room for u_exhausted:
         u_exhausted: 0.30,      // ...their sum must be <= 1.0 or no texel can ever satisfy both at once
         pin_dwell_secs: 6.0,    // how long both must hold, unwatched, before the primordium commits
-        pin_min_spacing: 1.5,   // world units between bodies. Neighbouring knots starve each other out
-                                // (primordium abortion; Kües & Navarro-González 2015, 10.1016/j.fbr.2015.05.001)
-        max_fruit_bodies: 64,   // hard budget; hitting it is logged, never silently ignored
-        body_scale: 2.5,        // the mesh is a true-to-life 13.9 cm; 2.5 makes it knee-high on a unit
+        pin_min_spacing: 3.0,   // world units between bodies. Neighbouring knots starve each other out
+                                // (primordium abortion; Kües & Navarro-González 2015, 10.1016/j.fbr.2015.05.001).
+                                // At 1.5 a walked-through room grew ~45 bodies over 139 tiles — a lawn, not a
+                                // flush. 3.0 quarters that, keeps the floor clear for pathing and gore, and
+                                // makes each mushroom an event rather than ground cover.
+        max_fruit_bodies: 40,   // hard budget; hitting it is logged, never silently ignored
+        body_scale: 4.0,        // the mesh is a true-to-life 13.9 cm. 4.0 -> 56 cm, knee-high on a squad unit
+                                // and ~50 px tall at the default zoom (a unit is ~150). At 2.5 it measured 31
+                                // px and read as floor debris beside the figurines.
         maintain_v: 0.20,       // below this the patch has collapsed and the body reabsorbs, running its
                                 // growth clock backwards. Must sit below v_fruit.
 

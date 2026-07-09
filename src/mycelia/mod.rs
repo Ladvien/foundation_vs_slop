@@ -39,6 +39,7 @@ mod material;
 mod measure;
 pub mod perceptual;
 mod pipeline;
+mod testbed;
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -272,11 +273,18 @@ pub struct MyceliaConfig {
     pub pin_dwell_secs: f32,
     /// Minimum separation (world units) between fruit bodies. Most hyphal knots never mature; neighbours
     /// compete for translocated nutrient (Kües & Navarro-González 2015). This is that competition.
+    ///
+    /// Measured: at `1.5` a room the squad walked through grew ~45 bodies across 139 tiles — a lawn. `3.0`
+    /// quarters that, which reads as a flush and leaves the floor clear for pathing and gore.
     pub pin_min_spacing: f32,
     /// Hard ceiling on live fruit bodies. Reaching it is logged, never silently ignored.
     pub max_fruit_bodies: u32,
-    /// Scale applied to the death cap mesh, whose native height is 13.9 cm. `2.5` gives a 35 cm mushroom —
-    /// knee-high on a squad unit, legible at the RTS zoom the game actually plays at.
+    /// Scale applied to the death cap mesh, whose native height is 13.9 cm. `4.0` gives a 56 cm mushroom —
+    /// knee-high on a squad unit, and ~50 px tall at the default zoom against a unit's ~150 px. At `2.5` it
+    /// measured 31 px and read as floor debris rather than a prop.
+    ///
+    /// Growth time scales with it: the speed limit is on vertex *speed*, so a bigger body has further to
+    /// travel. See [`perceptual::egg_to_adult_secs`].
     pub body_scale: f32,
     /// Local biomass `V` below which a fruit body's patch has collapsed and the body reabsorbs, running its
     /// growth clock backwards. Primordium abortion, not a fallback branch: the same ODE with a negative
@@ -588,8 +596,9 @@ impl Plugin for MyceliaPlugin {
         // Fruit bodies: the mold reproducing. Registered here (not as a separate plugin) because it depends
         // on this plugin's textures, buffers and config, and shares its determinism firewall.
         fruit::build(app);
-        // Dev calibration instrument. No-ops unless MYCELIA_MEASURE is set in the environment.
+        // Dev calibration instruments. Both no-op unless their environment variable is set.
         measure::build(app);
+        testbed::build(app);
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than
@@ -850,9 +859,9 @@ mod tests {
             v_fruit: 0.35,
             u_exhausted: 0.30,
             pin_dwell_secs: 6.0,
-            pin_min_spacing: 1.5,
-            max_fruit_bodies: 64,
-            body_scale: 2.5,
+            pin_min_spacing: 3.0,
+            max_fruit_bodies: 40,
+            body_scale: 4.0,
             maintain_v: 0.20,
             motion_threshold_deg_per_s: 0.02,
             screen_fov_deg_v: 30.0,

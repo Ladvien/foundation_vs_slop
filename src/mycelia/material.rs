@@ -120,17 +120,27 @@ pub struct MoldWallExt {
 }
 
 /// Per-body state for the fruit shader. Separate from [`MoldSurfaceParams`] because every mushroom needs
-/// its own copy while the surface dials are shared.
+/// its own copy while the surface dials are shared. `vec2` first, so the following scalar is naturally
+/// aligned and the WGSL struct in `mycelia_fruit.wgsl` matches byte for byte.
 #[derive(Clone, ShaderType)]
 pub struct MoldFruitParams {
-    /// Rate-limited maturity, `0` = egg white, `1` = the death cap's olive pileus. Not `growth`: the albedo
-    /// shift is throttled so it can never complete faster than the slow-change-blindness window (see
+    /// Apex deflection of the stipe, in the body's **object space**, in native-scale metres. Fixed at spawn:
+    /// thigmotropic escape from a wall the cap would otherwise pass through, plus a random lean. The vertex
+    /// shader applies it over the stipe's upper 30% and lets the cap ride rigid and level on top.
+    bend: Vec2,
+    /// The body's growth angle, object space, as a slope. Applied linearly in `y`, so it leans the whole
+    /// stem while leaving the volva seated. Fixed at spawn.
+    tilt: Vec2,
+    /// Rate-limited maturity. `0` = the pale universal veil stretched over a fresh primordium, `1` = the
+    /// mat's own deep flesh showing through an expanded pileus. Not `growth`: the albedo shift is throttled
+    /// so it can never complete faster than the slow-change-blindness window (see
     /// `perceptual::MIN_APPEARANCE_RAMP_SECS`).
     tint: f32,
 }
 
-/// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's hyphal fibre noise, sheen
-/// and cavity AO, and visibly reads as the *same organism* that grew it.
+/// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's palette, hyphal fibre
+/// noise, margin mottle, matte felt roughness, sheen and cavity AO — retuning the mat retunes the mushroom,
+/// and the two visibly read as the *same organism*.
 ///
 /// The mesh's `COLOR_0` is a **part mask**, not artwork: `R` = cap (pileus), `G` = flesh (stipe, gills,
 /// annulus), `B` = volva. Bevy's `StandardMaterial` multiplies base colour by the vertex colour when the
@@ -156,8 +166,15 @@ impl MoldFruitExt {
         display: Handle<Image>,
         control: Handle<Image>,
         tint: f32,
+        bend: Vec2,
+        tilt: Vec2,
     ) -> Self {
-        Self { params: MoldSurfaceParams::new(cfg), display, control, fruit: MoldFruitParams { tint } }
+        Self {
+            params: MoldSurfaceParams::new(cfg),
+            display,
+            control,
+            fruit: MoldFruitParams { bend, tilt, tint },
+        }
     }
 
     /// Publish this body's maturity to its shader. Called by `fruit::tint_fruit_bodies` when it changes.
@@ -173,6 +190,19 @@ impl MoldFruitExt {
 }
 
 impl MaterialExtension for MoldFruitExt {
+    /// The body's stem is bent on the GPU, so this overrides the **vertex** stage as well as the fragment.
+    /// Both entry points live in one file: `vertex` re-applies the glTF morph (which the default mesh vertex
+    /// shader would otherwise have done for us) and then curves the stipe.
+    ///
+    /// `prepass_vertex_shader` is deliberately **not** overridden, and that is safe here rather than
+    /// merely convenient: the scene's directional light sets `shadow_maps_enabled: false` (`world.rs`) and
+    /// no camera carries a `DepthPrepass`/`NormalPrepass`, so the main pass is the only pipeline that ever
+    /// rasterizes this mesh. Turn shadows on and a bent mushroom would cast a straight silhouette — at which
+    /// point this needs a matching prepass vertex shader, not a `NotShadowCaster`.
+    fn vertex_shader() -> ShaderRef {
+        "shaders/mycelia_fruit.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/mycelia_fruit.wgsl".into()
     }
