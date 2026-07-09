@@ -205,8 +205,11 @@ struct GoreFx {
 }
 
 /// A permanent floor stain. Capped in number by [`cap_blood_pools`] via [`PoolRing`].
+///
+/// Public so [`crate::mycelia`] can read pool positions as chemoattractant sources — the mold forages
+/// toward carnage. Its footprint lives in `Transform::scale` (there is no radius field).
 #[derive(Component)]
-struct BloodPool;
+pub struct BloodPool;
 
 
 /// Marker for every physics gib chunk (autogib fragment, flung gun, or meat blob). Motion is owned by

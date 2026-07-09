@@ -37,6 +37,7 @@ use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::ShaderCacheError;
 
+use super::control::MoldControlImage;
 use super::{agents, MoldBuffers, MoldImages, MoldParams, DISPLAY_FORMAT, FIELD_SIZE, WORKGROUP_SIZE};
 
 /// WGSL source for the compute chain (runtime-loaded from `assets/`, like every other shader here).
@@ -112,6 +113,8 @@ fn init_mold_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 // 7: biomass WRITE (storage — this tick's reacted field).
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
+                // 8: control (CPU-written world state: chemo / light / disturbance / walkable).
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
     );
@@ -170,6 +173,7 @@ fn prepare_bind_group(
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
     mold_images: Res<MoldImages>,
     mold_buffers: Res<MoldBuffers>,
+    mold_control: Res<MoldControlImage>,
     params: Res<MoldParams>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
@@ -187,6 +191,11 @@ fn prepare_bind_group(
     let (Some(agent_buf), Some(deposit_buf)) =
         (gpu_buffers.get(&mold_buffers.agents), gpu_buffers.get(&mold_buffers.deposit))
     else {
+        return;
+    };
+    // The control texture is re-uploaded from the main world every `Update`; until its first upload lands
+    // there is nothing for the mold to sense, so we simply don't dispatch.
+    let Some(control) = gpu_images.get(&mold_control.0) else {
         return;
     };
 
@@ -211,6 +220,7 @@ fn prepare_bind_group(
             &uniform,
             &bio_read.texture_view,
             &bio_write.texture_view,
+            &control.texture_view,
         )),
     );
     commands.insert_resource(MoldBindGroup(bind_group));

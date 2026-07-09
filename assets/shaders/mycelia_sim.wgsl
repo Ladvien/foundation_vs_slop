@@ -17,6 +17,7 @@ struct MoldParams {
     world_origin: vec2<f32>,
     world_extent: vec2<f32>,
     field_res: vec2<f32>,
+    control_res: vec2<f32>,
     time: f32,
     agent_count: u32,
     sense_angle: f32,
@@ -34,6 +35,10 @@ struct MoldParams {
     d_v: f32,
     bloom_seed: f32,
     diffuse_weight: f32,
+    photophobia: f32,
+    chemo_gain: f32,
+    disturbance_gain: f32,
+    wall_repel: f32,
 };
 
 // MUST byte-match the `u32` encoding in `src/mycelia/agents.rs` (std430 stride 16).
@@ -51,6 +56,9 @@ struct Agent {
 @group(0) @binding(5) var<uniform> params: MoldParams;
 @group(0) @binding(6) var biomass_read: texture_2d<f32>;
 @group(0) @binding(7) var biomass_write: texture_storage_2d<rgba16float, write>;
+// CPU-written world state, one texel per dungeon cell.
+//   R = chemoattractant (blood, nests) · G = light/gaze · B = disturbance (squad) · A = walkable
+@group(0) @binding(8) var control: texture_2d<f32>;
 
 // Integer hash → uniform f32 in [0,1). Cheap per-agent randomness for the "turn away" case.
 fn hash_u32(x: u32) -> u32 {
@@ -79,6 +87,32 @@ fn trail_at(p: vec2<f32>, dim: i32) -> f32 {
     return textureLoad(trail_read, vec2<i32>(x, y), 0).r;
 }
 
+// Sample the control texture at a float FIELD position. The control texture spans the same world footprint
+// at one texel per dungeon cell, so the field UV maps straight onto it.
+fn control_at(p: vec2<f32>, dim: i32) -> vec4<f32> {
+    let uv = vec2<f32>(f32(wrap_i(i32(floor(p.x)), dim)), f32(wrap_i(i32(floor(p.y)), dim)))
+           / params.field_res;
+    let c = uv * params.control_res;
+    let cx = clamp(i32(c.x), 0, i32(params.control_res.x) - 1);
+    let cy = clamp(i32(c.y), 0, i32(params.control_res.y) - 1);
+    return textureLoad(control, vec2<i32>(cx, cy), 0);
+}
+
+// What an agent's sensor actually perceives at `p`: the scent trail, pulled toward food and pushed away
+// from gaze, footsteps, and the void. All gains are in trail units so they compete directly with scent.
+//
+// This single expression is where the "sentience" lives — foraging (chemo), photophobia + habituation
+// (light, already habituation-attenuated on the CPU), flinching from the squad (disturbance), and staying
+// on the floor (wall_repel).
+fn sense(p: vec2<f32>, dim: i32) -> f32 {
+    let ctl = control_at(p, dim);
+    let attract = ctl.r * params.chemo_gain;
+    let repel = ctl.g * params.photophobia
+              + ctl.b * params.disturbance_gain
+              + (1.0 - ctl.a) * params.wall_repel;
+    return trail_at(p, dim) + attract - repel;
+}
+
 // ── Pass 1: zero the deposit accumulator ─────────────────────────────────────────────────────────────
 @compute @workgroup_size(256, 1, 1)
 fn clear_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -104,13 +138,14 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     let sa = params.sense_angle;
     let sd = params.sense_dist;
 
-    // Three sensors: centre, ahead-left, ahead-right.
+    // Three sensors: centre, ahead-left, ahead-right. They perceive scent *and* the world (food, gaze,
+    // footsteps, walls), so the same Jones steering rule now produces foraging and flinching.
     let dir_c = vec2<f32>(cos(a.heading), sin(a.heading));
     let dir_l = vec2<f32>(cos(a.heading + sa), sin(a.heading + sa));
     let dir_r = vec2<f32>(cos(a.heading - sa), sin(a.heading - sa));
-    let c = trail_at(a.pos + dir_c * sd, dim);
-    let l = trail_at(a.pos + dir_l * sd, dim);
-    let r = trail_at(a.pos + dir_r * sd, dim);
+    let c = sense(a.pos + dir_c * sd, dim);
+    let l = sense(a.pos + dir_l * sd, dim);
+    let r = sense(a.pos + dir_r * sd, dim);
 
     // Jones steering rule.
     var heading = a.heading;
@@ -139,11 +174,14 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     a.heading = heading;
     agents[i] = a;
 
-    // Deposit fixed-point scent at the new texel.
+    // Deposit fixed-point scent at the new texel — but only on walkable floor, so no trail ever accumulates
+    // out in the void (agents that seeded there leave no mark while they steer themselves back to ground).
     let dx = wrap_i(i32(floor(np.x)), dim);
     let dy = wrap_i(i32(floor(np.y)), dim);
-    let idx = u32(dy) * u32(dim) + u32(dx);
-    atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
+    if (control_at(np, dim).a >= 0.5) {
+        let idx = u32(dy) * u32(dim) + u32(dx);
+        atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
+    }
 }
 
 // ── Pass 3: diffuse + decay the trail, fold in deposits, composite the display ───────────────────────
@@ -219,8 +257,12 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // this tick's source field (the freshly-diffused trail lands in `trail_write`), so the bloom trails the
     // veins by exactly one tick — imperceptible, and it avoids a read-after-write on the same texture.
     let trail = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
+    let ctl = control_at(vec2<f32>(f32(x), f32(y)), dim);
     let vein = smoothstep(4.0, 12.0, trail);
-    v += vein * params.bloom_seed * params.dt;
+
+    // Blooms swell in the unseen dark and shrink under a live gaze — the room you just left goes ripe.
+    let dark = 1.0 - ctl.g;
+    v += vein * params.bloom_seed * dark * params.dt;
 
     u = clamp(u, 0.0, 1.0);
     v = clamp(v, 0.0, 1.0);
@@ -233,11 +275,18 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     let sheen = smoothstep(0.5, 3.0, trail);
     let bio = smoothstep(0.10, 0.35, v);
 
+    // The mold conceals its bioluminescence under a direct gaze — glow is strongest in the dark. (Slower
+    // structural retreat comes from the agents themselves fleeing the light; this is the instant flinch.)
+    let conceal = 1.0 - 0.7 * ctl.g;
+
     // Kept deliberately dim: the game's bloom post-process blows out anything brighter, turning the veins
     // into neon tubes rather than a sickly phosphorescence.
-    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins;
+    let glow = vec3<f32>(0.05, 0.22, 0.13) * veins * conceal;
     let flesh = vec3<f32>(0.045, 0.075, 0.055) * bio;
     let grime = vec3<f32>(0.015, 0.035, 0.028) * sheen;
-    let alpha = max(max(veins * 0.80, sheen * 0.22), bio * 0.55);
+
+    // Masked to walkable floor: the coating is on the ground, never floating over the void. The film terms
+    // are held well under the veins so the network stays legible instead of drowning in a flat wash.
+    let alpha = max(max(veins * 0.80, sheen * 0.12), bio * 0.34) * ctl.a;
     textureStore(display, vec2<i32>(x, y), vec4<f32>(glow + flesh + grime, alpha));
 }

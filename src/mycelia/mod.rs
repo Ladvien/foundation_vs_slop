@@ -28,6 +28,7 @@
 //! (arXiv 2212.07906) for the mass-conserving multi-species extension (deferred past v1).
 
 mod agents;
+mod control;
 mod field;
 mod material;
 mod pipeline;
@@ -58,6 +59,15 @@ pub const WORLD_EXTENT: Vec2 = Vec2::splat(192.0);
 /// filterable-sampleable on Metal/wgpu29 (unlike `Rgba32Float`, which is not filterable), so the compute
 /// pass can `textureStore` into it and the floor material can `textureSample` it with linear filtering.
 pub const DISPLAY_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+/// Side length of the CPU-written control texture — one texel per dungeon cell (the dungeon is
+/// `192×192` tiles), which is all the resolution the world-state hooks need.
+pub const CONTROL_SIZE: u32 = 192;
+
+/// Control-texture format. CPU-written each `Update`, compute-read. Channels:
+/// `R` = chemoattractant (blood pools, nests) · `G` = light/gaze repellent (fog-visible cells, attenuated
+/// by habituation) · `B` = disturbance (squad proximity) · `A` = walkable mask (1 on floor, 0 over void).
+pub const CONTROL_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 // ── Physarum tuning (Jones three-sensor model) ─────────────────────────────────────────────────────
 // Distances/angles are in field texels (1024² over 192 m ≈ 5.3 texels/m) and radians. These are the
@@ -117,6 +127,33 @@ const D_V: f32 = 0.08;
 /// network instead of appearing at random.
 const BLOOM_SEED: f32 = 0.06;
 
+// ── Reactivity (the "sentience") ──────────────────────────────────────────────────────────────────────
+// The mold reads the world one-way through the control texture and steers on it. Each gain is expressed in
+// trail units, so it competes directly with the scent an agent senses: an attractant of 6.0 outweighs a
+// mid-strength vein, a repellent of 9.0 overrides even a strong one.
+//
+// Photophobia stands in for Physarum's real light-avoidance; here the fog-of-war "a unit can see this cell"
+// is the light/gaze proxy, since the game has no dynamic lights.
+//
+// The habituation term is grounded in Boisseau, Vogel & Dussutour (2016), "Habituation in non-neural
+// organisms: evidence from slime moulds," Proc. R. Soc. B 283 (10.1098/rspb.2016.0446): P. polycephalum
+// learns to ignore a repeatedly-presented *harmless* repellent (they used quinine/caffeine), showing both
+// responsiveness decline AND spontaneous recovery once the stimulus is withheld. That is exactly the shape
+// of `MoldControl::habituation` — it builds while a cell is watched and decays back when it is not, so a
+// corridor the squad keeps staring down stops scaring the mold, and re-scares it after they leave.
+
+/// How strongly a cell a unit currently *sees* repels agents (fog-of-war as a light/gaze proxy).
+const PHOTOPHOBIA: f32 = 9.0;
+/// How strongly blood pools and nests attract foraging agents.
+const CHEMO_GAIN: f32 = 6.0;
+/// How strongly a squad unit's immediate presence disturbs the mold, scattering agents away.
+const DISTURBANCE_GAIN: f32 = 5.0;
+/// How strongly non-walkable space (the void beyond the floor) repels agents. Rather than hard-blocking
+/// movement — which would strand every agent that happened to seed inside a wall, forever — this makes the
+/// void merely *unattractive*. Agents on the floor hug it and thread down corridors; the few that start in
+/// the void steer themselves onto the nearest floor within a second. One path, self-healing.
+const WALL_REPEL: f32 = 12.0;
+
 /// The mold's field textures. Only `display` crosses to the material; the trail and biomass pairs live
 /// purely to feed the compute chain. All are extracted so `prepare_bind_group` can bind them.
 #[derive(Resource, Clone, ExtractResource)]
@@ -162,6 +199,9 @@ pub struct MoldParams {
     pub world_extent: Vec2,
     /// Field resolution in texels (as float, for UV↔texel math in-shader).
     pub field_res: Vec2,
+    /// Control-texture resolution in texels (one per dungeon cell). Kept with the other `vec2`s so every
+    /// following scalar stays naturally aligned.
+    pub control_res: Vec2,
     /// Seconds since startup — seeds the agent-steering RNG. Advanced on the main world each `Update`.
     pub time: f32,
     /// Active agent count (agents beyond this in the buffer are idle).
@@ -196,6 +236,14 @@ pub struct MoldParams {
     pub bloom_seed: f32,
     /// Lerp factor toward the trail's 3×3 mean each tick (the diffusion rate).
     pub diffuse_weight: f32,
+    /// Repulsion from cells a unit currently sees (control `G`).
+    pub photophobia: f32,
+    /// Attraction to blood pools and nests (control `R`).
+    pub chemo_gain: f32,
+    /// Repulsion from squad proximity (control `B`).
+    pub disturbance_gain: f32,
+    /// Repulsion from non-walkable void (inverse of control `A`).
+    pub wall_repel: f32,
 }
 
 pub struct MyceliaPlugin;
@@ -207,9 +255,10 @@ impl Plugin for MyceliaPlugin {
             ExtractResourcePlugin::<MoldImages>::default(),
             ExtractResourcePlugin::<MoldBuffers>::default(),
             ExtractResourcePlugin::<MoldParams>::default(),
+            ExtractResourcePlugin::<control::MoldControlImage>::default(),
         ))
-        .add_systems(Startup, setup_mycelia)
-        .add_systems(Update, advance_mold_time);
+        .add_systems(Startup, (setup_mycelia, control::setup_control))
+        .add_systems(Update, (advance_mold_time, control::write_control));
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than
@@ -249,6 +298,7 @@ fn setup_mycelia(
         world_origin: WORLD_ORIGIN,
         world_extent: WORLD_EXTENT,
         field_res: Vec2::splat(FIELD_SIZE as f32),
+        control_res: Vec2::splat(CONTROL_SIZE as f32),
         time: 0.0,
         agent_count: agents::AGENT_COUNT,
         sense_angle: SENSE_ANGLE,
@@ -266,6 +316,10 @@ fn setup_mycelia(
         d_v: D_V,
         bloom_seed: BLOOM_SEED,
         diffuse_weight: DIFFUSE_WEIGHT,
+        photophobia: PHOTOPHOBIA,
+        chemo_gain: CHEMO_GAIN,
+        disturbance_gain: DISTURBANCE_GAIN,
+        wall_repel: WALL_REPEL,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the

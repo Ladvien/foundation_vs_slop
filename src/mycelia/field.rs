@@ -9,7 +9,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureUsages};
 
-use super::DISPLAY_FORMAT;
+use super::{CONTROL_FORMAT, DISPLAY_FORMAT};
 
 /// Bytes per texel of [`DISPLAY_FORMAT`] (`Rgba16Float` = 4 channels × 2 bytes). Used to size the
 /// zero-fill backing so the CPU upload matches the texture exactly.
@@ -31,3 +31,24 @@ pub(super) fn field_texture(size: u32) -> Image {
         TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
     image
 }
+
+/// Build the CPU-written control texture (one texel per dungeon cell). Unlike the field textures this one
+/// is *not* storage-written — it is rewritten from the main world each `Update` and only sampled by the
+/// compute chain, so it needs `MAIN_WORLD` asset usage (to keep the CPU-side data around for mutation)
+/// plus `COPY_DST | TEXTURE_BINDING`.
+pub(super) fn control_texture(size: u32) -> Image {
+    let extent = Extent3d { width: size, height: size, depth_or_array_layers: 1 };
+    let bytes = (size as usize) * (size as usize) * CONTROL_BYTES_PER_TEXEL;
+    let mut image = Image::new(
+        extent,
+        TextureDimension::D2,
+        vec![0u8; bytes],
+        CONTROL_FORMAT,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
+    image
+}
+
+/// Bytes per texel of [`CONTROL_FORMAT`] (`Rgba8Unorm`).
+pub(super) const CONTROL_BYTES_PER_TEXEL: usize = 4;
