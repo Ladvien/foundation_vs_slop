@@ -315,11 +315,31 @@
     mycelia: (
         // ── Field geometry. field_size must be a multiple of 8 (the workgroup edge) and <= 4096.
         // This is the dominant perf dial: cost scales with area.
-        // Sim ticks per second. NOT a perf dial — a biology dial. The compute chain used to dispatch once
-        // per rendered frame, so at 60fps agents crossed ~11 world units/sec and Gray-Scott took 60 reaction
-        // steps/sec. That is a flow rate: the mold read as a river of liquid no matter how it was shaded.
-        // Growth should be alien-fast, not fluid.
-        sim_hz: 6.0,
+        // Sim ticks per second. NOT a perf dial — a biology dial, and the ONE dial that sets how fast the
+        // mold visibly grows: every velocity in the chain (agent step, Gray-Scott advance) is per-tick, so
+        // they all scale with it. The chain used to dispatch once per rendered frame, so at 60fps agents
+        // crossed ~11 world units/sec and Gray-Scott took 60 reaction steps/sec — a flow rate, which is why
+        // the mold read as a river of liquid no matter how it was shaded.
+        //
+        // This value is MEASURED, not chosen. `src/mycelia/measure.rs` reads the display texture back and
+        // computes the biomass margin's normal speed by the level-set formula |dV/dt| / |grad V| — the
+        // velocity of the contour the eye actually tracks. The budget is the object-relative motion
+        // threshold: perceptual::v_max at MIN_ZOOM = 3.33 mm/s (Leibowitz 1955, 10.1364/josa.45.000829).
+        //
+        //     MYCELIA_MEASURE=1 cargo run
+        //
+        // At matched colony maturity (~66,000 texels covered, 450 ticks in):
+        //
+        //     sim_hz 6.0  ->  23.1  mm/s   6.9x OVER budget
+        //     sim_hz 3.0  ->  11.2  mm/s   3.4x OVER
+        //     sim_hz 1.5  ->   2.92 mm/s   0.88x  <- just below the threshold. Ship this.
+        //
+        // So the mold was ~7x too fast to be invisible, not too slow: the "river of liquid" was still
+        // flowing at 6 Hz, only more slowly. Raise this and the mold visibly creeps; lower it and you give
+        // away growth the player would never have noticed. `decay`/`deposit_amount` are deliberately NOT
+        // part of the fix — the binding constraint is the Gray-Scott margin, not the Physarum trail churn,
+        // and the trail settled along with the clock.
+        sim_hz: 1.5,
         field_size: 1024,       // texels across the 192 m footprint (~5.3 texels/tile)
         agent_count: 55000,     // sparse on purpose: channels form, rather than flooding to saturation
 
@@ -401,5 +421,40 @@
         // normals entirely. Without a cavity-occlusion term the filaments render flat however hard the
         // normal is perturbed. This is the dial that actually makes the strands visible.
         ao_strength: 0.75,      // cavity AO written into pbr_input.diffuse_occlusion
+
+        // ── Fruiting (src/mycelia/fruit.rs). Where the mat has grown thick and eaten its substrate, in the
+        // dark, a death cap erupts. Gray-Scott already integrates both halves of the real trigger: V is the
+        // biomass, U the substrate it consumes, and Agaricomycetes fruit on critical mycelial mass PLUS
+        // nutrient exhaustion (Zhang 2015, 10.1371/journal.pone.0123025). So the condition needed no new
+        // state — it was being computed on the GPU every tick already.
+        //
+        // Primary hyphal knots form in the DARK; the transition out of them is LIGHT-induced (Liu 2006,
+        // 10.1534/genetics.105.045542). The fog is the light proxy, as it already is for photophobia: a pin
+        // commits only in a room the squad has explored and then LEFT, and the universal veil will not
+        // rupture until a unit looks at it again. The mold hides from you; its fruit body wants an audience.
+        v_fruit: 0.35,          // biomass V above which a texel may pin. Must leave room for u_exhausted:
+        u_exhausted: 0.30,      // ...their sum must be <= 1.0 or no texel can ever satisfy both at once
+        pin_dwell_secs: 6.0,    // how long both must hold, unwatched, before the primordium commits
+        pin_min_spacing: 1.5,   // world units between bodies. Neighbouring knots starve each other out
+                                // (primordium abortion; Kües & Navarro-González 2015, 10.1016/j.fbr.2015.05.001)
+        max_fruit_bodies: 64,   // hard budget; hitting it is logged, never silently ignored
+        body_scale: 2.5,        // the mesh is a true-to-life 13.9 cm; 2.5 makes it knee-high on a unit
+        maintain_v: 0.20,       // below this the patch has collapsed and the body reabsorbs, running its
+                                // growth clock backwards. Must sit below v_fruit.
+
+        // ── Perception budget (src/mycelia/perceptual.rs). The mold grows AS FAST AS IT CAN while staying
+        // under the human motion-detection threshold. Because the camera is orthographic, world->angle is a
+        // constant and the whole budget is one division:
+        //
+        //     v_max(world units/sec) = motion_threshold_deg_per_s * viewport_height / screen_fov_deg_v
+        //
+        // evaluated against the LIVE zoom, so growth runs ~7x faster zoomed out (22.7 mm/s) than zoomed all
+        // the way in (3.33 mm/s) — which is exactly as fast as the eye permits at each. This gates only
+        // AUTONOMOUS motion; a crab eating a mushroom is meant to be seen, and is exempt.
+        motion_threshold_deg_per_s: 0.02, // 1.2 arcmin/s. The object-relative threshold — the strict one,
+                                          // because the mold always sits beside a stationary floor edge
+                                          // (Leibowitz 1955, 10.1364/josa.45.000829; Nakayama 1985,
+                                          // 10.1016/0042-6989(85)90171-3)
+        screen_fov_deg_v: 30.0,           // vertical visual angle of the window: a 27" panel at ~60 cm
     ),
 )

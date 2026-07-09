@@ -2,7 +2,7 @@
 //!
 //! Every field texture is square, `Rgba16Float`, and usable as **both** a compute storage-write target and
 //! a sampled/loaded texture (the trail ping-pong alternates between the two roles each frame), so they all
-//! carry `STORAGE_BINDING | TEXTURE_BINDING | COPY_DST`. They are created **zero-filled** (not
+//! carry `STORAGE_BINDING | TEXTURE_BINDING | COPY_DST | COPY_SRC`. They are created **zero-filled** (not
 //! `new_uninit`) so the very first simulation tick reads a clean field instead of undefined GPU memory.
 
 use bevy::asset::RenderAssetUsages;
@@ -27,8 +27,12 @@ pub(super) fn field_texture(size: u32) -> Image {
         DISPLAY_FORMAT,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage =
-        TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+    // `COPY_SRC` is what lets `measure.rs` read the display texture back to the CPU for calibration. It
+    // costs nothing when unused (a usage flag, not an allocation) and wgpu rejects the copy without it.
+    image.texture_descriptor.usage = TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC
+        | TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING;
     image
 }
 
