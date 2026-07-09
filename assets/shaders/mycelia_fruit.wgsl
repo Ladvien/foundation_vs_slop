@@ -49,6 +49,7 @@ struct MoldSurfaceParams {
 // putting the scalar after it costs no padding.
 struct MoldFruitParams {
     bend: vec2<f32>,
+    tilt: vec2<f32>,
     tint: f32,
 };
 
@@ -110,6 +111,12 @@ const SKIRT_HEIGHT: f32 = 0.06;
 // perceptual speed limit on the CPU (`perceptual::STAGE_BEND_FRACTION`), so a leaning mushroom grows
 // slower rather than swinging over where you can see it.
 //
+// `tilt` is the other half, and a different animal: a LINEAR term, `tilt * y`, so it leans the whole stem
+// from the ground up rather than curving its top. It is the body's growth angle. At `y = 0` it contributes
+// nothing, so the volva stays seated on the floor no matter how far off plumb the stem grew — which is why
+// this is a vertex displacement and not a rotation of the entity. Its drift is likewise charged to the
+// speed limit (`perceptual::STAGE_HEIGHT_DELTA`).
+//
 // MUST match `BEND_LO_M` / `BEND_HI_M` in `src/mycelia/perceptual.rs`, which budgets for this exact curve.
 const BEND_LO: f32 = 0.0891;
 const BEND_HI: f32 = 0.1180;
@@ -162,16 +169,19 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     var vertex = vertex_no_morph;
 #endif
 
-    // Curve the stipe. Object space, so this is independent of the body's yaw and scale.
+    // Lean the stem (linear) and curve its top (the bend profile). Object space, so both are independent of
+    // the body's yaw and scale.
     let b = vec3<f32>(fruit.bend.x, 0.0, fruit.bend.y);
+    let t = vec3<f32>(fruit.tilt.x, 0.0, fruit.tilt.y);
     let y = vertex.position.y;
-    vertex.position = vertex.position + b * bend_profile(y);
+    vertex.position = vertex.position + t * y + b * bend_profile(y);
 
 #ifdef VERTEX_NORMALS
-    // The displacement d(y) = b * p(y) shears the surface, so the normal must tilt with it. For
-    // J = I + p'(y) * b (x) e_y^T, the inverse transpose is I - p'(y) * e_y (x) b^T to first order, which
-    // touches only the normal's Y component. Skipping this leaves the lighting flat on a visibly bent stem.
-    let shear = bend_slope(y) * dot(b.xz, vertex.normal.xz);
+    // The displacement d(y) = t*y + b*p(y) shears the surface, so the normal must tilt with it. For
+    // J = I + d'(y) (x) e_y^T, the inverse transpose is I - e_y (x) d'(y)^T to first order, which touches
+    // only the normal's Y component. Skipping this leaves the lighting flat on a visibly bent stem.
+    let slope = t + b * bend_slope(y);
+    let shear = dot(slope.xz, vertex.normal.xz);
     vertex.normal = normalize(vertex.normal - vec3<f32>(0.0, shear, 0.0));
 #endif
 

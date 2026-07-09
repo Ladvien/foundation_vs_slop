@@ -39,6 +39,7 @@ mod material;
 mod measure;
 pub mod perceptual;
 mod pipeline;
+mod testbed;
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -595,8 +596,9 @@ impl Plugin for MyceliaPlugin {
         // Fruit bodies: the mold reproducing. Registered here (not as a separate plugin) because it depends
         // on this plugin's textures, buffers and config, and shares its determinism firewall.
         fruit::build(app);
-        // Dev calibration instrument. No-ops unless MYCELIA_MEASURE is set in the environment.
+        // Dev calibration instruments. Both no-op unless their environment variable is set.
         measure::build(app);
+        testbed::build(app);
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than

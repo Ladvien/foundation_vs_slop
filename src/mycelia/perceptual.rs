@@ -126,6 +126,48 @@ pub const BEND_HI_M: f32 = 0.1180;
 /// the entire morph.
 pub const MAX_BEND_M: f32 = 0.35 * ADULT_HEIGHT_M;
 
+/// Hard ceiling on a body's **tilt**: horizontal drift per unit of height, so `0.22` is a lean of
+/// `atan(0.22)` ≈ 12.4°. Drawn uniformly, so a flush averages about 6° off plumb — enough that no two
+/// mushrooms read as the same model at different growth stages, which is exactly what they did at 9°. Unlike the bend this is a *linear* term, applied from the ground up, so it is the
+/// body's overall growth angle rather than a curve in its stem — the volva stays seated because the
+/// displacement is zero at `y = 0`.
+///
+/// The youngest fruit-body initials grow perpendicular to their substratum, and negative gravitropism only
+/// takes over later (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x); no stem ends up exactly plumb.
+pub const MAX_TILT: f32 = 0.22;
+
+/// `|Δheight|` across each morph segment, metres at native scale, from [`STAGE_HEIGHT_M`]. A tilted body's
+/// apex drifts sideways by `tilt × Δheight` as it grows, which is vertex travel the speed limit must charge
+/// for exactly as it charges for the bend.
+pub const STAGE_HEIGHT_DELTA: [f32; 6] = [0.0001, 0.0143, 0.0306, 0.0259, 0.0153, 0.0048];
+
+/// The adult body's silhouette: the largest radius (metres, native scale) found in each of 16 equal slices
+/// of `[0, ADULT_HEIGHT_M]`. Read straight off the shipped `.glb`, taking the maximum `hypot(x, z)` per
+/// slice and linearly interpolating the slices that fall between vertex rings.
+///
+/// This is what makes wall clearance solvable rather than guessed. Two facts fall out of it:
+///
+/// - Everything wide is high. The 5.60 cm cap lives in the top three slices, where [`bend_profile`] has
+///   saturated at `1.0` — so a bend moves it one-for-one.
+/// - The widest thing that **cannot** be bent (`bend_profile < 0.05`) is the volva, at 2.30 cm. The annulus
+///   at 9.14 cm is only 1.24 cm across.
+///
+/// So a body's base must clear 2.30 cm of wall and no more, and its cap — four times wider — is carried
+/// clear by curving the stem. A keep-out radius sized for the cap would have banished mushrooms from
+/// exactly the damp skirting where the mold pools and a real flush appears.
+pub const RADIUS_PROFILE: [f32; 16] = [
+    0.0184, 0.0225, 0.0230, 0.0142, 0.0123, 0.0106, 0.0099, 0.0092, 0.0082, 0.0103, 0.0124, 0.0088,
+    0.0070, 0.0560, 0.0533, 0.0396,
+];
+
+/// Centre height (metres, native scale) of `RADIUS_PROFILE[i]`.
+pub fn radius_slice_height(i: usize) -> f32 {
+    (i as f32 + 0.5) * ADULT_HEIGHT_M / RADIUS_PROFILE.len() as f32
+}
+
+/// Below this, [`bend_profile`] is too weak to move a ring meaningfully — the base must clear it instead.
+pub const BENDABLE_MIN_PROFILE: f32 = 0.05;
+
 /// What fraction of a body's total bend is laid down during each morph segment.
 ///
 /// The bend is a function of the stipe's *height*, so it develops as the stipe grows through
@@ -174,13 +216,16 @@ pub fn segment_index(growth: f32) -> usize {
     (0..6).find(|&k| g <= STAGE_T[k + 1]).unwrap_or(5)
 }
 
-/// The vertex travel charged to segment `k`, metres at native scale: the morph's own chord plus whatever
-/// share of the stipe's bend is laid down while `growth` crosses that segment.
+/// The vertex travel charged to segment `k`, metres at native scale: the morph's own chord, plus the share
+/// of the stipe's bend laid down while `growth` crosses that segment, plus the sideways drift a tilted body
+/// accumulates as it grows taller.
 ///
-/// The two displacements need not point the same way, so their sum is an **upper bound** on the fastest
+/// The three displacements need not point the same way, so their sum is an **upper bound** on the fastest
 /// vertex's travel (triangle inequality). Bounding it is exactly what the speed limit needs.
-fn segment_travel(k: usize, bend_m: f32) -> f32 {
-    STAGE_MAX_DISP[k] + STAGE_BEND_FRACTION[k] * bend_m.abs().min(MAX_BEND_M)
+fn segment_travel(k: usize, bend_m: f32, tilt: f32) -> f32 {
+    STAGE_MAX_DISP[k]
+        + STAGE_BEND_FRACTION[k] * bend_m.abs().min(MAX_BEND_M)
+        + STAGE_HEIGHT_DELTA[k] * tilt.abs().min(MAX_TILT)
 }
 
 /// `d(growth)/dt` that holds the fastest-moving vertex at exactly `v_max`.
@@ -193,25 +238,25 @@ fn segment_travel(k: usize, bend_m: f32) -> f32 {
 /// dgrowth/dt       = (STAGE_T[k+1] - STAGE_T[k]) / segment_duration
 /// ```
 ///
-/// `bend_m` is the body's apex deflection in **native-scale metres** (see [`MAX_BEND_M`]). A bent mushroom
-/// therefore grows *slower* through the segment where its stipe curves — which is both what the eye
-/// requires and, pleasingly, what the stem is actually doing: the same growth resources are being spent on
-/// curvature instead of extension (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x).
+/// `bend_m` is the body's apex deflection in **native-scale metres** (see [`MAX_BEND_M`]); `tilt` is its
+/// growth angle as a slope (see [`MAX_TILT`]). A bent or leaning mushroom therefore grows *slower* — which
+/// is both what the eye requires and, pleasingly, what the stem is actually doing: the same growth resources
+/// are being spent on curvature instead of extension (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x).
 ///
 /// Always finite: every entry of [`STAGE_MAX_DISP`] is strictly positive, and `body_scale` is validated
 /// `> 0`. The returned rate is unsigned — callers apply the biology gate (which may be negative, when a
 /// primordium aborts or something takes a bite).
-pub fn growth_rate(growth: f32, body_scale: f32, bend_m: f32, v_max: f32) -> f32 {
+pub fn growth_rate(growth: f32, body_scale: f32, bend_m: f32, tilt: f32, v_max: f32) -> f32 {
     let k = segment_index(growth);
     let span = STAGE_T[k + 1] - STAGE_T[k];
-    let duration = segment_travel(k, bend_m) * body_scale / v_max;
+    let duration = segment_travel(k, bend_m, tilt) * body_scale / v_max;
     span / duration
 }
 
 /// Seconds for one body to go from sealed egg to adult at a fixed `v_max`, ignoring the emergence rise.
 /// Only used for diagnostics and tests — the live clock re-evaluates `v_max` every frame against the zoom.
-pub fn egg_to_adult_secs(body_scale: f32, bend_m: f32, v_max: f32) -> f32 {
-    (0..6).map(|k| segment_travel(k, bend_m) * body_scale / v_max).sum()
+pub fn egg_to_adult_secs(body_scale: f32, bend_m: f32, tilt: f32, v_max: f32) -> f32 {
+    (0..6).map(|k| segment_travel(k, bend_m, tilt) * body_scale / v_max).sum()
 }
 
 /// `growth` in `[0,1]` → the six morph-target weights, in target order (`grow_012 … grow_100`).
@@ -256,25 +301,30 @@ mod tests {
         // Straight body and maximally bent body alike: the bend's travel is charged to the budget, so a
         // leaning mushroom must simply take longer, never move faster.
         for bend in [0.0, 0.5 * MAX_BEND_M, MAX_BEND_M] {
-            for steps in 0..=32u32 {
-                let viewport = MIN_ZOOM + (MAX_ZOOM - MIN_ZOOM) * (steps as f32 / 32.0);
-                let budget = v_max(THRESH, FOV, viewport);
-                for k in 0..6 {
-                    // Sample strictly inside the segment so `segment_index` lands on `k`.
-                    let g = STAGE_T[k] + 0.5 * (STAGE_T[k + 1] - STAGE_T[k]);
-                    assert_eq!(segment_index(g), k, "sample fell outside segment {k}");
+            for tilt in [0.0, MAX_TILT] {
+                for steps in 0..=16u32 {
+                    let viewport = MIN_ZOOM + (MAX_ZOOM - MIN_ZOOM) * (steps as f32 / 16.0);
+                    let budget = v_max(THRESH, FOV, viewport);
+                    for k in 0..6 {
+                        // Sample strictly inside the segment so `segment_index` lands on `k`.
+                        let g = STAGE_T[k] + 0.5 * (STAGE_T[k + 1] - STAGE_T[k]);
+                        assert_eq!(segment_index(g), k, "sample fell outside segment {k}");
 
-                    let rate = growth_rate(g, SHIPPED_SCALE, bend, budget);
-                    let span = STAGE_T[k + 1] - STAGE_T[k];
-                    // The worst vertex travels the morph chord PLUS its share of the bend.
-                    let travel = STAGE_MAX_DISP[k] + STAGE_BEND_FRACTION[k] * bend;
-                    let vertex_speed = travel * SHIPPED_SCALE * rate / span;
+                        let rate = growth_rate(g, SHIPPED_SCALE, bend, tilt, budget);
+                        let span = STAGE_T[k + 1] - STAGE_T[k];
+                        // The worst vertex travels the morph chord PLUS its share of the bend PLUS the
+                        // sideways drift of a tilted stem growing taller.
+                        let travel = STAGE_MAX_DISP[k]
+                            + STAGE_BEND_FRACTION[k] * bend
+                            + STAGE_HEIGHT_DELTA[k] * tilt;
+                        let vertex_speed = travel * SHIPPED_SCALE * rate / span;
 
-                    assert!(
-                        vertex_speed <= budget * (1.0 + 1e-4),
-                        "segment {k}, bend {bend}, viewport {viewport}: vertex {vertex_speed} m/s \
-                         exceeds budget {budget} m/s",
-                    );
+                        assert!(
+                            vertex_speed <= budget * (1.0 + 1e-4),
+                            "segment {k}, bend {bend}, tilt {tilt}, viewport {viewport}: vertex \
+                             {vertex_speed} m/s exceeds budget {budget} m/s",
+                        );
+                    }
                 }
             }
         }
@@ -325,20 +375,53 @@ mod tests {
     #[test]
     fn bending_costs_time_only_where_the_stipe_curves() {
         let budget = v_max(THRESH, FOV, MIN_ZOOM);
-        let straight = egg_to_adult_secs(SHIPPED_SCALE, 0.0, budget);
-        let bent = egg_to_adult_secs(SHIPPED_SCALE, MAX_BEND_M, budget);
+        let straight = egg_to_adult_secs(SHIPPED_SCALE, 0.0, 0.0, budget);
+        let bent = egg_to_adult_secs(SHIPPED_SCALE, MAX_BEND_M, 0.0, budget);
         assert!(bent > straight, "a bent stem must take longer: {bent} vs {straight}");
 
         // Segments 0, 1, 4, 5 lay down no bend, so their rate is untouched.
         for k in [0usize, 1, 4, 5] {
             let g = STAGE_T[k] + 0.5 * (STAGE_T[k + 1] - STAGE_T[k]);
-            let a = growth_rate(g, SHIPPED_SCALE, 0.0, budget);
-            let b = growth_rate(g, SHIPPED_SCALE, MAX_BEND_M, budget);
+            let a = growth_rate(g, SHIPPED_SCALE, 0.0, 0.0, budget);
+            let b = growth_rate(g, SHIPPED_SCALE, MAX_BEND_M, 0.0, budget);
             assert!((a - b).abs() < 1e-6, "segment {k} should be unaffected by bend");
         }
         // Segment 3 carries 94% of it, so it slows markedly.
         let g3 = STAGE_T[3] + 0.5 * (STAGE_T[4] - STAGE_T[3]);
-        assert!(growth_rate(g3, SHIPPED_SCALE, MAX_BEND_M, budget) < 0.6 * growth_rate(g3, SHIPPED_SCALE, 0.0, budget));
+        assert!(
+            growth_rate(g3, SHIPPED_SCALE, MAX_BEND_M, 0.0, budget)
+                < 0.6 * growth_rate(g3, SHIPPED_SCALE, 0.0, 0.0, budget)
+        );
+    }
+
+    /// The clearance design rests entirely on this: everything wide is high enough to be bent away, and the
+    /// only thing that cannot be bent is the volva. If a future asset put a wide ring low on the stem, a
+    /// bend could never clear it and the base nudge would have to grow to match.
+    #[test]
+    fn everything_wide_is_high_enough_to_bend_away() {
+        let unbendable_max = RADIUS_PROFILE
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| bend_profile(radius_slice_height(*i)) < BENDABLE_MIN_PROFILE)
+            .map(|(_, r)| *r)
+            .fold(0.0f32, f32::max);
+        assert!(
+            (unbendable_max - VOLVA_RADIUS_M).abs() < 1e-3,
+            "the widest unbendable ring should be the volva, got {unbendable_max}",
+        );
+
+        // ...and the cap, four times wider, sits where the profile has fully saturated.
+        let cap_slices: Vec<usize> = RADIUS_PROFILE
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| **r > 0.05)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!cap_slices.is_empty());
+        for i in cap_slices {
+            let p = bend_profile(radius_slice_height(i));
+            assert!(p > 0.99, "cap slice {i} sits at profile {p}, a bend could not carry it clear");
+        }
     }
 
     /// The cap overhangs the volva by 4x. That gap is the whole reason a mushroom whose base clears a wall
@@ -372,7 +455,7 @@ mod tests {
         assert!((travel - 0.1140).abs() < 1e-4, "travel = {travel}");
 
         // At the shipped body_scale of 4.0: 0.1140 m x 4 = 45.6 cm of vertex travel, for a straight body.
-        let secs = |viewport| egg_to_adult_secs(SHIPPED_SCALE, 0.0, v_max(THRESH, FOV, viewport));
+        let secs = |viewport| egg_to_adult_secs(SHIPPED_SCALE, 0.0, 0.0, v_max(THRESH, FOV, viewport));
         assert!((secs(MIN_ZOOM) - 136.8).abs() < 1.0, "max zoom-in: {}", secs(MIN_ZOOM));
         assert!((secs(12.0) - 57.0).abs() < 1.0, "startup zoom: {}", secs(12.0));
         assert!((secs(MAX_ZOOM) - 20.1).abs() < 1.0, "max zoom-out: {}", secs(MAX_ZOOM));
@@ -428,7 +511,7 @@ mod tests {
         let budget = v_max(THRESH, FOV, MIN_ZOOM);
         let rate = |k: usize| {
             let g = STAGE_T[k] + 0.5 * (STAGE_T[k + 1] - STAGE_T[k]);
-            growth_rate(g, SHIPPED_SCALE, 0.0, budget)
+            growth_rate(g, SHIPPED_SCALE, 0.0, 0.0, budget)
         };
         let rates: Vec<f32> = (0..6).map(rate).collect();
         let slowest = rates.iter().copied().fold(f32::INFINITY, f32::min);

@@ -128,6 +128,9 @@ pub struct MoldFruitParams {
     /// thigmotropic escape from a wall the cap would otherwise pass through, plus a random lean. The vertex
     /// shader applies it over the stipe's upper 30% and lets the cap ride rigid and level on top.
     bend: Vec2,
+    /// The body's growth angle, object space, as a slope. Applied linearly in `y`, so it leans the whole
+    /// stem while leaving the volva seated. Fixed at spawn.
+    tilt: Vec2,
     /// Rate-limited maturity. `0` = the pale universal veil stretched over a fresh primordium, `1` = the
     /// mat's own deep flesh showing through an expanded pileus. Not `growth`: the albedo shift is throttled
     /// so it can never complete faster than the slow-change-blindness window (see
@@ -164,12 +167,13 @@ impl MoldFruitExt {
         control: Handle<Image>,
         tint: f32,
         bend: Vec2,
+        tilt: Vec2,
     ) -> Self {
         Self {
             params: MoldSurfaceParams::new(cfg),
             display,
             control,
-            fruit: MoldFruitParams { bend, tint },
+            fruit: MoldFruitParams { bend, tilt, tint },
         }
     }
 

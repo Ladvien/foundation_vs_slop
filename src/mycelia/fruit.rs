@@ -64,8 +64,9 @@ use crate::fog::FogGrid;
 use super::material::{MoldFruitExt, MoldFruitMaterial};
 use super::control::{self, MoldControlImage};
 use super::perceptual::{
-    growth_rate, stage_weights, v_max, ADULT_HEIGHT_M, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M,
-    MIN_APPEARANCE_RAMP_SECS, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
+    bend_profile, growth_rate, radius_slice_height, stage_weights, v_max, ADULT_HEIGHT_M,
+    BENDABLE_MIN_PROFILE, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
+    RADIUS_PROFILE, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
 };
 use super::{MoldImages, MyceliaConfig, COARSE_SIZE, WORLD_EXTENT, WORLD_ORIGIN};
 
@@ -115,6 +116,14 @@ pub struct FruitBody {
     /// of a wall its 9 cm volva already clears — and a per-body random lean, because no two stems in a
     /// flush grow alike.
     pub bend: Vec2,
+    /// The body's **growth angle**, as a slope in its own object space: horizontal drift per unit of height.
+    /// A *linear* term, so it leans the whole stem from the ground up while leaving the volva seated at
+    /// `y = 0`. Distinct from [`FruitBody::bend`], which is a *curve* confined to the stipe's upper third —
+    /// together they are a stem that grew off-plumb and then turned away from what it touched.
+    ///
+    /// The youngest fruit-body initials grow perpendicular to their substratum, and negative gravitropism
+    /// only asserts itself later (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x). No stem ends up plumb.
+    pub tilt: Vec2,
 }
 
 impl FruitBody {
@@ -192,6 +201,13 @@ pub struct PinDwell(HashMap<usize, f32>);
 /// The loaded death cap scene. Loaded once at startup; `WorldAssetRoot` instantiates it asynchronously.
 #[derive(Resource)]
 pub struct DeathCapScene(Handle<WorldAsset>);
+
+impl DeathCapScene {
+    /// A clone of the scene handle, for anything that spawns a body outside the normal pin path.
+    pub fn handle(&self) -> Handle<WorldAsset> {
+        self.0.clone()
+    }
+}
 
 pub(super) fn build(app: &mut App) {
     app.init_resource::<MoldCoarse>()
@@ -273,89 +289,221 @@ fn hash01(x: u64) -> f32 {
 /// How many rays the wall probe casts around a candidate site.
 const PROBE_RAYS: usize = 24;
 /// Step along each probe ray, world units. Well under `WALL_THICKNESS`, so a slab can never be stepped over.
-const PROBE_STEP: f32 = 0.03;
-/// Breathing room between the volva and the wall face it is nudged clear of, world units.
-const VOLVA_MARGIN: f32 = 0.02;
+const PROBE_STEP: f32 = 0.01;
+/// Angular samples around the body when testing its silhouette against the walls.
+const SILHOUETTE_ANGLES: usize = 16;
+/// How far a buried silhouette sample will march before giving up, world units.
+const MARCH_MAX: f32 = 0.6;
+/// Clearance left between the body and the wall face it was pushed off, world units. Zero would leave the
+/// cap's rim exactly coplanar with the slab, which reads as clipping the moment anything is interpolated.
+const WALL_MARGIN: f32 = 0.03;
+/// How many times `plan_body` will back the base off and re-solve before giving the site up.
+const RESEAT_ATTEMPTS: usize = 4;
 /// Peak random lean, as a fraction of adult height — the natural crookedness of a stem with nothing to
 /// avoid. Small: real stipes are near-vertical (negatively gravitropic), just never perfectly so.
 const LEAN_FRACTION: f32 = 0.18;
 /// Per-body size jitter, ±this fraction of `body_scale`. A flush is not a set of clones.
 const SCALE_JITTER: f32 = 0.18;
 
-/// What the geometry around a candidate site demands of a stem planted there.
-struct WallEscape {
-    /// Unit direction away from the nearest solid, or zero if nothing is within reach.
-    away: Vec2,
-    /// Distance (world units) to the nearest solid along any probe ray; infinite in the open.
-    nearest: f32,
+/// Everything a body's pose needs, worked out once at spawn.
+pub struct BodyPlan {
+    /// Where the volva actually sits, world XZ.
+    pub base: Vec2,
+    /// Apex deflection of the curving stem, world XZ, native-scale metres (i.e. pre-`scale`).
+    pub bend: Vec2,
+    /// Growth angle as a slope, world XZ: horizontal drift per unit height.
+    pub tilt: Vec2,
 }
 
-/// Probe the solid geometry around `site` and work out which way a stem there would have to lean.
-///
-/// Casts [`PROBE_RAYS`] rays and marches each until it hits a wall slab or rock. Each hit pushes back with
-/// a weight equal to how far it intrudes inside the cap's radius, so a stem in a corner leans out along the
-/// diagonal and a stem in the open leans nowhere. It reads the *slab band* — not the cell boundary —
-/// through `control::solid_at_world`, so the direction it returns points away from the surface the player
-/// actually sees.
-fn wall_escape(dungeon: &Dungeon, site: Vec2, cap_radius: f32) -> WallEscape {
-    let reach = cap_radius + PROBE_STEP;
+/// Unit direction away from the nearest solid within `reach` of `site`, and how far that solid is.
+fn wall_escape(dungeon: &Dungeon, site: Vec2, reach: f32) -> (Vec2, f32) {
     let mut push = Vec2::ZERO;
     let mut nearest = f32::INFINITY;
-
     for i in 0..PROBE_RAYS {
-        let angle = std::f32::consts::TAU * (i as f32) / (PROBE_RAYS as f32);
-        let dir = Vec2::from_angle(angle);
-
+        let dir = Vec2::from_angle(std::f32::consts::TAU * (i as f32) / (PROBE_RAYS as f32));
         let mut r = PROBE_STEP;
         while r <= reach {
             if control::solid_at_world(dungeon, site + dir * r) {
                 nearest = nearest.min(r);
-                // Weight by intrusion: a slab grazing the cap's rim barely steers; one under the stipe
-                // steers hard.
-                push -= dir * (cap_radius - r).max(0.0);
+                // Weight by intrusion, so a slab under the stipe steers harder than one grazing the rim.
+                push -= dir * (reach - r);
                 break;
             }
             r += PROBE_STEP;
         }
     }
-
-    WallEscape { away: push.normalize_or_zero(), nearest }
+    (push.normalize_or_zero(), nearest)
 }
 
-/// Where a body planted near `site` should actually stand, and how far its apex should lean, in **world**
-/// XZ metres.
+/// How far `p` must travel along `away` to leave solid matter and gain [`WALL_MARGIN`]. Zero if it is
+/// already clear.
+fn march_out(dungeon: &Dungeon, p: Vec2, away: Vec2) -> f32 {
+    if away == Vec2::ZERO {
+        return 0.0;
+    }
+    let mut d = 0.0;
+    while d <= MARCH_MAX {
+        if !control::solid_at_world(dungeon, p + away * d) {
+            // Keep going until the margin is also clear, so the rim never rests on the face.
+            let mut m = d;
+            while m <= d + WALL_MARGIN {
+                if control::solid_at_world(dungeon, p + away * m) {
+                    break;
+                }
+                m += PROBE_STEP;
+            }
+            if m > d + WALL_MARGIN {
+                return d + WALL_MARGIN;
+            }
+        }
+        d += PROBE_STEP;
+    }
+    MARCH_MAX
+}
+
+/// Deepest push, along `away`, needed by any silhouette sample in the given profile band.
 ///
-/// Thigmotropism first: if the cap would overhang a slab, the stem curves out by exactly the overhang.
-/// Then a per-body random lean on top, so no two stems match. The two are clamped together, because a stem
-/// bent past [`MAX_BEND_M`] reads as snapped rather than curved.
+/// Samples the **adult** silhouette (`RADIUS_PROFILE`) — the widest the body will ever be — displaced by the
+/// pose it is being asked to hold. `select` picks which bands to consider: the rings a bend can move, or the
+/// rings it cannot.
+fn deepest_push(
+    dungeon: &Dungeon,
+    base: Vec2,
+    scale: f32,
+    tilt: Vec2,
+    bend: Vec2,
+    away: Vec2,
+    bendable: bool,
+) -> f32 {
+    let mut worst = 0.0f32;
+    for (i, &radius) in RADIUS_PROFILE.iter().enumerate() {
+        let y = radius_slice_height(i);
+        let p = bend_profile(y);
+        if (p >= BENDABLE_MIN_PROFILE) != bendable {
+            continue;
+        }
+        let centre = base + (tilt * y + bend * p) * scale;
+        for a in 0..SILHOUETTE_ANGLES {
+            let dir = Vec2::from_angle(std::f32::consts::TAU * (a as f32) / (SILHOUETTE_ANGLES as f32));
+            let sample = centre + dir * (radius * scale);
+            if control::solid_at_world(dungeon, sample) {
+                let push = march_out(dungeon, sample, away);
+                // A bendable ring is moved by `bend * p`, so it needs `push / p` of bend to clear.
+                worst = worst.max(if bendable { push / p } else { push });
+            }
+        }
+    }
+    worst
+}
+
+/// Work out where a body near `site` can actually stand, how its stem must curve, and which way it leans.
+/// Returns `None` when no pose seats the body clear of the geometry.
 ///
-/// The base nudge is a separate, purely geometric thing: a volva cannot occupy rock. It fires only when the
-/// site sits closer than the sac's own radius to a wall, and moves the body by at most that radius. It is
-/// *not* a keep-out rule — a mushroom may still grow with its sac against the skirting, which is precisely
-/// where the mold pools (`wall_affinity`). Only the cap is carried clear, and by bending.
-fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u64) -> (Vec2, Vec2) {
+/// This is a **clearance solve against the real silhouette**, not a heuristic push, and it **verifies its own
+/// answer** before returning it. Both halves were learned the hard way:
+///
+/// - An earlier version added the thigmotropic escape and the random lean together and clamped the sum. So a
+///   lean pointing *into* the wall silently cancelled the escape; a corner was under-cleared by `1/√2`,
+///   because one diagonal push serves two faces; and the clamp could truncate the very displacement it had
+///   just computed. Here the lean and tilt are projected so they can never point into a wall, and the bend is
+///   derived from how deep the adult cap's own rings actually sit inside solid matter.
+/// - Even then, `pin_scan` can hand us a site *inside* a wall. It rejects texels whose dungeon **cell** is
+///   not walkable, but a slab occupies the outer `WALL_THICKNESS` strip of a perfectly walkable floor cell.
+///   Solving from inside rock produces a confident, wrong answer. So the pose is checked against
+///   [`penetration`] and the base retried further out; a site that cannot host a body does not host one.
+///
+/// The base nudge is separate and purely geometric: a volva cannot occupy rock. It is bounded by the volva's
+/// own radius, not the cap's, so a mushroom may still grow with its sac against the skirting — which is
+/// precisely where the mold pools (`wall_affinity`). Only the cap is carried clear, and only by bending.
+pub fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u64) -> Option<BodyPlan> {
     let cap_r = CAP_RADIUS_M * scale;
     let volva_r = VOLVA_RADIUS_M * scale;
+    let (away, nearest) = wall_escape(dungeon, site, cap_r + WALL_MARGIN);
 
-    // A volva cannot grow inside a wall. Push the base out just far enough that it does not.
-    let probe = wall_escape(dungeon, site, cap_r);
-    let want = volva_r + VOLVA_MARGIN;
-    let nudge = if probe.nearest < want { probe.away * (want - probe.nearest) } else { Vec2::ZERO };
-    let base = site + nudge;
+    // The crookedness every stem has anyway, and the angle it grew at. Where a wall is near, strip the
+    // component pointing into it: random variation must never eat into clearance.
+    let project = |v: Vec2| {
+        if away == Vec2::ZERO {
+            v
+        } else {
+            v - away * v.dot(away).min(0.0)
+        }
+    };
 
-    // Re-probe from where the body will actually stand: the nudge changed what it can see.
-    let probe = wall_escape(dungeon, base, cap_r);
-    // Thigmotropic lean: carry the cap's rim back out of the slab it would otherwise pass through.
-    let overhang = if probe.nearest.is_finite() { (cap_r - probe.nearest).max(0.0) } else { 0.0 };
-    let thigmo = probe.away * overhang;
+    let lean_dir = Vec2::from_angle(hash01(seed ^ 0xA1) * std::f32::consts::TAU);
+    let lean = project(lean_dir * (hash01(seed ^ 0xB2) * LEAN_FRACTION * ADULT_HEIGHT_M));
 
-    // ...plus the crookedness every stem has anyway.
-    let angle = hash01(seed ^ 0xA1) * std::f32::consts::TAU;
-    let lean_mag = hash01(seed ^ 0xB2) * LEAN_FRACTION * ADULT_HEIGHT_M * scale;
-    let lean = Vec2::from_angle(angle) * lean_mag;
+    let tilt_dir = Vec2::from_angle(hash01(seed ^ 0xD4) * std::f32::consts::TAU);
+    let tilt = project(tilt_dir * (hash01(seed ^ 0xE5) * MAX_TILT));
 
-    let bend = (thigmo + lean).clamp_length_max(MAX_BEND_M * scale);
-    (base, bend)
+    // Nothing near: no clearance to solve, and nothing to verify.
+    if !nearest.is_finite() {
+        return Some(BodyPlan { base: site, bend: lean, tilt });
+    }
+
+    // Retry from progressively further out. A site inside the slab band cannot be solved from where it sits,
+    // and one wedged in a corner may need more room than a single pass concedes.
+    let mut base = site;
+    for _ in 0..RESEAT_ATTEMPTS {
+        // 1. Seat the volva. Only the rings a bend cannot move constrain the base.
+        base += away * deepest_push(dungeon, base, scale, tilt, lean, away, false);
+
+        // 2. Curve the stem until the cap's rings are clear of the slab.
+        let bend_push = deepest_push(dungeon, base, scale, tilt, lean, away, true);
+        let mut bend = lean + away * (bend_push / scale);
+
+        // 3. A stem bent past the ceiling reads as snapped. Spend the excess on moving the whole body —
+        //    the base is free to travel, the volva having already been seated.
+        let excess = bend.length() - MAX_BEND_M;
+        if excess > 0.0 {
+            bend = bend.clamp_length_max(MAX_BEND_M);
+            base += away * (excess * scale);
+        }
+
+        let plan = BodyPlan { base, bend, tilt };
+        if penetration(dungeon, &plan, scale) <= 0.0 {
+            return Some(plan);
+        }
+        // Still buried. Back off by half a volva and try again.
+        base += away * (volva_r * 0.5);
+    }
+    None
+}
+
+/// Deepest penetration of the adult body's silhouette into solid matter, world units. `0.0` means the pose
+/// is entirely clear. Used by the fruit-body testbed to assert what a screenshot can only suggest.
+///
+/// Sampled **deliberately finer than [`deepest_push`] solves** — four times the angular resolution, and
+/// heights interpolated between the profile's slices rather than taken at their centres. A checker that
+/// samples exactly where the solver sampled can only ever agree with it; this one can catch a cap rim that
+/// slips between two of the solver's rays.
+pub fn penetration(dungeon: &Dungeon, plan: &BodyPlan, scale: f32) -> f32 {
+    const CHECK_ANGLES: usize = SILHOUETTE_ANGLES * 4;
+    const CHECK_HEIGHTS: usize = 64;
+
+    let mut worst = 0.0f32;
+    for h in 0..CHECK_HEIGHTS {
+        // Interpolate the silhouette between profile slices, so the check is not blind between them.
+        let t = (h as f32 + 0.5) / CHECK_HEIGHTS as f32 * (RADIUS_PROFILE.len() as f32) - 0.5;
+        let i = (t.floor().max(0.0) as usize).min(RADIUS_PROFILE.len() - 1);
+        let j = (i + 1).min(RADIUS_PROFILE.len() - 1);
+        let f = (t - i as f32).clamp(0.0, 1.0);
+        let radius = RADIUS_PROFILE[i] * (1.0 - f) + RADIUS_PROFILE[j] * f;
+        let y = radius_slice_height(i) * (1.0 - f) + radius_slice_height(j) * f;
+
+        let centre = plan.base + (plan.tilt * y + plan.bend * bend_profile(y)) * scale;
+        for a in 0..CHECK_ANGLES {
+            let dir = Vec2::from_angle(std::f32::consts::TAU * (a as f32) / (CHECK_ANGLES as f32));
+            let sample = centre + dir * (radius * scale);
+            if control::solid_at_world(dungeon, sample) {
+                // How far in? March out along the local escape direction.
+                let (away, _) = wall_escape(dungeon, sample, PROBE_STEP * 8.0);
+                let out = if away == Vec2::ZERO { Vec2::Y } else { away };
+                worst = worst.max(march_out(dungeon, sample, out));
+            }
+        }
+    }
+    worst
 }
 
 /// Commit primordia where the mat is thick, the substrate spent, and nothing is watching.
@@ -426,15 +574,24 @@ fn pin_fruit_bodies(
         let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01(seed ^ 0xC3) - 1.0));
         let yaw = hash01(seed) * std::f32::consts::TAU;
 
-        // Where it can actually stand, and which way its stem must curve to keep its cap out of the wall.
-        let (base_xz, bend_world) = plan_body(&dungeon, world_xz, scale, seed);
+        // Where it can actually stand, which way its stem curves, and how far off plumb it grew. A site that
+        // cannot seat a body clear of the geometry grows nothing — `pin_scan` works at cell resolution and
+        // will happily nominate a texel inside a wall slab.
+        let Some(plan) = plan_body(&dungeon, world_xz, scale, seed) else {
+            debug!("mycelia: no clear pose for a fruit body at {world_xz:?}; skipping the pin");
+            continue;
+        };
 
-        // The vertex shader bends in object space, so undo the entity's yaw and scale here rather than
-        // handing the GPU a transform it would have to invert per vertex.
-        let bend_local = Quat::from_rotation_y(-yaw) * Vec3::new(bend_world.x, 0.0, bend_world.y);
-        let bend = Vec2::new(bend_local.x, bend_local.z) / scale;
+        // The vertex shader works in object space, so undo the entity's yaw here rather than handing the GPU
+        // a transform it would have to invert per vertex. (Both are already in native-scale units.)
+        let unyaw = |v: Vec2| {
+            let r = Quat::from_rotation_y(-yaw) * Vec3::new(v.x, 0.0, v.y);
+            Vec2::new(r.x, r.z)
+        };
+        let bend = unyaw(plan.bend);
+        let tilt = unyaw(plan.tilt);
 
-        let base = Vec3::new(base_xz.x, 0.0, base_xz.y);
+        let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
         commands.spawn((
             Name::new("mycelia_fruit_body"),
             FruitBody {
@@ -445,6 +602,7 @@ fn pin_fruit_bodies(
                 veil_triggered: false,
                 tint: 0.0,
                 bend,
+                tilt,
             },
             // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
             Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
@@ -496,7 +654,8 @@ fn grow_fruit_bodies(
         let rise_rate = budget / sink;
         // A bent stem spends growth on curvature, so it crosses its bending segment slower. The bend's
         // extra vertex travel is charged to the same speed limit as the morph's — see `perceptual`.
-        let morph_rate = growth_rate(body.growth, body.scale, body.bend.length(), budget);
+        let morph_rate =
+            growth_rate(body.growth, body.scale, body.bend.length(), body.tilt.length(), budget);
 
         if gate > 0.0 {
             if body.rise < 1.0 {
@@ -607,6 +766,7 @@ fn coat_fruit_bodies(
                             control_image.dynamic.clone(),
                             body.tint,
                             body.bend,
+                            body.tilt,
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
@@ -660,6 +820,7 @@ mod tests {
             veil_triggered: false,
             tint: 0.0,
             bend: Vec2::ZERO,
+            tilt: Vec2::ZERO,
         }
     }
 
