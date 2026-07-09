@@ -25,8 +25,11 @@ const SHAKE_MAX: f32 = 0.85;
 const SHAKE_ROLL: f32 = 0.035;
 /// Initial vertical world units shown.
 const VIEWPORT_HEIGHT: f32 = 12.0;
-const MIN_ZOOM: f32 = 5.0;
-const MAX_ZOOM: f32 = 34.0;
+/// Zoom bounds, in vertical world units shown. `pub` because the mold's perceptual speed limit is a
+/// function of the orthographic viewport height, and its unit tests must prove the bound holds across the
+/// whole zoom range (see `mycelia::perceptual`).
+pub const MIN_ZOOM: f32 = 5.0;
+pub const MAX_ZOOM: f32 = 34.0;
 const ZOOM_STEP: f32 = 2.0;
 const PAN_SPEED: f32 = 16.0;
 const DRAG_SCALE: f32 = 0.03;
@@ -62,9 +65,23 @@ struct CameraRig {
 /// the camera — and so occludes the room and should be squashed — when its outward normal has a
 /// positive dot with this. Only the per-axis sign matters at the 90° detents, but it's kept continuous
 /// so the cutaway can ease across a turn (see `dungeon::update_cutaway`).
-#[derive(Resource, Default)]
+///
+/// `viewport_height` is the orthographic `ScalingMode::FixedVertical` extent — the vertical span of world
+/// the window shows. Because the projection is orthographic, world→screen scale is constant with depth, so
+/// this single number converts world units to visual angle. `mycelia::perceptual` uses it to hold the
+/// mold's growth just under the human motion-detection threshold at whatever zoom the player is actually at.
+#[derive(Resource)]
 pub struct CameraView {
     pub to_camera: Vec3,
+    pub viewport_height: f32,
+}
+
+impl Default for CameraView {
+    fn default() -> Self {
+        // Seeded to the startup zoom, not 0.0: this resource is readable before `setup_camera` runs, and a
+        // zero viewport height would divide the perceptual speed budget down to nothing.
+        Self { to_camera: Vec3::ZERO, viewport_height: VIEWPORT_HEIGHT }
+    }
 }
 
 pub struct CameraPlugin;
@@ -106,6 +123,7 @@ fn setup_camera(
     // yaw = 0 ⇒ camera looks from (+X,+Z); seed the cutaway so the E/S near walls are already knee-high
     // on the first rendered frame (no startup squash animation).
     view.to_camera = Vec3::new(1.0, 0.0, 1.0);
+    view.viewport_height = rig.height;
     commands.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -170,8 +188,10 @@ fn drive_camera(
     let yaw_rot = Quat::from_rotation_y(rig.yaw);
     let screen_forward = yaw_rot * SCREEN_FORWARD;
     let screen_right = yaw_rot * SCREEN_RIGHT;
-    // Publish the horizontal camera direction (the yawed iso diagonal) for the wall cutaway.
+    // Publish the horizontal camera direction (the yawed iso diagonal) for the wall cutaway, and the
+    // orthographic viewport height (the mold's perceptual speed budget scales with it).
     view.to_camera = yaw_rot * Vec3::new(1.0, 0.0, 1.0);
+    view.viewport_height = rig.height;
 
     // Pan on REAL time, not the sim clock: keyboard panning must feel the same at ×1, ×64, or paused.
     // (Reading the generic `Time` here would resolve to `Time<Virtual>` and scale pan speed with the

@@ -16,11 +16,15 @@
 //! # Determinism firewall (see `TESTING.md`)
 //! Everything here is cosmetic and lives on **`Update`**, never `FixedUpdate`. No mold entity carries
 //! `Health` and no existing actor's `Transform`/`Health` is mutated, so `snapshot_hash` (which queries
-//! `(Transform, Health)`) never sees it. Data flow is strictly **CPU→GPU, one-way** — no GPU→gameplay
-//! readback (GPU floats are not bit-reproducible across hardware, the same non-determinism class as the
-//! Avian physics and FX layers). `MyceliaPlugin` is registered **only** in `lib::run`, never in the
+//! `(Transform, Health)`) never sees it. `MyceliaPlugin` is registered **only** in `lib::run`, never in the
 //! headless `sim_harness` (mirroring `UiPlugin`/`DialoguePlugin`), and it **no-ops if the `RenderApp`
 //! sub-app is absent** — belt-and-suspenders so a headless build can never touch the render world.
+//!
+//! There is **exactly one GPU→CPU edge**: `fruit.rs` reads back the coarse biomass grid that the `pin_scan`
+//! pass writes, to decide where mushrooms erupt (see [`COARSE_SIZE`]). GPU floats are not bit-reproducible
+//! across hardware, so this puts fruit-body positions in the same non-determinism class as the Avian
+//! physics and FX layers. That is safe for the replay oracle for the same reason `gore::GibChunk` is: a
+//! `FruitBody` carries a `Transform` but never a `Health`. Everything else is still strictly CPU→GPU.
 //!
 //! ## References (home-still corpus)
 //! Jones multi-agent Physarum (arXiv 1503.06579; 10.1080/17445760.2015.1085535); foraging survey
@@ -30,7 +34,10 @@
 mod agents;
 mod control;
 mod field;
+pub mod fruit;
 mod material;
+mod measure;
+pub mod perceptual;
 mod pipeline;
 
 use bevy::prelude::*;
@@ -42,7 +49,8 @@ use serde::Deserialize;
 
 use crate::dungeon::Wall;
 
-pub use material::{MoldFloorMaterial, MoldWallMaterial};
+pub use fruit::FruitBody;
+pub use material::{MoldFloorMaterial, MoldFruitMaterial, MoldWallMaterial};
 
 /// Compute workgroup edge (8×8 = 64 threads), matching the Bevy game-of-life reference. `field_size`
 /// must be a whole multiple of this so the dispatch covers every texel exactly (see [`validate_config`]).
@@ -72,6 +80,20 @@ pub const CONTROL_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 /// diffuse pass reads back `/ SCALE`. Large enough to preserve fractional deposits under heavy overlap.
 /// Not a knob — a numerical detail of the atomic accumulator.
 const DEPOSIT_SCALE: f32 = 1024.0;
+
+/// Side length of the coarse biomass grid that `pin_scan` reduces the `field_size²` biomass field into, and
+/// which is the module's **only** GPU→CPU channel (see `fruit.rs`).
+///
+/// Each coarse cell max-pools a `field_size / COARSE_SIZE` block and reports the winning texel's `(V, U)`
+/// *and its exact field coordinates*, so a fruit body is placed at full field precision (0.19 world units)
+/// even though the grid it was found on is coarse (1.5 world units per cell at 1024²/128²).
+///
+/// Every output slot is written by exactly one thread, so there are no atomics, no clear pass, and — unlike
+/// an `atomicAdd`-appended candidate list — the readback's ordering is deterministic.
+///
+/// `field_size` must be a whole multiple of this (see [`validate_config`]), or the block reduction would
+/// leave a ragged edge of unscanned texels.
+pub const COARSE_SIZE: u32 = 128;
 
 /// Every tunable knob of the mold, from the `mycelia:` slice of `assets/config/config.ron`.
 ///
@@ -107,11 +129,16 @@ pub struct MyceliaConfig {
     /// Side length (texels) of the square world-space mold field. Must be a multiple of [`WORKGROUP_SIZE`].
     /// 1024² over the 192 m footprint ≈ 5.3 texels/tile. The dominant perf dial (cost scales with area).
     pub field_size: u32,
-    /// How many simulation ticks per second the mold advances. **Not a performance dial — a biology dial.**
-    /// The compute chain used to dispatch once per rendered frame, so at 60 fps agents crossed ~11 world
-    /// units per second and Gray-Scott took 60 reaction steps per second. That is a flow rate, and it made
-    /// the mold read as a river of liquid no matter how the surface was shaded. Growth must be *alien fast*,
-    /// not fluid: a handful of ticks per second.
+    /// How many simulation ticks per second the mold advances. **Not a performance dial — a biology dial**,
+    /// and the single dial that sets how fast the mold visibly grows: every velocity in the chain (agent
+    /// step, Gray-Scott advance) is per-tick, so all of them scale with it.
+    ///
+    /// The shipped value is **measured, not chosen**. `measure.rs` reads the display texture back and
+    /// computes the biomass margin's normal speed by the level-set formula `|∂V/∂t| / |∇V|`, and the
+    /// budget is [`perceptual::v_max`] at the tightest zoom. At 6 Hz the mold ran at 23.1 mm/s — nearly
+    /// seven times the 3.33 mm/s object-relative motion threshold, i.e. plainly visible if you looked. At
+    /// 1.5 Hz it runs at 2.92 mm/s, just below. See the `mycelia.sim_hz` comment in `config.ron` for the
+    /// full sweep and how to reproduce it.
     pub sim_hz: f32,
     /// Number of walking agents. Sparse on purpose (≈0.05/texel at 1024²) so the trail forms legible
     /// foraging *channels* rather than flooding to uniform saturation. An aesthetic ceiling, not a
@@ -228,6 +255,42 @@ pub struct MyceliaConfig {
     /// ambient is a bright *uniform* fill, which ignores surface normals entirely, so without an occlusion
     /// term the filaments render flat no matter how hard the normal is perturbed.
     pub ao_strength: f32,
+
+    // ── Fruiting (see `fruit.rs`) ─────────────────────────────────────────────────────────────────────
+    /// Biomass `V` above which a texel is a candidate to pin a fruit body.
+    ///
+    /// Real Agaricomycetes fruit only once a colony has accumulated **critical mycelial mass** *and*
+    /// **exhausted its nutrients** — nitrogen starvation is among the strongest maturation cues (Zhang et
+    /// al. 2015, 10.1371/journal.pone.0123025; morphogenesis review: Kües & Navarro-González 2015,
+    /// 10.1016/j.fbr.2015.05.001). Gray-Scott already integrates exactly those two quantities: `V` is the
+    /// biomass and `U` the substrate it consumes. So "thick mat, spent substrate" is `V > v_fruit && U <
+    /// u_exhausted` — free, with no new state.
+    pub v_fruit: f32,
+    /// Substrate `U` below which the patch counts as spent. See [`MyceliaConfig::v_fruit`].
+    pub u_exhausted: f32,
+    /// How long (seconds) a texel must hold the pin condition, unwatched, before it commits to a primordium.
+    pub pin_dwell_secs: f32,
+    /// Minimum separation (world units) between fruit bodies. Most hyphal knots never mature; neighbours
+    /// compete for translocated nutrient (Kües & Navarro-González 2015). This is that competition.
+    pub pin_min_spacing: f32,
+    /// Hard ceiling on live fruit bodies. Reaching it is logged, never silently ignored.
+    pub max_fruit_bodies: u32,
+    /// Scale applied to the death cap mesh, whose native height is 13.9 cm. `2.5` gives a 35 cm mushroom —
+    /// knee-high on a squad unit, legible at the RTS zoom the game actually plays at.
+    pub body_scale: f32,
+    /// Local biomass `V` below which a fruit body's patch has collapsed and the body reabsorbs, running its
+    /// growth clock backwards. Primordium abortion, not a fallback branch: the same ODE with a negative
+    /// sign. Must be below [`MyceliaConfig::v_fruit`], or a body would begin aborting the instant it pinned.
+    pub maintain_v: f32,
+
+    // ── Perception budget (see `perceptual.rs`) ───────────────────────────────────────────────────────
+    /// Slowest motion (degrees of visual angle per second) a human reliably detects beside a stationary
+    /// reference. Every *autonomous* motion the mold makes is held under this. Being eaten or crushed is
+    /// exempt — that is meant to be seen. Leibowitz (1955), 10.1364/josa.45.000829.
+    pub motion_threshold_deg_per_s: f32,
+    /// Vertical visual angle the game window subtends at the player's eye (a 27" panel at ~60 cm ≈ 30°).
+    /// The one number here that depends on the player's desk rather than on the game.
+    pub screen_fov_deg_v: f32,
 }
 
 /// Whether the compute chain advances this frame. The mold runs on its own slow clock (`sim_hz`), not the
@@ -264,6 +327,15 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     // The deposit accumulator is one u32 per field texel; keep the allocation sane.
     if c.field_size > 4096 {
         return Err(format!("mycelia.field_size must be <= 4096, got {}", c.field_size));
+    }
+    // `pin_scan` reduces the field in `field_size / COARSE_SIZE` blocks. A non-integer ratio would leave a
+    // ragged strip of texels no coarse cell covers, so mushrooms could never pin there.
+    if c.field_size % COARSE_SIZE != 0 {
+        return Err(format!(
+            "mycelia.field_size ({}) must be a multiple of COARSE_SIZE ({COARSE_SIZE}) so the pin scan's \
+             block reduction covers every texel",
+            c.field_size
+        ));
     }
 
     positive("sense_dist", c.sense_dist)?;
@@ -327,6 +399,57 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     if c.vein_hi <= c.vein_lo {
         return Err(format!("mycelia.vein_hi ({}) must exceed vein_lo ({})", c.vein_hi, c.vein_lo));
     }
+
+    // ── Fruiting ──────────────────────────────────────────────────────────────────────────────────────
+    // `v_fruit`/`u_exhausted`/`maintain_v` are Gray-Scott concentrations, clamped to 0..=1 in the shader.
+    unit("v_fruit", c.v_fruit)?;
+    unit("u_exhausted", c.u_exhausted)?;
+    unit("maintain_v", c.maintain_v)?;
+    positive("pin_dwell_secs", c.pin_dwell_secs)?;
+    positive("pin_min_spacing", c.pin_min_spacing)?;
+    positive("body_scale", c.body_scale)?;
+    if c.max_fruit_bodies == 0 {
+        return Err("mycelia.max_fruit_bodies must be > 0".to_string());
+    }
+    // A body pins at `v_fruit` and reabsorbs below `maintain_v`. If the two crossed, every primordium would
+    // begin aborting on the frame it committed — a mushroom that flickers rather than one that grows.
+    if c.maintain_v >= c.v_fruit {
+        return Err(format!(
+            "mycelia.maintain_v ({}) must be below v_fruit ({}), or every pin aborts the instant it commits",
+            c.maintain_v, c.v_fruit
+        ));
+    }
+    // The pin condition is a conjunction: thick mat AND spent substrate. Gray-Scott's `U + 2V -> 3V` keeps
+    // `U + V` near 1 in the reacting region, so demanding `V > v_fruit` while `U < u_exhausted` is only
+    // satisfiable when the two thresholds leave room between them. `v_fruit + u_exhausted <= 1` guarantees
+    // a texel can hold both at once; above that the mold would grow forever and never fruit, silently.
+    if c.v_fruit + c.u_exhausted > 1.0 {
+        return Err(format!(
+            "mycelia.v_fruit ({}) + u_exhausted ({}) exceeds 1.0; no texel can satisfy both, so nothing \
+             would ever fruit",
+            c.v_fruit, c.u_exhausted
+        ));
+    }
+
+    // ── Perception budget ─────────────────────────────────────────────────────────────────────────────
+    // Both feed a division in `perceptual::v_max`; zero or negative means an infinite or reversed budget.
+    positive("motion_threshold_deg_per_s", c.motion_threshold_deg_per_s)?;
+    positive("screen_fov_deg_v", c.screen_fov_deg_v)?;
+    // A threshold above ~1 deg/s is no longer "below the ability to notice" — it is plainly visible drift.
+    // This is a guard against a fat-fingered decimal point, not a taste boundary.
+    if c.motion_threshold_deg_per_s > 1.0 {
+        return Err(format!(
+            "mycelia.motion_threshold_deg_per_s ({}) is far above the ~0.02 deg/s object-relative motion \
+             threshold (Leibowitz 1955); the mold would visibly crawl",
+            c.motion_threshold_deg_per_s
+        ));
+    }
+    if !(1.0..=180.0).contains(&c.screen_fov_deg_v) {
+        return Err(format!(
+            "mycelia.screen_fov_deg_v ({}) must be a plausible vertical field of view in degrees",
+            c.screen_fov_deg_v
+        ));
+    }
     Ok(())
 }
 
@@ -359,6 +482,10 @@ pub struct MoldBuffers {
     /// here; the `diffuse` pass reads it back and folds it into the trail; `clear_deposit` zeroes it each
     /// tick. A storage buffer (not a storage *texture*) because wgpu/Metal has no portable texture atomics.
     pub deposit: Handle<ShaderBuffer>,
+    /// `array<vec4<f32>, COARSE_SIZE²>` — the mold's only reading back to the CPU. Written by the `pin_scan`
+    /// pass, one slot per thread; each entry is `(max V in block, U at that texel, texel x, texel y)`.
+    /// `fruit.rs` attaches a [`bevy::render::gpu_readback::Readback`] to it and grows mushrooms from it.
+    pub coarse: Handle<ShaderBuffer>,
 }
 
 /// Simulation parameters for the compute chain. Field order/types MUST byte-match the `MoldParams` struct
@@ -428,6 +555,9 @@ pub struct MoldParams {
     pub vein_lo: f32,
     /// Trail value at which a vein is fully lit.
     pub vein_hi: f32,
+    /// Side length of the coarse biomass grid the `pin_scan` pass max-pools into. Structural, not a dial —
+    /// see [`COARSE_SIZE`].
+    pub coarse_res: u32,
 }
 
 pub struct MyceliaPlugin;
@@ -454,6 +584,12 @@ impl Plugin for MyceliaPlugin {
         .add_systems(Startup, (control::setup_control, setup_mycelia).chain())
         .init_resource::<CoatedFurniture>()
         .add_systems(Update, (advance_mold_time, control::write_control, coat_walls, coat_furniture));
+
+        // Fruit bodies: the mold reproducing. Registered here (not as a separate plugin) because it depends
+        // on this plugin's textures, buffers and config, and shares its determinism firewall.
+        fruit::build(app);
+        // Dev calibration instrument. No-ops unless MYCELIA_MEASURE is set in the environment.
+        measure::build(app);
 
         // Render-world wiring. `get_sub_app_mut` returns `None` in a headless build with no `RenderApp`,
         // so the whole compute path is silently absent there (the determinism firewall) rather than
@@ -513,10 +649,23 @@ fn setup_mycelia(
     let seeded = agents::seed_agents(size, cfg.agent_count, &walkable, CONTROL_SIZE)?;
     let agents = buffers.add(ShaderBuffer::from(seeded));
     let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (size * size) as usize]));
+    // `vec4<f32>` per coarse cell: (max V, U at that texel, texel x, texel y). Zero-initialised, which reads
+    // as "no biomass anywhere" — the true state before the first tick, not a placeholder.
+    let coarse =
+        buffers.add(ShaderBuffer::from(vec![0.0f32; (COARSE_SIZE * COARSE_SIZE * 4) as usize]));
 
     commands
         .insert_resource(MoldImages { display: display.clone(), trail_a, trail_b, biomass_a, biomass_b });
-    commands.insert_resource(MoldBuffers { agents, deposit });
+    commands.insert_resource(MoldBuffers { agents, deposit, coarse: coarse.clone() });
+    // The mold's single GPU→CPU edge. `Readback` copies the buffer every frame it is present; `fruit.rs`
+    // observes `ReadbackComplete` on this entity. Cosmetic-only, `Update`-only — see the module header.
+    commands
+        .spawn((
+            Name::new("mycelia_coarse_readback"),
+            bevy::render::gpu_readback::Readback::buffer(coarse),
+            fruit::CoarseReadback,
+        ))
+        .observe(fruit::receive_coarse);
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
         world_extent: WORLD_EXTENT,
@@ -547,6 +696,7 @@ fn setup_mycelia(
         carrion_bloom: cfg.carrion_bloom,
         vein_lo: cfg.vein_lo,
         vein_hi: cfg.vein_hi,
+        coarse_res: COARSE_SIZE,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the
@@ -659,7 +809,7 @@ mod tests {
     fn valid() -> MyceliaConfig {
         MyceliaConfig {
             field_size: 1024,
-            sim_hz: 6.0,
+            sim_hz: 1.5,
             agent_count: 55_000,
             sense_angle: 0.40,
             sense_dist: 9.0,
@@ -697,6 +847,15 @@ mod tests {
             margin_roughness: 0.55,
             sheen_strength: 0.18,
             ao_strength: 0.75,
+            v_fruit: 0.35,
+            u_exhausted: 0.30,
+            pin_dwell_secs: 6.0,
+            pin_min_spacing: 1.5,
+            max_fruit_bodies: 64,
+            body_scale: 2.5,
+            maintain_v: 0.20,
+            motion_threshold_deg_per_s: 0.02,
+            screen_fov_deg_v: 30.0,
         }
     }
 
@@ -789,6 +948,76 @@ mod tests {
         let mut c = valid();
         c.sense_dist = f32::NAN;
         assert!(validate_config(&c).is_err());
+    }
+
+    /// A body pins at `v_fruit` and reabsorbs below `maintain_v`. Crossed, every primordium would begin
+    /// aborting on the frame it committed and the mold would flicker mushrooms rather than grow them.
+    #[test]
+    fn maintenance_threshold_must_sit_below_the_fruiting_threshold() {
+        let mut c = valid();
+        c.maintain_v = c.v_fruit;
+        assert!(validate_config(&c).is_err());
+        c.maintain_v = c.v_fruit + 0.1;
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// The pin condition is a conjunction — thick mat AND spent substrate. Thresholds that cannot both hold
+    /// at once mean nothing ever fruits, which would look exactly like a bug in the scan pass.
+    #[test]
+    fn fruiting_thresholds_must_be_jointly_satisfiable() {
+        let mut c = valid();
+        c.v_fruit = 0.8;
+        c.u_exhausted = 0.5; // 1.3 > 1.0: no texel can hold V > 0.8 while U < 0.5
+        assert!(validate_config(&c).is_err());
+    }
+
+    /// The perception budget divides by `screen_fov_deg_v` and scales by `motion_threshold_deg_per_s`; a
+    /// zero or absurd value silently produces an infinite growth rate rather than a visibly wrong one.
+    #[test]
+    fn perception_budget_is_bounded_by_psychophysics() {
+        for bad in [0.0, -0.02] {
+            let mut c = valid();
+            c.motion_threshold_deg_per_s = bad;
+            assert!(validate_config(&c).is_err(), "threshold={bad} should be rejected");
+        }
+        // 20 deg/s is a briskly moving object, not a subliminal one. Catch the misplaced decimal.
+        let mut c = valid();
+        c.motion_threshold_deg_per_s = 20.0;
+        assert!(validate_config(&c).is_err());
+
+        for bad in [0.0, 0.5, 200.0] {
+            let mut c = valid();
+            c.screen_fov_deg_v = bad;
+            assert!(validate_config(&c).is_err(), "fov={bad} should be rejected");
+        }
+    }
+
+    /// The fruiting dials are rejected outside their physical ranges rather than clamped.
+    #[test]
+    fn fruiting_dials_are_bounded() {
+        let mut c = valid();
+        c.max_fruit_bodies = 0;
+        assert!(validate_config(&c).is_err());
+
+        for bad in [0.0, -1.0] {
+            let mut c = valid();
+            c.pin_min_spacing = bad;
+            assert!(validate_config(&c).is_err(), "pin_min_spacing={bad} should be rejected");
+
+            let mut c = valid();
+            c.body_scale = bad;
+            assert!(validate_config(&c).is_err(), "body_scale={bad} should be rejected");
+
+            let mut c = valid();
+            c.pin_dwell_secs = bad;
+            assert!(validate_config(&c).is_err(), "pin_dwell_secs={bad} should be rejected");
+        }
+
+        for bad in [-0.1, 1.1] {
+            let mut c = valid();
+            c.v_fruit = bad;
+            assert!(validate_config(&c).is_err(), "v_fruit={bad} should be rejected");
+        }
     }
 }
 

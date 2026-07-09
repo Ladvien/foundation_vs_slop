@@ -27,6 +27,8 @@ use super::{MyceliaConfig, WORLD_EXTENT, WORLD_ORIGIN};
 pub type MoldFloorMaterial = ExtendedMaterial<StandardMaterial, MoldFloorExt>;
 /// The lit coating creeping up the walls.
 pub type MoldWallMaterial = ExtendedMaterial<StandardMaterial, MoldWallExt>;
+/// The fruit body itself — the same organism, wearing flesh instead of film.
+pub type MoldFruitMaterial = ExtendedMaterial<StandardMaterial, MoldFruitExt>;
 
 /// GPU uniform shared by both surface shaders — must byte-match `MoldSurfaceParams` in
 /// `mycelia_floor.wgsl` / `mycelia_wall.wgsl`. `vec2`s first so every following scalar is naturally aligned.
@@ -115,6 +117,65 @@ pub struct MoldWallExt {
     #[texture(103)]
     #[sampler(104)]
     control: Handle<Image>,
+}
+
+/// Per-body state for the fruit shader. Separate from [`MoldSurfaceParams`] because every mushroom needs
+/// its own copy while the surface dials are shared.
+#[derive(Clone, ShaderType)]
+pub struct MoldFruitParams {
+    /// Rate-limited maturity, `0` = egg white, `1` = the death cap's olive pileus. Not `growth`: the albedo
+    /// shift is throttled so it can never complete faster than the slow-change-blindness window (see
+    /// `perceptual::MIN_APPEARANCE_RAMP_SECS`).
+    tint: f32,
+}
+
+/// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's hyphal fibre noise, sheen
+/// and cavity AO, and visibly reads as the *same organism* that grew it.
+///
+/// The mesh's `COLOR_0` is a **part mask**, not artwork: `R` = cap (pileus), `G` = flesh (stipe, gills,
+/// annulus), `B` = volva. Bevy's `StandardMaterial` multiplies base colour by the vertex colour when the
+/// mesh carries `COLOR_0`, which would tint the cap pure red — so this shader overwrites `base_color`
+/// outright and reads the mask itself. There are no textures on this asset; the parts *are* the mask.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct MoldFruitExt {
+    #[uniform(100)]
+    params: MoldSurfaceParams,
+    #[texture(101)]
+    #[sampler(102)]
+    display: Handle<Image>,
+    #[texture(103)]
+    #[sampler(104)]
+    control: Handle<Image>,
+    #[uniform(105)]
+    fruit: MoldFruitParams,
+}
+
+impl MoldFruitExt {
+    pub fn new(
+        cfg: &MyceliaConfig,
+        display: Handle<Image>,
+        control: Handle<Image>,
+        tint: f32,
+    ) -> Self {
+        Self { params: MoldSurfaceParams::new(cfg), display, control, fruit: MoldFruitParams { tint } }
+    }
+
+    /// Publish this body's maturity to its shader. Called by `fruit::tint_fruit_bodies` when it changes.
+    pub fn set_tint(&mut self, tint: f32) {
+        self.fruit.tint = tint;
+    }
+
+    /// The tint currently uploaded, so the caller can skip a no-op write (which would otherwise emit an
+    /// `AssetEvent::Modified` and re-upload the uniform every frame for every mature mushroom).
+    pub fn tint(&self) -> f32 {
+        self.fruit.tint
+    }
+}
+
+impl MaterialExtension for MoldFruitExt {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/mycelia_fruit.wgsl".into()
+    }
 }
 
 impl MoldFloorExt {

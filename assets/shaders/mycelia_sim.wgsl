@@ -43,6 +43,7 @@ struct MoldParams {
     carrion_bloom: f32,
     vein_lo: f32,
     vein_hi: f32,
+    coarse_res: u32,
 };
 
 // MUST byte-match the `u32` encoding in `src/mycelia/agents.rs` (std430 stride 16).
@@ -70,6 +71,10 @@ struct Agent {
 // falling to 0 over `wall_reach` world units. Built by an exact Euclidean distance transform against the
 // real slab geometry, so its ridge sits on the surface the player sees rather than at the cell centre.
 @group(0) @binding(9) var wall_prox: texture_2d<f32>;
+// The mold's ONLY channel back to the CPU: a `coarse_res²` reduction of the biomass field, one `vec4` per
+// cell = (max V in the block, U at that same texel, that texel's x, that texel's y). Read back by
+// `src/mycelia/fruit.rs` to decide where mushrooms erupt. Write-only from the shader's point of view.
+@group(0) @binding(10) var<storage, read_write> coarse: array<vec4<f32>>;
 
 const TAU: f32 = 6.2831853;
 
@@ -442,4 +447,57 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     let cov = is_explored(ctl.a) * (0.5 + 0.5 * is_visible(ctl.a));
     let contact = wall_prox_at(vec2<f32>(f32(x), f32(y)), dim);
     textureStore(display, vec2<i32>(x, y), vec4<f32>(trail, v, contact, cov));
+}
+
+// ── Pass 5: reduce the biomass field for the CPU ─────────────────────────────────────────────────────
+//
+// The mold's only reading back to gameplay. Each thread owns one coarse cell, max-pools the biomass `V`
+// over its `field_res / coarse_res` block, and reports the winning texel's `(V, U)` together with that
+// texel's exact field coordinates. So the *search* is coarse (1.5 world units per cell at 1024²→128²) while
+// the *answer* is at full field precision (0.19 world units) — a mushroom lands where the mat is actually
+// thickest, not at a cell centre.
+//
+// One thread per output slot: no atomics, no clear pass, and a deterministic readback order. An
+// `atomicAdd`-appended candidate list would have given neither.
+//
+// Reads `biomass_read`, which is this tick's *source* field (the `field` pass writes `biomass_write`), so
+// the reduction trails the reaction by exactly one tick. At `sim_hz` that is a fraction of a second, and it
+// avoids a read-after-write hazard on the same texture.
+//
+// Rock is skipped, so a block that is entirely wall reports `V = 0` and the CPU's fruiting conjunction
+// (thick mat AND spent substrate) rejects it on the `V` term. Nothing fruits inside a wall.
+@compute @workgroup_size(8, 8, 1)
+fn pin_scan(@builtin(global_invocation_id) id: vec3<u32>) {
+    let cres = i32(params.coarse_res);
+    if (i32(id.x) >= cres || i32(id.y) >= cres) {
+        return;
+    }
+    let dim = i32(params.field_res.x);
+    let block = dim / cres;
+    let x0 = i32(id.x) * block;
+    let y0 = i32(id.y) * block;
+
+    var best_v = 0.0;
+    var best_u = 0.0;
+    var best_x = f32(x0);
+    var best_y = f32(y0);
+
+    for (var j = 0; j < block; j++) {
+        for (var i = 0; i < block; i++) {
+            let x = x0 + i;
+            let y = y0 + j;
+            if (texel_walkable(x, y, dim) < 0.5) {
+                continue;
+            }
+            let b = bio_at(x, y, dim);
+            if (b.y > best_v) {
+                best_v = b.y;
+                best_u = b.x;
+                best_x = f32(x);
+                best_y = f32(y);
+            }
+        }
+    }
+
+    coarse[u32(id.y) * params.coarse_res + u32(id.x)] = vec4<f32>(best_v, best_u, best_x, best_y);
 }
