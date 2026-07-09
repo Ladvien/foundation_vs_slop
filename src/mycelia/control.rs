@@ -42,17 +42,26 @@ const UNIT_RADIUS_CELLS: f32 = 2.0;
 /// Floor on a blood pool's splat radius (cells), so even a small stain is smelled.
 const BLOOD_MIN_RADIUS_CELLS: f32 = 1.0;
 
-/// The control texture handle, extracted so the render world can bind it.
+/// The control texture handles, extracted so the render world can bind them.
 #[derive(Resource, Clone, ExtractResource)]
-pub struct MoldControlImage(pub Handle<Image>);
+pub struct MoldControlImage {
+    /// Rewritten every `Update` (chemo / light / disturbance / substrate).
+    pub dynamic: Handle<Image>,
+    /// Written **once**, when the dungeon first exists. `R` = wall proximity (1 on floor touching a wall,
+    /// falling to 0 over `wall_reach` cells). The dungeon never regenerates, so this never changes.
+    pub wall: Handle<Image>,
+}
 
-/// Main-world scratch for the control texture: the CPU-side pixel buffer we rewrite each `Update`, plus
-/// the per-cell habituation accumulator (which is *state*, so it must persist between frames).
+/// Main-world scratch: the CPU-side pixel buffers we rewrite each `Update`, plus the per-cell habituation
+/// accumulator (which is *state*, so it must persist between frames).
 #[derive(Resource)]
 pub struct MoldControl {
-    image: Handle<Image>,
+    dynamic: Handle<Image>,
+    wall: Handle<Image>,
     cpu: Vec<u8>,
     habituation: Vec<f32>,
+    /// The static wall field is uploaded exactly once, the first `Update` that sees a `Dungeon`.
+    wall_written: bool,
 }
 
 impl MoldControl {
@@ -61,15 +70,73 @@ impl MoldControl {
     }
 }
 
-/// Create the control texture and its CPU mirrors. Runs once at `Startup`.
+/// Create the control textures and their CPU mirrors. Runs once at `Startup`.
 pub(super) fn setup_control(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let image = images.add(field::control_texture(CONTROL_SIZE));
-    commands.insert_resource(MoldControlImage(image.clone()));
+    let dynamic = images.add(field::control_texture(CONTROL_SIZE));
+    let wall = images.add(field::control_texture(CONTROL_SIZE));
+    commands.insert_resource(MoldControlImage { dynamic: dynamic.clone(), wall: wall.clone() });
     commands.insert_resource(MoldControl {
-        image,
+        dynamic,
+        wall,
         cpu: vec![0u8; MoldControl::cells() * field::CONTROL_BYTES_PER_TEXEL],
         habituation: vec![0.0; MoldControl::cells()],
+        wall_written: false,
     });
+}
+
+/// Compute, once, how close each floor cell sits to a wall.
+///
+/// Walls in this dungeon are thin slabs on the *edge* between a floor cell and a rock cell, so "distance to
+/// a wall" is just the distance from a floor cell to the nearest non-floor cell. A multi-source BFS seeded
+/// from every non-floor cell gives that for all 36,864 cells in one sweep — trivially cheap, and the result
+/// never changes because the dungeon is generated once.
+///
+/// Returned as `R` bytes: `1.0` on floor immediately touching a wall, falling linearly to `0.0` at
+/// `wall_reach` cells away. Non-floor cells are `0` (they are not somewhere the mold can pool).
+fn compute_wall_proximity(dungeon: &Dungeon, wall_reach: f32, cpu: &mut [u8]) {
+    let size = CONTROL_SIZE as i32;
+    let n = (size * size) as usize;
+    // `u16::MAX` = unreached. Seed the queue with every non-floor cell at distance 0.
+    let mut dist = vec![u16::MAX; n];
+    let mut queue = std::collections::VecDeque::new();
+    for y in 0..size {
+        for x in 0..size {
+            if !dungeon.is_floor(IVec2::new(x, y)) {
+                let i = (y * size + x) as usize;
+                dist[i] = 0;
+                queue.push_back((x, y));
+            }
+        }
+    }
+
+    // 8-connected BFS so the falloff is round rather than diamond-shaped.
+    const NEIGHBORS: [(i32, i32); 8] =
+        [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+    while let Some((x, y)) = queue.pop_front() {
+        let d = dist[(y * size + x) as usize];
+        for (dx, dy) in NEIGHBORS {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= size || ny >= size {
+                continue;
+            }
+            let ni = (ny * size + nx) as usize;
+            if dist[ni] == u16::MAX {
+                dist[ni] = d.saturating_add(1);
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    let reach = wall_reach.max(1.0);
+    for (i, &d) in dist.iter().enumerate() {
+        // d == 0 means the cell IS rock; d == 1 means floor touching a wall.
+        let prox = if d == 0 || d == u16::MAX {
+            0.0
+        } else {
+            (1.0 - (f32::from(d) - 1.0) / reach).clamp(0.0, 1.0)
+        };
+        cpu[i * field::CONTROL_BYTES_PER_TEXEL] = to_u8(prox);
+    }
 }
 
 /// Rasterize world state into the control texture, once per `Update`.
@@ -96,7 +163,18 @@ pub(super) fn write_control(
     let size = CONTROL_SIZE as i32;
 
     // Split the borrow so we can read `cpu` while mutating `habituation` (and vice versa).
-    let MoldControl { image, cpu, habituation } = &mut *control;
+    let MoldControl { dynamic, wall, cpu, habituation, wall_written } = &mut *control;
+
+    // ── Once: the static wall-proximity field ─────────────────────────────────────────────────────────
+    // The dungeon is generated once and never regenerates, so this is computed and uploaded a single time.
+    if !*wall_written {
+        let mut wall_cpu = vec![0u8; MoldControl::cells() * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon, cfg.wall_reach, &mut wall_cpu);
+        if let Some(mut gpu) = images.get_mut(&*wall) {
+            gpu.data = Some(wall_cpu);
+            *wall_written = true;
+        }
+    }
 
     // ── Pass 1: per-cell fog (light + habituation) and the walkable mask ──────────────────────────────
     for y in 0..size {
@@ -152,7 +230,7 @@ pub(super) fn write_control(
     // Mutating through `Assets<Image>` marks the asset changed, so Bevy re-uploads it to the GPU.
     // `get_mut` hands back an `AssetMut` guard; touching it through `DerefMut` is what flags the asset as
     // changed, which is precisely what triggers Bevy's re-upload of the texture to the GPU.
-    let Some(mut gpu_image) = images.get_mut(&*image) else {
+    let Some(mut gpu_image) = images.get_mut(&*dynamic) else {
         return;
     };
     match gpu_image.data.as_mut() {

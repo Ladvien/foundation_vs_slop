@@ -113,7 +113,9 @@ fn init_mold_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 // 7: biomass WRITE (storage — this tick's reacted field).
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
-                // 8: control (CPU-written world state: chemo / light / disturbance / walkable).
+                // 8: control (CPU-written world state: chemo / light / disturbance / substrate).
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                // 9: static wall-proximity field (`R`), written once.
                 texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
@@ -193,9 +195,11 @@ fn prepare_bind_group(
     else {
         return;
     };
-    // The control texture is re-uploaded from the main world every `Update`; until its first upload lands
-    // there is nothing for the mold to sense, so we simply don't dispatch.
-    let Some(control) = gpu_images.get(&mold_control.0) else {
+    // The control textures are uploaded from the main world; until their first upload lands there is
+    // nothing for the mold to sense, so we simply don't dispatch.
+    let (Some(control), Some(wall)) =
+        (gpu_images.get(&mold_control.dynamic), gpu_images.get(&mold_control.wall))
+    else {
         return;
     };
 
@@ -221,6 +225,7 @@ fn prepare_bind_group(
             &bio_read.texture_view,
             &bio_write.texture_view,
             &control.texture_view,
+            &wall.texture_view,
         )),
     );
     commands.insert_resource(MoldBindGroup(bind_group));
