@@ -315,6 +315,11 @@
     mycelia: (
         // ── Field geometry. field_size must be a multiple of 8 (the workgroup edge) and <= 4096.
         // This is the dominant perf dial: cost scales with area.
+        // Sim ticks per second. NOT a perf dial — a biology dial. The compute chain used to dispatch once
+        // per rendered frame, so at 60fps agents crossed ~11 world units/sec and Gray-Scott took 60 reaction
+        // steps/sec. That is a flow rate: the mold read as a river of liquid no matter how it was shaded.
+        // Growth should be alien-fast, not fluid.
+        sim_hz: 6.0,
         field_size: 1024,       // texels across the 192 m footprint (~5.3 texels/tile)
         agent_count: 55000,     // sparse on purpose: channels form, rather than flooding to saturation
 
@@ -345,13 +350,20 @@
         photophobia: 9.0,       // repulsion from cells a unit currently SEES (fog as a gaze proxy)
         chemo_gain: 6.0,        // attraction to blood pools and nests
         disturbance_gain: 5.0,  // repulsion from squad proximity (footsteps scatter it)
-        wall_repel: 12.0,       // repulsion from solid rock; keeps the coating off the void
+        wall_repel: 12.0,       // steering-only: agents SEE rock ~1.7 cells ahead and turn early. Movement
+                                // into rock is hard-blocked in agent_step; this stops them driving into the
+                                // face and piling up against it.
         // wall_affinity is NOT the opposite of wall_repel. wall_repel acts on the non-floor cell the wall
         // slab stands on; wall_affinity acts on the FLOOR BESIDE IT. Together they park agents hard against
         // the wall face — where a real mold pools: dark, sheltered, damp. Without it the mold flees to
         // corridor centres, which is exactly backwards.
         wall_affinity: 5.0,     // attraction to wall-adjacent floor
-        wall_reach: 2.5,        // how far (cells) the wall's pull reaches across the floor
+        // Carrion is FOOD, not merely scent. Blood/nests only STEER agents (chemo_gain); meat nucleates
+        // biomass directly, so a fresh gib erupts into flesh instead of waiting for a vein to arrive.
+        carrion_bloom: 0.30,
+        wall_reach: 0.6,        // how far (WORLD UNITS, from the slab surface) the wall's pull reaches.
+                                // Measured by an exact distance transform at field resolution, so this is
+                                // sub-tile: 0.6 covers roughly the near half of the adjoining tile.
         // Habituation: a watched cell's fear fades, and recovers once the gaze leaves. Grounded in
         // Boisseau, Vogel & Dussutour (2016), 10.1098/rspb.2016.0446.
         hab_rate: 0.35,         // gained per second while watched (~3 s to fully habituate)
@@ -363,14 +375,31 @@
         // Emissive is held near 1.0 because the camera is LDR (no hdr, no Bloom) and the scene is
         // brightly lit (AmbientLight 500 + 2500-lux directional), so the default TonyMcMapface
         // tonemapper clips anything much brighter straight to white.
-        glow_gain: 1.0,         // multiplier on vein bioluminescence
+        glow_gain: 1.35,        // multiplier on vein bioluminescence
         intensity: 1.0,         // master opacity dial for the whole coating (0 = invisible)
         vein_lo: 3.0,           // trail value at which a vein begins to show
         vein_hi: 12.0,          // trail value at which a vein is fully lit (must exceed vein_lo)
         // normal_strength too high + wet_roughness too low turns the mold into a chrome puddle: with an
-        // ambient this bright, a near-black albedo shows almost nothing BUT its specular highlight.
-        normal_strength: 2.5,   // thickness -> normal perturbation. 0 = flat decal (the old look)
-        wet_roughness: 0.45,    // roughness where thickest (carpet is 0.95). Lower = wetter, glossier
+        // ambient this bright, a near-black albedo shows almost nothing BUT its specular highlight. That is
+        // also why the body of the mat is matte (~0.92) and only the vein CORES go wet: a low roughness
+        // smeared across the whole sheet is what makes mycelium read as spilled liquid.
+        normal_strength: 1.1,   // thickness -> normal perturbation. Low: fiber_strength carries the detail
+        wet_roughness: 0.42,    // roughness in the vein cores only (mat body is 0.92, carpet is 0.95)
         climb_height: 0.85,     // how far (world units) the mold creeps up a wall. Walls are 2.4 tall
+
+        // Fibrous-mat shading. Mycelium is a felt of hyphal filaments, so the surface needs structure
+        // finer than one field texel (0.19 world units) and an edge that is dendritic rather than a smooth
+        // meniscus. Both come from procedural fbm, reusing the hash21/vnoise/fbm chain from vhs.wgsl.
+        // Filament frequency, cycles per world unit. Tuned against the actual isometric camera: at 22.0
+        // the strands fell below pixel size and aliased into grey mush, which read as dirt rather than as
+        // a fibrous mat. Legibility at the real zoom, not physical hyphal scale, sets this.
+        fiber_scale: 8.0,
+        fiber_strength: 1.6,    // how hard the filaments carve the normal
+        margin_roughness: 0.55, // how feathery the colony's advancing edge is. 0 = a puddle's rim
+        sheen_strength: 0.18,   // grazing-angle fuzz rim, standing in for a sheen BRDF lobe
+        // Load-bearing, not a garnish: the scene's ambient is a bright UNIFORM fill, which ignores surface
+        // normals entirely. Without a cavity-occlusion term the filaments render flat however hard the
+        // normal is perturbed. This is the dial that actually makes the strands visible.
+        ao_strength: 0.75,      // cavity AO written into pbr_input.diffuse_occlusion
     ),
 )

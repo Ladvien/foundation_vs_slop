@@ -40,6 +40,7 @@ struct MoldParams {
     disturbance_gain: f32,
     wall_repel: f32,
     wall_affinity: f32,
+    carrion_bloom: f32,
     vein_lo: f32,
     vein_hi: f32,
 };
@@ -61,33 +62,57 @@ struct Agent {
 @group(0) @binding(7) var biomass_write: texture_storage_2d<rgba16float, write>;
 // CPU-written world state, one texel per dungeon cell.
 //   R = chemoattractant (blood, nests) · G = light/gaze · B = disturbance (squad)
-//   A = substrate mask: 0 = void · 0.5 = floor never seen · 1 = floor explored
-// The mold GROWS on any floor (A >= 0.25) but is only DRAWN on explored floor (A >= 0.75) — otherwise the
-// coating would trace the corridor layout through the fog of war and leak the map.
+//   A = substrate: 0 = void · 0.33 = floor never seen · 0.67 = remembered · 1.0 = currently visible
+// The mold GROWS on any floor, is only DRAWN on explored floor (else the coating would trace the corridor
+// layout through the fog and leak the map), and is only LIT where a unit can currently see.
 @group(0) @binding(8) var control: texture_2d<f32>;
-// Static wall-proximity field, written once: R = 1 on floor touching a wall, falling to 0 over `wall_reach`
-// cells. Walls here are thin slabs on cell EDGES, so "near a wall" == "near a non-floor cell".
+// Static wall-proximity field at FIELD resolution, written once: R = 1 on the mold's side of a wall surface,
+// falling to 0 over `wall_reach` world units. Built by an exact Euclidean distance transform against the
+// real slab geometry, so its ridge sits on the surface the player sees rather than at the cell centre.
 @group(0) @binding(9) var wall_prox: texture_2d<f32>;
 
+const TAU: f32 = 6.2831853;
+
+// Substrate mask `A` is four-state: 0 void · 0.33 floor never seen · 0.67 remembered · 1.0 currently visible.
 /// Is this cell floor the mold may grow on? (Seen or not.)
 fn is_walkable(a: f32) -> f32 {
-    return step(0.25, a);
+    return step(0.2, a);
 }
-/// Has the player explored this cell, so the mold may be rendered here?
+/// Has the player explored this cell, so the mold may be rendered here at all?
 fn is_explored(a: f32) -> f32 {
-    return step(0.75, a);
+    return step(0.5, a);
+}
+/// Is a unit looking at this cell right now? Drives both the gaze flinch and the fog dimming.
+fn is_visible(a: f32) -> f32 {
+    return step(0.9, a);
 }
 
-/// Bilinearly sample the static wall-proximity field at a float FIELD position. Bilinear (not nearest) so
-/// agents get a smooth gradient to climb toward the wall instead of a blocky per-cell step, and so the
-/// contact shading the material derives from it isn't a staircase.
+/// Is the dungeon cell under FIELD texel (x, y) floor? Out-of-range texels are non-floor: the field covers
+/// the dungeon exactly, so its border *is* the world boundary and must behave like rock. (Returning 0 here
+/// is what lets the stencils below treat the border as a no-flux wall instead of wrapping toroidally.)
+fn texel_walkable(x: i32, y: i32, dim: i32) -> f32 {
+    if (x < 0 || y < 0 || x >= dim || y >= dim) {
+        return 0.0;
+    }
+    let c = vec2<f32>(f32(x), f32(y)) / params.field_res * params.control_res;
+    let cx = clamp(i32(c.x), 0, i32(params.control_res.x) - 1);
+    let cy = clamp(i32(c.y), 0, i32(params.control_res.y) - 1);
+    return is_walkable(textureLoad(control, vec2<i32>(cx, cy), 0).a);
+}
+
+/// May an agent stand at this float FIELD position?
+fn pos_walkable(p: vec2<f32>, dim: i32) -> bool {
+    return texel_walkable(i32(floor(p.x)), i32(floor(p.y)), dim) > 0.5;
+}
+
+/// Bilinearly sample the static wall-proximity field at a float FIELD position. The field is now stored at
+/// field resolution (1:1 with this texture), so this is a plain bilinear tap — no cell-grid remap. Bilinear
+/// (not nearest) so agents get a smooth gradient to climb toward the wall instead of a blocky step.
 fn wall_prox_at(p: vec2<f32>, dim: i32) -> f32 {
-    let uv = vec2<f32>(f32(wrap_i(i32(floor(p.x)), dim)), f32(wrap_i(i32(floor(p.y)), dim)))
-           / params.field_res;
-    let c = uv * params.control_res - vec2<f32>(0.5, 0.5);
+    let c = p - vec2<f32>(0.5, 0.5);
     let base = floor(c);
     let f = c - base;
-    let hi = params.control_res - vec2<f32>(1.0, 1.0);
+    let hi = params.field_res - vec2<f32>(1.0, 1.0);
 
     var acc = 0.0;
     for (var j = 0; j < 2; j++) {
@@ -145,11 +170,18 @@ fn control_at(p: vec2<f32>, dim: i32) -> vec4<f32> {
 //
 // This single expression is where the "sentience" lives — foraging (chemo), nestling into corners
 // (wall_affinity), photophobia + habituation (light, already habituation-attenuated on the CPU), flinching
-// from the squad (disturbance), and staying off the rock (wall_repel).
+// from the squad (disturbance), and shying from the rock (wall_repel).
 //
-// Note `wall_affinity` and `wall_repel` are NOT opposites. `wall_repel` acts on the *non-floor* cell (the
-// rock the wall slab stands on); `wall_affinity` acts on the *floor beside it*. Together they park agents
-// hard against the wall face — which is where a real mold pools: dark, sheltered, and damp.
+// `wall_repel` is a STEERING term, not a movement guard, and the two are not interchangeable. Movement is
+// hard-blocked in `agent_step`, but a sensor reaches `sense_dist` (≈1.7 cells) ahead — well into rock the
+// agent will never occupy. `wall_repel` is what lets an agent *anticipate* a wall and turn early instead of
+// driving into the face and relying on the collision bounce. Without it agents pile against every wall.
+//
+// `wall_affinity` is its counterpart in floor space: it pulls agents toward the floor *beside* a wall. The
+// pair is what parks the mold hard against the wall face — dark, sheltered, damp — without cramming it there.
+//
+// Note the trail term is self-limiting at walls now: with no-flux boundaries (see `diffuse`/`field`) rock
+// texels hold exactly zero trail, so rock is intrinsically scentless as well as explicitly repellent.
 fn sense(p: vec2<f32>, dim: i32) -> f32 {
     let ctl = control_at(p, dim);
     let attract = ctl.r * params.chemo_gain
@@ -179,7 +211,6 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let dim = i32(params.field_res.x);
-    let dimf = params.field_res.x;
 
     var a = agents[i];
     let sa = params.sense_angle;
@@ -212,23 +243,49 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
         heading += params.rotate_angle;
     }
 
-    // Step forward, wrapping toroidally into [0, dim).
-    var np = a.pos + vec2<f32>(cos(heading), sin(heading)) * params.step_size;
-    np.x -= floor(np.x / dimf) * dimf;
-    np.y -= floor(np.y / dimf) * dimf;
+    // ── Step forward, confined to the floor ──────────────────────────────────────────────────────────
+    // Agents are HARD-BLOCKED from rock. Seeding places every agent on floor (see `agents.rs`), and this
+    // rule preserves that, so "an agent stands on walkable floor" is an invariant by induction — which is
+    // why nothing downstream needs a walkability guard.
+    //
+    // The two axes resolve SEQUENTIALLY, not in parallel. Testing both against the *starting* cell tunnels
+    // through concave corners: with N and E floor but NE rock, each axis test passes on its own while the
+    // combined diagonal step lands in the rock. Committing X first and testing Z from the post-X position
+    // tests the true destination, and yields wall-sliding for free.
+    //
+    // `step_size` is 1 texel ≈ 0.19 cells, so a step can never skip a cell boundary — one test per axis is
+    // sufficient. Out-of-range positions are non-floor (`texel_walkable`), so the world border is a wall and
+    // the old toroidal wrap — which could teleport an agent across the map — is gone.
+    let delta = vec2<f32>(cos(heading), sin(heading)) * params.step_size;
+    var pos = a.pos;
+    var blocked_x = false;
+    var blocked_y = false;
 
-    a.pos = np;
+    let try_x = vec2<f32>(pos.x + delta.x, pos.y);
+    if (pos_walkable(try_x, dim)) { pos = try_x; } else { blocked_x = true; }
+
+    let try_y = vec2<f32>(pos.x, pos.y + delta.y);
+    if (pos_walkable(try_y, dim)) { pos = try_y; } else { blocked_y = true; }
+
+    // Collision response. One axis blocked = slide along the wall: the mold creeps along the surface it
+    // touched, which is thigmotropism (contact guidance) and is how real hyphae follow topography —
+    // Perera et al. (1997), "Contact-sensing by hyphae of dermatophytic and saprophytic fungi",
+    // 10.1080/02681219780001301. Both axes blocked = wedged in a corner, so take Jones' collision rule and
+    // pick a fresh random heading; that is also what breaks corner-pinning oscillation.
+    if (blocked_x && blocked_y) {
+        heading = rand01(i * 2246822519u + u32(params.time * 60.0)) * TAU;
+    }
+
+    a.pos = pos;
     a.heading = heading;
     agents[i] = a;
 
-    // Deposit fixed-point scent at the new texel — but only on walkable floor, so no trail ever accumulates
-    // out in the void (agents that seeded there leave no mark while they steer themselves back to ground).
-    let dx = wrap_i(i32(floor(np.x)), dim);
-    let dy = wrap_i(i32(floor(np.y)), dim);
-    if (is_walkable(control_at(np, dim).a) > 0.5) {
-        let idx = u32(dy) * u32(dim) + u32(dx);
-        atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
-    }
+    // Deposit fixed-point scent at the new texel. No walkability guard: `pos` is floor by the invariant
+    // above, and a redundant second check would be a silent second execution path.
+    let dx = i32(floor(pos.x));
+    let dy = i32(floor(pos.y));
+    let idx = u32(dy) * u32(dim) + u32(dx);
+    atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
 }
 
 // ── Pass 3: diffuse + decay the trail, fold in deposits, composite the display ───────────────────────
@@ -241,14 +298,33 @@ fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
     let y = i32(id.y);
 
-    // 3x3 mean of the read trail (Jenson/Lague mean filter).
+    // Rock carries no scent. Storing zero (rather than letting trail bleed in and rot) is what makes rock
+    // intrinsically unattractive to `sense()`, and it is the read side of the no-flux boundary below.
+    if (texel_walkable(x, y, dim) < 0.5) {
+        textureStore(trail_write, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    // 3x3 mean of the read trail (Jenson/Lague mean filter), restricted to floor.
+    //
+    // This is an AVERAGING filter, so masked neighbours must be dropped *and the divisor reduced to match*.
+    // Dividing by a fixed 9 while summing only the floor neighbours would bias every wall-adjacent texel
+    // toward zero — the very drain we are removing. Contrast the Gray-Scott Laplacian in `field`, which is a
+    // flux operator and must NOT be renormalised. Same masking, opposite correction.
     var sum = 0.0;
+    var wsum = 0.0;
     for (var oy = -1; oy <= 1; oy++) {
         for (var ox = -1; ox <= 1; ox++) {
-            sum += textureLoad(trail_read, vec2<i32>(wrap_i(x + ox, dim), wrap_i(y + oy, dim)), 0).r;
+            let nx = x + ox;
+            let ny = y + oy;
+            if (texel_walkable(nx, ny, dim) > 0.5) {
+                sum += textureLoad(trail_read, vec2<i32>(nx, ny), 0).r;
+                wsum += 1.0;
+            }
         }
     }
-    let blur = sum * (1.0 / 9.0);
+    // `wsum >= 1` always: the centre texel is walkable (we returned above otherwise).
+    let blur = sum / wsum;
     let here = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
 
     // This tick's deposits at this texel (fixed-point → float).
@@ -275,6 +351,28 @@ fn bio_at(x: i32, y: i32, dim: i32) -> vec2<f32> {
     return textureLoad(biomass_read, vec2<i32>(wrap_i(x, dim), wrap_i(y, dim)), 0).rg;
 }
 
+// One neighbour's contribution to the no-flux (Neumann) Laplacian, in FLUX form: `w * (u_k - u_c)`.
+//
+// A masked (rock) neighbour contributes exactly zero. That is the discrete ghost-node mirror condition
+// `u_ghost := u_c` ⇒ zero gradient ⇒ zero flux through that face — mold piles up against the wall instead
+// of leaking through it.
+//
+// This must NOT be renormalised back to `sum(w) == 1`. The previous form, `sum(w*u_k) - u_c`, is
+// algebraically identical in the interior (the eight weights sum to 1) but at a wall it keeps the full
+// `-u_c` while losing the neighbour's positive term — a Dirichlet `u -> 0` node. Rock was an absorbing sink
+// that drained the mold near every wall. Renormalising the surviving weights would be a different bug: it
+// would speed tangential diffusion to compensate for the blocked normal direction. Lowering the effective
+// diffusivity next to a wall is the physically correct consequence of a smaller domain.
+//
+// The Turing condition `d_v < d_u` survives: U and V share this mask, so both diffusivities scale by the
+// same near-wall factor and the ratio is preserved.
+fn bio_flux(x: i32, y: i32, dim: i32, w: f32, c: vec2<f32>) -> vec2<f32> {
+    if (texel_walkable(x, y, dim) < 0.5) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return (bio_at(x, y, dim) - c) * w;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     let dim = i32(params.field_res.x);
@@ -284,16 +382,23 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
     let y = i32(id.y);
 
+    // Nothing grows in rock. Zeroing here (instead of letting the reaction term drift `u -> 1` in cells
+    // nothing ever reads) keeps the field honest and matches the trail's treatment in `diffuse`.
+    if (texel_walkable(x, y, dim) < 0.5) {
+        textureStore(biomass_write, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        textureStore(display, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
     let c = bio_at(x, y, dim);
     var u = c.x;
     var v = c.y;
 
-    // 9-point Laplacian of (U, V).
-    var lap = (bio_at(x - 1, y, dim) + bio_at(x + 1, y, dim)
-             + bio_at(x, y - 1, dim) + bio_at(x, y + 1, dim)) * 0.2;
-    lap += (bio_at(x - 1, y - 1, dim) + bio_at(x + 1, y - 1, dim)
-          + bio_at(x - 1, y + 1, dim) + bio_at(x + 1, y + 1, dim)) * 0.05;
-    lap -= c;
+    // 9-point no-flux Laplacian of (U, V): orthogonal 0.2, diagonal 0.05. See `bio_flux`.
+    var lap = bio_flux(x - 1, y, dim, 0.2, c) + bio_flux(x + 1, y, dim, 0.2, c)
+            + bio_flux(x, y - 1, dim, 0.2, c) + bio_flux(x, y + 1, dim, 0.2, c);
+    lap += bio_flux(x - 1, y - 1, dim, 0.05, c) + bio_flux(x + 1, y - 1, dim, 0.05, c)
+         + bio_flux(x - 1, y + 1, dim, 0.05, c) + bio_flux(x + 1, y + 1, dim, 0.05, c);
 
     // Gray-Scott reaction.
     let uvv = u * v * v;
@@ -311,6 +416,10 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     let dark = 1.0 - ctl.g;
     v += vein * params.bloom_seed * dark * params.dt;
 
+    // Carrion is FOOD, not merely a scent. Blood and nests only steer agents (`chemo_gain`); meat nucleates
+    // flesh directly, without waiting for a vein to establish, so a fresh gib erupts into biomass.
+    v += ctl.r * params.carrion_bloom * params.dt;
+
     u = clamp(u, 0.0, 1.0);
     v = clamp(v, 0.0, 1.0);
     textureStore(biomass_write, vec2<i32>(x, y), vec4<f32>(u, v, 0.0, 1.0));
@@ -327,6 +436,10 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     //
     // Coverage is masked to explored floor: never over the void, and never on ground the player has not yet
     // seen. The mold still GROWS there — it just isn't drawn, so it cannot leak the map through the fog.
+    // Coverage encodes BOTH "may be drawn" and "is lit": 0 = never seen (draw nothing), 0.5 = remembered
+    // (draw, but dimmed like the fogged floor beneath it), 1.0 = currently visible (draw at full light).
+    // Without the middle state the mold glowed at full strength on out-of-sight ground.
+    let cov = is_explored(ctl.a) * (0.5 + 0.5 * is_visible(ctl.a));
     let contact = wall_prox_at(vec2<f32>(f32(x), f32(y)), dim);
-    textureStore(display, vec2<i32>(x, y), vec4<f32>(trail, v, contact, is_explored(ctl.a)));
+    textureStore(display, vec2<i32>(x, y), vec4<f32>(trail, v, contact, cov));
 }
