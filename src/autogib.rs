@@ -44,7 +44,7 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use crate::gore::GoreSettings;
-use crate::squad::{GunModel, Unit};
+use crate::squad::{FigurineSource, GunModel, Unit};
 use crate::util::hash_f32;
 
 /// Classification tolerance: a vertex within `EPS` of the cut plane is treated as lying *on* it, so
@@ -722,15 +722,15 @@ fn bake_autogib(
     mut cache: ResMut<AutogibCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     settings: Res<GoreSettings>,
-    units: Query<(&WorldAssetRoot, &Children), With<Unit>>,
+    units: Query<(&FigurineSource, &Children), With<Unit>>,
     children_q: Query<&Children>,
     transforms: Query<&Transform>,
     mesh_q: Query<&Mesh3d>,
     mat_q: Query<&MeshMaterial3d<StandardMaterial>>,
     is_gun: Query<(), With<GunModel>>,
 ) {
-    for (root, children) in &units {
-        let source = root.0.id();
+    for (figurine, children) in &units {
+        let source = figurine.0.id();
         if cache.baked.contains(&source) {
             continue;
         }
