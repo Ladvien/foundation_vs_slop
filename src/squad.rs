@@ -25,7 +25,7 @@ use crate::ai::drives::Drives;
 use crate::squad_ai::actions::UtterCooldown;
 use crate::squad_ai::cohesion::DesiredMove;
 use crate::squad_ai::dialogue::MemoryStream;
-use crate::squad_ai::persona::default_personas;
+use crate::squad_ai::persona::load_personas;
 use crate::squad_ai::role::RoleId;
 
 /// Marker for a squad member (the RTS unit; replaces the old single-agent `Player`).
@@ -231,8 +231,10 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
         .take(5)
         .collect();
 
-    // The role + persona roster, index-matched to spawn order (member i plays role i).
-    let personas = default_personas();
+    // The role + persona roster, index-matched to spawn order (member i plays role i). Loaded from
+    // `assets/config/personas.ron` when present (validated), else the code-literal defaults — a
+    // malformed/invalid override is a loud startup panic, never a silent default (mirrors roles.ron).
+    let personas = load_personas().unwrap_or_else(|e| panic!("personas.ron: {e}"));
 
     for (i, &cell) in cells.iter().enumerate() {
         let outfit = OUTFITS[i];
@@ -433,9 +435,13 @@ fn unit_movement(
     }
 
     // Snapshot every unit as an ORCA agent using last frame's velocity (synchronous update: all
-    // solves see the same prior state). A unit that is moving — under a player order OR an AI goal —
-    // `avoids` (it reciprocates); a truly idle unit does not, so movers take full responsibility
-    // going around it.
+    // solves see the same prior state). A unit that is moving — under a player order OR an *active* AI
+    // goal — `avoids` (it reciprocates); a truly idle unit does not, so movers take full responsibility
+    // going around it AND it reads as a "settled" neighbor for the `blocked_by_settled` arrival blob.
+    // This hinges on `squad_think` giving an at-rest unit a `None` goal: the FollowAnchor deadband
+    // (see `squad_ai::perception`) makes an idle unit near the anchor hold with `goal == None`, so it
+    // is correctly `avoids: false` here. Without that deadband every idle unit carried a standing
+    // FollowAnchor goal, was permanently `avoids: true`, and the arrival shortcut could never fire.
     let agents: Vec<(Entity, Agent)> = units
         .iter()
         .map(|(e, t, _, v, order, desired)| {
@@ -497,6 +503,15 @@ fn unit_movement(
                 blocked_by_settled = true;
             }
         }
+        // Canonicalize neighbour order so ORCA is iteration-order-independent. `new_velocity` pushes one
+        // half-plane per neighbour and solves an INCREMENTAL 2D linear program (`orca::new_velocity` →
+        // `linear_program2/3`), whose float output depends on constraint ORDER. ECS query iteration
+        // order is not guaranteed stable across runs (archetype membership shifts as components are
+        // added/removed), so sorting neighbours by position — the value-sort determinism idiom of
+        // `snapshot_hash`/`update_anchor` — makes the solve a pure function of the neighbour SET, a
+        // cheap reproducibility guard on this ≤handful-of-neighbours hot path. `blocked_by_settled`
+        // above is an order-independent OR, so it needs no sort.
+        neighbors.sort_unstable_by_key(|a| (a.pos.x.to_bits(), a.pos.y.to_bits()));
 
         // Nearby solid cells become hard ORCA wall constraints, so a unit dodging a neighbor is never
         // steered into a wall (where it would stall). Only walls the unit is actually *close* to bind

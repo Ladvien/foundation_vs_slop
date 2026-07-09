@@ -275,11 +275,19 @@ pub fn generate_dialogue(
         };
         let recent = memory.top(tick);
         memory.push(u.event, tick);
-        // Verbosity gate: a taciturn member speaks less. Deterministic per (speaker, event) so it's
-        // reproducible — not a random suppression.
-        let chatty =
-            hash01_u32((u.speaker.to_bits() as u32).wrapping_add(u.event.seed())) < persona.verbosity;
-        if !chatty {
+        // Verbosity gate: a taciturn member speaks a FRACTION of the time. Folding the tick into the
+        // hash gives each utterance an independent pseudo-random draw, so over many barks roughly
+        // `verbosity` of them pass — a real frequency throttle. Hashing only (speaker, event) — as the
+        // old gate did — is a single constant per (speaker, event-type): it made a unit's signature
+        // line either fire on EVERY cooldown window forever or stay permanently mute, never "less
+        // often". Still deterministic/reproducible (tick is the elapsed-frame count), and cosmetic —
+        // this runs on `Update`, never entering `snapshot_hash`.
+        let draw = hash01_u32(
+            (u.speaker.to_bits() as u32)
+                .wrapping_add(u.event.seed())
+                .wrapping_add((tick as u32).wrapping_mul(0x9E37_79B1)),
+        );
+        if draw >= persona.verbosity {
             continue;
         }
         let ctx = DialogueContext { speaker: u.speaker, persona, event: u.event, recent };

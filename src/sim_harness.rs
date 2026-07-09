@@ -134,6 +134,17 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
+        // Squad movement. NOTE: `squad_ai::SquadAiPlugin` (which production `lib::run` DOES register
+        // alongside `SquadPlugin`) is deliberately NOT added to this exact-hash gate yet. Adding it
+        // makes the squad AI move/heal units — driving the whole cast harder — which surfaces a
+        // PRE-EXISTING determinism fragility that is NOT in the squad-AI logic: cosmetic async GLTF
+        // scene loads attach `Children`/`SceneInstance` to actors (and `recolor_units` tags
+        // `Recolored`) at a wall-clock-dependent tick AND order, churning archetypes so ECS iteration
+        // order shifts between two same-seed runs and tips order-sensitive float reductions. The
+        // squad-AI decision/anchor logic is itself deterministic and is gated directly by pure unit
+        // tests (`squad_ai::cohesion` centroid order-independence; `ai::utility` decide reproducibility).
+        // Re-adding the plugin here is a follow-up gated on making the sim iteration-order-independent
+        // (or settling asset loads deterministically before the compared window).
         crate::squad::SquadPlugin,
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,

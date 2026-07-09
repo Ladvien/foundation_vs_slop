@@ -11,7 +11,7 @@
 //! into the [`MapElitesArchive`]. This module is the pure archive + descriptor math; wiring it to the
 //! headless `sim_harness` is the training entry point.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A 2-D behaviour characterisation of one squad configuration, each axis in `[0,1]`:
 /// - `aggression`: how much the squad engages threats vs. avoids (combat share of actions).
@@ -46,10 +46,14 @@ pub struct Elite {
     pub genome: u64,
 }
 
-/// The MAP-Elites feature grid: at most one elite per behaviour cell, always the highest fitness seen.
+/// The MAP-Elites feature grid: at most one elite per behaviour cell, always the highest fitness seen
+/// (Mouret & Clune 2015). A **`BTreeMap`** (not `HashMap`) so iteration is in a fixed, sorted cell
+/// order: `std::collections::HashMap`'s per-process-randomized order would make `best()`'s tie-break
+/// and `qd_score()`'s non-associative f32 sum differ run-to-run, breaking the module's documented
+/// "run headless on the deterministic core (repeatable)" guarantee.
 pub struct MapElitesArchive {
     res: usize,
-    cells: HashMap<(usize, usize), Elite>,
+    cells: BTreeMap<(usize, usize), Elite>,
 }
 
 impl MapElitesArchive {
@@ -57,7 +61,7 @@ impl MapElitesArchive {
     pub fn new(res: usize) -> Self {
         MapElitesArchive {
             res: res.max(1),
-            cells: HashMap::new(),
+            cells: BTreeMap::new(),
         }
     }
 
