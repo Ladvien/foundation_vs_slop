@@ -134,18 +134,15 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
-        // Squad movement. NOTE: `squad_ai::SquadAiPlugin` (which production `lib::run` DOES register
-        // alongside `SquadPlugin`) is deliberately NOT added to this exact-hash gate yet. Adding it
-        // makes the squad AI move/heal units — driving the whole cast harder — which surfaces a
-        // PRE-EXISTING determinism fragility that is NOT in the squad-AI logic: cosmetic async GLTF
-        // scene loads attach `Children`/`SceneInstance` to actors (and `recolor_units` tags
-        // `Recolored`) at a wall-clock-dependent tick AND order, churning archetypes so ECS iteration
-        // order shifts between two same-seed runs and tips order-sensitive float reductions. The
-        // squad-AI decision/anchor logic is itself deterministic and is gated directly by pure unit
-        // tests (`squad_ai::cohesion` centroid order-independence; `ai::utility` decide reproducibility).
-        // Re-adding the plugin here is a follow-up gated on making the sim iteration-order-independent
-        // (or settling asset loads deterministically before the compared window).
-        crate::squad::SquadPlugin,
+        // Squad movement AND squad AI — registered together, exactly as production `lib::run` does, so
+        // the squad AI's pinned `FixedUpdate` systems (`update_anchor`, `squad_think`, `unit_actions`,
+        // `medic_heal`) are exercised by the exact-hash determinism gate. This was previously deferred
+        // because driving the cast harder surfaced a pre-existing fragility — cosmetic async GLTF scene
+        // loads attaching `Children`/`SceneInstance` to *sim* actors — that churned archetypes and
+        // shifted ECS iteration order between same-seed runs. That is now fixed at the root: the unit
+        // figurine scene lives on a cosmetic child, not the `Unit` (see `crate::squad`, issue #18), so
+        // the sim archetype is fixed at spawn and iteration order is stable.
+        (crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,
         crate::health::HealthPlugin,

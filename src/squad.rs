@@ -102,7 +102,23 @@ pub struct AimTarget(pub Option<Vec3>);
 #[derive(Component)]
 pub struct GunModel;
 
-/// Marks a unit whose figurine has already been recolored (so the one-shot recolor runs once).
+/// Marks the figurine child entity that carries the unit's async body scene (`WorldAssetRoot`). The
+/// figurine lives on a *child*, not the `Unit` sim entity, so the scene spawner's async
+/// `Children`/scene-instance insertion (and the `Recolored` tag) churns *this* cosmetic entity's
+/// archetype at a wall-clock-dependent tick — never the `Unit`'s. Keeping the `Unit` archetype fixed
+/// at spawn is what lets the deterministic replay gate run the squad AI (see issue #18 / `sim_harness`).
+#[derive(Component)]
+pub struct FigurineModel;
+
+/// The unit's figurine scene asset, carried on the `Unit` itself as a stable, spawn-time id so death
+/// (`despawn_dead_units`) and fracture baking (`autogib::bake_autogib`) can key the gib source without
+/// reading the async `WorldAssetRoot` (which now lives on the [`FigurineModel`] child). One handle is
+/// loaded once and cloned into both the child's `WorldAssetRoot` and this component — one asset, one path.
+#[derive(Component)]
+pub struct FigurineSource(pub Handle<WorldAsset>);
+
+/// Marks a [`FigurineModel`] child whose meshes have already been recolored (so the one-shot recolor
+/// runs once). Tagged on the figurine child, never the `Unit`, so recoloring never churns the sim archetype.
 #[derive(Component)]
 struct Recolored;
 
@@ -241,6 +257,14 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
         // Per-unit decision seed from the spawn index (deterministic; never from position, mirroring
         // the crab/scout convention in `ai::brain`).
         let seed = (i as u32).wrapping_add(1);
+        // The figurine body scene: loaded once, then referenced from two places — a stable
+        // `FigurineSource` on the `Unit` (spawn-time id for gib/death code) and the async
+        // `WorldAssetRoot` on the cosmetic `FigurineModel` child below. Attaching the scene to a child
+        // (not the `Unit`) keeps the sim entity's archetype fixed across the async load, so ECS
+        // iteration order is stable between same-seed runs — the fix that lets the squad AI into the
+        // deterministic replay gate (issue #18). Crabs already do this (`crate::crab`, `with_child`).
+        let figurine: Handle<WorldAsset> =
+            assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB));
         let mut unit = commands.spawn((
                 Unit,
                 SquadMember(i),
@@ -262,7 +286,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     UtterCooldown::default(),
                     MemoryStream::default(),
                 ),
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB))),
+                FigurineSource(figurine.clone()),
                 Transform::from_translation(dungeon.cell_center(cell))
                     .with_scale(Vec3::splat(FIGURINE_SCALE)),
                 // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
@@ -271,6 +295,14 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
             ));
         // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
         // not here — putting it on one unit in the headless core would split the hashed archetype.
+        // The figurine body scene, on a cosmetic child with an identity transform: it inherits the
+        // unit's position + `FIGURINE_SCALE`, so it renders exactly where the old root-attached scene
+        // did, but the async `Children`/scene-instance churn lands on this child, not the `Unit`.
+        unit.with_child((
+            FigurineModel,
+            WorldAssetRoot(figurine),
+            Transform::default(),
+        ));
         // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
         unit.with_child((
             GunModel,
@@ -317,11 +349,11 @@ fn despawn_dead_units(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut units: Query<(Entity, &mut Health, &Transform, &Outfit, &WorldAssetRoot), With<Unit>>,
+    mut units: Query<(Entity, &mut Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
 ) {
     // How many dead units we may actually remove this frame while keeping the living floor.
     let mut removable = units.iter().count().saturating_sub(MIN_LIVING_UNITS);
-    for (entity, mut hp, transform, outfit, root) in &mut units {
+    for (entity, mut hp, transform, outfit, figurine) in &mut units {
         if hp.current <= 0.0 {
             if removable > 0 {
                 // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
@@ -332,7 +364,7 @@ fn despawn_dead_units(
                     tint: outfit.0,
                     // The figurine's baked fracture set: spawn from its foot origin at its render scale.
                     gib: Some(GibSource {
-                        source: root.0.id(),
+                        source: figurine.0.id(),
                         origin: transform.translation,
                         scale: transform.scale.x,
                     }),
@@ -351,21 +383,28 @@ fn despawn_dead_units(
 }
 
 /// Once a unit's figurine scene has spawned its mesh descendants, give it a flat outfit-colored
-/// material (a new handle per unit so they don't share one asset). The gun subtree is skipped so
-/// the blaster keeps its own look. Runs until the async scene load produces meshes, then tags the
-/// unit `Recolored` so it never runs again.
+/// material (a new handle per unit so they don't share one asset). Runs until the async scene load
+/// produces meshes, then tags the `FigurineModel` child `Recolored` so it never runs again.
+///
+/// Keyed on the figurine *child* (not the `Unit`) so the one-shot `Recolored` tag churns the cosmetic
+/// child's archetype, never the sim entity's — the async-load isolation that lets the squad AI into
+/// the deterministic replay gate (issue #18). The gun is a *sibling* child of the `Unit`, outside the
+/// figurine subtree walked here, so it keeps its own colors without an explicit skip.
 fn recolor_units(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    units: Query<(Entity, &Outfit), (With<Unit>, Without<Recolored>)>,
+    figurines: Query<(Entity, &ChildOf), (With<FigurineModel>, Without<Recolored>)>,
+    outfits: Query<&Outfit, With<Unit>>,
     children: Query<&Children>,
     has_material: Query<(), With<MeshMaterial3d<StandardMaterial>>>,
-    is_gun: Query<(), With<GunModel>>,
 ) {
-    for (unit, outfit) in &units {
-        let mut stack: Vec<Entity> = match children.get(unit) {
+    for (figurine, child_of) in &figurines {
+        let Ok(outfit) = outfits.get(child_of.parent()) else {
+            continue; // parent isn't a unit (or despawned) — nothing to color
+        };
+        let mut stack: Vec<Entity> = match children.get(figurine) {
             Ok(c) => c.iter().collect(),
-            Err(_) => continue,
+            Err(_) => continue, // scene not instantiated yet — retry next frame
         };
         // Mint the outfit material lazily — only once we've actually found a mesh to recolor. Creating
         // it up-front orphaned a fresh `StandardMaterial` on every frame the scene was still streaming
@@ -374,9 +413,6 @@ fn recolor_units(
         // as the "did we recolor anything?" flag that gates the `Recolored` tag.
         let mut material: Option<Handle<StandardMaterial>> = None;
         while let Some(e) = stack.pop() {
-            if is_gun.get(e).is_ok() {
-                continue; // don't recurse into the gun sub-model
-            }
             if has_material.get(e).is_ok() {
                 let handle = material.get_or_insert_with(|| {
                     materials.add(StandardMaterial {
@@ -392,7 +428,7 @@ fn recolor_units(
             }
         }
         if material.is_some() {
-            commands.entity(unit).insert(Recolored);
+            commands.entity(figurine).insert(Recolored);
         }
     }
 }
