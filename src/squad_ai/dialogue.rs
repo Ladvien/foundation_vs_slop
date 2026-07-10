@@ -7,12 +7,14 @@
 //! (Shanahan et al., "Role-Play with LLMs", 2023; grounded in game state per Gallotta et al. 2024) for
 //! a local LLM — its transport is the opt-in integration point.
 //!
-//! Output is a self-contained [`SquadLine`] event (speaker + text + emotion), so this compiles on
-//! `main` without the dialogue-bubble crate (PR #12). A thin adapter maps `SquadLine` → that crate's
-//! `Bark` when it lands — the render path is content-agnostic (`build_bubble(&str)`).
+//! Output is a [`SquadLine`] message (speaker + text + emotion). `crate::dialogue::bark_squad_lines`
+//! adapts it to a `Bark` and the bubble layer renders it above the speaker's head. That adapter is
+//! registered by `DialoguePlugin` (windowed only), so generation still runs — and stays deterministic —
+//! in the headless harness, where nothing renders and a line's text never reaches `snapshot_hash`.
 
 use bevy::prelude::*;
 
+use crate::dialogue::Emotion;
 use crate::util::hash01_u32;
 
 use super::persona::Persona;
@@ -85,9 +87,65 @@ pub struct SquadUtterance {
 pub struct SquadLine {
     pub speaker: Entity,
     pub text: String,
-    /// A coarse tone tag the bubble layer can map to its `Emotion` (kept as a string to avoid a
-    /// compile dependency on the dialogue crate).
-    pub tone: &'static str,
+    /// The affect the bubble layer tints the balloon with.
+    ///
+    /// A typed [`Emotion`], not a `&'static str` tone tag. Both modules live in this crate, so the string
+    /// bought nothing and cost a *partial* mapping: the adapter would have had to decide what to do with a
+    /// tone it didn't recognise, and "unknown tone → Neutral" is exactly the silent-default the one-path
+    /// rule forbids. Typed, the mapping is total by construction and a new emotion is a compile error.
+    pub emotion: Emotion,
+}
+
+/// The last few line keys a unit spoke, so the template provider can avoid repeating itself.
+///
+/// `TemplateProvider` picks by hashing `(speaker, event, recent memory)`, which is deterministic — a
+/// virtue for replay, but it means an identical situation always yields the identical phrase. Without this
+/// the squad reads as a set of voice-clip triggers rather than people.
+///
+/// Lives on every unit (uniform, so no archetype split) and holds no simulation state: nothing in
+/// `snapshot_hash` reads it, and it is written only from `generate_dialogue` on `Update`.
+#[derive(Component, Default)]
+pub struct SpokenLines {
+    recent: Vec<u64>,
+}
+
+/// How many of a speaker's most recent lines to avoid reusing. Held small on purpose: with a 2–3 phrase
+/// table, a longer memory would exclude every candidate and force a repeat anyway.
+const RECENT_LINE_MEMORY: usize = 3;
+
+impl SpokenLines {
+    /// Every remembered key, most recent last. Providers narrow this with [`avoid_window`].
+    fn keys(&self) -> &[u64] {
+        &self.recent
+    }
+
+    fn remember(&mut self, key: u64) {
+        self.recent.push(key);
+        if self.recent.len() > RECENT_LINE_MEMORY {
+            self.recent.remove(0);
+        }
+    }
+}
+
+/// The suffix of `recent` a provider should refuse to repeat when choosing among `n_choices` phrases.
+///
+/// Capped at `n_choices - 1` so at least one candidate always survives the filter. Without the cap, a
+/// two-phrase table plus a three-deep memory would exclude everything and the provider would quietly fall
+/// back to repeating — anti-repetition that silently stops working is worse than none.
+pub fn avoid_window(recent: &[u64], n_choices: usize) -> &[u64] {
+    let keep = n_choices.saturating_sub(1).min(recent.len());
+    &recent[recent.len() - keep..]
+}
+
+/// A stable, dependency-free key for a phrase (FNV-1a). `DefaultHasher` would also do, but its output is
+/// explicitly not stable across Rust releases, and this feeds a deterministic pick.
+fn line_key(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 /// One remembered observation. A trimmed [`SquadUtterance`] plus when it happened.
@@ -146,12 +204,15 @@ pub trait DialogueProvider: Send + Sync {
     fn line(&self, ctx: &DialogueContext) -> Option<SquadLine>;
 }
 
-/// Everything a provider needs: who is speaking, what just happened, and their salient memory.
+/// Everything a provider needs: who is speaking, what just happened, their salient memory, and the lines
+/// they have most recently spoken (so a provider can avoid repeating itself).
 pub struct DialogueContext<'a> {
     pub speaker: Entity,
     pub persona: &'a Persona,
     pub event: ObsEvent,
     pub recent: Option<MemoryRecord>,
+    /// Keys of this speaker's recent lines — see [`SpokenLines::avoid`]. Never excludes every candidate.
+    pub recent_lines: &'a [u64],
 }
 
 /// The selected provider, inserted at startup by config (default = [`TemplateProvider`]).
@@ -171,14 +232,14 @@ pub struct TemplateProvider;
 
 impl DialogueProvider for TemplateProvider {
     fn line(&self, ctx: &DialogueContext) -> Option<SquadLine> {
-        let (phrases, tone): (&[&str], &str) = match (ctx.event, ctx.persona.role) {
+        let (phrases, emotion): (&[&str], Emotion) = match (ctx.event, ctx.persona.role) {
             (ObsEvent::ExaminedBody, RoleId::Researcher) => (
                 &[
                     "Post-mortem lacerations. Something fed here.",
                     "Tissue's necrotic. This one's been dead a while.",
                     "No containment tags. Unlogged specimen.",
                 ],
-                "clinical",
+                Emotion::Neutral,
             ),
             (ObsEvent::ExaminedObject, _) => (
                 &[
@@ -186,7 +247,7 @@ impl DialogueProvider for TemplateProvider {
                     "Residue on the surface — bag it later.",
                     "Structurally sound. Moving on.",
                 ],
-                "flat",
+                Emotion::Neutral,
             ),
             (ObsEvent::SensedAnomaly, RoleId::Psionic) => (
                 &[
@@ -194,41 +255,50 @@ impl DialogueProvider for TemplateProvider {
                     "The signature's close. My teeth ache.",
                     "Something's wrong with the air in here.",
                 ],
-                "afraid",
+                Emotion::Fear,
             ),
             (ObsEvent::Communed, RoleId::Psionic) => (
                 &["It knows we're here.", "...it's smiling. It's always smiling."],
-                "afraid",
+                Emotion::Fear,
             ),
             (ObsEvent::Warded, RoleId::Psionic) => (
                 &["Hold together. I've got us.", "Ward's up. Breathe."],
-                "calm",
+                Emotion::Calm,
             ),
             (ObsEvent::HealedAlly, RoleId::Medic) => (
                 &["You're patched. Stay on me.", "Pressure's holding. Walk it off."],
-                "steady",
+                Emotion::Calm,
             ),
             (ObsEvent::ThreatSpotted, RoleId::Gunman) => (
                 &["Contact. Hold your lane.", "Eyes up. I've got the angle."],
-                "clipped",
+                Emotion::Anger,
             ),
             (ObsEvent::Regrouped, _) => (
                 &["Forming up.", "Back on you."],
-                "flat",
+                Emotion::Neutral,
             ),
             // Any event a role has no special voice for → generic acknowledgement (still in-character
             // enough via tone). Keeps a line for every (event, role) without a giant table.
-            _ => (&["Copy.", "Moving."], "flat"),
+            _ => (&["Copy.", "Moving."], Emotion::Neutral),
         };
         let seed = (ctx.speaker.to_bits() as u32)
             .wrapping_mul(2_654_435_761)
             .wrapping_add(ctx.event.seed())
             .wrapping_add(ctx.recent.map(|r| r.event.seed() * 31).unwrap_or(0));
-        let pick = (hash01_u32(seed) * phrases.len() as f32) as usize % phrases.len();
+        let base = (hash01_u32(seed) * phrases.len() as f32) as usize % phrases.len();
+        // Walk forward from the hashed pick to the first phrase this speaker hasn't just used. The hash
+        // alone is a pure function of (speaker, event, recent memory), so an identical situation would
+        // otherwise replay the identical phrase forever. `avoid_window` never excludes every candidate, so
+        // this always lands on something — deterministically, keeping headless generation reproducible.
+        let avoid = avoid_window(ctx.recent_lines, phrases.len());
+        let pick = (0..phrases.len())
+            .map(|k| (base + k) % phrases.len())
+            .find(|&i| !avoid.contains(&line_key(phrases[i])))
+            .unwrap_or(base);
         Some(SquadLine {
             speaker: ctx.speaker,
             text: phrases[pick].to_string(),
-            tone,
+            emotion,
         })
     }
 }
@@ -265,12 +335,14 @@ pub fn generate_dialogue(
     provider: Res<ActiveDialogueProvider>,
     mut utterances: MessageReader<SquadUtterance>,
     mut lines: MessageWriter<SquadLine>,
-    mut speakers: Query<(&Persona, &mut MemoryStream)>,
+    mut speakers: Query<(&Persona, &mut MemoryStream, &mut SpokenLines)>,
 ) {
     // A monotonic tick proxy for memory timestamps (elapsed 60 Hz frames since start).
     let tick = (time.elapsed_secs() * 60.0) as u64;
     for u in utterances.read() {
-        let Ok((persona, mut memory)) = speakers.get_mut(u.speaker) else {
+        // An utterance whose speaker died (or was despawned) between the action and this system has
+        // nobody to say it. Dropping it is correct, not a swallowed error.
+        let Ok((persona, mut memory, mut spoken)) = speakers.get_mut(u.speaker) else {
             continue;
         };
         let recent = memory.top(tick);
@@ -290,9 +362,16 @@ pub fn generate_dialogue(
         if draw >= persona.verbosity {
             continue;
         }
-        let ctx = DialogueContext { speaker: u.speaker, persona, event: u.event, recent };
+        let ctx = DialogueContext {
+            speaker: u.speaker,
+            persona,
+            event: u.event,
+            recent,
+            recent_lines: spoken.keys(),
+        };
         if let Some(line) = provider.0.line(&ctx) {
             debug!("[{}] {}", persona.name, line.text);
+            spoken.remember(line_key(&line.text));
             lines.write(line);
         }
     }
@@ -328,20 +407,80 @@ mod tests {
         assert_eq!(m.top(100).map(|r| r.event), Some(ObsEvent::SensedAnomaly));
     }
 
+    fn ctx<'a>(p: &'a Persona, event: ObsEvent, recent_lines: &'a [u64]) -> DialogueContext<'a> {
+        DialogueContext {
+            speaker: Entity::PLACEHOLDER,
+            persona: p,
+            event,
+            recent: None,
+            recent_lines,
+        }
+    }
+
     #[test]
     fn template_provider_is_deterministic_and_in_character() {
         let p = persona(RoleId::Researcher, 1.0);
-        let ctx = DialogueContext {
-            speaker: Entity::PLACEHOLDER,
-            persona: &p,
-            event: ObsEvent::ExaminedBody,
-            recent: None,
-        };
-        let a = TemplateProvider.line(&ctx).unwrap();
-        let b = TemplateProvider.line(&ctx).unwrap();
-        assert_eq!(a.text, b.text); // deterministic
+        let c = ctx(&p, ObsEvent::ExaminedBody, &[]);
+        let a = TemplateProvider.line(&c).unwrap();
+        let b = TemplateProvider.line(&c).unwrap();
+        assert_eq!(a.text, b.text); // deterministic given the same (speaker, event, memory, recent lines)
         assert!(!a.text.is_empty());
-        assert_eq!(a.tone, "clinical");
+        assert_eq!(a.emotion, Emotion::Neutral); // a Researcher over a corpse is clinical
+    }
+
+    #[test]
+    fn a_speaker_does_not_repeat_the_line_it_just_said() {
+        // Without this, `TemplateProvider`'s hash of (speaker, event, memory) makes an identical situation
+        // replay the identical phrase forever — the squad reads as voice-clip triggers, not people.
+        let p = persona(RoleId::Researcher, 1.0);
+        let first = TemplateProvider.line(&ctx(&p, ObsEvent::ExaminedBody, &[])).unwrap();
+
+        let mut spoken = SpokenLines::default();
+        spoken.remember(line_key(&first.text));
+        let second = TemplateProvider.line(&ctx(&p, ObsEvent::ExaminedBody, spoken.keys())).unwrap();
+        assert_ne!(first.text, second.text, "the Researcher repeated itself verbatim");
+
+        // ...and it keeps finding fresh lines as its memory fills.
+        spoken.remember(line_key(&second.text));
+        let third = TemplateProvider.line(&ctx(&p, ObsEvent::ExaminedBody, spoken.keys())).unwrap();
+        assert_ne!(third.text, first.text);
+        assert_ne!(third.text, second.text);
+    }
+
+    #[test]
+    fn anti_repetition_never_starves_a_small_phrase_table() {
+        // `Regrouped` has only two phrases. A three-deep memory must not exclude both and leave the
+        // provider with nothing — `avoid_window` caps the exclusion at `n_choices - 1`.
+        let p = persona(RoleId::Gunman, 1.0);
+        let mut spoken = SpokenLines::default();
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            let line = TemplateProvider.line(&ctx(&p, ObsEvent::Regrouped, spoken.keys())).unwrap();
+            spoken.remember(line_key(&line.text));
+            seen.push(line.text);
+        }
+        // Every beat produced a line, and consecutive beats never repeated.
+        assert!(seen.windows(2).all(|w| w[0] != w[1]), "consecutive repeat in {seen:?}");
+        assert!(seen.iter().collect::<std::collections::HashSet<_>>().len() >= 2, "stuck on one phrase");
+    }
+
+    #[test]
+    fn avoid_window_always_leaves_a_candidate() {
+        // The invariant the whole scheme rests on: filtering can never exclude the entire table.
+        let recent = [1, 2, 3, 4, 5];
+        for n_choices in 1..=6 {
+            assert!(avoid_window(&recent, n_choices).len() < n_choices.max(1));
+        }
+        assert!(avoid_window(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn spoken_lines_memory_is_bounded() {
+        let mut spoken = SpokenLines::default();
+        for i in 0..100 {
+            spoken.remember(i);
+        }
+        assert_eq!(spoken.keys().len(), RECENT_LINE_MEMORY);
     }
 
     #[test]
@@ -357,21 +496,14 @@ mod tests {
             ObsEvent::ThreatSpotted,
             ObsEvent::Regrouped,
         ] {
-            let ctx = DialogueContext { speaker: Entity::PLACEHOLDER, persona: &p, event, recent: None };
-            assert!(TemplateProvider.line(&ctx).is_some(), "no line for {event:?}");
+            assert!(TemplateProvider.line(&ctx(&p, event, &[])).is_some(), "no line for {event:?}");
         }
     }
 
     #[test]
     fn llm_prompt_grounds_persona_and_event() {
         let p = persona(RoleId::Psionic, 1.0);
-        let ctx = DialogueContext {
-            speaker: Entity::PLACEHOLDER,
-            persona: &p,
-            event: ObsEvent::SensedAnomaly,
-            recent: None,
-        };
-        let prompt = LlmProvider::build_prompt(&ctx);
+        let prompt = LlmProvider::build_prompt(&ctx(&p, ObsEvent::SensedAnomaly, &[]));
         assert!(prompt.contains("Test"));
         assert!(prompt.contains("Psionic"));
         assert!(prompt.contains("SensedAnomaly"));

@@ -85,6 +85,9 @@ pub fn plugin(app: &mut App) {
                 resolve_choice,
                 advance_line,
                 present_current,
+                // The squad-AI adapter feeds `Bark`, so it runs immediately before the consumer and a
+                // generated line reaches the screen on the frame it was spoken.
+                super::bark_squad_lines,
                 emit_barks,
             )
                 .chain(),

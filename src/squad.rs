@@ -304,6 +304,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     crate::squad_ai::perception::PerceptionLatch::default(),
                     UtterCooldown::default(),
                     MemoryStream::default(),
+                    crate::squad_ai::dialogue::SpokenLines::default(),
                 ),
                 FigurineSource(figurine.clone()),
                 Transform::from_translation(dungeon.cell_center(cell))
