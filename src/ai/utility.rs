@@ -111,6 +111,10 @@ pub enum Fact {
     ThreatBearingKnown,
     /// 1.0 while psychic residue (an anomaly signature) is sensed nearby — the Psionic's PsiScan hook.
     AnomalyResidueNearby,
+    /// 1.0 once the unit has strayed past the cohesion leash (hysteretic — see `SquadFields::past_leash`).
+    /// Gates `Regroup`, which outranks role work, so a strayed unit comes home instead of chaining duties
+    /// across the map.
+    PastLeash,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -266,6 +270,10 @@ pub struct SquadFields {
     pub tracked_threat: Option<Vec3>,
     pub threat_bearing_known: f32,
     pub anomaly_residue: f32,
+    /// 1.0 once the unit has strayed past the cohesion leash, and back to 0.0 only once it has returned
+    /// well inside it. Already hysteretic when it arrives here (`squad_ai::PerceptionLatch`), so `Regroup`
+    /// can gate on it with a plain `Step` without chattering at the leash boundary.
+    pub past_leash: f32,
 }
 
 impl SquadFields {
@@ -283,6 +291,7 @@ impl SquadFields {
             tracked_threat: None,
             threat_bearing_known: 0.0,
             anomaly_residue: 0.0,
+            past_leash: 0.0,
         }
     }
 }
@@ -307,6 +316,7 @@ impl Perception {
             Input::Perc(Fact::AllyDownNearby) => self.squad.ally_down,
             Input::Perc(Fact::ThreatBearingKnown) => self.squad.threat_bearing_known,
             Input::Perc(Fact::AnomalyResidueNearby) => self.squad.anomaly_residue,
+            Input::Perc(Fact::PastLeash) => self.squad.past_leash,
         }
     }
 }

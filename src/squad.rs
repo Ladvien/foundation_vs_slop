@@ -285,6 +285,10 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     ActiveBehavior::new(seed),
                     ThinkTimer::staggered(seed),
                     DesiredMove::default(),
+                    // On EVERY unit, never a subset: a component present on only some units would split
+                    // the hashed squad archetype and make iteration order run-dependent (see the `Leader`
+                    // note below).
+                    crate::squad_ai::perception::PerceptionLatch::default(),
                     UtterCooldown::default(),
                     MemoryStream::default(),
                 ),
