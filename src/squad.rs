@@ -223,9 +223,22 @@ impl Plugin for SquadPlugin {
         // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
         app.add_systems(Startup, spawn_squad)
+            // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
+            // `AiSet::Think`, so that edge is pinned explicitly rather than left to registration order.
+            // Both are on `FixedUpdate`, so without the constraint Bevy is free to run them in either
+            // order — an ambiguity that would silently cost a tick of latency (or shift the replay hash)
+            // in a codebase that value-sorts ORCA neighbours to keep the sim reproducible.
+            //
             // `unit_facing` after `unit_movement` so it turns units (moving OR idle) toward their aim/travel
             // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
-            .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
+            .add_systems(
+                FixedUpdate,
+                (
+                    unit_movement.after(crate::ai::AiSet::Think),
+                    unit_facing.after(unit_movement),
+                    despawn_dead_units,
+                ),
+            )
             .add_systems(Update, recolor_units);
         // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
         // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
@@ -456,7 +469,11 @@ fn unit_movement(
             &MoveSpeed,
             &mut Velocity,
             Option<&mut MoveOrder>,
-            Option<&mut crate::squad_ai::cohesion::DesiredMove>,
+            // Read-only on purpose: `squad_ai::squad_think` is the single owner of `DesiredMove.goal`.
+            // Taking `&mut` here once tempted this system into clearing the goal on arrival — a write
+            // nothing could observe, since `squad_think` re-resolves the goal every tick before this
+            // system runs. `&` makes a second writer a compile error rather than a comment.
+            Option<&crate::squad_ai::cohesion::DesiredMove>,
         ),
         With<Unit>,
     >,
@@ -500,7 +517,7 @@ fn unit_movement(
         })
         .collect();
 
-    for (entity, mut transform, speed, mut velocity, mut order, mut desired) in &mut units {
+    for (entity, mut transform, speed, mut velocity, mut order, desired) in &mut units {
         let pos = transform.translation;
         let self_pos = pos.xz();
 
@@ -611,11 +628,14 @@ fn unit_movement(
                 velocity.0 = Vec2::ZERO;
             }
         } else if new_goal_dist < ARRIVE_RADIUS {
-            // --- AI-goal arrival: reached the cohesion/role goal → clear it and hold (no blob/stall
-            // logic; autonomous goals are short-range and re-planned each think). ---
-            if let Some(d) = desired.as_mut() {
-                d.goal = None;
-            }
+            // --- AI-goal arrival: reached the cohesion/role goal → come to rest for this tick. ---
+            //
+            // We do NOT clear `desired.goal` here. `squad_think` re-resolves it from scratch every tick
+            // (it runs earlier in `FixedUpdate`, see `SquadPlugin`), so it is the single owner; a write
+            // here would be overwritten before anything could read it — including the `agents` snapshot
+            // above, which is built at the top of this system, i.e. *after* this tick's `squad_think`.
+            // What actually lets a unit settle is the Regroup/FollowAnchor deadband in `resolve_goal`,
+            // which yields `None` near the anchor (see the `agents` comment above).
             velocity.0 = Vec2::ZERO;
         }
 

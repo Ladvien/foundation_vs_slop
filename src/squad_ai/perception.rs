@@ -327,12 +327,16 @@ fn health_frac(h: &Health) -> f32 {
 fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<Vec3> {
     let anchor_goal = anchor.valid.then_some(anchor.pos);
     match mode {
-        // Cohesion: a strayed unit heads straight for the group reference point.
-        Mode::Regroup => anchor_goal,
-        // Loose formation: only steer toward the anchor when OUTSIDE the deadband; within it, hold
-        // (None) so the idle squad settles into a loose blob instead of all piling onto the identical
-        // centroid and vibrating in place (the moving anchor still pulls the band along).
-        Mode::FollowAnchor => {
+        // Both cohesion modes aim at the group reference point, and both stop short of it: outside the
+        // deadband they steer to the anchor; within it they hold (None), so the squad settles into a loose
+        // blob (ORCA spaces the members) instead of every unit converging on one identical point and
+        // vibrating there. The moving anchor still pulls the band along.
+        //
+        // `Regroup` needs the deadband too, not just `FollowAnchor`. Modes are cached between thinks (up to
+        // `THINK_INTERVAL`), so a unit that has just run home is still in `Regroup` for a fraction of a
+        // second after arriving — without the deadband it would spend that time steering into the exact
+        // centroid, and `avoids: true` would keep it from reading as settled to ORCA.
+        Mode::Regroup | Mode::FollowAnchor => {
             if perc.squad.anchor_dist > FOLLOW_DEADZONE {
                 anchor_goal
             } else {
@@ -442,14 +446,20 @@ mod tests {
     }
 
     #[test]
-    fn followanchor_holds_inside_the_deadband() {
+    fn both_cohesion_modes_hold_inside_the_deadband() {
         // Within the loose-formation deadband a unit holds (no goal) so the idle squad settles instead
         // of piling onto the exact centroid; outside it, the anchor pulls it back.
+        //
+        // `Regroup` is included deliberately: modes are cached between thinks, so a unit that has just run
+        // home is still in Regroup for a fraction of a second after arriving. Without the deadband it
+        // would steer into the exact centroid for that window, and never read as settled to ORCA.
         let a = anchor_at(Vec3::new(2.0, 0.0, 0.0));
-        let near = perc_with(SquadFields { anchor_dist: 1.0, ..SquadFields::neutral() });
-        assert_eq!(resolve_goal(Mode::FollowAnchor, &near, &a), None, "inside deadband → hold");
-        let far = perc_with(SquadFields { anchor_dist: 5.0, ..SquadFields::neutral() });
-        assert_eq!(resolve_goal(Mode::FollowAnchor, &far, &a), Some(a.pos), "outside deadband → pull");
+        for mode in [Mode::FollowAnchor, Mode::Regroup] {
+            let near = perc_with(SquadFields { anchor_dist: 1.0, ..SquadFields::neutral() });
+            assert_eq!(resolve_goal(mode, &near, &a), None, "{mode:?} inside deadband → hold");
+            let far = perc_with(SquadFields { anchor_dist: 5.0, ..SquadFields::neutral() });
+            assert_eq!(resolve_goal(mode, &far, &a), Some(a.pos), "{mode:?} outside deadband → pull");
+        }
     }
 
     #[test]
