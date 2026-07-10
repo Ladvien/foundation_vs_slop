@@ -272,6 +272,10 @@ fn plant(
                 growth: 1.0,
                 rise: 1.0,
                 scale: TESTBED_SCALE,
+                // The testbed plants a deliberate row, not a flush: one cluster per body, so each wears its
+                // own colour and any two that look alike do so by chance rather than by kinship.
+                cluster: i as u32,
+                cap_ab: crate::mycelia::perceptual::cap_ab_for(i as u32, seed),
                 cell: dungeon.world_to_cell(Vec3::new(plan.base.x, 0.0, plan.base.y)),
                 veil_triggered: true,
                 tint: 1.0,
@@ -314,6 +318,8 @@ fn plant(
                         growth: 1.0,
                         rise: 1.0,
                         scale: TESTBED_SCALE,
+                        cluster: 0x1000 + i as u32,
+                        cap_ab: crate::mycelia::perceptual::cap_ab_for(0x1000 + i as u32, seed),
                         cell: dungeon.world_to_cell(Vec3::new(plan.base.x, 0.0, plan.base.y)),
                         veil_triggered: true,
                         tint: 1.0,

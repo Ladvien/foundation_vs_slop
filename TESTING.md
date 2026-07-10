@@ -255,6 +255,11 @@ CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves 
 - Comparing **screenshots**? → `visual_regression::ssim` with a tolerance (and the windowed `devshot` rig).
 - Added a **system**? → `FixedUpdate` if it touches pinned state, `Update` if cosmetic. If unsure: would it
   show up in `snapshot_hash`?
+- Working in **`mycelia`**? → its determinism firewall is a *plugin boundary*, not a property of its systems:
+  `MyceliaPlugin` is registered only in `lib::run`, never in `sim_harness`. Most of it is `Update`-only and
+  carries no `Health`, but `mycelia::grazing` deliberately runs on `FixedUpdate` and steers crabs (hunger +
+  the `MEAT` field). That is pinned state, and it is safe *only* because the harness never registers the
+  plugin. Do not move those systems into `crab.rs` — `CrabPlugin` **is** registered in the harness.
 - A harness test **flakes**? → you're probably exact-hashing physics-on (use `deterministic_core()`), or
   missing `serial_guard`.
 

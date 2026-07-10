@@ -50,6 +50,7 @@ struct MoldSurfaceParams {
 struct MoldFruitParams {
     bend: vec2<f32>,
     tilt: vec2<f32>,
+    cap_ab: vec2<f32>,
     tint: f32,
 };
 
@@ -72,6 +73,43 @@ const FOG_DIM: vec3<f32> = vec3<f32>(0.30, 0.30, 0.38);
 // A fungus is a dielectric felt and barely reflects; StandardMaterial's default F0 of 0.04 puts a specular
 // sheet over the whole body under this scene's brightness-500 ambient. See `mycelia_wall.wgsl`.
 const MOLD_REFLECTANCE: f32 = 0.08;
+
+// ── Oklab ─────────────────────────────────────────────────────────────────────────────────────────────
+// Björn Ottosson (2020); the space CSS Color 4 interpolates in. Used here for exactly one thing: shifting the
+// cap's hue and chroma by this body's `cap_ab` while leaving its LIGHTNESS untouched. `L` is what the cavity
+// AO, the sheen and this LDR tonemapper were balanced against, so a naive RGB tint would relight the
+// mushroom; an Oklab `(a, b)` offset recolours it and nothing else.
+//
+// Each cluster draws one `(a, b)`, and each member deviates a little from it — so a bunch reads as one
+// colour, and its caps as individuals. **Duplicated in `src/mycelia/perceptual.rs`**, where the round-trip
+// and the lightness invariant are unit-tested. They must agree.
+fn linear_srgb_to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+    let l_ = pow(max(l, 0.0), 0.3333333333);
+    let m_ = pow(max(m, 0.0), 0.3333333333);
+    let s_ = pow(max(s, 0.0), 0.3333333333);
+    return vec3<f32>(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    );
+}
+
+fn oklab_to_linear_srgb(c: vec3<f32>) -> vec3<f32> {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    return vec3<f32>(
+         4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    );
+}
 
 // ── The body, in the mat's hue ────────────────────────────────────────────────────────────────────────
 // Everything below is the mold's grey-black, lightened by part, and desaturated in OKLAB by the same factor
@@ -321,7 +359,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // ── Albedo by part ────────────────────────────────────────────────────────────────────────────────
     // The pileus darkens toward the mat's own flesh as the veil thins. `tint`, never `growth` — see header.
-    let pileus = mix(CAP_YOUNG, CAP_OLD, fruit.tint);
+    // Then this body's cluster colour, applied in Oklab so only hue and chroma move: the maturity ramp lives
+    // in lightness and must survive untouched, or a differently-coloured cap would also read as a
+    // differently-aged one.
+    let pileus_lab = linear_srgb_to_oklab(mix(CAP_YOUNG, CAP_OLD, fruit.tint));
+    let pileus = max(
+        oklab_to_linear_srgb(vec3<f32>(pileus_lab.x, pileus_lab.y + fruit.cap_ab.x, pileus_lab.z + fruit.cap_ab.y)),
+        vec3<f32>(0.0),
+    );
     // Mottle the cap with the same fbm the colony's advancing margin is broken by, so its surface is
     // dappled like the mat rather than a clean painted dome.
     let mottle = smoothstep(0.35, 0.78, fbm(sp * 1.3));

@@ -136,9 +136,11 @@ pub fn run() {
                 autogib::AutogibPlugin,
             ),
             audio::GameAudioPlugin,
-            // Cosmetic render/FX. Mycelia (GPU-compute mold ambience) lives here — `Update`-only,
-            // carries no `Health`, mutates no actor state, and is registered ONLY here (never in the
-            // headless `sim_harness`), keeping it outside the deterministic core (see `mycelia` docs).
+            // Cosmetic render/FX. Mycelia (GPU-compute mold ambience) lives here and is registered ONLY
+            // here, never in the headless `sim_harness` — which is precisely what keeps it outside the
+            // deterministic core. Its `grazing` systems DO steer crabs (hunger + the MEAT field) and run on
+            // `FixedUpdate`; the harness never registers this plugin, so they cannot perturb `snapshot_hash`.
+            // See the `mycelia` module docs before moving any of it.
             (vhs::VhsPlugin, blood_lens::BloodLensPlugin, mycelia::MyceliaPlugin),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the

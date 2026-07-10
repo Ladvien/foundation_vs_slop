@@ -14,11 +14,17 @@
 //! the whole field fits in a single 1024² texture — no chunking/LOD machinery is needed.
 //!
 //! # Determinism firewall (see `TESTING.md`)
-//! Everything here is cosmetic and lives on **`Update`**, never `FixedUpdate`. No mold entity carries
-//! `Health` and no existing actor's `Transform`/`Health` is mutated, so `snapshot_hash` (which queries
-//! `(Transform, Health)`) never sees it. `MyceliaPlugin` is registered **only** in `lib::run`, never in the
-//! headless `sim_harness` (mirroring `UiPlugin`/`DialoguePlugin`), and it **no-ops if the `RenderApp`
-//! sub-app is absent** — belt-and-suspenders so a headless build can never touch the render world.
+//! The firewall is a **plugin boundary**, not a property of the systems: `MyceliaPlugin` is registered
+//! **only** in `lib::run`, never in the headless `sim_harness` (mirroring `UiPlugin`/`DialoguePlugin`), and
+//! it **no-ops if the `RenderApp` sub-app is absent**. The replay harness therefore spawns no fruit bodies
+//! and runs none of this code.
+//!
+//! Nearly everything here is cosmetic and lives on **`Update`**; no mold entity carries `Health`, so
+//! `snapshot_hash` (which queries `(Transform, Health)`) never sees one. The exception is [`grazing`], whose
+//! two systems are on `FixedUpdate` because they steer crabs — they drain `DriveId::HUNGER` and deposit into
+//! `FieldId::MEAT`, both of which move a crab's `Transform`, which `snapshot_hash` *does* read. That is
+//! pinned state, and it is only safe because of the plugin boundary above. It is also why those systems live
+//! here and not in `crab.rs`: `CrabPlugin` **is** registered in the harness.
 //!
 //! There is **exactly one GPU→CPU edge**: `fruit.rs` reads back the coarse biomass grid that the `pin_scan`
 //! pass writes, to decide where mushrooms erupt (see [`COARSE_SIZE`]). GPU floats are not bit-reproducible
@@ -34,6 +40,7 @@
 mod agents;
 mod control;
 mod field;
+mod grazing;
 pub mod fruit;
 mod material;
 mod measure;
@@ -283,12 +290,20 @@ pub struct MyceliaConfig {
     pub u_exhausted: f32,
     /// How long (seconds) a texel must hold the pin condition, unwatched, before it commits to a primordium.
     pub pin_dwell_secs: f32,
-    /// Minimum separation (world units) between fruit bodies. Most hyphal knots never mature; neighbours
-    /// compete for translocated nutrient (Kües & Navarro-González 2015). This is that competition.
+    /// Minimum separation (world units) between fruit bodies of **different clusters**. Most hyphal knots
+    /// never mature; neighbouring knots compete for translocated nutrient (Kües & Navarro-González 2015).
+    /// That competition is between genets — inside one flush the only floor is volva geometry.
     ///
     /// Measured: at `1.5` a room the squad walked through grew ~45 bodies across 139 tiles — a lawn. `3.0`
     /// quarters that, which reads as a flush and leaves the floor clear for pathing and gore.
-    pub pin_min_spacing: f32,
+    pub cluster_spacing: f32,
+    /// How far (world units) a flush's satellites may stand from its nucleus. Must exceed
+    /// [`perceptual::min_sibling_spacing`], or there is no annulus to place them in and every bunch would
+    /// silently collapse to a single body.
+    pub cluster_radius: f32,
+    /// Largest flush a nucleus may produce. Two is the structural minimum (a "cluster" of one is a solitary
+    /// body), and the size distribution skews small — see [`perceptual::cluster_sites`].
+    pub cluster_size_max: u32,
     /// Hard ceiling on live fruit bodies. Reaching it is logged, never silently ignored.
     pub max_fruit_bodies: u32,
     /// Scale applied to the death cap mesh, whose native height is 13.9 cm. `4.0` gives a 56 cm mushroom —
@@ -318,18 +333,29 @@ pub struct MyceliaConfig {
 /// parity alone, so the display texture simply persists.
 #[derive(Resource, Clone, Copy, ExtractResource, Default)]
 pub struct MoldStep {
-    pub step: bool,
+    /// How many sim ticks to dispatch this frame. Usually `0` or `1`; more only when the game clock is
+    /// running fast enough that a rendered frame spans several sim periods (see [`MAX_TICKS_PER_FRAME`]).
+    pub ticks: u32,
     /// Phase through the current sim period, `0..1`. The `blend` pass lerps the previous tick's snapshot
     /// toward the newest by exactly this much, every rendered frame — see [`advance_mold_time`].
     pub alpha: f32,
 }
 
+/// Hard ceiling on sim ticks dispatched in one rendered frame.
+///
+/// Bounds the catch-up burst after a real stall (alt-tab, breakpoint, a slow first frame), exactly as
+/// `Time<Virtual>::max_delta` bounds the fixed-timestep one — see the discussion in `time_control`. At the
+/// top of the speed ladder (×64) the steady-state demand is `64 × sim_hz / fps` ticks per frame, far under
+/// this; the cap only bites transients. When it does bite, it is **logged**, because a silently dropped tick
+/// is a mold that quietly runs slower than the speed the player selected.
+pub const MAX_TICKS_PER_FRAME: u32 = 8;
+
 /// `true` once the colony has completed its [`MyceliaConfig::warmup_ticks`] and the mold is established.
 ///
-/// The mold runs on `Time<Real>`, so it colonises underneath the boot and title screens while the player
-/// reads the menu — by the time most players click through, this is already `true` and the warmup screen
-/// passes straight through. `ui::warmup` waits on it so that a player who clicks fast still never sees bare
-/// carpet.
+/// Warmup ticks are dispatched one per rendered frame and ignore the clock entirely, so the colony grows
+/// underneath the boot and title screens even though `SimBlocked` has frozen virtual time there. By the time
+/// most players click through, this is already `true` and the warmup screen passes straight through.
+/// `ui::warmup` waits on it so that a player who clicks fast still never sees bare carpet.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct MoldWarm(pub bool);
 
@@ -449,8 +475,34 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
             c.pin_dwell_secs, c.sim_hz,
         ));
     }
-    positive("pin_min_spacing", c.pin_min_spacing)?;
+    positive("cluster_spacing", c.cluster_spacing)?;
+    positive("cluster_radius", c.cluster_radius)?;
     positive("body_scale", c.body_scale)?;
+    // A satellite is placed in the annulus between two volvas touching and the cluster radius. If the radius
+    // does not clear that floor there is no annulus, every rejection-sample fails, and each "flush" is
+    // silently just its nucleus — a feature that looks implemented and is not.
+    let sibling_min = perceptual::min_sibling_spacing(c.body_scale);
+    if c.cluster_radius <= sibling_min {
+        return Err(format!(
+            "mycelia.cluster_radius ({}) must exceed two volva radii at body_scale {} ({sibling_min}), or a \
+             flush has nowhere to put its satellites and collapses to one body",
+            c.cluster_radius, c.body_scale,
+        ));
+    }
+    // Clusters must be tighter than the gap between them, or a "bunch" is indistinguishable from the lawn
+    // `cluster_spacing` exists to prevent.
+    if c.cluster_spacing <= c.cluster_radius {
+        return Err(format!(
+            "mycelia.cluster_spacing ({}) must exceed cluster_radius ({}), or neighbouring flushes merge",
+            c.cluster_spacing, c.cluster_radius,
+        ));
+    }
+    if c.cluster_size_max < 2 {
+        return Err(format!(
+            "mycelia.cluster_size_max ({}) must be >= 2; a cluster of one is a solitary body",
+            c.cluster_size_max,
+        ));
+    }
     if c.max_fruit_bodies == 0 {
         return Err("mycelia.max_fruit_bodies must be > 0".to_string());
     }
@@ -640,6 +692,9 @@ impl Plugin for MyceliaPlugin {
         // Fruit bodies: the mold reproducing. Registered here (not as a separate plugin) because it depends
         // on this plugin's textures, buffers and config, and shares its determinism firewall.
         fruit::build(app);
+        // Crabs eating those fruit bodies. The one part of this module that touches pinned state, and it is
+        // safe for the same reason everything else here is: this plugin never reaches the headless harness.
+        grazing::build(app);
         // Dev calibration instruments. Both no-op unless their environment variable is set.
         measure::build(app);
         testbed::build(app);
@@ -791,16 +846,24 @@ fn period_secs(cfg: &MyceliaConfig) -> f32 {
 /// Advance the shared sim clock on the main world each frame; the value is extracted into the render
 /// world for the compute pass and reused by the floor material. `Update` (cosmetic), never `FixedUpdate`.
 ///
-/// Uses **real** time (not `Time<Virtual>`), so the mold keeps breathing while the game is paused or at
-/// the menu — matching the repo's other cosmetic shaders (`nest`, `vhs`) which animate off `globals.time`.
-/// The mold is ambience; it should never freeze with a gameplay pause. It is also what lets the colony warm
-/// up underneath the boot and title screens, where gameplay is frozen by `SimBlocked`.
+/// # The clock
 ///
-/// Two cadences, and the warmup is not one of them dressed up. Warmup is *history*: ticks the world already
-/// lived through before the player arrived, dispatched as fast as the GPU accepts them. Afterwards the clock
-/// is the slow `sim_hz` one, and it is the only one.
+/// `Time<Virtual>` — the same clock gameplay runs on, scaled by [`crate::time_control::GameSpeed`] and driven
+/// to zero by a pause or a blocking menu. So the mold grows at ×1 exactly as slowly as
+/// [`perceptual::v_max`] demands, and the speed ladder fast-forwards it along with everything else: at ×16 a
+/// player who wants to *watch* the colony spread can.
+///
+/// That reverses an earlier decision to run this on `Time<Real>` so the mold kept breathing behind the pause
+/// menu. Ambience is not worth two clocks. The one thing that decision bought — a colony already grown by the
+/// time the player arrives — is now bought properly, by [`MyceliaConfig::warmup_ticks`].
+///
+/// # Two cadences, and the warmup is not one of them dressed up
+///
+/// Warmup is *history*: ticks the world already lived through before the player arrived, dispatched one per
+/// rendered frame regardless of any clock (which is why it still runs behind the frozen title screen).
+/// Afterwards the clock is the `sim_hz` one, and it is the only one.
 fn advance_mold_time(
-    time: Res<Time<Real>>,
+    time: Res<Time<Virtual>>,
     cfg: Res<MyceliaConfig>,
     coarse: Res<fruit::MoldCoarse>,
     mut warm: ResMut<MoldWarm>,
@@ -841,25 +904,35 @@ fn advance_mold_time(
             // means the snapshot we are already showing.
             *accum = period_secs(&cfg);
         } else {
-            step.step = true;
-            // Nothing to interpolate toward yet, and no eye to notice: show each snapshot whole.
+            // Exactly one tick per frame, so `MoldCoarse::ticks_elapsed` (one readback per frame) counts
+            // them one-for-one. Nothing to interpolate toward yet, and no eye to notice: show each
+            // snapshot whole.
+            step.ticks = 1;
             step.alpha = 1.0;
             *accum = 0.0;
             return;
         }
     }
 
-    // Fixed-rate sim clock, decoupled from the render clock. `Time<Real>` so the mold keeps breathing while
-    // the game is paused (matching the rest of this module). One tick per period at most: if the frame rate
-    // collapses we drop ticks rather than fast-forwarding the mold in a visible surge.
+    // Fixed-rate sim clock, decoupled from the render clock: the mold advances by whole `1 / sim_hz` periods
+    // of *virtual* time, however many of those a rendered frame happens to span. At ×1 and 60 fps that is a
+    // tick every few hundred frames; at ×64 it is several per frame, which is the point of the speed ladder.
     let period = period_secs(&cfg);
     *accum += time.delta_secs();
-    if *accum >= period {
-        *accum = (*accum - period).min(period);
-        step.step = true;
-    } else {
-        step.step = false;
+    let wanted = (*accum / period).floor().max(0.0) as u32;
+    step.ticks = wanted.min(MAX_TICKS_PER_FRAME);
+    if wanted > MAX_TICKS_PER_FRAME {
+        // Loudly. A dropped tick means the mold ran slower than the speed the player asked for, and a mold
+        // that silently ignores the speed ladder is exactly the kind of result that takes hours to trace.
+        warn!(
+            "mycelia: frame spanned {wanted} sim ticks, capped at {MAX_TICKS_PER_FRAME}; \
+             the mold fell {} ticks behind the game clock",
+            wanted - MAX_TICKS_PER_FRAME,
+        );
     }
+    // Consume the ticks we ran; discard the rest of the backlog rather than carry it into a surge on the
+    // next frame. Never leave more than one period banked, or `alpha` would exceed 1.
+    *accum = (*accum - step.ticks as f32 * period).clamp(0.0, period);
 
     // How far we are through the *current* period, `0..1`. The `blend` pass uses this to interpolate the
     // display texture between the last two tick snapshots, every rendered frame.
@@ -880,15 +953,16 @@ fn advance_mold_time(
 /// `bevy_render`'s `prepare_buffers` queues a `copy_buffer_to_buffer` for **every** entity carrying a
 /// `Readback`, every rendered frame — there is no dirty flag and no one-shot variant, and the component's own
 /// docs say "if this component is not removed, the readback will be attempted every frame". But `pin_scan`
-/// only rewrites the buffer when [`MoldStep::step`] is set, i.e. at `sim_hz`. Copying it at the display's
+/// only rewrites the buffer when [`MoldStep::ticks`] is non-zero, i.e. at `sim_hz`. Copying it at the display's
 /// refresh rate would pay a GPU→CPU transfer and a `COARSE_SIZE²` decode ~80× per meaningful update.
 ///
 /// Removing the component (rather than despawning the entity) keeps the `receive_coarse` observer and the
 /// [`fruit::CoarseReadback`] marker alive. `GpuReadbackPlugin` installs `ExtractComponentPlugin<Readback>`,
 /// whose `SyncComponentPlugin` registers an `on_remove` hook, so the removal reaches the render world.
 ///
-/// `advance_mold_time` raises `step` for exactly one frame per period, and `Update` runs before
-/// `ExtractSchedule`, so this yields exactly one copy per tick.
+/// `advance_mold_time` raises `ticks` on exactly the frames a tick runs, and `Update` runs before
+/// `ExtractSchedule`, so this yields one copy per *frame that ticked* — which the warmup counter relies on
+/// being one per tick, hence its one-tick-per-frame cadence.
 fn gate_coarse_readback(
     mut commands: Commands,
     step: Res<MoldStep>,
@@ -897,9 +971,9 @@ fn gate_coarse_readback(
 ) -> Result<(), BevyError> {
     // Spawned unconditionally by `setup_mycelia`; its absence means the setup contract broke.
     let (entity, present) = readback.single()?;
-    if step.step && !present {
+    if step.ticks > 0 && !present {
         commands.entity(entity).insert(Readback::buffer(buffers.coarse.clone()));
-    } else if !step.step && present {
+    } else if step.ticks == 0 && present {
         commands.entity(entity).remove::<Readback>();
     }
     Ok(())
@@ -1006,7 +1080,9 @@ mod tests {
             v_fruit: 0.35,
             u_exhausted: 0.30,
             pin_dwell_secs: 6.0,
-            pin_min_spacing: 3.0,
+            cluster_spacing: 3.0,
+            cluster_radius: 0.7,
+            cluster_size_max: 8,
             max_fruit_bodies: 40,
             body_scale: 4.0,
             maintain_v: 0.20,
@@ -1157,8 +1233,8 @@ mod tests {
 
         for bad in [0.0, -1.0] {
             let mut c = valid();
-            c.pin_min_spacing = bad;
-            assert!(validate_config(&c).is_err(), "pin_min_spacing={bad} should be rejected");
+            c.cluster_spacing = bad;
+            assert!(validate_config(&c).is_err(), "cluster_spacing={bad} should be rejected");
 
             let mut c = valid();
             c.body_scale = bad;

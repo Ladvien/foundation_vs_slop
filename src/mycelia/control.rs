@@ -263,13 +263,17 @@ fn compute_wall_proximity(dungeon: &Dungeon, field_size: u32, wall_reach: f32, c
 /// Rasterize world state into the control texture, once per `Update`.
 ///
 /// Cosmetic and read-only with respect to gameplay: it queries `Transform`s and the fog/dungeon grids and
-/// mutates nothing but its own buffers. Uses `Time<Real>` to match the rest of the mold (which keeps
-/// breathing while the game is paused).
+/// mutates nothing but its own buffers.
+///
+/// Runs on `Update` and re-uploads **every frame**, whatever the clock is doing: the substrate mask in `A` is
+/// the fog reveal, and it must land on the same frame the floor tile swaps. Only the *accumulators* —
+/// habituation, and the gaze slew below — read `Time<Virtual>`, so they scale with `GameSpeed` and freeze
+/// with a pause, exactly as the growth they modulate does.
 pub(super) fn write_control(
     mut control: ResMut<MoldControl>,
     cfg: Res<MyceliaConfig>,
     mut images: ResMut<Assets<Image>>,
-    time: Res<Time<Real>>,
+    time: Res<Time<Virtual>>,
     dungeon: Option<Res<Dungeon>>,
     fog: Option<Res<FogGrid>>,
     pools: Query<&Transform, With<BloodPool>>,

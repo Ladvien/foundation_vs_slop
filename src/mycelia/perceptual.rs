@@ -38,6 +38,18 @@
 //! (a crab taking a bite, a boot crushing a cap) is meant to be seen and is deliberately exempt. That is
 //! the same principle already at work in the module: the mold hides from a gaze but visibly scatters from
 //! footsteps.
+//!
+//! # The clock these budgets are denominated in
+//!
+//! Every rate here is **per second of `Time<Virtual>`** — the gameplay clock. At ×1 that is a real second and
+//! the thresholds mean what the psychophysics says they mean. Above ×1 they do not, and that is the entire
+//! purpose of the speed ladder: fast-forward deliberately lifts the mold's autonomous motion above the
+//! detection threshold so a player who *wants* to watch the colony spread can. A pause drives the clock to
+//! zero and the mold stops, which is what "the sim is frozen" ought to mean.
+
+use bevy::math::{Vec2, Vec3};
+
+use crate::util::hash01_u32;
 
 /// Vertical visual angle the game window subtends at the player's eye: a 27" panel at ~60 cm shows about
 /// 31°. This is the one genuinely unknowable number here — it depends on the player's desk — so it is a
@@ -59,8 +71,9 @@ pub const MIN_APPEARANCE_RAMP_SECS: f32 = 12.0;
 /// `ramp_secs`. The one rate limiter for every *non-moving* signal in this module — a fruit body's albedo
 /// as it matures, and the mat's glow as it flinches from a gaze.
 ///
-/// `dt` and `ramp_secs` must be in the same clock. Symmetric (it limits fades in and out alike), monotone,
-/// and a no-op at `dt == 0`, so a paused game holds its shading exactly where it was.
+/// `dt` and `ramp_secs` must be in the same clock — virtual seconds, throughout this module. Symmetric (it
+/// limits fades in and out alike), monotone, and a no-op at `dt == 0`, so a paused game holds its shading
+/// exactly where it was, and ×16 completes the ramp sixteen times sooner in wall-clock terms.
 ///
 /// A non-positive `ramp_secs` would divide by zero and teleport the value; callers pass
 /// [`MIN_APPEARANCE_RAMP_SECS`], and `validate_config` rejects a non-positive ramp at startup. Guarding
@@ -211,7 +224,7 @@ pub fn bend_profile(y: f32) -> f32 {
 /// tissues appear only when the veil tears, so a body is only poisonous once it has a cap and gills.
 pub const VEIL_RUPTURE_T: f32 = STAGE_T[3];
 
-/// The autonomous-motion budget, in **world units per second**.
+/// The autonomous-motion budget, in **world units per virtual second** (see the module header).
 ///
 /// `threshold_deg_per_s` is the psychophysical limit; `fov_deg_v` and `viewport_height` describe the
 /// orthographic projection (degrees of visual angle, and world units, spanned by the window's height).
@@ -269,7 +282,7 @@ pub fn growth_rate(growth: f32, body_scale: f32, bend_m: f32, tilt: f32, v_max: 
     span / duration
 }
 
-/// Seconds for one body to go from sealed egg to adult at a fixed `v_max`, ignoring the emergence rise.
+/// Virtual seconds for one body to go from sealed egg to adult at a fixed `v_max`, ignoring the rise.
 /// Only used for diagnostics and tests — the live clock re-evaluates `v_max` every frame against the zoom.
 pub fn egg_to_adult_secs(body_scale: f32, bend_m: f32, tilt: f32, v_max: f32) -> f32 {
     (0..6).map(|k| segment_travel(k, bend_m, tilt) * body_scale / v_max).sum()
@@ -295,6 +308,110 @@ pub fn stage_weights(growth: f32) -> [f32; 6] {
     }
     w[k] = u; // the stage we are approaching
     w
+}
+
+// ── Caespitose flushes: bunches, and the colour they share ────────────────────────────────────────────
+//
+// Fruit bodies do not arrive one at a time. A flush erupts from a single aggregated hyphal knot, near
+// synchronously, its members drawing on one translocated resource pool through the mycelial cords that feed
+// the sink (Kües & Navarro-González 2015, Fungal Biol. Rev. 29:63, 10.1016/j.fbr.2015.05.001; cord-borne
+// translocation to a resource sink: Wells & Boddy 1995, FEMS Microbiol. Ecol. 17:43,
+// 10.1111/j.1574-6941.1995.tb00128.x). They are one genet, so they wear one pigment — with the spread in
+// shade that mixed age and microclimate give any two caps on the same clump.
+//
+// `pin_min_spacing` used to enforce the opposite, and it was not wrong: neighbouring *knots* really do starve
+// each other out. That competition is between genets. It is now `cluster_spacing`, and inside a cluster the
+// only floor is geometry — two volvas cannot occupy the same ground.
+
+/// Half-width of a cluster's Oklab `(a, b)` chroma offset, drawn per nucleus. Small: every cap must stay
+/// inside the mat's grey-olive family, so this is the difference between "that clump is a little browner"
+/// and "that clump is a different species".
+pub const MAX_CLUSTER_AB: f32 = 0.020;
+
+/// Half-width of the per-member offset around its cluster's colour. A quarter of the cluster spread, so a
+/// bunch reads as one colour first and as individuals second.
+pub const MAX_MEMBER_AB: f32 = 0.006;
+
+/// Smallest centre-to-centre spacing two bodies of `body_scale` may have: their volvas touching. Below this
+/// the sacs interpenetrate and the flush reads as one melted lump.
+pub fn min_sibling_spacing(body_scale: f32) -> f32 {
+    2.0 * VOLVA_RADIUS_M * body_scale
+}
+
+/// Deterministic layout of one caespitose flush: nucleus-relative offsets in world units, before any
+/// wall-clearance seating. Element `0` is always the nucleus at the origin.
+///
+/// Size is drawn from `h²`, which skews toward the small flushes that dominate in the field: a pair or a
+/// triple is common, an eight-body clump is not. Offsets are rejection-sampled in the annulus between
+/// [`min_sibling_spacing`] and `cluster_radius`, so no two volvas overlap; a draw that cannot be placed in a
+/// few attempts is simply dropped, which shrinks the flush rather than forcing a body into its sibling.
+///
+/// `cluster_radius` must exceed [`min_sibling_spacing`] — `validate_config` rejects a config where it does
+/// not, because there would be no annulus to sample and every flush would silently collapse to its nucleus.
+pub fn cluster_sites(seed: u32, body_scale: f32, cluster_radius: f32, size_max: u32) -> Vec<Vec2> {
+    let r_min = min_sibling_spacing(body_scale);
+    let ceiling = size_max.max(2);
+
+    let h = hash01_u32(seed ^ 0x5127);
+    let size = (2 + (h * h * (ceiling - 1) as f32) as u32).min(ceiling);
+
+    let mut sites = vec![Vec2::ZERO];
+    for m in 1..size {
+        for attempt in 0..8u32 {
+            let salt = seed ^ (0x9E00 + m * 16 + attempt);
+            let angle = hash01_u32(salt) * std::f32::consts::TAU;
+            let radius = r_min + hash01_u32(salt ^ 0xB3) * (cluster_radius - r_min);
+            let p = Vec2::from_angle(angle) * radius;
+            if sites.iter().all(|q| q.distance(p) >= r_min) {
+                sites.push(p);
+                break;
+            }
+        }
+    }
+    sites
+}
+
+/// A body's Oklab `(a, b)` offset: its cluster's colour, plus its own small deviation from it.
+pub fn cap_ab_for(nucleus_seed: u32, member_seed: u32) -> Vec2 {
+    let signed = |s: u32| 2.0 * hash01_u32(s) - 1.0;
+    let cluster = Vec2::new(signed(nucleus_seed ^ 0xCA), signed(nucleus_seed ^ 0xCB)) * MAX_CLUSTER_AB;
+    let member = Vec2::new(signed(member_seed ^ 0xD1), signed(member_seed ^ 0xD2)) * MAX_MEMBER_AB;
+    cluster + member
+}
+
+// Oklab (Björn Ottosson, 2020). The perceptual space CSS Color 4 interpolates in, and the reason the cap's
+// colour can vary without its *lightness* moving: `L` is what the cavity AO, the sheen and this LDR
+// tonemapper were balanced against. Shift only `(a, b)` and the surface reads identically, in a new hue.
+//
+// **Duplicated in `mycelia_fruit.wgsl`**, which does the real work per fragment. These exist so the contract
+// — round-trip fidelity, and that an `(a, b)` offset leaves `L` untouched — is provable in a unit test.
+
+/// Linear sRGB → Oklab. `x` is `L`, `y` is `a`, `z` is `b`.
+pub fn linear_srgb_to_oklab(c: Vec3) -> Vec3 {
+    let l = 0.412_221_47 * c.x + 0.536_332_54 * c.y + 0.051_445_995 * c.z;
+    let m = 0.211_903_5 * c.x + 0.680_699_5 * c.y + 0.107_396_96 * c.z;
+    let s = 0.088_302_46 * c.x + 0.281_718_85 * c.y + 0.629_978_7 * c.z;
+    // `cbrt` of a negative is defined and real, but a negative cone response is out of gamut; clamp so the
+    // round trip is a function rather than a surprise.
+    let (l_, m_, s_) = (l.max(0.0).cbrt(), m.max(0.0).cbrt(), s.max(0.0).cbrt());
+    Vec3::new(
+        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_,
+    )
+}
+
+/// Oklab → linear sRGB. May land outside `[0,1]` for an aggressive offset; the caller clamps.
+pub fn oklab_to_linear_srgb(c: Vec3) -> Vec3 {
+    let l_ = c.x + 0.396_337_78 * c.y + 0.215_803_76 * c.z;
+    let m_ = c.x - 0.105_561_346 * c.y - 0.063_854_17 * c.z;
+    let s_ = c.x - 0.089_484_18 * c.y - 1.291_485_5 * c.z;
+    let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    Vec3::new(
+        4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+        -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+        -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+    )
 }
 
 #[cfg(test)]
@@ -598,6 +715,119 @@ mod tests {
             let step = dt / ramp;
             b += (target - b).clamp(-step, step);
             assert!((a - b).abs() < 1e-9, "step {i}: {a} vs {b}");
+        }
+    }
+
+    const SHIPPED_CLUSTER_RADIUS: f32 = 0.7;
+    const SHIPPED_SIZE_MAX: u32 = 8;
+
+    /// **The flush invariant.** No two bodies in a bunch may stand closer than their volvas touching, and
+    /// none may stray outside the cluster radius. Both hold for every seed, because the layout is
+    /// rejection-sampled rather than nudged into place.
+    #[test]
+    fn a_flush_never_overlaps_its_own_volvas_nor_leaves_its_radius() {
+        let r_min = min_sibling_spacing(SHIPPED_SCALE);
+        assert!(SHIPPED_CLUSTER_RADIUS > r_min, "the shipped radius must leave an annulus to sample");
+        for seed in 0..400u32 {
+            let sites = cluster_sites(seed, SHIPPED_SCALE, SHIPPED_CLUSTER_RADIUS, SHIPPED_SIZE_MAX);
+            assert!((2..=SHIPPED_SIZE_MAX as usize).contains(&sites.len()), "seed {seed}: {sites:?}");
+            assert_eq!(sites[0], Vec2::ZERO, "member 0 is the nucleus");
+            for (i, a) in sites.iter().enumerate() {
+                assert!(
+                    a.length() <= SHIPPED_CLUSTER_RADIUS + 1e-5,
+                    "seed {seed}: member {i} at {a:?} left the cluster radius",
+                );
+                for b in sites.iter().skip(i + 1) {
+                    assert!(
+                        a.distance(*b) >= r_min - 1e-5,
+                        "seed {seed}: volvas overlap, {a:?} and {b:?} are {} apart (min {r_min})",
+                        a.distance(*b),
+                    );
+                }
+            }
+        }
+    }
+
+    /// A flush is a deterministic function of its nucleus's seed — the pin order must not depend on when a
+    /// readback happened to land. And the size distribution skews small, as real flushes do.
+    #[test]
+    fn flush_layout_is_deterministic_and_skews_small() {
+        for seed in [0u32, 1, 7, 4242, u32::MAX] {
+            let a = cluster_sites(seed, SHIPPED_SCALE, SHIPPED_CLUSTER_RADIUS, SHIPPED_SIZE_MAX);
+            let b = cluster_sites(seed, SHIPPED_SCALE, SHIPPED_CLUSTER_RADIUS, SHIPPED_SIZE_MAX);
+            assert_eq!(a, b, "seed {seed} laid out two different flushes");
+        }
+        let sizes: Vec<usize> = (0..500u32)
+            .map(|s| cluster_sites(s, SHIPPED_SCALE, SHIPPED_CLUSTER_RADIUS, SHIPPED_SIZE_MAX).len())
+            .collect();
+        let small = sizes.iter().filter(|n| **n <= 4).count();
+        assert!(small * 2 > sizes.len(), "most flushes should be small, got {small}/{}", sizes.len());
+    }
+
+    /// The whole reason the cap's colour lives in Oklab: an `(a, b)` offset must leave **lightness exactly
+    /// alone**. `L` is what the AO, the sheen and the tonemapper were balanced against — a hue that also
+    /// moved `L` would relight the mushroom.
+    #[test]
+    fn an_oklab_chroma_offset_never_moves_lightness() {
+        let cap_young = Vec3::new(0.444, 0.450, 0.417);
+        let cap_old = Vec3::new(0.135, 0.155, 0.128);
+        for base in [cap_young, cap_old] {
+            let lab = linear_srgb_to_oklab(base);
+            for seed in 0..200u32 {
+                let ab = cap_ab_for(seed, seed ^ 0xF00D);
+                let shifted = oklab_to_linear_srgb(Vec3::new(lab.x, lab.y + ab.x, lab.z + ab.y));
+                let back = linear_srgb_to_oklab(shifted);
+                assert!(
+                    (back.x - lab.x).abs() < 1e-4,
+                    "seed {seed}: lightness moved {} -> {}",
+                    lab.x,
+                    back.x,
+                );
+                assert!(shifted.min_element() >= -1e-3, "seed {seed} left the gamut: {shifted:?}");
+            }
+        }
+    }
+
+    /// Oklab round-trips. If this drifts, the shader's duplicate of these matrices is describing a different
+    /// colour space from the one the tests above vouch for.
+    #[test]
+    fn oklab_round_trips() {
+        let probes = [
+            Vec3::new(0.048, 0.059, 0.051),
+            Vec3::new(0.238, 0.396, 0.323),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.5, 0.25, 0.75),
+            Vec3::ZERO,
+        ];
+        for c in probes {
+            let back = oklab_to_linear_srgb(linear_srgb_to_oklab(c));
+            assert!((back - c).abs().max_element() < 1e-4, "{c:?} round-tripped to {back:?}");
+        }
+    }
+
+    /// A bunch reads as one colour: every member sits within `MAX_MEMBER_AB` of its cluster's shade, and no
+    /// body ever leaves the mat's family.
+    #[test]
+    fn cluster_members_share_a_colour_and_stay_in_the_family() {
+        for nucleus in 0..100u32 {
+            let members: Vec<Vec2> = (0..8).map(|m| cap_ab_for(nucleus, nucleus ^ (0xF000 + m))).collect();
+            for ab in &members {
+                assert!(
+                    ab.length() <= MAX_CLUSTER_AB * std::f32::consts::SQRT_2
+                        + MAX_MEMBER_AB * std::f32::consts::SQRT_2
+                        + 1e-6,
+                    "nucleus {nucleus}: {ab:?} strayed outside the family",
+                );
+            }
+            // Members of one cluster differ from each other by at most twice the member spread.
+            for (i, a) in members.iter().enumerate() {
+                for b in members.iter().skip(i + 1) {
+                    assert!(
+                        a.distance(*b) <= 2.0 * MAX_MEMBER_AB * std::f32::consts::SQRT_2 + 1e-6,
+                        "nucleus {nucleus}: siblings {a:?} and {b:?} do not share a colour",
+                    );
+                }
+            }
         }
     }
 

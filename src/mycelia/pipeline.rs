@@ -100,7 +100,19 @@ struct MoldPipeline {
 /// This frame's prepared bind group (the six mold resources, with the trail read/write pair selected by
 /// the current parity).
 #[derive(Resource)]
-struct MoldBindGroup(BindGroup);
+struct MoldBindGroup {
+    /// Reads the `A` textures, writes the `B` ones. Bound by ticks whose parity is even.
+    even: BindGroup,
+    /// The reverse.
+    odd: BindGroup,
+}
+
+impl MoldBindGroup {
+    /// The bind group for a tick at `parity`, i.e. the one whose ping-pong reads what the previous tick wrote.
+    fn at(&self, parity: u64) -> &BindGroup {
+        if parity & 1 == 0 { &self.even } else { &self.odd }
+    }
+}
 
 /// The `blend` pass's bind group. Separate from [`MoldBindGroup`] and rebuilt on the same schedule.
 #[derive(Resource)]
@@ -242,11 +254,13 @@ fn advance_state(
             });
         state.ready = all_ok;
     }
-    // Advance the ping-pong parity ONLY on a sim tick. On skipped frames the read/write pair must stay put,
-    // or `prepare_bind_group` would swap the textures under a pass that never ran and the mold would flicker
-    // between two half-updated fields.
-    if state.ready && step.step {
-        state.frame = state.frame.wrapping_add(1);
+    // Advance the ping-pong parity once per sim TICK, not per frame. On frames that run no tick the read/write
+    // pair must stay put, or `prepare_bind_group` would swap the textures under a pass that never ran and the
+    // mold would flicker between two half-updated fields. On frames that run several, it advances by several,
+    // and `state.frame` ends on the parity of the LAST tick — which is what `prepare_bind_group` binds the
+    // blend pass against.
+    if state.ready {
+        state.frame = state.frame.wrapping_add(step.ticks as u64);
     }
 }
 
@@ -295,38 +309,46 @@ fn prepare_bind_group(
         return;
     };
 
-    // Parity: even frames read A / write B, odd frames read B / write A. What we write this tick becomes
-    // next tick's read (the parity flips), giving a correct ping-pong. Trail and biomass share the parity.
-    let even = state.frame & 1 == 0;
-    let (read, write) = if even { (trail_a, trail_b) } else { (trail_b, trail_a) };
-    let (bio_read, bio_write) = if even { (bio_a, bio_b) } else { (bio_b, bio_a) };
-    // The snapshots ride the same parity, and `advance_state` (RenderSystems::Prepare) has already flipped it
-    // for the tick about to run. So the WRITE slot is where this tick's `field` pass lands — and therefore,
-    // once it has, where the newest snapshot lives — while the READ slot still holds the tick before it.
-    // Between ticks nothing flips, so the pairing holds until the next tick overwrites the old one.
-    let (snap_old, snap_new) = if even { (snap_a, snap_b) } else { (snap_b, snap_a) };
-
     let mut uniform = UniformBuffer::from(params.into_inner().clone());
     uniform.write_buffer(&render_device, &queue);
 
-    let bind_group = render_device.create_bind_group(
-        None,
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((
-            agent_buf.buffer.as_entire_buffer_binding(),
-            deposit_buf.buffer.as_entire_buffer_binding(),
-            &read.texture_view,
-            &write.texture_view,
-            &snap_new.texture_view,
-            &uniform,
-            &bio_read.texture_view,
-            &bio_write.texture_view,
-            &control.texture_view,
-            &wall.texture_view,
-            coarse_buf.buffer.as_entire_buffer_binding(),
-        )),
-    );
-    commands.insert_resource(MoldBindGroup(bind_group));
+    // Parity: on an even tick the chain reads A and writes B, on an odd tick the reverse. What a tick writes
+    // becomes the next tick's read, giving a correct ping-pong. Trail, biomass and snapshot share the parity.
+    //
+    // BOTH parities are built every frame, because a frame may run several ticks (the game clock can outrun
+    // `sim_hz`) and each successive tick must bind the opposite pair. They are cheap — the textures and
+    // buffers persist; only the descriptor is rebuilt.
+    let sim_bind_group = |even: bool| {
+        let (read, write) = if even { (trail_a, trail_b) } else { (trail_b, trail_a) };
+        let (bio_read, bio_write) = if even { (bio_a, bio_b) } else { (bio_b, bio_a) };
+        let snap_write = if even { snap_b } else { snap_a };
+        render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.layout),
+            &BindGroupEntries::sequential((
+                agent_buf.buffer.as_entire_buffer_binding(),
+                deposit_buf.buffer.as_entire_buffer_binding(),
+                &read.texture_view,
+                &write.texture_view,
+                &snap_write.texture_view,
+                &uniform,
+                &bio_read.texture_view,
+                &bio_write.texture_view,
+                &control.texture_view,
+                &wall.texture_view,
+                coarse_buf.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    };
+    commands.insert_resource(MoldBindGroup { even: sim_bind_group(true), odd: sim_bind_group(false) });
+
+    // `advance_state` (RenderSystems::Prepare) has already advanced the parity past every tick this frame
+    // will run, so `state.frame` is the parity of the LAST of them. Its WRITE slot is where that tick's
+    // `field` pass lands — and therefore, once it has, where the newest snapshot lives — while its READ slot
+    // holds the tick before. Between ticks nothing flips, so the pairing holds until the next tick overwrites
+    // the old one.
+    let even = state.frame & 1 == 0;
+    let (snap_old, snap_new) = if even { (snap_a, snap_b) } else { (snap_b, snap_a) };
 
     // The interpolation bind group. `snap_new` appears here as a SAMPLED texture and above as a write-only
     // storage target; that is legal only because they are different bind groups, set in different compute
@@ -404,14 +426,20 @@ fn mold_compute(
         pass.dispatch_workgroups(x, y, 1);
     };
 
-    let bg = &bind_group.0;
-    if step.step {
+    // `advance_state` already advanced the parity past all of this frame's ticks, so the FIRST of them ran at
+    // parity `frame - ticks + 1` and the last at `frame`. Walking forward from that base gives each tick the
+    // ping-pong pair that reads what its predecessor wrote. The barrier between compute passes is what makes
+    // a chain of them correct within one frame.
+    let base = state.frame.wrapping_sub(step.ticks as u64);
+    for i in 0..step.ticks {
+        let bg = bind_group.at(base.wrapping_add(i as u64).wrapping_add(1));
         dispatch(bg, clear, deposit_slots.div_ceil(CLEAR_WORKGROUP), 1);
         dispatch(bg, agents_pl, params.agent_count.div_ceil(LINEAR_WORKGROUP), 1);
         dispatch(bg, diffuse, field_groups, field_groups);
         dispatch(bg, field, field_groups, field_groups);
         // Reduce the biomass for the CPU. It reads `biomass_read` (the field pass wrote `biomass_write`), so
         // its position in the chain is immaterial — running it last keeps the snapshot write unencumbered.
+        // On a multi-tick frame only the last reduction survives to the readback, which is the freshest.
         dispatch(bg, pin_scan, coarse_groups, coarse_groups);
     }
 

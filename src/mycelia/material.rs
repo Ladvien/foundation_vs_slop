@@ -131,6 +131,11 @@ pub struct MoldFruitParams {
     /// The body's growth angle, object space, as a slope. Applied linearly in `y`, so it leans the whole
     /// stem while leaving the volva seated. Fixed at spawn.
     tilt: Vec2,
+    /// This body's Oklab `(a, b)` chroma offset for the cap, fixed at spawn: its cluster's shade plus its own
+    /// small deviation from it (`perceptual::cap_ab_for`). Applied in Oklab so it moves hue and chroma while
+    /// leaving *lightness* exactly alone — the mushroom recolours without relighting. Third `vec2` in a row,
+    /// so `tint` after it is still naturally aligned.
+    cap_ab: Vec2,
     /// Rate-limited maturity. `0` = the pale universal veil stretched over a fresh primordium, `1` = the
     /// mat's own deep flesh showing through an expanded pileus. Not `growth`: the albedo shift is throttled
     /// so it can never complete faster than the slow-change-blindness window (see
@@ -168,12 +173,13 @@ impl MoldFruitExt {
         tint: f32,
         bend: Vec2,
         tilt: Vec2,
+        cap_ab: Vec2,
     ) -> Self {
         Self {
             params: MoldSurfaceParams::new(cfg),
             display,
             control,
-            fruit: MoldFruitParams { bend, tilt, tint },
+            fruit: MoldFruitParams { bend, tilt, cap_ab, tint },
         }
     }
 
