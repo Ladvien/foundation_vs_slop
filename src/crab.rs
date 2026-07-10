@@ -376,7 +376,7 @@ impl Plugin for CrabPlugin {
                     crab_alarm_on_damage.before(crate::ai::AiSet::Deposits),
                     // Sate HUNGER after the brain has consumed this tick's drive values.
                     crab_feeding_sates_hunger.after(crate::ai::AiSet::Think),
-                    crab_despawn_dead,
+                    crab_despawn_dead.in_set(CrabDespawn),
                     deposit_crab_density,
                     deposit_meat_scent,
                     // Scout detection + rally-pheromone deposit: before the rally deposits drain so the
@@ -1395,6 +1395,16 @@ fn crab_contact_damage(
 /// normal death emits (a scent here would magnet more crabs into a feeding feedback loop).
 #[derive(Component)]
 pub struct Culled;
+
+/// The set holding [`crab_despawn_dead`], the single owner of crab removal.
+///
+/// Anything that *tags* a crab for death rather than despawning it — `enemy::smiley_defense`, which writes
+/// [`Culled`] — must be ordered `.before` this set. A sole despawn owner prevents a double-despawn, but it
+/// does nothing about an `insert` command queued **after** the despawn command: applying it panics with
+/// "Entity despawned". The two systems live in different plugins, so nothing but this set can express the
+/// ordering they have always relied on.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CrabDespawn;
 
 /// The ONE system that removes a crab at ≤ 0 HP, whatever zeroed it (laser, `smiley_zap`, or a boss cull
 /// via the `Culled` tag). Being the sole despawn+gore owner is what prevents the double-despawn /

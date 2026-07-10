@@ -470,11 +470,20 @@
         // behaves identically. `validate_config` rejects that outright rather than let a dead dial sit here
         // looking meaningful. 20 s spans three scans at the shipped clock.
         pin_dwell_secs: 20.0,
-        pin_min_spacing: 3.0,   // world units between bodies. Neighbouring knots starve each other out
-                                // (primordium abortion; Kües & Navarro-González 2015, 10.1016/j.fbr.2015.05.001).
-                                // At 1.5 a walked-through room grew ~45 bodies over 139 tiles — a lawn, not a
-                                // flush. 3.0 quarters that, keeps the floor clear for pathing and gore, and
-                                // makes each mushroom an event rather than ground cover.
+        // ── Caespitose flushes ────────────────────────────────────────────────────────────────────────
+        // Mushrooms arrive in bunches, not one at a time. A nucleus commits, and its whole flush erupts with
+        // it from the same hyphal knot — one genet, one resource sink, one pigment. So there are two
+        // spacings, and they mean different things.
+        cluster_spacing: 3.0,   // world units between bodies of DIFFERENT clusters. Neighbouring knots starve
+                                // each other out (primordium abortion; Kües & Navarro-González 2015,
+                                // 10.1016/j.fbr.2015.05.001). At 1.5 a walked-through room grew ~45 bodies
+                                // over 139 tiles — a lawn, not a flush. 3.0 quarters that, keeps the floor
+                                // clear for pathing and gore, and makes each clump an event.
+        cluster_radius: 0.7,    // how far a satellite may stand from its nucleus. A bunch fits inside roughly
+                                // one tile. Must exceed two volva radii at `body_scale` (0.184 world units),
+                                // or there is no annulus to place a satellite in — `validate_config` checks.
+        cluster_size_max: 8,    // ceiling on a flush. The draw skews small (h^2), so pairs and triples are
+                                // the common case and an eight-body clump is rare, as in the field.
         max_fruit_bodies: 40,   // hard budget; hitting it is logged, never silently ignored
         body_scale: 4.0,        // the mesh is a true-to-life 13.9 cm. 4.0 -> 56 cm, knee-high on a squad unit
                                 // and ~50 px tall at the default zoom (a unit is ~150). At 2.5 it measured 31

@@ -2,7 +2,7 @@
 //!
 //! Where the mat has grown thick and eaten its substrate, in the dark, a death cap erupts: a single
 //! `death_cap_growth.glb` mesh blended from sealed egg to adult across six glTF morph targets under one
-//! `growth: f32`. It grows in real time, and it grows **too slowly to see**.
+//! `growth: f32`. It grows on the game clock, and at ×1 it grows **too slowly to see**.
 //!
 //! # The biology, and where it already lives in the fields
 //!
@@ -70,7 +70,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy::render::gpu_readback::ReadbackComplete;
-use bevy::time::Real;
+use bevy::time::Virtual;
 
 use crate::dungeon::Dungeon;
 use crate::fog::FogGrid;
@@ -79,7 +79,8 @@ use crate::util::hash01_u32;
 use super::material::{MoldFruitExt, MoldFruitMaterial};
 use super::control::{self, MoldControlImage};
 use super::perceptual::{
-    bend_profile, growth_rate, radius_slice_height, stage_weights, v_max, ADULT_HEIGHT_M,
+    bend_profile, cap_ab_for, cluster_sites, growth_rate, radius_slice_height, stage_weights, v_max,
+    ADULT_HEIGHT_M,
     BENDABLE_MIN_PROFILE, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
     RADIUS_PROFILE, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
 };
@@ -121,6 +122,13 @@ pub struct FruitBody {
     /// faster than [`MIN_APPEARANCE_RAMP_SECS`]. Motion has its own, far tighter budget; this bounds the
     /// *non-moving* half of the change signal (Simons, Franconeri & Reimer 2000, 10.1068/p3104).
     pub tint: f32,
+    /// Which flush this body belongs to: the coarse-grid index of the nucleus that pinned it. Bodies of one
+    /// cluster are one genet — they erupted together from a single hyphal knot, so they crowd only *other*
+    /// clusters, and they share a cap colour.
+    pub cluster: u32,
+    /// This body's Oklab `(a, b)` cap-chroma offset: its cluster's shade, plus its own small deviation from
+    /// it. Fixed at spawn and handed to the shader by `coat_fruit_bodies`. See [`perceptual::cap_ab_for`].
+    pub cap_ab: Vec2,
     /// Apex deflection of the stipe, in the body's **own object space** and in native-scale metres, so the
     /// vertex shader can apply it without knowing the entity's yaw or scale. Fixed at spawn; a bent stem
     /// does not un-bend.
@@ -565,11 +573,11 @@ fn pin_fruit_bodies(
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
     scene: Res<DeathCapScene>,
-    time: Res<Time<Real>>,
+    time: Res<Time<Virtual>>,
     mut dwell: ResMut<PinDwell>,
     mut last_gen: Local<u64>,
     mut last_scan: Local<Option<f32>>,
-    bodies: Query<&Transform, With<FruitBody>>,
+    bodies: Query<(&Transform, &FruitBody)>,
 ) {
     if coarse.cells.is_empty() {
         return;
@@ -581,7 +589,7 @@ fn pin_fruit_bodies(
     }
     *last_gen = coarse.generation;
 
-    // `pin_dwell_secs` is real seconds. This system now fires once per readback rather than once per frame, so
+    // `pin_dwell_secs` is virtual seconds. This system fires once per readback rather than once per frame, so
     // a cell must be credited the whole interval since the previous scan — a frame delta would undercount it by
     // the same ~80×. Measuring the elapsed span (rather than assuming `1.0 / sim_hz`) also stays exact when
     // `advance_mold_time` drops a tick under load.
@@ -593,7 +601,7 @@ fn pin_fruit_bodies(
     let mut live = bodies.iter().count() as u32;
     // `commands.spawn` is deferred, so `bodies` cannot see a body pinned earlier in this same run. Without
     // this, two cells that ripen on the same pass both clear the spacing check and erupt on top of each other.
-    let mut pinned_this_run: Vec<Vec3> = Vec::new();
+    let mut pinned_this_run: Vec<(u32, Vec3)> = Vec::new();
 
     for (index, cell) in coarse.cells.iter().enumerate() {
         let (v, u) = (cell[0], cell[1]);
@@ -627,66 +635,128 @@ fn pin_fruit_bodies(
             continue;
         }
 
-        // Primordium competition: neighbours starve each other out (Kües & Navarro-González 2015). Committed
-        // bodies and the ones pinned earlier in this run are one population — `nearest_planar` ranks by
-        // (distance bits, position bits), so chaining the two iterators cannot perturb the deterministic order.
-        let candidates = bodies
-            .iter()
-            .map(|t| ((), t.translation))
-            .chain(pinned_this_run.iter().map(|&p| ((), p)));
-        let crowded = crate::util::nearest_planar(world, candidates)
-            .is_some_and(|(_, _, d)| d < cfg.pin_min_spacing);
-        if crowded {
+        // Bounded by `COARSE_SIZE² = 16_384`, so the cast is lossless and the salts stay in range. The
+        // nucleus's index *is* the cluster's identity.
+        let nucleus = index as u32;
+
+        // Primordium competition, between genets: a new knot may not open inside another cluster's ground
+        // (Kües & Navarro-González 2015). Its own siblings are exempt — they share its resource pool, which
+        // is the whole reason a flush is a flush. Committed bodies and the ones pinned earlier in this run
+        // are one population; `nearest_planar` ranks by (distance bits, position bits), so chaining the two
+        // iterators cannot perturb the deterministic order.
+        if crowded_by_another_cluster(&bodies, &pinned_this_run, nucleus, world, cfg.cluster_spacing) {
             continue;
         }
 
-        // Bounded by `COARSE_SIZE² = 16_384`, so the cast is lossless and the salts stay in range.
-        let seed = index as u32;
-        // Size varies across a flush. Growth time scales with it, since the speed limit bounds vertex
-        // *speed* and a bigger body has further to travel — a large mushroom simply takes longer.
-        let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01_u32(seed ^ 0xC3) - 1.0));
-        let yaw = hash01_u32(seed) * std::f32::consts::TAU;
+        // The flush. Its layout is a pure function of the nucleus's seed, so a pin is reproducible whatever
+        // frame the readback happened to land on. Member 0 sits at the nucleus.
+        let sites = cluster_sites(nucleus, cfg.body_scale, cfg.cluster_radius, cfg.cluster_size_max);
+        for (member, offset) in sites.iter().enumerate() {
+            if live >= cfg.max_fruit_bodies {
+                debug!(
+                    "mycelia: fruit body budget of {} reached; flush at {:?} stopped at {member} bodies",
+                    cfg.max_fruit_bodies, dcell
+                );
+                break;
+            }
+            // Decorrelated from the nucleus so siblings differ in size, yaw, lean and shade — but derived
+            // from it, so the whole flush is still one deterministic draw.
+            let seed = nucleus ^ (0xF000 + member as u32);
+            let site = world_xz + *offset;
 
-        // Where it can actually stand, which way its stem curves, and how far off plumb it grew. A site that
-        // cannot seat a body clear of the geometry grows nothing — `pin_scan` works at cell resolution and
-        // will happily nominate a texel inside a wall slab.
-        let Some(plan) = plan_body(&dungeon, world_xz, scale, seed) else {
-            debug!("mycelia: no clear pose for a fruit body at {world_xz:?}; skipping the pin");
-            continue;
-        };
+            // Size varies across a flush. Growth time scales with it, since the speed limit bounds vertex
+            // *speed* and a bigger body has further to travel — a large mushroom simply takes longer.
+            let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01_u32(seed ^ 0xC3) - 1.0));
+            let yaw = hash01_u32(seed) * std::f32::consts::TAU;
 
-        // The vertex shader works in object space, so undo the entity's yaw here rather than handing the GPU
-        // a transform it would have to invert per vertex. (Both are already in native-scale units.)
-        let unyaw = |v: Vec2| {
-            let r = Quat::from_rotation_y(-yaw) * Vec3::new(v.x, 0.0, v.y);
-            Vec2::new(r.x, r.z)
-        };
-        let bend = unyaw(plan.bend);
-        let tilt = unyaw(plan.tilt);
+            // A satellite may drift toward a neighbouring genet even though its nucleus cleared it.
+            let site_world = Vec3::new(site.x, 0.0, site.y);
+            if member > 0
+                && crowded_by_another_cluster(
+                    &bodies,
+                    &pinned_this_run,
+                    nucleus,
+                    site_world,
+                    cfg.cluster_spacing,
+                )
+            {
+                continue;
+            }
 
-        let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
-        commands.spawn((
-            Name::new("mycelia_fruit_body"),
-            FruitBody {
-                growth: 0.0,
-                rise: 0.0,
-                scale,
-                cell: dungeon.world_to_cell(base),
-                veil_triggered: false,
-                tint: 0.0,
-                bend,
-                tilt,
-            },
-            // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
-            Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
-                .with_rotation(Quat::from_rotation_y(yaw))
-                .with_scale(Vec3::splat(scale)),
-            Visibility::default(),
-            WorldAssetRoot(scene.0.clone()),
-        ));
-        live += 1;
-        pinned_this_run.push(base);
+            // Where it can actually stand, which way its stem curves, and how far off plumb it grew. A site
+            // that cannot seat a body clear of the geometry grows nothing — `pin_scan` works at cell
+            // resolution and will happily nominate a texel inside a wall slab. A satellite that cannot be
+            // seated is simply not born; if the *nucleus* cannot be, the whole flush is abandoned, because
+            // its members are all measured from that point.
+            let Some(plan) = plan_body(&dungeon, site, scale, seed) else {
+                debug!("mycelia: no clear pose for a fruit body at {site:?}; skipping it");
+                if member == 0 {
+                    break;
+                }
+                continue;
+            };
+
+            // The vertex shader works in object space, so undo the entity's yaw here rather than handing the
+            // GPU a transform it would have to invert per vertex. (Both are in native-scale units.)
+            let unyaw = |v: Vec2| {
+                let r = Quat::from_rotation_y(-yaw) * Vec3::new(v.x, 0.0, v.y);
+                Vec2::new(r.x, r.z)
+            };
+            let bend = unyaw(plan.bend);
+            let tilt = unyaw(plan.tilt);
+
+            let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
+            commands.spawn((
+                Name::new("mycelia_fruit_body"),
+                FruitBody {
+                    growth: 0.0,
+                    rise: 0.0,
+                    scale,
+                    cell: dungeon.world_to_cell(base),
+                    veil_triggered: false,
+                    tint: 0.0,
+                    cluster: nucleus,
+                    cap_ab: cap_ab_for(nucleus, seed),
+                    bend,
+                    tilt,
+                },
+                // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
+                Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
+                    .with_rotation(Quat::from_rotation_y(yaw))
+                    .with_scale(Vec3::splat(scale)),
+                Visibility::default(),
+                WorldAssetRoot(scene.0.clone()),
+            ));
+            live += 1;
+            pinned_this_run.push((nucleus, base));
+        }
     }
+}
+
+/// Is `world` inside another cluster's keep-out radius?
+///
+/// Siblings are exempt: one flush shares one resource pool, and its members are packed by volva geometry
+/// rather than by primordium competition (`perceptual::cluster_sites` already guarantees they cannot
+/// overlap). `pinned_this_run` carries the cluster id for the same reason it exists at all — `commands.spawn`
+/// is deferred, so a body pinned earlier in this scan is invisible to the `bodies` query.
+fn crowded_by_another_cluster(
+    bodies: &Query<(&Transform, &FruitBody)>,
+    pinned_this_run: &[(u32, Vec3)],
+    cluster: u32,
+    world: Vec3,
+    spacing: f32,
+) -> bool {
+    let candidates = bodies
+        .iter()
+        .filter(|(_, body)| body.cluster != cluster)
+        .map(|(t, _)| ((), t.translation))
+        .chain(
+            pinned_this_run
+                .iter()
+                .filter(|(c, _)| *c != cluster)
+                .map(|&(_, p)| ((), p)),
+        );
+    crate::util::nearest_planar(world, candidates).is_some_and(|(_, _, d)| d < spacing)
 }
 
 /// The growth ODE. One expression, evaluated against the live zoom every frame.
@@ -699,7 +769,7 @@ fn grow_fruit_bodies(
     coarse: Res<MoldCoarse>,
     fog: Res<FogGrid>,
     view: Res<crate::camera::CameraView>,
-    time: Res<Time<Real>>,
+    time: Res<Time<Virtual>>,
     mut bodies: Query<(Entity, &mut FruitBody, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
@@ -854,6 +924,7 @@ fn coat_fruit_bodies(
                             body.tint,
                             body.bend,
                             body.tilt,
+                            body.cap_ab,
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
@@ -906,6 +977,8 @@ mod tests {
             cell: IVec2::ZERO,
             veil_triggered: false,
             tint: 0.0,
+            cluster: 0,
+            cap_ab: Vec2::ZERO,
             bend: Vec2::ZERO,
             tilt: Vec2::ZERO,
         }
@@ -1057,7 +1130,7 @@ mod tests {
     /// A world where every coarse cell is barren except the ones named, which are ripe (`V` high, `U`
     /// spent). Texel coordinates are chosen so the sites land on open floor, far from any slab.
     ///
-    /// `Time<Real>` is inserted by hand rather than via `TimePlugin`, so the clock only moves when the test
+    /// `Time<Virtual>` is inserted by hand rather than via `TimePlugin`, so the clock only moves when the test
     /// says so. The system's `Local`s persist across `app.update()`, which is the whole point — the readback
     /// gate lives in one.
     fn app_with_ripe_cells(cfg: MyceliaConfig, texels: &[f32]) -> App {
@@ -1077,7 +1150,7 @@ mod tests {
             ))
             .insert_resource(DeathCapScene(Handle::default()))
             .insert_resource(PinDwell::default())
-            .insert_resource(Time::<Real>::default())
+            .insert_resource(Time::<Virtual>::default())
             .add_systems(Update, pin_fruit_bodies);
         app
     }
@@ -1086,6 +1159,13 @@ mod tests {
         let mut q = app.world_mut().query_filtered::<(), With<FruitBody>>();
         let n = q.iter(app.world()).count();
         n
+    }
+
+    /// The distinct genets standing in the world. One nucleus bursts a whole flush, so this is what "how
+    /// many primordia committed" now means.
+    fn cluster_ids(app: &mut App) -> std::collections::BTreeSet<u32> {
+        let mut q = app.world_mut().query::<&FruitBody>();
+        q.iter(app.world()).map(|b| b.cluster).collect()
     }
 
     /// Drive the app the way the game drives it: the render loop ticks at `fps`, and a readback lands only
@@ -1097,40 +1177,44 @@ mod tests {
     fn run_frames(app: &mut App, frames: usize, fps: f32, frames_per_scan: usize) -> f32 {
         let frame = std::time::Duration::from_secs_f32(1.0 / fps);
         for i in 1..=frames {
-            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            app.world_mut().resource_mut::<Time<Virtual>>().advance_by(frame);
             if i % frames_per_scan == 0 {
                 app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
             }
             app.update();
         }
-        app.world().resource::<Time<Real>>().elapsed_secs()
+        app.world().resource::<Time<Virtual>>().elapsed_secs()
     }
 
-    /// Run frame-by-frame until a body pins, returning the real time on the clock when it did. `None` if it
+    /// Run frame-by-frame until a body pins, returning the time on the clock when it did. `None` if it
     /// never pins within `max_frames`.
     fn time_to_first_pin(app: &mut App, max_frames: usize, fps: f32, frames_per_scan: usize) -> Option<f32> {
         let frame = std::time::Duration::from_secs_f32(1.0 / fps);
         for i in 1..=max_frames {
-            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            app.world_mut().resource_mut::<Time<Virtual>>().advance_by(frame);
             if i % frames_per_scan == 0 {
                 app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
             }
             app.update();
             if body_count(app) > 0 {
-                return Some(app.world().resource::<Time<Real>>().elapsed_secs());
+                return Some(app.world().resource::<Time<Virtual>>().elapsed_secs());
             }
         }
         None
     }
 
-    /// Two cells that ripen together must not both pin: `commands.spawn` is deferred, so the second cell's
-    /// crowding check cannot see the first body in the `World`. It has to see the pending position instead.
+    /// Two cells that ripen together must not both nucleate: `commands.spawn` is deferred, so the second
+    /// cell's crowding check cannot see the first *cluster* in the `World`. It has to see the pending
+    /// positions instead — which is why `pinned_this_run` carries a cluster id alongside each position.
     ///
-    /// The sites here are 1.5 world units apart against a `pin_min_spacing` of 3.0 — unambiguously crowded.
+    /// The sites are 1.5 world units apart against a `cluster_spacing` of 3.0 — unambiguously crowded. The
+    /// surviving nucleus still bursts its whole flush, so the assertion counts **clusters, not bodies**: one
+    /// genet may put down eight mushrooms and still have starved out its neighbour.
     #[test]
-    fn two_cells_ripening_on_the_same_scan_pin_only_one_body() {
+    fn two_cells_ripening_on_the_same_scan_nucleate_only_one_cluster() {
         let cfg = crate::config::load_game_config().expect("game config").mycelia;
-        let spacing = cfg.pin_min_spacing;
+        let spacing = cfg.cluster_spacing;
+        let size_max = cfg.cluster_size_max as usize;
         let (fps, per_scan) = frame_clock(&cfg);
         let budget_frames = frames_to_cover_the_dwell(&cfg, fps, per_scan);
 
@@ -1140,15 +1224,58 @@ mod tests {
         // Run well past the dwell threshold, so both cells certainly cross it on the same scan.
         run_frames(&mut app, budget_frames, fps, per_scan);
 
-        let n = body_count(&mut app);
+        let clusters = cluster_ids(&mut app);
         assert_eq!(
-            n, 1,
-            "two cells 1.5 units apart (pin_min_spacing = {spacing}) ripened together and produced {n} \
-             bodies; the second must be rejected by the same-scan crowding check",
+            clusters.len(),
+            1,
+            "two cells 1.5 units apart (cluster_spacing = {spacing}) ripened together and nucleated \
+             {} clusters; the second must be rejected by the same-scan crowding check",
+            clusters.len(),
+        );
+        let n = body_count(&mut app);
+        assert!(
+            (2..=size_max).contains(&n),
+            "the surviving nucleus should have burst a flush of 2..={size_max} bodies, got {n}",
         );
     }
 
-    /// `pin_dwell_secs` is **real seconds**. The scan now runs once per readback (~`sim_hz`) rather than once
+    /// Every body of one flush wears one colour, and the flush is packed tightly — far tighter than the
+    /// `cluster_spacing` that keeps *genets* apart. This is the whole visible point of clustering.
+    #[test]
+    fn a_flush_shares_a_colour_and_packs_tighter_than_the_cluster_spacing() {
+        let cfg = crate::config::load_game_config().expect("game config").mycelia;
+        let (radius, spacing) = (cfg.cluster_radius, cfg.cluster_spacing);
+        let (fps, per_scan) = frame_clock(&cfg);
+        let budget_frames = frames_to_cover_the_dwell(&cfg, fps, per_scan);
+
+        let mut app = app_with_ripe_cells(cfg, &[320.0]);
+        run_frames(&mut app, budget_frames, fps, per_scan);
+
+        let mut q = app.world_mut().query::<(&Transform, &FruitBody)>();
+        let bodies: Vec<(Vec3, Vec2)> =
+            q.iter(app.world()).map(|(t, b)| (t.translation, b.cap_ab)).collect();
+        assert!(bodies.len() >= 2, "a lone ripe cell should burst a flush, got {}", bodies.len());
+
+        // Cap colours agree to within twice the per-member spread: one genet, one pigment.
+        let spread = 2.0 * crate::mycelia::perceptual::MAX_MEMBER_AB * std::f32::consts::SQRT_2;
+        for (i, (_, a)) in bodies.iter().enumerate() {
+            for (_, b) in bodies.iter().skip(i + 1) {
+                assert!(a.distance(*b) <= spread + 1e-5, "siblings differ in colour: {a:?} vs {b:?}");
+            }
+        }
+
+        // Every body sits inside the flush, not a `cluster_spacing` away like a rival genet would.
+        let nucleus = bodies[0].0;
+        for (p, _) in &bodies {
+            let d = Vec2::new(p.x - nucleus.x, p.z - nucleus.z).length();
+            // `plan_body` may nudge a base clear of geometry, so allow a body radius of slack over the
+            // sampling radius — but it must still be nowhere near the between-genet spacing.
+            assert!(d < spacing, "body {d} from the nucleus is as far as a rival genet (spacing {spacing})");
+            assert!(d <= radius + 2.0 * VOLVA_RADIUS_M * 4.0, "body strayed {d} outside the flush");
+        }
+    }
+
+    /// `pin_dwell_secs` is **virtual seconds**. The scan runs once per readback (~`sim_hz`) rather than once
     /// per rendered frame, so it must credit the whole inter-scan interval — the elapsed span since the last
     /// scan, *not* `Time::delta_secs()`, which is one render frame.
     ///
@@ -1168,7 +1295,7 @@ mod tests {
         // arrive, which is the regression this test exists to catch.
         let t = time_to_first_pin(&mut app, max_frames, fps, per_scan).unwrap_or_else(|| {
             panic!(
-                "a lone ripe cell never pinned within {:.0} s of real time, though `pin_dwell_secs` is \
+                "a lone ripe cell never pinned within {:.0} s of sim time, though `pin_dwell_secs` is \
                  {dwell} s. The dwell accumulator is crediting far less than the elapsed interval.",
                 2.0 * dwell,
             )
@@ -1178,7 +1305,7 @@ mod tests {
         let expected = dwell + scan_secs;
         assert!(
             (t - expected).abs() <= scan_secs + 1e-3,
-            "pinned after {t:.3} s of real time; expected near {expected:.3} s ({dwell} s dwell + one scan)",
+            "pinned after {t:.3} s of sim time; expected near {expected:.3} s ({dwell} s dwell + one scan)",
         );
     }
 
@@ -1301,7 +1428,7 @@ mod tests {
 
         // One readback: the cell is seen, and starts its dwell at zero (no prior scan to measure from).
         let frame = std::time::Duration::from_secs_f32(1.0 / fps);
-        app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+        app.world_mut().resource_mut::<Time<Virtual>>().advance_by(frame);
         app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
         app.update();
         let after_scan = app.world().resource::<PinDwell>().0.get(&0).copied();
@@ -1309,7 +1436,7 @@ mod tests {
 
         // Now run 200 frames with no new readback. The buffer has not changed, so neither may the dwell.
         for _ in 0..200 {
-            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            app.world_mut().resource_mut::<Time<Virtual>>().advance_by(frame);
             app.update();
         }
 

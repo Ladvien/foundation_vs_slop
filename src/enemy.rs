@@ -399,8 +399,10 @@ impl Plugin for EnemyPlugin {
                     smiley_reflex.after(crate::ai::AiSet::Think),
                     // Smite attackers while unleashing (instakill = pinned state → FixedUpdate).
                     smiley_zap.after(smiley_reflex),
-                    // Bounded no-heal crab cull so the swarm can't free-farm the coexisting god.
-                    smiley_defense,
+                    // Bounded no-heal crab cull so the swarm can't free-farm the coexisting god. It TAGS
+                    // its victims (`crab::Culled`) rather than despawning them, so it must run before the
+                    // one despawn owner — an `insert` command applied after that despawn panics.
+                    smiley_defense.before(crate::crab::CrabDespawn),
                     // Move after the brain chose this tick's mode and the reflex set the mood.
                     enemy_seek
                         .after(rebuild_enemy_field)
@@ -1007,9 +1009,10 @@ fn smiley_zap(
 ///
 /// The cull zeroes each victim's HP and tags it `crate::crab::Culled`, then lets the ONE crab-death
 /// despawner (`crab::crab_despawn_dead`) remove it. A single despawn owner means a crab that is also
-/// killed by a laser or `smiley_zap` the same tick can't be double-despawned / double-gored (the two
-/// systems are unordered across plugins). The `Culled` tag tells that despawner to emit the green-ichor
-/// swat gore but NO SCENT bloom — a scent here would just magnet more crabs into a feedback loop.
+/// killed by a laser or `smiley_zap` the same tick can't be double-despawned / double-gored. This system is
+/// ordered `.before(crab::CrabDespawn)` because tagging is not despawning: a `Culled` insert queued after
+/// the despawn command is applied to a dead entity and panics. The `Culled` tag tells that despawner to emit
+/// the green-ichor swat gore but NO SCENT bloom — a scent here would just magnet more crabs into a loop.
 fn smiley_defense(
     time: Res<Time>,
     mut commands: Commands,
