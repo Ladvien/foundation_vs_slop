@@ -32,10 +32,15 @@ impl From<ChannelTuning> for ChannelDef {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct FieldsTuning {
     pub scent: ChannelTuning,
-    pub threat: ChannelTuning,
+    /// Danger emitted by the squad's weapons (read by crabs and the boss).
+    pub threat_gun: ChannelTuning,
     pub crab_density: ChannelTuning,
     pub meat: ChannelTuning,
     pub alarm: ChannelTuning,
+    /// Danger emitted by crabs (read by units).
+    pub threat_crab: ChannelTuning,
+    /// Danger emitted by the watcher (read by units).
+    pub threat_anomaly: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -43,10 +48,12 @@ impl FieldsTuning {
     pub fn channel_defs(&self) -> [ChannelDef; CHANNEL_COUNT] {
         let mut defs = [ChannelDef::default(); CHANNEL_COUNT];
         defs[FieldId::SCENT.0] = self.scent.into();
-        defs[FieldId::THREAT.0] = self.threat.into();
+        defs[FieldId::THREAT_GUN.0] = self.threat_gun.into();
         defs[FieldId::CRAB_DENSITY.0] = self.crab_density.into();
         defs[FieldId::MEAT.0] = self.meat.into();
         defs[FieldId::ALARM.0] = self.alarm.into();
+        defs[FieldId::THREAT_CRAB.0] = self.threat_crab.into();
+        defs[FieldId::THREAT_ANOMALY.0] = self.threat_anomaly.into();
         defs
     }
 }
@@ -87,7 +94,7 @@ impl Default for AiTuning {
                     diffuse: 0.15,
                     deposit_radius: 1.5,
                 },
-                threat: ChannelTuning {
+                threat_gun: ChannelTuning {
                     evaporate: 0.6,
                     diffuse: 0.1,
                     deposit_radius: 2.0,
@@ -110,6 +117,21 @@ impl Default for AiTuning {
                     evaporate: 0.5,
                     diffuse: 0.0,
                     deposit_radius: 5.0,
+                },
+                // Crab menace: each crab lays at ≈ this evaporation rate, so a cell's value tracks the
+                // local crab COUNT (the `DENSITY_RATE` idiom). A wider radius + gentle diffusion than
+                // CRAB_DENSITY, because dread should be felt from further off than crowding is.
+                threat_crab: ChannelTuning {
+                    evaporate: 0.5,
+                    diffuse: 0.12,
+                    deposit_radius: 3.0,
+                },
+                // The watcher's aura: broad, slow-fading, and diffuse — it seeps down a corridor, which is
+                // what makes the Psionic's through-wall sense read as dread rather than as a proximity ping.
+                threat_anomaly: ChannelTuning {
+                    evaporate: 0.4,
+                    diffuse: 0.2,
+                    deposit_radius: 6.0,
                 },
             },
             // Rally vectors decay over a few seconds (call-off), accumulate scout deposits, and smear a

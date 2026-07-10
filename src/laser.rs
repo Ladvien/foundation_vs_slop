@@ -245,7 +245,7 @@ fn fire_laser(
         // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
         deposits.0.push(Deposit {
             pos: unit.translation,
-            field: FieldId::THREAT,
+            field: FieldId::THREAT_GUN,
             amount: THREAT_PER_SHOT,
         });
     }
@@ -349,7 +349,7 @@ fn update_lasers(
                 // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
                 deposits.0.push(Deposit {
                     pos: hit_point,
-                    field: FieldId::THREAT,
+                    field: FieldId::THREAT_GUN,
                     amount: THREAT_PER_SHOT,
                 });
             }

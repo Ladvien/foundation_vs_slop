@@ -377,7 +377,7 @@ impl Plugin for CrabPlugin {
                     // Sate HUNGER after the brain has consumed this tick's drive values.
                     crab_feeding_sates_hunger.after(crate::ai::AiSet::Think),
                     crab_despawn_dead.in_set(CrabDespawn),
-                    deposit_crab_density,
+                    deposit_crab_fields,
                     deposit_meat_scent,
                     // Scout detection + rally-pheromone deposit: before the rally deposits drain so the
                     // beacon is live this tick, and before Think so the tracking state feeds the scout brain.
@@ -607,6 +607,9 @@ fn spawn_crab_on_patch(
             // begins differentiated — hungry crabs press to feed, sated ones forage — instead of a uniform
             // ramp where every crab hits HUNGER==1 in lockstep. Feeding sates it (`crab_feeding_sates_hunger`).
             crate::ai::drives::Drives::seeded(crate::ai::drives::DriveId::HUNGER, 0.2 + 0.6 * draw(6)),
+            // Fear the squad's gunfire, never the swarm's own menace. Tagged here rather than at the two
+            // call sites so runtime-bred crabs (`nest_reproduce`) inherit it too.
+            crate::ai::faction::Faction::Crab,
             brain_id,
             crate::ai::brain::ActiveBehavior::new(rand_seed),
             crate::ai::brain::ThinkTimer::staggered(rand_seed),
@@ -1491,6 +1494,10 @@ const CROWD_CAP: f32 = 5.0; // local CRAB_DENSITY above this suppresses breeding
 /// Per-second density each crab lays into the CRAB_DENSITY field (≈ evaporation rate, so the field's
 /// value at a cell tracks the local crab count).
 const DENSITY_RATE: f32 = 0.4;
+/// Per-second menace each crab lays into the THREAT_CRAB field (≈ that channel's evaporation, so the
+/// field's value at a cell tracks the local crab count — one crab ≈ 1.0). The squad's FEAR gain is then
+/// literally "fear per adjacent crab" (`ai::FEAR_PER_CRAB`).
+const CRAB_MENACE_RATE: f32 = 0.5;
 /// Per-second MEAT a gib lays into the field (≈ evaporation, so the field tracks current meat presence).
 const MEAT_RATE: f32 = 0.5;
 /// One crab's carry capacity (weight units). Measured meat weights (density × real GLB mesh volume) span
@@ -1548,7 +1555,7 @@ fn crab_flee(
     // Flee down the THREAT gradient (away from danger); if the field is flat, keep the current heading
     // so the crab keeps moving rather than freezing. `steer_surface` routes this along the graph, so a
     // cornered crab climbs a wall to escape instead of clipping through it.
-    let g = stig.gradient(crate::ai::field::FieldId::THREAT, dungeon, motion.pos);
+    let g = stig.gradient(crate::ai::field::FieldId::THREAT_GUN, dungeon, motion.pos);
     let away = Vec3::new(-g.x, 0.0, -g.y);
     let desired = if away.length_squared() > 1.0e-6 {
         away
@@ -2169,19 +2176,37 @@ fn carry_gibs(
     }
 }
 
-/// Each crab lays into the CRAB_DENSITY field (a stigmergic crowding/recruitment substrate). With the
-/// per-second rate ≈ the field's evaporation, the value at a cell tracks the local crab count.
-fn deposit_crab_density(
+/// Each crab lays into two channels, both at a per-second rate ≈ the channel's evaporation, so each
+/// cell's value tracks the local crab count:
+///
+/// - CRAB_DENSITY — the swarm's own crowding/recruitment substrate (read by `nest_reproduce`).
+/// - THREAT_CRAB — the menace the swarm radiates, read as FEAR by the *squad* (never by crabs; see
+///   `ai::faction`). Separate from density because dread wants a wider radius and slower decay than
+///   crowding, and because the two must be tunable apart.
+///
+/// Determinism: overlapping discs accumulate into shared cells and float `+=` is non-associative, so a
+/// deposit emitted in entity-iteration order would make the summed field depend on that order (which can
+/// shift between same-seed runs). Emit in a stable *position* order, exactly as `deposit_meat_scent` does.
+fn deposit_crab_fields(
     time: Res<Time>,
     crabs: Query<&Transform, With<Crab>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
 ) {
-    let amount = DENSITY_RATE * time.delta_secs();
-    for tf in &crabs {
+    let dt = time.delta_secs();
+    let density = DENSITY_RATE * dt;
+    let menace = CRAB_MENACE_RATE * dt;
+    let mut positions: Vec<Vec3> = crabs.iter().map(|tf| tf.translation).collect();
+    positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
-            pos: tf.translation,
+            pos,
             field: crate::ai::field::FieldId::CRAB_DENSITY,
-            amount,
+            amount: density,
+        });
+        deposits.0.push(crate::ai::field::Deposit {
+            pos,
+            field: crate::ai::field::FieldId::THREAT_CRAB,
+            amount: menace,
         });
     }
 }

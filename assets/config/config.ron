@@ -271,14 +271,27 @@
     ai_tuning: (
         fields: (
             // evaporate: fraction lost per second. diffuse: 0..1 blur to neighbours. deposit_radius: world units.
-            scent:        ( evaporate: 0.25, diffuse: 0.15, deposit_radius: 1.5 ),
-            threat:       ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
-            crab_density: ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
-            meat:         ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
+            //
+            // Danger is split into one channel PER EMITTER, and each faction reads only its enemies'
+            // channels (see `src/ai/faction.rs`). A single shared `threat` channel meant a firing unit
+            // deposited danger at its own muzzle and read it back as terror, so the squad fled from its
+            // own gunfire.
+            scent:          ( evaporate: 0.25, diffuse: 0.15, deposit_radius: 1.5 ),
+            // Emitted by the squad's lasers (muzzle + impact); feared by crabs and the boss.
+            threat_gun:     ( evaporate: 0.6,  diffuse: 0.1,  deposit_radius: 2.0 ),
+            crab_density:   ( evaporate: 0.4,  diffuse: 0.05, deposit_radius: 1.0 ),
+            meat:           ( evaporate: 0.3,  diffuse: 0.12, deposit_radius: 2.0 ),
             // Alarm: a wounded crab floods this ~one room (deposit_radius) so nearby crabs muster instead of
             // fleeing. No diffusion (stays a local bloom); evaporate over ~2–3 s so the surge is a sharp
             // retaliation, not permanent aggro. Radius is the "how far the alarm carries" dial.
-            alarm:        ( evaporate: 0.5,  diffuse: 0.0,  deposit_radius: 5.0 ),
+            alarm:          ( evaporate: 0.5,  diffuse: 0.0,  deposit_radius: 5.0 ),
+            // Emitted by every crab, feared by the squad. Each crab lays at ~the evaporation rate, so a
+            // cell's value tracks the local crab COUNT and the squad's fear gain reads as "fear per crab".
+            // Wider + gentler than crab_density: dread carries further than crowding.
+            threat_crab:    ( evaporate: 0.5,  diffuse: 0.12, deposit_radius: 3.0 ),
+            // Emitted by the living watcher, feared by the squad. Broad, slow, diffuse — it seeps down a
+            // corridor, so the Psionic's through-wall sense reads as dread rather than a proximity ping.
+            threat_anomaly: ( evaporate: 0.4,  diffuse: 0.2,  deposit_radius: 6.0 ),
         ),
         // Vectorial rally pheromone (Tang et al. 2019): scouts deposit direction vectors toward live prey;
         // the swarm reads the local bearing and masses on it. decay = call-off rate, accumulate = deposit

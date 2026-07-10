@@ -280,6 +280,8 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     RoleId::ALL[i],
                     personas[i].clone(),
                     Drives::new(),
+                    // Units fear the creatures (THREAT_CRAB / THREAT_ANOMALY), never their own gunfire.
+                    crate::ai::faction::Faction::Foundation,
                     ActiveBehavior::new(seed),
                     ThinkTimer::staggered(seed),
                     DesiredMove::default(),

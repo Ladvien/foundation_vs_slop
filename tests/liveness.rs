@@ -65,3 +65,38 @@ fn squad_survives_a_long_unattended_run() {
         assert!(v.is_empty(), "liveness violated at tick {}: {v:?}", checkpoint * 30);
     }
 }
+
+#[test]
+fn every_drives_carrier_has_a_faction_throughout_a_live_run() {
+    // `update_drives` picks an agent's fear sources by `Faction`. `ai::faction::validate_factions` covers
+    // the Startup population, but crabs are also bred at runtime (`nest::nest_reproduce`) — an untagged
+    // agent there would simply never feel fear, an invisible-in-play bug rather than a crash. Both crab
+    // paths funnel through `crab::spawn_crab_on_patch`, so the tag is structural; this asserts it stays so
+    // over a long unattended run, while the swarm hunts and breeds.
+    use bevy::prelude::{Entity, With, Without};
+    use foundation_vs_slop::ai::drives::Drives;
+    use foundation_vs_slop::ai::faction::Faction;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::default();
+    let mut app = build_headless_app(&cfg);
+
+    let mut agents_seen = 0usize;
+    for checkpoint in 1..=20 {
+        step(&mut app, &cfg, 30);
+        let world = app.world_mut();
+        let mut untagged = world.query_filtered::<Entity, (With<Drives>, Without<Faction>)>();
+        let missing: Vec<Entity> = untagged.iter(world).collect();
+        assert!(
+            missing.is_empty(),
+            "at tick {}: {} agent(s) carry Drives without a Faction (first {:?}) — they would never feel fear",
+            checkpoint * 30,
+            missing.len(),
+            missing.first(),
+        );
+        let mut tagged = world.query_filtered::<Entity, (With<Drives>, With<Faction>)>();
+        agents_seen = agents_seen.max(tagged.iter(world).count());
+    }
+    // Guard against the assertion above passing vacuously on an empty world.
+    assert!(agents_seen > 5, "expected the squad plus a swarm to exist, saw {agents_seen} agents");
+}

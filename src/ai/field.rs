@@ -16,14 +16,17 @@ use bevy::prelude::*;
 use crate::dungeon::Dungeon;
 
 /// A stigmergy channel, addressed by a stable slot index. Extend by adding a const below.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FieldId(pub usize);
 
 impl FieldId {
     /// Food/blood trail — creatures deposit as they feed/die; foragers climb its gradient.
     pub const SCENT: FieldId = FieldId(0);
-    /// Danger — gunfire, the boss's aura, a unit's distress; drives fear and flight.
-    pub const THREAT: FieldId = FieldId(1);
+    /// Danger **emitted by the squad's weapons** — a firing unit and the point its bolts land. Read by
+    /// crabs and the boss so they scatter from a shooter. Deliberately NOT read by units: an agent that
+    /// feared its own muzzle would flee from itself (this channel used to be a single undifferentiated
+    /// `THREAT` that every `Drives` carrier tracked, which pinned a firing squad into `Mode::Flee`).
+    pub const THREAT_GUN: FieldId = FieldId(1);
     /// Local creature density — recruitment/crowding substrate (positive feedback + dispersal).
     pub const CRAB_DENSITY: FieldId = FieldId(2);
     /// Meat trail — carryable gibs emit it; foraging crabs climb its gradient toward food.
@@ -35,12 +38,24 @@ impl FieldId {
     /// universal coordination mechanism", Cognitive Systems Research 2016). Deposited by
     /// `crab::crab_alarm_on_damage`; read by the brain as `Fact::AlarmHere` (gates Muster on, Flee off).
     pub const ALARM: FieldId = FieldId(4);
+    /// Danger **emitted by crabs** — the menace a swarm radiates. Read by units (never by crabs, which
+    /// would otherwise fear the swarm they belong to). Kept distinct from [`Self::CRAB_DENSITY`]: density
+    /// is the crabs' own *coordination* substrate (crowding → dispersal, recruitment), whereas this is a
+    /// *fear* signal for the other faction, and the two want different radii and decay rates.
+    pub const THREAT_CRAB: FieldId = FieldId(5);
+    /// Danger **emitted by the watcher** — its standing anomaly aura, deposited every tick while it lives.
+    /// Read by units; it is what the Psionic's field-sight renders and what `PsiScan` reacts to.
+    pub const THREAT_ANOMALY: FieldId = FieldId(6);
     // NOTE: the rally beacon is NOT a scalar channel — it's a *vectorial* pheromone (see [`RallyField`]
     // below), which stores a direction toward the moving prey rather than a scalar concentration.
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 5;
+pub const CHANNEL_COUNT: usize = 7;
+
+/// The danger channels a *unit* reads. One per hostile creature type, so nothing ever fears its own
+/// emissions. Ordered, but consumed by an order-independent `max` (see `DriveRule::TrackMaxFields`).
+pub const UNIT_THREAT_CHANNELS: [FieldId; 2] = [FieldId::THREAT_CRAB, FieldId::THREAT_ANOMALY];
 
 /// SCENT deposited by a death — a strong, lingering feeding-site marker the swarm and boss home on.
 pub const BLOOD_SCENT: f32 = 4.0;

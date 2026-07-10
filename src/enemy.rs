@@ -393,6 +393,8 @@ impl Plugin for EnemyPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // The watcher's aura must reach the grid before it is drained/evaporated this tick.
+                    deposit_anomaly_aura.before(crate::ai::AiSet::Deposits),
                     // Rebuild the pursuit field before enemies read it this tick.
                     rebuild_enemy_field,
                     // Reflex first so movement + the zap see this tick's mood.
@@ -483,7 +485,13 @@ fn spawn_enemies(
                 SmileyState::new(START_HP),
                 LastAttacker::default(), // who last hit it (written by the laser + crab damage sites)
                 Health::new(START_HP),
-                crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
+                // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
+                (
+                    crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
+                    // The watcher fears nothing — but it must still be tagged, because every `Drives`
+                    // carrier needs a faction (`ai::faction::validate_factions`).
+                    crate::ai::faction::Faction::Anomaly,
+                ),
                 crate::ai::brain::BrainId::Smiley,
                 // Single boss → a stable per-spawn seed from its position bits (the seed just needs to be
                 // deterministic and distinct; only the swarm needs the monotonic `CrabSpawnSeq`).
@@ -530,6 +538,36 @@ fn spawn_enemies(
                 Transform::from_translation(FACE_LOCAL),
                 Visibility::Hidden,
             ));
+    }
+}
+
+/// Per-second dread the living watcher lays into the THREAT_ANOMALY field (≈ that channel's evaporation,
+/// so the value at its own cell settles near 1.0 and the squad's `FEAR_OF_ANOMALY` gain reads directly as
+/// "fear while standing in the aura").
+const ANOMALY_AURA_RATE: f32 = 0.4;
+
+/// The watcher radiates dread simply by existing. This is the only writer of THREAT_ANOMALY — the channel
+/// units read (through walls, via the Psionic) as the boss's presence.
+///
+/// Before the threat channels were split by emitter, the boss deposited nothing at all while alive: the
+/// single `THREAT` channel was written only by the squad's own lasers, so "the boss's aura" that the
+/// field's doc-comment advertised did not exist. Determinism: positions are value-sorted before emitting,
+/// because overlapping deposit discs accumulate with non-associative float `+=` (the same reason
+/// `crab::deposit_crab_fields` and `crab::deposit_meat_scent` sort).
+fn deposit_anomaly_aura(
+    time: Res<Time>,
+    bosses: Query<&Transform, With<Enemy>>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    let amount = ANOMALY_AURA_RATE * time.delta_secs();
+    let mut positions: Vec<Vec3> = bosses.iter().map(|tf| tf.translation).collect();
+    positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    for pos in positions {
+        deposits.0.push(crate::ai::field::Deposit {
+            pos,
+            field: crate::ai::field::FieldId::THREAT_ANOMALY,
+            amount,
+        });
     }
 }
 
