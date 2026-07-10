@@ -100,15 +100,18 @@ fn load_role_brains() -> Result<RoleBrains, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("unreadable: {e}")),
     }
-    // Whether a role kept its code-literal default or was replaced from RON, it must retain an
-    // unconditional behaviour (the `follow_anchor` tail) that clears MIN_SCORE. Otherwise `decide` would
-    // find no eligible bucket and fall through to behaviour 0 — which for a role brain is the rank-4
-    // DUTY, silently making the unit examine/heal/breach instead of standing down. Fail loudly here.
+    // Validate the FINAL repertoire of every role, whether it kept its code-literal default or was replaced
+    // from RON — `validate_role_defs` only sees the overrides, so the defaults would otherwise go unchecked.
+    //
+    // 1. An unconditional behaviour (the `follow_anchor` tail) must clear MIN_SCORE, or `decide` would find
+    //    no eligible bucket and fall through to behaviour 0 — the rank-4 DUTY for a role brain, silently
+    //    making the unit examine/heal/breach instead of standing down.
+    // 2. Ranks must be unique, or `decide`'s weighted-random re-roll makes the unit thrash between modes.
     for role in role::RoleId::ALL {
-        crate::ai::utility::validate_unconditional_default(
-            &brains.get(role).behaviors,
-            &format!("role {role:?}"),
-        )?;
+        let behaviors = &brains.get(role).behaviors;
+        let who = format!("role {role:?}");
+        crate::ai::utility::validate_unconditional_default(behaviors, &who)?;
+        role::validate_rank_ladder(role, behaviors)?;
     }
     Ok(brains)
 }
