@@ -40,6 +40,7 @@
 mod agents;
 mod control;
 mod field;
+mod habitat;
 mod grazing;
 pub mod fruit;
 mod material;
@@ -318,6 +319,46 @@ pub struct MyceliaConfig {
     /// sign. Must be below [`MyceliaConfig::v_fruit`], or a body would begin aborting the instant it pinned.
     pub maintain_v: f32,
 
+    // ── Habitat (see `habitat.rs`) ────────────────────────────────────────────────────────────────────
+    /// Fraction of **walkable floor cells** (rooms + corridors alike) the colony may occupy. The mold has no
+    /// business coating a whole dungeon: real fungal colonies are patchy because substrate, moisture and
+    /// competition are patchy. `habitat::build` hits this by selecting rooms greedily, and reports what it
+    /// actually achieved rather than silently clamping.
+    pub habitat_coverage: f32,
+    /// Blue-noise spacing (in cells) between patch nuclei inside an infested room. Reuses `geom::poisson_disk`.
+    pub patch_spacing: f32,
+    /// Smallest patch radius (cells). Must not exceed [`MyceliaConfig::patch_radius_max`].
+    pub patch_radius_min: f32,
+    /// Largest patch radius (cells).
+    pub patch_radius_max: f32,
+    /// Probability that a given corridor *run* (one adjacency edge, end to end) is fully infested. Rooms get
+    /// patches; a corridor gets all of itself or none of it — a passage you dread is a passage, not a spot.
+    pub corridor_infest_chance: f32,
+    /// How hard fbm breaks up a patch's border. `0` yields circles; higher yields a ragged colony margin.
+    pub edge_noise_amp: f32,
+    /// Spatial frequency (cycles per cell) of that border noise.
+    pub edge_noise_scale: f32,
+    /// Habitat value at or above which an agent may stand. The GPU reads the mask as `u8`, so this threshold
+    /// must be expressible there: the CPU seeder and the shader's hard block quantize identically, or an
+    /// agent could be seeded on a texel the GPU then refuses to let it leave. Hence the `>= 2/255` floor.
+    pub agent_hab_min: f32,
+    /// Gray-Scott removal rate `k` on **barren** floor, blended toward [`MyceliaConfig::kill`] by habitat.
+    ///
+    /// Containment is a *reaction* property, not a masking one: masking the Laplacian would make every patch
+    /// edge a no-flux wall and pile biomass into a hard rim. Instead barren floor sits in the regime where
+    /// `(U, V) = (1, 0)` is the only stable homogeneous state, so `V` simply dies there. Linearizing the `V`
+    /// equation about `V ≈ 0`, `U ≈ 1` gives a penetration length `λ = sqrt(d_v / (feed + kill_barren))` —
+    /// sub-texel at the shipped values, so the mat cannot creep past the patch no matter how long it runs.
+    /// Pearson (1993), *Science* 261:189, doi:10.1126/science.261.5118.189 — the canonical `(F, k)` map.
+    pub kill_barren: f32,
+    /// How readily each room type rots, keyed by the room-type tag `dungeon::pick_room` stamps into
+    /// `Region::props`. Damp rooms (bathroom, kitchen) rot; dry ones (office, bedroom) rarely do.
+    ///
+    /// There is deliberately **no default weight** for an unlisted tag: a silent `1.0` would let a renamed or
+    /// new room type slip in at middling susceptibility and go unnoticed. [`validate_config`] instead demands
+    /// this table name exactly the tags the dungeon can emit.
+    pub damp_weights: Vec<DampWeight>,
+
     // ── Perception budget (see `perceptual.rs`) ───────────────────────────────────────────────────────
     /// Slowest motion (degrees of visual angle per second) a human reliably detects beside a stationary
     /// reference. Every *autonomous* motion the mold makes is held under this. Being eaten or crushed is
@@ -326,6 +367,29 @@ pub struct MyceliaConfig {
     /// Vertical visual angle the game window subtends at the player's eye (a 27" panel at ~60 cm ≈ 30°).
     /// The one number here that depends on the player's desk rather than on the game.
     pub screen_fov_deg_v: f32,
+}
+
+/// One row of [`MyceliaConfig::damp_weights`] — how readily a room type rots.
+#[derive(Deserialize, Clone, Debug)]
+pub struct DampWeight {
+    /// The room-type tag, as stamped into `Region::props.tags` by `dungeon::pick_room`.
+    pub tag: String,
+    /// Multiplier on the room's susceptibility score. Relative, not a probability.
+    pub weight: f32,
+}
+
+impl MyceliaConfig {
+    /// The susceptibility multiplier for a region's tags. Infallible **because** [`validate_config`] has
+    /// already proved the table covers every tag the dungeon emits; a region carrying an unlisted tag is a
+    /// contract violation between `dungeon` and this config, and it fails loudly there rather than here.
+    pub fn damp_weight(&self, tags: &[String]) -> Result<f32, String> {
+        for row in &self.damp_weights {
+            if tags.iter().any(|t| t == &row.tag) {
+                return Ok(row.weight);
+            }
+        }
+        Err(format!("mycelia.damp_weights names no tag of region {tags:?}"))
+    }
 }
 
 /// Whether the compute chain advances this frame. The mold runs on its own slow clock (`sim_hz`), not the
@@ -349,6 +413,30 @@ pub struct MoldStep {
 /// this; the cap only bites transients. When it does bite, it is **logged**, because a silently dropped tick
 /// is a mold that quietly runs slower than the speed the player selected.
 pub const MAX_TICKS_PER_FRAME: u32 = 8;
+
+/// The habitat mask: **where the mold may live at all**, at field resolution, in row-major order.
+///
+/// Held as the quantized `u8` bytes that cross to the GPU in the static control texture's `G` channel, not as
+/// `f32`. Two consumers must agree on this mask to the bit — `agents::seed_agents` on the CPU and
+/// `agent_step`'s hard block on the GPU — and the only way to guarantee that is for both to read the same
+/// bytes and apply the same threshold. Built once, at `Startup`, by [`habitat::build`]; the dungeon never
+/// regenerates, so it never changes.
+#[derive(Resource)]
+pub struct MoldHabitat(pub Vec<u8>);
+
+/// Decide the colony's footprint, once, before anything that depends on it exists.
+///
+/// Runs between `setup_control` (which allocates the texture the mask is uploaded into) and `setup_mycelia`
+/// (which seeds the agents inside it). A failure here is a loud startup failure: a dungeon the mold cannot be
+/// placed in is a generation bug, and there is no degraded colony worth rendering.
+fn setup_habitat(
+    mut commands: Commands,
+    cfg: Res<MyceliaConfig>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+) -> Result<(), BevyError> {
+    commands.insert_resource(MoldHabitat(habitat::build(&dungeon, &cfg)?));
+    Ok(())
+}
 
 /// `true` once the colony has completed its [`MyceliaConfig::warmup_ticks`] and the mold is established.
 ///
@@ -441,6 +529,40 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
         ));
     }
 
+    // ── Habitat ───────────────────────────────────────────────────────────────────────────────────────
+    unit("habitat_coverage", c.habitat_coverage)?;
+    unit("corridor_infest_chance", c.corridor_infest_chance)?;
+    unit("agent_hab_min", c.agent_hab_min)?;
+    positive("patch_spacing", c.patch_spacing)?;
+    positive("patch_radius_min", c.patch_radius_min)?;
+    positive("edge_noise_scale", c.edge_noise_scale)?;
+    non_negative("edge_noise_amp", c.edge_noise_amp)?;
+    if c.patch_radius_max < c.patch_radius_min {
+        return Err(format!(
+            "mycelia.patch_radius_max ({}) must be >= patch_radius_min ({})",
+            c.patch_radius_max, c.patch_radius_min
+        ));
+    }
+    // The habitat mask crosses to the GPU as one `Rgba8Unorm` byte, so a threshold finer than a quantisation
+    // step is a threshold the shader cannot honour. Below 2/255 a texel the CPU seeder judged habitable can
+    // round to a byte the shader's hard block rejects — and that agent is frozen for the run.
+    if c.agent_hab_min < 2.0 / 255.0 {
+        return Err(format!(
+            "mycelia.agent_hab_min must be >= 2/255 ({:.5}) so the u8 habitat mask can express it, got {}",
+            2.0 / 255.0,
+            c.agent_hab_min
+        ));
+    }
+    if c.damp_weights.is_empty() {
+        return Err("mycelia.damp_weights must not be empty".to_string());
+    }
+    for row in &c.damp_weights {
+        non_negative(&format!("damp_weights[{}].weight", row.tag), row.weight)?;
+    }
+    if c.damp_weights.iter().all(|r| r.weight <= 0.0) {
+        return Err("mycelia.damp_weights: at least one room type must be able to rot".to_string());
+    }
+
     // `decay >= 1` never fades: the trail saturates to `trail_max` everywhere and the network dissolves
     // into a flat flood. `decay <= 0` erases it every tick. Both are degenerate, not merely ugly.
     if !(c.decay > 0.0 && c.decay < 1.0) {
@@ -454,6 +576,27 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     }
     positive("feed", c.feed)?;
     positive("kill", c.kill)?;
+    // Barren floor must sit where `(U, V) = (1, 0)` is the only stable homogeneous state, or the mat merely
+    // grows *slower* outside its patch instead of dying there. The non-trivial states solve
+    // `(F+k)V² - F·V + F(F+k) = 0`, which has real roots only while `F + k <= sqrt(F)/2`; above that the
+    // saddle-node has annihilated them and `V` decays unconditionally. Pearson (1993), Science 261:189.
+    positive("kill_barren", c.kill_barren)?;
+    let saddle_node = c.feed.sqrt() * 0.5;
+    if c.feed + c.kill_barren <= saddle_node {
+        return Err(format!(
+            "mycelia.kill_barren ({}) leaves barren floor inside the Gray-Scott pattern regime: \
+             feed + kill_barren = {} must exceed sqrt(feed)/2 = {saddle_node}, or biomass survives \
+             outside its patch",
+            c.kill_barren,
+            c.feed + c.kill_barren
+        ));
+    }
+    if c.kill_barren <= c.kill {
+        return Err(format!(
+            "mycelia.kill_barren ({}) must exceed kill ({}) — barren floor is where the mold dies",
+            c.kill_barren, c.kill
+        ));
+    }
     if c.vein_hi <= c.vein_lo {
         return Err(format!("mycelia.vein_hi ({}) must exceed vein_lo ({})", c.vein_hi, c.vein_lo));
     }
@@ -544,6 +687,37 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
             "mycelia.screen_fov_deg_v ({}) must be a plausible vertical field of view in degrees",
             c.screen_fov_deg_v
         ));
+    }
+    Ok(())
+}
+
+/// Cross-slice check: `mycelia.damp_weights` must name **exactly** the room types `dungeon.room_types`
+/// declares — no missing type, no stale one.
+///
+/// A missing tag has no safe answer. Defaulting it to `1.0` would quietly give a brand-new room type middling
+/// susceptibility and nobody would ever notice; erroring at lookup time would fire only on the seeds that
+/// happen to roll that type. Neither slice can see the other, so the check lives with the caller that holds
+/// both (`crate::config::load_game_config`) and fires before a single frame runs.
+pub fn validate_damp_coverage(
+    c: &MyceliaConfig,
+    room_types: &[crate::dungeon::RoomType],
+) -> Result<(), String> {
+    for rt in room_types {
+        if !c.damp_weights.iter().any(|r| r.tag == rt.tag) {
+            return Err(format!(
+                "mycelia.damp_weights is missing room type {:?}; every type dungeon.room_types can emit \
+                 needs a susceptibility, or the mold would silently treat it as average",
+                rt.tag
+            ));
+        }
+    }
+    for row in &c.damp_weights {
+        if !room_types.iter().any(|rt| rt.tag == row.tag) {
+            return Err(format!(
+                "mycelia.damp_weights names room type {:?}, which dungeon.room_types never emits",
+                row.tag
+            ));
+        }
     }
     Ok(())
 }
@@ -659,6 +833,10 @@ pub struct MoldParams {
     /// Side length of the coarse biomass grid the `pin_scan` pass max-pools into. Structural, not a dial —
     /// see [`COARSE_SIZE`].
     pub coarse_res: u32,
+    /// Habitat (static field `G`) at or above which an agent may stand. See [`MyceliaConfig::agent_hab_min`].
+    pub agent_hab_min: f32,
+    /// Gray-Scott `k` on barren floor. See [`MyceliaConfig::kill_barren`].
+    pub kill_barren: f32,
 }
 
 pub struct MyceliaPlugin;
@@ -680,10 +858,11 @@ impl Plugin for MyceliaPlugin {
             ExtractResourcePlugin::<control::MoldControlImage>::default(),
         ))
         // `setup_mycelia` binds the control texture into the floor material, so the control textures must
-        // exist first.
+        // exist first; and it seeds the agents inside the habitat mask, so `setup_habitat` must run between
+        // the two.
         .init_resource::<MoldStep>()
         .init_resource::<MoldWarm>()
-        .add_systems(Startup, (control::setup_control, setup_mycelia).chain())
+        .add_systems(Startup, (control::setup_control, setup_habitat, setup_mycelia).chain())
         .init_resource::<CoatedFurniture>()
         .add_systems(Update, (advance_mold_time, control::write_control, coat_walls, coat_furniture))
         // Reads `MoldStep`, so it must observe the flag `advance_mold_time` set this frame.
@@ -718,6 +897,7 @@ fn setup_mycelia(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
     dungeon: Res<crate::dungeon::Dungeon>,
+    habitat: Res<MoldHabitat>,
     control: Res<control::MoldControlImage>,
     mut images: ResMut<Assets<Image>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
@@ -750,15 +930,11 @@ fn setup_mycelia(
     let biomass_a = images.add(field::field_texture(size));
     let biomass_b = images.add(field::field_texture(size));
 
-    // Agent population (seeded once, on floor only) + zeroed deposit accumulator (one slot per field texel).
-    // Both are `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is exactly what the chain needs.
-    let walkable: Vec<bool> = (0..dungeon.height)
-        .flat_map(|y| {
-            (0..dungeon.width).map(move |x| IVec2::new(x as i32, y as i32))
-        })
-        .map(|c| dungeon.is_floor(c))
-        .collect();
-    let seeded = agents::seed_agents(size, cfg.agent_count, &walkable, CONTROL_SIZE)?;
+    // Agent population (seeded once, inside the habitat only) + zeroed deposit accumulator (one slot per
+    // field texel). Both are `ShaderBuffer`s — the default usage (`STORAGE | COPY_DST`) is what the chain
+    // needs. Seeding reads the *quantized* mask, the same bytes the shader's hard block will read; see the
+    // habitat invariant in `agents.rs`.
+    let seeded = agents::seed_agents(size, cfg.agent_count, &habitat.0, cfg.agent_hab_min)?;
     let agents = buffers.add(ShaderBuffer::from(seeded));
     let deposit = buffers.add(ShaderBuffer::from(vec![0u32; (size * size) as usize]));
     // `vec4<f32>` per coarse cell: (max V, U at that texel, texel x, texel y). Zero-initialised, which reads
@@ -813,6 +989,8 @@ fn setup_mycelia(
         vein_lo: cfg.vein_lo,
         vein_hi: cfg.vein_hi,
         coarse_res: COARSE_SIZE,
+        agent_hab_min: cfg.agent_hab_min,
+        kill_barren: cfg.kill_barren,
     });
 
     // A single translucent overlay quad covering the whole floor footprint, sitting a hair above the
@@ -1035,7 +1213,8 @@ mod tests {
     use super::*;
 
     /// A known-good config, matching the shipped `mycelia:` slice.
-    fn valid() -> MyceliaConfig {
+    /// Visible to the sibling submodules' tests (e.g. `habitat`), which need a valid config to build against.
+    pub(super) fn valid() -> MyceliaConfig {
         MyceliaConfig {
             field_size: 1024,
             sim_hz: 1.5,
@@ -1052,9 +1231,26 @@ mod tests {
             dt: 1.0,
             feed: 0.036,
             kill: 0.060,
+            kill_barren: 0.09,
             d_u: 0.16,
             d_v: 0.08,
             bloom_seed: 0.06,
+            habitat_coverage: 0.25,
+            patch_spacing: 4.0,
+            patch_radius_min: 2.0,
+            patch_radius_max: 5.0,
+            corridor_infest_chance: 0.12,
+            edge_noise_amp: 0.35,
+            edge_noise_scale: 0.15,
+            agent_hab_min: 0.02,
+            damp_weights: vec![
+                DampWeight { tag: "bathroom".into(), weight: 3.0 },
+                DampWeight { tag: "kitchen".into(), weight: 2.5 },
+                DampWeight { tag: "hall".into(), weight: 1.2 },
+                DampWeight { tag: "living".into(), weight: 1.0 },
+                DampWeight { tag: "bedroom".into(), weight: 0.6 },
+                DampWeight { tag: "office".into(), weight: 0.4 },
+            ],
             photophobia: 9.0,
             chemo_gain: 6.0,
             disturbance_gain: 5.0,

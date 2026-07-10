@@ -64,6 +64,10 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     manifest::validate_manifest(&cfg.placement.furniture)?;
     gore::validate_settings(&cfg.gore)?;
     mycelia::validate_config(&cfg.mycelia)?;
+    // Cross-slice: the mold's damp table must name exactly the room types the dungeon can emit. Neither
+    // slice can check this alone, and this is the one place both are in hand. A missing tag would otherwise
+    // surface as a runtime error deep in habitat selection, on some seeds only.
+    mycelia::validate_damp_coverage(&cfg.mycelia, &cfg.dungeon.room_types)?;
     Ok(cfg)
 }
 
