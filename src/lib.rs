@@ -45,6 +45,9 @@ pub mod placement;
 pub mod rng;
 pub mod selection;
 pub mod settings;
+/// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
+/// config slice. Mirrors `ai::tuning`; together they form the `WorldConfig` the offline search evolves.
+pub mod sim;
 /// Headless deterministic replay/liveness harness — opt-in so it never enters the shipped binary.
 #[cfg(feature = "test-harness")]
 pub mod sim_harness;

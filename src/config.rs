@@ -24,6 +24,7 @@ use crate::impact_fx::ImpactFxSettings;
 use crate::mycelia::{self, MyceliaConfig};
 use crate::placement::manifest::{self, FurnitureManifest};
 use crate::placement::solvers::metropolis::MetropolisWeights;
+use crate::sim::{self, SimTuning};
 use crate::vhs::VhsConfig;
 
 /// Path to the unified config file, relative to the project-root working directory (matches the old
@@ -47,6 +48,7 @@ pub struct GameConfig {
     pub gore: GoreSettings,
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
+    pub sim: SimTuning,
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
 }
@@ -64,6 +66,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     manifest::validate_manifest(&cfg.placement.furniture)?;
     gore::validate_settings(&cfg.gore)?;
     mycelia::validate_config(&cfg.mycelia)?;
+    sim::validate_tuning(&cfg.sim)?;
     Ok(cfg)
 }
 

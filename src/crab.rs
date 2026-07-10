@@ -32,6 +32,7 @@ use crate::dungeon::Dungeon;
 use crate::enemy::Hostile;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::{Health, NoHealthBar};
+use crate::sim::SimTuning;
 use crate::squad::{Prey, Unit};
 use crate::surface_nav::{SurfaceField, SurfaceGraph};
 use crate::util::{hash01_u32, rand01, unit_is_facing};
@@ -46,15 +47,6 @@ const CRAB_WALL_CLUSTERS: usize = 2;
 const CRAB_MIN_SPAWN_DIST: f32 = 8.0;
 const CRAB_CLUSTER_SEP: f32 = 5.0;
 
-/// Weak individually: ~3 laser hits (see `laser::LASER_DAMAGE`).
-const CRAB_HP: f32 = 25.0;
-/// Base bite DPS, scaled up **super-linearly** by how many crabs pile on one unit (see
-/// `crab_contact_damage`): total = `CRAB_CONTACT_DPS * count^DAMAGE_EXPONENT`. One crab is a nuisance
-/// (~3 DPS, ~33 s to kill), but a pile becomes a feeding frenzy — the more crabs, the faster it climbs.
-const CRAB_CONTACT_DPS: f32 = 3.0;
-/// Growth curve for stacked bites — >1 makes a pile hurt disproportionately more than linear stacking
-/// (≈33 DPS at 5 crabs, ≈95 at 10, ≈270 at 20). Tune this to taste.
-const DAMAGE_EXPONENT: f32 = 1.5;
 /// Planar bite margin beyond the unit's body radius — a crab this close (in XZ) to a unit is feeding.
 const CRAB_CONTACT_RADIUS: f32 = 0.2;
 /// Pounce tuning. A crab lunges at a unit within `JUMP_LEN` (≈10 body lengths; a crab renders ~0.19 wide,
@@ -81,7 +73,6 @@ const CRAB_STALK_STRENGTH: f32 = 0.8;
 const JUMP_AIR: f32 = 0.35;
 const JUMP_ARC: f32 = 0.9;
 const JUMP_COOLDOWN: f32 = 2.5;
-const JUMP_DAMAGE: f32 = 8.0;
 
 /// Scuttle speed along the surface (world units/s). The base pace every crab movement mode scales off
 /// (scout roam ×`SCOUT_SPEED_MUL`, flee ×`FLEE_SPEED_MUL`, rally/seek at 1×), so tuning it slows the
@@ -114,20 +105,9 @@ const CRAB_SEP_STRENGTH: f32 = 7.0;
 const CRAB_JITTER_STRENGTH: f32 = 0.6;
 const CRAB_JITTER_FREQ: f32 = 2.3;
 
-/// Alarm-pheromone recruitment to defense. When a crab is wounded it floods the local ALARM channel
-/// (see `crate::ai::field::FieldId::ALARM` / `crab_alarm_on_damage`) so nearby crabs muster and converge
-/// on the squad instead of fleeing — the retaliatory, *local* twin of the nest's own alarm (nest hit →
-/// a stronger, wider bloom, crab hit → a one-room alarm bloom). Peak value deposited at the wound; it falls off
-/// over the channel's ~one-room `deposit_radius` and evaporates over a couple seconds. Heylighen,
-/// "Stigmergy as a universal coordination mechanism", Cognitive Systems Research 2016 (a warning-cry).
-const ALARM_DEPOSIT: f32 = 2.0;
 /// Speed multiplier while mustering — an alarmed crab charges noticeably faster than a calm forage, so a
 /// bolt into a pack reads as a scary surge boiling toward the shooter rather than a leisurely approach.
 const MUSTER_SPEED_MUL: f32 = 1.4;
-/// How fast an actively-biting crab drains its HUNGER drive (per second). Well above HUNGER's 0.03/s rise
-/// so feeding meaningfully sates — a fed crab's forage/latch weighting drops and it peels off, leaving the
-/// hungry crabs to press. Turns HUNGER from a uniform saturating ramp into a real per-agent motivator.
-const HUNGER_SATE_RATE: f32 = 0.3;
 
 /// Scout recon tuning (the swarm's ~20% roaming recruiters; see [`Scout`] / `scout_sense_and_report`).
 /// Fraction of crabs tagged as scouts at spawn (deterministic by spatial hash, so newborns split the
@@ -143,8 +123,6 @@ const SCOUT_WANDER_INTERVAL: f32 = 3.0;
 /// Minimum seconds between a marking scout's rally-pheromone deposits. Keeps the beacon tracking the
 /// moving prey (a vectorial pheromone; Tang et al. 2019) without saturating the field frame-by-frame.
 const RALLY_DEPOSIT_COOLDOWN: f32 = 0.2;
-/// Strength of each rally-pheromone deposit (the intermediate-vector magnitude before accumulation).
-const RALLY_MARK_STRENGTH: f32 = 4.0;
 
 /// The unit's body approximated as a vertical cylinder the crabs cling to (radius, climbable height).
 const UNIT_BODY_RADIUS: f32 = 0.33;
@@ -436,6 +414,7 @@ fn spawn_crabs(
     mut meshes: ResMut<Assets<Mesh>>,
     mut nest_mats: ResMut<Assets<crate::nest::NestMaterial>>,
     mut seq: ResMut<CrabSpawnSeq>,
+    sim: Res<SimTuning>,
 ) {
     let collider = meshes.add(Sphere::new(CRAB_COLLIDER_R));
     let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(CRAB_GLB));
@@ -537,7 +516,7 @@ fn spawn_crabs(
             if let Some(patch) = pick_patch(&graph, &dungeon, cell, on_wall) {
                 let s = seq.0 as u32;
                 seq.0 += 1;
-                spawn_crab_on_patch(&mut commands, &graph, patch, &collider, &scene, s);
+                spawn_crab_on_patch(&mut commands, &graph, patch, &collider, &scene, s, &sim);
                 spawned += 1;
                 in_cluster += 1;
             }
@@ -577,6 +556,7 @@ fn spawn_crab_on_patch(
     collider: &Handle<Mesh>,
     scene: &Handle<WorldAsset>,
     rand_seed: u32,
+    sim: &SimTuning,
 ) {
     let p = graph.patch(patch);
     let pos = p.center;
@@ -601,7 +581,7 @@ fn spawn_crab_on_patch(
     let mut ec = commands.spawn((
             Crab,
             Hostile,
-            Health::new(CRAB_HP),
+            Health::new(sim.combat.crab_hp),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)
             // Seed a per-crab starting HUNGER (salt 6, decorrelated from the other draws) so the swarm
             // begins differentiated — hungry crabs press to feed, sated ones forage — instead of a uniform
@@ -1206,6 +1186,7 @@ fn crab_jump(
         With<Crab>,
     >,
     mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+    sim: Res<SimTuning>,
 ) {
     let Some(graph) = graph else { return };
     let dt = time.delta_secs().min(MAX_FRAME_DT);
@@ -1290,7 +1271,7 @@ fn crab_jump(
                     let reach_sq = (UNIT_BODY_RADIUS + CRAB_CONTACT_RADIUS + 0.2).powi(2);
                     for (ptf, mut hp) in &mut prey {
                         if (ptf.translation.xz() - motion.pos.xz()).length_squared() <= reach_sq {
-                            hp.current -= JUMP_DAMAGE;
+                            hp.current -= sim.combat.crab_jump_damage;
                             break;
                         }
                     }
@@ -1312,6 +1293,7 @@ fn crab_jump(
 fn crab_alarm_on_damage(
     crabs: Query<(Ref<Health>, &Transform), With<Crab>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    sim: Res<SimTuning>,
 ) {
     for (hp, tf) in &crabs {
         // `is_changed()` also fires on spawn; `is_added()` screens that out. `current < max` restricts to
@@ -1320,7 +1302,7 @@ fn crab_alarm_on_damage(
             deposits.0.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::ALARM,
-                amount: ALARM_DEPOSIT,
+                amount: sim.deposit.alarm_crab,
             });
         }
     }
@@ -1334,12 +1316,13 @@ fn crab_alarm_on_damage(
 fn crab_feeding_sates_hunger(
     time: Res<Time>,
     mut crabs: Query<(&CrabState, &mut crate::ai::drives::Drives), With<Crab>>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
     for (state, mut drives) in &mut crabs {
         if *state == CrabState::Attack {
             let h = drives.get(crate::ai::drives::DriveId::HUNGER);
-            drives.set(crate::ai::drives::DriveId::HUNGER, h - HUNGER_SATE_RATE * dt);
+            drives.set(crate::ai::drives::DriveId::HUNGER, h - sim.breeding.hunger_sate_rate * dt);
         }
     }
 }
@@ -1356,6 +1339,7 @@ fn crab_contact_damage(
     // `Option<&mut LastAttacker>` is present only on the smiley watcher: a crab biting it records itself as
     // the attacker so the watcher retaliates against the swarm (not a bystander unit) — see `enemy::smiley_zap`.
     mut prey: Query<(&Transform, &mut Health, Option<&mut crate::enemy::LastAttacker>), (With<Prey>, Without<Crab>)>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
     // Reach = body radius + a little, so anything latched onto the cylinder counts (units and the boss).
@@ -1383,7 +1367,7 @@ fn crab_contact_damage(
             }
         }
         if count > 0 {
-            hp.current -= CRAB_CONTACT_DPS * (count as f32).powf(DAMAGE_EXPONENT) * dt;
+            hp.current -= sim.combat.crab_contact_dps * (count as f32).powf(sim.combat.crab_damage_exponent) * dt;
             if let Some(mut la) = last_attacker {
                 la.entity = biter;
                 la.age = 0.0;
@@ -1418,6 +1402,7 @@ fn crab_despawn_dead(
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     crabs: Query<(Entity, &Health, &Transform, Option<&Culled>, &CrabSeed), With<Crab>>,
+    sim: Res<SimTuning>,
 ) {
     // Emit gore + despawn deaths in a STABLE order (by `CrabSeed`, unique+deterministic), NOT crab query
     // order — which is not reproducible across same-seed runs (see `util::nearest_planar`). The gore
@@ -1451,13 +1436,13 @@ fn crab_despawn_dead(
                 gib: None,
                 // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
                 // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).
-                intensity: crate::gore::death_intensity(CRAB_HP, CRAB_CONTACT_DPS),
+                intensity: crate::gore::death_intensity(sim.combat.crab_hp, sim.combat.crab_contact_dps),
             });
             // Blood → SCENT: a fresh kill draws the swarm and the boss to the feeding site.
             deposits.0.push(crate::ai::field::Deposit {
                 pos,
                 field: crate::ai::field::FieldId::SCENT,
-                amount: crate::ai::field::BLOOD_SCENT,
+                amount: sim.deposit.blood_scent,
             });
             sfx.write(Sfx::EnemyDeath(pos));
         }
@@ -1468,38 +1453,6 @@ fn crab_despawn_dead(
 /// Crabs flee a little faster than they forage — panic overrides the leisurely scuttle.
 const FLEE_SPEED_MUL: f32 = 1.3;
 
-/// Reproduction (positive feedback) + crowding cap. New crabs are born at a nest, paid for out of the
-/// meat its crews have hauled in — never if the nest cell is already crowded or the global cap is hit.
-const CRAB_COUNT_MAX: usize = 90;
-/// Minimum inter-birth interval (seconds) — a rate limiter, NOT a free drip. A nest can only breed when
-/// it has enough hauled meat (`MEAT_PER_CRAB`) *and* this timer has elapsed, so a well-fed nest births at
-/// most this often (accelerated by `spawn_boost`) and a starved nest can't breed at all. Also capped by
-/// `CRAB_COUNT_MAX` and suppressed while the nest cell is crowded.
-const NEST_RESPAWN_INTERVAL: f32 = 5.0;
-/// Hoarded meat one birth consumes. Breeding both *requires* and *spends* this much `hoard`, so the
-/// forage→haul→deliver economy is the one gate on reinforcements: cut off the crabs' food (destroy the
-/// gibs) and `hoard` drains to zero and births stop. Playtest dial — measured chunk weights run
-/// ~0.10–1.5 (median ~0.45), so at 1.0 a birth costs roughly 2–3 delivered chunks.
-const MEAT_PER_CRAB: f32 = 1.0;
-/// Weight → spawn-boost conversion when a chunk is delivered. A heavy chunk (~1.5) alone roughly maxes
-/// the boost; lighter chunks add proportionally, and deliveries accumulate. See [`SPAWN_BOOST_MAX`].
-const FEED_GAIN: f32 = 6.0;
-/// Cap on a nest's feeding surge. The effective respawn rate is `1 + spawn_boost`, so `9.0` = up to
-/// **10×** faster births while well-fed (the "x10 based on chunk weight" the design calls for).
-const SPAWN_BOOST_MAX: f32 = 9.0;
-/// How fast the feeding surge fades (units/s). At the cap it takes ~9 s to decay to base, so a steady
-/// stream of deliveries sustains fast spawning while a fed-then-starved nest relaxes back to the drip.
-const SPAWN_BOOST_DECAY: f32 = 1.0;
-const CROWD_CAP: f32 = 5.0; // local CRAB_DENSITY above this suppresses breeding (territorial)
-/// Per-second density each crab lays into the CRAB_DENSITY field (≈ evaporation rate, so the field's
-/// value at a cell tracks the local crab count).
-const DENSITY_RATE: f32 = 0.4;
-/// Per-second menace each crab lays into the THREAT_CRAB field (≈ that channel's evaporation, so the
-/// field's value at a cell tracks the local crab count — one crab ≈ 1.0). The squad's FEAR gain is then
-/// literally "fear per adjacent crab" (`ai::FEAR_PER_CRAB`).
-const CRAB_MENACE_RATE: f32 = 0.5;
-/// Per-second MEAT a gib lays into the field (≈ evaporation, so the field tracks current meat presence).
-const MEAT_RATE: f32 = 0.5;
 /// One crab's carry capacity (weight units). Measured meat weights (density × real GLB mesh volume) span
 /// ~0.10–1.5, median ~0.45, so at 0.4 a light chunk goes solo, a mid chunk needs 2, and the heaviest
 /// need 3–4 crabs cooperating (Σ capacity ≥ weight). Per-crab ±20% variance. Also self-limits pile-ups:
@@ -1961,6 +1914,7 @@ fn carry_gibs(
         (Entity, &Transform, &mut crate::nest::Nest),
         (Without<crate::gore::GibChunk>, Without<Crab>),
     >,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
 
@@ -2129,7 +2083,7 @@ fn carry_gibs(
                                 nest.hoard += carry.weight;
                                 // Feeding surge: heavier chunks accelerate births more, up to ~10×.
                                 nest.spawn_boost =
-                                    (nest.spawn_boost + carry.weight * FEED_GAIN).min(SPAWN_BOOST_MAX);
+                                    (nest.spawn_boost + carry.weight * sim.breeding.feed_gain).min(sim.breeding.spawn_boost_max);
                             }
                         }
                         for &c in &carry.carriers {
@@ -2191,10 +2145,11 @@ fn deposit_crab_fields(
     time: Res<Time>,
     crabs: Query<&Transform, With<Crab>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
-    let density = DENSITY_RATE * dt;
-    let menace = CRAB_MENACE_RATE * dt;
+    let density = sim.deposit.crab_density_rate * dt;
+    let menace = sim.deposit.crab_menace_rate * dt;
     let mut positions: Vec<Vec3> = crabs.iter().map(|tf| tf.translation).collect();
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
@@ -2219,8 +2174,9 @@ fn deposit_meat_scent(
     time: Res<Time>,
     gibs: Query<(&Transform, &crate::gore::Carryable)>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    sim: Res<SimTuning>,
 ) {
-    let amount = MEAT_RATE * time.delta_secs();
+    let amount = sim.deposit.meat_rate * time.delta_secs();
     // Determinism: gibs enumerate in unstable entity order (see `util::nearest_planar`). Each MEAT
     // deposit spreads over a disc, so overlapping chunks accumulate into shared field cells; pushing
     // them in enumeration order makes the summed gradient depend on that order (float `+=` is
@@ -2259,6 +2215,7 @@ fn scout_mark_prey(
     mut scouts: Query<(&Transform, &mut Scout)>,
     prey: Query<&Transform, With<Prey>>,
     mut deposits: ResMut<crate::ai::field::RallyDeposits>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
     for (tf, mut scout) in &mut scouts {
@@ -2276,7 +2233,7 @@ fn scout_mark_prey(
                     && let Some(dir) = (prey_pos.xz() - pos.xz()).try_normalize()
                 {
                     let strength =
-                        RALLY_MARK_STRENGTH * ((SCOUT_SIGHT - best) / SCOUT_SIGHT).clamp(0.0, 1.0);
+                        sim.deposit.rally_mark * ((SCOUT_SIGHT - best) / SCOUT_SIGHT).clamp(0.0, 1.0);
                     deposits.0.push(crate::ai::field::RallyDeposit {
                         pos,
                         vec: dir * strength,
@@ -2312,6 +2269,7 @@ fn nest_reproduce(
     mut nests: Query<&mut crate::nest::Nest>,
     crabs: Query<(), With<Crab>>,
     mut seq: ResMut<CrabSpawnSeq>,
+    sim: Res<SimTuning>,
 ) {
     let (Some(graph), Some(crab_assets)) = (graph, crab_assets) else {
         return;
@@ -2320,32 +2278,32 @@ fn nest_reproduce(
     let mut total = crabs.iter().count();
     for mut nest in &mut nests {
         // Fade the feeding surge, then re-arm the next spawn at the boosted rate (up to 10× faster).
-        nest.spawn_boost = (nest.spawn_boost - SPAWN_BOOST_DECAY * dt).max(0.0);
+        nest.spawn_boost = (nest.spawn_boost - sim.breeding.spawn_boost_decay * dt).max(0.0);
         nest.respawn_timer -= dt;
         if nest.respawn_timer > 0.0 {
             continue;
         }
         // Effective rate = 1 + spawn_boost (SPAWN_BOOST_MAX ⇒ ~10× faster). Re-arm even if this tick
         // can't spawn (cap/crowd), so a fed nest keeps its fast cadence.
-        nest.respawn_timer = NEST_RESPAWN_INTERVAL / (1.0 + nest.spawn_boost);
+        nest.respawn_timer = sim.breeding.respawn_interval / (1.0 + nest.spawn_boost);
 
-        if total >= CRAB_COUNT_MAX {
+        if total >= sim.breeding.crab_count_max {
             continue;
         }
         // Meat gate: breeding both requires and consumes hoarded meat. No hoard → no birth, so cutting
         // off the swarm's food halts reinforcements (the economy's one lever).
-        if nest.hoard < MEAT_PER_CRAB {
+        if nest.hoard < sim.breeding.meat_per_crab {
             continue;
         }
         // Don't pile births onto a crowded nest cell (territorial self-limiting).
         let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, nest.pos);
-        if density >= CROWD_CAP {
+        if density >= sim.breeding.crowd_cap {
             continue;
         }
         let Some(patch) = graph.floor_patch_cell(dungeon.world_to_cell(nest.pos)) else {
             continue; // nest's delivery cell isn't floor — can't seat a newborn here
         };
-        nest.hoard -= MEAT_PER_CRAB; // spend the meat this birth cost
+        nest.hoard -= sim.breeding.meat_per_crab; // spend the meat this birth cost
         let s = seq.0 as u32;
         seq.0 += 1;
         spawn_crab_on_patch(
@@ -2355,6 +2313,7 @@ fn nest_reproduce(
             &crab_assets.collider,
             &crab_assets.scene,
             s,
+            &sim,
         );
         total += 1;
         if crate::ai::diag::AI_DIAG {

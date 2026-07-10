@@ -37,11 +37,6 @@ const NEST_WALL_HEIGHT: f32 = crate::dungeon::WALL_HEIGHT * 0.5;
 /// Nest hit points. Sized so a focused squad razes it in a few seconds at the current nerfed
 /// `LASER_DAMAGE` (see `laser.rs`); raise alongside laser power for a longer siege.
 const NEST_HP: f32 = 60.0;
-/// Strength of the ALARM pheromone a nest floods its surroundings with per hit. Stronger than a single
-/// crab's wound deposit (see `crab::ALARM_DEPOSIT`) so the whole ~one-room radius clears `ALARM_MIN` —
-/// the colony rallying to defend its breeding portal. Deposited into `FieldId::ALARM` at the nest, so it
-/// is spatially LOCAL (only crabs near the sieged nest muster) rather than a global mapwide berserk.
-const NEST_ALARM_DEPOSIT: f32 = 4.0;
 
 /// GPU uniform — must byte-match `NestSettings` in `nest.wgsl`.
 #[derive(Clone, ShaderType)]
@@ -211,13 +206,14 @@ impl Plugin for NestPlugin {
 fn nest_alarm(
     nests: Query<(Ref<Health>, &Transform), With<Nest>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    sim: Res<crate::sim::SimTuning>,
 ) {
     for (hp, tf) in &nests {
         if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
             deposits.0.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::ALARM,
-                amount: NEST_ALARM_DEPOSIT,
+                amount: sim.deposit.alarm_nest,
             });
         }
     }

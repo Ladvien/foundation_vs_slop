@@ -97,8 +97,11 @@ disabled; `RenderPlugin { backends: None }`). `tests/replay.rs` and `tests/liven
 
 Dropping the backend is sound, not a shortcut: `snapshot_hash` covers `(Transform, Health)`, every writer
 of which is on `FixedUpdate`, and rendering only *reads* sim state. It was verified by measurement — with a
-real Metal backend, seed `0x5C09191` × 1800 ticks hashes to `716d0cfbb69b778e`, and with no backend it
-hashes to the same value, with the whole suite passing. It also made the harness ~2.9× faster (that episode:
+real Metal backend and with no backend, seed `0x5C09191` × 1800 ticks hash to the same value, with the whole
+suite passing. That deterministic-core golden is now pinned as an absolute value by
+`migrated_defaults_reproduce_the_shipped_golden_hash` (currently `0xec1add310772895c`; it tracks gameplay, so
+committing a deliberate balance change updates it — the earlier `716d0cfbb69b778e` predates the
+faction-relative-fear / psionic-field-sight work and is stale). It also made the harness ~2.9× faster (that episode:
 9.31 s → 3.18 s), because ~84% of a headless run was render-extract rather than simulation.
 
 ### 3. Visual regression (`src/visual_regression.rs`)

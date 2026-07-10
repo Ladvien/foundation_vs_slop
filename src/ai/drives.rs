@@ -76,7 +76,7 @@ impl Drives {
 /// believable rise-lag and a decay when the danger evaporates.
 const TRACK_EASE: f32 = 3.0;
 
-/// A pluggable update rule for one drive. Static slices (not `Box<dyn>`) keep it type-safe + alloc-free.
+/// A pluggable update rule for one drive. Type-safe enum (not `Box<dyn>`).
 pub enum DriveRule {
     /// Accumulate over time toward 1 (hunger).
     RiseOverTime { rate: f32 },
@@ -87,7 +87,12 @@ pub enum DriveRule {
     /// make two mild dangers add up to panic, and — since it is commutative *and* associative in exact
     /// float arithmetic — `max` keeps the result independent of slice order, which a running float sum
     /// would not (the same determinism concern as `deterministic_centroid`).
-    TrackMaxFields { sources: &'static [(FieldId, f32)] },
+    ///
+    /// The `(channel, gain)` pairs are **owned** (a one-time Startup allocation), not a `&'static` slice,
+    /// because the gains now come from the `sim:` config slice (`SimTuning::fear`) rather than code consts —
+    /// so `init_drives` builds them from the loaded config. The `max` reduction is unchanged, so this stays
+    /// order-independent and determinism-neutral.
+    TrackMaxFields { sources: Vec<(FieldId, f32)> },
 }
 
 /// The level a `TrackMaxFields` drive eases toward, given each source's `(sample, gain)`.

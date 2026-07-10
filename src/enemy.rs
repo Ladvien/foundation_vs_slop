@@ -30,6 +30,7 @@ use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::util::unit_is_facing;
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
+use crate::sim::SimTuning;
 use crate::ai::brain::ActiveBehavior;
 use crate::ai::utility::Mode;
 use crate::squad::Unit;
@@ -75,10 +76,6 @@ const ENEMY_Y: f32 = CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
 /// Billboard face size (world units) and its local offset up the capsule toward the "head".
 const FACE_SIZE: f32 = 1.6;
 const FACE_LOCAL: Vec3 = Vec3::new(0.0, 1.0, 0.0);
-/// Starting hit points — a serious bullet sponge. This lone boss carries a whole pack's health on one
-/// body (6 × the old 400), so with per-shot spread making most bolts miss it is a long, real fight —
-/// not a 3-shot kill (enemy strength as a difficulty variable, McKay et al. 2018).
-const START_HP: f32 = 2400.0;
 /// Only floor cells at least this far (tiles) from the squad spawn are candidate enemy positions,
 /// and accepted enemies are kept at least `SPAWN_SEP` apart so they don't stack.
 const MIN_SPAWN_DIST: f32 = 4.0;
@@ -128,11 +125,6 @@ const LOOK_RANGE: f32 = crate::fog::VISION_RADIUS as f32;
 /// Seconds after a hit the watcher stays "attacked", so the reaction persists past the single damage
 /// tick. Short — this is a reflex, not a mood.
 const HIT_MEMORY: f32 = 0.6;
-/// Seconds it keeps fleeing after the last hit while a unit is watching it.
-const SCARED_TIME: f32 = 1.6;
-/// Lightning cadence: seconds between instakill bolts while unleashing (one victim per bolt, "if that
-/// was the last enemy" it relaxes).
-const ZAP_CADENCE: f32 = 0.35;
 /// Range (world units) within which it can smite an attacker with lightning. Clamped to the gaze/vision
 /// range so it can never zap a unit beyond the distance at which that unit could ever see it (and thus
 /// de-escalate it into cowering) — no deaths to an enemy you can neither see nor stop.
@@ -145,19 +137,16 @@ const FLASH_TIME: f32 = 0.18;
 const FLEE_SPEED: f32 = 3.2;
 /// Seconds a lightning-beam VFX stays on screen.
 const LIGHTNING_LIFE: f32 = 0.12;
-/// --- Bounded self-defence (a *coexisting god*, never a normal boss) ---
-/// It is intentionally un-killable-by-default and is NOT a required objective, so "leave it alone and it
-/// just watches you" is always a valid resolution — no soft-lock. Game balance tolerates deliberate
-/// unkillability (Jaffe et al., "Evaluating Game Balance with Restricted Play", AIIDE 2012) as long as
-/// nothing forces an inert *stuck* state (a logical bug that renders a game unplayable — Bergdahl et al.,
-/// "Augmenting Automated Game Testing with Deep RL", 2021). But the crab swarm treats it as `Prey`, so
-/// without a defence a pile would free-farm it to death (review finding #7). It therefore reflexively
-/// culls an over-committed crab pile — a mundane swat of bugs, NOT the concealed lightning, so it never
-/// reveals the true form — with NO heal (the old heal turned it into a crab-farming HP fountain).
-const CULL_THRESHOLD: usize = 4; // biting crabs before it swats
-const CULL_RADIUS: f32 = 1.4; // crabs within this of its centre are eaten
-const CULL_MAX: usize = 6; // most crabs one swat removes (bounds the swarm hit)
-const CULL_COOLDOWN: f32 = 2.0; // seconds between swats
+// --- Bounded self-defence (a *coexisting god*, never a normal boss) ---
+// It is intentionally un-killable-by-default and is NOT a required objective, so "leave it alone and it
+// just watches you" is always a valid resolution — no soft-lock. Game balance tolerates deliberate
+// unkillability (Jaffe et al., "Evaluating Game Balance with Restricted Play", AIIDE 2012) as long as
+// nothing forces an inert *stuck* state (a logical bug that renders a game unplayable — Bergdahl et al.,
+// "Augmenting Automated Game Testing with Deep RL", 2021). But the crab swarm treats it as `Prey`, so
+// without a defence a pile would free-farm it to death (review finding #7). It therefore reflexively
+// culls an over-committed crab pile — a mundane swat of bugs, NOT the concealed lightning, so it never
+// reveals the true form — with NO heal (the old heal turned it into a crab-farming HP fountain). The
+// swat's knobs (threshold/radius/max/cooldown) now live in the `sim:` config slice (`SimTuning::boss`).
 
 /// Marker for an enemy root entity (also the raycast collider — carries the capsule mesh).
 #[derive(Component)]
@@ -428,6 +417,7 @@ fn spawn_enemies(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SmileyMaterial>>,
     mut attack_materials: ResMut<Assets<AttackSphereMaterial>>,
+    sim: Res<SimTuning>,
 ) {
     let capsule = meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_LENGTH));
     let quad = meshes.add(Rectangle::new(FACE_SIZE, FACE_SIZE));
@@ -482,9 +472,9 @@ fn spawn_enemies(
                 Enemy,
                 Hostile,
                 crate::squad::Prey, // crabs swarm the boss too (nearest-prey targeting)
-                SmileyState::new(START_HP),
+                SmileyState::new(sim.boss.start_hp),
                 LastAttacker::default(), // who last hit it (written by the laser + crab damage sites)
-                Health::new(START_HP),
+                Health::new(sim.boss.start_hp),
                 // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
                 (
                     crate::ai::drives::Drives::new(), // the boss weighs its own drives (bloodlust, …)
@@ -541,10 +531,6 @@ fn spawn_enemies(
     }
 }
 
-/// Per-second dread the living watcher lays into the THREAT_ANOMALY field (≈ that channel's evaporation,
-/// so the value at its own cell settles near 1.0 and the squad's `FEAR_OF_ANOMALY` gain reads directly as
-/// "fear while standing in the aura").
-const ANOMALY_AURA_RATE: f32 = 0.4;
 
 /// The watcher radiates dread simply by existing. This is the only writer of THREAT_ANOMALY — the channel
 /// units read (through walls, via the Psionic) as the boss's presence.
@@ -558,8 +544,9 @@ fn deposit_anomaly_aura(
     time: Res<Time>,
     bosses: Query<&Transform, With<Enemy>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    sim: Res<SimTuning>,
 ) {
-    let amount = ANOMALY_AURA_RATE * time.delta_secs();
+    let amount = sim.deposit.anomaly_aura_rate * time.delta_secs();
     let mut positions: Vec<Vec3> = bosses.iter().map(|tf| tf.translation).collect();
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
@@ -878,6 +865,7 @@ fn despawn_dead(
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     enemies: Query<(Entity, &Health, &Transform), With<Enemy>>,
+    sim: Res<SimTuning>,
 ) {
     for (entity, hp, tf) in &enemies {
         if hp.current <= 0.0 {
@@ -888,13 +876,13 @@ fn despawn_dead(
                 tint: Color::srgb(0.7, 0.05, 0.05),
                 gib: None,
                 // The boss is the heaviest thing in the level: full camera kick on its death.
-                intensity: crate::gore::death_intensity(START_HP, CONTACT_DPS),
+                intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
             });
             // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
             deposits.0.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::SCENT,
-                amount: crate::ai::field::BLOOD_SCENT,
+                amount: sim.deposit.blood_scent,
             });
             sfx.write(Sfx::EnemyDeath(tf.translation));
             commands.entity(entity).despawn();
@@ -930,6 +918,7 @@ fn smiley_reflex(
     dungeon: Res<Dungeon>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
     mut smileys: Query<(&Transform, &Health, &mut SmileyState, &mut LastAttacker), With<Enemy>>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
     for (stf, hp, mut state, mut attacker) in &mut smileys {
@@ -966,7 +955,7 @@ fn smiley_reflex(
 
         // Scared flight persists for a beat after the last hit-while-watched.
         if looked_at && attacked {
-            state.flee_timer = SCARED_TIME;
+            state.flee_timer = sim.boss.scared_time;
         } else {
             state.flee_timer = (state.flee_timer - dt).max(0.0);
         }
@@ -997,6 +986,7 @@ fn smiley_zap(
     mut smileys: Query<(&Transform, &mut SmileyState, &LastAttacker), With<Enemy>>,
     mut crabs: Query<(&Transform, &mut Health), (With<crate::crab::Crab>, Without<Unit>, Without<Enemy>)>,
     mut units: Query<(&Transform, &mut Health), (With<Unit>, Without<crate::crab::Crab>, Without<Enemy>)>,
+    sim: Res<SimTuning>,
 ) {
     for (stf, mut state, attacker) in &mut smileys {
         if !state.is_angry() || state.zap_cooldown > 0.0 {
@@ -1033,7 +1023,7 @@ fn smiley_zap(
         lightning.0.push((spos + Vec3::Y * 0.9, vpos));
         impacts.0.push(vpos);
         sfx.write(Sfx::ImpactWall(vpos)); // a sharp crack — stands in for a dedicated thunder clip
-        state.zap_cooldown = ZAP_CADENCE;
+        state.zap_cooldown = sim.boss.zap_cadence;
         state.flash_timer = FLASH_TIME; // flip to the "true form" for ~180 ms as the bolt strikes
     }
 }
@@ -1057,6 +1047,7 @@ fn smiley_defense(
     mut sfx: MessageWriter<Sfx>,
     mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
     mut crabs: Query<(Entity, &Transform, &mut Health), With<crate::crab::Crab>>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
     for (stf, mut state) in &mut smileys {
@@ -1069,24 +1060,24 @@ fn smiley_defense(
         // tick) is left to `crab_despawn_dead`'s normal death path, so the two never both claim one crab.
         let mut biters: Vec<(Entity, Vec3)> = crabs
             .iter()
-            .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= CULL_RADIUS)
+            .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= sim.boss.cull_radius)
             .map(|(e, ctf, _)| (e, ctf.translation))
             .collect();
-        if biters.len() < CULL_THRESHOLD {
+        if biters.len() < sim.boss.cull_threshold {
             continue;
         }
         // Deterministic: cull the first `CULL_MAX` in a STABLE order (by world position), not query
         // order — WHICH crabs die feeds Health/despawn and must not depend on unstable entity ordering
         // (query order is not reproducible across same-seed runs; see `util::nearest_planar`).
         biters.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
-        for (ce, _) in biters.into_iter().take(CULL_MAX) {
+        for (ce, _) in biters.into_iter().take(sim.boss.cull_max) {
             if let Ok((_, _, mut hp)) = crabs.get_mut(ce) {
                 hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
             }
             commands.entity(ce).insert(crate::crab::Culled);
         }
         sfx.write(Sfx::ImpactFlesh(spos));
-        state.cull_cooldown = CULL_COOLDOWN;
+        state.cull_cooldown = sim.boss.cull_cooldown;
     }
 }
 

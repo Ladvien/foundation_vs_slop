@@ -46,6 +46,33 @@ fn deterministic_core_is_bit_identical() {
 }
 
 #[test]
+fn migrated_defaults_reproduce_the_shipped_golden_hash() {
+    // Phase-1 byte-identity gate for the const→config (`SimTuning`) migration. Promoting the combat /
+    // economy / deposit / fear / boss numbers out of Rust `const`s and into the `sim:` config slice must
+    // be a PURE refactor: the deterministic core, run from the shipped config (dungeon seed 0x5C09191) for
+    // 1800 fixed ticks, must still hash to the value measured BEFORE the migration. A drifted default — in
+    // `SimTuning::default()` or the `config.ron` `sim:` slice — reds this test instead of silently shifting
+    // a gameplay value. This is the absolute-value lock the same-seed reproducibility tests above cannot
+    // provide.
+    //
+    // Proven byte-identical across the migration: pre-migration HEAD and the post-migration tree BOTH hash to
+    // exactly this at 1800 ticks (measured by stashing the migration and re-running). It supersedes the older
+    // `0x716d0cfbb69b778e` quoted in TESTING.md, which predates this branch's gameplay changes
+    // (faction-relative fear, psionic field-sight) and is stale.
+    const GOLDEN: u64 = 0xec1add310772895c;
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1800);
+    assert_eq!(
+        snapshot_hash(&mut app),
+        GOLDEN,
+        "deterministic-core hash drifted from the pre-migration golden — the const→config promotion \
+         changed a gameplay value (or the shipped `sim:` slice differs from SimTuning::default())"
+    );
+}
+
+#[test]
 fn deterministic_core_is_bit_identical_across_many_builds() {
     // Stronger guard than the two-build check above. Entity enumeration order is NOT stable across
     // same-seed `App` instances in one process (GLB scene-child instantiation + entity-id reuse permute

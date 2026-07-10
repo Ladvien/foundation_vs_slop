@@ -30,6 +30,8 @@ use faction::{Faction, FACTION_COUNT};
 use field::{FieldId, RallyDeposits, RallyField, Stig, StigDeposits};
 use tuning::AiTuning;
 
+use crate::sim::SimTuning;
+
 /// Ordering of the AI pipeline within `Update`, so downstream creature decision systems (in other
 /// plugins) can `.after(AiSet::Think)`. Runs: deposits → field update → drives → think.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,7 +57,12 @@ impl Plugin for AiPlugin {
         // Required config — one path, no fallback. The `ai_tuning:` slice comes from the unified
         // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
         let tuning = app.world().resource::<crate::config::GameConfig>().ai_tuning;
+        // Simulation-dynamics knobs (combat, economy, deposit strengths, fear, boss). Read once here and
+        // inserted as a global resource so every FixedUpdate consumer (crab/laser/enemy/nest) and the
+        // `init_drives` Startup system reads `Res<SimTuning>` — the same one-path config seam as `AiTuning`.
+        let sim = app.world().resource::<crate::config::GameConfig>().sim;
         app.insert_resource(tuning)
+            .insert_resource(sim)
             .init_resource::<StigDeposits>()
             .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()
@@ -123,53 +130,47 @@ fn init_fields(mut commands: Commands, dungeon: Res<Dungeon>, tuning: Res<AiTuni
     commands.insert_resource(RallyField::new(&dungeon, tuning.rally.into()));
 }
 
-/// How strongly a unit fears one nearby crab. The THREAT_CRAB channel is laid at ≈ its own evaporation
-/// rate, so its value at a cell tracks the local crab *count*: this gain therefore reads as "fear per
-/// crab". `Flee` needs FEAR ≳ 0.28 to clear `MIN_SCORE`, so a squad holds its ground against one or two
-/// crabs and breaks under four or more — a firefight, not a rout.
-const FEAR_PER_CRAB: f32 = 0.08;
-
-/// How strongly a unit fears the watcher. Near-total: standing in the aura is meant to rout the squad,
-/// which is the whole point of the boss. The channel peaks near 1.0 at the boss's own cell.
-const FEAR_OF_ANOMALY: f32 = 0.9;
-
-/// How strongly a crab fears gunfire (unchanged from the original single-channel model).
-const CRAB_FEAR_OF_GUNFIRE: f32 = 0.2;
-
-/// A unit's fear sources: one entry per hostile creature type. Reduced by `max`, so a crab swarm and the
-/// watcher don't sum into panic — the scarier of the two wins.
-const FOUNDATION_FEAR: [(FieldId, f32); 2] = [
-    (FieldId::THREAT_CRAB, FEAR_PER_CRAB),
-    (FieldId::THREAT_ANOMALY, FEAR_OF_ANOMALY),
-];
-
-/// A crab's fear sources: the squad's weapons, and nothing else.
-const CRAB_FEAR: [(FieldId, f32); 1] = [(FieldId::THREAT_GUN, CRAB_FEAR_OF_GUNFIRE)];
+/// Which threat channels each faction *fears*, one entry per hostile emitter. Identity (which channel)
+/// stays in code — a unit fears crabs (`THREAT_CRAB`) and the watcher (`THREAT_ANOMALY`); a crab fears
+/// gunfire (`THREAT_GUN`). The *gains* now come from the `sim:` config slice (`SimTuning::fear`), so
+/// `init_drives` pairs each channel with its configured gain. Reduced by `max`, so a crab swarm and the
+/// watcher don't sum into panic — the scarier of the two wins. Nothing fears a channel it emits (the
+/// regression lock in the tests below).
+const FOUNDATION_FEAR_CHANNELS: [FieldId; 2] = [FieldId::THREAT_CRAB, FieldId::THREAT_ANOMALY];
+const CRAB_FEAR_CHANNELS: [FieldId; 1] = [FieldId::THREAT_GUN];
 
 /// Build the active drive set, **keyed by faction**. This is the drive extension point — add a `DriveDef`
-/// literal to the relevant faction (numeric knobs will migrate to the `ai_tuning:` config slice).
+/// literal to the relevant faction. Numeric knobs (fear gains, the hunger rate) come from the `sim:`
+/// config slice (`SimTuning`); channel identity stays in code.
 ///
 /// Fear is faction-relative: each side tracks only its *enemies'* threat channels. Nothing fears its own
 /// emissions, which is what stops a firing unit from reading its own muzzle deposit back as terror.
-fn init_drives(mut commands: Commands) {
+fn init_drives(mut commands: Commands, sim: Res<SimTuning>) {
     let mut by_faction: [Vec<DriveDef>; FACTION_COUNT] = Default::default();
 
     // The squad: fear the creatures. No HUNGER rule — units don't forage, and no role behaviour reads the
     // drive, so the old global rule was ramping a number nobody consulted.
     by_faction[Faction::Foundation.index()] = vec![DriveDef {
         id: DriveId::FEAR,
-        rule: DriveRule::TrackMaxFields { sources: &FOUNDATION_FEAR },
+        rule: DriveRule::TrackMaxFields {
+            sources: vec![
+                (FOUNDATION_FEAR_CHANNELS[0], sim.fear.per_crab),
+                (FOUNDATION_FEAR_CHANNELS[1], sim.fear.of_anomaly),
+            ],
+        },
     }];
 
     // The swarm: hunger rises steadily → pushes foraging/feeding; fear tracks the squad's gunfire.
     by_faction[Faction::Crab.index()] = vec![
         DriveDef {
             id: DriveId::HUNGER,
-            rule: DriveRule::RiseOverTime { rate: 0.03 },
+            rule: DriveRule::RiseOverTime { rate: sim.breeding.hunger_rate },
         },
         DriveDef {
             id: DriveId::FEAR,
-            rule: DriveRule::TrackMaxFields { sources: &CRAB_FEAR },
+            rule: DriveRule::TrackMaxFields {
+                sources: vec![(CRAB_FEAR_CHANNELS[0], sim.fear.crab_of_gunfire)],
+            },
         },
     ];
 
@@ -199,11 +200,17 @@ mod tests {
         }
     }
 
-    fn fear_sources(faction: Faction) -> &'static [(FieldId, f32)] {
+    fn fear_sources(faction: Faction) -> Vec<(FieldId, f32)> {
+        // Gains come from the shipped config defaults (the same values `init_drives` reads at runtime);
+        // channel identity comes from the code-owned channel lists.
+        let fear = SimTuning::default().fear;
         match faction {
-            Faction::Foundation => &FOUNDATION_FEAR,
-            Faction::Crab => &CRAB_FEAR,
-            Faction::Anomaly => &[],
+            Faction::Foundation => vec![
+                (FOUNDATION_FEAR_CHANNELS[0], fear.per_crab),
+                (FOUNDATION_FEAR_CHANNELS[1], fear.of_anomaly),
+            ],
+            Faction::Crab => vec![(CRAB_FEAR_CHANNELS[0], fear.crab_of_gunfire)],
+            Faction::Anomaly => vec![],
         }
     }
 
@@ -214,7 +221,7 @@ mod tests {
         // `Flee` (the top rank for every role) preempted Overwatch, Ward, TendWounded and the rest. Since
         // firing is not gated on AI mode, the unit kept shooting while fleeing and never recovered.
         for faction in Faction::ALL {
-            for &(feared, _) in fear_sources(faction) {
+            for &(feared, _) in fear_sources(faction).iter() {
                 assert!(
                     !emits(faction).contains(&feared),
                     "{faction:?} fears a channel it emits — it will flee from itself",
@@ -238,7 +245,7 @@ mod tests {
     #[test]
     fn fear_sources_name_real_channels_with_positive_gains() {
         for faction in Faction::ALL {
-            for &(field, gain) in fear_sources(faction) {
+            for &(field, gain) in fear_sources(faction).iter() {
                 assert!(gain > 0.0, "{faction:?} has a non-positive fear gain");
                 assert!(field.0 < CHANNEL_COUNT, "{faction:?} fears an out-of-range channel slot");
             }
@@ -250,14 +257,15 @@ mod tests {
         // THREAT_CRAB is laid at ~its own evaporation rate, so a cell's value tracks the local crab count.
         // `Flee` needs FEAR >= ~0.28 to clear MIN_SCORE (Logistic{k:10,x0:0.5}), so the squad must hold
         // against one or two crabs and break under four. This pins the *feel*, not just the plumbing.
+        let fear = SimTuning::default().fear;
         let fear_from = |crabs: f32| {
-            drives::track_max_target([(crabs, FEAR_PER_CRAB), (0.0, FEAR_OF_ANOMALY)])
+            drives::track_max_target([(crabs, fear.per_crab), (0.0, fear.of_anomaly)])
         };
         const FLEE_ONSET: f32 = 0.28;
         assert!(fear_from(1.0) < FLEE_ONSET, "a lone crab must not rout a trained squad");
         assert!(fear_from(2.0) < FLEE_ONSET, "two crabs is a firefight, not a rout");
         assert!(fear_from(4.0) > FLEE_ONSET, "four crabs should break the line");
         // Standing in the watcher's aura is meant to be unsurvivable dread, whatever else is around.
-        assert!(drives::track_max_target([(1.0, FEAR_OF_ANOMALY)]) > FLEE_ONSET);
+        assert!(drives::track_max_target([(1.0, fear.of_anomaly)]) > FLEE_ONSET);
     }
 }

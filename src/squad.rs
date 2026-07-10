@@ -20,6 +20,7 @@ use crate::flowfield::FlowField;
 use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::orca::{self, Agent};
+use crate::sim::SimTuning;
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
 use crate::ai::drives::Drives;
 use crate::squad_ai::actions::UtterCooldown;
@@ -136,14 +137,11 @@ const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.22);
 /// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
 /// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
 pub const UNIT_SPEED: f32 = 6.0;
-/// Encumbrance: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
-/// movement down. Effective speed = `UNIT_SPEED / (1 + crabs * CRAB_DRAG)`, floored at `MIN_ENCUMBER`
-/// so a heavily-swarmed unit crawls (piranha weight) but is never frozen solid. Diminishing per crab:
-/// 3 ≈ 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×.
-const CRAB_DRAG: f32 = 0.15;
+/// Encumbrance floor: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
+/// movement down to `UNIT_SPEED / (1 + crabs * sim.combat.crab_drag)`, floored here so a heavily-swarmed
+/// unit crawls (piranha weight) but is never frozen solid. At the shipped `crab_drag` (0.15): 3 crabs ≈
+/// 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×. (`crab_drag` and unit HP now live in the `sim:` config slice.)
 const MIN_ENCUMBER: f32 = 0.15;
-/// Squad member hit points (drives the floating health bar; units take no damage yet).
-const UNIT_HP: f32 = 100.0;
 /// How fast a unit turns to face its travel direction (per-second slerp rate, clamped per frame).
 const TURN_SPEED: f32 = 14.0;
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
@@ -250,7 +248,7 @@ impl Plugin for SquadPlugin {
     }
 }
 
-fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>) {
+fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>, sim: Res<SimTuning>) {
     // Pick five distinct floor cells clustered around the dungeon spawn.
     let base = dungeon.spawn;
     let cells: Vec<IVec2> = SPAWN_SPIRAL
@@ -285,7 +283,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
                 AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
-                Health::new(UNIT_HP),
+                Health::new(sim.combat.unit_hp),
                 Outfit(outfit),
                 // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
                 // decision + think throttle, and the autonomous movement goal (see `squad_ai`).
@@ -480,6 +478,7 @@ fn unit_movement(
     >,
     // Crabs clinging to units, for the encumbrance slowdown (a piranha pile bogs a unit down).
     attached: Query<&CrabAttached>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     if dt <= 0.0 {
@@ -524,7 +523,7 @@ fn unit_movement(
 
         // Encumbrance: crabs clinging to this unit drag its top speed down (never to a dead stop).
         let crabs = crab_load.get(&entity).copied().unwrap_or(0);
-        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * CRAB_DRAG)).max(MIN_ENCUMBER);
+        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * sim.combat.crab_drag)).max(MIN_ENCUMBER);
 
         // Preferred velocity + goal from the authoritative source. Player order first (unchanged flow-
         // field steer); else the AI goal (straight steer); else hold.

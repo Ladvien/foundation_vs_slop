@@ -300,6 +300,72 @@
     ),
 
     // =============================================================================================
+    // sim — simulation-dynamics knobs (see src/sim.rs): combat, swarm economy, field-deposit strengths,
+    // fear gains, and the boss. Structure is code; only these numbers are data. Each value is bit-identical
+    // to the Rust const it replaced (pinned by the deterministic-core replay hash + sim_default_equals_
+    // shipped_config). `ai_tuning` above owns field PROPAGATION (evaporate/diffuse/radius); this owns the
+    // deposit STRENGTHS — several channels are designed so deposit ≈ evaporate, so both are tuned together.
+    // =============================================================================================
+    sim: (
+        // Fear gains: how hard a drive tracks an enemy's threat channel. Each channel is laid at ≈ its own
+        // evaporation rate, so a cell tracks the local emitter COUNT and the gain reads as "fear per emitter".
+        // Flee needs FEAR >= ~0.28: per_crab 0.08 holds vs 1–2 crabs, breaks under 4 (a firefight, not a rout).
+        fear: ( per_crab: 0.08, of_anomaly: 0.9, crab_of_gunfire: 0.2 ),
+
+        // Deposit strengths (amount laid per event / per second). Paired with the ai_tuning evaporate rates.
+        deposit: (
+            threat_per_shot: 0.6,     // THREAT_GUN per shot (muzzle + impact)
+            blood_scent: 4.0,         // SCENT at a death (crab or boss)
+            crab_density_rate: 0.4,   // CRAB_DENSITY per crab/s (the "reads-as-a-count" rate)
+            crab_menace_rate: 0.5,    // THREAT_CRAB (dread) per crab/s
+            meat_rate: 0.5,           // MEAT per carrion source/s
+            anomaly_aura_rate: 0.4,   // THREAT_ANOMALY aura per second (living watcher)
+            alarm_crab: 2.0,          // ALARM flooded around a wounded crab
+            alarm_nest: 4.0,          // ALARM flooded around a wounded nest
+            rally_mark: 4.0,          // rally-vector strength a scout lays toward live prey
+        ),
+
+        // Combat: weapon damage, the super-linear crab bite (dps · count^exponent), and hit points.
+        combat: (
+            laser_damage: 10.0,       // ~3 hits to down a 25 HP crab
+            friendly_fire_chance: 0.2,
+            friendly_fire_damage: 5.0,
+            crab_contact_dps: 3.0,
+            crab_damage_exponent: 1.5, // being swarmed is the real threat, not a single bite
+            crab_jump_damage: 8.0,
+            crab_hp: 25.0,
+            unit_hp: 100.0,
+            crab_drag: 0.15,          // speed / (1 + clinging_crabs · drag)
+        ),
+
+        // Swarm economy: breeding toward the cap, feeding, and hunger. crab_count_max is the operative
+        // population cap the nests breed toward (initial spawn count is a separate spawn-structure knob).
+        breeding: (
+            crab_count_max: 90,
+            respawn_interval: 5.0,
+            meat_per_crab: 1.0,
+            feed_gain: 6.0,
+            spawn_boost_max: 9.0,
+            spawn_boost_decay: 1.0,
+            crowd_cap: 5.0,           // local CRAB_DENSITY above this suppresses breeding (territorial)
+            hunger_rate: 0.03,        // per-second HUNGER rise (pushes foraging/feeding)
+            hunger_sate_rate: 0.3,    // per-second HUNGER drain while feeding
+        ),
+
+        // The watcher (boss). start_hp is the dominant fight-length lever; cull_* govern swatting biting
+        // crabs off itself. The vestigial CONTACT_DPS (a death-camera mass weight) is NOT a knob here.
+        boss: (
+            start_hp: 2400.0,
+            scared_time: 1.6,         // seconds it recoils after a hit
+            zap_cadence: 0.35,        // min seconds between lightning zaps
+            cull_threshold: 4,        // biting crabs before it swats
+            cull_radius: 1.4,
+            cull_max: 6,              // most crabs one swat removes
+            cull_cooldown: 2.0,
+        ),
+    ),
+
+    // =============================================================================================
     // vhs — full-screen VHS post-process pass (see src/vhs.rs). Values are the module's built-in
     // baseline (the effect previously had no file and always ran on these defaults).
     // =============================================================================================

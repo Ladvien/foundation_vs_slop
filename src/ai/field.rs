@@ -57,9 +57,6 @@ pub const CHANNEL_COUNT: usize = 7;
 /// emissions. Ordered, but consumed by an order-independent `max` (see `DriveRule::TrackMaxFields`).
 pub const UNIT_THREAT_CHANNELS: [FieldId; 2] = [FieldId::THREAT_CRAB, FieldId::THREAT_ANOMALY];
 
-/// SCENT deposited by a death — a strong, lingering feeding-site marker the swarm and boss home on.
-pub const BLOOD_SCENT: f32 = 4.0;
-
 /// Per-channel behaviour, filled from the `ai_tuning:` slice of `assets/config/config.ron` at startup.
 #[derive(Clone, Copy)]
 pub struct ChannelDef {
