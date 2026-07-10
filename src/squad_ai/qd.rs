@@ -78,6 +78,21 @@ impl MapElitesArchive {
         }
     }
 
+    /// The elite currently holding `descriptor`'s cell, if any. `Elite` is `Copy`, so this hands back a
+    /// value — letting the search re-evaluate that incumbent under a challenger's conditions before the
+    /// (non-stationary) elitism test, without holding a borrow on the archive (POET's `EVALUATE_CANDIDATES`
+    /// common-opponent comparison; Wang et al., arXiv:1901.01753).
+    pub fn incumbent(&self, descriptor: BehaviorDescriptor) -> Option<Elite> {
+        self.cells.get(&descriptor.cell(self.res)).copied()
+    }
+
+    /// Place an elite **unconditionally**, bypassing `insert`'s elitism test. Used only after the search
+    /// loop has already decided the winner by a common-opponent comparison (see
+    /// `coevolve::Population::try_insert_with_reeval`); this just commits it into the cell.
+    pub fn place(&mut self, descriptor: BehaviorDescriptor, fitness: f32, genome: u64) {
+        self.cells.insert(descriptor.cell(self.res), Elite { descriptor, fitness, genome });
+    }
+
     /// How many behaviour niches are occupied — the QD "coverage" metric (breadth of playstyles found).
     pub fn coverage(&self) -> usize {
         self.cells.len()

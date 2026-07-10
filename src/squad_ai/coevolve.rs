@@ -1,10 +1,12 @@
 //! **Co-evolutionary MAP-Elites** (feature `test-harness`) — the offline search.
 //!
-//! Two populations, squad and swarm, each illuminated by its own MAP-Elites archive (Mouret & Clune,
-//! arXiv:1504.04909), each supplying the other's selection pressure. Neither optimises "win"; both
-//! optimise **witnessed learnable-surprise** (`squad_ai::surprise`) subject to a **relational minimal
-//! criterion** — a candidate is admitted only if a real encounter happened against the opponent it was
-//! paired with (Wang et al., POET, arXiv:1901.01753; minimal-criterion coevolution).
+//! Three co-evolving populations — squad, swarm, and **world** (the game's own config: field propagation +
+//! sim tuning, see `world_genome`) — each illuminated by its own MAP-Elites archive (Mouret & Clune,
+//! arXiv:1504.04909), each supplying the others' selection pressure. Nothing optimises "win"; all optimise
+//! **witnessed learnable-surprise** (`squad_ai::surprise`) subject to a **relational minimal criterion** —
+//! a candidate is admitted only if a real encounter happened against the (squad, swarm, world) it was
+//! paired with (Wang et al., POET, arXiv:1901.01753; Baker et al. autocurricula, arXiv:1909.07528;
+//! minimal-criterion coevolution).
 //!
 //! Three design commitments, each earned from the literature:
 //!
@@ -23,29 +25,21 @@
 //!
 //! Everything is seeded (`crate::rng`), so a whole run is reproducible from one `u64`.
 //!
-//! # KNOWN DEFECT: fitness is non-stationary, and MAP-Elites assumes it is not
+//! # Non-stationary fitness — handled by common-opponent re-evaluation
 //!
-//! An elite's recorded fitness is the mean of `W·S·L` over the **three opponents it happened to be paired
-//! with at insertion time**, and it is never re-measured. But fitness is not a function of the genome
-//! alone: `W`, `L`, and even the descriptor all depend on the opponent (a squad's `aggression` is the share
-//! of combat modes, and combat modes gate on `ThreatBearingKnown` — i.e. on whether the swarm showed up).
+//! An elite's fitness is the mean of `W·S·L` over the opponents it was paired with, and fitness is **not** a
+//! function of the genome alone: `W`, `L`, and even the descriptor all depend on the opponent (a squad's
+//! `aggression` is the share of combat modes, which gate on whether the swarm showed up). So a naive
+//! `incumbent.fitness >= challenger.fitness` elitism test would compare scores measured under *different*
+//! conditions. Mouret & Clune's predictability argument rests on a stationary `f(genome)` (arXiv:1504.04909);
+//! freezing the *prior* fixes the reference of `S` but not the rollout's opponent-dependence — and with three
+//! co-adapting populations that non-stationarity is load-bearing, not a rounding error.
 //!
-//! So `MapElitesArchive::insert`'s elitism test (`incumbent.fitness >= challenger.fitness`) compares scores
-//! measured under different conditions. Mouret & Clune state the assumption their predictability argument
-//! rests on: "the only thing that changes over time is the number of cells that are filled and their
-//! performance" (arXiv:1504.04909) — i.e. a stationary `f(genome)`. Freezing the *prior* fixes the
-//! reference of `S`; it does not make the rollout opponent-independent.
-//!
-//! Consequences: an early elite scored against a weak, monoculture archive can enshrine itself and lock out
-//! a genuinely better later genome; the fitnesses written into the committed RON are not comparable across
-//! cells.
-//!
-//! POET — cited above for the minimal criterion — solves exactly this with continual re-evaluation and
-//! transfer (its `EVALUATE_CANDIDATES` re-runs every agent in the target environment and keeps the best).
-//! This module does not implement it. The fix is to re-evaluate an incumbent against the challenger's
-//! opponent set before comparing (a common-opponent comparison), at the cost of one extra rollout pair per
-//! contested cell. **Until that lands, treat the archive as a set of interesting candidates to read, not as
-//! a ranked optimum.**
+//! The fix (POET's `EVALUATE_CANDIDATES`, arXiv:1901.01753): when a challenger contests a filled cell, the
+//! **incumbent** is re-evaluated against the challenger's *exact* recorded opponents and seeds — a
+//! common-opponent comparison — before the elitism test (`Population::try_insert_with_reeval`). It costs up
+//! to `OPPONENTS` extra rollout pairs per *contested* cell (most proposals fill an empty niche, so amortized
+//! cost is modest) and draws no fresh RNG, so a whole run stays reproducible from one `u64`.
 
 use std::collections::HashMap;
 
@@ -346,6 +340,53 @@ impl<G: Clone> Population<G> {
         }
     }
 
+    /// Insert a challenger, resolving a contested cell by a **common-opponent** comparison instead of the
+    /// archive's stored fitness — the fix for MAP-Elites' stationary-fitness assumption (Mouret & Clune
+    /// rest their argument on a stationary `f(genome)`; ours is not — `W`, `L`, and the descriptor all
+    /// depend on the opponents a candidate drew). Comparing a challenger's fitness to an incumbent's scored
+    /// against *different* opponents is apples-to-oranges, so when the cell is occupied `reeval_incumbent`
+    /// re-scores the incumbent against the challenger's **exact** opponents and seeds (POET's
+    /// `EVALUATE_CANDIDATES`, arXiv:1901.01753); the challenger wins unless the incumbent still scores `>=`
+    /// it under those identical conditions. On a hold the incumbent's stored fitness is refreshed to the
+    /// fresh common-opponent value, so the cell stays comparable going forward.
+    ///
+    /// `reeval_incumbent` returns `None` when the incumbent produces no real encounter on any of the
+    /// challenger's conditions (inadmissible there) — then the challenger, which did, wins. It consumes no
+    /// fresh RNG (it replays recorded seeds), so the whole run stays reproducible from `cfg.seed`.
+    pub fn try_insert_with_reeval(
+        &mut self,
+        descriptor: BehaviorDescriptor,
+        challenger_fitness: f32,
+        challenger: G,
+        reeval_incumbent: impl FnOnce(&G) -> Result<Option<f32>, String>,
+    ) -> Result<bool, String> {
+        match self.archive.incumbent(descriptor) {
+            None => {
+                let handle = self.store.len() as u64;
+                self.store.push(challenger);
+                self.archive.place(descriptor, challenger_fitness, handle);
+                Ok(true)
+            }
+            Some(inc) => {
+                let incumbent_genome = self.get(inc.genome).ok_or("dangling elite handle")?.clone();
+                match reeval_incumbent(&incumbent_genome)? {
+                    // Incumbent holds under the common opponents; refresh its fitness to the fresh value.
+                    Some(s) if s >= challenger_fitness => {
+                        self.archive.place(inc.descriptor, s, inc.genome);
+                        Ok(false)
+                    }
+                    // Incumbent inadmissible under these conditions (`None`) or worse: the challenger wins.
+                    _ => {
+                        let handle = self.store.len() as u64;
+                        self.store.push(challenger);
+                        self.archive.place(descriptor, challenger_fitness, handle);
+                        Ok(true)
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get(&self, handle: u64) -> Option<&G> {
         self.store.get(handle as usize)
     }
@@ -556,6 +597,9 @@ fn score_and_insert_squad(
 ) -> Result<(), String> {
     let mut scores = Vec::new();
     let mut descriptors = Vec::new();
+    // Record each PASSING triple's exact (opponents, seeds) so the incumbent can be re-scored on identical
+    // conditions in the Phase-5 common-opponent comparison.
+    let mut recorded: Vec<(SwarmGenome, WorldGenome, u64, u64)> = Vec::new();
     for (swarm, world) in swarm_opps.iter().zip(world_opps) {
         // Feasible by construction (`propose_*` screens children; archive members were screened on entry).
         // A failure here is a bug, not a candidate to skip.
@@ -567,6 +611,7 @@ fn score_and_insert_squad(
             Some(tr) => {
                 scores.push(tr.fitness.score());
                 descriptors.push(tr.squad);
+                recorded.push((swarm.clone(), world.clone(), sa, sb));
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -574,7 +619,11 @@ fn score_and_insert_squad(
     if scores.is_empty() {
         return Ok(());
     }
-    result.squad.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
+    let descriptor = mean_descriptor(&descriptors);
+    let challenger_fitness = mean(&scores);
+    result.squad.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
+        reeval_squad(t, incumbent, prior, &recorded, cfg.episode_ticks)
+    })?;
     Ok(())
 }
 
@@ -590,6 +639,7 @@ fn score_and_insert_swarm(
 ) -> Result<(), String> {
     let mut scores = Vec::new();
     let mut descriptors = Vec::new();
+    let mut recorded: Vec<(SquadGenome, WorldGenome, u64, u64)> = Vec::new();
     for (squad, world) in squad_opps.iter().zip(world_opps) {
         feasible(t, squad, child)?;
         world_genome::is_feasible(world)?;
@@ -599,6 +649,7 @@ fn score_and_insert_swarm(
             Some(tr) => {
                 scores.push(tr.fitness.score());
                 descriptors.push(tr.swarm);
+                recorded.push((squad.clone(), world.clone(), sa, sb));
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -606,7 +657,11 @@ fn score_and_insert_swarm(
     if scores.is_empty() {
         return Ok(());
     }
-    result.swarm.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
+    let descriptor = mean_descriptor(&descriptors);
+    let challenger_fitness = mean(&scores);
+    result.swarm.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
+        reeval_swarm(t, incumbent, prior, &recorded, cfg.episode_ticks)
+    })?;
     Ok(())
 }
 
@@ -623,6 +678,7 @@ fn score_and_insert_world(
     world_genome::is_feasible(child)?;
     let mut scores = Vec::new();
     let mut descriptors = Vec::new();
+    let mut recorded: Vec<(SquadGenome, SwarmGenome, u64, u64)> = Vec::new();
     for (squad, swarm) in squad_opps.iter().zip(swarm_opps) {
         feasible(t, squad, swarm)?;
         result.evaluations += 1;
@@ -631,6 +687,7 @@ fn score_and_insert_world(
             Some(tr) => {
                 scores.push(tr.fitness.score());
                 descriptors.push(tr.world);
+                recorded.push((squad.clone(), swarm.clone(), sa, sb));
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -638,8 +695,72 @@ fn score_and_insert_world(
     if scores.is_empty() {
         return Ok(());
     }
-    result.world.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
+    let descriptor = mean_descriptor(&descriptors);
+    let challenger_fitness = mean(&scores);
+    result.world.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
+        reeval_world(t, incumbent, prior, &recorded, cfg.episode_ticks)
+    })?;
     Ok(())
+}
+
+// ── Common-opponent re-evaluation (the Phase-5 non-stationarity fix) ────────────────────────────────
+//
+// Each `reeval_*` re-scores an incumbent on a challenger's EXACT recorded opponents and seeds, so the two
+// are compared under identical conditions before `try_insert_with_reeval`'s elitism test. `None` means the
+// incumbent produced no real encounter on any of them (inadmissible here) — the challenger, which did, wins.
+// No fresh RNG is drawn (recorded seeds are replayed), so the run stays reproducible.
+//
+// SERIAL_GUARD: each `rollout` inside `score_triple` acquires the non-reentrant `HARNESS_LOCK` itself and
+// releases it before the next, so these sequential re-eval rollouts are safe. `search()` must therefore
+// NEVER hold `serial_guard` around the generation loop — doing so (e.g. to "reuse one lock") would deadlock
+// the very first re-eval on the lock the loop already holds.
+
+fn reeval_squad(
+    t: &Templates,
+    incumbent: &SquadGenome,
+    prior: &ModePrior,
+    recorded: &[(SwarmGenome, WorldGenome, u64, u64)],
+    episode_ticks: u32,
+) -> Result<Option<f32>, String> {
+    let mut scores = Vec::new();
+    for (swarm, world, sa, sb) in recorded {
+        if let Some(tr) = score_triple(t, incumbent, swarm, world, prior, *sa, *sb, episode_ticks)? {
+            scores.push(tr.fitness.score());
+        }
+    }
+    Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
+}
+
+fn reeval_swarm(
+    t: &Templates,
+    incumbent: &SwarmGenome,
+    prior: &ModePrior,
+    recorded: &[(SquadGenome, WorldGenome, u64, u64)],
+    episode_ticks: u32,
+) -> Result<Option<f32>, String> {
+    let mut scores = Vec::new();
+    for (squad, world, sa, sb) in recorded {
+        if let Some(tr) = score_triple(t, squad, incumbent, world, prior, *sa, *sb, episode_ticks)? {
+            scores.push(tr.fitness.score());
+        }
+    }
+    Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
+}
+
+fn reeval_world(
+    t: &Templates,
+    incumbent: &WorldGenome,
+    prior: &ModePrior,
+    recorded: &[(SquadGenome, SwarmGenome, u64, u64)],
+    episode_ticks: u32,
+) -> Result<Option<f32>, String> {
+    let mut scores = Vec::new();
+    for (squad, swarm, sa, sb) in recorded {
+        if let Some(tr) = score_triple(t, squad, swarm, incumbent, prior, *sa, *sb, episode_ticks)? {
+            scores.push(tr.fitness.score());
+        }
+    }
+    Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
 }
 
 /// Expose one squad mutation to the integration tests, which must prove that a candidate genome actually
@@ -798,6 +919,40 @@ mod tests {
         assert!(!pop.insert(d, 0.2, 222), "worse fitness must be rejected");
         let elite = pop.archive.best().expect("an elite");
         assert_eq!(pop.get(elite.genome), Some(&111), "the incumbent's handle still resolves");
+    }
+
+    #[test]
+    fn reeval_insert_resolves_a_contested_cell_by_the_common_opponent_score() {
+        // The Phase-5 elitism logic (no rollouts — the re-eval is a closure). An empty cell takes the
+        // challenger without consulting the incumbent; a contest is decided by re-scoring the incumbent on
+        // the challenger's conditions, and the incumbent's stored fitness is refreshed to that fresh value.
+        let mut pop: Population<u32> = Population::new(4);
+        let d = BehaviorDescriptor::new(0.5, 0.5);
+
+        assert!(pop
+            .try_insert_with_reeval(d, 0.8, 111, |_| panic!("no re-eval on an empty cell"))
+            .unwrap());
+
+        // Incumbent re-scores >= challenger under the common opponents → it holds, refreshed to 0.95.
+        assert!(!pop
+            .try_insert_with_reeval(d, 0.9, 222, |&g| {
+                assert_eq!(g, 111, "the incumbent genome is re-evaluated");
+                Ok(Some(0.95))
+            })
+            .unwrap());
+        let inc = pop.archive.incumbent(d).expect("held");
+        assert_eq!(pop.get(inc.genome), Some(&111));
+        assert!((inc.fitness - 0.95).abs() < 1e-6, "fitness refreshed to the common-opponent score");
+
+        // Incumbent re-scores lower → challenger wins.
+        assert!(pop.try_insert_with_reeval(d, 0.5, 333, |_| Ok(Some(0.1))).unwrap());
+        assert_eq!(pop.get(pop.archive.incumbent(d).unwrap().genome), Some(&333));
+
+        // Incumbent inadmissible (produces no encounter) under the challenger's conditions → challenger wins.
+        let d2 = BehaviorDescriptor::new(0.1, 0.1);
+        assert!(pop.try_insert_with_reeval(d2, 0.4, 444, |_| panic!("empty")).unwrap());
+        assert!(pop.try_insert_with_reeval(d2, 0.2, 555, |_| Ok(None)).unwrap());
+        assert_eq!(pop.get(pop.archive.incumbent(d2).unwrap().genome), Some(&555));
     }
 
     #[test]
