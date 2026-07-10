@@ -1,8 +1,8 @@
 //! Game system UI — windowed-only, one plugin per surface.
 //!
-//! [`UiPlugin`] owns the whole UI stack: the [`state`] machine (`Boot → Title → InGame` +
+//! [`UiPlugin`] owns the whole UI stack: the [`state`] machine (`Boot → Title → Warmup → InGame` +
 //! in-game overlay substates), the CRT [`theme`], reusable [`widgets`], and one plugin per screen
-//! ([`boot`], [`title`], [`pause`], [`hud`]).
+//! ([`boot`], [`title`], [`warmup`], [`pause`], [`hud`]).
 //!
 //! **Registered only in `lib::run` — never in the headless harness.** Consequences that keep the
 //! deterministic core intact:
@@ -23,6 +23,7 @@ pub mod settings_menu;
 pub mod state;
 pub mod theme;
 pub mod title;
+pub mod warmup;
 pub mod widgets;
 
 use state::{AppState, MenuState, TitleMenu};
@@ -39,6 +40,7 @@ impl Plugin for UiPlugin {
                 theme::UiThemePlugin,
                 boot::BootScreenPlugin,
                 title::TitlePlugin,
+                warmup::WarmupScreenPlugin,
                 pause::PauseMenuPlugin,
                 settings_menu::SettingsMenuPlugin,
                 hud::HudPlugin,

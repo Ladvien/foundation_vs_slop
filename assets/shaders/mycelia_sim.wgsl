@@ -8,7 +8,7 @@
 //   sense→rotate→move→deposit→diffuse→decay loop is the standard real-time GPU formulation (Jenson; Lague).
 //
 //   Field layer (the "flesh"): `field` runs one Gray-Scott reaction-diffusion step whose biomass is
-//   nucleated by the veins, then composites veins + biomass into the grimy-bioluminescent display.
+//   nucleated by the veins, then composites veins + biomass into this tick's field snapshot.
 //   Ref: Turk (1991), "Generating textures on arbitrary surfaces using reaction-diffusion," SIGGRAPH
 //   (10.1145/122718.122749); Pearson (1993), Science 261.
 
@@ -57,15 +57,19 @@ struct Agent {
 @group(0) @binding(1) var<storage, read_write> deposit: array<atomic<u32>>;
 @group(0) @binding(2) var trail_read: texture_2d<f32>;
 @group(0) @binding(3) var trail_write: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var display: texture_storage_2d<rgba16float, write>;
+// Per-tick SNAPSHOT target. `blend` (mycelia_blend.wgsl) interpolates the last two snapshots into the
+// `display` texture the materials sample, so the mold advances continuously between ticks.
+@group(0) @binding(4) var snap_write: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(5) var<uniform> params: MoldParams;
 @group(0) @binding(6) var biomass_read: texture_2d<f32>;
 @group(0) @binding(7) var biomass_write: texture_storage_2d<rgba16float, write>;
 // CPU-written world state, one texel per dungeon cell.
 //   R = chemoattractant (blood, nests) · G = light/gaze · B = disturbance (squad)
 //   A = substrate: 0 = void · 0.33 = floor never seen · 0.67 = remembered · 1.0 = currently visible
-// The mold GROWS on any floor, is only DRAWN on explored floor (else the coating would trace the corridor
-// layout through the fog and leak the map), and is only LIT where a unit can currently see.
+// The mold GROWS on any floor — that is all this pass needs from `A`. It is only DRAWN on explored floor
+// (else the coating would trace the corridor layout through the fog and leak the map) and only LIT where a
+// unit can currently see, but both of those are decided per-frame by the material shaders, which sample this
+// same texture directly.
 @group(0) @binding(8) var control: texture_2d<f32>;
 // Static wall-proximity field at FIELD resolution, written once: R = 1 on the mold's side of a wall surface,
 // falling to 0 over `wall_reach` world units. Built by an exact Euclidean distance transform against the
@@ -79,17 +83,11 @@ struct Agent {
 const TAU: f32 = 6.2831853;
 
 // Substrate mask `A` is four-state: 0 void · 0.33 floor never seen · 0.67 remembered · 1.0 currently visible.
-/// Is this cell floor the mold may grow on? (Seen or not.)
+/// Is this cell floor the mold may grow on? (Seen or not.) The only threshold the SIM needs: growth keys off
+/// "is floor" alone. The explored/visible thresholds are a *rendering* concern and live in the three material
+/// shaders, which read `control.a` per frame rather than through this pass's 1.5 Hz output.
 fn is_walkable(a: f32) -> f32 {
     return step(0.2, a);
-}
-/// Has the player explored this cell, so the mold may be rendered here at all?
-fn is_explored(a: f32) -> f32 {
-    return step(0.5, a);
-}
-/// Is a unit looking at this cell right now? Drives both the gaze flinch and the fog dimming.
-fn is_visible(a: f32) -> f32 {
-    return step(0.9, a);
 }
 
 /// Is the dungeon cell under FIELD texel (x, y) floor? Out-of-range texels are non-floor: the field covers
@@ -293,7 +291,7 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&deposit[idx], u32(params.deposit_amount * params.deposit_scale));
 }
 
-// ── Pass 3: diffuse + decay the trail, fold in deposits, composite the display ───────────────────────
+// ── Pass 3: diffuse + decay the trail, fold in deposits ─────────────────────────────────────────────
 @compute @workgroup_size(8, 8, 1)
 fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
     let dim = i32(params.field_res.x);
@@ -344,7 +342,7 @@ fn diffuse(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(trail_write, vec2<i32>(x, y), vec4<f32>(v, 0.0, 0.0, 1.0));
 }
 
-// ── Pass 4: Gray-Scott biomass step + final display composite ────────────────────────────────────────
+// ── Pass 4: Gray-Scott biomass step + this tick's field snapshot ─────────────────────────────────────
 // U (substrate) and V (biomass) diffuse at unequal rates and react via the autocatalytic U + 2V -> 3V.
 // Strong veins nucleate V beneath them, so the blooms grow *along* the transport network. The 9-point
 // Laplacian stencil (orthogonal 0.2, diagonal 0.05, centre -1) is the standard discretization.
@@ -391,7 +389,7 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // nothing ever reads) keeps the field honest and matches the trail's treatment in `diffuse`.
     if (texel_walkable(x, y, dim) < 0.5) {
         textureStore(biomass_write, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 1.0));
-        textureStore(display, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(snap_write, vec2<i32>(x, y), vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -432,21 +430,25 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // Grimy-bioluminescent composite. Sickly green/cyan veins glow out of a dark wet biomass film; a faint
     // scent sheen hints at growth even where no vein has established. Alpha stays < 1 throughout so the
     // mold reads as a translucent coating over the carpet, not opaque paint.
-    // `display` carries raw SIMULATION FIELDS, not a colour. Shading (lighting, normals, wetness, glow) is
+    // The snapshot carries raw SIMULATION FIELDS, not a colour. Shading (lighting, normals, wetness, glow) is
     // the material's job — that separation is what lets the mold be a lit PBR surface rather than a flat
     // decal, and lets the wall material reuse the exact same field.
     //
     //   R = trail (raw, 0..trail_max)   G = biomass V (0..1)
-    //   B = wall contact (0..1)         A = coverage: 1 only on floor the player has EXPLORED
+    //   B = wall contact (0..1)         A = unused (see below)
     //
-    // Coverage is masked to explored floor: never over the void, and never on ground the player has not yet
-    // seen. The mold still GROWS there — it just isn't drawn, so it cannot leak the map through the fog.
-    // Coverage encodes BOTH "may be drawn" and "is lit": 0 = never seen (draw nothing), 0.5 = remembered
-    // (draw, but dimmed like the fogged floor beneath it), 1.0 = currently visible (draw at full light).
-    // Without the middle state the mold glowed at full strength on out-of-sight ground.
-    let cov = is_explored(ctl.a) * (0.5 + 0.5 * is_visible(ctl.a));
+    // `A` once carried coverage — the explored/visible fog mask, baked in from `control.a`. It no longer
+    // does. This texture is only rewritten on a sim tick, so a fog state routed through it reached the screen
+    // a whole tick period after the fog itself, and the mat visibly arrived *after* the floor tile beneath it.
+    // The materials now read `control.a` directly, which `write_control` rewrites every frame. Nothing samples
+    // this channel; it is written as 1.0 rather than repurposed, because a second meaning for one channel is
+    // exactly how the first one got lost.
+    //
+    // This is a per-tick SNAPSHOT, not the texture the materials sample: `blend` interpolates the two most
+    // recent snapshots into `display` every rendered frame. Writing straight to `display` made the mold's
+    // rendered contour hop once per period.
     let contact = wall_prox_at(vec2<f32>(f32(x), f32(y)), dim);
-    textureStore(display, vec2<i32>(x, y), vec4<f32>(trail, v, contact, cov));
+    textureStore(snap_write, vec2<i32>(x, y), vec4<f32>(trail, v, contact, 1.0));
 }
 
 // ── Pass 5: reduce the biomass field for the CPU ─────────────────────────────────────────────────────

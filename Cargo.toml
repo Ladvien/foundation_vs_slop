@@ -31,6 +31,15 @@ rayon = "1"
 # iteration is fast, but optimize dependencies so the engine runs at speed.
 [profile.dev]
 opt-level = 1
+# Debug info is ~84% of a default Bevy debug build (bevyengine/bevy#21938: 803 MB of 961 MB).
+# `line-tables-only` keeps filename/line in panic backtraces while dropping type/variable info.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+# Dependencies dominate target/, and we never step through Bevy internals.
+debug = false
+
+# Package overrides above do not reach build scripts or proc macros; those need build-override.
+[profile.dev.build-override]
+debug = false

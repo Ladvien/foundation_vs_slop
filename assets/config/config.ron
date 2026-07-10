@@ -332,14 +332,44 @@
         //
         //     sim_hz 6.0  ->  23.1  mm/s   6.9x OVER budget
         //     sim_hz 3.0  ->  11.2  mm/s   3.4x OVER
-        //     sim_hz 1.5  ->   2.92 mm/s   0.88x  <- just below the threshold. Ship this.
+        //     sim_hz 1.5  ->   2.92 mm/s   0.88x  (the first value measured under the threshold)
         //
         // So the mold was ~7x too fast to be invisible, not too slow: the "river of liquid" was still
-        // flowing at 6 Hz, only more slowly. Raise this and the mold visibly creeps; lower it and you give
-        // away growth the player would never have noticed. `decay`/`deposit_amount` are deliberately NOT
-        // part of the fix — the binding constraint is the Gray-Scott margin, not the Physarum trail churn,
-        // and the trail settled along with the clock.
-        sim_hz: 1.5,
+        // flowing at 6 Hz, only more slowly. `decay`/`deposit_amount` are deliberately NOT part of the fix
+        // — the binding constraint is the Gray-Scott margin, not the Physarum trail churn, and the trail
+        // settled along with the clock.
+        //
+        // 1.5 Hz measured under the threshold but still read as moving, for a reason the front-speed number
+        // could not see: the eye tracks the CONTOUR, and the material resolves the field through a
+        // `smoothstep`, so a contour on a shallow gradient slides `dV / |grad V|` per tick — a long way for a
+        // small step. Two changes followed, and they are independent:
+        //
+        //   1. `mycelia_blend.wgsl` now interpolates between tick snapshots every rendered frame, so the
+        //      contour creeps instead of hopping. That fixed the STEPPING.
+        //   2. This dial fell 1.5 -> 0.3 -> 0.075, in two passes against a live playtest, because even a
+        //      smooth 2.92 mm/s creep was still visible. Front speed falls FASTER than linearly in `sim_hz`
+        //      (read the table: halving 3.0 -> 1.5 cut the speed 3.8x, not 2x), so at 0.075 Hz the margin is
+        //      orders of magnitude under the 3.33 mm/s threshold, not the 20x the tick ratio suggests.
+        //
+        // Every velocity in the chain is per-tick, so they all scale together and the colony's *morphology*
+        // is unchanged — the same channels and margins, arriving slower. That is exactly why `sim_hz` is the
+        // one dial to turn, and why `decay` / `deposit_amount` stay put.
+        //
+        // The colony no longer has to grow itself from nothing during play: `warmup_ticks` advances it to a
+        // mature mat behind the loading screen, so a slow clock costs the player no visible colonisation. A
+        // 13.3 s tick period is only affordable *because* of that warmup.
+        sim_hz: 0.075,
+
+        // Sim ticks run before the player ever sees the dungeon, dispatched as fast as the GPU will take
+        // them behind the loading screen. The mold is meant to have been here for years; a player who walks
+        // in on bare carpet and watches it colonise has watched the trick. 200 ticks is roughly where the
+        // Physarum network has resolved into channels and the Gray-Scott margin has left its transient — the
+        // same "matched maturity" the `sim_hz` table above is measured at, which is 450 ticks, but a bare mat
+        // reads as established well before it stops spreading.
+        //
+        // This is also what buys the slow `sim_hz`: growth during play is now decoration on an already-grown
+        // colony, not the colony's only chance to exist.
+        warmup_ticks: 200,
         field_size: 1024,       // texels across the 192 m footprint (~5.3 texels/tile)
         agent_count: 55000,     // sparse on purpose: channels form, rather than flooding to saturation
 
@@ -434,7 +464,12 @@
         // rupture until a unit looks at it again. The mold hides from you; its fruit body wants an audience.
         v_fruit: 0.35,          // biomass V above which a texel may pin. Must leave room for u_exhausted:
         u_exhausted: 0.30,      // ...their sum must be <= 1.0 or no texel can ever satisfy both at once
-        pin_dwell_secs: 6.0,    // how long both must hold, unwatched, before the primordium commits
+        // How long both conditions must hold, unwatched, before the primordium commits. Quantised by the
+        // scan: `pin_fruit_bodies` only runs when a readback lands, i.e. once per sim tick, so a dwell
+        // shorter than `1 / sim_hz` (13.3 s) cannot be distinguished from zero and every value below it
+        // behaves identically. `validate_config` rejects that outright rather than let a dead dial sit here
+        // looking meaningful. 20 s spans three scans at the shipped clock.
+        pin_dwell_secs: 20.0,
         pin_min_spacing: 3.0,   // world units between bodies. Neighbouring knots starve each other out
                                 // (primordium abortion; Kües & Navarro-González 2015, 10.1016/j.fbr.2015.05.001).
                                 // At 1.5 a walked-through room grew ~45 bodies over 139 tiles — a lawn, not a

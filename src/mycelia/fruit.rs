@@ -6,26 +6,38 @@
 //!
 //! # The biology, and where it already lives in the fields
 //!
-//! Gray-Scott integrates `U` (substrate) and `V` (biomass) via the autocatalytic `U + 2V → 3V`. Real
-//! Agaricomycetes fruit once a colony has accumulated **critical mycelial mass** *and* **exhausted its
-//! nutrients** — nitrogen starvation is among the strongest maturation cues (Zhang et al. 2015, PLoS ONE
-//! 10:e0123025, 10.1371/journal.pone.0123025; morphogenesis review: Kües & Navarro-González 2015, Fungal
-//! Biol. Rev. 29:63, 10.1016/j.fbr.2015.05.001). That is exactly `V > v_fruit && U < u_exhausted`. The
-//! trigger needed no new state; it was already being integrated on the GPU every tick.
+//! Gray-Scott integrates `U` (substrate) and `V` (biomass) via the autocatalytic `U + 2V → 3V`. The pin gate
+//! `V > v_fruit && U < u_exhausted` is thick mat over spent substrate, and that is what a real primary hyphal
+//! knot forms on: "In the dark, upon nutritional depletion, single hyphae locally undergo intense branching to
+//! form microscopic primary hyphal knots" (Liu et al. 2006, Genetics 172:873, 10.1534/genetics.105.045542).
+//! Nutrient exhaustion is an **initiation** cue there. Nitrogen starvation is separately implicated in
+//! **maturation** — the transcriptome of *Hypsizygus marmoreus* puts it among the strongest such cues (Zhang
+//! et al. 2015, PLoS ONE 10:e0123025, 10.1371/journal.pone.0123025, which hedges: "might be one of the most
+//! important factors"). Either way the trigger needed no new state; it was already integrated on the GPU.
 //!
 //! Two more rules, both real phenomena rather than engineering conveniences:
 //!
 //! - **Dark-dependent initiation, light-induced rupture.** In *Coprinopsis cinerea*, primary hyphal knots
-//!   form **in the dark**, and their transition to the compact secondary knot is **light-induced** (Liu et
-//!   al. 2006, Genetics 172:873, 10.1534/genetics.105.045542; Kües 2000, MMBR 64:316,
-//!   10.1128/mmbr.64.2.316-353.2000). The fog is our light proxy, as it already is for the mold's
-//!   photophobia. So a pin commits only in a cell **no unit can currently see**, and the universal veil
-//!   only ruptures once a unit **looks at it**. The mold hides from you; its fruiting body wants an
-//!   audience.
-//! - **Primordium abortion.** Most knots never mature; neighbours compete for translocated nutrient (Kües
-//!   & Navarro-González 2015). Hence `pin_min_spacing`, and hence a body whose local `V` collapses below
-//!   `maintain_v` running its growth clock **backwards** until it is reabsorbed. Not a fallback branch —
-//!   the same ODE with a negative sign.
+//!   form **in the dark**, and "following a light signal, radial growth of primary hyphal knots and hyphal
+//!   interaction lead to the formation of compact hyphal aggregates, secondary hyphal knots" (Liu et al.
+//!   2006, ibid.; corroborated by Kües 2000, MMBR 64:316, 10.1128/mmbr.64.2.316-353.2000: knots "are formed
+//!   in the dark", are "repressed by illumination with blue light", and "continuation of development toward
+//!   fruiting-body formation is light dependent"). The fog is our light proxy, as it already is for the
+//!   mold's photophobia. So a pin commits only in a cell **no unit can currently see**, and the universal
+//!   veil only ruptures once a unit **looks at it**. Mapping that light step onto *veil rupture* rather than
+//!   onto the knot→secondary-knot transition is ours; the phenomenon is theirs. The mold hides from you; its
+//!   fruiting body wants an audience.
+//! - **Primordium abortion.** A body whose local `V` collapses below `maintain_v` runs its growth clock
+//!   **backwards** until it is reabsorbed — not a fallback branch, the same ODE with a negative sign.
+//!
+//!   `pin_min_spacing` is a **geometric stand-in, not a cited mechanism.** This module used to attribute
+//!   "neighbours compete for translocated nutrient" to Kües & Navarro-González 2015 (Fungal Biol. Rev. 29:63,
+//!   10.1016/j.fbr.2015.05.001). That review is paywalled and its green-OA copy 403s, so the attribution was
+//!   never checked; the two sources above that *are* readable — Liu 2006 and Kües 2000 — say nothing about
+//!   primordium abortion or inter-primordium nutrient competition. Do not restore the claim without reading
+//!   the review. What the spacing *is* defensible as: local activation with long-range inhibition, where the
+//!   inhibition takes Oster's "movement away from a local zone of influence" form (Jones 2010,
+//!   10.1162/artl.2010.16.2.16202 — already this module's Physarum reference, and in the home-still corpus).
 //!
 //! # The speed limit
 //!
@@ -48,9 +60,11 @@
 //! `ai::field::FieldId::MEAT` stigmergy field against an accumulating `DriveId::HUNGER`, scored by
 //! `Mode::SeekMeat`/`TargetKind::MeatHotspot`, and haul `gore::Carryable` back to nests. A mature body
 //! splatting into that field would be foraged with no AI changes at all. [`FruitBody::consume`] is the hook.
-//! Amatoxins concentrate in the pileus rather than the stipe or volva (Enjalbert et al. 1993, Toxicon
-//! 31:803, 10.1016/0041-0101(93)90386-w), so [`FruitBody::amatoxin`] is a function of `growth` alone — a
-//! body is only poisonous once it has a cap to hold them.
+//! Amatoxins live in the **hymenophore and cap**, and are scarce in the volva: gills 13.38 > pileus 10.16 >
+//! stipe 9.99 >> volva 2.85 mg/g dry matter (Enjalbert et al. 1999, C. R. Acad. Sci. III 322:855,
+//! 10.1016/s0764-4469(00)86651-2, as tabulated by Vetter 2023, 10.3390/molecules28155932). Gills and cap both
+//! appear only when the veil tears, so [`FruitBody::amatoxin`] is a function of `growth` alone — a body is
+//! only poisonous once it has a cap and gills to hold the toxin.
 
 use std::collections::HashMap;
 
@@ -60,6 +74,7 @@ use bevy::time::Real;
 
 use crate::dungeon::Dungeon;
 use crate::fog::FogGrid;
+use crate::util::hash01_u32;
 
 use super::material::{MoldFruitExt, MoldFruitMaterial};
 use super::control::{self, MoldControlImage};
@@ -133,10 +148,14 @@ impl FruitBody {
         self.growth * self.growth * self.growth * self.scale * self.scale * self.scale
     }
 
-    /// Amatoxin load, `0..1`. Zero until the cap has expanded past [`VEIL_RUPTURE_T`], because amatoxins
-    /// concentrate in the pileus rather than the stipe or volva (Enjalbert et al. 1993,
-    /// 10.1016/0041-0101(93)90386-w). The mesh's `COLOR_0` part mask partitions it the same way, so the
-    /// shader and this function agree without either knowing about the other.
+    /// Amatoxin load, `0..1`. Zero until the cap has expanded past [`VEIL_RUPTURE_T`], because the toxin is
+    /// carried by the tissues that appear with the cap: gills (13.38 mg/g DM) and pileus (10.16) hold it, the
+    /// stipe about as much as the pileus (9.99), and the volva almost none (2.85) — Enjalbert et al. 1999,
+    /// 10.1016/s0764-4469(00)86651-2, tabulated by Vetter 2023, 10.3390/molecules28155932.
+    ///
+    /// Note the `COLOR_0` part mask does **not** partition the body by toxin: it groups gills with the stipe
+    /// and annulus under `G` (flesh), and the gills are the *most* toxic tissue of all. The mask is anatomy;
+    /// this function is chemistry. They agree only on the volva being inert and the egg being harmless.
     pub fn amatoxin(&self) -> f32 {
         ((self.growth - VEIL_RUPTURE_T) / (1.0 - VEIL_RUPTURE_T)).clamp(0.0, 1.0)
     }
@@ -162,7 +181,7 @@ struct FruitMaterial(Handle<MoldFruitMaterial>);
 #[derive(Component)]
 struct FruitCoated;
 
-/// The mold's coarse biomass grid, read back from the GPU each frame.
+/// The mold's coarse biomass grid, read back from the GPU once per sim tick.
 ///
 /// One entry per `COARSE_SIZE²` cell: `(max V in the block, U at that same texel, texel x, texel y)`.
 /// Written by the `pin_scan` compute pass — see `mycelia_sim.wgsl`.
@@ -170,9 +189,32 @@ struct FruitCoated;
 pub struct MoldCoarse {
     /// `COARSE_SIZE * COARSE_SIZE` entries. Empty until the first readback lands.
     cells: Vec<[f32; 4]>,
+    /// Bumped each time a readback lands. `pin_fruit_bodies` rescans all `COARSE_SIZE²` cells, which is only
+    /// worth doing when the contents actually changed — the GPU rewrites this buffer at `sim_hz`, not per frame.
+    generation: u64,
 }
 
 impl MoldCoarse {
+    /// How many readbacks have landed. **Not** the same as ticks dispatched until [`Self::has_run`] is
+    /// true: `bevy_render` copies the buffer for every entity carrying a `Readback`, whether or not the
+    /// compute chain ran, so early frames (while the pipelines are still compiling) bump this against a
+    /// buffer nothing has written. `advance_mold_time` takes a baseline at the first live readback.
+    pub fn ticks_elapsed(&self) -> u64 {
+        self.generation
+    }
+
+    /// Has the compute chain ever actually dispatched?
+    ///
+    /// The coarse buffer is zero-initialised, and `pin_scan` writes each cell's `(V, U, x, y)` with the
+    /// texel coordinates `x, y` of its block — unconditionally, even where the block is solid rock. Those
+    /// coordinates are non-zero for every cell but the first. So a buffer whose texel coordinates are all
+    /// zero has never been written by the GPU, and one where any is non-zero has. That is a fact about the
+    /// data rather than about the render world's private `MoldState::ready`, which the main world cannot
+    /// see.
+    pub fn has_run(&self) -> bool {
+        self.cells.iter().any(|c| c[2] != 0.0 || c[3] != 0.0)
+    }
+
     /// Biomass `V` at a world position, or `0.0` before the first readback. Coarse: one sample per
     /// `WORLD_EXTENT / COARSE_SIZE` (1.5 world units) block.
     fn v_at(&self, world_xz: Vec2) -> f32 {
@@ -266,6 +308,7 @@ pub(super) fn receive_coarse(
         }
         coarse.cells.push(cell);
     }
+    coarse.generation = coarse.generation.wrapping_add(1);
     Ok(())
 }
 
@@ -274,17 +317,6 @@ fn field_texel_to_world(texel: Vec2, field_size: f32) -> Vec2 {
     WORLD_ORIGIN + (texel + Vec2::splat(0.5)) / field_size * WORLD_EXTENT
 }
 
-/// Integer hash → uniform `f32` in `[0,1)`. Decorrelates each body's yaw, lean and scale, so a flush does
-/// not look stamped from one mould. Seeded from the coarse index, so it is reproducible.
-fn hash01(x: u64) -> f32 {
-    let mut s = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    s ^= s >> 30;
-    s = s.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    s ^= s >> 27;
-    s = s.wrapping_mul(0x94D0_49BB_1331_11EB);
-    s ^= s >> 31;
-    (s >> 40) as f32 / (1u64 << 24) as f32
-}
 
 /// How many rays the wall probe casts around a candidate site.
 const PROBE_RAYS: usize = 24;
@@ -305,6 +337,17 @@ const LEAN_FRACTION: f32 = 0.18;
 /// Per-body size jitter, ±this fraction of `body_scale`. A flush is not a set of clones.
 const SCALE_JITTER: f32 = 0.18;
 
+/// Radius of the disc, in **native-scale metres**, that any admissible adult pose can reach around its base.
+///
+/// The cap is not the widest thing about a fruit body: `tilt` carries the whole silhouette sideways by up to
+/// `MAX_TILT * ADULT_HEIGHT_M`, and the stem's curve adds up to `MAX_BEND_M` on top of that (before the solve
+/// runs, the curve is just the random `lean`, bounded by `LEAN_FRACTION * ADULT_HEIGHT_M`). A wall probe that
+/// only reaches `CAP_RADIUS_M` is blind to slabs the body's own lean can drive it into.
+fn pose_envelope_m() -> f32 {
+    let lean_max = LEAN_FRACTION * ADULT_HEIGHT_M;
+    CAP_RADIUS_M + MAX_TILT * ADULT_HEIGHT_M + MAX_BEND_M.max(lean_max)
+}
+
 /// Everything a body's pose needs, worked out once at spawn.
 pub struct BodyPlan {
     /// Where the volva actually sits, world XZ.
@@ -315,16 +358,15 @@ pub struct BodyPlan {
     pub tilt: Vec2,
 }
 
-/// Unit direction away from the nearest solid within `reach` of `site`, and how far that solid is.
-fn wall_escape(dungeon: &Dungeon, site: Vec2, reach: f32) -> (Vec2, f32) {
+/// Unit direction away from the solids within `reach` of `site`, weighted by how deeply each intrudes.
+/// `Vec2::ZERO` when nothing solid is in reach, or when opposing slabs cancel exactly.
+fn wall_escape(dungeon: &Dungeon, site: Vec2, reach: f32) -> Vec2 {
     let mut push = Vec2::ZERO;
-    let mut nearest = f32::INFINITY;
     for i in 0..PROBE_RAYS {
         let dir = Vec2::from_angle(std::f32::consts::TAU * (i as f32) / (PROBE_RAYS as f32));
         let mut r = PROBE_STEP;
         while r <= reach {
             if control::solid_at_world(dungeon, site + dir * r) {
-                nearest = nearest.min(r);
                 // Weight by intrusion, so a slab under the stipe steers harder than one grazing the rim.
                 push -= dir * (reach - r);
                 break;
@@ -332,7 +374,7 @@ fn wall_escape(dungeon: &Dungeon, site: Vec2, reach: f32) -> (Vec2, f32) {
             r += PROBE_STEP;
         }
     }
-    (push.normalize_or_zero(), nearest)
+    push.normalize_or_zero()
 }
 
 /// How far `p` must travel along `away` to leave solid matter and gain [`WALL_MARGIN`]. Zero if it is
@@ -415,10 +457,14 @@ fn deepest_push(
 /// The base nudge is separate and purely geometric: a volva cannot occupy rock. It is bounded by the volva's
 /// own radius, not the cap's, so a mushroom may still grow with its sac against the skirting — which is
 /// precisely where the mold pools (`wall_affinity`). Only the cap is carried clear, and only by bending.
-pub fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u64) -> Option<BodyPlan> {
-    let cap_r = CAP_RADIUS_M * scale;
+pub fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u32) -> Option<BodyPlan> {
     let volva_r = VOLVA_RADIUS_M * scale;
-    let (away, nearest) = wall_escape(dungeon, site, cap_r + WALL_MARGIN);
+    // Probe the whole disc any admissible pose can reach, not just the cap's own radius. `lean` and `tilt` are
+    // drawn *after* this call and need `away` to be projected safely, so the probe must already have found any
+    // slab they could swing the silhouette into. Reaching only `CAP_RADIUS_M` left a blind band — a wall just
+    // outside it returned `away == ZERO`, which disabled the projection *and* the solve, and the body leaned
+    // into the slab it never saw.
+    let away = wall_escape(dungeon, site, pose_envelope_m() * scale + WALL_MARGIN);
 
     // The crookedness every stem has anyway, and the angle it grew at. Where a wall is near, strip the
     // component pointing into it: random variation must never eat into clearance.
@@ -430,16 +476,17 @@ pub fn plan_body(dungeon: &Dungeon, site: Vec2, scale: f32, seed: u64) -> Option
         }
     };
 
-    let lean_dir = Vec2::from_angle(hash01(seed ^ 0xA1) * std::f32::consts::TAU);
-    let lean = project(lean_dir * (hash01(seed ^ 0xB2) * LEAN_FRACTION * ADULT_HEIGHT_M));
+    let lean_dir = Vec2::from_angle(hash01_u32(seed ^ 0xA1) * std::f32::consts::TAU);
+    let lean = project(lean_dir * (hash01_u32(seed ^ 0xB2) * LEAN_FRACTION * ADULT_HEIGHT_M));
 
-    let tilt_dir = Vec2::from_angle(hash01(seed ^ 0xD4) * std::f32::consts::TAU);
-    let tilt = project(tilt_dir * (hash01(seed ^ 0xE5) * MAX_TILT));
+    let tilt_dir = Vec2::from_angle(hash01_u32(seed ^ 0xD4) * std::f32::consts::TAU);
+    let tilt = project(tilt_dir * (hash01_u32(seed ^ 0xE5) * MAX_TILT));
 
-    // Nothing near: no clearance to solve, and nothing to verify.
-    if !nearest.is_finite() {
-        return Some(BodyPlan { base: site, bend: lean, tilt });
-    }
+    // No early-out for "nothing near". When the probe finds nothing, `away` is zero, so the loop below pushes
+    // the base nowhere and bends the stem not at all — it lands on `bend = lean` and verifies it, which is
+    // exactly the answer the old special case returned, minus the special case. One path, and every plan that
+    // leaves this function has been checked against [`penetration`]. (The old branch returned *unverified*,
+    // which is how a body could lean into a slab the cap-radius probe never saw.)
 
     // Retry from progressively further out. A site inside the slab band cannot be solved from where it sits,
     // and one wedged in a corner may need more room than a single pass concedes.
@@ -497,7 +544,7 @@ pub fn penetration(dungeon: &Dungeon, plan: &BodyPlan, scale: f32) -> f32 {
             let sample = centre + dir * (radius * scale);
             if control::solid_at_world(dungeon, sample) {
                 // How far in? March out along the local escape direction.
-                let (away, _) = wall_escape(dungeon, sample, PROBE_STEP * 8.0);
+                let away = wall_escape(dungeon, sample, PROBE_STEP * 8.0);
                 let out = if away == Vec2::ZERO { Vec2::Y } else { away };
                 worst = worst.max(march_out(dungeon, sample, out));
             }
@@ -520,14 +567,33 @@ fn pin_fruit_bodies(
     scene: Res<DeathCapScene>,
     time: Res<Time<Real>>,
     mut dwell: ResMut<PinDwell>,
+    mut last_gen: Local<u64>,
+    mut last_scan: Local<Option<f32>>,
     bodies: Query<&Transform, With<FruitBody>>,
 ) {
     if coarse.cells.is_empty() {
         return;
     }
-    let dt = time.delta_secs();
+    // Rescanning all `COARSE_SIZE²` cells is only meaningful when a new readback has landed. The GPU rewrites
+    // the coarse buffer at `sim_hz` (1.5 Hz), so at 120 fps an ungated scan repeats the same work ~80×.
+    if coarse.generation == *last_gen {
+        return;
+    }
+    *last_gen = coarse.generation;
+
+    // `pin_dwell_secs` is real seconds. This system now fires once per readback rather than once per frame, so
+    // a cell must be credited the whole interval since the previous scan — a frame delta would undercount it by
+    // the same ~80×. Measuring the elapsed span (rather than assuming `1.0 / sim_hz`) also stays exact when
+    // `advance_mold_time` drops a tick under load.
+    let now = time.elapsed_secs();
+    let dt = last_scan.map_or(0.0, |t| now - t);
+    *last_scan = Some(now);
+
     let field_size = cfg.field_size as f32;
     let mut live = bodies.iter().count() as u32;
+    // `commands.spawn` is deferred, so `bodies` cannot see a body pinned earlier in this same run. Without
+    // this, two cells that ripen on the same pass both clear the spacing check and erupt on top of each other.
+    let mut pinned_this_run: Vec<Vec3> = Vec::new();
 
     for (index, cell) in coarse.cells.iter().enumerate() {
         let (v, u) = (cell[0], cell[1]);
@@ -561,18 +627,25 @@ fn pin_fruit_bodies(
             continue;
         }
 
-        // Primordium competition: neighbours starve each other out (Kües & Navarro-González 2015).
-        let crowded = crate::util::nearest_planar(world, bodies.iter().map(|t| ((), t.translation)))
+        // Primordium competition: neighbours starve each other out (Kües & Navarro-González 2015). Committed
+        // bodies and the ones pinned earlier in this run are one population — `nearest_planar` ranks by
+        // (distance bits, position bits), so chaining the two iterators cannot perturb the deterministic order.
+        let candidates = bodies
+            .iter()
+            .map(|t| ((), t.translation))
+            .chain(pinned_this_run.iter().map(|&p| ((), p)));
+        let crowded = crate::util::nearest_planar(world, candidates)
             .is_some_and(|(_, _, d)| d < cfg.pin_min_spacing);
         if crowded {
             continue;
         }
 
-        let seed = index as u64;
+        // Bounded by `COARSE_SIZE² = 16_384`, so the cast is lossless and the salts stay in range.
+        let seed = index as u32;
         // Size varies across a flush. Growth time scales with it, since the speed limit bounds vertex
         // *speed* and a bigger body has further to travel — a large mushroom simply takes longer.
-        let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01(seed ^ 0xC3) - 1.0));
-        let yaw = hash01(seed) * std::f32::consts::TAU;
+        let scale = cfg.body_scale * (1.0 + SCALE_JITTER * (2.0 * hash01_u32(seed ^ 0xC3) - 1.0));
+        let yaw = hash01_u32(seed) * std::f32::consts::TAU;
 
         // Where it can actually stand, which way its stem curves, and how far off plumb it grew. A site that
         // cannot seat a body clear of the geometry grows nothing — `pin_scan` works at cell resolution and
@@ -612,6 +685,7 @@ fn pin_fruit_bodies(
             WorldAssetRoot(scene.0.clone()),
         ));
         live += 1;
+        pinned_this_run.push(base);
     }
 }
 
@@ -694,12 +768,25 @@ fn grow_fruit_bodies(
 /// The scene instantiates asynchronously, so `MorphWeights` is absent for the first frame or two. That is
 /// expected and skipped. A *wrong* number of targets is not: it would mean the mesh no longer matches
 /// `perceptual::STAGE_MAX_DISP`, from which the entire speed limit is derived.
+///
+/// A non-finite `growth` is likewise fatal. `f32::clamp` propagates NaN rather than absorbing it, so
+/// `stage_weights` would hand glTF a set of NaN blend weights and the mesh would collapse to garbage. No
+/// current path produces one — `growth` is a clamped accumulation seeded at `0.0` — so if it ever happens the
+/// integrator is broken and the only honest thing to do is say so.
 fn drive_morph_weights(
     bodies: Query<(Entity, &FruitBody)>,
     children: Query<&Children>,
     mut weights: Query<&mut MorphWeights>,
 ) -> Result<(), BevyError> {
     for (root, body) in &bodies {
+        if !body.growth.is_finite() {
+            return Err(format!(
+                "mycelia: fruit body {root} has growth = {}, which is not finite; the growth integrator \
+                 produced a value that would drive the death cap's morph weights to NaN",
+                body.growth
+            )
+            .into());
+        }
         let target = stage_weights(body.growth);
         for descendant in children.iter_descendants(root) {
             let Ok(mut mw) = weights.get_mut(descendant) else {
@@ -825,7 +912,7 @@ mod tests {
     }
 
     /// An egg carries no amatoxins; a mature cap carries them all. The threshold is the veil rupture,
-    /// because the toxin lives in the pileus (Enjalbert et al. 1993).
+    /// because the toxin lives in the gills and cap, not the volva (Enjalbert et al. 1999).
     #[test]
     fn amatoxin_appears_only_once_the_cap_does() {
         let mut b = body();
@@ -902,6 +989,405 @@ mod tests {
                 "viewport {viewport}: rise speed {world_speed} != budget {budget}",
             );
         }
+    }
+
+    // ── plan_body's clearance contract ────────────────────────────────────────────────────────────────
+
+    const TEST_SCALE: f32 = 4.0;
+
+    /// A `CONTROL_SIZE`-square dungeon whose floor is the block `lo..=hi`; everything else is rock. The
+    /// slab therefore stands on the outer edge of cell `hi` — the face a body near `x = hi` must clear.
+    fn dungeon_with_floor_block(lo: i32, hi: i32) -> Dungeon {
+        let size = crate::mycelia::CONTROL_SIZE as usize;
+        let mut walkable = vec![false; size * size];
+        for y in lo..=hi {
+            for x in lo..=hi {
+                walkable[y as usize * size + x as usize] = true;
+            }
+        }
+        Dungeon::from_walkable(size, size, walkable)
+    }
+
+    /// `plan_body` documents that it "verifies its own answer" and that "a site that cannot host a body does
+    /// not host one". Both halves are asserted here: every plan it hands back must be clear of solid matter.
+    ///
+    /// This is swept over seeds rather than fixed at one, because the pose is a *function of the draw*: the
+    /// stem's lean and tilt are hashed from the coarse index. A single seed proves nothing about the site —
+    /// it only samples one of the poses the site can produce. (Exactly this blind spot let the bug through:
+    /// `MYCELIA_FRUIT_TESTBED` pins six seeds, and those six happened to clear.)
+    #[test]
+    fn plan_body_never_returns_a_pose_that_clips_a_wall() {
+        let dungeon = dungeon_with_floor_block(40, 80);
+        // The east slab stands on the outer edge of cell 80, i.e. at world x = 80.5 - WALL_THICKNESS.
+        let face_x = 80.5 - crate::dungeon::WALL_THICKNESS;
+
+        let mut clipped = Vec::new();
+        // Negative offsets sit **inside** the slab strip. `pin_scan` really does hand those over: it rejects
+        // texels whose dungeon *cell* is not walkable, but a slab occupies the outer `WALL_THICKNESS` of a
+        // perfectly walkable cell. Solving from inside rock is where the verify-and-reseat loop earns its keep.
+        // Positive offsets step out across the whole band a pose can reach.
+        for step in -8..=60 {
+            let offset = step as f32 * 0.01;
+            let site = Vec2::new(face_x - offset, 60.0);
+            for seed in 0..64u32 {
+                let Some(plan) = plan_body(&dungeon, site, TEST_SCALE, seed) else {
+                    continue; // Refusing the site is always a legal answer.
+                };
+                let depth = penetration(&dungeon, &plan, TEST_SCALE);
+                if depth > 0.0 {
+                    clipped.push((offset, seed, depth));
+                }
+            }
+        }
+
+        assert!(
+            clipped.is_empty(),
+            "plan_body returned {} poses that clip the slab; worst {:?}. \
+             A returned plan must always be clear — refuse the site instead.",
+            clipped.len(),
+            clipped
+                .iter()
+                .max_by(|a, b| a.2.total_cmp(&b.2))
+                .map(|(o, s, d)| format!("offset {o:.2} m, seed {s}, {d:.4} m deep")),
+        );
+    }
+
+    // ── pin_fruit_bodies: spacing, and the dwell clock ────────────────────────────────────────────────
+
+    /// A world where every coarse cell is barren except the ones named, which are ripe (`V` high, `U`
+    /// spent). Texel coordinates are chosen so the sites land on open floor, far from any slab.
+    ///
+    /// `Time<Real>` is inserted by hand rather than via `TimePlugin`, so the clock only moves when the test
+    /// says so. The system's `Local`s persist across `app.update()`, which is the whole point — the readback
+    /// gate lives in one.
+    fn app_with_ripe_cells(cfg: MyceliaConfig, texels: &[f32]) -> App {
+        let mut cells = vec![[0.0f32; 4]; (COARSE_SIZE * COARSE_SIZE) as usize];
+        for (i, &tx) in texels.iter().enumerate() {
+            // (V above v_fruit, U below u_exhausted, texel x, texel y)
+            cells[i] = [0.9, 0.1, tx, 320.0];
+        }
+
+        let mut app = App::new();
+        app.insert_resource(cfg)
+            .insert_resource(MoldCoarse { cells, generation: 0 })
+            .insert_resource(dungeon_with_floor_block(40, 80))
+            .insert_resource(crate::fog::FogGrid::all_explored(
+                crate::mycelia::CONTROL_SIZE as usize,
+                crate::mycelia::CONTROL_SIZE as usize,
+            ))
+            .insert_resource(DeathCapScene(Handle::default()))
+            .insert_resource(PinDwell::default())
+            .insert_resource(Time::<Real>::default())
+            .add_systems(Update, pin_fruit_bodies);
+        app
+    }
+
+    fn body_count(app: &mut App) -> usize {
+        let mut q = app.world_mut().query_filtered::<(), With<FruitBody>>();
+        let n = q.iter(app.world()).count();
+        n
+    }
+
+    /// Drive the app the way the game drives it: the render loop ticks at `fps`, and a readback lands only
+    /// every `frames_per_scan`th frame. `pin_fruit_bodies` runs on `Update` every frame and gates itself.
+    ///
+    /// Advancing the clock one *frame* at a time is the whole point. A harness that advanced it one *scan* at
+    /// a time would make `Time::delta_secs()` and the true inter-scan interval identical, and could not tell a
+    /// correct dwell accumulator from one that credits a render frame.
+    fn run_frames(app: &mut App, frames: usize, fps: f32, frames_per_scan: usize) -> f32 {
+        let frame = std::time::Duration::from_secs_f32(1.0 / fps);
+        for i in 1..=frames {
+            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            if i % frames_per_scan == 0 {
+                app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
+            }
+            app.update();
+        }
+        app.world().resource::<Time<Real>>().elapsed_secs()
+    }
+
+    /// Run frame-by-frame until a body pins, returning the real time on the clock when it did. `None` if it
+    /// never pins within `max_frames`.
+    fn time_to_first_pin(app: &mut App, max_frames: usize, fps: f32, frames_per_scan: usize) -> Option<f32> {
+        let frame = std::time::Duration::from_secs_f32(1.0 / fps);
+        for i in 1..=max_frames {
+            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            if i % frames_per_scan == 0 {
+                app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
+            }
+            app.update();
+            if body_count(app) > 0 {
+                return Some(app.world().resource::<Time<Real>>().elapsed_secs());
+            }
+        }
+        None
+    }
+
+    /// Two cells that ripen together must not both pin: `commands.spawn` is deferred, so the second cell's
+    /// crowding check cannot see the first body in the `World`. It has to see the pending position instead.
+    ///
+    /// The sites here are 1.5 world units apart against a `pin_min_spacing` of 3.0 — unambiguously crowded.
+    #[test]
+    fn two_cells_ripening_on_the_same_scan_pin_only_one_body() {
+        let cfg = crate::config::load_game_config().expect("game config").mycelia;
+        let spacing = cfg.pin_min_spacing;
+        let (fps, per_scan) = frame_clock(&cfg);
+        let budget_frames = frames_to_cover_the_dwell(&cfg, fps, per_scan);
+
+        // 8 texels apart = 8 * 192/1024 = 1.5 world units.
+        let mut app = app_with_ripe_cells(cfg, &[320.0, 328.0]);
+
+        // Run well past the dwell threshold, so both cells certainly cross it on the same scan.
+        run_frames(&mut app, budget_frames, fps, per_scan);
+
+        let n = body_count(&mut app);
+        assert_eq!(
+            n, 1,
+            "two cells 1.5 units apart (pin_min_spacing = {spacing}) ripened together and produced {n} \
+             bodies; the second must be rejected by the same-scan crowding check",
+        );
+    }
+
+    /// `pin_dwell_secs` is **real seconds**. The scan now runs once per readback (~`sim_hz`) rather than once
+    /// per rendered frame, so it must credit the whole inter-scan interval — the elapsed span since the last
+    /// scan, *not* `Time::delta_secs()`, which is one render frame.
+    ///
+    /// At 120 fps and `sim_hz` 1.5 that is an 80x error: a 6 s dwell would become 480 s and mushrooms would
+    /// effectively stop appearing, with every other test in this suite still green.
+    #[test]
+    fn dwell_is_credited_in_real_seconds_not_render_frames() {
+        let cfg = crate::config::load_game_config().expect("game config").mycelia;
+        let (fps, per_scan) = frame_clock(&cfg);
+        let scan_secs = per_scan as f32 / fps;
+        let dwell = cfg.pin_dwell_secs;
+
+        let max_frames = frames_to_cover_the_dwell(&cfg, fps, per_scan);
+        let mut app = app_with_ripe_cells(cfg, &[320.0]);
+
+        // Budget the dwell plus a couple of scans. A frame-delta accumulator needs ~80x that and will not
+        // arrive, which is the regression this test exists to catch.
+        let t = time_to_first_pin(&mut app, max_frames, fps, per_scan).unwrap_or_else(|| {
+            panic!(
+                "a lone ripe cell never pinned within {:.0} s of real time, though `pin_dwell_secs` is \
+                 {dwell} s. The dwell accumulator is crediting far less than the elapsed interval.",
+                2.0 * dwell,
+            )
+        });
+
+        // The first scan credits nothing (no previous scan to measure from), so the pin lands one scan late.
+        let expected = dwell + scan_secs;
+        assert!(
+            (t - expected).abs() <= scan_secs + 1e-3,
+            "pinned after {t:.3} s of real time; expected near {expected:.3} s ({dwell} s dwell + one scan)",
+        );
+    }
+
+    /// A non-finite `growth` must stop the frame, not silently reach glTF. `f32::clamp` propagates NaN, so
+    /// `stage_weights` would emit NaN blend weights and the mesh would collapse. The guard sits ahead of the
+    /// descendant walk, so it fires even before the scene has instantiated.
+    #[test]
+    fn drive_morph_weights_rejects_a_non_finite_growth() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut world = World::new();
+            let mut b = body();
+            b.growth = bad;
+            world.spawn(b);
+            let out: Result<(), BevyError> =
+                world.run_system_once(drive_morph_weights).expect("system should run");
+            assert!(out.is_err(), "growth = {bad} must be a hard error, not a silent NaN morph weight");
+        }
+
+        // And a healthy body is not disturbed by the guard.
+        let mut world = World::new();
+        let mut b = body();
+        b.growth = 0.5;
+        world.spawn(b);
+        let out: Result<(), BevyError> =
+            world.run_system_once(drive_morph_weights).expect("system should run");
+        assert!(out.is_ok(), "a finite growth must pass the guard");
+    }
+
+    /// A one-cell-wide corridor: slabs on both flanks, symmetric, so `wall_escape`'s weighted push cancels to
+    /// `Vec2::ZERO`. There is no direction to solve along — `deepest_push` cannot move the base and the stem
+    /// cannot bend away from one wall without bending into the other.
+    ///
+    /// This is the case that makes the `penetration` gate load-bearing rather than decorative. A pose whose
+    /// lean drives the cap into a flank must be **refused**, and only the check catches it: the solve loop
+    /// happily returns a clipping plan on its first pass, because it computed a zero push and believes it.
+    #[test]
+    fn plan_body_refuses_a_corridor_pose_it_cannot_solve() {
+        let size = crate::mycelia::CONTROL_SIZE as usize;
+        let mut walkable = vec![false; size * size];
+        for y in 40..=80 {
+            walkable[y * size + 60] = true; // a single column of floor: rock at x = 59 and x = 61
+        }
+        let dungeon = Dungeon::from_walkable(size, size, walkable);
+
+        let mut clipped = Vec::new();
+        let mut refused = 0;
+        for seed in 0..256u32 {
+            match plan_body(&dungeon, Vec2::new(60.0, 60.0), TEST_SCALE, seed) {
+                None => refused += 1,
+                Some(plan) => {
+                    let depth = penetration(&dungeon, &plan, TEST_SCALE);
+                    if depth > 0.0 {
+                        clipped.push((seed, depth));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            clipped.is_empty(),
+            "{} corridor poses clip a flank; worst {:?}. With no escape direction the only correct answer \
+             is to refuse the site — verify the pose before returning it.",
+            clipped.len(),
+            clipped.iter().max_by(|a, b| a.1.total_cmp(&b.1)),
+        );
+        assert!(
+            refused > 0,
+            "a 1-cell corridor should defeat at least some poses; none were refused, so this test is not \
+             exercising the unsolvable case it claims to",
+        );
+    }
+
+    /// The case a single escape direction serves worst: an inside corner, where one diagonal push must clear
+    /// two faces at once and under-clears each by `1/√2`. The first solve iteration is not enough here — the
+    /// pose has to be checked and the base re-seated. This is what `plan_body`'s `penetration` gate is *for*.
+    #[test]
+    fn plan_body_clears_an_inside_corner() {
+        let dungeon = dungeon_with_floor_block(40, 80);
+        let wt = crate::dungeon::WALL_THICKNESS;
+        // The south-west inside corner of the floor block: slabs on the west face of cell 40 and its south.
+        let corner = Vec2::new(39.5 + wt, 39.5 + wt);
+        let diag = Vec2::new(1.0, 1.0).normalize();
+
+        let mut clipped = Vec::new();
+        for step in 0..=60 {
+            let site = corner + diag * (step as f32 * 0.01);
+            for seed in 0..64u32 {
+                let Some(plan) = plan_body(&dungeon, site, TEST_SCALE, seed) else {
+                    continue;
+                };
+                let depth = penetration(&dungeon, &plan, TEST_SCALE);
+                if depth > 0.0 {
+                    clipped.push((step, seed, depth));
+                }
+            }
+        }
+
+        assert!(
+            clipped.is_empty(),
+            "{} corner poses clip; worst {:?}. A returned plan must be verified and re-seated, \
+             not trusted after one solve pass.",
+            clipped.len(),
+            clipped.iter().max_by(|a, b| a.2.total_cmp(&b.2)),
+        );
+    }
+
+    /// The 16,384-cell scan must run once per readback, not once per rendered frame. `MoldCoarse` only
+    /// changes at `sim_hz`, so rescanning at the display's refresh rate repeats identical work ~80x.
+    ///
+    /// This is a *performance* invariant, and the dwell clock cannot detect it: because the accumulator
+    /// credits elapsed time, an ungated scan still pins on schedule — it just burns 80x the CPU getting
+    /// there. So assert the gate directly: with no new readback, the scan must not touch `PinDwell` at all.
+    #[test]
+    fn the_coarse_scan_is_skipped_when_no_new_readback_landed() {
+        let cfg = crate::config::load_game_config().expect("game config").mycelia;
+        let (fps, _) = frame_clock(&cfg);
+        let mut app = app_with_ripe_cells(cfg, &[320.0]);
+
+        // One readback: the cell is seen, and starts its dwell at zero (no prior scan to measure from).
+        let frame = std::time::Duration::from_secs_f32(1.0 / fps);
+        app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+        app.world_mut().resource_mut::<MoldCoarse>().generation += 1;
+        app.update();
+        let after_scan = app.world().resource::<PinDwell>().0.get(&0).copied();
+        assert_eq!(after_scan, Some(0.0), "the first scan must register the cell with zero dwell");
+
+        // Now run 200 frames with no new readback. The buffer has not changed, so neither may the dwell.
+        for _ in 0..200 {
+            app.world_mut().resource_mut::<Time<Real>>().advance_by(frame);
+            app.update();
+        }
+
+        let held = app.world().resource::<PinDwell>().0.get(&0).copied();
+        assert_eq!(
+            held,
+            Some(0.0),
+            "dwell advanced without a new readback: the scan ran on frames where `MoldCoarse` was unchanged",
+        );
+        assert_eq!(body_count(&mut app), 0, "no body may pin from re-scanning stale data");
+    }
+
+    /// Sites in the band between the cap's radius and the pose envelope must still be *plannable*, not merely
+    /// refused. Verifying the pose without widening the probe would make `plan_body` reject them — the bodies
+    /// would stop clipping, and also stop existing. Both halves of the fix are load-bearing.
+    #[test]
+    fn sites_inside_the_old_blind_band_still_get_a_pose() {
+        let dungeon = dungeon_with_floor_block(40, 80);
+        let face_x = 80.5 - crate::dungeon::WALL_THICKNESS;
+        let cap_reach = CAP_RADIUS_M * TEST_SCALE + WALL_MARGIN;
+        let envelope = pose_envelope_m() * TEST_SCALE + WALL_MARGIN;
+
+        let mut refused = 0;
+        let mut total = 0;
+        let mut offset = cap_reach;
+        while offset < envelope {
+            let site = Vec2::new(face_x - offset, 60.0);
+            for seed in 0..64u32 {
+                total += 1;
+                if plan_body(&dungeon, site, TEST_SCALE, seed).is_none() {
+                    refused += 1;
+                }
+            }
+            offset += 0.01;
+        }
+
+        assert!(total > 0, "the blind band must be non-empty");
+        assert_eq!(
+            refused, 0,
+            "{refused}/{total} sites between the cap radius ({cap_reach:.3} m) and the pose envelope \
+             ({envelope:.3} m) were refused. Widen the wall probe to the envelope rather than rejecting them.",
+        );
+    }
+
+    /// The shipped render/sim clock, as the pinning path actually sees it.
+    fn frame_clock(cfg: &MyceliaConfig) -> (f32, usize) {
+        let fps = 120.0;
+        (fps, (fps / cfg.sim_hz) as usize)
+    }
+
+    /// Frames enough for a lone ripe cell to certainly pin.
+    ///
+    /// The dwell is credited **once per scan**, not per frame, and the first scan credits nothing (it has no
+    /// previous scan to measure from). So the pin lands on scan `ceil(dwell / scan) + 1`, and a budget
+    /// expressed in dwell-seconds is only enough while a scan is short compared to the dwell. It no longer
+    /// is: at the shipped `sim_hz` a scan is 13.3 s against a 20 s dwell. Budget in *scans*, from the config,
+    /// so this keeps holding whichever way the clock is tuned.
+    fn frames_to_cover_the_dwell(cfg: &MyceliaConfig, fps: f32, per_scan: usize) -> usize {
+        let scan_secs = per_scan as f32 / fps;
+        let scans = (cfg.pin_dwell_secs / scan_secs).ceil() + 2.0;
+        (scans * scan_secs * fps) as usize
+    }
+
+    /// The pose envelope really is wider than the cap: a body may lean and tilt its silhouette out beyond
+    /// `CAP_RADIUS_M`. Any wall probe that only reaches the cap radius is blind to slabs the body can hit.
+    #[test]
+    fn the_pose_envelope_exceeds_the_cap_radius() {
+        let lean_max = LEAN_FRACTION * ADULT_HEIGHT_M;
+        let sway = MAX_TILT * ADULT_HEIGHT_M + MAX_BEND_M.max(lean_max);
+        assert!(sway > 0.0);
+        assert!(
+            pose_envelope_m() > CAP_RADIUS_M,
+            "envelope {} must exceed the bare cap radius {CAP_RADIUS_M}",
+            pose_envelope_m(),
+        );
+        // And the miss is large, not a rounding detail: at the shipped scale it is centimetres of blind band.
+        let blind = (pose_envelope_m() - CAP_RADIUS_M) * TEST_SCALE;
+        assert!(blind > 0.2, "blind band {blind} m is suspiciously small");
     }
 }
 

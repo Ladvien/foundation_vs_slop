@@ -55,6 +55,21 @@ pub const NOMINAL_MOTION_THRESHOLD_DEG_PER_S: f32 = 0.02;
 /// Motion has its own, much tighter budget ([`v_max`]); this bounds the *non-moving* half of the signal.
 pub const MIN_APPEARANCE_RAMP_SECS: f32 = 12.0;
 
+/// Move `current` toward `target` so that a full `0 → 1` transition can never complete faster than
+/// `ramp_secs`. The one rate limiter for every *non-moving* signal in this module — a fruit body's albedo
+/// as it matures, and the mat's glow as it flinches from a gaze.
+///
+/// `dt` and `ramp_secs` must be in the same clock. Symmetric (it limits fades in and out alike), monotone,
+/// and a no-op at `dt == 0`, so a paused game holds its shading exactly where it was.
+///
+/// A non-positive `ramp_secs` would divide by zero and teleport the value; callers pass
+/// [`MIN_APPEARANCE_RAMP_SECS`], and `validate_config` rejects a non-positive ramp at startup. Guarding
+/// here as well would be a second, silent path — so this simply documents the contract.
+pub fn slew(current: f32, target: f32, dt: f32, ramp_secs: f32) -> f32 {
+    let step = dt / ramp_secs;
+    current + (target - current).clamp(-step, step)
+}
+
 /// The `growth` values at which the death cap's morph targets were baked, from the asset's operating manual
 /// (`death_cap_procedural/CLAUDE.md`). Index 0 is the **basis** (the sealed egg, all weights zero); the six
 /// remaining entries correspond one-for-one with the six morph targets `grow_012 … grow_100`.
@@ -190,9 +205,10 @@ pub fn bend_profile(y: f32) -> f32 {
 
 /// The `growth` value past which the universal veil has ruptured and the cap is expanding. Below this the
 /// egg is sealed; above it the mushroom is recognisably a mushroom. Used as the light gate (a primordium
-/// only opens once seen) and as the amatoxin threshold — amatoxins concentrate in the pileus rather than
-/// the stipe or volva (Enjalbert et al. 1993, Toxicon 31:803, 10.1016/0041-0101(93)90386-w), so a body is
-/// only poisonous once it has a cap to hold them.
+/// only opens once seen) and as the amatoxin threshold — the toxin rides the gills and cap, and is nearly
+/// absent from the volva (gills 13.38 > pileus 10.16 > stipe 9.99 >> volva 2.85 mg/g DM; Enjalbert et al.
+/// 1999, 10.1016/s0764-4469(00)86651-2, tabulated by Vetter 2023, 10.3390/molecules28155932). Both of those
+/// tissues appear only when the veil tears, so a body is only poisonous once it has a cap and gills.
 pub const VEIL_RUPTURE_T: f32 = STAGE_T[3];
 
 /// The autonomous-motion budget, in **world units per second**.
@@ -526,8 +542,6 @@ mod tests {
     fn segment_index_is_total() {
         assert_eq!(segment_index(0.0), 0);
         assert_eq!(segment_index(1.0), 5);
-        // NaN clamps to the low end rather than escaping the range (`clamp` returns the min for NaN).
-        assert!(segment_index(f32::NAN) < 6);
         for i in 0..=100u32 {
             let k = segment_index(i as f32 / 100.0);
             assert!(k < 6);
@@ -535,5 +549,83 @@ mod tests {
         // Exact stage boundaries belong to the segment they close.
         assert_eq!(segment_index(STAGE_T[1]), 0);
         assert_eq!(segment_index(STAGE_T[1] + 1e-6), 1);
+    }
+
+    /// **The other invariant.** No albedo or glow transition may complete faster than the slow-change
+    /// window, at any frame rate. Stepped at 60 Hz from either end, `slew` must need at least
+    /// `MIN_APPEARANCE_RAMP_SECS` to cross the full `[0,1]` range.
+    #[test]
+    fn slew_never_completes_faster_than_the_slow_change_window() {
+        for (from, to) in [(0.0f32, 1.0f32), (1.0, 0.0)] {
+            for hz in [30.0f32, 60.0, 144.0] {
+                let dt = 1.0 / hz;
+                let (mut v, mut elapsed) = (from, 0.0f32);
+                while (v - to).abs() > 1e-6 && elapsed < 60.0 {
+                    v = slew(v, to, dt, MIN_APPEARANCE_RAMP_SECS);
+                    elapsed += dt;
+                }
+                assert!(
+                    elapsed >= MIN_APPEARANCE_RAMP_SECS - dt,
+                    "{from} → {to} at {hz} Hz completed in {elapsed}s, faster than the \
+                     {MIN_APPEARANCE_RAMP_SECS}s window",
+                );
+            }
+        }
+    }
+
+    /// A paused clock freezes the signal rather than snapping it to the target — the mold holds its
+    /// shading exactly where it was. And `slew` never overshoots, so it cannot ring around the target.
+    #[test]
+    fn slew_is_a_no_op_at_zero_dt_and_never_overshoots() {
+        assert_eq!(slew(0.3, 1.0, 0.0, MIN_APPEARANCE_RAMP_SECS), 0.3);
+        // A `dt` far larger than the whole ramp lands exactly on the target, never past it.
+        assert_eq!(slew(0.0, 1.0, 1e6, MIN_APPEARANCE_RAMP_SECS), 1.0);
+        assert_eq!(slew(1.0, 0.0, 1e6, MIN_APPEARANCE_RAMP_SECS), 0.0);
+        // Already there: a no-op regardless of `dt`.
+        assert_eq!(slew(0.5, 0.5, 0.016, MIN_APPEARANCE_RAMP_SECS), 0.5);
+    }
+
+    /// Monotone in the direction of travel, and it reproduces the fruit body's tint limiter exactly — the
+    /// idiom `fruit::grow_fruit_bodies` used before this function existed.
+    #[test]
+    fn slew_matches_the_open_coded_tint_limiter() {
+        let (dt, ramp) = (1.0 / 60.0, MIN_APPEARANCE_RAMP_SECS);
+        let (mut a, mut b) = (0.0f32, 0.0f32);
+        for i in 0..600 {
+            let target = i as f32 / 600.0;
+            a = slew(a, target, dt, ramp);
+            // The original two-liner, verbatim.
+            let step = dt / ramp;
+            b += (target - b).clamp(-step, step);
+            assert!((a - b).abs() < 1e-9, "step {i}: {a} vs {b}");
+        }
+    }
+
+    /// `f32::clamp` **propagates** NaN — it does not return the min, as an earlier comment here claimed.
+    ///
+    /// So a NaN `growth` leaves `g` NaN, every `g <= STAGE_T[k + 1]` comparison is false, `find` yields
+    /// nothing, and `unwrap_or(5)` saturates to the **high** end. The index stays in range, which is all
+    /// `segment_index` promises — but the weights built from it do not, and glTF morph weights of NaN collapse
+    /// the mesh. Nothing downstream may rely on this being absorbed: `fruit::drive_morph_weights` rejects a
+    /// non-finite `growth` outright.
+    #[test]
+    fn nan_growth_saturates_the_index_but_poisons_the_weights() {
+        assert!(f32::NAN.clamp(0.0, 1.0).is_nan(), "clamp must propagate NaN, not absorb it");
+        assert_eq!(segment_index(f32::NAN), 5);
+        assert!(
+            stage_weights(f32::NAN).iter().any(|w| w.is_nan()),
+            "a NaN growth must be caught upstream, because it is not caught here"
+        );
+    }
+
+    /// Every finite `growth`, in range or out of it, yields six finite weights.
+    #[test]
+    fn stage_weights_are_finite_over_the_finite_domain() {
+        let probes = [-1e9, -1.0, -1e-6, 0.0, 0.5, 1.0, 1.0 + 1e-6, 1e9, f32::MIN, f32::MAX];
+        for g in probes {
+            let w = stage_weights(g);
+            assert!(w.iter().all(|x| x.is_finite()), "growth {g} produced {w:?}");
+            assert!(w.iter().all(|x| (0.0..=1.0).contains(x)), "growth {g} produced {w:?}");
+        }
     }
 }
