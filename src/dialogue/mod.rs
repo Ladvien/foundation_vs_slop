@@ -13,7 +13,6 @@
 //! Conversations); balloon color/emotion carries affect (An et al., *AniBalloons*, arXiv:2408.06294).
 
 pub mod bubble;
-pub mod load;
 pub mod model;
 mod runtime;
 
@@ -27,8 +26,14 @@ pub struct DialoguePlugin;
 
 impl Plugin for DialoguePlugin {
     fn build(&self, app: &mut App) {
-        // One path, no fallback: a missing/broken script is a loud panic at startup.
-        let script = load::load_dialogue().unwrap_or_else(|e| panic!("dialogue: {e}"));
+        // The dialogue graph is a slice of the unified `GameConfig` (loaded + validated by
+        // `ConfigPlugin`, which is registered first). Clone it into its own `DialogueScript` resource
+        // because the runtime systems read it directly as `Res<DialogueScript>`.
+        let script = app
+            .world()
+            .resource::<crate::config::GameConfig>()
+            .dialogue
+            .clone();
         app.insert_resource(script)
             // 3D quads are only pickable with the mesh backend; UI picking (DefaultPlugins) isn't enough.
             .add_plugins(MeshPickingPlugin)
