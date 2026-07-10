@@ -50,9 +50,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       # Hard gate — the deterministic suite must pass. Default features only: the `test-harness` replay /
-      # liveness tests bring up a headless render device (Metal/Vulkan) and need a GPU, so they run in a
-      # separate GPU lane (or locally), NOT here. `#![cfg(feature = "test-harness")]` keeps them out of
-      # this compile entirely.
+      # liveness / search-calibration tests are GPU-free (see the `harness` lane) but slower, so they run
+      # separately. `#![cfg(feature = "test-harness")]` keeps them out of this compile entirely.
       - name: Test (deterministic core, GPU-free)
         run: cargo test
 
@@ -65,30 +64,22 @@ jobs:
         continue-on-error: true
         run: cargo clippy --all-targets --all-features
 
-  # Best-effort GPU lane: the headless replay/liveness harness needs a render device. On CI we try a
-  # software rasteriser (Mesa lavapipe / llvmpipe). `continue-on-error` so a runner without working
-  # software-GL never reddens the build — locally these run on the real GPU. This is also where a future
-  # SSIM visual-regression pass over `devshot` screenshots would live.
+  # The headless replay / liveness / search-calibration harness. GPU-free: `sim_harness` builds the app
+  # with `RenderPlugin { backends: None }`, so no adapter/device is ever created — these tests need no GPU
+  # and no software rasteriser (the earlier lavapipe/Mesa setup was vestigial after the harness went
+  # backends:None, and `WGPU_BACKEND` was inert). Advisory (`continue-on-error`) for now, but since it no
+  # longer needs special hardware it is a candidate for promotion to a hard gate (see TESTING.md). A future
+  # SSIM visual-regression pass over `devshot` screenshots would live here.
   harness:
-    name: replay + liveness (headless GPU / software-GL)
+    name: replay + liveness (headless, GPU-free)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install Bevy + software-Vulkan (lavapipe) dependencies
+      - name: Install Bevy Linux build dependencies
         run: |
           sudo apt-get update
-          # NOTE: no --no-install-recommends here — mesa-vulkan-drivers pulls the lavapipe ICD +
-          # runtime via recommends; stripping them is what left the loader with "Found no drivers".
-          sudo apt-get install -y \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
-            mesa-vulkan-drivers libvulkan1 vulkan-tools
-      - name: Sanity-check the software Vulkan device is discoverable
-        # If this can't see lavapipe (reports device "llvmpipe"), the harness step below will fail with
-        # "Unable to find a GPU" — surface *why* here rather than deep in a bevy panic.
-        run: |
-          ls -l /usr/share/vulkan/icd.d/
-          vulkaninfo --summary | grep -i llvmpipe
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
@@ -97,11 +88,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
-      - name: Test (harness — replay + liveness + ssim, single-threaded)
-        env:
-          # Do NOT pin VK_ICD_FILENAMES: the Vulkan loader auto-discovers the only ICD present on the
-          # runner (lavapipe) by scanning /usr/share/vulkan/icd.d/. Pinning an exact path that shifts
-          # across Mesa releases is what produced "Failed to open JSON file … lvp_icd.x86_64.json".
-          # Keep tests serial — headless Apps must not overlap.
-          WGPU_BACKEND: vulkan
+      - name: Test (harness — replay + liveness + search-calibration, single-threaded)
+        # Serial: headless Apps must not overlap (serial_guard + --test-threads=1).
         run: cargo test --features test-harness -- --test-threads=1
