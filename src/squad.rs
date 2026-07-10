@@ -307,6 +307,14 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     crate::squad_ai::dialogue::SpokenLines::default(),
                 ),
                 FigurineSource(figurine.clone()),
+                // The `Unit` carries no mesh of its own (the figurine is a cosmetic child), so nothing
+                // auto-inserted `Visibility` here. Two things needed it and quietly went without:
+                // the cosmetic children logged `B0004: parent without InheritedVisibility` every frame,
+                // and `dialogue::bubble::track_bubbles` — whose owner query is `(&Transform, &Visibility)`
+                // — never matched a unit, so it despawned every speech bubble on the frame it spawned.
+                // Squad dialogue could not render at all. Uniform across all five units, so it does not
+                // split the hashed archetype, and `snapshot_hash` reads only Transform + Health.
+                Visibility::default(),
                 Transform::from_translation(dungeon.cell_center(cell))
                     .with_scale(Vec3::splat(FIGURINE_SCALE)),
                 // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
