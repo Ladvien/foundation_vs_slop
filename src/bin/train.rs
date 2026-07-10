@@ -28,7 +28,8 @@ use foundation_vs_slop::sim_harness::{
     build_headless_app, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
 };
 use foundation_vs_slop::squad_ai::coevolve::{
-    search, squad_archive_doc, swarm_archive_doc, sweep_prior, SearchConfig, Templates,
+    search, squad_archive_doc, swarm_archive_doc, sweep_prior, world_archive_doc, SearchConfig,
+    SearchResult, Templates,
 };
 
 /// Where the frozen baseline expectation lives. Committed, and validated on load.
@@ -36,6 +37,7 @@ const PRIOR_PATH: &str = "assets/config/baseline_prior.ron";
 /// Where the illuminated archives land, for a human to read before anything ships.
 const SQUAD_ARCHIVE_PATH: &str = "assets/config/elites_squad.ron";
 const SWARM_ARCHIVE_PATH: &str = "assets/config/elites_swarm.ron";
+const WORLD_ARCHIVE_PATH: &str = "assets/config/elites_world.ron";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -56,8 +58,11 @@ fn main() {
         "bench" => parse_bench(&args[1..]).map(|(ticks, seeds, speed)| bench(ticks, &seeds, speed)),
         "prior" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| prior(ticks, &seeds)),
         "evolve" => parse_evolve(&args[1..]).and_then(evolve),
+        "evolve3" => parse_evolve(&args[1..]).and_then(evolve3),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
-        other => Err(format!("unknown subcommand {other:?} (expected bench | probe | prior | evolve)")),
+        other => Err(format!(
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3)"
+        )),
     };
     if let Err(e) = result {
         eprintln!("train {cmd}: {e}");
@@ -81,7 +86,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let swarm = SwarmGenome::authored(&t);
 
     for &seed in seeds {
-        let r = rollout(brains_of(&t, &squad, &swarm)?, seed, ticks);
+        let r = rollout(brains_of(&t, &squad, &swarm)?, None, seed, ticks);
         let o = &r.outcome;
         let coverage = if o.reachable_cells > 0 {
             o.cells_covered as f32 / o.reachable_cells as f32
@@ -180,8 +185,10 @@ fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
     Ok(EvolveArgs { cfg })
 }
 
-fn evolve(args: EvolveArgs) -> Result<(), String> {
-    let cfg = args.cfg;
+/// Run the three-way co-evolution (squad × swarm × world) and return the templates + filled archives.
+/// Both `evolve` and `evolve3` delegate here; they differ only in which archives they commit — the world
+/// population co-evolves either way (it is what makes the squad/swarm do things a player has not seen).
+fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), String> {
     let templates = Templates::authored();
     let src = std::fs::read_to_string(PRIOR_PATH)
         .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
@@ -194,26 +201,52 @@ fn evolve(args: EvolveArgs) -> Result<(), String> {
 
     let result = search(&templates, &prior, &cfg, |generation, r| {
         println!(
-            "  gen {generation:>3}: squad {:>3} niches (qd {:.3}) | swarm {:>3} niches (qd {:.3}) | \
-             {} evals, {} infeasible, {} failed the criterion",
+            "  gen {generation:>3}: squad {:>3} (qd {:.3}) | swarm {:>3} (qd {:.3}) | world {:>3} (qd {:.3}) \
+             | {} evals, {} infeasible, {} failed the criterion",
             r.squad.archive.coverage(),
             r.squad.archive.qd_score(),
             r.swarm.archive.coverage(),
             r.swarm.archive.qd_score(),
+            r.world.archive.coverage(),
+            r.world.archive.qd_score(),
             r.evaluations,
             r.rejected_infeasible,
             r.rejected_by_criterion
         );
     })?;
+    Ok((templates, result))
+}
 
+/// The reward-hacking guard is only a guard if someone reads the diff.
+fn print_read_warning() {
+    println!();
+    println!("READ THE ELITES BEFORE SHIPPING THEM. They are RON in the same shape you author by hand;");
+    println!("that readability is the reward-hacking guard, and it only works if someone looks.");
+}
+
+/// Two-population view: co-evolve and commit the squad + swarm archives (world is illuminated but not saved).
+fn evolve(args: EvolveArgs) -> Result<(), String> {
+    let (templates, result) = run_coevolution(args.cfg)?;
     write_ron(SQUAD_ARCHIVE_PATH, &squad_archive_doc(&templates, &result.squad)?)?;
     write_ron(SWARM_ARCHIVE_PATH, &swarm_archive_doc(&templates, &result.swarm)?)?;
     println!();
     println!("wrote {SQUAD_ARCHIVE_PATH} ({} elites)", result.squad.archive.coverage());
     println!("wrote {SWARM_ARCHIVE_PATH} ({} elites)", result.swarm.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// Three-population run: co-evolve and commit all three archives, including the evolved worlds.
+fn evolve3(args: EvolveArgs) -> Result<(), String> {
+    let (templates, result) = run_coevolution(args.cfg)?;
+    write_ron(SQUAD_ARCHIVE_PATH, &squad_archive_doc(&templates, &result.squad)?)?;
+    write_ron(SWARM_ARCHIVE_PATH, &swarm_archive_doc(&templates, &result.swarm)?)?;
+    write_ron(WORLD_ARCHIVE_PATH, &world_archive_doc(&result.world)?)?;
     println!();
-    println!("READ THE ELITES BEFORE SHIPPING THEM. They are RON in the same shape you author by hand;");
-    println!("that readability is the reward-hacking guard, and it only works if someone looks.");
+    println!("wrote {SQUAD_ARCHIVE_PATH} ({} elites)", result.squad.archive.coverage());
+    println!("wrote {SWARM_ARCHIVE_PATH} ({} elites)", result.swarm.archive.coverage());
+    println!("wrote {WORLD_ARCHIVE_PATH} ({} elites)", result.world.archive.coverage());
+    print_read_warning();
     Ok(())
 }
 

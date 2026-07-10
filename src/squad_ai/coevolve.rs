@@ -62,8 +62,9 @@ use super::evaluate::rollout;
 use super::genome::{decode, encode, is_feasible, is_feasible_creature, mutate, Genome};
 use super::qd::{BehaviorDescriptor, MapElitesArchive};
 use super::surprise::{
-    fitness, minimal_criterion, EpisodeOutcome, EpisodeTrace, Fitness, ModePrior,
+    fitness, minimal_criterion, ActorKind, EpisodeOutcome, EpisodeTrace, FearBucket, Fitness, ModePrior,
 };
+use super::world_genome::{self, WorldGenome};
 
 /// Mutation strength (fraction of each parameter's authored scale). Large enough to leave the authored
 /// basin within a few generations, small enough that most children stay feasible.
@@ -72,6 +73,10 @@ const SIGMA: f32 = 0.25;
 const RANK_SWAP_P: f64 = 0.15;
 /// How many opponents a candidate is evaluated against, drawn from across the opponent archive.
 const OPPONENTS: usize = 3;
+/// Mutation strength for the world genome (fraction of each knob's authored scale). Gentler than the brain
+/// `SIGMA`: the config knobs span a wide range of magnitudes, and a smaller kick keeps a child world near
+/// its parent so the archive fills a smooth spread rather than scattering.
+const WORLD_SIGMA: f32 = 0.15;
 
 /// The authored repertoires: the fixed *structure* every genome lays values over, and the reference
 /// behaviour the baseline prior is swept from.
@@ -277,6 +282,33 @@ pub fn swarm_descriptor(trace: &EpisodeTrace) -> BehaviorDescriptor {
     BehaviorDescriptor::new(aggression, persistence)
 }
 
+/// The **world's** axes, both player-perceptible: how much DREAD it produces (mean unit fear over the
+/// episode) × how FEROCIOUS a fight (the swarm's aggression share). Read off the trace, no new
+/// instrumentation. Tune the axes after inspecting the first world archive.
+pub fn world_descriptor(trace: &EpisodeTrace) -> BehaviorDescriptor {
+    BehaviorDescriptor::new(mean_unit_fear(trace), swarm_descriptor(trace).aggression)
+}
+
+/// Mean unit fear over the episode, from the coarse `FearBucket` on each squad (`Role`) decision
+/// (Calm = 0, Wary = 0.5, Panicked = 1). Value-sorted `mean` for order-independence.
+fn mean_unit_fear(trace: &EpisodeTrace) -> f32 {
+    let fears: Vec<f32> = trace
+        .decisions
+        .iter()
+        .filter(|d| matches!(d.context.actor, ActorKind::Role(_)))
+        .map(|d| match d.context.fear {
+            FearBucket::Calm => 0.0,
+            FearBucket::Wary => 0.5,
+            FearBucket::Panicked => 1.0,
+        })
+        .collect();
+    if fears.is_empty() {
+        0.0
+    } else {
+        mean(&fears)
+    }
+}
+
 fn share(modes: &[Mode], pred: impl Fn(Mode) -> bool) -> f32 {
     if modes.is_empty() {
         return 0.0;
@@ -373,26 +405,12 @@ impl Default for SearchConfig {
     }
 }
 
-/// The result of scoring one candidate against one opponent across a rollout pair.
-struct Pairing {
-    fitness: Fitness,
-    squad: BehaviorDescriptor,
-    swarm: BehaviorDescriptor,
-}
-
-/// Evaluate one (squad, swarm) pairing: two rollouts on two different worlds. `None` when the pairing
-/// fails the behavioural minimal criterion — no real encounter happened, so there is nothing to score.
-fn evaluate_pair(
-    t: &Templates,
-    squad: &SquadGenome,
-    swarm: &SwarmGenome,
-    prior: &ModePrior,
-    cfg: &SearchConfig,
-    rng: &mut ChaCha8Rng,
-) -> Result<Option<Pairing>, String> {
-    let seeds = &cfg.dungeon_seeds;
+/// Draw two DIFFERENT held-in dungeon seeds (the second differs whenever the set allows), so learnability
+/// measures behaviour that generalises across worlds rather than a memorised map. Split out of the old
+/// `evaluate_pair` so a challenger's *exact* worlds can be replayed against an incumbent in the Phase-5
+/// common-opponent re-evaluation.
+fn draw_two_seeds(seeds: &[u64], rng: &mut ChaCha8Rng) -> (u64, u64) {
     let i = rng.below(seeds.len());
-    // A *different* world for the second rollout whenever the set allows one.
     let j = if seeds.len() > 1 {
         let mut j = rng.below(seeds.len() - 1);
         if j >= i {
@@ -402,20 +420,45 @@ fn evaluate_pair(
     } else {
         i
     };
+    (seeds[i], seeds[j])
+}
 
-    let a = rollout(brains_of(t, squad, swarm)?, seeds[i], cfg.episode_ticks);
-    if let Err(_why) = minimal_criterion(&a.outcome) {
+/// The result of scoring one `(squad, swarm, world)` triple across a rollout pair.
+struct Triple {
+    fitness: Fitness,
+    squad: BehaviorDescriptor,
+    swarm: BehaviorDescriptor,
+    world: BehaviorDescriptor,
+}
+
+/// Evaluate one `(squad, swarm, world)` triple: two rollouts on two given worlds (`seed_a`, `seed_b`), with
+/// the evolved world config installed on both. `None` when either rollout fails the behavioural minimal
+/// criterion — no real encounter, so nothing to score. Fitness is the unchanged `W·S·L` against the frozen
+/// prior; each population reads its own descriptor off the first trace.
+fn score_triple(
+    t: &Templates,
+    squad: &SquadGenome,
+    swarm: &SwarmGenome,
+    world: &WorldGenome,
+    prior: &ModePrior,
+    seed_a: u64,
+    seed_b: u64,
+    episode_ticks: u32,
+) -> Result<Option<Triple>, String> {
+    let wc = world_genome::decode(world)?;
+    let a = rollout(brains_of(t, squad, swarm)?, Some(wc), seed_a, episode_ticks);
+    if minimal_criterion(&a.outcome).is_err() {
         return Ok(None);
     }
-    let b = rollout(brains_of(t, squad, swarm)?, seeds[j], cfg.episode_ticks);
-    if let Err(_why) = minimal_criterion(&b.outcome) {
+    let b = rollout(brains_of(t, squad, swarm)?, Some(wc), seed_b, episode_ticks);
+    if minimal_criterion(&b.outcome).is_err() {
         return Ok(None);
     }
-
-    Ok(Some(Pairing {
+    Ok(Some(Triple {
         fitness: fitness(&a.trace, &b.trace, prior),
         squad: squad_descriptor(&a.trace, &a.outcome),
         swarm: swarm_descriptor(&a.trace),
+        world: world_descriptor(&a.trace),
     }))
 }
 
@@ -423,6 +466,7 @@ fn evaluate_pair(
 pub struct SearchResult {
     pub squad: Population<SquadGenome>,
     pub swarm: Population<SwarmGenome>,
+    pub world: Population<WorldGenome>,
     pub evaluations: u32,
     pub rejected_infeasible: u32,
     pub rejected_by_criterion: u32,
@@ -444,46 +488,60 @@ pub fn search(
     let mut rng = seeded(cfg.seed);
     let authored_squad = SquadGenome::authored(t);
     let authored_swarm = SwarmGenome::authored(t);
+    let authored_world = world_genome::authored();
 
     let mut result = SearchResult {
         squad: Population::new(cfg.resolution),
         swarm: Population::new(cfg.resolution),
+        world: Population::new(cfg.resolution),
         evaluations: 0,
         rejected_infeasible: 0,
         rejected_by_criterion: 0,
     };
 
+    // Each generation mutates one child per population and scores it against `OPPONENTS` pairs drawn from
+    // the OTHER two archives (three-way co-evolution in the spirit of POET, arXiv:1901.01753, and multi-
+    // agent autocurricula, Baker et al. arXiv:1909.07528): a squad child fights (swarm, world) pairs, a
+    // swarm child fights (squad, world), and a world child is judged by the (squad, swarm) it induces.
     for generation in 0..cfg.generations {
         for _ in 0..cfg.batch {
-            // ── squad child, evaluated against swarm opponents ──
+            // ── squad child vs (swarm, world) opponents ──
             let parent = result.squad.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_squad.clone());
             let child = propose_squad(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
-            let opponents: Vec<SwarmGenome> = {
-                let sampled = result.swarm.sample_opponents(OPPONENTS, &mut rng);
-                if sampled.is_empty() {
-                    vec![authored_swarm.clone()]
-                } else {
-                    sampled.into_iter().cloned().collect()
-                }
-            };
-            score_and_insert_squad(t, prior, cfg, &mut rng, &mut result, &child, &opponents)?;
+            let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
+            let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
+            score_and_insert_squad(t, prior, cfg, &mut rng, &mut result, &child, &swarm_opps, &world_opps)?;
 
-            // ── swarm child, evaluated against squad opponents ──
+            // ── swarm child vs (squad, world) opponents ──
             let parent = result.swarm.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_swarm.clone());
             let child = propose_swarm(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
-            let opponents: Vec<SquadGenome> = {
-                let sampled = result.squad.sample_opponents(OPPONENTS, &mut rng);
-                if sampled.is_empty() {
-                    vec![authored_squad.clone()]
-                } else {
-                    sampled.into_iter().cloned().collect()
-                }
-            };
-            score_and_insert_swarm(t, prior, cfg, &mut rng, &mut result, &child, &opponents)?;
+            let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
+            let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
+            score_and_insert_swarm(t, prior, cfg, &mut rng, &mut result, &child, &squad_opps, &world_opps)?;
+
+            // ── world child vs (squad, swarm) opponents ──
+            let parent = result.world.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_world.clone());
+            let child = propose_world(&parent, &mut rng)?;
+            let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
+            let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
+            score_and_insert_world(t, prior, cfg, &mut rng, &mut result, &child, &squad_opps, &swarm_opps)?;
         }
         report(generation, &result);
     }
     Ok(result)
+}
+
+/// Sample `OPPONENTS` opponents from an archive, falling back to `OPPONENTS` copies of the authored genome
+/// while the archive is still empty — so an opponent set is always exactly `OPPONENTS` long and two sets
+/// (one per other population) can be paired index-by-index into `(a, b)` opponents for one triple.
+fn sample_or_authored<G: Clone>(pop: &Population<G>, authored: &G, rng: &mut ChaCha8Rng) -> Vec<G> {
+    let sampled = pop.sample_opponents(OPPONENTS, rng);
+    if sampled.is_empty() {
+        vec![authored.clone(); OPPONENTS]
+    } else {
+        // `sample_opponents` draws `OPPONENTS` with replacement, so this is already that length.
+        sampled.into_iter().cloned().collect()
+    }
 }
 
 fn score_and_insert_squad(
@@ -493,19 +551,22 @@ fn score_and_insert_squad(
     rng: &mut ChaCha8Rng,
     result: &mut SearchResult,
     child: &SquadGenome,
-    opponents: &[SwarmGenome],
+    swarm_opps: &[SwarmGenome],
+    world_opps: &[WorldGenome],
 ) -> Result<(), String> {
     let mut scores = Vec::new();
     let mut descriptors = Vec::new();
-    for opponent in opponents {
-        // Both sides are feasible by construction (`propose_*` screens children; archive members were
-        // screened when they entered). A failure here is a bug, not a candidate to skip.
-        feasible(t, child, opponent)?;
+    for (swarm, world) in swarm_opps.iter().zip(world_opps) {
+        // Feasible by construction (`propose_*` screens children; archive members were screened on entry).
+        // A failure here is a bug, not a candidate to skip.
+        feasible(t, child, swarm)?;
+        world_genome::is_feasible(world)?;
         result.evaluations += 1;
-        match evaluate_pair(t, child, opponent, prior, cfg, rng)? {
-            Some(p) => {
-                scores.push(p.fitness.score());
-                descriptors.push(p.squad);
+        let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
+        match score_triple(t, child, swarm, world, prior, sa, sb, cfg.episode_ticks)? {
+            Some(tr) => {
+                scores.push(tr.fitness.score());
+                descriptors.push(tr.squad);
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -513,9 +574,7 @@ fn score_and_insert_squad(
     if scores.is_empty() {
         return Ok(());
     }
-    let fitness = mean(&scores);
-    let descriptor = mean_descriptor(&descriptors);
-    result.squad.insert(descriptor, fitness, child.clone());
+    result.squad.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
     Ok(())
 }
 
@@ -526,17 +585,20 @@ fn score_and_insert_swarm(
     rng: &mut ChaCha8Rng,
     result: &mut SearchResult,
     child: &SwarmGenome,
-    opponents: &[SquadGenome],
+    squad_opps: &[SquadGenome],
+    world_opps: &[WorldGenome],
 ) -> Result<(), String> {
     let mut scores = Vec::new();
     let mut descriptors = Vec::new();
-    for opponent in opponents {
-        feasible(t, opponent, child)?;
+    for (squad, world) in squad_opps.iter().zip(world_opps) {
+        feasible(t, squad, child)?;
+        world_genome::is_feasible(world)?;
         result.evaluations += 1;
-        match evaluate_pair(t, opponent, child, prior, cfg, rng)? {
-            Some(p) => {
-                scores.push(p.fitness.score());
-                descriptors.push(p.swarm);
+        let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
+        match score_triple(t, squad, child, world, prior, sa, sb, cfg.episode_ticks)? {
+            Some(tr) => {
+                scores.push(tr.fitness.score());
+                descriptors.push(tr.swarm);
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -544,9 +606,39 @@ fn score_and_insert_swarm(
     if scores.is_empty() {
         return Ok(());
     }
-    let fitness = mean(&scores);
-    let descriptor = mean_descriptor(&descriptors);
-    result.swarm.insert(descriptor, fitness, child.clone());
+    result.swarm.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
+    Ok(())
+}
+
+fn score_and_insert_world(
+    t: &Templates,
+    prior: &ModePrior,
+    cfg: &SearchConfig,
+    rng: &mut ChaCha8Rng,
+    result: &mut SearchResult,
+    child: &WorldGenome,
+    squad_opps: &[SquadGenome],
+    swarm_opps: &[SwarmGenome],
+) -> Result<(), String> {
+    world_genome::is_feasible(child)?;
+    let mut scores = Vec::new();
+    let mut descriptors = Vec::new();
+    for (squad, swarm) in squad_opps.iter().zip(swarm_opps) {
+        feasible(t, squad, swarm)?;
+        result.evaluations += 1;
+        let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
+        match score_triple(t, squad, swarm, child, prior, sa, sb, cfg.episode_ticks)? {
+            Some(tr) => {
+                scores.push(tr.fitness.score());
+                descriptors.push(tr.world);
+            }
+            None => result.rejected_by_criterion += 1,
+        }
+    }
+    if scores.is_empty() {
+        return Ok(());
+    }
+    result.world.insert(mean_descriptor(&descriptors), mean(&scores), child.clone());
     Ok(())
 }
 
@@ -593,6 +685,16 @@ fn mutate_swarm(
         scout: mutate(&t.scout, &parent.scout, SIGMA, RANK_SWAP_P, rng)?,
         smiley: mutate(&t.smiley, &parent.smiley, SIGMA, RANK_SWAP_P, rng)?,
     })
+}
+
+/// Propose a world child. `world_genome::mutate` clamps every knob into its hard `BOUNDS`, so a child is
+/// feasible **by construction** — no rejection-sampling loop, unlike the brains (whose feasibility is a
+/// value-space guard the mutation can violate). `is_feasible` is still asserted: a failure would be a
+/// `BOUNDS` bug, and one path means surfacing it loudly rather than searching an infeasible world.
+fn propose_world(parent: &WorldGenome, rng: &mut ChaCha8Rng) -> Result<WorldGenome, String> {
+    let child = world_genome::mutate(parent, WORLD_SIGMA, rng)?;
+    world_genome::is_feasible(&child)?;
+    Ok(child)
 }
 
 /// Mean of a non-empty slice. Sorted before summing so the result does not depend on evaluation order —
@@ -852,6 +954,43 @@ pub fn swarm_archive_doc(t: &Templates, pop: &Population<SwarmGenome>) -> Result
     })
 }
 
+/// One world elite, decoded back into its two config slices — a readable RON diff of the shipped world's
+/// dials (the reward-hacking guard: a human reads what the search found before it ships).
+#[derive(Serialize)]
+pub struct WorldEliteDoc {
+    pub cell: (usize, usize),
+    /// The archive's axes carry the world's descriptor (`world_descriptor`): mean unit fear × swarm
+    /// aggression. `BehaviorDescriptor`'s generic `aggression`/`exploration` fields hold them respectively.
+    pub mean_fear: f32,
+    pub swarm_aggression: f32,
+    pub fitness: f32,
+    pub ai: crate::ai::tuning::AiTuning,
+    pub sim: crate::sim::SimTuning,
+}
+
+/// Decode every world elite for review/commit — each is a readable diff of the shipped world's dials.
+pub fn world_archive_doc(pop: &Population<WorldGenome>) -> Result<ArchiveDoc<WorldEliteDoc>, String> {
+    let mut elites = Vec::new();
+    for (cell, elite) in pop.archive.iter() {
+        let g = pop.get(elite.genome).ok_or("dangling elite handle")?;
+        let wc = world_genome::decode(g)?;
+        elites.push(WorldEliteDoc {
+            cell: *cell,
+            mean_fear: elite.descriptor.aggression,
+            swarm_aggression: elite.descriptor.exploration,
+            fitness: elite.fitness,
+            ai: wc.ai,
+            sim: wc.sim,
+        });
+    }
+    Ok(ArchiveDoc {
+        resolution: pop.archive.resolution(),
+        coverage: pop.archive.coverage(),
+        qd_score: pop.archive.qd_score(),
+        elites,
+    })
+}
+
 /// Sweep the **authored** brains to build the player's baseline expectation.
 ///
 /// This is `P(mode | context)` for the game as shipped: the model every prior encounter has trained the
@@ -862,7 +1001,7 @@ pub fn sweep_prior(t: &Templates, seeds: &[u64], episode_ticks: u32) -> Result<M
     let swarm = SwarmGenome::authored(t);
     let mut prior = ModePrior::default();
     for &seed in seeds {
-        let r = rollout(brains_of(t, &squad, &swarm)?, seed, episode_ticks);
+        let r = rollout(brains_of(t, &squad, &swarm)?, None, seed, episode_ticks);
         prior.observe(&r.trace);
     }
     Ok(prior)

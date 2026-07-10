@@ -31,6 +31,7 @@ fx*.png
 assets/config/baseline_prior.ron
 assets/config/elites_squad.ron
 assets/config/elites_swarm.ron
+assets/config/elites_world.ron
 
 # Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
 .claude/

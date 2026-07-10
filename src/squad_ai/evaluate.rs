@@ -19,6 +19,7 @@ use bevy::math::IVec2;
 use bevy::prelude::App;
 
 use crate::ai::brain::BrainSource;
+use crate::config::WorldConfig;
 use crate::sim_harness::{
     build_headless_app, clear_squad_orders, field_saturation, floor_cells, issue_squad_order,
     liveness_violations, nest_cells, ordered_unit_count, serial_guard, step, SimConfig,
@@ -104,11 +105,21 @@ fn tour_goals(app: &mut App) -> Vec<IVec2> {
 /// Physics is **off** (`deterministic_core`): only gib chunks are `RigidBody::Dynamic` and they carry no
 /// `Health`, so they cannot influence gameplay — but the Avian solver is not bit-reproducible, and a
 /// search whose fitness wobbles between identical evaluations is searching noise.
-pub fn rollout(brains: BrainSource, dungeon_seed: u64, ticks: u32) -> Rollout {
+pub fn rollout(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+) -> Rollout {
     // Held for the App's whole lifetime (harness invariant 4).
     let _serial = serial_guard();
 
-    let cfg = SimConfig::deterministic_core_seeded(dungeon_seed).with_brains(brains);
+    let mut cfg = SimConfig::deterministic_core_seeded(dungeon_seed).with_brains(brains);
+    // `None` runs the shipped world (the baseline prior sweep passes `None`); `Some(w)` installs an evolved
+    // world for the third co-evolving population. One config reaches the sim either way.
+    if let Some(w) = config {
+        cfg = cfg.with_world_config(w);
+    }
     let mut app = build_headless_app(&cfg);
 
     // One tick so the dungeon and squad exist before the tour is planned.
