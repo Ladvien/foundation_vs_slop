@@ -34,7 +34,9 @@ const WORLDS: [u64; 3] = [0x5C09191, 0xA11CE, 0xBEEF];
 
 #[test]
 fn the_authored_brains_produce_a_real_encounter_on_every_world() {
-    let _serial = serial_guard();
+    // No `serial_guard()` here: `rollout` acquires it for each episode's App lifetime (see
+    // `evaluate::rollout`). Taking it here too would lock the non-reentrant `HARNESS_LOCK` twice on this
+    // thread and deadlock — `--test-threads=1` already serializes tests within the process.
     let t = Templates::authored();
     let squad = SquadGenome::authored(&t);
     let swarm = SwarmGenome::authored(&t);
@@ -77,7 +79,8 @@ fn the_authored_brains_produce_a_real_encounter_on_every_world() {
 
 #[test]
 fn the_recorder_sees_both_sides_and_the_witness_filter_bites() {
-    let _serial = serial_guard();
+    // No `serial_guard()` here — `rollout` takes it per episode; double-locking the non-reentrant
+    // `HARNESS_LOCK` on one thread would deadlock (see the note above).
     let t = Templates::authored();
     let squad = SquadGenome::authored(&t);
     let swarm = SwarmGenome::authored(&t);
