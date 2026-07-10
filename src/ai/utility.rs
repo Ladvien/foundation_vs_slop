@@ -9,7 +9,7 @@
 
 use bevy::math::Vec3;
 use bevy::prelude::Component;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::drives::{DriveId, DRIVE_COUNT};
 use crate::util::rand01;
@@ -18,7 +18,7 @@ use crate::util::rand01;
 /// movement mechanic runs this tick. `Deserialize` so squad **role** repertoires are authored as data
 /// in `assets/config/roles.ron` (Jacopin, "Optimizing Practical Planning for Game AI", Game AI Pro 2
 /// Ch.13 — actions as text files); the crab/boss brains stay code literals.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub enum Mode {
     Forage,
     Latch,
@@ -69,8 +69,50 @@ pub enum Mode {
     FollowAnchor,
 }
 
+impl Mode {
+    /// Every mode, in discriminant order — the action alphabet of the offline behaviour search
+    /// (`squad_ai::surprise` indexes mode distributions by `Mode::index`). Pinned by
+    /// `mode_all_is_dense_and_in_discriminant_order`, so adding a variant without listing it here is a
+    /// loud test failure rather than a silently truncated distribution.
+    pub const ALL: [Mode; 24] = [
+        Mode::Forage,
+        Mode::Latch,
+        Mode::Flee,
+        Mode::Chase,
+        Mode::Wander,
+        Mode::HuntBlood,
+        Mode::SeekMeat,
+        Mode::Carry,
+        Mode::Scout,
+        Mode::Mark,
+        Mode::Rally,
+        Mode::Muster,
+        Mode::Examine,
+        Mode::Overwatch,
+        Mode::Engage,
+        Mode::Suppress,
+        Mode::PsiScan,
+        Mode::Commune,
+        Mode::Ward,
+        Mode::TendWounded,
+        Mode::SecureDoor,
+        Mode::DeploySensor,
+        Mode::Regroup,
+        Mode::FollowAnchor,
+    ];
+
+    /// Dense index into [`Mode::ALL`]. Every variant is fieldless, so the discriminant *is* the index.
+    #[inline]
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Width of the action alphabet — the size of every mode distribution in `squad_ai::surprise`.
+pub const MODE_COUNT: usize = Mode::ALL.len();
+
 /// A perception fact the brain reads (extend freely).
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum Fact {
     /// Distance to the nearest unit (large when none).
     NearestUnitDist,
@@ -118,14 +160,14 @@ pub enum Fact {
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum Input {
     Drive(DriveId),
     Perc(Fact),
 }
 
 /// Parametric response curve mapping a raw input to a `[0,1]` utility. Params are RON-tunable.
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Curve {
     /// `m*x + b`, clamped.
     Linear { m: f32, b: f32 },
@@ -157,14 +199,14 @@ impl Curve {
 }
 
 /// One scoring factor: read an input, shape it with a curve.
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Consideration {
     pub input: Input,
     pub curve: Curve,
 }
 
 /// Where a chosen behaviour aims (resolved from perception when the behaviour is selected).
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum TargetKind {
     None,
     NearestUnit,
@@ -188,7 +230,7 @@ pub enum TargetKind {
 }
 
 /// A complete behaviour: a small data literal.
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Behavior {
     pub mode: Mode,
     /// Dual-utility priority bucket — a higher rank with any positive score wins outright over lower.
@@ -452,6 +494,17 @@ mod tests {
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 1.0e-5, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn mode_all_is_dense_and_in_discriminant_order() {
+        // `surprise` indexes mode histograms by `Mode::index()` (the discriminant). If a variant is added
+        // to the enum but not to `ALL`, or the order drifts, every distribution silently misattributes
+        // counts. Catch it here instead.
+        for (i, mode) in Mode::ALL.iter().enumerate() {
+            assert_eq!(mode.index(), i, "{mode:?} must sit at index {i} of Mode::ALL");
+        }
+        assert_eq!(MODE_COUNT, Mode::ALL.len());
     }
 
     #[test]

@@ -83,6 +83,21 @@ impl MapElitesArchive {
         self.cells.len()
     }
 
+    /// Every occupied niche, in the archive's fixed sorted cell order (the `BTreeMap` is deliberate —
+    /// see the type docs). Used to sample a MAP-Elites parent and to sample coevolutionary opponents.
+    pub fn iter(&self) -> impl Iterator<Item = (&(usize, usize), &Elite)> {
+        self.cells.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// The archive resolution (cells per axis).
+    pub fn resolution(&self) -> usize {
+        self.res
+    }
+
     /// The single highest-fitness elite across the whole archive.
     pub fn best(&self) -> Option<&Elite> {
         self.cells.values().max_by(|a, b| a.fitness.total_cmp(&b.fitness))

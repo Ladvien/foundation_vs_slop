@@ -8,7 +8,7 @@
 //! by id, and every creature carries the full array.
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::faction::{Faction, FACTION_COUNT};
 use super::field::{FieldId, Stig};
@@ -16,7 +16,7 @@ use crate::dungeon::Dungeon;
 
 /// A need, addressed by a stable slot index. Extend by adding a const + bumping [`DRIVE_COUNT`].
 /// `Deserialize` so squad role brains can name a drive (`Drive((2))` = CURIOSITY) in `roles.ron`.
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct DriveId(pub usize);
 
 impl DriveId {

@@ -48,6 +48,10 @@ pub struct AiPlugin;
 
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
+        // The brain data source. `Default` is `Authored`, so the shipped game needs no setup; the
+        // headless harness inserts a `Candidate` BEFORE adding this plugin, and `init_resource` then
+        // leaves it alone. One path: the resource always exists and `init_brains` matches exhaustively.
+        app.init_resource::<brain::BrainSource>();
         // Required config — one path, no fallback. The `ai_tuning:` slice comes from the unified
         // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
         let tuning = app.world().resource::<crate::config::GameConfig>().ai_tuning;

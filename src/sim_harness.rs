@@ -6,11 +6,12 @@
 //! Gómez-Martín 2017, "An approach to automated videogame beta testing", §9): the harness advances a
 //! *fixed* `Time` delta per `step`, so the simulation never sees variable frame pacing.
 //!
-//! Render is brought up head-lessly (no window, Winit disabled) rather than stripped, so every game
-//! plugin — including the custom-material ones — runs unmodified; the GPU is used only to satisfy the
-//! render world and never draws to a surface. Visual output is simply absent (no window). Simulation
-//! state is deterministic regardless: rendering reads sim state, never writes it, and the snapshot
-//! excludes all visual/physics-gib components.
+//! Render is brought up head-lessly (no window, Winit disabled) and **with no wgpu backend** rather than
+//! stripped, so every game plugin — including the custom-material ones — runs unmodified against a
+//! registered render world that never creates an adapter, device, or queue. Visual output is simply
+//! absent. Simulation state is deterministic regardless: rendering reads sim state, never writes it, and
+//! the snapshot excludes all visual/physics-gib components. See the `RenderPlugin` note in
+//! [`build_headless_app_unfinished`] for the measurement that admitted this.
 
 use bevy::prelude::*;
 use std::sync::{Mutex, MutexGuard};
@@ -46,12 +47,30 @@ pub struct SimConfig {
     /// the gameplay LOGIC (AI, movement, combat, economy) with no solver, which IS bit-reproducible and
     /// is what the exact same-seed replay pins.
     pub physics: bool,
+    /// Which brains the simulation runs. `Authored` is the shipped game; `Candidate` installs a genome
+    /// under evaluation by the offline behaviour search. Inserted as a resource *before* `AiPlugin` and
+    /// `SquadAiPlugin` build, so their `init_resource`/`Startup` systems pick it up.
+    pub brains: crate::ai::brain::BrainSource,
+    /// Override the dungeon generation seed shipped in `assets/config/config.ron`. `None` runs the
+    /// shipped world (what the replay goldens pin); `Some(s)` generates a different one.
+    ///
+    /// This is a knob, not a fallback: exactly one seed reaches `Dungeon::generate` on either setting,
+    /// and a bad seed still fails loudly there. It exists because a behaviour search that only ever sees
+    /// one map learns that map — the offline squad/swarm search (`squad_ai::qd`) evaluates every genome
+    /// across a held-in seed set and validates on a held-out one.
+    pub dungeon_seed: Option<u64>,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
         // 1/60 s fixed step — the game's `MAX_FRAME_DT` clamp is 1/30, so this is a well-behaved sub-step.
-        Self { fixed_dt: 1.0 / 60.0, speed: 1.0, physics: true }
+        Self {
+            fixed_dt: 1.0 / 60.0,
+            speed: 1.0,
+            physics: true,
+            brains: crate::ai::brain::BrainSource::Authored,
+            dungeon_seed: None,
+        }
     }
 }
 
@@ -59,6 +78,18 @@ impl SimConfig {
     /// A physics-free configuration: the deterministic gameplay core, suitable for exact same-seed hashing.
     pub fn deterministic_core() -> Self {
         Self { physics: false, ..Self::default() }
+    }
+
+    /// The deterministic core on a specific generated world — one evaluation environment for the
+    /// offline behaviour search.
+    pub fn deterministic_core_seeded(dungeon_seed: u64) -> Self {
+        Self { dungeon_seed: Some(dungeon_seed), ..Self::deterministic_core() }
+    }
+
+    /// Install a candidate genome for one evaluation rollout.
+    pub fn with_brains(mut self, brains: crate::ai::brain::BrainSource) -> Self {
+        self.brains = brains;
+        self
     }
 }
 
@@ -114,6 +145,33 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             .set(bevy::app::TaskPoolPlugin {
                 task_pool_options: bevy::app::TaskPoolOptions::with_num_threads(1),
             })
+            // No wgpu backend: the render plugin still registers every render type (so the custom
+            // `Material` plugins build and `Assets<StandardMaterial>` exists), but no adapter, device, or
+            // queue is created and no GPU work is submitted.
+            //
+            // This is not a second code path — it is the *same* plugin graph with the device omitted.
+            // It is sound because `snapshot_hash` covers `(Transform, Health)`, every writer of which
+            // runs on `FixedUpdate`, while rendering only ever reads simulation state. The `FixedUpdate`
+            // / `Update` split (see TESTING.md) is what enforces that, and `ui_never_leaks_into_
+            // deterministic_core` guards the one plugin that would otherwise breach it.
+            //
+            // Verified when this landed: with a real Metal backend, seed `0x5C09191` × 1800 ticks at
+            // speed 1 hashes to `716d0cfbb69b778e`; with `backends: None` it hashes to the same value,
+            // and the whole replay + liveness suite passes unchanged. (The two cannot be compared inside
+            // one test — the harness admits a single `App` per process — so this is a recorded
+            // measurement, not an automated assertion.)
+            //
+            // Measured on an M5: step time for that episode falls 9.31 s → 3.18 s. Solving
+            // `T = updates·R + steps·S` across `speed` ∈ {1,20} put ~84% of a headless run in
+            // per-`update()` render-extract rather than simulation. That is what makes the offline
+            // behaviour search (`squad_ai::genome`) affordable, and it drops the harness's GPU
+            // requirement entirely — the replay/liveness suite now runs on a pure-CPU runner.
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
+                    bevy::render::settings::WgpuSettings { backends: None, ..default() },
+                )),
+                ..default()
+            })
             .disable::<bevy::winit::WinitPlugin>(),
     );
 
@@ -124,13 +182,23 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         app.insert_resource(avian3d::prelude::Gravity(Vec3::NEG_Y * 18.0));
     }
 
+    // ConfigPlugin first: it loads + validates the unified `assets/config/config.ron` and inserts
+    // the `GameConfig` resource that every consumer plugin below reads at build time. Added on its own
+    // so a `dungeon_seed` override can be applied to `GameConfig` *before* `DungeonPlugin::build` reads
+    // it — that plugin generates the world eagerly at build time, so this is the only seam. Splitting
+    // the tuple does not change plugin build order.
+    app.add_plugins(crate::config::ConfigPlugin);
+    if let Some(seed) = cfg.dungeon_seed {
+        app.world_mut().resource_mut::<crate::config::GameConfig>().dungeon.seed = seed;
+    }
+    // Insert BEFORE `AiPlugin`/`SquadAiPlugin`: their `init_resource::<BrainSource>()` is a no-op when the
+    // resource already exists, so this is what selects authored-vs-candidate brains for the whole run.
+    app.insert_resource(cfg.brains.clone());
+
     // The full game simulation, identical to production (see `lib::run`). Cosmetic plugins are included
     // too — they run harmlessly headless and keep the plugin graph identical, which matters because some
     // sim systems are ordered relative to them.
     app.add_plugins((
-        // ConfigPlugin first: it loads + validates the unified `assets/config/config.ron` and inserts
-        // the `GameConfig` resource that every consumer plugin below reads at build time.
-        crate::config::ConfigPlugin,
         (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
@@ -264,11 +332,51 @@ pub fn issue_squad_order(app: &mut App, goal: IVec2) -> bool {
     true
 }
 
+/// Revoke every standing player order, handing locomotion (and the role actions gated on
+/// `Without<MoveOrder>`) back to the squad AI.
+///
+/// A standing `MoveOrder` is not merely a movement hint — it is authoritative. `squad::unit_movement`
+/// steers by the order's flow field and ignores `DesiredMove`; `perception::squad_think` sets
+/// `DesiredMove.goal = None`; and **both `actions::unit_actions` and `actions::medic_heal` are
+/// `Without<MoveOrder>`**, so an ordered unit neither examines, wards, barks, nor heals. An offline
+/// evaluation that keeps the squad permanently ordered is therefore not evaluating the squad brain at
+/// all. Returns the number of units released.
+pub fn clear_squad_orders(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<Entity, (With<crate::squad::Unit>, With<crate::squad::MoveOrder>)>();
+    let ordered: Vec<Entity> = q.iter(world).collect();
+    for e in &ordered {
+        world.entity_mut(*e).remove::<crate::squad::MoveOrder>();
+    }
+    ordered.len()
+}
+
+/// How many units currently carry a player `MoveOrder` — the fraction of an episode in which the squad
+/// AI is *not* in control.
+pub fn ordered_unit_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(), (With<crate::squad::Unit>, With<crate::squad::MoveOrder>)>();
+    q.iter(world).count()
+}
+
 /// The dungeon cells currently occupied by squad units (for coverage tracking).
 pub fn unit_cells(app: &mut App) -> Vec<IVec2> {
     let world = app.world_mut();
     let positions: Vec<Vec3> = {
         let mut q = world.query_filtered::<&Transform, With<crate::squad::Unit>>();
+        q.iter(world).map(|t| t.translation).collect()
+    };
+    let dungeon = world.resource::<crate::dungeon::Dungeon>();
+    positions.iter().map(|p| dungeon.world_to_cell(*p)).collect()
+}
+
+/// The dungeon cells the crab nests occupy. The offline evaluation's synthetic player walks its tour
+/// through these, because a player who never seeks the objective never has an encounter — and a search
+/// whose episodes contain no encounter learns nothing (see `squad_ai::evaluate`).
+pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
+    let world = app.world_mut();
+    let positions: Vec<Vec3> = {
+        let mut q = world.query_filtered::<&Transform, With<crate::nest::Nest>>();
         q.iter(world).map(|t| t.translation).collect()
     };
     let dungeon = world.resource::<crate::dungeon::Dungeon>();

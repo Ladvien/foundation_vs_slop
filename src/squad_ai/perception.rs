@@ -276,6 +276,9 @@ pub fn squad_think(
             let brain = brains.get(*role);
             let idx = policy.0.choose(&perc, &brain.behaviors, &mut active.rng);
             active.mode = brain.behaviors[idx].mode;
+            // A real decision. `squad_ai::trace` samples on this, NOT on `Changed<ActiveBehavior>` — the
+            // unconditional `active.target` write below marks the component changed every tick.
+            active.decision = active.decision.wrapping_add(1);
         }
 
         // Resolve the movement goal from the (possibly cached) mode + fresh perception every tick, so

@@ -363,50 +363,42 @@ pub(crate) fn ensure_leader(
     }
 }
 
-/// Debug safeguard: never let the whole squad wipe. At least [`MIN_LIVING_UNITS`] member always
-/// survives — so of five units, four can die but the last cannot. (Remove this floor for real
-/// lose conditions.)
-const MIN_LIVING_UNITS: usize = 1;
-
 /// Remove squad members whose health has run out (enemies gnaw them down — see `enemy`). Despawning
 /// a unit takes its figurine + carried gun with it; its floating health bar is cleaned up as an
-/// orphan by `health::update_health_bars`. A small burst at chest height marks the death. The last
-/// [`MIN_LIVING_UNITS`] can't be despawned: a protected survivor has its health floored so it lingers
-/// (bar shows a sliver) instead of dying.
+/// orphan by `health::update_health_bars`. A small burst at chest height marks the death.
+///
+/// Every unit can die, including the last: a total wipe is a real outcome. `cohesion::update_anchor`
+/// clears `SquadAnchor::valid` on an empty squad and `pick_leader` no-ops, so the zero-unit world is
+/// well-defined rather than a state the sim is protected from. This matters beyond lose conditions:
+/// the offline behaviour search (`squad_ai::qd`) scores `survivors` and gates on "the squad was not
+/// wiped", and a floor that silently resurrects the last member would make both signals a lie.
 fn despawn_dead_units(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut units: Query<(Entity, &mut Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
+    units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
 ) {
-    // How many dead units we may actually remove this frame while keeping the living floor.
-    let mut removable = units.iter().count().saturating_sub(MIN_LIVING_UNITS);
-    for (entity, mut hp, transform, outfit, figurine) in &mut units {
-        if hp.current <= 0.0 {
-            if removable > 0 {
-                // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
-                // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
-                gore.0.push(GoreEvent {
-                    pos: transform.translation + Vec3::Y * 0.5,
-                    kind: GoreKind::UnitCrunch,
-                    tint: outfit.0,
-                    // The figurine's baked fracture set: spawn from its foot origin at its render scale.
-                    gib: Some(GibSource {
-                        source: figurine.0.id(),
-                        origin: transform.translation,
-                        scale: transform.scale.x,
-                    }),
-                    // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
-                    intensity: 0.6,
-                });
-                sfx.write(Sfx::UnitDeath(transform.translation));
-                commands.entity(entity).despawn();
-                removable -= 1;
-            } else {
-                // Protected survivor — clamp so it can't die and its bar keeps a sliver.
-                hp.current = hp.current.max(1.0);
-            }
+    for (entity, hp, transform, outfit, figurine) in &units {
+        if hp.current > 0.0 {
+            continue;
         }
+        // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
+        // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
+        gore.0.push(GoreEvent {
+            pos: transform.translation + Vec3::Y * 0.5,
+            kind: GoreKind::UnitCrunch,
+            tint: outfit.0,
+            // The figurine's baked fracture set: spawn from its foot origin at its render scale.
+            gib: Some(GibSource {
+                source: figurine.0.id(),
+                origin: transform.translation,
+                scale: transform.scale.x,
+            }),
+            // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
+            intensity: 0.6,
+        });
+        sfx.write(Sfx::UnitDeath(transform.translation));
+        commands.entity(entity).despawn();
     }
 }
 

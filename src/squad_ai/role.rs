@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::brain::Brain;
 use crate::ai::drives::{DriveId, DRIVE_COUNT};
@@ -20,7 +20,7 @@ use crate::ai::utility::{Behavior, Consideration, Curve, Fact, Input, Mode, Targ
 
 /// Which SCP task-force role a unit plays. `Deserialize`/`Hash`/`Eq` so it keys the `roles.ron` map and
 /// the [`RoleBrains`] registry.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 pub enum RoleId {
     Gunman,
     Researcher,
@@ -42,7 +42,7 @@ impl RoleId {
 
 /// A role's authored repertoire, as it appears in `roles.ron`. One list of behaviours — the same
 /// [`Behavior`] literal the engine already scores, now `Deserialize`.
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RoleDef {
     pub behaviors: Vec<Behavior>,
 }
