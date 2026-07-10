@@ -538,6 +538,14 @@ pub struct EpisodeOutcome {
     /// squad brain was *not* in control of movement, `unit_actions`, or `medic_heal`. Diagnostic: an
     /// evaluation in which this approaches the episode length is not evaluating the squad.
     pub ordered_ticks: u32,
+    /// Peak stigmergy-field value seen at any checkpoint — the **saturation** guard. A near-zero
+    /// evaporation rate makes a channel accumulate without bound; the genome `BOUNDS` floor evaporation to
+    /// prevent it, and this catches any residual runaway. Sampled in `evaluate::rollout`.
+    pub peak_field: f32,
+    /// Max fraction of the floor at ≥ half the peak field value seen at any checkpoint — the **whole-map
+    /// smear** guard. A flooded field is uniform (no gradient to navigate); the shipped game is sparse, so
+    /// this stays small. `1.0` would mean the whole floor is saturated. Sampled in `evaluate::rollout`.
+    pub field_flatness: f32,
 }
 
 /// Minimum fraction of the reachable map an episode must cover to count as "an encounter happened".
@@ -559,6 +567,18 @@ pub struct EpisodeOutcome {
 /// must admit the game as shipped**, or the search is measuring the wrong thing
 /// (`tests/search_calibration.rs`).
 const MIN_COVERAGE: f32 = 0.02;
+
+/// Max fraction of the floor at ≥ half the peak field value an episode may reach before its stigmergy
+/// field counts as a degenerate **whole-map smear** — flooded uniform, with no gradient for agents to
+/// climb, so the coordination the whole AI rests on is dead.
+///
+/// **Calibrated by `train probe`**, not chosen: the shipped worlds run at 0.3–0.5% flatness (a sharp peak
+/// over sparse activity) across the three held-in seeds at 7200 ticks, so a 50% ceiling is a ~100× backstop
+/// that only fires on a genuinely gradient-less field. `EpisodeOutcome::peak_field` is *recorded* (a
+/// diagnostic `train probe` prints) but deliberately NOT gated: the `world_genome::BOUNDS` floor
+/// evaporation, so the field cannot saturate unbounded, and a high-but-finite peak is an *intense* world —
+/// exactly what the search is meant to discover, not a degenerate one to reject.
+const FIELD_FLATNESS_CEILING: f32 = 0.5;
 
 /// The **behavioural** minimal criterion: did a real encounter happen?
 ///
@@ -612,6 +632,16 @@ pub fn minimal_criterion(outcome: &EpisodeOutcome) -> Result<(), String> {
     let coverage = outcome.cells_covered as f32 / outcome.reachable_cells as f32;
     if coverage < MIN_COVERAGE {
         return Err(format!("covered {:.1}% of the map (< {:.0}%)", coverage * 100.0, MIN_COVERAGE * 100.0));
+    }
+    // Field-sanity (see [`FIELD_FLATNESS_CEILING`]): reject a flooded, gradient-less field. A hard gate, not
+    // a penalty (Skalse et al.) — the primary defence is the genome `BOUNDS`; this is the residual backstop
+    // for in-bounds knob combinations that still homogenize the field over the episode.
+    if outcome.field_flatness > FIELD_FLATNESS_CEILING {
+        return Err(format!(
+            "field smeared: {:.0}% of the floor at >= half-peak (> {:.0}%) — a flooded, gradient-less field",
+            outcome.field_flatness * 100.0,
+            FIELD_FLATNESS_CEILING * 100.0
+        ));
     }
     Ok(())
 }
@@ -919,12 +949,24 @@ mod tests {
             reachable_cells: 200,
             liveness_violations: 0,
             ordered_ticks: 0,
+            // A sparse, non-degenerate field: a modest peak over a small fraction of the floor.
+            peak_field: 8.0,
+            field_flatness: 0.15,
         }
     }
 
     #[test]
     fn minimal_criterion_admits_a_real_encounter() {
         assert!(minimal_criterion(&healthy()).is_ok());
+    }
+
+    #[test]
+    fn minimal_criterion_rejects_a_smeared_field() {
+        // A flooded, gradient-less field is a hard reject; a shipped-range flatness passes with headroom
+        // (shipped is 0.3–0.5%, healthy() is 0.15, the ceiling is 0.5).
+        let smeared = EpisodeOutcome { field_flatness: 0.9, ..healthy() };
+        assert!(minimal_criterion(&smeared).is_err(), "a flooded, gradient-less field must be rejected");
+        assert!(minimal_criterion(&EpisodeOutcome { field_flatness: 0.45, ..healthy() }).is_ok());
     }
 
     #[test]

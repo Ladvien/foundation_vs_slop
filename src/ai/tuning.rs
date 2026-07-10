@@ -144,3 +144,48 @@ impl Default for AiTuning {
         }
     }
 }
+
+/// Range-check the field-propagation knobs. One path, no fallback: an out-of-range value is a loud `Err`
+/// the loader (`config::load_game_config`) surfaces, never a silent clamp. `diffuse` is the load-bearing
+/// bound — it is an unclamped blur lerp weight (see `field.rs`), so a value ≥ 1 blows the diffusion up;
+/// `evaporate` and `deposit_radius` must be positive. This guards the shipped config and any hand edit; the
+/// offline search's `world_genome::BOUNDS` is tighter still (it also caps the *upper* end per knob).
+pub fn validate_tuning(t: &AiTuning) -> Result<(), String> {
+    let channel = |name: &str, c: &ChannelTuning| -> Result<(), String> {
+        if !(c.evaporate > 0.0 && c.evaporate.is_finite()) {
+            return Err(format!("ai_tuning.fields.{name}.evaporate must be finite and > 0 (got {})", c.evaporate));
+        }
+        if !(0.0..1.0).contains(&c.diffuse) {
+            return Err(format!(
+                "ai_tuning.fields.{name}.diffuse must be in [0, 1) — it is a blur lerp weight (got {})",
+                c.diffuse
+            ));
+        }
+        if !(c.deposit_radius > 0.0 && c.deposit_radius.is_finite()) {
+            return Err(format!(
+                "ai_tuning.fields.{name}.deposit_radius must be finite and > 0 (got {})",
+                c.deposit_radius
+            ));
+        }
+        Ok(())
+    };
+    let f = &t.fields;
+    channel("scent", &f.scent)?;
+    channel("threat_gun", &f.threat_gun)?;
+    channel("crab_density", &f.crab_density)?;
+    channel("meat", &f.meat)?;
+    channel("alarm", &f.alarm)?;
+    channel("threat_crab", &f.threat_crab)?;
+    channel("threat_anomaly", &f.threat_anomaly)?;
+    let positive = |name: &str, v: f32| -> Result<(), String> {
+        if v > 0.0 && v.is_finite() {
+            Ok(())
+        } else {
+            Err(format!("ai_tuning.rally.{name} must be finite and > 0 (got {v})"))
+        }
+    };
+    positive("decay", t.rally.decay)?;
+    positive("accumulate", t.rally.accumulate)?;
+    positive("deposit_radius", t.rally.deposit_radius)?;
+    Ok(())
+}

@@ -77,6 +77,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     manifest::validate_manifest(&cfg.placement.furniture)?;
     gore::validate_settings(&cfg.gore)?;
     mycelia::validate_config(&cfg.mycelia)?;
+    crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
     sim::validate_tuning(&cfg.sim)?;
     Ok(cfg)
 }

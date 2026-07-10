@@ -381,6 +381,19 @@ pub fn ordered_unit_count(app: &mut App) -> usize {
     q.iter(world).count()
 }
 
+/// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see
+/// `ai::field::Stig::saturation_stats`). `(0.0, 0.0)` before the fields/dungeon exist. Read-only.
+pub fn field_saturation(app: &mut App) -> (f32, f32) {
+    let world = app.world();
+    match (
+        world.get_resource::<crate::ai::field::Stig>(),
+        world.get_resource::<crate::dungeon::Dungeon>(),
+    ) {
+        (Some(stig), Some(dungeon)) => stig.saturation_stats(dungeon),
+        _ => (0.0, 0.0),
+    }
+}
+
 /// The dungeon cells currently occupied by squad units (for coverage tracking).
 pub fn unit_cells(app: &mut App) -> Vec<IVec2> {
     let world = app.world_mut();

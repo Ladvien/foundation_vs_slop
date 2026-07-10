@@ -245,6 +245,43 @@ impl Stig {
         }
         (dungeon.cell_center(best_cell), best)
     }
+
+    /// Field-degeneracy stats for the offline search's field-sanity gate: `(peak, flatness)` where `peak`
+    /// is the largest value over every channel and floor cell, and `flatness` is the fraction of floor
+    /// cells whose strongest channel is at least **half** that peak. A healthy field has a sharp peak over
+    /// sparse activity (low flatness); a saturated field (evaporation ≈ 0) has a runaway peak, and a
+    /// whole-map smear (huge radius/diffusion) is high *and* uniform (flatness → 1), so agents cannot
+    /// navigate its gradient. Read-only and order-independent (`max`/count), so it never perturbs the
+    /// pinned sim — it is sampled from `squad_ai::evaluate::rollout`, not a system.
+    pub fn saturation_stats(&self, dungeon: &Dungeon) -> (f32, f32) {
+        let per_cell_max =
+            |i: usize| (0..CHANNEL_COUNT).map(|ch| self.channels[ch][i]).fold(0.0f32, f32::max);
+        let mut peak = 0.0f32;
+        let mut floor = 0usize;
+        for y in 0..self.height as i32 {
+            for x in 0..self.width as i32 {
+                let cell = IVec2::new(x, y);
+                if dungeon.is_floor(cell) {
+                    peak = peak.max(per_cell_max(self.index(cell)));
+                    floor += 1;
+                }
+            }
+        }
+        if floor == 0 || peak <= 0.0 {
+            return (peak, 0.0);
+        }
+        let thresh = 0.5 * peak;
+        let mut hot = 0usize;
+        for y in 0..self.height as i32 {
+            for x in 0..self.width as i32 {
+                let cell = IVec2::new(x, y);
+                if dungeon.is_floor(cell) && per_cell_max(self.index(cell)) >= thresh {
+                    hot += 1;
+                }
+            }
+        }
+        (peak, hot as f32 / floor as f32)
+    }
 }
 
 /// Drain queued deposits into the grid (placement).

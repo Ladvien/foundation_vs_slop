@@ -100,6 +100,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
         println!("  swarm          : {} killed, {} alive", o.crabs_killed, o.crabs_alive);
         println!("  coverage       : {} / {} cells = {:.2}%", o.cells_covered, o.reachable_cells, 100.0 * coverage);
         println!("  liveness       : {} violation(s)", o.liveness_violations);
+        println!("  field          : peak {:.2}, flatness {:.1}% (field-sanity gate calibration)", o.peak_field, 100.0 * o.field_flatness);
         println!("  squad descr    : aggression {:.3}, exploration {:.3}", squad_descriptor(&r.trace, o).aggression, squad_descriptor(&r.trace, o).exploration);
         println!("  swarm descr    : aggression {:.3}, persistence {:.3}", swarm_descriptor(&r.trace).aggression, swarm_descriptor(&r.trace).exploration);
         // What did the brain actually choose? The agency clause must be defined from this, not guessed.

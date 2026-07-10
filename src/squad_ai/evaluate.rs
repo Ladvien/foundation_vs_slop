@@ -20,8 +20,8 @@ use bevy::prelude::App;
 
 use crate::ai::brain::BrainSource;
 use crate::sim_harness::{
-    build_headless_app, clear_squad_orders, floor_cells, issue_squad_order, liveness_violations,
-    nest_cells, ordered_unit_count, serial_guard, step, SimConfig,
+    build_headless_app, clear_squad_orders, field_saturation, floor_cells, issue_squad_order,
+    liveness_violations, nest_cells, ordered_unit_count, serial_guard, step, SimConfig,
 };
 
 use super::surprise::{EpisodeOutcome, EpisodeTrace};
@@ -120,6 +120,9 @@ pub fn rollout(brains: BrainSource, dungeon_seed: u64, ticks: u32) -> Rollout {
     start_recording(&mut app);
 
     let mut violations = 0u32;
+    // Worst field-degeneracy seen across the episode (the saturation / whole-map-smear guard).
+    let mut peak_field = 0.0f32;
+    let mut field_flatness = 0.0f32;
     let mut elapsed = 0u32;
     let mut next_goal = 0usize;
     // Ticks in which at least one unit was under a player order — reported so an evaluation that has
@@ -134,7 +137,14 @@ pub fn rollout(brains: BrainSource, dungeon_seed: u64, ticks: u32) -> Rollout {
             issue_squad_order(&mut app, goals[next_goal % goals.len()]);
             next_goal += 1;
         }
-        elapsed += run(&mut app, &cfg, ADVANCE_TICKS.min(ticks - elapsed), &mut violations);
+        elapsed += run(
+            &mut app,
+            &cfg,
+            ADVANCE_TICKS.min(ticks - elapsed),
+            &mut violations,
+            &mut peak_field,
+            &mut field_flatness,
+        );
         if ordered_unit_count(&mut app) > 0 {
             ordered_ticks += ADVANCE_TICKS;
         }
@@ -144,22 +154,40 @@ pub fn rollout(brains: BrainSource, dungeon_seed: u64, ticks: u32) -> Rollout {
 
         // ── engage: hand the squad back to its brain ──
         clear_squad_orders(&mut app);
-        elapsed += run(&mut app, &cfg, ENGAGE_TICKS.min(ticks - elapsed), &mut violations);
+        elapsed += run(
+            &mut app,
+            &cfg,
+            ENGAGE_TICKS.min(ticks - elapsed),
+            &mut violations,
+            &mut peak_field,
+            &mut field_flatness,
+        );
     }
 
-    let mut rollout = finish_recording(&mut app, violations);
+    let mut rollout = finish_recording(&mut app, violations, peak_field, field_flatness);
     rollout.outcome.ordered_ticks = ordered_ticks.min(ticks);
     rollout
 }
 
 /// Step `ticks`, consulting the liveness oracle every [`LIVENESS_EVERY`]. Returns `ticks`.
-fn run(app: &mut App, cfg: &SimConfig, ticks: u32, violations: &mut u32) -> u32 {
+fn run(
+    app: &mut App,
+    cfg: &SimConfig,
+    ticks: u32,
+    violations: &mut u32,
+    peak_field: &mut f32,
+    field_flatness: &mut f32,
+) -> u32 {
     let mut done = 0;
     while done < ticks {
         let chunk = (ticks - done).min(LIVENESS_EVERY);
         step(app, cfg, chunk);
         done += chunk;
         *violations += liveness_violations(app).len() as u32;
+        // Field-sanity: track the worst degeneracy (highest peak, flattest smear) across the episode.
+        let (peak, flatness) = field_saturation(app);
+        *peak_field = peak_field.max(peak);
+        *field_flatness = field_flatness.max(flatness);
     }
     ticks
 }
@@ -170,10 +198,12 @@ fn start_recording(app: &mut App) {
     app.world_mut().resource_mut::<Recording>().start();
 }
 
-fn finish_recording(app: &mut App, liveness_violations: u32) -> Rollout {
+fn finish_recording(app: &mut App, liveness_violations: u32, peak_field: f32, field_flatness: f32) -> Rollout {
     let mut rec = app.world_mut().resource_mut::<Recording>();
     rec.enabled = false;
     let mut outcome = rec.outcome;
     outcome.liveness_violations = liveness_violations;
+    outcome.peak_field = peak_field;
+    outcome.field_flatness = field_flatness;
     Rollout { trace: std::mem::take(&mut rec.trace), outcome }
 }
