@@ -450,7 +450,58 @@
         // colony, not the colony's only chance to exist.
         warmup_ticks: 200,
         field_size: 1024,       // texels across the 192 m footprint (~5.3 texels/tile)
-        agent_count: 55000,     // sparse on purpose: channels form, rather than flooding to saturation
+        // Sparse on purpose: channels form, rather than flooding to saturation. Agents are confined to the
+        // habitat mask (~habitat_coverage of the floor), so this is a density, not a total: at 55000 over the
+        // whole floor the mat read as channels; over a quarter of it, the same 55000 would be 4x denser and
+        // flood the veins into a flat sheet. Scaled by habitat_coverage to hold the per-texel density fixed.
+        agent_count: 14000,
+
+        // ── Habitat: WHERE the mold may live at all (src/mycelia/habitat.rs) ─────────────────────────
+        // The mold used to grow on every floor cell in the dungeon, because nothing ever decided otherwise:
+        // the substrate mask was `dungeon.is_floor(cell)` and the agents were scattered uniformly over all
+        // of it. Real colonies are patchy — substrate, moisture and competition are patchy. So a habitat
+        // mask is built once at startup and the agents (and, via kill_barren, the biomass) are confined to it.
+        //
+        // The selection is deterministic and exact, not statistical: every room's patch geometry is drawn
+        // FIRST (so an infested room always looks heavily patched), rooms are then ranked by susceptibility
+        // and accepted greedily until the cell budget is spent. Only HOW MANY rooms are infested varies.
+        // Achieved coverage is always logged; a miss is warned, never silently clamped.
+        //
+        // These two values are COUPLED, and the coupling is not obvious. This dungeon is only about a THIRD
+        // room floor by area (1179 room cells against 2349 corridor cells at the shipped seed), so the
+        // coverage quota is mostly a claim on corridors. Push habitat_coverage up without raising
+        // corridor_infest_chance and the greedy has nowhere to get the cells but rooms — at 0.25/0.12 it
+        // infested 17 of 24 rooms and no room was left clean. Push corridor_infest_chance up to compensate
+        // and the mold stops being a room phenomenon: at 0.25/0.30 nearly half of it lives in the halls.
+        //
+        // 0.15/0.08 is the point where all three design rules hold at once, measured against the shipped seed:
+        //   6 of 24 rooms infested (18 stay clean) · 80% of the mold is in rooms · 2 of 26 corridor runs.
+        // `habitat::tests::the_shipped_config_delivers_the_intended_level` asserts exactly that, so a change
+        // to either dial fails the test rather than quietly coating the level again.
+        habitat_coverage: 0.15,      // fraction of walkable floor cells (rooms + corridors) the mold occupies
+        patch_spacing: 4.0,          // blue-noise spacing (cells) between patch nuclei within a room
+        patch_radius_min: 2.0,       // patch radii (cells). The spread is what stops patches reading as a
+        patch_radius_max: 5.0,       // regular polka-dot lattice inside a room.
+        // A corridor gets all of itself or none of it. Rooms get patches; a passage you dread is a passage,
+        // not a spot. One roll per adjacency edge (a "run" from one room to the next).
+        corridor_infest_chance: 0.08,
+        edge_noise_amp: 0.35,        // how hard fbm breaks up a patch border. 0 = circles.
+        edge_noise_scale: 0.15,      // border-noise frequency, cycles per cell
+        // Habitat at/above which an agent may stand. The mask crosses to the GPU as one Rgba8Unorm byte, so
+        // this must be >= 2/255 or the shader's hard block could reject a texel the CPU seeder accepted —
+        // and that agent would be frozen for the whole run. validate_config enforces the floor.
+        agent_hab_min: 0.02,
+        // How readily each room type rots. Damp rooms rot; dry ones rarely do. Must name EXACTLY the tags in
+        // dungeon.room_types above — a missing type is a loud startup error, not a silent 1.0 (see
+        // mycelia::validate_damp_coverage). Weights are relative susceptibility, not probabilities.
+        damp_weights: [
+            ( tag: "bathroom", weight: 3.0 ),   // standing water, no ventilation
+            ( tag: "kitchen",  weight: 2.5 ),   // organics, grease, damp
+            ( tag: "hall",     weight: 1.2 ),
+            ( tag: "living",   weight: 1.0 ),
+            ( tag: "bedroom",  weight: 0.6 ),
+            ( tag: "office",   weight: 0.4 ),   // dry paper, the last place to rot
+        ],
 
         // ── Transport layer (Physarum, Jones three-sensor rule). Texels and radians.
         sense_angle: 0.40,      // half-angle between centre and side sensors (~23 deg)
@@ -470,6 +521,19 @@
         dt: 1.0,
         feed: 0.036,
         kill: 0.060,
+        // Removal rate on BARREN floor — floor outside the habitat mask. `kill_eff` in the field pass blends
+        // kill -> kill_barren as habitat falls to 0, so biomass simply dies where the mold does not live,
+        // leaving a ragged margin instead of the hard rim a masked Laplacian would carve.
+        //
+        // The non-trivial homogeneous states solve (F+k)V^2 - F*V + F(F+k) = 0, which has real roots only
+        // while F + k <= sqrt(F)/2. At feed 0.036 that bound is 0.0949, so any kill_barren above 0.0589
+        // annihilates them and (U,V) = (1,0) is the sole stable state. 0.09 (F+k = 0.126) clears it with
+        // margin. Pearson 1993, Science 261:189 — the canonical (F,k) regime map. validate_config enforces it.
+        //
+        // Diffusion cannot defeat it: linearizing V about (V~0, U~1) in the barren zone gives a penetration
+        // length lambda = sqrt(d_v / (feed + kill_barren)) = sqrt(0.08/0.126) ~= 0.80 texel. Sub-texel. The
+        // mat cannot creep past its patch however long it runs, which is why d_v needs no habitat damping.
+        kill_barren: 0.09,
         d_u: 0.16,
         d_v: 0.08,
         bloom_seed: 0.06,       // how strongly a vein nucleates biomass beneath it

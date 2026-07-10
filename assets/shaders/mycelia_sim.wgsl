@@ -44,6 +44,8 @@ struct MoldParams {
     vein_lo: f32,
     vein_hi: f32,
     coarse_res: u32,
+    agent_hab_min: f32,
+    kill_barren: f32,
 };
 
 // MUST byte-match the `u32` encoding in `src/mycelia/agents.rs` (std430 stride 16).
@@ -71,10 +73,13 @@ struct Agent {
 // unit can currently see, but both of those are decided per-frame by the material shaders, which sample this
 // same texture directly.
 @group(0) @binding(8) var control: texture_2d<f32>;
-// Static wall-proximity field at FIELD resolution, written once: R = 1 on the mold's side of a wall surface,
-// falling to 0 over `wall_reach` world units. Built by an exact Euclidean distance transform against the
-// real slab geometry, so its ridge sits on the surface the player sees rather than at the cell centre.
-@group(0) @binding(9) var wall_prox: texture_2d<f32>;
+// Static world field at FIELD resolution, written once. Two channels, both unchanging:
+//   R = wall proximity: 1 on the mold's side of a wall surface, falling to 0 over `wall_reach` world units.
+//       Built by an exact Euclidean distance transform against the real slab geometry, so its ridge sits on
+//       the surface the player sees rather than at the cell centre.
+//   G = habitat: where the mold may live at all (src/mycelia/habitat.rs). 0 on barren floor and on rock.
+//       The mold used to grow on every floor cell; this is the mask that makes it patchy.
+@group(0) @binding(9) var static_field: texture_2d<f32>;
 // The mold's ONLY channel back to the CPU: a `coarse_res²` reduction of the biomass field, one `vec4` per
 // cell = (max V in the block, U at that same texel, that texel's x, that texel's y). Read back by
 // `src/mycelia/fruit.rs` to decide where mushrooms erupt. Write-only from the shader's point of view.
@@ -103,30 +108,59 @@ fn texel_walkable(x: i32, y: i32, dim: i32) -> f32 {
     return is_walkable(textureLoad(control, vec2<i32>(cx, cy), 0).a);
 }
 
-/// May an agent stand at this float FIELD position?
+/// Is this float FIELD position on dungeon floor? (Rock test only — see `pos_habitable` for the agent gate.)
 fn pos_walkable(p: vec2<f32>, dim: i32) -> bool {
     return texel_walkable(i32(floor(p.x)), i32(floor(p.y)), dim) > 0.5;
 }
 
-/// Bilinearly sample the static wall-proximity field at a float FIELD position. The field is now stored at
-/// field resolution (1:1 with this texture), so this is a plain bilinear tap — no cell-grid remap. Bilinear
-/// (not nearest) so agents get a smooth gradient to climb toward the wall instead of a blocky step.
-fn wall_prox_at(p: vec2<f32>, dim: i32) -> f32 {
+/// May an agent stand at this float FIELD position? Floor **and** habitat.
+///
+/// This is deliberately a *different* predicate from `texel_walkable`, which four other call sites
+/// (`diffuse`, `field`, `bio_flux`, `pin_scan`) use to mean "is rock". Folding habitat into that one would
+/// hard-gate the Gray-Scott Laplacian at every patch border, turning each into a no-flux wall that biomass
+/// piles against — a hard rim exactly where the colony should have a ragged margin. Agents get a hard block;
+/// the field gets a soft kill ramp. One function per meaning.
+fn pos_habitable(p: vec2<f32>, dim: i32) -> bool {
+    return pos_walkable(p, dim) && static_hab_at(p, dim) >= params.agent_hab_min;
+}
+
+/// Bilinearly sample the static field at a float FIELD position. It is stored at field resolution (1:1 with
+/// this texture), so this is a plain bilinear tap — no cell-grid remap. Bilinear (not nearest) so agents get
+/// a smooth gradient to climb toward a wall, and so a patch border is a ramp rather than a blocky step.
+fn static_at(p: vec2<f32>, dim: i32) -> vec4<f32> {
     let c = p - vec2<f32>(0.5, 0.5);
     let base = floor(c);
     let f = c - base;
     let hi = params.field_res - vec2<f32>(1.0, 1.0);
 
-    var acc = 0.0;
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     for (var j = 0; j < 2; j++) {
         for (var i = 0; i < 2; i++) {
             let q = clamp(base + vec2<f32>(f32(i), f32(j)), vec2<f32>(0.0, 0.0), hi);
             let wx = select(1.0 - f.x, f.x, i == 1);
             let wy = select(1.0 - f.y, f.y, j == 1);
-            acc += textureLoad(wall_prox, vec2<i32>(i32(q.x), i32(q.y)), 0).r * wx * wy;
+            acc += textureLoad(static_field, vec2<i32>(i32(q.x), i32(q.y)), 0) * wx * wy;
         }
     }
     return acc;
+}
+
+/// How close is this position to a wall surface? `R` of the static field.
+fn wall_prox_at(p: vec2<f32>, dim: i32) -> f32 {
+    return static_at(p, dim).r;
+}
+
+/// How habitable is this position? `G` of the static field — the STATIC mask only.
+///
+/// Nothing dynamic may widen this. The agent hard block below is an induction invariant ("an agent stands on
+/// habitable floor"), and it survives only because the mask never changes: were a transient signal — a blood
+/// pool, say — to make barren ground habitable, every agent that walked onto it would be stranded with no
+/// habitable neighbour the moment the pool faded. Rock works as a hard block for exactly the same reason.
+///
+/// The *field* pass is free to take `max(this, chemo)`, because it has no such invariant to preserve: biomass
+/// that blooms on a corpse in a bare corridor simply dies back when the corpse is gone.
+fn static_hab_at(p: vec2<f32>, dim: i32) -> f32 {
+    return static_at(p, dim).g;
 }
 
 // Integer hash → uniform f32 in [0,1). Cheap per-agent randomness for the "turn away" case.
@@ -189,9 +223,15 @@ fn sense(p: vec2<f32>, dim: i32) -> f32 {
     let ctl = control_at(p, dim);
     let attract = ctl.r * params.chemo_gain
                 + wall_prox_at(p, dim) * params.wall_affinity;
+    // Rock and barren floor are equally somewhere an agent may not go (`pos_habitable`), so both must repel
+    // at sensor range for the same reason: an agent that only discovers the boundary by being blocked drives
+    // into it and bounces. Repelling from the *union* lets it turn early, so a patch acquires the same soft
+    // interior margin the dungeon walls already give it, and the mold pools inside its patch rather than
+    // piling against the border.
+    let habitable = is_walkable(ctl.a) * step(params.agent_hab_min, static_hab_at(p, dim));
     let repel = ctl.g * params.photophobia
               + ctl.b * params.disturbance_gain
-              + (1.0 - is_walkable(ctl.a)) * params.wall_repel;
+              + (1.0 - habitable) * params.wall_repel;
     return trail_at(p, dim) + attract - repel;
 }
 
@@ -259,16 +299,22 @@ fn agent_step(@builtin(global_invocation_id) id: vec3<u32>) {
     // `step_size` is 1 texel ≈ 0.19 cells, so a step can never skip a cell boundary — one test per axis is
     // sufficient. Out-of-range positions are non-floor (`texel_walkable`), so the world border is a wall and
     // the old toroidal wrap — which could teleport an agent across the map — is gone.
+    //
+    // The gate is `pos_habitable`, not `pos_walkable`: a patch border is as impassable to an agent as rock.
+    // Since agents are *seeded* inside the habitat (`agents::seed_agents`), this preserves by induction the
+    // invariant that every agent stands on habitable floor — which is what confines the veins, and through
+    // `bloom_seed`, the biomass. The mask it reads is static, so the invariant cannot be broken by a
+    // transient (see `static_hab_at`).
     let delta = vec2<f32>(cos(heading), sin(heading)) * params.step_size;
     var pos = a.pos;
     var blocked_x = false;
     var blocked_y = false;
 
     let try_x = vec2<f32>(pos.x + delta.x, pos.y);
-    if (pos_walkable(try_x, dim)) { pos = try_x; } else { blocked_x = true; }
+    if (pos_habitable(try_x, dim)) { pos = try_x; } else { blocked_x = true; }
 
     let try_y = vec2<f32>(pos.x, pos.y + delta.y);
-    if (pos_walkable(try_y, dim)) { pos = try_y; } else { blocked_y = true; }
+    if (pos_habitable(try_y, dim)) { pos = try_y; } else { blocked_y = true; }
 
     // Collision response. One axis blocked = slide along the wall: the mold creeps along the surface it
     // touched, which is thigmotropism (contact guidance) and is how real hyphae follow topography —
@@ -403,16 +449,36 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     lap += bio_flux(x - 1, y - 1, dim, 0.05, c) + bio_flux(x + 1, y - 1, dim, 0.05, c)
          + bio_flux(x - 1, y + 1, dim, 0.05, c) + bio_flux(x + 1, y + 1, dim, 0.05, c);
 
-    // Gray-Scott reaction.
+    let p = vec2<f32>(f32(x), f32(y));
+    let ctl = control_at(p, dim);
+
+    // How hospitable is this texel to living flesh? The static habitat mask, OR carrion.
+    //
+    // Carrion is substrate, not merely scent: a gib rotting on bare corridor floor makes that floor briefly
+    // habitable, so the mold erupts there and then recedes once the meat is gone. Note this is the FIELD's
+    // notion of habitat, not the agents' — agents are confined to the static mask alone (see
+    // `static_hab_at`), so the veins never reach the corpse. The flesh blooms; the network does not follow.
+    // That is the intended reading, and it is also what keeps the agent hard block a sound invariant.
+    let hab = max(static_hab_at(p, dim), ctl.r);
+
+    // Gray-Scott reaction, with the removal rate `k` blended toward `kill_barren` as habitat falls away.
+    //
+    // Containment is a REACTION property here, not a masking one. Masking the Laplacian (as `bio_flux` does
+    // for rock) would make every patch border a no-flux wall and pile biomass into a hard rim; instead barren
+    // floor simply sits in the regime where `(U, V) = (1, 0)` is the only stable homogeneous state, and `V`
+    // dies there of its own accord, leaving the ragged margin a colony ought to have. Linearizing `V` about
+    // `(V ~ 0, U ~ 1)` gives a penetration length `sqrt(d_v / (feed + kill_barren))` — sub-texel at the
+    // shipped values, so diffusion cannot carry the mat past its patch however long it runs.
+    // Pearson (1993), Science 261:189.
+    let kill_eff = mix(params.kill_barren, params.kill, hab);
     let uvv = u * v * v;
     u += (params.d_u * lap.x - uvv + params.feed * (1.0 - u)) * params.dt;
-    v += (params.d_v * lap.y + uvv - (params.feed + params.kill) * v) * params.dt;
+    v += (params.d_v * lap.y + uvv - (params.feed + kill_eff) * v) * params.dt;
 
     // The transport network feeds the flesh: a strong vein seeds biomass beneath itself. `trail_read` is
     // this tick's source field (the freshly-diffused trail lands in `trail_write`), so the bloom trails the
     // veins by exactly one tick — imperceptible, and it avoids a read-after-write on the same texture.
     let trail = textureLoad(trail_read, vec2<i32>(x, y), 0).r;
-    let ctl = control_at(vec2<f32>(f32(x), f32(y)), dim);
     let vein = smoothstep(params.vein_lo, params.vein_hi, trail);
 
     // Blooms swell in the unseen dark and shrink under a live gaze — the room you just left goes ripe.
@@ -447,7 +513,7 @@ fn field(@builtin(global_invocation_id) id: vec3<u32>) {
     // This is a per-tick SNAPSHOT, not the texture the materials sample: `blend` interpolates the two most
     // recent snapshots into `display` every rendered frame. Writing straight to `display` made the mold's
     // rendered contour hop once per period.
-    let contact = wall_prox_at(vec2<f32>(f32(x), f32(y)), dim);
+    let contact = wall_prox_at(p, dim);
     textureStore(snap_write, vec2<i32>(x, y), vec4<f32>(trail, v, contact, 1.0));
 }
 

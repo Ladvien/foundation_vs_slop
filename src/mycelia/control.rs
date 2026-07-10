@@ -11,12 +11,16 @@
 //! | `A` | substrate mask | `0` void · `0.33` floor never seen · `0.67` remembered · `1` visible |
 //!
 //! # Why `A` is four-state, not a bool
-//! The mold *grows* on any floor, seen or not — a room you have never entered is exactly where it should be
-//! ripest. But it must not be *drawn* on floor the player has never explored, or the coating would trace
-//! the corridor layout straight through the fog of war and leak the map. And it must not be *lit* on floor
-//! the squad cannot currently see, or a remembered room's mold glows through the dark while the floor under
-//! it is dimmed. So growth keys off "is floor", rendering off "is explored", and brightness off "is
-//! visible". One channel, three thresholds.
+//! The mold *grows* on any floor **it has habitat on**, seen or not — a room you have never entered is
+//! exactly where it should be ripest. But it must not be *drawn* on floor the player has never explored, or
+//! the coating would trace the corridor layout straight through the fog of war and leak the map. And it must
+//! not be *lit* on floor the squad cannot currently see, or a remembered room's mold glows through the dark
+//! while the floor under it is dimmed. So growth keys off "is floor", rendering off "is explored", and
+//! brightness off "is visible". One channel, three thresholds.
+//!
+//! *Where* the mold may grow at all is a separate, static question, answered once by `habitat.rs` and carried
+//! in the `G` channel of the **static** field below — not here. `A` says "this is floor"; habitat says "the
+//! mold lives here". Conflating them is what made the mold coat every room and corridor in the dungeon.
 //!
 //! # Habituation
 //! `G` is not simply "is this cell watched". Each watched cell accumulates habituation and its repellent
@@ -65,10 +69,18 @@ const MEAT_RADIUS_CELLS: f32 = 1.6;
 pub struct MoldControlImage {
     /// Rewritten every `Update` (chemo / light / disturbance / substrate).
     pub dynamic: Handle<Image>,
-    /// Written **once**, when the dungeon first exists. At **field** resolution, not cell resolution:
-    /// `R` = wall proximity (1 hard against a wall surface, falling to 0 over `wall_reach` world units).
-    /// The dungeon never regenerates, so this never changes.
-    pub wall: Handle<Image>,
+    /// Written **once**, when the dungeon first exists. At **field** resolution, not cell resolution, and
+    /// carrying the two things about the world that never change:
+    ///
+    /// | Ch | Meaning |
+    /// |----|---------|
+    /// | `R` | wall proximity — `1` hard against a wall surface, falling to `0` over `wall_reach` world units |
+    /// | `G` | habitat — where the mold may live at all (see `habitat.rs`); `0` on barren floor and rock |
+    ///
+    /// Both are at field resolution for the same reason: a cell-resolution wall ridge lands half a tile from
+    /// the wall, and a cell-resolution patch border is tile-blocky. The dungeon never regenerates, so this
+    /// texture is uploaded once and never touched again.
+    pub static_field: Handle<Image>,
 }
 
 /// Main-world scratch: the CPU-side pixel buffers we rewrite each `Update`, plus the two per-cell
@@ -76,14 +88,14 @@ pub struct MoldControlImage {
 #[derive(Resource)]
 pub struct MoldControl {
     dynamic: Handle<Image>,
-    wall: Handle<Image>,
+    static_field: Handle<Image>,
     cpu: Vec<u8>,
     habituation: Vec<f32>,
     /// The gaze signal actually written to `G`, rate-limited toward its instantaneous target so the mat's
     /// glow can never swing faster than the slow-change window. See [`write_control`].
     light: Vec<f32>,
-    /// The static wall field is uploaded exactly once, the first `Update` that sees a `Dungeon`.
-    wall_written: bool,
+    /// The static field is uploaded exactly once, the first `Update` that sees a `Dungeon`.
+    static_written: bool,
 }
 
 impl MoldControl {
@@ -103,15 +115,18 @@ pub(super) fn setup_control(
     mut images: ResMut<Assets<Image>>,
 ) {
     let dynamic = images.add(field::control_texture(CONTROL_SIZE));
-    let wall = images.add(field::control_texture(cfg.field_size));
-    commands.insert_resource(MoldControlImage { dynamic: dynamic.clone(), wall: wall.clone() });
+    let static_field = images.add(field::control_texture(cfg.field_size));
+    commands.insert_resource(MoldControlImage {
+        dynamic: dynamic.clone(),
+        static_field: static_field.clone(),
+    });
     commands.insert_resource(MoldControl {
         dynamic,
-        wall,
+        static_field,
         cpu: vec![0u8; MoldControl::cells() * field::CONTROL_BYTES_PER_TEXEL],
         habituation: vec![0.0; MoldControl::cells()],
         light: vec![0.0; MoldControl::cells()],
-        wall_written: false,
+        static_written: false,
     });
 }
 
@@ -272,6 +287,7 @@ fn compute_wall_proximity(dungeon: &Dungeon, field_size: u32, wall_reach: f32, c
 pub(super) fn write_control(
     mut control: ResMut<MoldControl>,
     cfg: Res<MyceliaConfig>,
+    habitat: Res<super::MoldHabitat>,
     mut images: ResMut<Assets<Image>>,
     time: Res<Time<Virtual>>,
     dungeon: Option<Res<Dungeon>>,
@@ -289,17 +305,25 @@ pub(super) fn write_control(
     let size = CONTROL_SIZE as i32;
 
     // Split the borrow so we can read `cpu` while mutating `habituation` (and vice versa).
-    let MoldControl { dynamic, wall, cpu, habituation, light, wall_written } = &mut *control;
+    let MoldControl { dynamic, static_field, cpu, habituation, light, static_written } = &mut *control;
 
-    // ── Once: the static wall-proximity field ─────────────────────────────────────────────────────────
+    // ── Once: the static field (R = wall proximity, G = habitat) ──────────────────────────────────────
     // The dungeon is generated once and never regenerates, so this is computed and uploaded a single time.
-    if !*wall_written {
+    if !*static_written {
         let texels = (cfg.field_size as usize) * (cfg.field_size as usize);
-        let mut wall_cpu = vec![0u8; texels * field::CONTROL_BYTES_PER_TEXEL];
-        compute_wall_proximity(&dungeon, cfg.field_size, cfg.wall_reach, &mut wall_cpu);
-        if let Some(mut gpu) = images.get_mut(&*wall) {
-            gpu.data = Some(wall_cpu);
-            *wall_written = true;
+        let mut static_cpu = vec![0u8; texels * field::CONTROL_BYTES_PER_TEXEL];
+        compute_wall_proximity(&dungeon, cfg.field_size, cfg.wall_reach, &mut static_cpu);
+        // `G`: the habitat mask, byte-for-byte as `habitat::build` quantized it. The CPU agent seeder
+        // thresholded these exact bytes, so the shader's hard block agrees with it on every texel.
+        // Both buffers are sized from `cfg.field_size`, so the zip consumes each exactly.
+        for (texel, &h) in
+            static_cpu.chunks_exact_mut(field::CONTROL_BYTES_PER_TEXEL).zip(habitat.0.iter())
+        {
+            texel[1] = h;
+        }
+        if let Some(mut gpu) = images.get_mut(&*static_field) {
+            gpu.data = Some(static_cpu);
+            *static_written = true;
         }
     }
 

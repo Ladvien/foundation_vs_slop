@@ -158,7 +158,7 @@ fn init_mold_pipeline(
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
                 // 8: control (CPU-written world state: chemo / light / disturbance / substrate).
                 texture_2d(TextureSampleType::Float { filterable: false }),
-                // 9: static wall-proximity field (`R`), written once.
+                // 9: static field, written once: `R` = wall proximity, `G` = habitat (habitat.rs).
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 // 10: coarse biomass reduction (write-only from the shader; read back by `fruit.rs`).
                 storage_buffer_sized(false, None),
@@ -303,8 +303,8 @@ fn prepare_bind_group(
     };
     // The control textures are uploaded from the main world; until their first upload lands there is
     // nothing for the mold to sense, so we simply don't dispatch.
-    let (Some(control), Some(wall)) =
-        (gpu_images.get(&mold_control.dynamic), gpu_images.get(&mold_control.wall))
+    let (Some(control), Some(static_field)) =
+        (gpu_images.get(&mold_control.dynamic), gpu_images.get(&mold_control.static_field))
     else {
         return;
     };
@@ -335,7 +335,7 @@ fn prepare_bind_group(
                 &bio_read.texture_view,
                 &bio_write.texture_view,
                 &control.texture_view,
-                &wall.texture_view,
+                &static_field.texture_view,
                 coarse_buf.buffer.as_entire_buffer_binding(),
             )),
         )

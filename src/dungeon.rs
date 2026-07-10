@@ -457,6 +457,9 @@ pub struct FloorMaterials {
     pub dim: Handle<StandardMaterial>,
 }
 
+/// Sentinel in [`Dungeon::corridor_of`] for "this cell is not corridor floor".
+const NO_CORRIDOR: u32 = u32::MAX;
+
 /// The realized dungeon on the fine grid: a walkability mask plus the player spawn.
 #[derive(Resource)]
 pub struct Dungeon {
@@ -468,6 +471,11 @@ pub struct Dungeon {
     /// furnishes (see `crate::placement`). Carries each room's rect, boundary openings, and the
     /// corridor-adjacency graph, so cross-room rules are first-class.
     pub regions: Vec<Region>,
+    /// Which adjacency edge carved each cell, or [`NO_CORRIDOR`]. Rooms are `Region`s; corridors were only
+    /// ever strokes in the walkability mask, so a system that wants to reason about *a passage* — mold that
+    /// infests whole runs, say — had no handle on one. This restores it: a corridor run is an edge index.
+    /// Private, like `walkable`, and read through [`Dungeon::corridor_id`] / [`Dungeon::is_corridor`].
+    corridor_of: Vec<u32>,
 }
 
 pub struct DungeonPlugin;
@@ -682,7 +690,7 @@ fn expand_to_fine(
     layout: &CoarseLayout,
     config: &DungeonConfig,
     rng: &mut impl DetRng,
-) -> (Vec<bool>, Vec<Region>, IVec2) {
+) -> (Vec<bool>, Vec<Region>, IVec2, Vec<u32>) {
     let (width, height) = (layout.width, layout.height);
     let mut walkable = vec![false; width * height];
     let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
@@ -775,6 +783,13 @@ fn expand_to_fine(
         });
     }
 
+    // The room pass is complete, so this snapshot is exactly "floor that belongs to a room". Corridors are
+    // carved site-centre to site-centre, which means their paths run straight *through* room interiors — so
+    // "corridor cell" cannot be "floor outside a room rect". It is "floor the corridor pass added that the
+    // room pass had not already set", and this is the only moment that distinction is observable.
+    let room_floor = walkable.clone();
+    let mut corridor_of = vec![NO_CORRIDOR; width * height];
+
     // Corridor pass — each adjacency edge draws its own width in `[corridor_width, corridor_width_max]`
     // (uniform, from the carve RNG in adjacency order) so passages vary from tight to broad instead of
     // being identical. The drawn width is stashed per unordered edge so the necking pass below can reuse
@@ -784,7 +799,7 @@ fn expand_to_fine(
         config.corridor_width_max.unwrap_or(config.corridor_width),
     );
     let mut edge_width: HashMap<(usize, usize), usize> = HashMap::new();
-    for &(a, b) in &layout.adjacency {
+    for (edge_idx, &(a, b)) in layout.adjacency.iter().enumerate() {
         let w = cw_min + rng.below(cw_max - cw_min + 1);
         edge_width.insert((a.min(b), a.max(b)), w);
         carve_corridor(
@@ -795,6 +810,15 @@ fn expand_to_fine(
             layout.sites[b].center,
             w,
         );
+        // Claim every cell this edge just opened. The `NO_CORRIDOR` guard makes the FIRST edge to open a
+        // cell its owner, so an overlap at a junction resolves deterministically in adjacency order rather
+        // than by whichever edge happened to be carved last. `carve_corridor` is left untouched — it stays
+        // a pure walkability carve, and the identity is recovered here by diffing against `room_floor`.
+        for i in 0..walkable.len() {
+            if walkable[i] && !room_floor[i] && corridor_of[i] == NO_CORRIDOR {
+                corridor_of[i] = edge_idx as u32;
+            }
+        }
     }
 
     // Opening pass — record each region's adjacency + the interior wall cell where its corridor actually
@@ -834,7 +858,10 @@ fn expand_to_fine(
     }
 
     let spawn = layout.sites[layout.spawn_site].center;
-    (walkable, regions, spawn)
+    // The necking pass above may have un-set cells that the corridor pass opened. Their `corridor_of` entry
+    // survives, which is harmless: every read goes through `is_corridor`/`corridor_id`, and both gate on
+    // `is_floor` first. A necked-out doorway cell is simply not floor, so it is not a corridor cell either.
+    (walkable, regions, spawn, corridor_of)
 }
 
 /// Carve a `lanes`-wide corridor between two site centres. Axis-aligned edges (always, for the grid) are
@@ -1100,7 +1127,10 @@ impl Dungeon {
     /// Collapse a coarse room graph, keep the largest connected component, and expand
     /// each surviving slot into a room + corridors on the fine grid. Fails loud (one path) if the
     /// collapse yields zero rooms, rather than returning a degenerate empty dungeon.
-    fn generate(config: &DungeonConfig) -> Result<Self, String> {
+    ///
+    /// `pub(crate)` so `mycelia::habitat` can assert, in a GPU-free test, that the *shipped* seed and the
+    /// *shipped* config together produce the level the design intends.
+    pub(crate) fn generate(config: &DungeonConfig) -> Result<Self, String> {
         // Build the coarse layout for the selected topology — both fail loud (one path) if they can't
         // yield a usable dungeon — then carve the fine grid through the single shared `expand_to_fine`.
         let layout = match &config.topology {
@@ -1114,7 +1144,7 @@ impl Dungeon {
         // The carve RNG is seeded here (separately from the coarse seed) and drawn only inside
         // `expand_to_fine`, in site order — so the Grid path stays byte-identical to the pre-refactor carve.
         let mut rng = seeded(config.seed ^ 0xC0FFEE);
-        let (walkable, regions, spawn) = expand_to_fine(&layout, config, &mut rng);
+        let (walkable, regions, spawn, corridor_of) = expand_to_fine(&layout, config, &mut rng);
 
         Ok(Dungeon {
             width: layout.width,
@@ -1122,6 +1152,7 @@ impl Dungeon {
             walkable,
             spawn,
             regions,
+            corridor_of,
         })
     }
 
@@ -1178,6 +1209,26 @@ impl Dungeon {
 
     pub fn is_floor(&self, c: IVec2) -> bool {
         self.in_bounds(c) && self.walkable[self.index(c)]
+    }
+
+    /// Which corridor run (adjacency-edge index) owns this cell, or `None` for room floor and rock.
+    ///
+    /// Gated on `is_floor`, so a doorway cell the necking pass closed reports `None` even though the
+    /// corridor pass had opened it. Corridors cross room interiors on their way between site centres; those
+    /// crossing cells are room floor and report `None` too.
+    pub fn corridor_id(&self, c: IVec2) -> Option<u32> {
+        if !self.is_floor(c) {
+            return None;
+        }
+        match self.corridor_of[self.index(c)] {
+            NO_CORRIDOR => None,
+            id => Some(id),
+        }
+    }
+
+    /// Is this cell corridor floor rather than room floor? See [`Dungeon::corridor_id`].
+    pub fn is_corridor(&self, c: IVec2) -> bool {
+        self.corridor_id(c).is_some()
     }
 
     #[inline]
@@ -1263,10 +1314,26 @@ impl Dungeon {
         Dungeon {
             width,
             height,
+            corridor_of: vec![NO_CORRIDOR; walkable.len()],
             walkable,
             spawn: IVec2::ZERO,
             regions: Vec::new(),
         }
+    }
+
+    /// Test-only constructor for a dungeon with rooms *and* corridor identity — the shape `mycelia::habitat`
+    /// actually reasons about. `corridor_of` uses [`NO_CORRIDOR`] for room floor and rock.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        width: usize,
+        height: usize,
+        walkable: Vec<bool>,
+        regions: Vec<Region>,
+        corridor_of: Vec<u32>,
+    ) -> Self {
+        assert_eq!(walkable.len(), width * height, "walkable mask size mismatch");
+        assert_eq!(corridor_of.len(), width * height, "corridor mask size mismatch");
+        Dungeon { width, height, walkable, spawn: IVec2::ZERO, regions, corridor_of }
     }
 
     /// Test-only accessor for the private [`Self::is_solid`] ground-truth wall test.
@@ -1981,6 +2048,39 @@ fn spawn_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Corridor identity is a partition of floor: every cell is room floor XOR corridor floor, never both,
+    /// and rock is neither. This is the invariant `mycelia::habitat` leans on to keep patches out of halls.
+    #[test]
+    fn corridor_cells_are_floor_and_never_room_floor() {
+        let d = Dungeon::generate(&test_config()).expect("test config generates");
+        let mut corridor_cells = 0usize;
+        for y in 0..d.height as i32 {
+            for x in 0..d.width as i32 {
+                let c = IVec2::new(x, y);
+                match d.corridor_id(c) {
+                    Some(_) => {
+                        assert!(d.is_floor(c), "corridor cell {c:?} must be floor");
+                        corridor_cells += 1;
+                    }
+                    None => {}
+                }
+                // Rock is never a corridor, whatever the carve left painted underneath it.
+                if !d.is_floor(c) {
+                    assert!(!d.is_corridor(c), "rock {c:?} reported as corridor");
+                }
+            }
+        }
+        assert!(corridor_cells > 0, "a connected dungeon must have corridor floor");
+    }
+
+    /// The corridor painting must be a pure function of the seed, like every other carve decision.
+    #[test]
+    fn corridor_identity_is_deterministic() {
+        let a = Dungeon::generate(&test_config()).expect("generates");
+        let b = Dungeon::generate(&test_config()).expect("generates");
+        assert_eq!(a.corridor_of, b.corridor_of, "same seed must paint the same runs");
+    }
 
     /// A small, valid config for generation tests (avoids depending on the shipped RON's exact values).
     fn test_config() -> DungeonConfig {
