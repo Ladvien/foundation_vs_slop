@@ -33,6 +33,9 @@ pub mod rl;
 pub mod role;
 pub mod surprise;
 pub mod trace;
+/// The world-config genome (field-propagation + sim-dynamics tuning as a flat vector) the offline search
+/// evolves as a third population. Pure logic like `genome`; the harness installs a decoded `WorldConfig`.
+pub mod world_genome;
 
 use cohesion::{SquadAnchor, SquadControlMode};
 use dialogue::{ActiveDialogueProvider, SquadLine, SquadUtterance};

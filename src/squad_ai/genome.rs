@@ -185,8 +185,8 @@ pub fn decode(template: &[Behavior], genome: &Genome) -> Result<Vec<Behavior>, S
 }
 
 /// A standard normal draw (Box–Muller). `unit()` yields `[0, 1)`, so `1.0 - unit()` moves it to `(0, 1]`
-/// and keeps `ln` finite.
-fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
+/// and keeps `ln` finite. `pub(crate)` so `squad_ai::world_genome` shares the one Gaussian kernel.
+pub(crate) fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
     let u1 = 1.0 - rng.unit();
     let u2 = rng.unit();
     let r = (-2.0 * u1.ln()).sqrt();

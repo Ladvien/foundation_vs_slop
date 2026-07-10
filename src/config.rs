@@ -53,6 +53,17 @@ pub struct GameConfig {
     pub mycelia: MyceliaConfig,
 }
 
+/// The evolvable **world-dynamics** surface, as one value: the field-propagation tuning (`ai_tuning`)
+/// plus the simulation-dynamics tuning (`sim`). This is the slice-pair the offline search evolves (see
+/// `squad_ai::world_genome`) and the harness installs for one rollout (`sim_harness::SimConfig::config`).
+/// Both members are `Copy` + `Serialize`, so an evolved world decodes to a readable RON diff — the
+/// reward-hacking guard (Skalse et al., "Defining and Characterizing Reward Hacking", arXiv:2209.13085).
+#[derive(Clone, Copy)]
+pub struct WorldConfig {
+    pub ai: AiTuning,
+    pub sim: SimTuning,
+}
+
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
 /// failure is an `Err` the caller (`ConfigPlugin::build`) surfaces loudly — there is no default config.
 /// Validation reuses each subsystem's own validator so the invariants are identical to the pre-merge

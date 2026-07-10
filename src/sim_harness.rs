@@ -59,6 +59,11 @@ pub struct SimConfig {
     /// one map learns that map — the offline squad/swarm search (`squad_ai::qd`) evaluates every genome
     /// across a held-in seed set and validates on a held-out one.
     pub dungeon_seed: Option<u64>,
+    /// Override the evolvable world-dynamics config: the field-propagation tuning (`ai_tuning`) plus the
+    /// simulation-dynamics tuning (`sim`). `None` runs the shipped slices (what the replay goldens pin);
+    /// `Some(w)` installs an evolved world for one rollout. Like `dungeon_seed`, this is a knob applied at
+    /// the single `GameConfig` seam before the consumer plugins build — exactly one config reaches them.
+    pub config: Option<crate::config::WorldConfig>,
 }
 
 impl Default for SimConfig {
@@ -70,6 +75,7 @@ impl Default for SimConfig {
             physics: true,
             brains: crate::ai::brain::BrainSource::Authored,
             dungeon_seed: None,
+            config: None,
         }
     }
 }
@@ -89,6 +95,13 @@ impl SimConfig {
     /// Install a candidate genome for one evaluation rollout.
     pub fn with_brains(mut self, brains: crate::ai::brain::BrainSource) -> Self {
         self.brains = brains;
+        self
+    }
+
+    /// Install an evolved world config for one evaluation rollout — the world-population analogue of
+    /// [`with_brains`]. Applied at the same `GameConfig` seam as `dungeon_seed` (see `build_headless_app`).
+    pub fn with_world_config(mut self, config: crate::config::WorldConfig) -> Self {
+        self.config = Some(config);
         self
     }
 }
@@ -190,6 +203,15 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     app.add_plugins(crate::config::ConfigPlugin);
     if let Some(seed) = cfg.dungeon_seed {
         app.world_mut().resource_mut::<crate::config::GameConfig>().dungeon.seed = seed;
+    }
+    // Override the evolvable world-dynamics slices (field propagation + sim tuning) the same way, before
+    // the consumer plugins read them at build (`AiPlugin` reads `ai_tuning` + `sim` into resources). `None`
+    // runs the shipped config the goldens pin; `Some(w)` installs an evolved world for one rollout. Same
+    // "mutate GameConfig at the seam" mechanism as `dungeon_seed` — one config reaches the consumers.
+    if let Some(w) = cfg.config {
+        let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
+        gc.ai_tuning = w.ai;
+        gc.sim = w.sim;
     }
     // Insert BEFORE `AiPlugin`/`SquadAiPlugin`: their `init_resource::<BrainSource>()` is a no-op when the
     // resource already exists, so this is what selects authored-vs-candidate brains for the whole run.
