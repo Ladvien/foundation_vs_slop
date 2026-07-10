@@ -382,6 +382,21 @@ mod tests {
     }
 
     #[test]
+    fn every_shipped_role_brain_has_an_unconditional_default() {
+        // Mirror of the creature-brain check in `ai::brain`. If every behaviour in a role's repertoire is
+        // gated on perception, `decide` finds no eligible bucket and falls through to behaviour 0 — which
+        // for a role brain is the rank-4 DUTY, so the unit would silently examine/heal/breach instead of
+        // standing down. The shared `follow_anchor` tail is the unconditional floor that prevents it.
+        for role in RoleId::ALL {
+            crate::ai::utility::validate_unconditional_default(
+                &default_behaviors(role),
+                &format!("role {role:?}"),
+            )
+            .unwrap_or_else(|e| panic!("{role:?} must ship an unconditional default: {e}"));
+        }
+    }
+
+    #[test]
     fn validate_rejects_empty_behaviors() {
         // A well-formed RON file can still author an unsafe brain: an empty behaviour list would
         // index-panic on the unit's first think. Validation must reject it at the door (fail loud).

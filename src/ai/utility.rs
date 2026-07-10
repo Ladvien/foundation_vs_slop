@@ -239,12 +239,19 @@ pub struct Perception {
     pub squad: SquadFields,
 }
 
+/// The "nothing of this kind is in range" distance. Deliberately **far but finite**: these values are fed
+/// straight into the distance-falloff curves, where `f32::MAX` / `INFINITY` would produce `NaN` once
+/// scaled or subtracted, and `0.0` would falsely read as "touching". Any real in-range distance is orders
+/// of magnitude below it.
+pub const NO_TARGET_DIST: f32 = 999.0;
+
 /// The squad-only slice of a [`Perception`], grouped so non-squad builders (crab/boss) splat one
 /// neutral value instead of listing every unit field. A plain struct (not `Default`-derived) so the
-/// sentinel distances (`999.0`, not `0.0`) are explicit — a `0.0` distance would falsely fire the
-/// distance-falloff curves.
+/// sentinel distances ([`NO_TARGET_DIST`], not `0.0`) are explicit — a `0.0` distance would falsely fire
+/// the distance-falloff curves.
 pub struct SquadFields {
-    /// Squad anchor position + planar distance to it (see [`Fact::AnchorDist`]); `999.0` when no anchor.
+    /// Squad anchor position + planar distance to it (see [`Fact::AnchorDist`]); [`NO_TARGET_DIST`] when
+    /// there is no anchor.
     pub anchor: Option<Vec3>,
     pub anchor_dist: f32,
     /// The nearest examinable entity's position + distance, and whether an *unexamined* one is in range.
@@ -266,12 +273,12 @@ impl SquadFields {
     pub fn neutral() -> Self {
         SquadFields {
             anchor: None,
-            anchor_dist: 999.0,
+            anchor_dist: NO_TARGET_DIST,
             nearest_examinable: None,
-            examinable_dist: 999.0,
+            examinable_dist: NO_TARGET_DIST,
             has_unexamined: 0.0,
             nearest_wounded_ally: None,
-            wounded_ally_dist: 999.0,
+            wounded_ally_dist: NO_TARGET_DIST,
             ally_down: 0.0,
             tracked_threat: None,
             threat_bearing_known: 0.0,
@@ -307,6 +314,53 @@ impl Perception {
 /// A behaviour must score at least this to "turn on" and claim its rank (screens out curve tails).
 const MIN_SCORE: f32 = 0.1;
 
+/// A lower bound on this curve's output over the whole input domain.
+///
+/// Every [`Perception::read`] input is **non-negative** (drives and `health_frac` are clamped to `[0,1]`;
+/// field samples, flags, and distances are all `>= 0`), so the domain is `x >= 0`. A bound of `0.0` means
+/// "the world can switch this off" — sound, if sometimes pessimistic.
+fn guaranteed_floor(curve: Curve) -> f32 {
+    match curve {
+        // Non-decreasing in x, so the floor sits at x = 0. A negative slope is unbounded below over the
+        // half-line (distances have no ceiling), so it guarantees nothing.
+        Curve::Linear { m, b } if m >= 0.0 => b.clamp(0.0, 1.0),
+        Curve::Linear { .. } => 0.0,
+        // Same argument: a positive k is increasing, so x = 0 is the floor; a negative k decays to 0.
+        Curve::Logistic { k, x0 } if k >= 0.0 => Curve::Logistic { k, x0 }.eval(0.0),
+        Curve::Logistic { .. } => 0.0,
+        // A step only ever emits one of its two arms.
+        Curve::Step { below, above, .. } => below.clamp(0.0, 1.0).min(above.clamp(0.0, 1.0)),
+    }
+}
+
+/// A lower bound on the score this behaviour reaches no matter what the agent perceives. An empty
+/// consideration list is unconditional at 1.0, matching [`Behavior::score`].
+fn guaranteed_score(behavior: &Behavior) -> f32 {
+    behavior.considerations.iter().map(|c| guaranteed_floor(c.curve)).product()
+}
+
+/// Startup guard: a repertoire must contain at least one **unconditional** behaviour that clears
+/// [`MIN_SCORE`], so [`decide`] always finds a non-empty rank bucket.
+///
+/// This is what makes `decide`'s "nothing scored" branch unreachable for every shipped brain. Without it
+/// that branch silently returns behaviour 0 — which for a squad role brain is the rank-4 *duty*
+/// (Examine / TendWounded / SecureDoor), so a malformed repertoire would quietly make units perform their
+/// duty instead of standing down. We refuse to ship that ambiguity: it is a loud startup failure, checked
+/// once, rather than a silent per-tick fallback (the project's one-path rule).
+pub fn validate_unconditional_default(behaviors: &[Behavior], who: &str) -> Result<(), String> {
+    if behaviors.is_empty() {
+        return Err(format!("{who}: empty behaviour repertoire"));
+    }
+    let best = behaviors.iter().map(guaranteed_score).fold(0.0f32, f32::max);
+    if best >= MIN_SCORE {
+        return Ok(());
+    }
+    Err(format!(
+        "{who}: no unconditional behaviour scores >= MIN_SCORE ({MIN_SCORE}); every option can be gated \
+         off by perception, so `decide` would have nothing to choose"
+    ))
+}
+
 /// Dual-utility selection (Dill): the highest rank bucket with any positive score, then weight-based
 /// random within it. Returns the index of the chosen behaviour. `behaviors` must be non-empty and
 /// should include an unconditional low-rank default (e.g. Wander) so a choice always exists.
@@ -322,7 +376,11 @@ pub fn decide(behaviors: &[Behavior], perc: &Perception, rng: &mut u32) -> usize
         .map(|(b, _)| b.rank)
         .max();
     let Some(max_rank) = max_rank else {
-        return 0; // nothing scored — caller's first behaviour is the safety default
+        // Unreachable for any shipped repertoire: `validate_unconditional_default` runs at startup and
+        // rejects a brain in which every behaviour can be gated off, so some behaviour always clears
+        // MIN_SCORE. Index 0 is the arbitrary-but-total answer if that invariant is ever broken; it is
+        // never a *silent fallback*, because the brain could not have loaded.
+        return 0;
     };
     // Weight only the behaviours that BOTH sit in the winning bucket AND clear MIN_SCORE. Re-applying
     // the screen here (not just when picking max_rank) matters when a strong behaviour lifts a shared
@@ -448,7 +506,9 @@ mod tests {
     #[test]
     fn nothing_scoring_returns_safety_default() {
         // Single behaviour whose consideration reads 0 → screened out entirely → decide falls back to
-        // index 0 (the documented "caller's first behaviour is the safety default").
+        // index 0. This repertoire is exactly what `validate_unconditional_default` REJECTS at startup,
+        // so the branch is unreachable in the shipped game; the test pins `decide`'s total behaviour for
+        // the invariant-violated case rather than endorsing it as a runtime fallback.
         let behaviors = vec![behavior(
             Mode::Flee,
             2,
@@ -457,9 +517,110 @@ mod tests {
                 curve: Curve::Linear { m: 1.0, b: 0.0 },
             }],
         )];
+        assert!(validate_unconditional_default(&behaviors, "test").is_err());
         let perc = zeroed(); // health_frac = 0.0
         let mut rng = 7u32;
         assert_eq!(decide(&behaviors, &perc, &mut rng), 0);
+    }
+
+    #[test]
+    fn unconditional_default_accepts_a_constant_floor() {
+        // A `Linear { m: 0.0, b }` reads nothing from the world, so its score is a floor the agent always
+        // reaches — this is what every shipped brain's Wander/Forage/FollowAnchor tail provides.
+        let behaviors = vec![
+            behavior(
+                Mode::Flee,
+                5,
+                vec![Consideration {
+                    input: Input::Drive(DriveId::FEAR),
+                    curve: Curve::Logistic { k: 10.0, x0: 0.5 },
+                }],
+            ),
+            behavior(
+                Mode::Wander,
+                0,
+                vec![Consideration {
+                    input: Input::Perc(Fact::SelfHealthFrac),
+                    curve: Curve::Linear { m: 0.0, b: 0.12 },
+                }],
+            ),
+        ];
+        assert!(validate_unconditional_default(&behaviors, "test").is_ok());
+    }
+
+    #[test]
+    fn unconditional_default_accepts_a_positively_sloped_linear() {
+        // The crab's Forage shape: `0.8 * HUNGER + 0.2`. Every perception input is non-negative, so a
+        // non-negative slope means the intercept is a true floor — this behaviour can never be gated off,
+        // which is exactly why the crab brain always has a choice.
+        let behaviors = vec![behavior(
+            Mode::Forage,
+            0,
+            vec![Consideration {
+                input: Input::Drive(DriveId::HUNGER),
+                curve: Curve::Linear { m: 0.8, b: 0.2 },
+            }],
+        )];
+        assert!(validate_unconditional_default(&behaviors, "test").is_ok());
+    }
+
+    #[test]
+    fn unconditional_default_rejects_a_negatively_sloped_linear() {
+        // A negative slope over an unbounded input (a distance) decays past MIN_SCORE, so its intercept
+        // guarantees nothing.
+        let behaviors = vec![behavior(
+            Mode::Forage,
+            0,
+            vec![Consideration {
+                input: Input::Perc(Fact::NearestUnitDist),
+                curve: Curve::Linear { m: -0.1, b: 0.9 },
+            }],
+        )];
+        assert!(validate_unconditional_default(&behaviors, "test").is_err());
+    }
+
+    #[test]
+    fn unconditional_default_rejects_a_floor_below_min_score() {
+        // A constant floor that does not clear MIN_SCORE cannot claim a rank bucket, so it is not a
+        // usable default — `decide` would still find nothing eligible.
+        let behaviors = vec![behavior(
+            Mode::Wander,
+            0,
+            vec![Consideration {
+                input: Input::Perc(Fact::SelfHealthFrac),
+                curve: Curve::Linear { m: 0.0, b: MIN_SCORE * 0.5 },
+            }],
+        )];
+        assert!(validate_unconditional_default(&behaviors, "test").is_err());
+    }
+
+    #[test]
+    fn unconditional_default_rejects_an_all_gated_repertoire() {
+        // Every behaviour hangs off a Step gate the world can switch off → no guaranteed floor.
+        let behaviors = vec![
+            behavior(
+                Mode::Overwatch,
+                4,
+                vec![Consideration {
+                    input: Input::Perc(Fact::ThreatBearingKnown),
+                    curve: Curve::Step { threshold: 0.5, below: 0.0, above: 1.0 },
+                }],
+            ),
+            behavior(
+                Mode::Examine,
+                4,
+                vec![Consideration {
+                    input: Input::Perc(Fact::HasUnexaminedNearby),
+                    curve: Curve::Step { threshold: 0.5, below: 0.0, above: 1.0 },
+                }],
+            ),
+        ];
+        assert!(validate_unconditional_default(&behaviors, "test").is_err());
+    }
+
+    #[test]
+    fn empty_repertoire_is_rejected() {
+        assert!(validate_unconditional_default(&[], "test").is_err());
     }
 
     #[test]

@@ -87,12 +87,28 @@ fn init_role_brains(mut commands: Commands) {
 /// unsafe brain (empty behaviours / out-of-range drive index — see [`role::validate_role_defs`]).
 fn load_role_brains() -> Result<RoleBrains, String> {
     let mut brains = RoleBrains::defaults();
-    // A present file is parsed, validated, and overlaid; a missing file leaves the defaults untouched
-    // (the expected common case — not an error).
-    if let Ok(src) = std::fs::read_to_string("assets/config/roles.ron") {
-        let defs = role::parse_roles_ron(&src).map_err(|e| format!("malformed: {e}"))?;
-        role::validate_role_defs(&defs)?;
-        brains.overlay(defs);
+    // A present file is parsed, validated, and overlaid; an *absent* file leaves the defaults untouched
+    // (the expected common case — not an error). Any other io error (permission denied,
+    // path-is-a-directory) means an override exists and we could not read it — that must fail loudly,
+    // exactly as this function's contract promises. `if let Ok(..)` would have swallowed it.
+    match std::fs::read_to_string("assets/config/roles.ron") {
+        Ok(src) => {
+            let defs = role::parse_roles_ron(&src).map_err(|e| format!("malformed: {e}"))?;
+            role::validate_role_defs(&defs)?;
+            brains.overlay(defs);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("unreadable: {e}")),
+    }
+    // Whether a role kept its code-literal default or was replaced from RON, it must retain an
+    // unconditional behaviour (the `follow_anchor` tail) that clears MIN_SCORE. Otherwise `decide` would
+    // find no eligible bucket and fall through to behaviour 0 — which for a role brain is the rank-4
+    // DUTY, silently making the unit examine/heal/breach instead of standing down. Fail loudly here.
+    for role in role::RoleId::ALL {
+        crate::ai::utility::validate_unconditional_default(
+            &brains.get(role).behaviors,
+            &format!("role {role:?}"),
+        )?;
     }
     Ok(brains)
 }

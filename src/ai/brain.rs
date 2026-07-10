@@ -268,11 +268,24 @@ pub fn think(
 
 /// Insert the brain registry (the developer's behaviour catalogue).
 pub fn init_brains(mut commands: Commands) {
-    commands.insert_resource(AiBrains {
+    let brains = AiBrains {
         smiley: smiley_brain(),
         crab: crab_brain(),
         scout: scout_brain(),
-    });
+    };
+    // Every creature brain must keep an unconditional low-rank default (Wander/Forage), or `decide`
+    // would have no eligible behaviour. Checked once, loudly, at startup — see
+    // `utility::validate_unconditional_default`.
+    for (who, brain) in [
+        ("smiley_brain", &brains.smiley),
+        ("crab_brain", &brains.crab),
+        ("scout_brain", &brains.scout),
+    ] {
+        if let Err(e) = crate::ai::utility::validate_unconditional_default(&brain.behaviors, who) {
+            panic!("{e}");
+        }
+    }
+    commands.insert_resource(brains);
 }
 
 /// The smiley boss: hunt the nearest unit, but be **drawn to the biggest blood frenzy** (it reads the
@@ -579,5 +592,29 @@ fn scout_brain() -> Brain {
                 ],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Pure brain-shape checks — no App, no ECS (the seed-in/assert-out convention of `wfc.rs`).
+    use super::*;
+    use crate::ai::utility::validate_unconditional_default;
+
+    #[test]
+    fn every_shipped_creature_brain_has_an_unconditional_default() {
+        // `decide` screens out every behaviour scoring below MIN_SCORE. If a brain's whole repertoire is
+        // gated on perception, nothing is eligible and `decide` falls through to behaviour 0 — a silent
+        // wrong-action bug. Each creature brain must therefore keep a constant-score tail (Wander /
+        // Forage). `init_brains` enforces this at startup; this test enforces it at compile-and-test time,
+        // so a brain edit fails in CI rather than at launch.
+        for (who, brain) in [
+            ("smiley_brain", smiley_brain()),
+            ("crab_brain", crab_brain()),
+            ("scout_brain", scout_brain()),
+        ] {
+            validate_unconditional_default(&brain.behaviors, who)
+                .unwrap_or_else(|e| panic!("{who} must ship an unconditional default: {e}"));
+        }
     }
 }

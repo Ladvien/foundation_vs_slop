@@ -76,8 +76,12 @@ pub fn parse_personas_ron(src: &str) -> Result<Vec<Persona>, ron::error::Spanned
 pub fn load_personas() -> Result<[Persona; 5], String> {
     let src = match std::fs::read_to_string("assets/config/personas.ron") {
         Ok(src) => src,
-        // No override file → the complete, playable default roster (the expected common case).
-        Err(_) => return Ok(default_personas()),
+        // *Absent* is the expected common case → the complete, playable default roster. Any OTHER io
+        // error (permission denied, path-is-a-directory, bad encoding) means the author put a file
+        // there and we could not read it: fail loudly rather than silently voicing the squad with the
+        // defaults they meant to replace. Only `NotFound` is "no override".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default_personas()),
+        Err(e) => return Err(format!("unreadable: {e}")),
     };
     let list = parse_personas_ron(&src).map_err(|e| format!("malformed: {e}"))?;
     validate_personas(list)

@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
 use crate::ai::drives::{DriveId, Drives};
-use crate::ai::utility::{Mode, Perception, SquadFields};
+use crate::ai::utility::{Mode, Perception, SquadFields, NO_TARGET_DIST};
 use crate::crab::Crab;
 use crate::dungeon::Dungeon;
 use crate::enemy::Enemy;
@@ -119,7 +119,7 @@ pub fn squad_think(
         let anchor_dist = if anchor.valid {
             (anchor.pos - pos).length()
         } else {
-            999.0
+            NO_TARGET_DIST
         };
 
         // Feed perception-derived squad drives (curiosity near study targets, cohesion when strayed).
@@ -130,10 +130,10 @@ pub fn squad_think(
             anchor: anchor.valid.then_some(anchor.pos),
             anchor_dist,
             nearest_examinable: examinable.map(|(_, p, _)| p),
-            examinable_dist: examinable.map(|(_, _, d)| d).unwrap_or(999.0),
+            examinable_dist: examinable.map(|(_, _, d)| d).unwrap_or(NO_TARGET_DIST),
             has_unexamined: if examinable.is_some() { 1.0 } else { 0.0 },
             nearest_wounded_ally: wounded.map(|(_, p, _)| p),
-            wounded_ally_dist: wounded.map(|(_, _, d)| d).unwrap_or(999.0),
+            wounded_ally_dist: wounded.map(|(_, _, d)| d).unwrap_or(NO_TARGET_DIST),
             ally_down: if wounded.is_some() { 1.0 } else { 0.0 },
             tracked_threat: threat.map(|(_, p, _)| p),
             threat_bearing_known: if threat.is_some() { 1.0 } else { 0.0 },
@@ -143,7 +143,7 @@ pub fn squad_think(
         let perc = Perception {
             pos,
             nearest_unit: threat.map(|(_, p, _)| p),
-            nearest_dist: threat.map(|(_, _, d)| d).unwrap_or(999.0),
+            nearest_dist: threat.map(|(_, _, d)| d).unwrap_or(NO_TARGET_DIST),
             health_frac: health_frac(health),
             drives: drives.v,
             scent_hotspot: Vec3::ZERO,
@@ -259,8 +259,19 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
         | Mode::Ward
         | Mode::DeploySensor
         | Mode::Wander => None,
-        // Creature modes never chosen by a unit brain — hold.
-        _ => None,
+        // Creature modes, never chosen by a unit brain — hold. Enumerated rather than caught by a `_`
+        // wildcard so that adding a `Mode` is a COMPILE ERROR here instead of a silent hold: a new squad
+        // action that forgot its goal mapping would otherwise stand still and look like an AI bug.
+        Mode::Forage
+        | Mode::Latch
+        | Mode::Chase
+        | Mode::HuntBlood
+        | Mode::SeekMeat
+        | Mode::Carry
+        | Mode::Scout
+        | Mode::Mark
+        | Mode::Rally
+        | Mode::Muster => None,
     }
 }
 
