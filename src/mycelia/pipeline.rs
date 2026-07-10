@@ -6,18 +6,24 @@
 //!
 //! # The simulation chain
 //! One shader (`mycelia_sim.wgsl`) exposes five entry points that share a single bind group, dispatched
-//! in order each frame as five separate compute passes (so the GPU inserts a memory barrier between them
-//! and each sees the previous one's writes):
+//! in order **on each sim tick** as five separate compute passes (so the GPU inserts a memory barrier
+//! between them and each sees the previous one's writes):
 //!   1. `clear_deposit` — zero the per-texel scent accumulator.
 //!   2. `agent_step`    — each walker senses the trail, steers (Jones three-sensor rule), steps, and
 //!                        `atomicAdd`s scent into the accumulator.
 //!   3. `diffuse`       — blur+decay the trail and fold in this tick's deposits (the transport network).
 //!   4. `field`         — one Gray-Scott reaction-diffusion step of the biomass, nucleated by the veins,
-//!                        then composite veins + biomass into the shared `display` the material samples.
+//!                        then composite veins + biomass into this tick's field **snapshot**.
 //!   5. `pin_scan`      — reduce the biomass field into the coarse `(V, U, x, y)` grid `fruit.rs` reads
 //!                        back to decide where mushrooms erupt. The module's only GPU→CPU edge.
-//! The trail and biomass ping-pongs swap read/write each frame by the same parity, so neither stencil ever
-//! reads the texture it is concurrently writing.
+//! The trail, biomass and snapshot ping-pongs swap read/write each tick by the same parity, so no stencil
+//! ever reads the texture it is concurrently writing.
+//!
+//! # The interpolation pass
+//! A second shader (`mycelia_blend.wgsl`, its own bind group and layout) runs **every rendered frame**,
+//! lerping the two most recent snapshots into the `display` texture the three mold materials sample. Without
+//! it the mold's rendered contour hopped once per sim period — see that shader's header for why a slow field
+//! can still produce a fast-moving edge.
 
 use std::borrow::Cow;
 
@@ -31,7 +37,7 @@ use bevy::render::render_resource::binding_types::{
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
     CachedComputePipelineId, CachedPipelineState, ComputePassDescriptor, ComputePipelineDescriptor,
-    PipelineCache, ShaderStages, StorageTextureAccess, TextureSampleType, UniformBuffer,
+    PipelineCache, ShaderStages, ShaderType, StorageTextureAccess, TextureSampleType, UniformBuffer,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue};
 use bevy::render::storage::GpuShaderBuffer;
@@ -44,6 +50,19 @@ use super::{MoldBuffers, MoldImages, MoldParams, DISPLAY_FORMAT, WORKGROUP_SIZE}
 
 /// WGSL source for the compute chain (runtime-loaded from `assets/`, like every other shader here).
 const SHADER_ASSET_PATH: &str = "shaders/mycelia_sim.wgsl";
+/// WGSL source for the per-frame temporal interpolation pass.
+const BLEND_ASSET_PATH: &str = "shaders/mycelia_blend.wgsl";
+
+/// The `blend` pass's whole uniform. Kept separate from [`MoldParams`] rather than tacking `alpha` onto the
+/// end of it: `mycelia_blend.wgsl` has its own bind group (it must — see below), so sharing the uniform would
+/// force a second, byte-matched copy of the 27-field `MoldParams` struct into that shader.
+///
+/// MUST byte-match `BlendParams` in `mycelia_blend.wgsl`.
+#[derive(ShaderType, Clone, Copy, Default)]
+struct BlendParams {
+    /// Phase through the current sim period, `0..1`.
+    alpha: f32,
+}
 
 /// 1D workgroup width for the agent pass. Must match `@workgroup_size` in the shader.
 const LINEAR_WORKGROUP: u32 = 64;
@@ -72,12 +91,20 @@ struct MoldPipeline {
     diffuse: CachedComputePipelineId,
     field: CachedComputePipelineId,
     pin_scan: CachedComputePipelineId,
+    /// Separate layout: `blend` reads the snapshot the sim's `field` pass writes, and wgpu forbids binding
+    /// one texture as a write-only storage target and a sampled texture in the same bind group.
+    blend_layout: BindGroupLayoutDescriptor,
+    blend: CachedComputePipelineId,
 }
 
 /// This frame's prepared bind group (the six mold resources, with the trail read/write pair selected by
 /// the current parity).
 #[derive(Resource)]
 struct MoldBindGroup(BindGroup);
+
+/// The `blend` pass's bind group. Separate from [`MoldBindGroup`] and rebuilt on the same schedule.
+#[derive(Resource)]
+struct MoldBlendBindGroup(BindGroup);
 
 /// Compute lifecycle + ping-pong parity. `frame` advances once per rendered frame (only once the pipelines
 /// are ready); `frame & 1` selects which trail texture is read vs written this tick.
@@ -108,7 +135,8 @@ fn init_mold_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 // 3: trail WRITE (storage — this tick's diffused target field).
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
-                // 4: display (storage — the composited output the floor material samples).
+                // 4: snapshot WRITE (storage — this tick's composited fields; `blend` interpolates the last
+                //    two snapshots into the `display` texture the materials actually sample).
                 texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
                 // 5: shared sim params.
                 uniform_buffer::<MoldParams>(false),
@@ -141,7 +169,43 @@ fn init_mold_pipeline(
     let field = queue("field");
     let pin_scan = queue("pin_scan");
 
-    commands.insert_resource(MoldPipeline { layout, clear, agents, diffuse, field, pin_scan });
+    // The interpolation pass. Its own layout, because it must READ the snapshot texture that binding 4 of
+    // the layout above declares as a write-only storage target, and wgpu rejects a bind group that claims
+    // both usages for one texture.
+    let blend_layout = BindGroupLayoutDescriptor::new(
+        "mycelia_blend_bind_group_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                // 0: the phase through the current sim period.
+                uniform_buffer::<BlendParams>(false),
+                // 1: the tick before last.
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                // 2: the most recent tick.
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                // 3: display (storage — what the three mold materials sample).
+                texture_storage_2d(DISPLAY_FORMAT, StorageTextureAccess::WriteOnly),
+            ),
+        ),
+    );
+    let blend_shader = asset_server.load(BLEND_ASSET_PATH);
+    let blend = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        layout: vec![blend_layout.clone()],
+        shader: blend_shader,
+        entry_point: Some(Cow::from("blend_snapshots")),
+        ..default()
+    });
+
+    commands.insert_resource(MoldPipeline {
+        layout,
+        clear,
+        agents,
+        diffuse,
+        field,
+        pin_scan,
+        blend_layout,
+        blend,
+    });
 }
 
 /// `RenderSystems::Prepare` — advance the lifecycle. Stay not-ready until ALL five pipelines compile (a
@@ -154,14 +218,24 @@ fn advance_state(
     mut state: ResMut<MoldState>,
 ) {
     if !state.ready {
-        let all_ok = [pipeline.clear, pipeline.agents, pipeline.diffuse, pipeline.field, pipeline.pin_scan]
-            .iter()
+        let all_ok = [
+            pipeline.clear,
+            pipeline.agents,
+            pipeline.diffuse,
+            pipeline.field,
+            pipeline.pin_scan,
+            pipeline.blend,
+        ]
+        .iter()
             .all(|id| {
                 match pipeline_cache.get_compute_pipeline_state(*id) {
                     CachedPipelineState::Ok(_) => true,
                     CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(_)) => false,
                     CachedPipelineState::Err(err) => {
-                        panic!("mycelia: compiling assets/{SHADER_ASSET_PATH}:\n{err}")
+                        panic!(
+                            "mycelia: compiling assets/{SHADER_ASSET_PATH} or \
+                             assets/{BLEND_ASSET_PATH}:\n{err}"
+                        )
                     }
                     _ => false,
                 }
@@ -179,10 +253,12 @@ fn advance_state(
 /// `RenderSystems::PrepareBindGroups` — rebuild the bind group each frame (cheap; the underlying
 /// textures/buffers persist). Selects the trail read/write pair by parity and writes the params uniform.
 /// Silently returns until every GPU resource exists.
+#[allow(clippy::too_many_arguments)]
 fn prepare_bind_group(
     mut commands: Commands,
     pipeline: Res<MoldPipeline>,
     state: Res<MoldState>,
+    step: Res<super::MoldStep>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
     mold_images: Res<MoldImages>,
@@ -193,8 +269,10 @@ fn prepare_bind_group(
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
 ) {
-    let (Some(display), Some(trail_a), Some(trail_b), Some(bio_a), Some(bio_b)) = (
+    let (Some(display), Some(snap_a), Some(snap_b), Some(trail_a), Some(trail_b), Some(bio_a), Some(bio_b)) = (
         gpu_images.get(&mold_images.display),
+        gpu_images.get(&mold_images.snap_a),
+        gpu_images.get(&mold_images.snap_b),
         gpu_images.get(&mold_images.trail_a),
         gpu_images.get(&mold_images.trail_b),
         gpu_images.get(&mold_images.biomass_a),
@@ -222,6 +300,11 @@ fn prepare_bind_group(
     let even = state.frame & 1 == 0;
     let (read, write) = if even { (trail_a, trail_b) } else { (trail_b, trail_a) };
     let (bio_read, bio_write) = if even { (bio_a, bio_b) } else { (bio_b, bio_a) };
+    // The snapshots ride the same parity, and `advance_state` (RenderSystems::Prepare) has already flipped it
+    // for the tick about to run. So the WRITE slot is where this tick's `field` pass lands — and therefore,
+    // once it has, where the newest snapshot lives — while the READ slot still holds the tick before it.
+    // Between ticks nothing flips, so the pairing holds until the next tick overwrites the old one.
+    let (snap_old, snap_new) = if even { (snap_a, snap_b) } else { (snap_b, snap_a) };
 
     let mut uniform = UniformBuffer::from(params.into_inner().clone());
     uniform.write_buffer(&render_device, &queue);
@@ -234,7 +317,7 @@ fn prepare_bind_group(
             deposit_buf.buffer.as_entire_buffer_binding(),
             &read.texture_view,
             &write.texture_view,
-            &display.texture_view,
+            &snap_new.texture_view,
             &uniform,
             &bio_read.texture_view,
             &bio_write.texture_view,
@@ -244,33 +327,59 @@ fn prepare_bind_group(
         )),
     );
     commands.insert_resource(MoldBindGroup(bind_group));
+
+    // The interpolation bind group. `snap_new` appears here as a SAMPLED texture and above as a write-only
+    // storage target; that is legal only because they are different bind groups, set in different compute
+    // passes, with a barrier between them.
+    let mut blend_uniform = UniformBuffer::from(BlendParams { alpha: step.alpha });
+    blend_uniform.write_buffer(&render_device, &queue);
+    let blend_bind_group = render_device.create_bind_group(
+        None,
+        &pipeline_cache.get_bind_group_layout(&pipeline.blend_layout),
+        &BindGroupEntries::sequential((
+            &blend_uniform,
+            &snap_old.texture_view,
+            &snap_new.texture_view,
+            &display.texture_view,
+        )),
+    );
+    commands.insert_resource(MoldBlendBindGroup(blend_bind_group));
 }
 
 /// The `RenderGraph`-schedule compute chain, ordered `.before(camera_driver)` so its writes land before the
-/// main 3D pass samples the display texture. Dispatches the three passes as three separate compute passes
-/// so the GPU barriers between them (clear → deposit → diffuse each observe the prior pass's writes).
+/// main 3D pass samples the display texture. Dispatches each pass separately so the GPU inserts a memory
+/// barrier between them (clear → deposit → diffuse each observe the prior pass's writes).
+///
+/// Two cadences. The five **simulation** passes run only on a sim tick (`sim_hz`): dispatching them every
+/// rendered frame ran the agents at ~11 world units/sec and Gray-Scott at 60 reaction steps/sec — a flow
+/// rate, not a growth rate, and the single strongest reason the mold read as liquid. The **`blend`** pass
+/// runs every frame, interpolating the last two tick snapshots into the display texture so the mold's
+/// rendered contour creeps instead of hopping once per period.
+#[allow(clippy::too_many_arguments)]
 fn mold_compute(
     mut render_context: RenderContext,
     bind_group: Option<Res<MoldBindGroup>>,
+    blend_bind_group: Option<Res<MoldBlendBindGroup>>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<MoldPipeline>,
     params: Res<MoldParams>,
     state: Res<MoldState>,
     step: Res<super::MoldStep>,
 ) {
-    // The mold advances on its own slow clock (`sim_hz`), not the render clock. Dispatching every rendered
-    // frame ran the agents at ~11 world units/sec and Gray-Scott at 60 reaction steps/sec — a flow rate, not
-    // a growth rate, and the single strongest reason the mold read as liquid. Skipped frames simply resample
-    // the display texture from the previous tick.
-    let Some(bind_group) = bind_group.filter(|_| state.ready && step.step) else {
+    // Nothing is dispatched until every pipeline has compiled and every GPU resource exists.
+    if !state.ready {
+        return;
+    }
+    let (Some(bind_group), Some(blend_bind_group)) = (bind_group, blend_bind_group) else {
         return;
     };
-    let (Some(clear), Some(agents_pl), Some(diffuse), Some(field), Some(pin_scan)) = (
+    let (Some(clear), Some(agents_pl), Some(diffuse), Some(field), Some(pin_scan), Some(blend)) = (
         pipeline_cache.get_compute_pipeline(pipeline.clear),
         pipeline_cache.get_compute_pipeline(pipeline.agents),
         pipeline_cache.get_compute_pipeline(pipeline.diffuse),
         pipeline_cache.get_compute_pipeline(pipeline.field),
         pipeline_cache.get_compute_pipeline(pipeline.pin_scan),
+        pipeline_cache.get_compute_pipeline(pipeline.blend),
     ) else {
         return;
     };
@@ -282,9 +391,11 @@ fn mold_compute(
     let field_groups = field_size / WORKGROUP_SIZE;
     // `pin_scan` is one thread per COARSE cell, not per field texel — a 64× smaller dispatch.
     let coarse_groups = params.coarse_res.div_ceil(WORKGROUP_SIZE);
-    let bg = &bind_group.0;
 
-    let mut dispatch = |pipeline: &bevy::render::render_resource::ComputePipeline, x: u32, y: u32| {
+    let mut dispatch = |bg: &BindGroup,
+                        pipeline: &bevy::render::render_resource::ComputePipeline,
+                        x: u32,
+                        y: u32| {
         let mut pass = render_context
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
@@ -293,12 +404,18 @@ fn mold_compute(
         pass.dispatch_workgroups(x, y, 1);
     };
 
-    dispatch(clear, deposit_slots.div_ceil(CLEAR_WORKGROUP), 1);
-    dispatch(agents_pl, params.agent_count.div_ceil(LINEAR_WORKGROUP), 1);
-    dispatch(diffuse, field_groups, field_groups);
-    dispatch(field, field_groups, field_groups);
-    // Last: reduce the biomass for the CPU. It reads `biomass_read` (the field pass wrote `biomass_write`),
-    // so its position in the chain is immaterial — running it last keeps the display write on the critical
-    // path unencumbered.
-    dispatch(pin_scan, coarse_groups, coarse_groups);
+    let bg = &bind_group.0;
+    if step.step {
+        dispatch(bg, clear, deposit_slots.div_ceil(CLEAR_WORKGROUP), 1);
+        dispatch(bg, agents_pl, params.agent_count.div_ceil(LINEAR_WORKGROUP), 1);
+        dispatch(bg, diffuse, field_groups, field_groups);
+        dispatch(bg, field, field_groups, field_groups);
+        // Reduce the biomass for the CPU. It reads `biomass_read` (the field pass wrote `biomass_write`), so
+        // its position in the chain is immaterial — running it last keeps the snapshot write unencumbered.
+        dispatch(bg, pin_scan, coarse_groups, coarse_groups);
+    }
+
+    // Every frame, tick or not. Reads the two snapshots (one of which the `field` pass may have just written
+    // — the barrier between compute passes orders that correctly) and lerps them into `display`.
+    dispatch(&blend_bind_group.0, blend, field_groups, field_groups);
 }

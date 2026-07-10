@@ -6,7 +6,7 @@
 //! | Ch | Meaning | Source |
 //! |----|---------|--------|
 //! | `R` | chemoattractant | blood, nests, and **meat chunks** — carnage to forage on and feed from |
-//! | `G` | light / gaze repellent | cells a squad unit currently sees, attenuated by habituation |
+//! | `G` | light / gaze repellent | cells a squad unit currently sees, attenuated by habituation, rate-limited |
 //! | `B` | disturbance repellent | squad unit proximity — footsteps scatter the mold |
 //! | `A` | substrate mask | `0` void · `0.33` floor never seen · `0.67` remembered · `1` visible |
 //!
@@ -25,6 +25,19 @@
 //! leave. Grounded in Boisseau, Vogel & Dussutour (2016), 10.1098/rspb.2016.0446 — *P. polycephalum*
 //! habituates to a repeatedly-presented harmless repellent and shows spontaneous recovery when it is
 //! withheld.
+//!
+//! # Why `G` is rate-limited
+//! Habituation sets where `G` is *going*; [`perceptual::slew`] bounds how fast it may *get there*. The
+//! shaders turn `G` into `conceal`, a 2.75x swing on the mat's vein glow, and habituation crosses its whole
+//! range in ~3 s — so an unlimited `G` made the mat visibly pulse as the squad milled around a room, well
+//! inside the band the eye is most sensitive to. The mold's glow is an *autonomous* signal and so is bound
+//! by the slow-change window (`MIN_APPEARANCE_RAMP_SECS`); the fog reveal in `A` is *player-caused* and
+//! stays instantaneous, because the mat must appear the moment its floor tile does.
+//!
+//! `G` therefore has two consumers and one shape: the shaders' `conceal`, and the compute chain's
+//! `photophobia` steering plus its `dark` bloom term. Slewing the single signal means the agents' flight
+//! from a gaze is now as unhurried as the glow's — which is what a fungus does anyway, and it keeps the two
+//! from disagreeing about how brightly a cell is lit.
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
@@ -35,7 +48,7 @@ use crate::gore::{BloodPool, GibChunk};
 use crate::nest::Nest;
 use crate::squad::Unit;
 
-use super::{field, MyceliaConfig, CONTROL_SIZE};
+use super::{field, perceptual, MyceliaConfig, CONTROL_SIZE};
 
 /// Chemoattractant splat radius (cells) around a nest's floor position.
 const NEST_RADIUS_CELLS: f32 = 2.5;
@@ -58,14 +71,17 @@ pub struct MoldControlImage {
     pub wall: Handle<Image>,
 }
 
-/// Main-world scratch: the CPU-side pixel buffers we rewrite each `Update`, plus the per-cell habituation
-/// accumulator (which is *state*, so it must persist between frames).
+/// Main-world scratch: the CPU-side pixel buffers we rewrite each `Update`, plus the two per-cell
+/// accumulators (which are *state*, so they must persist between frames).
 #[derive(Resource)]
 pub struct MoldControl {
     dynamic: Handle<Image>,
     wall: Handle<Image>,
     cpu: Vec<u8>,
     habituation: Vec<f32>,
+    /// The gaze signal actually written to `G`, rate-limited toward its instantaneous target so the mat's
+    /// glow can never swing faster than the slow-change window. See [`write_control`].
+    light: Vec<f32>,
     /// The static wall field is uploaded exactly once, the first `Update` that sees a `Dungeon`.
     wall_written: bool,
 }
@@ -94,6 +110,7 @@ pub(super) fn setup_control(
         wall,
         cpu: vec![0u8; MoldControl::cells() * field::CONTROL_BYTES_PER_TEXEL],
         habituation: vec![0.0; MoldControl::cells()],
+        light: vec![0.0; MoldControl::cells()],
         wall_written: false,
     });
 }
@@ -268,7 +285,7 @@ pub(super) fn write_control(
     let size = CONTROL_SIZE as i32;
 
     // Split the borrow so we can read `cpu` while mutating `habituation` (and vice versa).
-    let MoldControl { dynamic, wall, cpu, habituation, wall_written } = &mut *control;
+    let MoldControl { dynamic, wall, cpu, habituation, light, wall_written } = &mut *control;
 
     // ── Once: the static wall-proximity field ─────────────────────────────────────────────────────────
     // The dungeon is generated once and never regenerates, so this is computed and uploaded a single time.
@@ -298,7 +315,19 @@ pub(super) fn write_control(
 
             // Only a *currently seen* cell repels. Explored-but-dark and never-seen cells are equally safe
             // — which is exactly the ambience we want: the mold blooms wherever nobody is looking.
-            let light = if watched { 1.0 - *hab * cfg.hab_strength } else { 0.0 };
+            let target = if watched { 1.0 - *hab * cfg.hab_strength } else { 0.0 };
+
+            // ...but the mat may not *reach* that target any faster than a human can notice a luminance
+            // change. `G` drives `conceal` in the floor/wall/fruit shaders, a 2.75x swing on the vein glow;
+            // written instantaneously it flickered visibly as the squad milled about a room, because
+            // `hab_rate` crosses the whole range in ~3 s and a cell flips `watched` the moment a unit
+            // turns. Rate-limiting it here — rather than in three shaders — keeps the gaze a single CPU
+            // signal, and one that `photophobia` (agent flight) and the `dark` bloom term already share.
+            //
+            // This is the mold's *autonomous* half of the signal, so it is bound by the slow-change window
+            // (Simons, Franconeri & Reimer 2000). Fog reveal is NOT: that is caused by the player walking
+            // into a room, and the mat must appear the instant its floor tile does. See `A` below.
+            light[i] = perceptual::slew(light[i], target, dt, perceptual::MIN_APPEARANCE_RAMP_SECS);
 
             // A: three-state substrate mask. Agents grow on any floor; only *explored* floor is drawn.
             // Four-state substrate. Growth keys off "is floor"; RENDERING keys off explored; and the
@@ -316,7 +345,7 @@ pub(super) fn write_control(
 
             let base = i * field::CONTROL_BYTES_PER_TEXEL;
             cpu[base] = 0; // R: chemo — accumulated in pass 2
-            cpu[base + 1] = to_u8(light); // G: light/gaze
+            cpu[base + 1] = to_u8(light[i]); // G: light/gaze, rate-limited above
             cpu[base + 2] = 0; // B: disturbance — accumulated in pass 2
             cpu[base + 3] = substrate; // A: 0 void / 85 unseen / 170 remembered / 255 visible
         }

@@ -248,7 +248,7 @@ fn plant(
     let half = (SITE_OFFSETS.len() as f32 - 1.0) * 0.5;
     for (i, offset) in SITE_OFFSETS.iter().enumerate() {
         let site = face + inward * *offset + along * ((i as f32 - half) * ROW_SPACING);
-        let seed = 0xF00D + i as u64;
+        let seed = 0xF00D + i as u32;
         let Some(plan) = plan_body(&dungeon, site, TESTBED_SCALE, seed) else {
             return Err(format!("mycelia testbed: no clear pose for site {i} at {site:?}").into());
         };
@@ -294,7 +294,7 @@ fn plant(
             info!("mycelia testbed: inside corner at {corner:?}, outward diagonal {out:?}");
             for (i, offset) in CORNER_OFFSETS.iter().enumerate() {
                 let site = corner + out * *offset;
-                let seed = 0xC0FFEE + i as u64;
+                let seed = 0xC0FFEE + i as u32;
                 let Some(plan) = plan_body(&dungeon, site, TESTBED_SCALE, seed) else {
                     error!("mycelia testbed: no clear pose for corner site {i} at {site:?}");
                     continue;

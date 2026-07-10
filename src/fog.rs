@@ -53,6 +53,15 @@ impl FogGrid {
         crate::util::row_major(c, self.width)
     }
 
+    /// Every cell explored, none currently visible — the "seen but unwatched" state a fruit body pins in
+    /// (`mycelia::fruit`). Test-only: in the game `update_los` is the sole writer of this grid.
+    #[cfg(test)]
+    pub(crate) fn all_explored(width: usize, height: usize) -> Self {
+        let mut grid = FogGrid::new(width, height);
+        grid.vis = vec![CellVis::Explored; width * height];
+        grid
+    }
+
     /// Is cell `c` in a unit's *live* line of sight right now? (Not merely explored-and-remembered.)
     /// This is the partial-observability query other systems use to hide/target enemies — hidden
     /// units outside current LOS are the defining property of an RTS fog-of-war (Yang, Xie & Peng,

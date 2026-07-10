@@ -39,9 +39,9 @@ struct MoldSurfaceParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var control_samp: sampler;
 
 // Kept identical to the floor's, so the coating is visibly one organism crossing the corner.
-const FLESH_DEEP: vec3<f32> = vec3<f32>(0.030, 0.068, 0.040);
-const GLOW: vec3<f32> = vec3<f32>(0.10, 0.46, 0.26);
-const FUZZ: vec3<f32> = vec3<f32>(0.17, 0.26, 0.17);
+const FLESH_DEEP: vec3<f32> = vec3<f32>(0.048, 0.059, 0.051);
+const GLOW: vec3<f32> = vec3<f32>(0.238, 0.396, 0.323);
+const FUZZ: vec3<f32> = vec3<f32>(0.213, 0.237, 0.213);
 // The fog's dim tint for remembered-but-unseen floor, matching `dungeon::FloorMaterials::dim`
 // (0.28, 0.28, 0.36). The mold must dim with the ground it sits on; drawn at full brightness it ignores the
 // fog's lighting state even while honouring its reveal state, and a remembered room glows through the dark.
@@ -92,6 +92,16 @@ fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
 }
 
+// Fog state from the control texture, which `write_control` rewrites every frame — never from the field's
+// alpha, which only advances on a sim tick and lagged the reveal by a whole tick period. See
+// `mycelia_floor.wgsl`.
+fn is_explored(a: f32) -> f32 {
+    return smoothstep(0.45, 0.55, a);
+}
+fn is_visible(a: f32) -> f32 {
+    return smoothstep(0.85, 0.95, a);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -110,8 +120,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
     let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
     let bio = smoothstep(0.10, 0.35, f.g);
-    let coverage = saturate(f.a * 2.0);
-    let lit = mix(FOG_DIM, vec3<f32>(1.0), smoothstep(0.5, 1.0, f.a));
+    let substrate = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    let coverage = is_explored(substrate);
+    let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 
     // ── Tangent frame on a vertical face ──────────────────────────────────────────────────────────────
     // Wall faces are vertical, so `cross(up, n)` is a well-defined horizontal tangent running along the

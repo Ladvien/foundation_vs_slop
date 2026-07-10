@@ -41,24 +41,35 @@ struct MoldSurfaceParams {
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> mold: MoldSurfaceParams;
-// R = trail · G = biomass V · B = wall contact · A = coverage (explored floor only)
+// R = trail · G = biomass V · B = wall contact · A = unused. Interpolated between the last two sim ticks by
+// `mycelia_blend.wgsl`, so this is continuous in time even though the simulation behind it is not. Coverage
+// used to live in `A`; it now comes from `control_tex.a` per frame — see `is_explored` below.
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var field_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var field_samp: sampler;
 // R = chemo · G = light/gaze · B = disturbance · A = substrate
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var control_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var control_samp: sampler;
 
-// Mature biomass: dark, sickly, saturated green. Dark enough that the emissive veins read as light coming
-// *out of* the flesh, but not so dark that the specular highlight is all you see — the scene's
-// 500-brightness ambient will otherwise render a near-black albedo as a grey mirror.
-const FLESH_DEEP: vec3<f32> = vec3<f32>(0.030, 0.068, 0.040);
+// ── Palette: damp grey, not green ─────────────────────────────────────────────────────────────────────
+// Every colour below was desaturated in OKLAB (Ottosson 2020, the space CSS Color 4 interpolates in),
+// scaling chroma toward the neutral axis while holding LIGHTNESS EXACTLY. That matters: `L` is what the AO,
+// the sheen and the LDR tonemapper were balanced against, so draining the colour cannot disturb the read of
+// the surface. Chroma fell ~70% (e.g. FLESH_DEEP 0.043 -> 0.013). The residual hue sits near 150 deg — a
+// cold olive — so the mat is grey and dank first and organic second, rather than a vivid mould green.
+//
+// Mature biomass: dark, wet, colourless. Dark enough that the emissive veins read as light coming *out of*
+// the flesh, but not so dark that the specular highlight is all you see — the scene's 500-brightness ambient
+// will otherwise render a near-black albedo as a grey mirror.
+const FLESH_DEEP: vec3<f32> = vec3<f32>(0.048, 0.059, 0.051);
 // The advancing margin of a real colony is paler than its mature centre — young hyphae, no pigment yet.
-const FLESH_EDGE: vec3<f32> = vec3<f32>(0.078, 0.112, 0.062);
-// Sickly green/cyan phosphorescence. The camera is LDR (no HDR, no bloom) and the scene is brightly lit, so
+const FLESH_EDGE: vec3<f32> = vec3<f32>(0.092, 0.103, 0.087);
+// Phosphorescence: a pale, sickly grey-green — the ONE place any colour survives, because a colourless glow
+// is just a lamp. Desaturated less hard than the albedo (chroma 0.108 -> 0.044) so the veins still read as
+// something alive lit from within. The camera is LDR (no HDR, no bloom) and the scene is brightly lit, so
 // this must be bright enough to compete with the ambient fill yet stay under the tonemapper's clip.
-const GLOW: vec3<f32> = vec3<f32>(0.10, 0.46, 0.26);
+const GLOW: vec3<f32> = vec3<f32>(0.238, 0.396, 0.323);
 // Colour of the grazing-angle fuzz. Desaturated: it is light scattering off filament tips, not pigment.
-const FUZZ: vec3<f32> = vec3<f32>(0.17, 0.26, 0.17);
+const FUZZ: vec3<f32> = vec3<f32>(0.213, 0.237, 0.213);
 // The fog's dim tint for remembered-but-unseen floor, matching `dungeon::FloorMaterials::dim`
 // (0.28, 0.28, 0.36). The mold must dim with the ground it sits on; drawn at full brightness it ignores the
 // fog's lighting state even while honouring its reveal state, and a remembered room glows through the dark.
@@ -108,6 +119,25 @@ fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
 }
 
+// ── Fog state, straight from the control texture ───────────────────────────────────────────────────────
+// `control.a` is the four-state substrate mask: 0 void · 0.33 floor never seen · 0.67 remembered · 1 visible.
+// The compute chain thresholds it with `step()`; here we use a narrow `smoothstep` instead, because the
+// control texture is one texel per dungeon CELL and a bare step would alias along the reveal boundary.
+//
+// Read from `control_tex`, NOT from the field's alpha. The field only advances on a sim tick, so a coverage
+// baked into it lagged the fog by a whole tick period and the mat visibly arrived *after* the floor tile it
+// sits on. `write_control` rewrites this texture every frame, so the reveal is exact.
+//
+// This is the one mold signal that is deliberately NOT rate-limited: it is caused by the player walking into
+// a room, not by the mold acting on its own, and it must land on the same frame as the floor's own material
+// swap in `fog::apply_floor_fog`.
+fn is_explored(a: f32) -> f32 {
+    return smoothstep(0.45, 0.55, a);
+}
+fn is_visible(a: f32) -> f32 {
+    return smoothstep(0.85, 0.95, a);
+}
+
 /// How physically thick the mold is at `uv`, in arbitrary units. Drives the surface normal.
 fn thickness(uv: vec2<f32>) -> f32 {
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
@@ -130,10 +160,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let sheen = smoothstep(mold.vein_lo * 0.17, mold.vein_lo, f.r);
     let bio = smoothstep(0.10, 0.35, f.g);
     let contact = f.b;
-    // `f.a` is 0 (never seen) / 0.5 (remembered) / 1.0 (visible). Coverage gates drawing; `lit` dims the
-    // mold to match the fogged floor under it.
-    let coverage = saturate(f.a * 2.0);
-    let lit = mix(FOG_DIM, vec3<f32>(1.0), smoothstep(0.5, 1.0, f.a));
+    // Coverage gates drawing (explored floor only, or the coat traces the map through the fog); `lit` dims
+    // the mold to match the fogged floor under it. Both are player-caused and therefore instantaneous.
+    let substrate = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    let coverage = is_explored(substrate);
+    let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 
     // ── Thickness gradient → the filament frame ───────────────────────────────────────────────────────
     // The overlay is a horizontal plane, so its tangent frame is trivial: +uv.x is +world.x, +uv.y is
@@ -217,8 +248,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.specular_occlusion = ao * (1.0 - 0.8 * coat);
 
     // ── Emission: bioluminescence + fuzz ──────────────────────────────────────────────────────────────
-    // The mold conceals its glow under a direct gaze — brightest in the dark. (The slow structural retreat
-    // comes from the agents themselves fleeing the light; this is the instant flinch.)
+    // The mold conceals its glow under a direct gaze — brightest in the dark. `control.g` is rate-limited on
+    // the CPU to the slow-change window (see `control.rs`), so the flinch is a slow bleed rather than a
+    // pulse: you never catch the mold reacting, you only notice later that it has. The structural retreat is
+    // the same signal steering the agents away.
     let light = textureSampleLevel(control_tex, control_samp, uv, 0.0).g;
     let conceal = 1.0 - 0.7 * light;
     var emissive = GLOW * veins * conceal * mold.glow_gain * lit;

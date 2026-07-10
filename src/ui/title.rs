@@ -62,14 +62,15 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                 theme.text_muted,
             ));
 
-            // New Run
+            // New Run. Via `Warmup`, which waits for the mold to finish colonising the dungeon before the
+            // player ever sees it — usually a single frame, since the colony grows behind this very screen.
             p.spawn(button_visual(&theme))
                 .with_children(|b| {
                     b.spawn(text(&theme, &fonts, "NEW RUN", theme.font_body));
                 })
                 .observe(
                     |_: On<Activate>, mut next: ResMut<NextState<AppState>>| {
-                        next.set(AppState::InGame);
+                        next.set(AppState::Warmup);
                     },
                 );
 

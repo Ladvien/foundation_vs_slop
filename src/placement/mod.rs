@@ -61,7 +61,7 @@ fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrator {
 }
 
 /// Tags a placed furniture entity with the region it belongs to — read by `furnish::furniture_room_visibility`
-/// to show furniture only in the room the squad currently occupies.
+/// to reveal furniture once the squad has entered its room (and to keep it revealed thereafter).
 #[derive(Component)]
 pub struct PlacedIn(pub ir::RegionId);
 
@@ -81,8 +81,8 @@ impl Plugin for PlacementPlugin {
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
         app.add_systems(Startup, furnish::furnish_regions);
-        // Reveal each room's furniture the first time the squad gains line of sight into it, and keep
-        // it revealed thereafter (remembered, per-room — see `furniture_room_visibility`).
+        // Reveal each room's furniture the first time a squad unit walks into it, and keep it revealed
+        // thereafter (remembered, per-room — see `furniture_room_visibility`).
         app.init_resource::<furnish::RevealedRooms>();
         app.add_systems(Update, furnish::furniture_room_visibility);
     }

@@ -1,7 +1,7 @@
 //! UI lifecycle state machine.
 //!
 //! Two axes:
-//! - [`AppState`] — top-level lifecycle: `Boot` (wait for UI assets) → `Title` → `InGame`.
+//! - [`AppState`] — top-level lifecycle: `Boot` (wait for UI assets) → `Title` → `Warmup` → `InGame`.
 //! - [`MenuState`] — in-game overlay stack (pause / settings / roster), a **substate** that only
 //!   exists while [`AppState::InGame`]. [`MenuState::Closed`] means "playing, no overlay".
 //! - [`TitleMenu`] — a tiny substate of [`AppState::Title`] so the *same* settings panel can be
@@ -24,6 +24,10 @@ pub enum AppState {
     Boot,
     /// Main menu / title card. The already-generated world sits frozen behind it.
     Title,
+    /// Between "NEW RUN" and play: wait for the mold to finish colonising the dungeon
+    /// ([`crate::mycelia::MoldWarm`]) so the player never watches it arrive. Usually passes straight
+    /// through — the mold runs on `Time<Real>` and has been growing behind the boot and title screens.
+    Warmup,
     /// Playing. Overlays are tracked by [`MenuState`].
     InGame,
 }
@@ -80,7 +84,7 @@ pub fn sync_sim_blocked(
     mut blocked: ResMut<SimBlocked>,
 ) {
     let want = match app_state.get() {
-        AppState::Boot | AppState::Title => true,
+        AppState::Boot | AppState::Title | AppState::Warmup => true,
         AppState::InGame => menu.map(|m| m.get().is_blocking()).unwrap_or(false),
     };
     if blocked.0 != want {

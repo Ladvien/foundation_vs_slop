@@ -43,6 +43,7 @@ mod testbed;
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::gpu_readback::Readback;
 use bevy::render::render_resource::{ShaderType, TextureFormat};
 use bevy::render::storage::ShaderBuffer;
 use bevy::render::RenderApp;
@@ -140,7 +141,18 @@ pub struct MyceliaConfig {
     /// seven times the 3.33 mm/s object-relative motion threshold, i.e. plainly visible if you looked. At
     /// 1.5 Hz it runs at 2.92 mm/s, just below. See the `mycelia.sim_hz` comment in `config.ron` for the
     /// full sweep and how to reproduce it.
+    ///
+    /// The shipped 0.075 Hz is a twentieth of that measured value. Front speed alone did not capture what
+    /// the eye actually tracks — the *contour*, which a `smoothstep` slides by `ΔV / |∇V|` per tick, far
+    /// further than the field itself moves. The interpolation pass (`mycelia_blend.wgsl`) fixed the stepping
+    /// that caused; two rounds of playtest took the clock down for the residual creep.
+    /// [`MyceliaConfig::warmup_ticks`] is what makes a clock this slow affordable.
     pub sim_hz: f32,
+    /// Sim ticks dispatched behind the loading screen, before the player sees anything, so the colony is
+    /// already mature at the moment of first sight. Advanced as fast as the GPU accepts them (one per
+    /// rendered frame), not on the `sim_hz` clock — this is not time passing, it is history that already
+    /// happened. `0` is legal and means "start from bare floor".
+    pub warmup_ticks: u32,
     /// Number of walking agents. Sparse on purpose (≈0.05/texel at 1024²) so the trail forms legible
     /// foraging *channels* rather than flooding to uniform saturation. An aesthetic ceiling, not a
     /// performance one — the GPU handles far more.
@@ -307,7 +319,19 @@ pub struct MyceliaConfig {
 #[derive(Resource, Clone, Copy, ExtractResource, Default)]
 pub struct MoldStep {
     pub step: bool,
+    /// Phase through the current sim period, `0..1`. The `blend` pass lerps the previous tick's snapshot
+    /// toward the newest by exactly this much, every rendered frame — see [`advance_mold_time`].
+    pub alpha: f32,
 }
+
+/// `true` once the colony has completed its [`MyceliaConfig::warmup_ticks`] and the mold is established.
+///
+/// The mold runs on `Time<Real>`, so it colonises underneath the boot and title screens while the player
+/// reads the menu — by the time most players click through, this is already `true` and the warmup screen
+/// passes straight through. `ui::warmup` waits on it so that a player who clicks fast still never sees bare
+/// carpet.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct MoldWarm(pub bool);
 
 /// Validate the `mycelia:` slice. One path: any violation is an `Err` that [`crate::config`] surfaces as a
 /// loud startup panic — there is no clamping to a "safe" value, because a silently-corrected knob is
@@ -414,6 +438,17 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     unit("u_exhausted", c.u_exhausted)?;
     unit("maintain_v", c.maintain_v)?;
     positive("pin_dwell_secs", c.pin_dwell_secs)?;
+    // The dwell is credited once per readback, and readbacks land once per sim tick. A dwell shorter than a
+    // tick period is therefore indistinguishable from zero — every value in `(0, period]` commits on exactly
+    // the same scan. Reject it rather than ship a dial that looks live and is not.
+    let period = 1.0 / c.sim_hz;
+    if c.pin_dwell_secs < period {
+        return Err(format!(
+            "mycelia.pin_dwell_secs ({}) must be >= one sim tick ({period} s at sim_hz {}), or the dwell \
+             gate is quantised away and any positive value behaves the same",
+            c.pin_dwell_secs, c.sim_hz,
+        ));
+    }
     positive("pin_min_spacing", c.pin_min_spacing)?;
     positive("body_scale", c.body_scale)?;
     if c.max_fruit_bodies == 0 {
@@ -465,10 +500,16 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
 /// purely to feed the compute chain. All are extracted so `prepare_bind_group` can bind them.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct MoldImages {
-    /// The composited output the floor material samples: straight premultiplied-ish `RGB` colour plus an
-    /// `A` coverage mask, written by the `field` pass (the last in the chain). Not channel-encoded state —
-    /// the material samples it and blends it over the floor directly.
+    /// The field the three mold materials sample: `R` trail · `G` biomass `V` · `B` wall contact. Written
+    /// **every rendered frame** by the `blend` pass, which lerps [`MoldImages::snap_a`] and
+    /// [`MoldImages::snap_b`] by `MoldParams::blend_alpha`. Raw simulation fields, not colour — shading is
+    /// the material's job.
     pub display: Handle<Image>,
+    /// Per-tick snapshot ping-pong pair, written by the `field` pass. One holds the newest tick's fields,
+    /// the other the tick before it, and `blend` interpolates between them so the mold advances continuously
+    /// instead of hopping once per `sim_hz` period. Same parity swap as the trail.
+    pub snap_a: Handle<Image>,
+    pub snap_b: Handle<Image>,
     /// Trail-scent ping-pong pair. Each tick one is the read source (sensed by agents + blurred by
     /// diffuse) and the other the write target; they swap by parity so diffusion never reads what it is
     /// concurrently writing. `R` channel holds trail intensity.
@@ -589,9 +630,12 @@ impl Plugin for MyceliaPlugin {
         // `setup_mycelia` binds the control texture into the floor material, so the control textures must
         // exist first.
         .init_resource::<MoldStep>()
+        .init_resource::<MoldWarm>()
         .add_systems(Startup, (control::setup_control, setup_mycelia).chain())
         .init_resource::<CoatedFurniture>()
-        .add_systems(Update, (advance_mold_time, control::write_control, coat_walls, coat_furniture));
+        .add_systems(Update, (advance_mold_time, control::write_control, coat_walls, coat_furniture))
+        // Reads `MoldStep`, so it must observe the flag `advance_mold_time` set this frame.
+        .add_systems(Update, gate_coarse_readback.after(advance_mold_time));
 
         // Fruit bodies: the mold reproducing. Registered here (not as a separate plugin) because it depends
         // on this plugin's textures, buffers and config, and shares its determinism firewall.
@@ -639,9 +683,13 @@ fn setup_mycelia(
         .into());
     }
 
-    // Five RGBA16F field textures (composited display + trail and biomass ping-pong pairs), each usable as
-    // both a compute storage-write target and a sampled read. `display` is the one shared with the material.
+    // Seven RGBA16F field textures (the blended display, the per-tick snapshot pair, and the trail and
+    // biomass ping-pong pairs), each usable as both a compute storage-write target and a sampled read.
+    // `display` is the one shared with the materials; the snapshots exist only so `blend` has two ticks to
+    // interpolate between. Zero-filled, so before the first tick the mold is simply absent.
     let display = images.add(field::field_texture(size));
+    let snap_a = images.add(field::field_texture(size));
+    let snap_b = images.add(field::field_texture(size));
     let trail_a = images.add(field::field_texture(size));
     let trail_b = images.add(field::field_texture(size));
     let biomass_a = images.add(field::field_texture(size));
@@ -663,17 +711,21 @@ fn setup_mycelia(
     let coarse =
         buffers.add(ShaderBuffer::from(vec![0.0f32; (COARSE_SIZE * COARSE_SIZE * 4) as usize]));
 
+    commands.insert_resource(MoldImages {
+        display: display.clone(),
+        snap_a,
+        snap_b,
+        trail_a,
+        trail_b,
+        biomass_a,
+        biomass_b,
+    });
+    commands.insert_resource(MoldBuffers { agents, deposit, coarse });
+    // The mold's single GPU→CPU edge; `fruit.rs` observes `ReadbackComplete` on this entity. Cosmetic-only,
+    // `Update`-only — see the module header. The `Readback` component itself is owned by
+    // `gate_coarse_readback`, which holds it only on sim-tick frames.
     commands
-        .insert_resource(MoldImages { display: display.clone(), trail_a, trail_b, biomass_a, biomass_b });
-    commands.insert_resource(MoldBuffers { agents, deposit, coarse: coarse.clone() });
-    // The mold's single GPU→CPU edge. `Readback` copies the buffer every frame it is present; `fruit.rs`
-    // observes `ReadbackComplete` on this entity. Cosmetic-only, `Update`-only — see the module header.
-    commands
-        .spawn((
-            Name::new("mycelia_coarse_readback"),
-            bevy::render::gpu_readback::Readback::buffer(coarse),
-            fruit::CoarseReadback,
-        ))
+        .spawn((Name::new("mycelia_coarse_readback"), fruit::CoarseReadback))
         .observe(fruit::receive_coarse);
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
@@ -731,25 +783,76 @@ fn setup_mycelia(
     Ok(())
 }
 
+/// Seconds between sim ticks. Validated `> 0` at startup, so this never divides by zero.
+fn period_secs(cfg: &MyceliaConfig) -> f32 {
+    1.0 / cfg.sim_hz
+}
+
 /// Advance the shared sim clock on the main world each frame; the value is extracted into the render
 /// world for the compute pass and reused by the floor material. `Update` (cosmetic), never `FixedUpdate`.
 ///
 /// Uses **real** time (not `Time<Virtual>`), so the mold keeps breathing while the game is paused or at
 /// the menu — matching the repo's other cosmetic shaders (`nest`, `vhs`) which animate off `globals.time`.
-/// The mold is ambience; it should never freeze with a gameplay pause.
+/// The mold is ambience; it should never freeze with a gameplay pause. It is also what lets the colony warm
+/// up underneath the boot and title screens, where gameplay is frozen by `SimBlocked`.
+///
+/// Two cadences, and the warmup is not one of them dressed up. Warmup is *history*: ticks the world already
+/// lived through before the player arrived, dispatched as fast as the GPU accepts them. Afterwards the clock
+/// is the slow `sim_hz` one, and it is the only one.
 fn advance_mold_time(
     time: Res<Time<Real>>,
     cfg: Res<MyceliaConfig>,
+    coarse: Res<fruit::MoldCoarse>,
+    mut warm: ResMut<MoldWarm>,
     mut params: ResMut<MoldParams>,
     mut step: ResMut<MoldStep>,
     mut accum: Local<f32>,
+    mut baseline: Local<Option<u64>>,
 ) {
     params.time = time.elapsed_secs();
+
+    // ── Warmup: run the colony's history before anyone is looking ─────────────────────────────────────
+    //
+    // A mold that has lived in these corridors for years must not be caught colonising them. So the chain is
+    // dispatched every frame — no `sim_hz` gate — until `warmup_ticks` ticks have actually run.
+    //
+    // Counted against a baseline taken at the first readback that proves the chain dispatched at all
+    // (`MoldCoarse::has_run`). A raw readback count would not do: `bevy_render` copies the coarse buffer on
+    // every frame the `Readback` component is present, including the frames before the compute pipelines
+    // have finished compiling, and the warmup budget would be spent on frames that dispatched nothing —
+    // handing the player a bare floor and a `MoldWarm` that lied. Over-requesting by the readback's
+    // one- or two-frame latency is harmless; under-delivering the colony is the whole failure.
+    if !warm.0 {
+        let done = match (coarse.has_run(), *baseline) {
+            (false, _) => false,
+            (true, None) => {
+                *baseline = Some(coarse.ticks_elapsed());
+                cfg.warmup_ticks == 0
+            }
+            (true, Some(base)) => coarse.ticks_elapsed() - base >= cfg.warmup_ticks as u64,
+        };
+        if done {
+            warm.0 = true;
+            info!("mycelia: colony warm after {} ticks", cfg.warmup_ticks);
+            // Hand over to the slow clock without letting the mold flinch backwards. Warmup leaves the blend
+            // showing the newest snapshot (`alpha = 1`); falling through with an empty accumulator would put
+            // `alpha` at 0 next frame, which displays the snapshot *before* it — a one-tick step backwards.
+            // A full accumulator fires a tick immediately instead, flipping the parity so that `alpha = 0`
+            // means the snapshot we are already showing.
+            *accum = period_secs(&cfg);
+        } else {
+            step.step = true;
+            // Nothing to interpolate toward yet, and no eye to notice: show each snapshot whole.
+            step.alpha = 1.0;
+            *accum = 0.0;
+            return;
+        }
+    }
 
     // Fixed-rate sim clock, decoupled from the render clock. `Time<Real>` so the mold keeps breathing while
     // the game is paused (matching the rest of this module). One tick per period at most: if the frame rate
     // collapses we drop ticks rather than fast-forwarding the mold in a visible surge.
-    let period = 1.0 / cfg.sim_hz;
+    let period = period_secs(&cfg);
     *accum += time.delta_secs();
     if *accum >= period {
         *accum = (*accum - period).min(period);
@@ -757,6 +860,49 @@ fn advance_mold_time(
     } else {
         step.step = false;
     }
+
+    // How far we are through the *current* period, `0..1`. The `blend` pass uses this to interpolate the
+    // display texture between the last two tick snapshots, every rendered frame.
+    //
+    // Without it the mold advanced in 667 ms jumps. That is not a motion-threshold failure — the biomass
+    // margin creeps at 2.92 mm/s, well under budget — but a *contour* one: the material resolves the field
+    // through `smoothstep`, so wherever the biomass gradient is shallow, a small step in `V` slides the
+    // rendered iso-contour a long way. The edge visibly hopped. Interpolating the field restores the
+    // continuous motion the speed limit was derived for; the eye integrates it and sees nothing.
+    //
+    // Costs one tick of latency (the blend arrives at snapshot `k` just as `k+1` is computed). At 1.5 Hz
+    // that is 667 ms of lag on an ambience layer nobody is timing.
+    step.alpha = (*accum / period).clamp(0.0, 1.0);
+}
+
+/// Hold the coarse buffer's [`Readback`] only on sim-tick frames.
+///
+/// `bevy_render`'s `prepare_buffers` queues a `copy_buffer_to_buffer` for **every** entity carrying a
+/// `Readback`, every rendered frame — there is no dirty flag and no one-shot variant, and the component's own
+/// docs say "if this component is not removed, the readback will be attempted every frame". But `pin_scan`
+/// only rewrites the buffer when [`MoldStep::step`] is set, i.e. at `sim_hz`. Copying it at the display's
+/// refresh rate would pay a GPU→CPU transfer and a `COARSE_SIZE²` decode ~80× per meaningful update.
+///
+/// Removing the component (rather than despawning the entity) keeps the `receive_coarse` observer and the
+/// [`fruit::CoarseReadback`] marker alive. `GpuReadbackPlugin` installs `ExtractComponentPlugin<Readback>`,
+/// whose `SyncComponentPlugin` registers an `on_remove` hook, so the removal reaches the render world.
+///
+/// `advance_mold_time` raises `step` for exactly one frame per period, and `Update` runs before
+/// `ExtractSchedule`, so this yields exactly one copy per tick.
+fn gate_coarse_readback(
+    mut commands: Commands,
+    step: Res<MoldStep>,
+    buffers: Res<MoldBuffers>,
+    readback: Query<(Entity, Has<Readback>), With<fruit::CoarseReadback>>,
+) -> Result<(), BevyError> {
+    // Spawned unconditionally by `setup_mycelia`; its absence means the setup contract broke.
+    let (entity, present) = readback.single()?;
+    if step.step && !present {
+        commands.entity(entity).insert(Readback::buffer(buffers.coarse.clone()));
+    } else if !step.step && present {
+        commands.entity(entity).remove::<Readback>();
+    }
+    Ok(())
 }
 
 /// Swap every wall's `StandardMaterial` for a mold-aware [`MoldWallMaterial`], once, as soon as the dungeon
@@ -819,6 +965,7 @@ mod tests {
         MyceliaConfig {
             field_size: 1024,
             sim_hz: 1.5,
+            warmup_ticks: 200,
             agent_count: 55_000,
             sense_angle: 0.40,
             sense_dist: 9.0,

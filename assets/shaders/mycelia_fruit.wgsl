@@ -65,29 +65,31 @@ struct MoldFruitParams {
 // of Amanita phalloides dropped onto the mold — it is the SAME ORGANISM, so it wears the same palette.
 // (An earlier revision used the species' real colours — pale tan cap, white flesh — and the mushroom read
 // as a garden prop standing on an alien mat. Realism lost to family resemblance.)
-const FLESH_DEEP: vec3<f32> = vec3<f32>(0.030, 0.068, 0.040);
-const GLOW: vec3<f32> = vec3<f32>(0.10, 0.46, 0.26);
-const FUZZ: vec3<f32> = vec3<f32>(0.17, 0.26, 0.17);
+const FLESH_DEEP: vec3<f32> = vec3<f32>(0.048, 0.059, 0.051);
+const GLOW: vec3<f32> = vec3<f32>(0.238, 0.396, 0.323);
+const FUZZ: vec3<f32> = vec3<f32>(0.213, 0.237, 0.213);
 const FOG_DIM: vec3<f32> = vec3<f32>(0.30, 0.30, 0.38);
 // A fungus is a dielectric felt and barely reflects; StandardMaterial's default F0 of 0.04 puts a specular
 // sheet over the whole body under this scene's brightness-500 ambient. See `mycelia_wall.wgsl`.
 const MOLD_REFLECTANCE: f32 = 0.08;
 
 // ── The body, in the mat's hue ────────────────────────────────────────────────────────────────────────
-// Everything below is the mold's green-black, lightened by part. The read comes from the bioluminescence,
-// not from albedo — exactly as it does on the floor, where a near-black mat is legible only by its veins.
+// Everything below is the mold's grey-black, lightened by part, and desaturated in OKLAB by the same factor
+// as the mat (see `mycelia_floor.wgsl`) — so the mushroom stays visibly the same organism. The read comes
+// from the bioluminescence, not from albedo — exactly as it does on the floor, where a near-black mat is
+// legible only by its veins.
 //
 // The universal veil is the palest thing on the mushroom: a young cap is a taut membrane stretched over
 // the primordium, so it catches the light. As the pileus expands and thins, the flesh beneath shows
 // through and it sinks toward the mat's own deep flesh.
-const CAP_YOUNG: vec3<f32> = vec3<f32>(0.44, 0.46, 0.36);
-const CAP_OLD: vec3<f32> = vec3<f32>(0.11, 0.17, 0.09);
+const CAP_YOUNG: vec3<f32> = vec3<f32>(0.444, 0.450, 0.417);
+const CAP_OLD: vec3<f32> = vec3<f32>(0.135, 0.155, 0.128);
 // Stipe, gills and annulus: hyphal felt, the fibrous part. Kept the lightest of the mature parts so the
 // body's silhouette still reads at the RTS zoom, and it is where the glow lives.
-const STIPE: vec3<f32> = vec3<f32>(0.20, 0.26, 0.19);
+const STIPE: vec3<f32> = vec3<f32>(0.227, 0.244, 0.224);
 // The volva is a torn sac half-buried in the substrate, so it wears the substrate.
-const VOLVA: vec3<f32> = vec3<f32>(0.13, 0.15, 0.10);
-const SUBSTRATE: vec3<f32> = vec3<f32>(0.040, 0.055, 0.035);
+const VOLVA: vec3<f32> = vec3<f32>(0.137, 0.143, 0.128);
+const SUBSTRATE: vec3<f32> = vec3<f32>(0.046, 0.051, 0.045);
 
 // How far up the body (world units, from its base) the mat it grew out of still clings. The mold does not
 // climb the whole mushroom — it pools around the volva, exactly where the sac meets the substrate.
@@ -268,12 +270,26 @@ fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
 }
 
+// Fog state from the control texture, which `write_control` rewrites every frame — never from the field's
+// alpha, which only advances on a sim tick and lagged the reveal by a whole tick period. See
+// `mycelia_floor.wgsl`.
+fn is_visible(a: f32) -> f32 {
+    return smoothstep(0.85, 0.95, a);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
     let n = normalize(pbr_input.world_normal);
+
+    // World Y of this body's base. The mesh is authored with its base (the volva) at object y = 0 and the
+    // `DeathCap` node's local transform is identity, so the primitive→world translation *is* the body's
+    // origin. It tracks the entity as it sinks and rises (`translation.y = -sink * (1 - rise)`), which world
+    // Y alone does not — anything keyed off absolute Y slides through the mesh during emergence.
+    let base_y = mesh_functions::get_world_from_local(in.instance_index)[3].y;
+    let height = in.world_position.y - base_y;
 
     // The part mask. Normalised because the generator writes one channel per part but interpolation across
     // a triangle spanning two parts leaves a blend that need not sum to 1.
@@ -297,7 +313,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         tangent = vec3<f32>(1.0, 0.0, 0.0);
     }
     let along = dot(in.world_position.xyz, tangent);
-    let sp = vec2<f32>(along * fs, in.world_position.y * fs * 0.6);
+    let sp = vec2<f32>(along * fs, height * fs * 0.6);
 
     // The body's own vein network, the same fbm ridge the mat's trail field resolves into. This is what
     // carries the family resemblance: the veins do not stop at the floor, they climb into the fruit body.
@@ -311,8 +327,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let mottle = smoothstep(0.35, 0.78, fbm(sp * 1.3));
     let cap_col = mix(pileus, FLESH_DEEP, mottle * mold.margin_roughness * 0.55);
 
-    // The volva is a torn sac still half in the ground: fleck it with substrate.
-    let grime = fbm(in.world_position.xz * fs * 2.0 + vec2<f32>(in.world_position.y * fs, 0.0));
+    // The volva is a torn sac still half in the ground: fleck it with substrate. Keyed off height above the
+    // base, so the flecks sit on the sac rather than swimming down it as the body rises out of the mat.
+    let grime = fbm(in.world_position.xz * fs * 2.0 + vec2<f32>(height * fs, 0.0));
     let sac = mix(VOLVA, SUBSTRATE, smoothstep(0.45, 0.75, grime) * 0.7);
 
     var albedo = cap_col * cap + STIPE * flesh + sac * volva;
@@ -328,11 +345,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
     let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
     let bio = smoothstep(0.10, 0.35, f.g);
-    let lit = mix(FOG_DIM, vec3<f32>(1.0), smoothstep(0.5, 1.0, f.a));
+    // A body is never drawn on unexplored floor — it cannot pin there — so it needs `is_visible` only, to
+    // dim with the fogged floor it stands on. No coverage gate, unlike the mat.
+    let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(textureSampleLevel(control_tex, control_samp, uv, 0.0).a));
 
-    // `h` is 0 at the floor plane and 1 at `SKIRT_HEIGHT` above it. Written out rather than as an inverted
+    // `h` is 0 at the body's base and 1 at `SKIRT_HEIGHT` above it, in world metres — so the skirt keeps its
+    // physical thickness whatever `body_scale` this mushroom drew. Written out rather than as an inverted
     // smoothstep: WGSL leaves smoothstep undefined when edge0 >= edge1.
-    let h = clamp(in.world_position.y / SKIRT_HEIGHT, 0.0, 1.0);
+    let h = clamp(height / SKIRT_HEIGHT, 0.0, 1.0);
     let ragged = (fbm(vec2<f32>(in.world_position.x, in.world_position.z) * fs * 1.5) - 0.5)
                * mold.margin_roughness;
     let t = clamp(1.0 - (h + ragged), 0.0, 1.0);

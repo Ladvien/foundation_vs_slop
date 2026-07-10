@@ -22,7 +22,6 @@ use bevy::prelude::*;
 use rayon::prelude::*;
 
 use crate::dungeon::{Dungeon, WALL_HEIGHT};
-use crate::fog::FogGrid;
 use crate::rng::{seeded, DetRng};
 
 use super::ir::{
@@ -272,12 +271,12 @@ pub fn furnish_regions(
             Transform::from_translation(req.pos)
                 .with_rotation(req.rot)
                 .with_scale(Vec3::splat(FURNITURE_SCALE)),
-            // Starts hidden; `furniture_room_visibility` shows it only while the squad is in its room.
+            // Starts hidden; `furniture_room_visibility` shows it once the squad has entered its room.
             Visibility::Hidden,
         ));
         // A wall-mounted prop rides the view-relative cutaway: it hides (scale → 0) whenever Q/E
         // rotation makes its host wall a near knee wall, so it never floats above the squash. Cutaway
-        // hiding uses `scale`; fog reveal owns `Visibility`; the two compose (see `dungeon`).
+        // hiding uses `scale`; the room-entry reveal owns `Visibility`; the two compose (see `dungeon`).
         if let Some(outward) = req.cutaway_outward {
             entity.insert(crate::dungeon::CutawayMounted {
                 outward,
@@ -581,37 +580,38 @@ fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
     constraints
 }
 
-/// Rooms that have entered the squad's line of sight at least once. Furniture reveal is one-way and
-/// per-room: a region is inserted the first frame any of its cells is `seen`, and its furniture then
-/// stays visible for the rest of the run — the same permanent reveal the floor/wall tiles use.
+/// Rooms a squad unit has physically stood in at least once. Furniture reveal is one-way and per-room: a
+/// region is inserted the first frame any unit occupies one of its cells, and its furniture then stays
+/// visible for the rest of the run — the same permanent reveal the floor/wall tiles use.
 #[derive(Resource, Default)]
 pub struct RevealedRooms(pub HashSet<RegionId>);
 
-/// Reveal a room's furniture the first time the squad gains line of sight into it, and keep it visible
-/// thereafter (remembered, per-room). The knee-wall layout lets the camera see into every room, so
-/// gating on live *occupancy* left explored rooms reading empty until re-entry; instead we key off the
-/// fog's permanent `seen` memory ([`FogGrid::seen_at`]). Owns furniture `Visibility` exclusively (fog
-/// never touches furniture), so nothing else fights it. One-way — only ever flips Hidden→Visible.
+/// Reveal a room's furniture the first time a squad unit **enters** it, and keep it visible thereafter
+/// (remembered, per-room). Owns furniture `Visibility` exclusively (fog never touches furniture), so
+/// nothing else fights it. One-way — only ever flips Hidden→Visible.
+///
+/// Entry, not line of sight. The knee-wall layout lets the camera see into a room long before the squad
+/// walks in, so a `FogGrid::seen_at` gate furnished rooms the squad had merely glimpsed down a corridor.
+/// An earlier revision keyed off *live* occupancy and rooms visibly emptied as the squad left; the one-way
+/// [`RevealedRooms`] guard is what makes entry-gating stable, and it is why this reads occupancy rather
+/// than the fog at all. Matches [`super::PlacedIn`]'s original intent.
 pub fn furniture_room_visibility(
-    fog: Res<FogGrid>,
     dungeon: Res<Dungeon>,
+    units: Query<&Transform, With<crate::squad::Unit>>,
     mut revealed: ResMut<RevealedRooms>,
     mut furniture: Query<(&PlacedIn, &mut Visibility)>,
 ) {
-    // Grow the revealed set: a region is revealed once any of its interior cells has been seen.
-    // Already-revealed regions are skipped (one-way), so this settles to a cheap membership check.
+    // Once per call, not once per region: a squad is a handful of units, a dungeon is many rooms.
+    let occupied: Vec<IVec2> = units.iter().map(|t| dungeon.world_to_cell(t.translation)).collect();
+
+    // Grow the revealed set: a region is revealed once a unit stands inside it. Already-revealed regions
+    // are skipped (one-way), so this settles to a cheap membership check.
     for region in &dungeon.regions {
         if revealed.0.contains(&region.id) {
             continue;
         }
-        let (mn, mx) = (region.rect.min, region.rect.max);
-        'scan: for cx in mn[0]..mx[0] {
-            for cz in mn[1]..mx[1] {
-                if fog.seen_at(IVec2::new(cx, cz)) {
-                    revealed.0.insert(region.id);
-                    break 'scan;
-                }
-            }
+        if occupied.iter().any(|c| region.rect.contains([c.x, c.y])) {
+            revealed.0.insert(region.id);
         }
     }
     // Reveal furniture in revealed rooms. One-way, so we only ever write the Hidden→Visible transition.
