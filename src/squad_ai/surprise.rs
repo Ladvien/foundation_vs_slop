@@ -137,12 +137,20 @@ pub enum FearBucket {
 }
 
 impl FearBucket {
-    /// Bands at 1/3 and 2/3. `NaN` reads as `Calm`: a non-finite drive is a bug elsewhere, and this
-    /// module must classify it rather than propagate it into a probability.
+    /// Bands at 0.05 (Wary) and 0.25 (Panicked), **calibrated from the measured FEAR-drive distribution**
+    /// under the synthetic-player tour on the authored brains — not guessed. The FEAR drive is a
+    /// `max`-reduced, eased tracker of the stigmergy threat fields (`ai::drives`), so under shipped play the
+    /// squad is unthreatened ~85% of the time (drive ≈ 0) and the **maximum drive ever observed was 0.497**.
+    /// The old naive 1/3, 2/3 bands therefore left `Panicked` *unreachable* and `Wary` firing on ~3% of
+    /// decisions, which collapsed the world archive's `mean_fear` descriptor into a single bin. These bands
+    /// put a genuinely crowded moment (the ~0.28–0.49 mode) into `Panicked` and a moderate threat (~p92 of
+    /// the distribution) into `Wary`, so scary worlds separate from calm ones on the descriptor axis. `NaN`
+    /// reads as `Calm`: a non-finite drive is a bug elsewhere, and this module must classify it rather than
+    /// propagate it into a probability.
     pub fn of(fear: f32) -> Self {
-        if fear >= 2.0 / 3.0 {
+        if fear >= 0.25 {
             FearBucket::Panicked
-        } else if fear >= 1.0 / 3.0 {
+        } else if fear >= 0.05 {
             FearBucket::Wary
         } else {
             FearBucket::Calm
@@ -737,11 +745,12 @@ mod tests {
 
     #[test]
     fn fear_buckets_partition_the_unit_interval() {
+        // Bands calibrated from the measured drive distribution: Wary at 0.05, Panicked at 0.25.
         assert_eq!(FearBucket::of(0.0), FearBucket::Calm);
-        assert_eq!(FearBucket::of(0.32), FearBucket::Calm);
-        assert_eq!(FearBucket::of(0.34), FearBucket::Wary);
-        assert_eq!(FearBucket::of(0.65), FearBucket::Wary);
-        assert_eq!(FearBucket::of(0.67), FearBucket::Panicked);
+        assert_eq!(FearBucket::of(0.04), FearBucket::Calm);
+        assert_eq!(FearBucket::of(0.05), FearBucket::Wary);
+        assert_eq!(FearBucket::of(0.24), FearBucket::Wary);
+        assert_eq!(FearBucket::of(0.25), FearBucket::Panicked);
         assert_eq!(FearBucket::of(1.0), FearBucket::Panicked);
         // A non-finite drive is a bug elsewhere; classify it, never propagate it into a probability.
         assert_eq!(FearBucket::of(f32::NAN), FearBucket::Calm);
