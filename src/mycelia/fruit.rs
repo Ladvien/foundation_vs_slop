@@ -812,6 +812,40 @@ fn pin_fruit_bodies(
     }
 }
 
+/// The colony's growth-speed multiplier at world position `pos`, at time `t` (virtual seconds).
+///
+/// Returns `1.0` almost everywhere — the imperceptible baseline. But the mycelium keeps a few slow-roaming,
+/// waxing-and-waning **foci of attention**; a body inside an active focus is boosted toward
+/// `cfg.intent_speed_scale` (≈ human movement speed), then relaxes as the focus drifts on. Pure and
+/// deterministic (fixed per-focus frequencies/phases derived from the index, no entropy), so the effect is
+/// reproducible and unit-testable. The foci trace slow Lissajous drifts over the world bounds and pulse in
+/// and out, so at any instant zero to a few room-sized patches are quickened — the organism recruiting part
+/// of its body and animating it with intent, while the rest of it holds imperceptibly still.
+fn intent_boost(pos: Vec2, t: f32, cfg: &MyceliaConfig) -> f32 {
+    if cfg.intent_focus_count == 0 || cfg.intent_speed_scale <= 1.0 {
+        return 1.0;
+    }
+    let center = WORLD_ORIGIN + WORLD_EXTENT * 0.5;
+    let amp = WORLD_EXTENT * 0.4;
+    let w = std::f32::consts::TAU / cfg.intent_roam_period.max(1.0);
+    let mut best = 0.0f32;
+    for i in 0..cfg.intent_focus_count {
+        let fi = i as f32;
+        let ph = fi * 1.7;
+        let focus = center
+            + Vec2::new(
+                amp.x * (w * (0.70 + 0.11 * fi) * t + ph).sin(),
+                amp.y * (w * (0.53 + 0.13 * fi) * t + ph * 1.3).cos(),
+            );
+        // Attention waxes and wanes, so a focus is not always "on": intent comes and goes.
+        let pulse = 0.5 + 0.5 * (w * 0.5 * t + fi * 2.1).sin();
+        let d = pos.distance(focus) / cfg.intent_focus_radius.max(0.01);
+        let prox = (-d * d).exp(); // Gaussian falloff to the baseline outside the focus.
+        best = best.max(pulse * prox);
+    }
+    1.0 + (cfg.intent_speed_scale - 1.0) * best.clamp(0.0, 1.0)
+}
+
 /// Marks a fruit body that grew out of a **wall** (a bracket fungus — Turkey Tail, Oyster, Chicken of
 /// the Woods) rather than up from the floor. Its emergence and morph are the same, but it is mounted
 /// rotated onto a wall face and does not rise/sink along world Y, so `grow_fruit_bodies` leaves its
@@ -939,8 +973,11 @@ fn grow_fruit_bodies(
     )>,
 ) {
     let dt = time.delta_secs();
-    // The whole perceptual budget, in world units per second, at the zoom the player is actually at.
-    let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    // The imperceptible baseline budget, in world units per second, at the zoom the player is actually at.
+    // Per body it is lifted by the colony's roaming "intent" (see `intent_boost`): most bodies keep the
+    // baseline, but one caught in an active focus surges toward human speed.
+    let base_budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    let now = time.elapsed_secs();
 
     for (entity, mut body, mut transform, phototropic, photophilic, wall) in &mut bodies {
         // A wall-mounted bracket does not rise/sink along world Y and its scale is owned by the cutaway
@@ -955,7 +992,11 @@ fn grow_fruit_bodies(
         // below is one path for every species — only the numbers it integrates against differ.
         let geom = table.get(body.species);
 
-        let local_v = coarse.v_at(Vec2::new(transform.translation.x, transform.translation.z));
+        // The colony's intent at this body: `1×` almost everywhere, up to `intent_speed_scale` in a focus.
+        let body_xz = Vec2::new(transform.translation.x, transform.translation.z);
+        let budget = base_budget * intent_boost(body_xz, now, &cfg);
+
+        let local_v = coarse.v_at(body_xz);
         let stalled = body.growth >= VEIL_RUPTURE_T && !body.veil_triggered;
         let gate = if local_v < cfg.maintain_v {
             -1.0
@@ -1053,13 +1094,17 @@ fn bend_toward_light(
     if dt <= 0.0 {
         return;
     }
-    let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    let base_budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    let now = time.elapsed_secs();
     for (mut body, transform) in &mut bodies {
         let geom = table.get(body.species);
         let g = light_field.gradient(&dungeon, transform.translation);
         if g == Vec2::ZERO {
             continue;
         }
+        // A quickened body leans as fast as it grows, so the intent boost applies here too.
+        let budget = base_budget
+            * intent_boost(Vec2::new(transform.translation.x, transform.translation.z), now, &cfg);
         // Target deflection: toward the light, in the body's own object space (undo the entity yaw).
         let yaw = transform.rotation.to_euler(EulerRot::YXZ).0;
         let world = Quat::from_rotation_y(-yaw) * Vec3::new(g.x, 0.0, g.y).normalize_or_zero();
@@ -1296,6 +1341,48 @@ mod tests {
         assert!(
             elapsed >= MIN_APPEARANCE_RAMP_SECS - 0.05,
             "tint completed in {elapsed}s, faster than the {MIN_APPEARANCE_RAMP_SECS}s window",
+        );
+    }
+
+    /// Intent quickening: disabled cleanly, bounded to `[1, speed_scale]`, and — swept over a roam period —
+    /// it must both leave most of the world at the imperceptible baseline AND actually quicken some of it,
+    /// or the "sentient" effect is either always-on (no contrast) or never-on (invisible).
+    #[test]
+    fn intent_boost_is_bounded_and_sometimes_but_not_always_quickens() {
+        let mut cfg = crate::mycelia::tests::valid();
+        // Disabled paths.
+        cfg.intent_focus_count = 0;
+        assert_eq!(intent_boost(Vec2::new(95.0, 95.0), 3.0, &cfg), 1.0);
+        cfg.intent_focus_count = 3;
+        cfg.intent_speed_scale = 1.0;
+        assert_eq!(intent_boost(Vec2::ZERO, 3.0, &cfg), 1.0);
+
+        cfg.intent_speed_scale = 40.0;
+        let mut max_seen = 0.0f32;
+        let mut baseline_samples = 0;
+        let mut total = 0;
+        for step in 0..400 {
+            let t = step as f32 * (cfg.intent_roam_period / 100.0);
+            for gx in 0..12 {
+                for gy in 0..12 {
+                    let p = Vec2::new(gx as f32 * 16.0, gy as f32 * 16.0);
+                    let b = intent_boost(p, t, &cfg);
+                    assert!((1.0..=cfg.intent_speed_scale + 1e-3).contains(&b), "boost {b} out of range");
+                    max_seen = max_seen.max(b);
+                    if b < 1.5 {
+                        baseline_samples += 1;
+                    }
+                    total += 1;
+                }
+            }
+        }
+        assert!(max_seen > 10.0, "intent never meaningfully quickened anything (max {max_seen})");
+        // The overwhelming majority of space-time stays near the imperceptible baseline.
+        assert!(
+            baseline_samples as f32 / total as f32 > 0.8,
+            "intent quickened too much of the colony ({}/{} below 1.5x)",
+            baseline_samples,
+            total
         );
     }
 
