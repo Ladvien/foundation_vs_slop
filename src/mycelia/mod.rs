@@ -369,6 +369,24 @@ pub struct MyceliaConfig {
     /// The one number here that depends on the player's desk rather than on the game.
     pub screen_fov_deg_v: f32,
 
+    // ── Intent: the sentient quickening (src/mycelia/fruit.rs `intent_boost`) ──────────────────────────
+    // The colony is one body. *Most* of it grows below the motion-detection threshold — imperceptible, as
+    // above. But a mycelium behaves as though it has intent: it recruits part of itself and animates it
+    // with purpose. A few slow-roaming, waxing-and-waning "foci of attention" drift over the world; a fruit
+    // body caught inside an active focus grows as fast as a *human moves*, then relaxes as the focus moves
+    // on. So a still, imperceptible colony is punctuated by patches that surge up together with intent —
+    // the organism deciding, not the physics ticking.
+    /// How many roaming foci of attention the colony maintains. `0` disables the effect entirely (every
+    /// body grows at the imperceptible rate). A handful reads as one mind moving across a large body.
+    pub intent_focus_count: u32,
+    /// Radius (world units) of a focus's fast zone — how much of the body it recruits at once.
+    pub intent_focus_radius: f32,
+    /// Budget multiplier at a focus's centre. `40` puts the quickened growth at roughly human movement
+    /// speed at the RTS zoom, while the rest of the colony stays at `1×` (imperceptible).
+    pub intent_speed_scale: f32,
+    /// Virtual seconds over which a focus traverses the colony. Slow — attention drifts, it does not dart.
+    pub intent_roam_period: f32,
+
     /// The mushroom species table. One row per species; the death cap is row 0. Each row carries its
     /// growth glb, native scale, and the measured geometry that feeds the perceptual speed limit. See
     /// [`species`]. There is deliberately no default row — the RON is the single source of truth, and a
@@ -694,6 +712,20 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
             "mycelia.screen_fov_deg_v ({}) must be a plausible vertical field of view in degrees",
             c.screen_fov_deg_v
         ));
+    }
+    if c.intent_focus_count > 0 {
+        if !(c.intent_focus_radius > 0.0) {
+            return Err("mycelia.intent_focus_radius must be > 0 when intent_focus_count > 0".into());
+        }
+        if !(c.intent_speed_scale >= 1.0) {
+            return Err(format!(
+                "mycelia.intent_speed_scale ({}) must be >= 1.0 (1.0 = no quickening; below would slow it)",
+                c.intent_speed_scale
+            ));
+        }
+        if !(c.intent_roam_period > 0.0) {
+            return Err("mycelia.intent_roam_period must be > 0".into());
+        }
     }
     Ok(())
 }
@@ -1362,6 +1394,10 @@ mod tests {
             maintain_v: 0.20,
             motion_threshold_deg_per_s: 0.02,
             screen_fov_deg_v: 30.0,
+            intent_focus_count: 3,
+            intent_focus_radius: 6.0,
+            intent_speed_scale: 40.0,
+            intent_roam_period: 45.0,
             species: vec![species::death_cap_config_row()],
         }
     }
