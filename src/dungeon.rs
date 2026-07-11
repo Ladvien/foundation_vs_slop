@@ -78,13 +78,15 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
 const CUTAWAY_SMOOTHING: f32 = 9.0;
 
 /// How a spawned tile participates in the cutaway: floors don't; walls squash to knee height on the
-/// near edge; wall-mounted lintels hide on the near edge. Passed to the tile spawner so the tag and
-/// the initial (yaw=0) pose are set in one place.
+/// near edge; wall-mounted lintels hide on the near edge; a corner post squashes like a wall but
+/// carries its own (diagonal) outward normal since it sits at a tile-corner vertex, not on an edge.
+/// Passed to the tile spawner so the tag and the initial (yaw=0) pose are set in one place.
 #[derive(Clone, Copy)]
 enum Cutaway {
     None,
     Wall,
     Mounted,
+    Post(Vec3),
 }
 
 /// A wall that participates in the view-relative cutaway. `outward` is its outward-facing horizontal
@@ -1899,8 +1901,12 @@ fn spawn_tiles(
     let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
     let full_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE);
     let short_size = Vec3::new(TILE_SIZE - WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
+    // A corner post is a WALL_THICKNESS² column standing the full wall height, filling the vertex gap
+    // where two perpendicular wall runs meet (see the post loop after the wall pass).
+    let post_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
     let wall_full = meshes.add(wall_mesh(full_size));
     let wall_short = meshes.add(wall_mesh(short_size));
+    let wall_post = meshes.add(wall_mesh(post_size));
 
     // One static half-space at y=0 catches every gib chunk (the whole floor is at y=0), so we don't
     // need a physics collider per floor tile — only the gib-chunk physics world uses these (see `gore`).
@@ -1928,10 +1934,12 @@ fn spawn_tiles(
                 let center = Vec3::new(cell.x as f32 * TILE_SIZE, 0.0, cell.y as f32 * TILE_SIZE);
                 wall_outward(transform.translation, center)
             }
+            // A post sits on a vertex, not an edge, so its diagonal outward is supplied by the caller.
+            Cutaway::Post(o) => o,
         };
         if SHORT_CAMERA_WALLS && faces_camera(outward, Vec3::new(1.0, 0.0, 1.0)) {
             match cutaway {
-                Cutaway::Wall => {
+                Cutaway::Wall | Cutaway::Post(_) => {
                     let (scale_y, y) = wall_pose(true);
                     transform.scale.y = scale_y;
                     transform.translation.y = y;
@@ -1947,9 +1955,13 @@ fn spawn_tiles(
             transform,
             Visibility::Hidden,
         ));
-        // Both walls and lintels carry `Wall` so the fog reveal treats them as walls (not floors); only
-        // solid walls get a physics collider (lintels are cosmetic — gibs pass under the ceiling beam).
-        if matches!(cutaway, Cutaway::Wall | Cutaway::Mounted) {
+        // Walls, lintels, and corner posts carry `Wall` so the fog reveal treats them as walls (not
+        // floors); only solid walls/posts get a physics collider (lintels are cosmetic — gibs pass under
+        // the ceiling beam).
+        if matches!(
+            cutaway,
+            Cutaway::Wall | Cutaway::Mounted | Cutaway::Post(_)
+        ) {
             entity.insert(Wall);
         }
         if let Some(size) = wall_size {
@@ -1958,7 +1970,7 @@ fn spawn_tiles(
             entity.insert((RigidBody::Static, Collider::cuboid(size.x, size.y, size.z)));
         }
         match cutaway {
-            Cutaway::Wall => {
+            Cutaway::Wall | Cutaway::Post(_) => {
                 entity.insert(CutawayWall { outward });
             }
             Cutaway::Mounted => {
@@ -2030,6 +2042,71 @@ fn spawn_tiles(
                     );
                 }
             }
+        }
+    }
+
+    // Corner posts: fill the ~WALL_THICKNESS² column left at a tile-corner vertex where two
+    // PERPENDICULAR wall runs meet but no single cell owns the convex corner — a concave corner, or a
+    // junction whose two walls come from different cells. `corner_arms` above already fills single-cell
+    // convex corners with its full arm, so those vertices are skipped to avoid overlapping geometry.
+    // Without this the two 0.14 m-thin inset wall slabs meet at the shared vertex leaving a small empty
+    // post-shaped gap for the full wall height. One post per vertex — the `-1..dim` scan visits each once.
+    for cz in -1..dungeon.height as i32 {
+        for cx in -1..dungeon.width as i32 {
+            // The four cells around vertex V at world (cx+0.5, cz+0.5): V is A's SE / B's SW / C's NE /
+            // D's NW corner. `walled` is false for non-floor cells, so boundary vertices work unchanged.
+            let a = IVec2::new(cx, cz);
+            let b = IVec2::new(cx + 1, cz);
+            let c = IVec2::new(cx, cz + 1);
+            let d = IVec2::new(cx + 1, cz + 1);
+
+            // Walled half-edges incident to V (true if the wall exists on either adjacent cell).
+            let north_v = dungeon.walled(a, E) || dungeon.walled(b, W); // vertical edge (cells A|B)
+            let south_v = dungeon.walled(c, E) || dungeon.walled(d, W); // vertical edge (cells C|D)
+            let west_h = dungeon.walled(a, S) || dungeon.walled(c, N); // horizontal edge (cells A|C)
+            let east_h = dungeon.walled(b, S) || dungeon.walled(d, N); // horizontal edge (cells B|D)
+
+            // A post is needed only where a vertical run meets a horizontal run (a real corner/junction).
+            if !((north_v || south_v) && (west_h || east_h)) {
+                continue;
+            }
+            // Skip the convex single-cell corners `corner_arms` already fills (each surrounding cell with
+            // both of its edges-at-V walled matches one CORNERS template), so posts never overlap an arm.
+            let convex_handled = (dungeon.walled(a, S) && dungeon.walled(a, E))
+                || (dungeon.walled(b, S) && dungeon.walled(b, W))
+                || (dungeon.walled(c, N) && dungeon.walled(c, E))
+                || (dungeon.walled(d, N) && dungeon.walled(d, W));
+            if convex_handled {
+                continue;
+            }
+
+            // Outward points from floor into rock on each walled axis so the post squashes together with
+            // its neighbour knee walls under Q/E rotation (`faces_camera` uses only the dot's sign).
+            let west_floor = dungeon.is_floor(a) || dungeon.is_floor(c);
+            let north_floor = dungeon.is_floor(a) || dungeon.is_floor(b);
+            let outward = Vec3::new(
+                if west_floor { 1.0 } else { -1.0 },
+                0.0,
+                if north_floor { 1.0 } else { -1.0 },
+            );
+            // Own the post to a bordering floor cell so the fog reveals it with that room (never rock).
+            let home = [a, b, c, d]
+                .into_iter()
+                .find(|&cc| dungeon.is_floor(cc))
+                .unwrap_or(a);
+            let post_pos = Vec3::new(
+                (cx as f32 + 0.5) * TILE_SIZE,
+                WALL_HEIGHT * 0.5,
+                (cz as f32 + 0.5) * TILE_SIZE,
+            );
+            spawn_tile(
+                home,
+                wall_post.clone(),
+                wall_mat.clone(),
+                Transform::from_translation(post_pos),
+                Some(post_size),
+                Cutaway::Post(outward),
+            );
         }
     }
 

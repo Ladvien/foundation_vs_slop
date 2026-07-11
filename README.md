@@ -1,15 +1,18 @@
 ## ISSUES
-- Toliet and sink need rules to be together, and close to the walls _(partial: generic `AgainstWall` wall-affinity applies, but no rule groups the two together — pieces are actively spread apart)_
-- TV, lamps, small potted plants all need to stack on tables and desks
-- The wall cutaways don't change when the player rotates the map
+_(none open — remaining work is in TODO; landed work is in DONE)_
 
 
 ### TODO
-- Make blood pools relate to the size of the mesh and/or weight of the mesh
 - **Stealth pounce:** gate the leap on the target's facing — stalk to the blind side and only pounce when prey isn't looking. (Now: range + cooldown only.)
 - **Dynamic castes:** let crabs re-role between scout and assault as swarm needs shift. (Now: fixed at birth.)
 
 ## DONE
+- Toilet + sink cluster together against a wall — both fixtures are tagged `group: "bath"` + `back_to_wall`, and `room_profile` now **co-selects the group partner** so the `Near` band always fires (the 2-of-3 pick used to drop half the pair); the Metropolis angular wall-snap seats each back to the perimeter (`assets/config/config.ron`, `src/placement/furnish.rs`).
+- TV / lamps / potted plants / globe stack on desks & tables — `Role::Scatter(surface: "support")` props seated on the inner 9×9 lattice of any `support` surface by the furnish scatter pass; the globe was re-tagged from a floor prop to a surface prop so it only rests on a desk/table (`assets/config/config.ron`, `src/placement/furnish.rs`, `scatter.rs`).
+- Fridges / sinks / chest of drawers back to the wall — the `back_to_wall` affordance drives a HARD `AgainstWall` + `w_wall_angle` angular snap that seats the piece flush with its back to the wall; the dresser (`drawer`) gained the affordance, which also covers the intended wardrobe/armoire "back against the wall" (`assets/config/config.ron`, `src/placement/solvers/metropolis.rs`).
+- Wall cutaways rotate with the map — the knee-wall squash follows the Q/E camera direction via `CutawayWall.outward · CameraView.to_camera` in `update_cutaway`; near walls squash and far walls stand full at every 90° iso detent (`src/dungeon.rs`, `src/camera.rs`).
+- Wall corners no longer leave a post-shaped gap — a corner post fills the `WALL_THICKNESS²` column at concave corners and cross-cell junctions that the single-cell L-corner arms don't cover; posts squash with their neighbour knee walls under rotation (`src/dungeon.rs`).
+- Blood pools scale with the dead thing's mass/size — `pool_scale()` multiplies the base pool by a mass proxy (`intensity`) and the unit's render scale, clamped to `[0.35, 2.0]×` (`src/gore.rs`).
 - Furniture spawns outside of wall boundaries. — room interior bounds inset by wall thickness, MH proposals hard-clamped, quadratic out-of-bounds penalty; WFC emits only in-region cells; furnish rejects non-floor centers (`src/placement/solvers/metropolis.rs`, `wfc.rs`, `furnish.rs`).
 - Furniture spawns halfway through walls — footprints inset from the wall slab (`WALL_INSET = WALL_THICKNESS`) and furniture–furniture overlap penalized (`src/placement/solvers/metropolis.rs`).
 - Ensure the crabs have flocking like behaviors and don't pile up — Reynolds separation steering over a spatial-hash of neighbors (`CRAB_SEP_RADIUS`/`CRAB_SEP_STRENGTH`), applied as real positional displacement across all movement modes (`src/crab.rs`).

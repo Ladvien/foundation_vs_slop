@@ -98,9 +98,11 @@
                 ( key: "bin", glb: "low_poly_furniture/glb/Miscellaneous/Bin.glb",
                   category: "bin", tags: ["decor"], role: Tiled, footprint: (0.40, 0.40),
                   affordances: ["store"] ),
+                // A globe rests on a desk/table (never the floor) — a Scatter prop seated on the
+                // inner lattice of a `support` surface, like the plants and lamp.
                 ( key: "globe", glb: "low_poly_furniture/glb/Miscellaneous/Globe.glb",
-                  category: "decor", tags: ["decor"], role: Tiled, footprint: (0.33, 0.28),
-                  affordances: ["decor"] ),
+                  category: "decor", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.33, 0.28),
+                  affordances: ["decor"], height: 0.30 ),
 
                 // ---- Scatter: small props that rest ON a support surface (desk/table/drawer), placed by
                 // the furnish scatter pass on the inner 9×9 lattice (Stage 3). `surface: "support"` targets
@@ -128,9 +130,11 @@
                 ( key: "chair", glb: "low_poly_furniture/glb/Chairs/Chair A.glb",
                   category: "seating", tags: ["dining"], role: Freestanding, footprint: (0.41, 0.51),
                   affordances: ["sit"] ),
+                // A chest of drawers backs onto a wall (`back_to_wall`) and still hosts props on top
+                // (`support`) — the dresser/armoire "back against the wall" rule.
                 ( key: "drawer", glb: "low_poly_furniture/glb/Drawers/Drawer A.glb",
                   category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (1.55, 0.60),
-                  affordances: ["store", "support"], height: 0.80 ),
+                  affordances: ["store", "support", "back_to_wall"], height: 0.80 ),
                 // Shelf A's source FBX is malformed (~10 m of stray geometry that survives conversion); use
                 // Shelf D, which measures a correct 1.23 × 0.38 × 2.15 m.
                 ( key: "shelf", glb: "low_poly_furniture/glb/Shelves/Shelf D.glb",

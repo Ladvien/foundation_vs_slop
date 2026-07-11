@@ -136,6 +136,35 @@ fn room_profile<'a>(
             }
         }
     }
+    // Same-group co-selection, kit-agnostic: pieces sharing a `group` (a bathroom's toilet + sink) only
+    // cluster if BOTH are picked — the `Near` band in `freestanding_constraints` needs the pair present.
+    // If a chosen item has a group whose partner was left out, swap a non-grouped pick for the partner (a
+    // swap, not a growth, so the room stays sparse at `count`). This is what makes toilet+sink read as one
+    // plumbed wall instead of being dropped to a lone fixture by the 2-of-3 selection above.
+    for idx in 0..chosen.len() {
+        let group = match &chosen[idx].group {
+            Some(g) => g.clone(),
+            None => continue,
+        };
+        let partner_present = chosen
+            .iter()
+            .enumerate()
+            .any(|(k, it)| k != idx && it.group.as_deref() == Some(group.as_str()));
+        if partner_present {
+            continue;
+        }
+        // A same-group partner not already chosen...
+        if let Some(partner) = freestanding
+            .iter()
+            .copied()
+            .find(|it| it.group.as_deref() == Some(group.as_str()) && !chosen.iter().any(|c| c.key == it.key))
+        {
+            // ...swaps into a slot holding a non-grouped item (never evict another group's member).
+            if let Some(slot) = chosen.iter().position(|it| it.group.is_none()) {
+                chosen[slot] = partner;
+            }
+        }
+    }
     chosen
 }
 
@@ -851,6 +880,31 @@ mod tests {
             matches!(pair(1, 2).predicate, Predicate::MinDistance(_)),
             "sink↔sofa spread apart"
         );
+    }
+
+    #[test]
+    fn grouped_fixtures_are_co_selected() {
+        // README ISSUE 1: the toilet+sink `Near` band only fires when BOTH are chosen. A bathroom has
+        // three eligible fixtures (toilet, sink, bath) but `freestanding_per_room` picks two, and the
+        // rotated scan can pick {toilet, bath} or {sink, bath} — dropping half the pair. `room_profile`
+        // must co-select the group partner so the pair always co-occurs, at every region rotation.
+        let mut toilet = item("toilet", &["bathroom"], &["hygiene", "back_to_wall"]);
+        toilet.group = Some("bath".into());
+        let mut sink = item("sink", &["bathroom"], &["hygiene", "back_to_wall"]);
+        sink.group = Some("bath".into());
+        let bath = item("bath", &["bathroom"], &["hygiene", "back_to_wall"]); // no group
+        let items = vec![toilet, sink, bath];
+        let refs: Vec<&ManifestItem> = items.iter().collect();
+        let bathroom = vec!["room".to_string(), "bathroom".to_string()];
+        // Every region rotation must yield the plumbed pair, never a lone fixture beside the bath.
+        for region_id in 0..6 {
+            let profile = room_profile(region_id, &bathroom, &refs, 2);
+            let keys: Vec<&str> = profile.iter().map(|it| it.key.as_str()).collect();
+            assert!(
+                keys.contains(&"toilet") && keys.contains(&"sink"),
+                "region {region_id}: bathroom must co-select toilet+sink, got {keys:?}"
+            );
+        }
     }
 
     #[test]

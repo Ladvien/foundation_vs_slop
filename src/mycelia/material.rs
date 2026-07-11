@@ -15,10 +15,16 @@
 //! `PREPASS_PIPELINE` branching is needed in the WGSL.
 
 use bevy::asset::Asset;
-use bevy::pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+    StandardMaterial,
+};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
 use bevy::shader::ShaderRef;
 
 use super::{MyceliaConfig, WORLD_EXTENT, WORLD_ORIGIN};
@@ -230,6 +236,28 @@ impl MaterialExtension for MoldFloorExt {
     fn fragment_shader() -> ShaderRef {
         "shaders/mycelia_floor.wgsl".into()
     }
+
+    /// Strip the *rasterizer* half of [`FLOOR_DEPTH_BIAS`], keeping only the sort-order half.
+    ///
+    /// `StandardMaterial::depth_bias` drives two unrelated things, and we want exactly one of them: the
+    /// transparent sort distance (yes) and `depth_stencil.bias.constant` (no). At the magnitude the sort
+    /// needs, that constant would bias every fragment's depth far enough back that the opaque carpet
+    /// 0.02 below would reject the overlay outright — the mold would simply stop drawing.
+    ///
+    /// `MaterialExtension::specialize` is documented to run *after* the base material's, so the
+    /// `bias.constant` `StandardMaterial` just wrote is still ours to clear. The overlay is a flat plane
+    /// with nothing coplanar to z-fight against, so zero is the value it always wanted.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+            depth_stencil.bias.constant = 0;
+        }
+        Ok(())
+    }
 }
 
 impl MaterialExtension for MoldWallExt {
@@ -237,6 +265,33 @@ impl MaterialExtension for MoldWallExt {
         "shaders/mycelia_wall.wgsl".into()
     }
 }
+
+/// Sort offset that pins the floor overlay behind every other transparent mesh.
+///
+/// The overlay is `AlphaMode::Blend`, so it never writes depth: Bevy resolves it against other
+/// transparent meshes purely by a painter's-algorithm sort on *one* key per mesh — the AABB centre,
+/// projected onto the camera axis (`Transparent3d::sort_distance` = `rangefinder.distance(centre) +
+/// depth_bias`; values increase toward the camera and are sorted ascending, i.e. back to front). The
+/// overlay is a single `WORLD_EXTENT`-wide quad whose centre sits at the middle of the map, so any
+/// transparent object standing *farther* from the camera than that midpoint — the Smiley's blended
+/// billboard, a dialogue balloon — sorted behind the overlay and was painted over by the mold.
+///
+/// A negative bias lowers the overlay's sort distance, i.e. pushes it away from the camera
+/// (`StandardMaterial::depth_bias`: "negative values cause the material to render behind other objects").
+/// The magnitude has to exceed the largest sort-distance gap the overlay's centre can have with any other
+/// mesh. That projection is 1-Lipschitz — `|d(a) - d(b)| <= |a - b|` — so the world's diagonal
+/// (`|WORLD_EXTENT| ≈ 271`) bounds it, and the Manhattan sum below clears that bound with room to spare.
+///
+/// This is correct rather than merely convenient: the overlay lies on the ground at `Y = 0.02`, and every
+/// transparent thing in this game — faces, balloons, health bars — is *above* the ground. There is no
+/// camera angle from which the mold film should occlude one, so "always draw the overlay first" is the
+/// order the scene actually has.
+///
+/// **The field is overloaded.** Bevy also casts `depth_bias` to `i32` and writes it into
+/// `depth_stencil.bias.constant` (`pbr_material.rs`), a genuine per-fragment rasterizer bias. At this
+/// magnitude that would shift the overlay's *tested* depth behind the carpet it floats above and cull it.
+/// [`MoldFloorExt::specialize`] zeroes that half back out; only the sort offset survives.
+const FLOOR_DEPTH_BIAS: f32 = -(WORLD_EXTENT.x + WORLD_EXTENT.y);
 
 /// The `StandardMaterial` under the floor overlay: translucent (the carpet shows through where there is no
 /// mold) and non-metallic. The extension fragment supplies base colour, normal, roughness and emissive.
@@ -246,6 +301,84 @@ pub fn floor_base() -> StandardMaterial {
         perceptual_roughness: 0.95,
         metallic: 0.0,
         alpha_mode: AlphaMode::Blend,
+        depth_bias: FLOOR_DEPTH_BIAS,
         ..default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overlay quad's centre — kept in step with the spawn in `mycelia::spawn_floor_overlay`.
+    fn overlay_centre() -> Vec3 {
+        Vec3::new(
+            WORLD_ORIGIN.x + WORLD_EXTENT.x * 0.5,
+            0.02,
+            WORLD_ORIGIN.y + WORLD_EXTENT.y * 0.5,
+        )
+    }
+
+    /// Bevy's transparent sort key is `rangefinder.distance(aabb_centre) + depth_bias`, and
+    /// `ViewRangefinder3d::distance` is a row of the view matrix dotted with the point — an affine map
+    /// whose linear part is a unit vector. Any unit `axis` therefore models it exactly (the constant
+    /// term is shared by both meshes and cancels in the comparison).
+    fn sort_key(p: Vec3, axis: Vec3, depth_bias: f32) -> f32 {
+        axis.dot(p) + depth_bias
+    }
+
+    /// The invariant the Smiley-occlusion fix rests on: the mold overlay must sort strictly *before*
+    /// (behind) every other transparent mesh, from every camera angle. Bevy sorts `Transparent3d`
+    /// ascending, and values increase toward the camera — so "behind" means a strictly smaller key.
+    ///
+    /// `sort_key` is affine in `p`, so over the convex world AABB its minimum is attained at a corner.
+    /// Checking the eight corners is therefore exhaustive, not a sample.
+    #[test]
+    fn floor_overlay_sorts_behind_every_transparent_mesh_in_the_world() {
+        let centre = overlay_centre();
+        let (x0, z0) = (WORLD_ORIGIN.x, WORLD_ORIGIN.y);
+        let (x1, z1) = (x0 + WORLD_EXTENT.x, z0 + WORLD_EXTENT.y);
+        // Ground level, and the highest a transparent mesh rides (a dialogue balloon sits ~2.5 up).
+        let corners = [x0, x1]
+            .into_iter()
+            .flat_map(|x| [z0, z1].map(move |z| (x, z)))
+            .flat_map(|(x, z)| [0.0_f32, 4.0].map(move |y| Vec3::new(x, y, z)));
+
+        // A spread of view directions, including straight-down and the game's isometric key angle.
+        let axes = [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::NEG_X,
+            Vec3::NEG_Y,
+            Vec3::NEG_Z,
+            Vec3::new(1.0, -1.0, 1.0).normalize(),
+            Vec3::new(-1.0, -1.0, -1.0).normalize(),
+            Vec3::new(1.0, -1.0, -1.0).normalize(),
+        ];
+
+        for axis in axes {
+            let overlay = sort_key(centre, axis, FLOOR_DEPTH_BIAS);
+            for p in corners.clone() {
+                let other = sort_key(p, axis, 0.0);
+                assert!(
+                    overlay < other,
+                    "mold overlay ({overlay}) would draw over a transparent mesh at {p} \
+                     ({other}) for view axis {axis} — the Smiley-occlusion bug",
+                );
+            }
+        }
+    }
+
+    /// Guards the bias magnitude against someone growing the world: the offset must beat the largest
+    /// gap the overlay's centre can have with any point in it (bounded by the half-diagonal, since the
+    /// projection is 1-Lipschitz).
+    #[test]
+    fn depth_bias_magnitude_covers_the_world_half_diagonal() {
+        let half_diagonal = (WORLD_EXTENT * 0.5).length();
+        assert!(
+            FLOOR_DEPTH_BIAS < -half_diagonal,
+            "bias {FLOOR_DEPTH_BIAS} no longer clears the half-diagonal {half_diagonal}",
+        );
     }
 }

@@ -9,6 +9,8 @@
 //! renderer but never block. In-world dialogue keeps the exchange spatial rather than on a screen HUD,
 //! which raises immersion (Kennedy et al., *Removing the HUD*, 2015, DOI 10.1145/2793107.2793120).
 
+use std::collections::VecDeque;
+
 use bevy::picking::Pickable;
 use bevy::picking::events::{Click, Out, Over, Pointer};
 use bevy::prelude::*;
@@ -30,7 +32,7 @@ pub struct StartConversation {
 
 /// Fire a one-off ambient bubble over a squad member — barks, reactions, LLM chatter later. Never
 /// blocks play.
-#[derive(Message)]
+#[derive(Message, Clone)]
 pub struct Bark {
     pub speaker: usize,
     pub kind: BubbleKind,
@@ -74,10 +76,76 @@ struct AmbientBubble {
 const CHOICE_GAP: f32 = 0.12;
 const CHOICE_BASE: f32 = 0.15;
 
+/// Minimum seconds between two ambient bubbles appearing, squad-wide.
+///
+/// The squad's barks are produced by independent per-unit systems, so two units acting on the same
+/// frame used to pop their balloons simultaneously — a reply landing 16 ms after its cue reads as
+/// noise, not as conversation. Human turn-taking is fast (modal gap ≈ 200 ms; Stivers et al.,
+/// *Universals and cultural variation in turn-taking*, PNAS 2009, DOI 10.1073/pnas.0903616106) but
+/// speech carries prosody and the listener already knows when a turn is ending. A *read* balloon has
+/// neither cue, so the gap must cover the eye-movement + comprehension cost of noticing the new
+/// balloon; ~1 s is the low end of that, and matches the dwell model's per-word budget in `bubble`.
+const BARK_GAP: f32 = 1.0;
+
+/// How long a bark may wait its turn before it is no longer worth saying. A line is a reaction to a
+/// world event; narrated late it describes a situation that has already moved on.
+const BARK_STALE: f32 = 3.0;
+
+/// Backlog cap. Beyond this the *oldest* pending barks are dropped: in a burst the freshest reactions
+/// are the relevant ones, and a deep queue would trickle out stale chatter for many seconds.
+const BARK_QUEUE_CAP: usize = 4;
+
+/// A bark waiting its turn to be spoken, with the time it was generated (for staleness).
+struct PendingBark {
+    bark: Bark,
+    queued_at: f32,
+}
+
+/// Paces ambient chatter. Barks are enqueued as they arrive and released one at a time, at least
+/// [`BARK_GAP`] apart, turning simultaneous utterances into a turn-taking exchange.
+///
+/// This is the single gate on bark presentation — barks are never spawned directly. Ordering is FIFO,
+/// so a reply still follows its cue.
+#[derive(Resource, Default)]
+struct BarkQueue {
+    pending: VecDeque<PendingBark>,
+    /// Real-time stamp before which no bark may be released.
+    next_at: f32,
+}
+
+impl BarkQueue {
+    /// File a bark, evicting the oldest if the backlog is full.
+    fn push(&mut self, bark: Bark, now: f32) {
+        self.pending.push_back(PendingBark { bark, queued_at: now });
+        while self.pending.len() > BARK_QUEUE_CAP {
+            self.pending.pop_front();
+        }
+    }
+
+    /// Discard barks that have waited past [`BARK_STALE`], then hand back the next one if the
+    /// [`BARK_GAP`] since the last balloon has elapsed. Staleness is applied unconditionally so a dead
+    /// bark can never hold the queue head and starve the fresh ones behind it.
+    fn take_ready(&mut self, now: f32) -> Option<Bark> {
+        while self.pending.front().is_some_and(|p| now - p.queued_at > BARK_STALE) {
+            self.pending.pop_front();
+        }
+        if now < self.next_at {
+            return None;
+        }
+        self.pending.pop_front().map(|p| p.bark)
+    }
+
+    /// A balloon actually reached the screen at `now` — open the gap before the next one may.
+    fn spoke_at(&mut self, now: f32) {
+        self.next_at = now + BARK_GAP;
+    }
+}
+
 pub fn plugin(app: &mut App) {
     app.add_message::<StartConversation>()
         .add_message::<Bark>()
         .add_message::<ChoicePicked>()
+        .init_resource::<BarkQueue>()
         .add_systems(
             Update,
             (
@@ -86,9 +154,12 @@ pub fn plugin(app: &mut App) {
                 advance_line,
                 present_current,
                 // The squad-AI adapter feeds `Bark`, so it runs immediately before the consumer and a
-                // generated line reaches the screen on the frame it was spoken.
+                // generated line reaches the queue on the frame it was spoken.
                 super::bark_squad_lines,
-                emit_barks,
+                // Enqueue, then release: a bark spoken this frame can still be shown this frame, but
+                // only one balloon appears per `BARK_GAP` (see `BarkQueue`).
+                queue_barks,
+                release_bark,
             )
                 .chain(),
         );
@@ -380,10 +451,27 @@ fn end_conversation(commands: &mut Commands, existing: &Query<Entity, With<Conve
     commands.remove_resource::<ConversationLock>();
 }
 
-fn emit_barks(
+/// Queue every incoming [`Bark`]. Runs before [`release_bark`] so a bark generated this frame is a
+/// candidate this frame — the queue adds pacing, never a frame of latency to an idle squad.
+fn queue_barks(time: Res<Time<Real>>, mut barks: MessageReader<Bark>, mut queue: ResMut<BarkQueue>) {
+    let now = time.elapsed_secs();
+    for bark in barks.read() {
+        queue.push(bark.clone(), now);
+    }
+}
+
+/// Release at most one queued bark per [`BARK_GAP`], dropping any that waited past [`BARK_STALE`].
+///
+/// Silent while a modal conversation holds the [`ConversationLock`]: this layer runs on `Time<Real>`
+/// (so balloons keep expiring through the freeze), which means the gap would otherwise elapse mid-
+/// conversation and pop ambient chatter over the authored scene. The sim is frozen, so no *new* bark is
+/// generated during one — only a bark filed on the frame the conversation opened could slip through.
+/// Anything still queued when the lock lifts is aged out by [`BARK_STALE`] on the next release.
+fn release_bark(
     mut commands: Commands,
     time: Res<Time<Real>>,
-    mut barks: MessageReader<Bark>,
+    lock: Option<Res<ConversationLock>>,
+    mut queue: ResMut<BarkQueue>,
     assets: Res<BubbleAssets>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -391,41 +479,49 @@ fn emit_barks(
     leader: Query<Entity, (With<Unit>, With<Leader>)>,
     ambient: Query<(Entity, &AmbientBubble)>,
 ) {
-    for bark in barks.read() {
-        let Some(owner) = speaker_entity(bark.speaker, &members, &leader) else {
-            continue;
-        };
-        // Replace any existing ambient bubble on this unit so they don't stack.
-        for (e, a) in &ambient {
-            if a.owner == owner {
-                commands.entity(e).despawn();
-            }
-        }
-        let rendered = build_bubble(
-            &assets,
-            &mut images,
-            &mut materials,
-            &BubbleStyle {
-                kind: bark.kind,
-                emotion: bark.emotion,
-                tail: true,
-            },
-            &bark.text,
-        );
-        commands.spawn((
-            Bubble {
-                owner,
-                offset: Vec2::ZERO,
-            },
-            AmbientBubble { owner },
-            BubbleTtl {
-                expires_at: time.elapsed_secs() + dwell_secs(&bark.text),
-            },
-            Mesh3d(assets.quad.clone()),
-            MeshMaterial3d(rendered.material),
-            Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
-        ));
+    if lock.is_some() {
+        return;
     }
+    let now = time.elapsed_secs();
+    let Some(bark) = queue.take_ready(now) else {
+        return;
+    };
+    let Some(owner) = speaker_entity(bark.speaker, &members, &leader) else {
+        // Nothing was shown, so the gap is not started — the next bark is eligible immediately.
+        return;
+    };
+    queue.spoke_at(now);
+
+    // Replace any existing ambient bubble on this unit so they don't stack.
+    for (e, a) in &ambient {
+        if a.owner == owner {
+            commands.entity(e).despawn();
+        }
+    }
+    let rendered = build_bubble(
+        &assets,
+        &mut images,
+        &mut materials,
+        &BubbleStyle {
+            kind: bark.kind,
+            emotion: bark.emotion,
+            tail: true,
+        },
+        &bark.text,
+    );
+    commands.spawn((
+        Bubble {
+            owner,
+            offset: Vec2::ZERO,
+        },
+        AmbientBubble { owner },
+        BubbleTtl {
+            expires_at: now + dwell_secs(&bark.text),
+        },
+        Mesh3d(assets.quad.clone()),
+        MeshMaterial3d(rendered.material),
+        Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -458,4 +554,101 @@ fn spawn_line_bubble(
         MeshMaterial3d(rendered.material),
         Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bark(text: &str) -> Bark {
+        Bark {
+            speaker: 0,
+            kind: BubbleKind::Speech,
+            emotion: Emotion::Neutral,
+            text: text.into(),
+        }
+    }
+
+    /// The bug this pacing exists for: two units acting on the same frame used to pop both balloons at
+    /// once, so a "reply" landed ~16 ms after its cue. The second must now wait a full `BARK_GAP`.
+    #[test]
+    fn a_second_bark_waits_a_full_gap() {
+        let mut q = BarkQueue::default();
+        q.push(bark("Contact. Hold your lane."), 0.0);
+        q.push(bark("Copy."), 0.0);
+
+        // The first speaks immediately — an idle squad is never made to wait.
+        assert_eq!(q.take_ready(0.0).map(|b| b.text), Some("Contact. Hold your lane.".into()));
+        q.spoke_at(0.0);
+
+        // ...and the reply is held back until the gap has fully elapsed.
+        assert!(q.take_ready(0.5).is_none(), "reply jumped the gap");
+        assert!(q.take_ready(BARK_GAP - 0.01).is_none(), "reply jumped the gap");
+        assert_eq!(q.take_ready(BARK_GAP).map(|b| b.text), Some("Copy.".into()));
+    }
+
+    #[test]
+    fn first_bark_is_never_delayed() {
+        let mut q = BarkQueue::default();
+        q.push(bark("Moving."), 0.0);
+        assert!(q.take_ready(0.0).is_some(), "a quiet squad should speak the instant it has a line");
+    }
+
+    #[test]
+    fn a_bark_that_waited_too_long_is_dropped_not_narrated_late() {
+        let mut q = BarkQueue::default();
+        q.push(bark("Contact."), 0.0);
+        assert!(
+            q.take_ready(BARK_STALE + 0.01).is_none(),
+            "a stale reaction describes a situation that has moved on"
+        );
+        assert!(q.pending.is_empty());
+    }
+
+    /// Staleness must be applied before the gap check, or a dead bark parked at the head would block
+    /// every fresh bark behind it until it happened to be picked.
+    #[test]
+    fn a_stale_head_does_not_starve_a_fresh_bark() {
+        let mut q = BarkQueue::default();
+        q.push(bark("old"), 0.0);
+        q.push(bark("fresh"), 2.5);
+        // At t=3.5 "old" has waited 3.5 s (stale); "fresh" only 1.0 s.
+        assert_eq!(q.take_ready(3.5).map(|b| b.text), Some("fresh".into()));
+    }
+
+    #[test]
+    fn a_burst_keeps_the_freshest_barks() {
+        let mut q = BarkQueue::default();
+        for i in 0..BARK_QUEUE_CAP + 2 {
+            q.push(bark(&i.to_string()), 0.0);
+        }
+        assert_eq!(q.pending.len(), BARK_QUEUE_CAP);
+        // The two oldest were evicted, not the two newest.
+        assert_eq!(q.pending.front().map(|p| p.bark.text.clone()), Some("2".into()));
+    }
+
+    /// A burst drains one balloon at a time, each a gap apart — the whole point of the queue.
+    #[test]
+    fn a_burst_drains_one_balloon_per_gap() {
+        let mut q = BarkQueue::default();
+        for i in 0..BARK_QUEUE_CAP {
+            q.push(bark(&i.to_string()), 0.0);
+        }
+        let mut spoken = Vec::new();
+        let mut t = 0.0_f32;
+        // Step in small increments across the staleness window; only whole gaps should release.
+        while t <= BARK_STALE {
+            if let Some(b) = q.take_ready(t) {
+                q.spoke_at(t);
+                spoken.push((b.text, t));
+            }
+            t += 0.1;
+        }
+        assert!(spoken.len() >= 3, "expected a paced drain, got {spoken:?}");
+        assert!(spoken.len() <= BARK_QUEUE_CAP, "released more than were queued");
+        // Every consecutive pair of balloons is at least a gap apart.
+        for w in spoken.windows(2) {
+            assert!(w[1].1 - w[0].1 >= BARK_GAP - 1.0e-3, "balloons {:?} and {:?} overlap", w[0], w[1]);
+        }
+    }
 }
