@@ -47,6 +47,7 @@ mod material;
 mod measure;
 pub mod perceptual;
 mod pipeline;
+pub mod species;
 mod testbed;
 
 use bevy::prelude::*;
