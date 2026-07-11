@@ -1,34 +1,20 @@
 # The Level-Quality Checklist — every knob, and how to steer it
 
-This is the **grader** the offline level search uses to decide whether an evolved level is "good." It is
-the one place your taste enters the system: the search can only ever find levels the checklist *rewards*,
-so if you want different levels, you change the checklist, not the search.
+This is the **grader** the offline level search uses to decide whether an evolved level is "good." It is the one place your taste enters the system: the search can only ever find levels the checklist *rewards*, so if you want different levels, you change the checklist, not the search.
 
-Everything here lives in **one function**: `score()` in `src/squad_ai/level_quality.rs`. It is a short,
-weighted list of rules. You do not need to touch anything else to retune it.
+Everything here lives in **one function**: `score()` in `src/squad_ai/level_quality.rs`. It is a short, weighted list of rules. You do not need to touch anything else to retune it.
 
-> **Why a checklist at all?** The search generates tens of thousands of candidate levels. Something has to
-> grade them automatically, fast, without a human watching. That grader is a proxy — it measures things we
-> *can* measure about a level's shape (is it connected? is it balanced?), which is not the same as "is it
-> fun." Treat the checklist as *your instructions to the intern*, and expect to revise it once you see what
-> it produces.
+> **Why a checklist at all?** The search generates tens of thousands of candidate levels. Something has to grade them automatically, fast, without a human watching. That grader is a proxy — it measures things we *can* measure about a level's shape (is it connected? is it balanced?), which is not the same as "is it fun." Treat the checklist as *your instructions to the intern*, and expect to revise it once you see what it produces.
 
 ---
 
 ## How a grade is computed (two stages)
 
-**Stage 1 — the gate (pass/fail).** Before a level gets any score, it must clear three hard rules
-(`passes_criterion`). Fail any one and the level is thrown out entirely (no score, not kept). This is the
-"don't even consider garbage" filter.
+**Stage 1 — the gate (pass/fail).** Before a level gets any score, it must clear three hard rules (`passes_criterion`). Fail any one and the level is thrown out entirely (no score, not kept). This is the "don't even consider garbage" filter.
 
-**Stage 2 — the weighted score (0.0 to 1.0).** A level that passes the gate is graded on seven rules. Each
-rule produces a number from 0 (bad) to 1 (perfect). Each rule has a **weight** — how much it matters — and
-the weights add up to 1.0. The final grade is the weighted average. A grade of **1.0 means every rule was
-perfectly satisfied.**
+**Stage 2 — the weighted score (0.0 to 1.0).** A level that passes the gate is graded on seven rules. Each rule produces a number from 0 (bad) to 1 (perfect). Each rule has a **weight** — how much it matters — and the weights add up to 1.0. The final grade is the weighted average. A grade of **1.0 means every rule was perfectly satisfied.**
 
-Two rules use a shape called a **band**, and one uses **reward-toward** — both explained at the bottom. For
-now: a *band* means "I want this value between X and Y"; *reward-toward* means "more is better, up to a
-target."
+Two rules use a shape called a **band**, and one uses **reward-toward** — both explained at the bottom. For now: a *band* means "I want this value between X and Y"; *reward-toward* means "more is better, up to a target."
 
 ---
 
@@ -42,16 +28,13 @@ If a level breaks any of these, it is rejected outright.
 | **At least 2 rooms** | The generator produced two or more rooms. | A one-room "level" isn't a level. |
 | **Not solid, not empty** | Between 5% and 95% of the map is floor. | Rejects a near-solid block of rock or a giant empty void — degenerate, not designable. |
 
-*In the code:* `passes_criterion()`. To loosen or tighten a gate, edit the numbers there (e.g. require
-`room_count >= 4` for busier levels).
+*In the code:* `passes_criterion()`. To loosen or tighten a gate, edit the numbers there (e.g. require `room_count >= 4` for busier levels).
 
 ---
 
 ## Stage 2: The seven grading knobs
 
-Each row is one rule. **Weight** is how much it counts toward the final grade. **Target** is the range or
-value the rule rewards. The **"turn it toward…"** column is your taste lever — what to change to steer the
-levels the search finds.
+Each row is one rule. **Weight** is how much it counts toward the final grade. **Target** is the range or value the rule rewards. The **"turn it toward…"** column is your taste lever — what to change to steer the levels the search finds.
 
 | # | Knob | What it measures (plainly) | Weight | Target | Turn it toward… |
 |---|---|---|---|---|---|
@@ -63,9 +46,7 @@ levels the search finds.
 | 6 | **Mushroom amount** | What fraction of the floor is infested with mould. | **0.10** | between **5% and 35%** of floor | Want levels drowning in mould? Raise the upper number (e.g. `0.2, 0.6`). Want a clean level with just a touch? Lower it. |
 | 7 | **Mushroom placement** | Whether the mould sits mostly in *rooms* rather than corridors. | **0.10** | **60%+** of mould in rooms | This encodes the shipped design rule "mould is a room thing." Raise the target toward 1.0 to punish corridor mould harder; lower it if you *want* infested hallways. |
 
-*In the code:* the `terms` list inside `score()`. Each line is `(weight, rule)`. To change a **weight**,
-edit the first number. To change a **target**, edit the numbers inside `band(...)` or `reward_toward(...)`.
-**Keep the weights adding up to 1.0** so a perfect level still scores exactly 1.0.
+*In the code:* the `terms` list inside `score()`. Each line is `(weight, rule)`. To change a **weight**, edit the first number. To change a **target**, edit the numbers inside `band(...)` or `reward_toward(...)`. **Keep the weights adding up to 1.0** so a perfect level still scores exactly 1.0.
 
 ---
 
@@ -73,34 +54,22 @@ edit the first number. To change a **target**, edit the numbers inside `band(...
 
 You'll see two little functions used above. They're simple:
 
-- **`band(value, low, high)`** — the "I want it in a range" shape. Returns **1.0** when `value` is anywhere
-  between `low` and `high`. Outside the range it fades to 0 gradually (it reaches 0 once you're half the
-  band's width past an edge), so a near-miss still scores partial credit rather than falling off a cliff.
-  Example: `band(room_count, 6, 18)` is happy with 6–18 rooms, mildly unhappy at 4 or 22, fully unhappy at 0.
+- **`band(value, low, high)`** — the "I want it in a range" shape. Returns **1.0** when `value` is anywhere between `low` and `high`. Outside the range it fades to 0 gradually (it reaches 0 once you're half the band's width past an edge), so a near-miss still scores partial credit rather than falling off a cliff. Example: `band(room_count, 6, 18)` is happy with 6–18 rooms, mildly unhappy at 4 or 22, fully unhappy at 0.
+- **`reward_toward(value, target)`** — the "more is better, up to a point" shape. Returns `value / target`, capped at 1.0. So it rewards climbing toward the target and then stops caring once you reach it. Example: `reward_toward(mushroom_room_fraction, 0.6)` gives full marks once 60% of mould is in rooms.
 
-- **`reward_toward(value, target)`** — the "more is better, up to a point" shape. Returns `value / target`,
-  capped at 1.0. So it rewards climbing toward the target and then stops caring once you reach it.
-  Example: `reward_toward(mushroom_room_fraction, 0.6)` gives full marks once 60% of mould is in rooms.
-
-Both live at the top of `level_quality.rs`. You rarely need to change *these*; you change the numbers you
-pass *into* them (the targets in the table above).
+Both live at the top of `level_quality.rs`. You rarely need to change *these*; you change the numbers you pass *into* them (the targets in the table above).
 
 ---
 
 ## A related knob: how the menu is organized (not grading)
 
-Separate from the grade, the search sorts its results into a grid — the "menu" you pick from — along two
-axes: **furniture clutter** (across) × **mushroom infestation** (down). This is `descriptor_axes()`. It
-does **not** affect a level's grade; it only decides *which slot* a level lands in, so the final menu spans
-"lots of furniture / no mould" through "sparse / heavily infested." If you'd rather organize the menu by,
-say, room-count vs. openness, that's the function to edit. (Grade = how good; axes = how it's filed.)
+Separate from the grade, the search sorts its results into a grid — the "menu" you pick from — along two axes: **furniture clutter** (across) × **mushroom infestation** (down). This is `descriptor_axes()`. It does **not** affect a level's grade; it only decides *which slot* a level lands in, so the final menu spans "lots of furniture / no mould" through "sparse / heavily infested." If you'd rather organize the menu by, say, room-count vs. openness, that's the function to edit. (Grade = how good; axes = how it's filed.)
 
 ---
 
 ## How to actually change the checklist
 
-1. Open `src/squad_ai/level_quality.rs` and edit the numbers in `score()` (weights/targets) or
-   `passes_criterion()` (gates), guided by the tables above.
+1. Open `src/squad_ai/level_quality.rs` and edit the numbers in `score()` (weights/targets) or `passes_criterion()` (gates), guided by the tables above.
 2. Re-run the search to regenerate the menu:
    ```
    cargo run --release --features test-harness --bin train -- levels \
@@ -111,19 +80,13 @@ say, room-count vs. openness, that's the function to edit. (Grade = how good; ax
 
 **Worked examples:**
 
-- *"I want tight, maze-like levels."* → Knob 2: raise the room-richness band to `10, 30`. Optionally Knob 5:
-  keep openness low. Rerun.
-- *"I want every level heavily overgrown with mould."* → Knob 6: raise the amount band to `0.25, 0.6`.
-  Optionally Knob 7: it'll follow. Rerun.
+- *"I want tight, maze-like levels."* → Knob 2: raise the room-richness band to `10, 30`. Optionally Knob 5: keep openness low. Rerun.
+- *"I want every level heavily overgrown with mould."* → Knob 6: raise the amount band to `0.25, 0.6`. Optionally Knob 7: it'll follow. Rerun.
 - *"Furniture everywhere, barely any mould."* → Knob 4: raise to `4, 8`; Knob 6: lower to `0.0, 0.1`. Rerun.
-- *"Only keep levels with at least 4 rooms."* → gate: change `room_count >= 2` to `>= 4` in
-  `passes_criterion()`. Rerun.
+- *"Only keep levels with at least 4 rooms."* → gate: change `room_count >= 2` to `>= 4` in `passes_criterion()`. Rerun.
 
 ---
 
 ## The one limit to keep in mind
 
-This checklist grades a level **sitting still** — its shape, balance, and contents. It never plays the
-level, so it cannot judge pacing, difficulty, or fun. It is a fast, honest proxy for "structurally sound and
-balanced," and a strong idea-generator — but the final "is this actually good to play?" call is always
-yours, which is exactly why the search hands you a menu to taste-test rather than shipping a level on its own.
+This checklist grades a level **sitting still** — its shape, balance, and contents. It never plays the level, so it cannot judge pacing, difficulty, or fun. It is a fast, honest proxy for "structurally sound and balanced," and a strong idea-generator — but the final "is this actually good to play?" call is always yours, which is exactly why the search hands you a menu to taste-test rather than shipping a level on its own.
