@@ -58,6 +58,38 @@ pub struct SpeciesGeometryData {
     pub bend_hi_m: f32,
 }
 
+/// How a species responds to lamp light — a real, per-species trait (Moore 1991; *Coprinus* is
+/// textbook positively phototropic). Drives which light marker the body spawns with.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightBehavior {
+    /// Fruits deeper in the dark, shuns lamps — the deadly amanitas.
+    Photophobic,
+    /// Fruits toward light and swells its cap under lamps — the wholesome edibles.
+    Photophilic,
+    /// Bends its stipe toward the brightest neighbour as it grows — leggy gilled species.
+    Phototropic,
+}
+
+/// One entry of a species' room affinity — how strongly it prefers to fruit in a given room type.
+/// Mirrors [`super::DampWeight`]; a species' saprotrophic/substrate preference expressed as habitat.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SpeciesAffinity {
+    pub tag: String,
+    pub weight: f32,
+}
+
+/// A species' flat part colours (linear RGB) + bend zone, for the fruit-body shader. `COLOR_0` is a
+/// part mask (R cap / G flesh / B volva); these tint each part. The cap darkens `young → old` with
+/// maturity. Harmonised toward the mold mat so a species reads as the same organism, not a garden prop.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SpeciesColors {
+    pub cap_young: [f32; 3],
+    pub cap_old: [f32; 3],
+    pub stipe: [f32; 3],
+    pub volva: [f32; 3],
+    pub substrate: [f32; 3],
+}
+
 /// One row of [`super::MyceliaConfig::species`] — a species as configuration.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SpeciesConfig {
@@ -71,6 +103,16 @@ pub struct SpeciesConfig {
     pub growth_glb: String,
     /// Uniform scale applied to the native-scale mesh. The death cap ships at 4.0 (13.9 cm → 56 cm).
     pub body_scale: f32,
+    /// Light response — which light marker the body spawns with.
+    pub light: LightBehavior,
+    /// Amatoxin/poison load `0..1` a mature body carries; harms a grazing crab. `0` = harmless.
+    pub toxicity: f32,
+    /// Food value multiplier a body's flesh gives a grazing crab. `1.0` = the reference.
+    pub nutrition: f32,
+    /// Per-room-type fruiting preference. Empty = no preference (uniform). Validated to name real tags.
+    pub room_affinity: Vec<SpeciesAffinity>,
+    /// Flat part colours for the shader.
+    pub colors: SpeciesColors,
     /// The measured geometry, resolved into a [`SpeciesGeometry`] at load.
     pub geom: SpeciesGeometryData,
 }
@@ -203,6 +245,21 @@ pub fn death_cap_config_row() -> SpeciesConfig {
         archetype: "veiled_egg".to_string(),
         growth_glb: "death_cap/death_cap_growth.glb".to_string(),
         body_scale: 4.0,
+        light: LightBehavior::Photophobic,
+        toxicity: 1.0,
+        nutrition: 0.2,
+        room_affinity: vec![
+            SpeciesAffinity { tag: "bedroom".to_string(), weight: 2.0 },
+            SpeciesAffinity { tag: "hall".to_string(), weight: 1.5 },
+        ],
+        // The current shader constants verbatim, so the death cap renders byte-identical.
+        colors: SpeciesColors {
+            cap_young: [0.444, 0.450, 0.417],
+            cap_old: [0.135, 0.155, 0.128],
+            stipe: [0.227, 0.244, 0.224],
+            volva: [0.137, 0.143, 0.128],
+            substrate: [0.046, 0.051, 0.045],
+        },
         geom: death_cap_data(),
     }
 }

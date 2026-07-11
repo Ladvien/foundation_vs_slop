@@ -653,6 +653,12 @@ fn pin_fruit_bodies(
             continue;
         }
 
+        // One flush, one species: chosen once per nucleus from the room's saprotrophic affinity, so the
+        // whole flush is one genet. Bracket (wall) species are excluded here — they grow on walls.
+        let species = pick_species(&cfg, &dungeon, dcell, nucleus);
+        let geom = table.get(species);
+        let light = cfg.species[species.0 as usize].light;
+
         // The flush. Its layout is a pure function of the nucleus's seed, so a pin is reproducible whatever
         // frame the readback happened to land on. Member 0 sits at the nucleus.
         let sites = cluster_sites(nucleus, cfg.body_scale, cfg.cluster_radius, cfg.cluster_size_max);
@@ -710,14 +716,8 @@ fn pin_fruit_bodies(
             let bend = unyaw(plan.bend);
             let tilt = unyaw(plan.tilt);
 
-            // The species this flush erupts as. One genet, one species; the whole flush inherits it.
-            // Phase 1 is the death cap (row 0) only — the seed-weighted, room-affinity choice lands in a
-            // later phase, keyed off this same nucleus seed so a cluster stays one species.
-            let species = SpeciesId(0);
-            let geom = table.get(species);
-
             let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
-            commands.spawn((
+            let mut ec = commands.spawn((
                 Name::new("mycelia_fruit_body"),
                 FruitBody {
                     growth: 0.0,
@@ -737,16 +737,72 @@ fn pin_fruit_bodies(
                     .with_rotation(Quat::from_rotation_y(yaw))
                     .with_scale(Vec3::splat(scale)),
                 Visibility::default(),
-                // Phototropic: the cap enlarges under lamp light (photomorphogenesis) — see
-                // `grow_fruit_bodies`. The vegetative mat stays dark-loving; only the fruiting body is
-                // light-grown, which is exactly the real biology (Zhang et al. 2015).
-                crate::light::Phototropic,
                 WorldAssetRoot(scenes.handle(species)),
             ));
+            // Per-species light response. Photophilic/Phototropic caps enlarge under lamp light
+            // (photomorphogenesis, Zhang et al. 2015); Phototropic ones also lean toward it
+            // (`bend_toward_light`). Photophobic species (the deadly amanitas) shun light and neither
+            // swell nor lean. The vegetative mat stays dark-loving regardless.
+            match light {
+                super::species::LightBehavior::Photophobic => {
+                    ec.insert(crate::light::Photophobic);
+                }
+                super::species::LightBehavior::Photophilic => {
+                    ec.insert(crate::light::Photophilic);
+                }
+                super::species::LightBehavior::Phototropic => {
+                    ec.insert(crate::light::Phototropic);
+                }
+            }
             live += 1;
             pinned_this_run.push((nucleus, base));
         }
     }
+}
+
+/// The room-affinity weight a species has for the room type at `cell` — its saprotrophic preference.
+/// A listed matching tag gives that weight; an unlisted room is neutral (`1.0`), so a species is
+/// eligible everywhere but favours its preferred substrate. Bracket (wall) species score `0` on the
+/// floor: they erupt from walls via a separate pin path, not here.
+fn species_floor_weight(s: &super::species::SpeciesConfig, tags: &[String]) -> f32 {
+    if s.archetype == "bracket" {
+        return 0.0;
+    }
+    let mut w = 1.0f32;
+    let mut matched = false;
+    for a in &s.room_affinity {
+        if tags.iter().any(|t| t == &a.tag) {
+            w = if matched { w.max(a.weight) } else { a.weight };
+            matched = true;
+        }
+    }
+    w
+}
+
+/// Choose the species a flush erupts as: a seed-derived weighted draw over the species' room affinity
+/// at the pin cell. Deterministic (`hash01_u32`, no entropy), one draw per nucleus, so a whole flush is
+/// one genet of one species. Falls back to the death cap if nothing is eligible (never happens with the
+/// shipped table, but the pin must always yield a species).
+fn pick_species(cfg: &MyceliaConfig, dungeon: &Dungeon, cell: IVec2, seed: u32) -> SpeciesId {
+    let tags: &[String] = dungeon
+        .regions
+        .iter()
+        .find(|r| r.rect.contains([cell.x, cell.y]))
+        .map(|r| r.props.tags.as_slice())
+        .unwrap_or(&[]);
+    let weights: Vec<f32> = cfg.species.iter().map(|s| species_floor_weight(s, tags)).collect();
+    let total: f32 = weights.iter().sum();
+    if total <= 0.0 {
+        return SpeciesId(0);
+    }
+    let mut pick = hash01_u32(seed ^ 0x5EED) * total;
+    for (i, w) in weights.iter().enumerate() {
+        pick -= w;
+        if pick <= 0.0 {
+            return SpeciesId(i as u16);
+        }
+    }
+    SpeciesId(0)
 }
 
 /// Is `world` inside another cluster's keep-out radius?
@@ -792,13 +848,19 @@ fn grow_fruit_bodies(
     light_field: Res<crate::light::LightField>,
     dungeon: Res<crate::dungeon::Dungeon>,
     game_config: Res<crate::config::GameConfig>,
-    mut bodies: Query<(Entity, &mut FruitBody, &mut Transform, Option<&crate::light::Phototropic>)>,
+    mut bodies: Query<(
+        Entity,
+        &mut FruitBody,
+        &mut Transform,
+        Option<&crate::light::Phototropic>,
+        Option<&crate::light::Photophilic>,
+    )>,
 ) {
     let dt = time.delta_secs();
     // The whole perceptual budget, in world units per second, at the zoom the player is actually at.
     let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
 
-    for (entity, mut body, mut transform, phototropic) in &mut bodies {
+    for (entity, mut body, mut transform, phototropic, photophilic) in &mut bodies {
         // Light-induced transition: once seen, the veil may rupture — and stays permitted thereafter.
         if fog.visible_at(body.cell) {
             body.veil_triggered = true;
@@ -858,7 +920,7 @@ fn grow_fruit_bodies(
         // drives the morph speed limit + `energy()`), so this is a pure additional slow enlargement, kept
         // below motion perception like everything else the mold animates. In a lit room the caps swell;
         // crabs (photophobic) won't cross the light to graze them — big mushrooms grow safe in the light.
-        if phototropic.is_some() {
+        if phototropic.is_some() || photophilic.is_some() {
             let lc = &game_config.lighting;
             let peak = light_field.peak();
             let light01 = if peak > 0.0 {
@@ -1196,6 +1258,15 @@ mod tests {
             cells[i] = [0.9, 0.1, tx, 320.0];
         }
 
+        // Scenes + geometry must be parallel to `cfg.species`, or a selected species indexes out of range.
+        let scenes = SpeciesScenes(vec![Handle::default(); cfg.species.len()]);
+        let table = SpeciesTable(
+            cfg.species
+                .iter()
+                .map(|s| crate::mycelia::species::SpeciesGeometry::from_data(&s.geom))
+                .collect(),
+        );
+
         let mut app = App::new();
         app.insert_resource(cfg)
             .insert_resource(MoldCoarse { cells, generation: 0 })
@@ -1204,12 +1275,8 @@ mod tests {
                 crate::mycelia::CONTROL_SIZE as usize,
                 crate::mycelia::CONTROL_SIZE as usize,
             ))
-            .insert_resource(SpeciesScenes(vec![Handle::default()]))
-            .insert_resource(SpeciesTable(vec![
-                crate::mycelia::species::SpeciesGeometry::from_data(
-                    &crate::mycelia::species::death_cap_data(),
-                ),
-            ]))
+            .insert_resource(scenes)
+            .insert_resource(table)
             .insert_resource(PinDwell::default())
             .insert_resource(Time::<Virtual>::default())
             .add_systems(Update, pin_fruit_bodies);
