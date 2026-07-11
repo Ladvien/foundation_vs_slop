@@ -77,18 +77,28 @@ pub(super) fn build(app: &mut App) {
 /// swarm's steering — depend on ECS storage layout.
 fn deposit_fruit_scent(
     time: Res<Time>,
+    cfg: Res<super::MyceliaConfig>,
     fog: Res<FogGrid>,
     bodies: Query<(&Transform, &FruitBody)>,
     mut deposits: ResMut<StigDeposits>,
 ) {
-    let amount = FRUIT_MEAT_RATE * time.delta_secs();
-    let mut positions: Vec<Vec3> = bodies
+    let dt = time.delta_secs();
+    // A mushroom smells of food in proportion to how edible it is: a nutritious edible (oyster, bolete)
+    // draws crabs, a poisonous one (death cap, destroying angel) barely registers — so the swarm learns
+    // to avoid the amanitas without ever being poisoned. Toxicity is scaled by maturity, since the toxin
+    // rides the expanded cap and gills (`FruitBody::amatoxin`).
+    let mut out: Vec<(Vec3, f32)> = bodies
         .iter()
-        .filter(|(_, body)| body.growth >= VEIL_RUPTURE_T && !fog.visible_at(body.cell))
-        .map(|(tf, _)| tf.translation)
+        .filter(|(_, b)| b.growth >= VEIL_RUPTURE_T && !fog.visible_at(b.cell))
+        .map(|(tf, b)| {
+            let sc = &cfg.species[b.species.0 as usize];
+            let appetite = (sc.nutrition * (1.0 - sc.toxicity * b.amatoxin())).max(0.0);
+            (tf.translation, FRUIT_MEAT_RATE * appetite * dt)
+        })
+        .filter(|(_, a)| *a > 0.0)
         .collect();
-    positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
-    for pos in positions {
+    out.sort_unstable_by_key(|(p, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    for (pos, amount) in out {
         deposits.0.push(Deposit { pos, field: FieldId::MEAT, amount });
     }
 }
@@ -116,6 +126,7 @@ fn deposit_fruit_scent(
 /// its hunger drained once. Each body's `growth` is likewise decremented once, by a count.
 fn crabs_graze_fruit_bodies(
     time: Res<Time>,
+    cfg: Res<super::MyceliaConfig>,
     fog: Res<FogGrid>,
     mut bodies: Query<(&Transform, &mut FruitBody)>,
     mut crabs: Query<(Entity, &Transform, &mut Drives), With<Crab>>,
@@ -130,12 +141,16 @@ fn crabs_graze_fruit_bodies(
 
     let crab_positions: Vec<(Entity, Vec3)> =
         crabs.iter().map(|(entity, tf, _)| (entity, tf.translation)).collect();
-    let mut bites: Vec<(Entity, u32)> = Vec::new();
+    // Accumulate *food value* per crab, not bite count: a mouthful of oyster sates; a mouthful of a
+    // mature death cap is toxin, not food, and sates almost nothing (`nutrition · (1 − toxicity·maturity)`).
+    let mut sated: Vec<(Entity, f32)> = Vec::new();
 
     for (body_tf, mut body) in &mut bodies {
         if body.growth <= 0.0 || fog.visible_at(body.cell) {
             continue;
         }
+        let sc = &cfg.species[body.species.0 as usize];
+        let food = (sc.nutrition * (1.0 - sc.toxicity * body.amatoxin())).max(0.0);
         let mut biters = 0u32;
         for (entity, crab_pos) in &crab_positions {
             let d = *crab_pos - body_tf.translation;
@@ -143,22 +158,23 @@ fn crabs_graze_fruit_bodies(
                 continue;
             }
             biters += 1;
-            match bites.iter_mut().find(|(e, _)| e == entity) {
-                Some((_, n)) => *n += 1,
-                None => bites.push((*entity, 1)),
+            match sated.iter_mut().find(|(e, _)| e == entity) {
+                Some((_, f)) => *f += food,
+                None => sated.push((*entity, food)),
             }
         }
         if biters > 0 {
             // Linear in the pile, unlike `crab_contact_damage`'s super-linear frenzy: a mushroom is a fixed
-            // quantity of food, not a body whose defences collapse under a swarm.
+            // quantity of food, not a body whose defences collapse under a swarm. The body is still consumed
+            // whatever its toxicity — the crab takes the bite; it just gains nothing from a poisonous one.
             body.consume(GRAZE_BITE_RATE * biters as f32 * dt);
         }
     }
 
-    for (entity, count) in bites {
+    for (entity, food) in sated {
         if let Ok((_, _, mut drives)) = crabs.get_mut(entity) {
             let h = drives.get(DriveId::HUNGER);
-            drives.set(DriveId::HUNGER, h - HUNGER_SATE_RATE * count as f32 * dt);
+            drives.set(DriveId::HUNGER, h - HUNGER_SATE_RATE * food * dt);
         }
     }
 }

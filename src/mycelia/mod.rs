@@ -729,6 +729,77 @@ pub fn validate_damp_coverage(
     Ok(())
 }
 
+/// Validate the species table. One path, no silent defaults: a malformed row is a loud startup error,
+/// not a mushroom that grows wrong on some seeds. Checks each row's geometry is well-formed (the speed
+/// limit is undefined otherwise), colours are in gamut, its flush cannot overlap at `body_scale`, and
+/// its room affinity names only room types the dungeon can emit.
+pub fn validate_species(
+    c: &MyceliaConfig,
+    room_types: &[crate::dungeon::RoomType],
+) -> Result<(), String> {
+    const ARCHETYPES: [&str; 9] = [
+        "veiled_egg", "gilled_ringed", "gilled_plain", "bolete", "funnel", "bracket", "globe",
+        "cluster", "morel",
+    ];
+    if c.species.is_empty() {
+        return Err("mycelia.species is empty; there must be at least the death cap (row 0)".into());
+    }
+    for (i, s) in c.species.iter().enumerate() {
+        let who = format!("mycelia.species[{i}] {:?}", s.name);
+        if s.name.is_empty() || s.growth_glb.is_empty() {
+            return Err(format!("{who}: empty name or growth_glb"));
+        }
+        if !ARCHETYPES.contains(&s.archetype.as_str()) {
+            return Err(format!("{who}: unknown archetype {:?}; one of {ARCHETYPES:?}", s.archetype));
+        }
+        if !(s.body_scale > 0.0) {
+            return Err(format!("{who}: body_scale must be > 0, got {}", s.body_scale));
+        }
+        if !(0.0..=1.0).contains(&s.toxicity) || !(s.nutrition >= 0.0) {
+            return Err(format!("{who}: toxicity must be 0..=1 and nutrition >= 0"));
+        }
+        let g = &s.geom;
+        for (k, &d) in g.stage_max_disp.iter().enumerate() {
+            if !(d > 0.0) {
+                return Err(format!("{who}: stage_max_disp[{k}] must be > 0 (speed limit divides by it)"));
+            }
+        }
+        for k in 0..6 {
+            if g.stage_height_m[k + 1] < g.stage_height_m[k] - 0.002 {
+                return Err(format!("{who}: stage_height_m drops at stage {k} (a body may not shrink)"));
+            }
+        }
+        if !(g.egg_height_m > 0.0 && g.cap_radius_m > 0.0 && g.volva_radius_m > 0.0) {
+            return Err(format!("{who}: egg/cap/volva radius must all be > 0"));
+        }
+        if !(g.bend_lo_m < g.bend_hi_m) {
+            return Err(format!("{who}: bend_lo_m must be < bend_hi_m"));
+        }
+        // A flush of this species must have room to pack without its volvas interpenetrating.
+        let min_sibling = 2.0 * g.volva_radius_m * s.body_scale;
+        if s.archetype != "bracket" && min_sibling >= c.cluster_radius {
+            return Err(format!(
+                "{who}: sibling spacing {min_sibling:.3} >= cluster_radius {:.3}; the flush would collapse",
+                c.cluster_radius
+            ));
+        }
+        for col in [&s.colors.cap_young, &s.colors.cap_old, &s.colors.stipe, &s.colors.volva, &s.colors.substrate] {
+            if col.iter().any(|&x| !(0.0..=1.0).contains(&x)) {
+                return Err(format!("{who}: a part colour is out of the [0,1] range: {col:?}"));
+            }
+        }
+        for a in &s.room_affinity {
+            if !room_types.iter().any(|rt| rt.tag == a.tag) {
+                return Err(format!(
+                    "{who}: room_affinity names room type {:?}, which dungeon.room_types never emits",
+                    a.tag
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The mold's field textures. Only `display` crosses to the material; the trail and biomass pairs live
 /// purely to feed the compute chain. All are extracted so `prepare_bind_group` can bind them.
 #[derive(Resource, Clone, ExtractResource)]

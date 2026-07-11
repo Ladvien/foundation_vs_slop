@@ -142,6 +142,8 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     // slice can check this alone, and this is the one place both are in hand. A missing tag would otherwise
     // surface as a runtime error deep in habitat selection, on some seeds only.
     mycelia::validate_damp_coverage(&cfg.mycelia, &cfg.dungeon.room_types)?;
+    // The species table's geometry, colours and room affinity, checked once at startup.
+    mycelia::validate_species(&cfg.mycelia, &cfg.dungeon.room_types)?;
     crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
     sim::validate_tuning(&cfg.sim)?;
     crate::light::validate_config(&cfg.lighting)?;
