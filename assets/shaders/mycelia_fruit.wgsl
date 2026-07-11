@@ -52,6 +52,13 @@ struct MoldFruitParams {
     tilt: vec2<f32>,
     cap_ab: vec2<f32>,
     tint: f32,
+    cap_young: vec3<f32>,
+    cap_old: vec3<f32>,
+    stipe: vec3<f32>,
+    volva: vec3<f32>,
+    substrate: vec3<f32>,
+    bend_lo: f32,
+    bend_hi: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> mold: MoldSurfaceParams;
@@ -117,17 +124,12 @@ fn oklab_to_linear_srgb(c: vec3<f32>) -> vec3<f32> {
 // from the bioluminescence, not from albedo — exactly as it does on the floor, where a near-black mat is
 // legible only by its veins.
 //
-// The universal veil is the palest thing on the mushroom: a young cap is a taut membrane stretched over
-// the primordium, so it catches the light. As the pileus expands and thins, the flesh beneath shows
-// through and it sinks toward the mat's own deep flesh.
-const CAP_YOUNG: vec3<f32> = vec3<f32>(0.444, 0.450, 0.417);
-const CAP_OLD: vec3<f32> = vec3<f32>(0.135, 0.155, 0.128);
-// Stipe, gills and annulus: hyphal felt, the fibrous part. Kept the lightest of the mature parts so the
-// body's silhouette still reads at the RTS zoom, and it is where the glow lives.
-const STIPE: vec3<f32> = vec3<f32>(0.227, 0.244, 0.224);
-// The volva is a torn sac half-buried in the substrate, so it wears the substrate.
-const VOLVA: vec3<f32> = vec3<f32>(0.137, 0.143, 0.128);
-const SUBSTRATE: vec3<f32> = vec3<f32>(0.046, 0.051, 0.045);
+// The cap (`fruit.cap_young → fruit.cap_old` with maturity), stipe/gills/annulus (`fruit.stipe`) and the
+// substrate-buried volva (`fruit.volva`/`fruit.substrate`) are now per-species uniforms from the
+// `mycelia.species` table — a young cap is a taut pale membrane that sinks toward the flesh beneath as the
+// pileus expands and thins. The death cap carries the values these constants used to hold, so it is
+// unchanged; a fly agaric is red, a chanterelle gold. `FLESH_DEEP`/`GLOW` stay shared so every species
+// still reads as the same organism as the mat it grew from.
 
 // How far up the body (world units, from its base) the mat it grew out of still clings. The mold does not
 // climb the whole mushroom — it pools around the volva, exactly where the sac meets the substrate.
@@ -157,19 +159,18 @@ const SKIRT_HEIGHT: f32 = 0.06;
 // this is a vertex displacement and not a rotation of the entity. Its drift is likewise charged to the
 // speed limit (`perceptual::STAGE_HEIGHT_DELTA`).
 //
-// MUST match `BEND_LO_M` / `BEND_HI_M` in `src/mycelia/perceptual.rs`, which budgets for this exact curve.
-const BEND_LO: f32 = 0.0891;
-const BEND_HI: f32 = 0.1180;
-
+// The zone `[fruit.bend_lo, fruit.bend_hi]` is per-species (from the `mycelia.species` table), so a short
+// mushroom bends over its own upper stipe. MUST match this species' `bend_lo_m`/`bend_hi_m`, which the CPU
+// budgets for in `SpeciesGeometry::stage_bend_fraction`.
 fn bend_profile(y: f32) -> f32 {
-    let u = clamp((y - BEND_LO) / (BEND_HI - BEND_LO), 0.0, 1.0);
+    let u = clamp((y - fruit.bend_lo) / (fruit.bend_hi - fruit.bend_lo), 0.0, 1.0);
     return u * u * (3.0 - 2.0 * u);
 }
 
 /// d(profile)/dy — the local shear, used to tilt the normal with the surface it rides on.
 fn bend_slope(y: f32) -> f32 {
-    let u = clamp((y - BEND_LO) / (BEND_HI - BEND_LO), 0.0, 1.0);
-    return 6.0 * u * (1.0 - u) / (BEND_HI - BEND_LO);
+    let u = clamp((y - fruit.bend_lo) / (fruit.bend_hi - fruit.bend_lo), 0.0, 1.0);
+    return 6.0 * u * (1.0 - u) / (fruit.bend_hi - fruit.bend_lo);
 }
 
 #ifdef MORPH_TARGETS
@@ -362,7 +363,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Then this body's cluster colour, applied in Oklab so only hue and chroma move: the maturity ramp lives
     // in lightness and must survive untouched, or a differently-coloured cap would also read as a
     // differently-aged one.
-    let pileus_lab = linear_srgb_to_oklab(mix(CAP_YOUNG, CAP_OLD, fruit.tint));
+    let pileus_lab = linear_srgb_to_oklab(mix(fruit.cap_young, fruit.cap_old, fruit.tint));
     let pileus = max(
         oklab_to_linear_srgb(vec3<f32>(pileus_lab.x, pileus_lab.y + fruit.cap_ab.x, pileus_lab.z + fruit.cap_ab.y)),
         vec3<f32>(0.0),
@@ -375,9 +376,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // The volva is a torn sac still half in the ground: fleck it with substrate. Keyed off height above the
     // base, so the flecks sit on the sac rather than swimming down it as the body rises out of the mat.
     let grime = fbm(in.world_position.xz * fs * 2.0 + vec2<f32>(height * fs, 0.0));
-    let sac = mix(VOLVA, SUBSTRATE, smoothstep(0.45, 0.75, grime) * 0.7);
+    let sac = mix(fruit.volva, fruit.substrate, smoothstep(0.45, 0.75, grime) * 0.7);
 
-    var albedo = cap_col * cap + STIPE * flesh + sac * volva;
+    var albedo = cap_col * cap + fruit.stipe * flesh + sac * volva;
     // Veins darken and thicken the flesh they run through, exactly as they do on the mat.
     albedo = mix(albedo, FLESH_DEEP, body_vein * 0.45 * saturate(flesh + volva));
 

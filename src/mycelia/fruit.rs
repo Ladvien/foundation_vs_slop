@@ -79,15 +79,13 @@ use crate::util::hash01_u32;
 use super::material::{MoldFruitExt, MoldFruitMaterial};
 use super::control::{self, MoldControlImage};
 use super::perceptual::{
-    bend_profile, cap_ab_for, cluster_sites, growth_rate, radius_slice_height, stage_weights, v_max,
+    bend_profile, cap_ab_for, cluster_sites, radius_slice_height, stage_weights, v_max,
     ADULT_HEIGHT_M,
-    BENDABLE_MIN_PROFILE, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
+    BENDABLE_MIN_PROFILE, CAP_RADIUS_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
     RADIUS_PROFILE, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
 };
+use super::species::{SpeciesId, SpeciesScenes, SpeciesTable};
 use super::{MoldImages, MyceliaConfig, COARSE_SIZE, WORLD_EXTENT, WORLD_ORIGIN};
-
-/// The death cap, as six morph targets over one `growth` scalar. No animation clips ship with it.
-const DEATH_CAP_GLB: &str = "death_cap/death_cap_growth.glb";
 
 /// How many morph targets the mesh must expose. If the asset is regenerated with a different `STAGES` list
 /// this stops matching, and [`super::perceptual::STAGE_MAX_DISP`] — from which the entire speed limit is
@@ -147,6 +145,10 @@ pub struct FruitBody {
     /// The youngest fruit-body initials grow perpendicular to their substratum, and negative gravitropism
     /// only asserts itself later (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x). No stem ends up plumb.
     pub tilt: Vec2,
+    /// Which species this body is: an index into the [`super::species::SpeciesTable`], fixed at spawn.
+    /// The death cap is [`SpeciesId`]`(0)`. Every growth/geometry lookup keys off this; no system
+    /// branches on it, so a species is data, not a code path.
+    pub species: SpeciesId,
 }
 
 impl FruitBody {
@@ -248,28 +250,18 @@ impl MoldCoarse {
 #[derive(Resource, Default)]
 pub struct PinDwell(HashMap<usize, f32>);
 
-/// The loaded death cap scene. Loaded once at startup; `WorldAssetRoot` instantiates it asynchronously.
-#[derive(Resource)]
-pub struct DeathCapScene(Handle<WorldAsset>);
-
-impl DeathCapScene {
-    /// A clone of the scene handle, for anything that spawns a body outside the normal pin path.
-    pub fn handle(&self) -> Handle<WorldAsset> {
-        self.0.clone()
-    }
-}
-
 pub(super) fn build(app: &mut App) {
     app.init_resource::<MoldCoarse>()
         .init_resource::<PinDwell>()
         .add_plugins(MaterialPlugin::<MoldFruitMaterial>::default())
-        .add_systems(Startup, load_death_cap)
+        .add_systems(Startup, load_species)
         // Cosmetic, and reads a GPU readback: `Update` only, never `FixedUpdate`. See the module header.
         .add_systems(
             Update,
             (
                 pin_fruit_bodies,
                 grow_fruit_bodies,
+                bend_toward_light,
                 drive_morph_weights,
                 coat_fruit_bodies,
                 tint_fruit_bodies,
@@ -278,9 +270,22 @@ pub(super) fn build(app: &mut App) {
         );
 }
 
-fn load_death_cap(mut commands: Commands, assets: Res<AssetServer>) {
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(DEATH_CAP_GLB));
-    commands.insert_resource(DeathCapScene(scene));
+/// Load every species' growth scene and resolve its geometry, once at startup. One path: the
+/// `mycelia.species` RON table is the single source of truth; row 0 is the death cap. `WorldAssetRoot`
+/// instantiates the chosen scene asynchronously beneath each pinned body.
+fn load_species(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<MyceliaConfig>) {
+    let scenes: Vec<Handle<WorldAsset>> = cfg
+        .species
+        .iter()
+        .map(|s| assets.load(GltfAssetLabel::Scene(0).from_asset(s.growth_glb.clone())))
+        .collect();
+    let table: Vec<super::species::SpeciesGeometry> = cfg
+        .species
+        .iter()
+        .map(|s| super::species::SpeciesGeometry::from_data(&s.geom))
+        .collect();
+    commands.insert_resource(SpeciesScenes(scenes));
+    commands.insert_resource(SpeciesTable(table));
 }
 
 /// Observer for the coarse-grid readback. Decodes `vec4<f32>` little-endian into [`MoldCoarse`].
@@ -344,6 +349,12 @@ const RESEAT_ATTEMPTS: usize = 4;
 const LEAN_FRACTION: f32 = 0.18;
 /// Per-body size jitter, ±this fraction of `body_scale`. A flush is not a set of clones.
 const SCALE_JITTER: f32 = 0.18;
+
+/// How far, as a fraction of the bend ceiling, a phototropic stem will lean toward the brightest
+/// neighbour. Below `1.0` so the light-lean and the thigmotropic wall-escape can coexist without the
+/// stem ever reading as snapped. *Coprinus* is the textbook positively-phototropic mushroom (Greening,
+/// Sánchez & Moore 1997, 10.1139/b97-830).
+const PHOTOTROPIC_BEND_FRAC: f32 = 0.6;
 
 /// Radius of the disc, in **native-scale metres**, that any admissible adult pose can reach around its base.
 ///
@@ -572,7 +583,8 @@ fn pin_fruit_bodies(
     coarse: Res<MoldCoarse>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
-    scene: Res<DeathCapScene>,
+    scenes: Res<SpeciesScenes>,
+    table: Res<SpeciesTable>,
     time: Res<Time<Virtual>>,
     mut dwell: ResMut<PinDwell>,
     mut last_gen: Local<u64>,
@@ -648,6 +660,20 @@ fn pin_fruit_bodies(
             continue;
         }
 
+        // One flush, one species: chosen once per nucleus from the room's saprotrophic affinity, so the
+        // whole flush is one genet. Bracket (wall) species are excluded here — they grow on walls.
+        let wall_available = (0..4).any(|d| dungeon.walled(dcell, d));
+        let species = pick_species(&cfg, &dungeon, dcell, nucleus, wall_available);
+        let geom = table.get(species);
+        let light = cfg.species[species.0 as usize].light;
+        // Bracket species grow on a wall face; everything else stands on the floor. Two complete pose
+        // strategies, chosen by species data — not a fallback.
+        let wall_mount = if cfg.species[species.0 as usize].archetype == "bracket" {
+            wall_face(&dungeon, dcell, nucleus)
+        } else {
+            None
+        };
+
         // The flush. Its layout is a pure function of the nucleus's seed, so a pin is reproducible whatever
         // frame the readback happened to land on. Member 0 sits at the nucleus.
         let sites = cluster_sites(nucleus, cfg.body_scale, cfg.cluster_radius, cfg.cluster_size_max);
@@ -683,6 +709,43 @@ fn pin_fruit_bodies(
                 continue;
             }
 
+            // Bracket fungi grow *out of the wall* as a shelf, not up from the floor. Mount rotated on
+            // the wall face; the flush's `offset` maps onto the wall plane (x along the wall, y up it).
+            // No `plan_body` — a bracket wants the wall the floor solver flees. `WallGrown` tells the
+            // growth system to leave its vertical position alone (it emerges by morph, not by rising);
+            // `CutawayMounted` hides it when the camera cuts its wall away, like any wall-hung prop.
+            if let Some((face, into_room, outward)) = wall_mount {
+                let tangent = Vec3::Y.cross(into_room).normalize_or_zero();
+                let h = (WALL_MOUNT_HEIGHT + offset.y).clamp(0.2, crate::dungeon::WALL_HEIGHT - 0.3);
+                let pos = face + tangent * offset.x + Vec3::Y * h;
+                let rot = Quat::from_rotation_arc(Vec3::Y, into_room)
+                    * Quat::from_axis_angle(Vec3::Y, yaw * 0.15);
+                commands.spawn((
+                    Name::new("mycelia_fruit_body"),
+                    FruitBody {
+                        growth: 0.0,
+                        rise: 1.0, // no floor emergence; a bracket grows out of the wall by morph alone
+                        scale,
+                        cell: dcell, // fog gates on the adjacent floor cell; a wall has no fog cell
+                        veil_triggered: true, // no universal veil to wait on
+                        tint: 0.0,
+                        cluster: nucleus,
+                        cap_ab: cap_ab_for(nucleus, seed),
+                        bend: Vec2::ZERO,
+                        tilt: Vec2::ZERO,
+                        species,
+                    },
+                    Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
+                    Visibility::default(),
+                    WallGrown,
+                    crate::dungeon::CutawayMounted { outward, base_scale: Vec3::splat(scale) },
+                    WorldAssetRoot(scenes.handle(species)),
+                ));
+                live += 1;
+                pinned_this_run.push((nucleus, pos));
+                continue;
+            }
+
             // Where it can actually stand, which way its stem curves, and how far off plumb it grew. A site
             // that cannot seat a body clear of the geometry grows nothing — `pin_scan` works at cell
             // resolution and will happily nominate a texel inside a wall slab. A satellite that cannot be
@@ -706,7 +769,7 @@ fn pin_fruit_bodies(
             let tilt = unyaw(plan.tilt);
 
             let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
-            commands.spawn((
+            let mut ec = commands.spawn((
                 Name::new("mycelia_fruit_body"),
                 FruitBody {
                     growth: 0.0,
@@ -719,22 +782,108 @@ fn pin_fruit_bodies(
                     cap_ab: cap_ab_for(nucleus, seed),
                     bend,
                     tilt,
+                    species,
                 },
                 // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
-                Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
+                Transform::from_translation(base - Vec3::Y * (geom.egg_height_m * scale))
                     .with_rotation(Quat::from_rotation_y(yaw))
                     .with_scale(Vec3::splat(scale)),
                 Visibility::default(),
-                // Phototropic: the cap enlarges under lamp light (photomorphogenesis) — see
-                // `grow_fruit_bodies`. The vegetative mat stays dark-loving; only the fruiting body is
-                // light-grown, which is exactly the real biology (Zhang et al. 2015).
-                crate::light::Phototropic,
-                WorldAssetRoot(scene.0.clone()),
+                WorldAssetRoot(scenes.handle(species)),
             ));
+            // Per-species light response. Photophilic/Phototropic caps enlarge under lamp light
+            // (photomorphogenesis, Zhang et al. 2015); Phototropic ones also lean toward it
+            // (`bend_toward_light`). Photophobic species (the deadly amanitas) shun light and neither
+            // swell nor lean. The vegetative mat stays dark-loving regardless.
+            match light {
+                super::species::LightBehavior::Photophobic => {
+                    ec.insert(crate::light::Photophobic);
+                }
+                super::species::LightBehavior::Photophilic => {
+                    ec.insert(crate::light::Photophilic);
+                }
+                super::species::LightBehavior::Phototropic => {
+                    ec.insert(crate::light::Phototropic);
+                }
+            }
             live += 1;
             pinned_this_run.push((nucleus, base));
         }
     }
+}
+
+/// Marks a fruit body that grew out of a **wall** (a bracket fungus — Turkey Tail, Oyster, Chicken of
+/// the Woods) rather than up from the floor. Its emergence and morph are the same, but it is mounted
+/// rotated onto a wall face and does not rise/sink along world Y, so `grow_fruit_bodies` leaves its
+/// vertical position alone. See [`wall_face`].
+#[derive(Component)]
+struct WallGrown;
+
+/// How far up a wall (world units) a bracket's mount sits before its per-member vertical offset. Brackets
+/// grow at chest height, where the mold has crept up out of the floor/wall corner.
+const WALL_MOUNT_HEIGHT: f32 = 0.8;
+
+/// The room-affinity weight a species has for the room type at a cell — its saprotrophic preference.
+/// A listed matching tag gives that weight; an unlisted room is neutral (`1.0`), so a species is
+/// eligible everywhere but favours its preferred substrate. Bracket (wall) species score `0` unless a
+/// wall face is available at the pin cell — they cannot erupt from open floor.
+fn species_weight(s: &super::species::SpeciesConfig, tags: &[String], wall_available: bool) -> f32 {
+    if s.archetype == "bracket" && !wall_available {
+        return 0.0;
+    }
+    let mut w = 1.0f32;
+    let mut matched = false;
+    for a in &s.room_affinity {
+        if tags.iter().any(|t| t == &a.tag) {
+            w = if matched { w.max(a.weight) } else { a.weight };
+            matched = true;
+        }
+    }
+    w
+}
+
+/// The mount point + orientation for a bracket fungus on a wall of `cell`. Picks one of the cell's walled
+/// edges (seeded), and returns `(face_point, into_room, outward)`: a point on the wall's inner face, the
+/// horizontal unit normal pointing **into the room** (the direction the shelf grows and its local `+Y`
+/// maps onto), and the wall's outward normal. `None` if the cell has no walled edge.
+fn wall_face(dungeon: &Dungeon, cell: IVec2, seed: u32) -> Option<(Vec3, Vec3, Vec3)> {
+    // Edge order matches `Dungeon::neighbor`: N, E, S, W.
+    const OFF: [IVec2; 4] = [IVec2::new(0, -1), IVec2::new(1, 0), IVec2::new(0, 1), IVec2::new(-1, 0)];
+    let dirs: Vec<usize> = (0..4).filter(|&d| dungeon.walled(cell, d)).collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    let dir = dirs[((hash01_u32(seed ^ 0x7A11) * dirs.len() as f32) as usize).min(dirs.len() - 1)];
+    let off = OFF[dir];
+    let outward = Vec3::new(off.x as f32, 0.0, off.y as f32); // from the room toward the wall/rock
+    let center = dungeon.cell_center(cell);
+    let face = center + outward * (0.5 * crate::dungeon::TILE_SIZE - crate::dungeon::WALL_THICKNESS);
+    Some((face, -outward, outward))
+}
+
+/// Choose the species a flush erupts as: a seed-derived weighted draw over the species' room affinity
+/// at the pin cell. Deterministic (`hash01_u32`, no entropy), one draw per nucleus, so a whole flush is
+/// one genet of one species. `wall_available` gates the bracket (wall) species in.
+fn pick_species(cfg: &MyceliaConfig, dungeon: &Dungeon, cell: IVec2, seed: u32, wall_available: bool) -> SpeciesId {
+    let tags: &[String] = dungeon
+        .regions
+        .iter()
+        .find(|r| r.rect.contains([cell.x, cell.y]))
+        .map(|r| r.props.tags.as_slice())
+        .unwrap_or(&[]);
+    let weights: Vec<f32> = cfg.species.iter().map(|s| species_weight(s, tags, wall_available)).collect();
+    let total: f32 = weights.iter().sum();
+    if total <= 0.0 {
+        return SpeciesId(0);
+    }
+    let mut pick = hash01_u32(seed ^ 0x5EED) * total;
+    for (i, w) in weights.iter().enumerate() {
+        pick -= w;
+        if pick <= 0.0 {
+            return SpeciesId(i as u16);
+        }
+    }
+    SpeciesId(0)
 }
 
 /// Is `world` inside another cluster's keep-out radius?
@@ -770,6 +919,7 @@ fn crowded_by_another_cluster(
 fn grow_fruit_bodies(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
+    table: Res<SpeciesTable>,
     coarse: Res<MoldCoarse>,
     fog: Res<FogGrid>,
     view: Res<crate::camera::CameraView>,
@@ -779,17 +929,31 @@ fn grow_fruit_bodies(
     light_field: Res<crate::light::LightField>,
     dungeon: Res<crate::dungeon::Dungeon>,
     game_config: Res<crate::config::GameConfig>,
-    mut bodies: Query<(Entity, &mut FruitBody, &mut Transform, Option<&crate::light::Phototropic>)>,
+    mut bodies: Query<(
+        Entity,
+        &mut FruitBody,
+        &mut Transform,
+        Option<&crate::light::Phototropic>,
+        Option<&crate::light::Photophilic>,
+        Option<&WallGrown>,
+    )>,
 ) {
     let dt = time.delta_secs();
     // The whole perceptual budget, in world units per second, at the zoom the player is actually at.
     let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
 
-    for (entity, mut body, mut transform, phototropic) in &mut bodies {
+    for (entity, mut body, mut transform, phototropic, photophilic, wall) in &mut bodies {
+        // A wall-mounted bracket does not rise/sink along world Y and its scale is owned by the cutaway
+        // system, so the floor-emergence and photomorphogenesis-swell branches below are skipped for it.
+        let wall = wall.is_some();
         // Light-induced transition: once seen, the veil may rupture — and stays permitted thereafter.
         if fog.visible_at(body.cell) {
             body.veil_triggered = true;
         }
+
+        // Per-species growth geometry (heights, morph-segment displacements, bend zone). The integrator
+        // below is one path for every species — only the numbers it integrates against differ.
+        let geom = table.get(body.species);
 
         let local_v = coarse.v_at(Vec2::new(transform.translation.x, transform.translation.z));
         let stalled = body.growth >= VEIL_RUPTURE_T && !body.veil_triggered;
@@ -803,12 +967,12 @@ fn grow_fruit_bodies(
 
         // Emergence and morph are one continuous clock: the body rises out of the mat first, then blends.
         // Reabsorption runs the same clock backwards, in the same order, reversed.
-        let sink = EGG_HEIGHT_M * body.scale;
+        let sink = geom.egg_height_m * body.scale;
         let rise_rate = budget / sink;
         // A bent stem spends growth on curvature, so it crosses its bending segment slower. The bend's
         // extra vertex travel is charged to the same speed limit as the morph's — see `perceptual`.
         let morph_rate =
-            growth_rate(body.growth, body.scale, body.bend.length(), body.tilt.length(), budget);
+            geom.growth_rate(body.growth, body.scale, body.bend.length(), body.tilt.length(), budget);
 
         if gate > 0.0 {
             if body.rise < 1.0 {
@@ -841,7 +1005,7 @@ fn grow_fruit_bodies(
         // drives the morph speed limit + `energy()`), so this is a pure additional slow enlargement, kept
         // below motion perception like everything else the mold animates. In a lit room the caps swell;
         // crabs (photophobic) won't cross the light to graze them — big mushrooms grow safe in the light.
-        if phototropic.is_some() {
+        if !wall && (phototropic.is_some() || photophilic.is_some()) {
             let lc = &game_config.lighting;
             let peak = light_field.peak();
             let light01 = if peak > 0.0 {
@@ -859,7 +1023,52 @@ fn grow_fruit_bodies(
             transform.scale = Vec3::splat(next);
         }
 
-        transform.translation.y = -sink * (1.0 - body.rise);
+        // A floor body's crown tracks its emergence out of the mat; a wall bracket keeps the vertical
+        // position it was mounted at.
+        if !wall {
+            transform.translation.y = -sink * (1.0 - body.rise);
+        }
+    }
+}
+
+/// Phototropism: a light-loving stem leans toward the brightest neighbour as it grows.
+///
+/// Only [`crate::light::Phototropic`] species bend (the leggy gilled ones — Ink Caps, Enoki,
+/// Champignon…). Photophilic species merely swell toward light; photophobic ones ignore it. The lean is
+/// an *autonomous* motion, so it obeys the same perceptual speed limit as growth — eased into `bend`
+/// (object space, native metres) no faster than the per-frame budget, and clamped to the bend ceiling so
+/// it never reads as snapped. `bend` feeds the vertex shader (via `tint_fruit_bodies`) and, because it is
+/// charged for by `growth_rate`, a leaning mushroom also grows slightly slower — the same growth resource
+/// spent on curvature instead of extension (Moore 1991).
+fn bend_toward_light(
+    time: Res<Time<Virtual>>,
+    cfg: Res<MyceliaConfig>,
+    table: Res<SpeciesTable>,
+    light_field: Res<crate::light::LightField>,
+    dungeon: Res<Dungeon>,
+    view: Res<crate::camera::CameraView>,
+    mut bodies: Query<(&mut FruitBody, &Transform), With<crate::light::Phototropic>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    for (mut body, transform) in &mut bodies {
+        let geom = table.get(body.species);
+        let g = light_field.gradient(&dungeon, transform.translation);
+        if g == Vec2::ZERO {
+            continue;
+        }
+        // Target deflection: toward the light, in the body's own object space (undo the entity yaw).
+        let yaw = transform.rotation.to_euler(EulerRot::YXZ).0;
+        let world = Quat::from_rotation_y(-yaw) * Vec3::new(g.x, 0.0, g.y).normalize_or_zero();
+        let target = Vec2::new(world.x, world.z) * (PHOTOTROPIC_BEND_FRAC * geom.max_bend_m);
+        // Ease toward it at the speed limit: the apex may sweep no faster than `budget` world units/s,
+        // i.e. `budget * dt / scale` native metres this frame.
+        let max_step = (budget * dt / body.scale).max(0.0);
+        let delta = (target - body.bend).clamp_length_max(max_step);
+        body.bend = (body.bend + delta).clamp_length_max(geom.max_bend_m);
     }
 }
 
@@ -899,9 +1108,10 @@ fn drive_morph_weights(
             let slots = mw.weights_mut();
             if slots.len() != MORPH_TARGET_COUNT {
                 return Err(format!(
-                    "mycelia: {DEATH_CAP_GLB} exposes {} morph targets, expected {MORPH_TARGET_COUNT}; \
-                     perceptual::STAGE_MAX_DISP describes a different mesh and the growth speed limit \
-                     would be a lie",
+                    "mycelia: a fruit body mesh (species {}) exposes {} morph targets, expected \
+                     {MORPH_TARGET_COUNT}; its SpeciesGeometry describes a different mesh and the growth \
+                     speed limit would be a lie",
+                    body.species.0,
                     slots.len()
                 )
                 .into());
@@ -949,6 +1159,7 @@ fn coat_fruit_bodies(
             let handle = match already {
                 Some(h) => h,
                 None => {
+                    let sc = &cfg.species[body.species.0 as usize];
                     let h = fruit_materials.add(MoldFruitMaterial {
                         base: base.clone(),
                         extension: MoldFruitExt::new(
@@ -959,6 +1170,9 @@ fn coat_fruit_bodies(
                             body.bend,
                             body.tilt,
                             body.cap_ab,
+                            &sc.colors,
+                            sc.geom.bend_lo_m,
+                            sc.geom.bend_hi_m,
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
@@ -982,15 +1196,19 @@ fn tint_fruit_bodies(
 ) {
     for (body, FruitMaterial(handle)) in &bodies {
         // `Assets::get_mut` emits `AssetEvent::Modified`, which re-uploads the uniform. A mature body's
-        // tint stops changing, so only touch the asset when it actually moved.
-        let unchanged = materials.get(handle).is_some_and(|m| (m.extension.tint() - body.tint).abs() < 1e-5);
-        if unchanged {
+        // tint and (phototropic) bend both stop changing, so only touch the asset when one actually moved.
+        let synced = materials.get(handle).is_some_and(|m| {
+            (m.extension.tint() - body.tint).abs() < 1e-5
+                && m.extension.bend().distance(body.bend) < 1e-5
+        });
+        if synced {
             continue;
         }
         let Some(mut material) = materials.get_mut(handle) else {
             continue;
         };
         material.extension.set_tint(body.tint);
+        material.extension.set_bend(body.bend);
     }
 }
 
@@ -1015,6 +1233,7 @@ mod tests {
             cap_ab: Vec2::ZERO,
             bend: Vec2::ZERO,
             tilt: Vec2::ZERO,
+            species: SpeciesId::default(),
         }
     }
 
@@ -1087,7 +1306,10 @@ mod tests {
         for viewport in [MIN_ZOOM, 12.0, MAX_ZOOM] {
             let budget = vmax(THRESH, FOV, viewport);
             let b = body();
-            let sink = EGG_HEIGHT_M * b.scale;
+            let geom = crate::mycelia::species::SpeciesGeometry::from_data(
+                &crate::mycelia::species::death_cap_data(),
+            );
+            let sink = geom.egg_height_m * b.scale;
             let rise_rate = budget / sink; // per second, in `rise` units
             // `rise` spans [0,1] over `sink` metres, so world speed is `rise_rate * sink`.
             let world_speed = rise_rate * sink;
@@ -1174,6 +1396,15 @@ mod tests {
             cells[i] = [0.9, 0.1, tx, 320.0];
         }
 
+        // Scenes + geometry must be parallel to `cfg.species`, or a selected species indexes out of range.
+        let scenes = SpeciesScenes(vec![Handle::default(); cfg.species.len()]);
+        let table = SpeciesTable(
+            cfg.species
+                .iter()
+                .map(|s| crate::mycelia::species::SpeciesGeometry::from_data(&s.geom))
+                .collect(),
+        );
+
         let mut app = App::new();
         app.insert_resource(cfg)
             .insert_resource(MoldCoarse { cells, generation: 0 })
@@ -1182,7 +1413,8 @@ mod tests {
                 crate::mycelia::CONTROL_SIZE as usize,
                 crate::mycelia::CONTROL_SIZE as usize,
             ))
-            .insert_resource(DeathCapScene(Handle::default()))
+            .insert_resource(scenes)
+            .insert_resource(table)
             .insert_resource(PinDwell::default())
             .insert_resource(Time::<Virtual>::default())
             .add_systems(Update, pin_fruit_bodies);
