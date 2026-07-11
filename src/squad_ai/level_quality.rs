@@ -62,10 +62,16 @@ fn reward_toward(v: f32, target: f32) -> f32 {
 }
 
 impl LevelMetrics {
-    /// The two MAP-Elites descriptor axes: openness (floor fraction) × infestation (mould coverage),
-    /// each already in `[0,1]`.
+    /// The two MAP-Elites descriptor axes: **furniture clutter × mould infestation** — the two "amount"
+    /// dials the search most directly controls, and two of the three things the level search exists to
+    /// vary. Openness (floor fraction) is deliberately *not* an axis: it barely varies for these liminal
+    /// dungeons (~0.06 always), so it would collapse the archive to one column — it stays a fitness term
+    /// instead. Each axis is normalised to its reachable range (clutter `[0, 8]` pieces/room, infestation
+    /// `[0, 0.5]` of floor) so the archive spreads rather than clustering in a corner.
     pub fn descriptor_axes(&self) -> (f32, f32) {
-        (self.floor_fraction, self.infestation)
+        let clutter = (self.furniture_per_room / 8.0).clamp(0.0, 1.0);
+        let infestation = (self.infestation / 0.5).clamp(0.0, 1.0);
+        (clutter, infestation)
     }
 
     /// The hard admission gate. A level that fails is not scored at all (fitness `None`): every floor cell
@@ -93,8 +99,10 @@ impl LevelMetrics {
             (0.15, band(self.room_size_cv, 0.3, 1.2)),
             // Furniture balance: rooms furnished but not crowded.
             (0.15, band(self.furniture_per_room, 1.5, 5.0)),
-            // Openness balance: some walls, some space — neither claustrophobic nor a void.
-            (0.15, band(self.floor_fraction, 0.25, 0.65)),
+            // Openness balance: this is a deliberately-liminal game (sparse Backrooms boxes adrift in
+            // the void), so the band is wide and low — it rejects a near-solid blob or a near-empty void
+            // but does NOT fight the sparse aesthetic the shipped `liminality: 1.0` produces.
+            (0.15, band(self.floor_fraction, 0.05, 0.5)),
             // Mushroom amount: present but not flooding the whole floor.
             (0.10, band(self.infestation, 0.05, 0.35)),
             // Mushroom placement: mould concentrated in rooms, not corridors (the shipped design rule).
@@ -149,18 +157,25 @@ pub fn measure(dungeon: &Dungeon, furniture: &[(u32, Vec3)], habitat: &[u8]) -> 
         furniture_count as f32 / room_count as f32
     };
 
-    // Mushroom coverage + room-vs-corridor split from the habitat mask.
+    // Mushroom coverage + room-vs-corridor split from the habitat mask. The mask is at FIELD resolution
+    // (`field × field`, `field = sqrt(len)` — the same texture the GPU consumes), NOT dungeon-cell
+    // resolution: a dungeon floor cell is infested iff its containing texel is at/above the coverage
+    // threshold `habitat::build` itself reports on (`COVERED` 0.5 → byte 128). This mirrors that builder's
+    // own `covered_cells` computation, so infestation here means the same thing the game's habitat log does.
+    const COVERED_BYTE: u8 = 128;
+    let field = (habitat.len() as f64).sqrt().round() as usize;
     let mut infested = 0usize;
     let mut infested_in_rooms = 0usize;
-    if habitat.len() == w * h {
-        for (i, &v) in habitat.iter().enumerate() {
-            if v == 0 {
-                continue;
-            }
-            infested += 1;
-            let c = IVec2::new((i % w) as i32, (i / w) as i32);
-            if dungeon.is_floor(c) && !dungeon.is_corridor(c) {
-                infested_in_rooms += 1;
+    if field > 0 && field * field == habitat.len() {
+        let cells_per_texel = w as f32 / field as f32;
+        for c in &floor {
+            let tx = ((c.x as f32 + 0.5) / cells_per_texel) as usize;
+            let ty = ((c.y as f32 + 0.5) / cells_per_texel) as usize;
+            if tx < field && ty < field && habitat[ty * field + tx] >= COVERED_BYTE {
+                infested += 1;
+                if !dungeon.is_corridor(*c) {
+                    infested_in_rooms += 1;
+                }
             }
         }
     }

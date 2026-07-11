@@ -104,6 +104,11 @@ mod tests {
         let a = evaluate(&g, &base, &manifest, &seeds).expect("shipped level passes the criterion");
         assert!(a.fitness > 0.0 && a.fitness <= 1.0, "fitness in (0,1], got {}", a.fitness);
         assert!((0.0..=1.0).contains(&a.axes.0) && (0.0..=1.0).contains(&a.axes.1));
+        // The shipped config infests ~15% of the floor, so the mushroom (infestation) axis must be > 0 —
+        // guards the habitat-mask resolution bug (the mask is 1024², not dungeon-cell resolution).
+        assert!(a.axes.1 > 0.0, "shipped level must read as having mushrooms, got infestation {}", a.axes.1);
+        // And it places furniture, so the clutter axis must be > 0 too.
+        assert!(a.axes.0 > 0.0, "shipped level must read as having furniture, got clutter {}", a.axes.0);
         let b = evaluate(&g, &base, &manifest, &seeds).expect("again");
         assert_eq!(a.fitness, b.fitness, "evaluation must be deterministic");
         assert_eq!(a.axes, b.axes);

@@ -123,9 +123,9 @@ pub fn search(
 #[derive(Serialize)]
 pub struct LevelEliteDoc {
     pub cell: (usize, usize),
-    /// Descriptor axis 1 — floor fraction.
-    pub openness: f32,
-    /// Descriptor axis 2 — mould coverage of floor.
+    /// Descriptor axis 1 — furniture clutter (normalised pieces/room).
+    pub clutter: f32,
+    /// Descriptor axis 2 — mould infestation (normalised coverage of floor).
     pub infestation: f32,
     pub fitness: f32,
     pub dungeon: DungeonConfig,
@@ -145,7 +145,7 @@ pub fn level_archive_doc(
         let p = level_genome::decode(g, base)?;
         elites.push(LevelEliteDoc {
             cell: *cell,
-            openness: elite.descriptor.aggression,
+            clutter: elite.descriptor.aggression,
             infestation: elite.descriptor.exploration,
             fitness: elite.fitness,
             dungeon: p.dungeon,
