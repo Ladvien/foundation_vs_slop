@@ -4,7 +4,8 @@
 // each subsystem pulls its own slice out of that resource at plugin-build time.
 //
 // Sections: dungeon (generation) · placement (furniture manifest + layout weights) · gore · impact_fx
-// · ai_tuning · vhs. Edit and relaunch to retune — there is no in-game panel.
+// · ai_tuning · vhs · mycelia · dialogue (authored conversation graph). Edit and relaunch to retune —
+// there is no in-game panel.
 //
 // (The asset-swap fixture assets/config/furniture_kenney.ron stays a standalone file: it exists only to
 // prove the furniture kit is swappable by swapping one file, and is loaded directly by the acceptance
@@ -648,5 +649,64 @@
                                           // (Leibowitz 1955, 10.1364/josa.45.000829; Nakayama 1985,
                                           // 10.1016/0042-6989(85)90171-3)
         screen_fov_deg_v: 30.0,           // vertical visual angle of the window: a 27" panel at ~60 cm
+    ),
+
+    // =============================================================================================
+    // dialogue — authored conversation graph (see `DialogueScript`/`Node` in src/dialogue/model.rs).
+    // A set of named conversations; each is a node graph keyed by id. Speakers are squad-member
+    // indices 0..=4 (0 = leader). `kind` defaults to Speech; `emotion` defaults to Neutral. `Line`
+    // advances to `next` (None ends the conversation); `Choice` presents clickable option bubbles
+    // above the leader and branches on the pick. Cloned into a `DialogueScript` resource at startup.
+    // =============================================================================================
+    dialogue: (
+        conversations: {
+            "intro": (
+                start: "open",
+                nodes: {
+                    "open": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        text: "Foundation, we're through the airlock. Containment breach ahead.",
+                        next: Some("dread"),
+                    ),
+                    "dread": Line(
+                        speaker: 1,
+                        kind: Thought,
+                        emotion: Fear,
+                        text: "Whatever SCP-9191 made... it's still in here with us.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 0,
+                        prompt: "How do we play this?",
+                        options: [
+                            (text: "Push forward, weapons hot.", next: "push"),
+                            (text: "Hold and sweep the room first.", next: "hold"),
+                        ],
+                    ),
+                    "push": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Anger,
+                        text: "Copy. Stack up and move — don't give it time to think.",
+                        next: Some("close"),
+                    ),
+                    "hold": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Smart. Eyes on the corners. Nobody moves until it's clear.",
+                        next: Some("close"),
+                    ),
+                    "close": Line(
+                        speaker: 1,
+                        kind: Thought,
+                        emotion: Calm,
+                        text: "Okay. Stay sharp. We've got this.",
+                        next: None,
+                    ),
+                },
+            ),
+        },
     ),
 )

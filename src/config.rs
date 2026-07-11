@@ -2,13 +2,14 @@
 //! data-driven knob in the game, deserialized once into one [`GameConfig`] resource.
 //!
 //! Before this module each subsystem read its own file (`gore.ron`, `impact_fx.ron`, `ai_tuning.ron`,
-//! `assets/dungeon.ron`, `assets/placement/{furniture,metropolis}.ron`) with its own load path — and
-//! the FX knobs silently fell back to built-in defaults when their file was absent. Both are gone:
-//! there is now **one path, no fallback**. [`ConfigPlugin`] (registered first, before any consumer
-//! plugin) reads and validates the master file at `build` time and inserts [`GameConfig`]; every
-//! downstream plugin pulls its own slice out of that resource in its own `build`, exactly the way
-//! `FogPlugin` reads the `Dungeon` resource `DungeonPlugin` inserts. A missing or malformed file is a
-//! loud panic here at startup, never a silent default world.
+//! `assets/dungeon.ron`, `assets/placement/{furniture,metropolis}.ron`, `assets/dialogue/script.dialogue.ron`)
+//! with its own load path — and the FX knobs silently fell back to built-in defaults when their file was
+//! absent. Both are gone: there is now **one path, no fallback**. [`ConfigPlugin`] (registered first,
+//! before any consumer plugin) reads and validates the master file at `build` time and inserts
+//! [`GameConfig`]; every downstream plugin pulls its own slice out of that resource in its own `build`,
+//! exactly the way `FogPlugin` reads the `Dungeon` resource `DungeonPlugin` inserts (the dialogue graph
+//! is the one slice cloned into its own `DialogueScript` resource, since its runtime systems read it
+//! directly). A missing or malformed file is a loud panic here at startup, never a silent default world.
 //!
 //! The one config file that stays standalone is `assets/config/furniture_kenney.ron` — a test-only
 //! asset-swap fixture whose entire purpose is proving the furniture kit is swappable by swapping a
@@ -18,6 +19,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::ai::tuning::AiTuning;
+use crate::dialogue::model::{self, DialogueScript};
 use crate::dungeon::{self, DungeonConfig};
 use crate::gore::{self, GoreSettings};
 use crate::impact_fx::ImpactFxSettings;
@@ -51,6 +53,7 @@ pub struct GameConfig {
     pub sim: SimTuning,
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
+    pub dialogue: DialogueScript,
 }
 
 /// The evolvable **world-dynamics** surface, as one value: the field-propagation tuning (`ai_tuning`)
@@ -83,6 +86,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     mycelia::validate_damp_coverage(&cfg.mycelia, &cfg.dungeon.room_types)?;
     crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
     sim::validate_tuning(&cfg.sim)?;
+    model::validate_script(&cfg.dialogue)?;
     Ok(cfg)
 }
 
