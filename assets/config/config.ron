@@ -666,6 +666,33 @@
                                           // (Leibowitz 1955, 10.1364/josa.45.000829; Nakayama 1985,
                                           // 10.1016/0042-6989(85)90171-3)
         screen_fov_deg_v: 30.0,           // vertical visual angle of the window: a 27" panel at ~60 cm
+
+        // ── Species table (src/mycelia/species.rs). One row per mushroom species; the death cap is row 0.
+        // Each row carries its growth glb (six morph targets, COLOR_0 part mask), native-scale multiplier,
+        // and the geometry measured off that glb by the asset framework's `_lib/inspect_glb.py` — the
+        // numbers the perceptual speed limit integrates against. There is no default row: the RON is the
+        // single source of truth. Row 0's numbers reproduce the shipped death cap exactly.
+        species: [
+            (
+                name: "Death Cap",
+                growth_glb: "death_cap/death_cap_growth.glb",
+                body_scale: 4.0,
+                geom: (
+                    // Fixed-size arrays are RON tuples: parentheses, not list brackets.
+                    stage_max_disp: (0.00060, 0.01978, 0.03057, 0.02778, 0.02397, 0.01134),
+                    stage_height_m: (0.0485, 0.0484, 0.0627, 0.0933, 0.1192, 0.1345, 0.1393),
+                    egg_height_m: 0.0485,
+                    cap_radius_m: 0.0560,
+                    volva_radius_m: 0.0230,
+                    radius_profile: (
+                        0.0184, 0.0225, 0.0230, 0.0142, 0.0123, 0.0106, 0.0099, 0.0092,
+                        0.0082, 0.0103, 0.0124, 0.0088, 0.0070, 0.0560, 0.0533, 0.0396,
+                    ),
+                    bend_lo_m: 0.0891,
+                    bend_hi_m: 0.1180,
+                ),
+            ),
+        ],
     ),
 
     // =============================================================================================

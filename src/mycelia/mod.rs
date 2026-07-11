@@ -368,6 +368,12 @@ pub struct MyceliaConfig {
     /// Vertical visual angle the game window subtends at the player's eye (a 27" panel at ~60 cm ≈ 30°).
     /// The one number here that depends on the player's desk rather than on the game.
     pub screen_fov_deg_v: f32,
+
+    /// The mushroom species table. One row per species; the death cap is row 0. Each row carries its
+    /// growth glb, native scale, and the measured geometry that feeds the perceptual speed limit. See
+    /// [`species`]. There is deliberately no default row — the RON is the single source of truth, and a
+    /// species referenced at spawn but absent here would be a loud out-of-range panic, not a silent one.
+    pub species: Vec<species::SpeciesConfig>,
 }
 
 /// One row of [`MyceliaConfig::damp_weights`] — how readily a room type rots.
@@ -1285,6 +1291,7 @@ mod tests {
             maintain_v: 0.20,
             motion_threshold_deg_per_s: 0.02,
             screen_fov_deg_v: 30.0,
+            species: vec![species::death_cap_config_row()],
         }
     }
 

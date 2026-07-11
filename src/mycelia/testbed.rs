@@ -24,7 +24,8 @@ use bevy::prelude::*;
 
 use crate::dungeon::Dungeon;
 
-use super::fruit::{penetration, plan_body, BodyPlan, DeathCapScene, FruitBody};
+use super::fruit::{penetration, plan_body, BodyPlan, FruitBody};
+use super::species::{SpeciesId, SpeciesScenes};
 use super::perceptual::CAP_RADIUS_M;
 
 /// Environment variable that arms the testbed.
@@ -229,7 +230,7 @@ fn find_corner(dungeon: &Dungeon) -> Option<(Vec2, Vec2)> {
 fn plant(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
-    scene: Res<DeathCapScene>,
+    scenes: Res<SpeciesScenes>,
 ) -> Result<(), BevyError> {
     let Some((face, inward)) = find_wall_run(&dungeon) else {
         return Err("mycelia testbed: found no usable stretch of wall near the squad spawn".into());
@@ -281,12 +282,13 @@ fn plant(
                 tint: 1.0,
                 bend: plan.bend,
                 tilt: plan.tilt,
+                species: SpeciesId::default(),
             },
             Transform::from_translation(Vec3::new(plan.base.x, 0.0, plan.base.y))
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(TESTBED_SCALE)),
             Visibility::default(),
-            WorldAssetRoot(scene.handle()),
+            WorldAssetRoot(scenes.handle(SpeciesId(0))),
         ));
     }
 
@@ -325,11 +327,12 @@ fn plant(
                         tint: 1.0,
                         bend: plan.bend,
                         tilt: plan.tilt,
+                        species: SpeciesId::default(),
                     },
                     Transform::from_translation(Vec3::new(plan.base.x, 0.0, plan.base.y))
                         .with_scale(Vec3::splat(TESTBED_SCALE)),
                     Visibility::default(),
-                    WorldAssetRoot(scene.handle()),
+                    WorldAssetRoot(scenes.handle(SpeciesId(0))),
                 ));
             }
         }

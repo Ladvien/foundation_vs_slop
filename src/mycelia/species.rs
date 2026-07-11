@@ -190,6 +190,18 @@ pub fn death_cap_data() -> SpeciesGeometryData {
     }
 }
 
+/// The death cap as a full config row — row 0 of the table. Used by test config builders that
+/// construct [`super::MyceliaConfig`] literally (the shipped RON carries the same row). The glb path
+/// matches the currently-shipped `death_cap_growth.glb`, so row 0 is byte-identical to today.
+pub fn death_cap_config_row() -> SpeciesConfig {
+    SpeciesConfig {
+        name: "Death Cap".to_string(),
+        growth_glb: "death_cap/death_cap_growth.glb".to_string(),
+        body_scale: 4.0,
+        geom: death_cap_data(),
+    }
+}
+
 /// Runtime table of per-species geometry, indexed by [`SpeciesId`]`.0`. Built once at startup from
 /// `MyceliaConfig::species`. Row 0 is the death cap.
 #[derive(Resource)]

@@ -79,15 +79,13 @@ use crate::util::hash01_u32;
 use super::material::{MoldFruitExt, MoldFruitMaterial};
 use super::control::{self, MoldControlImage};
 use super::perceptual::{
-    bend_profile, cap_ab_for, cluster_sites, growth_rate, radius_slice_height, stage_weights, v_max,
+    bend_profile, cap_ab_for, cluster_sites, radius_slice_height, stage_weights, v_max,
     ADULT_HEIGHT_M,
-    BENDABLE_MIN_PROFILE, CAP_RADIUS_M, EGG_HEIGHT_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
+    BENDABLE_MIN_PROFILE, CAP_RADIUS_M, MAX_BEND_M, MAX_TILT, MIN_APPEARANCE_RAMP_SECS,
     RADIUS_PROFILE, VEIL_RUPTURE_T, VOLVA_RADIUS_M,
 };
+use super::species::{SpeciesId, SpeciesScenes, SpeciesTable};
 use super::{MoldImages, MyceliaConfig, COARSE_SIZE, WORLD_EXTENT, WORLD_ORIGIN};
-
-/// The death cap, as six morph targets over one `growth` scalar. No animation clips ship with it.
-const DEATH_CAP_GLB: &str = "death_cap/death_cap_growth.glb";
 
 /// How many morph targets the mesh must expose. If the asset is regenerated with a different `STAGES` list
 /// this stops matching, and [`super::perceptual::STAGE_MAX_DISP`] — from which the entire speed limit is
@@ -147,6 +145,10 @@ pub struct FruitBody {
     /// The youngest fruit-body initials grow perpendicular to their substratum, and negative gravitropism
     /// only asserts itself later (Moore 1991, 10.1111/j.1469-8137.1991.tb00940.x). No stem ends up plumb.
     pub tilt: Vec2,
+    /// Which species this body is: an index into the [`super::species::SpeciesTable`], fixed at spawn.
+    /// The death cap is [`SpeciesId`]`(0)`. Every growth/geometry lookup keys off this; no system
+    /// branches on it, so a species is data, not a code path.
+    pub species: SpeciesId,
 }
 
 impl FruitBody {
@@ -248,22 +250,11 @@ impl MoldCoarse {
 #[derive(Resource, Default)]
 pub struct PinDwell(HashMap<usize, f32>);
 
-/// The loaded death cap scene. Loaded once at startup; `WorldAssetRoot` instantiates it asynchronously.
-#[derive(Resource)]
-pub struct DeathCapScene(Handle<WorldAsset>);
-
-impl DeathCapScene {
-    /// A clone of the scene handle, for anything that spawns a body outside the normal pin path.
-    pub fn handle(&self) -> Handle<WorldAsset> {
-        self.0.clone()
-    }
-}
-
 pub(super) fn build(app: &mut App) {
     app.init_resource::<MoldCoarse>()
         .init_resource::<PinDwell>()
         .add_plugins(MaterialPlugin::<MoldFruitMaterial>::default())
-        .add_systems(Startup, load_death_cap)
+        .add_systems(Startup, load_species)
         // Cosmetic, and reads a GPU readback: `Update` only, never `FixedUpdate`. See the module header.
         .add_systems(
             Update,
@@ -278,9 +269,22 @@ pub(super) fn build(app: &mut App) {
         );
 }
 
-fn load_death_cap(mut commands: Commands, assets: Res<AssetServer>) {
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(DEATH_CAP_GLB));
-    commands.insert_resource(DeathCapScene(scene));
+/// Load every species' growth scene and resolve its geometry, once at startup. One path: the
+/// `mycelia.species` RON table is the single source of truth; row 0 is the death cap. `WorldAssetRoot`
+/// instantiates the chosen scene asynchronously beneath each pinned body.
+fn load_species(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<MyceliaConfig>) {
+    let scenes: Vec<Handle<WorldAsset>> = cfg
+        .species
+        .iter()
+        .map(|s| assets.load(GltfAssetLabel::Scene(0).from_asset(s.growth_glb.clone())))
+        .collect();
+    let table: Vec<super::species::SpeciesGeometry> = cfg
+        .species
+        .iter()
+        .map(|s| super::species::SpeciesGeometry::from_data(&s.geom))
+        .collect();
+    commands.insert_resource(SpeciesScenes(scenes));
+    commands.insert_resource(SpeciesTable(table));
 }
 
 /// Observer for the coarse-grid readback. Decodes `vec4<f32>` little-endian into [`MoldCoarse`].
@@ -572,7 +576,8 @@ fn pin_fruit_bodies(
     coarse: Res<MoldCoarse>,
     dungeon: Res<Dungeon>,
     fog: Res<FogGrid>,
-    scene: Res<DeathCapScene>,
+    scenes: Res<SpeciesScenes>,
+    table: Res<SpeciesTable>,
     time: Res<Time<Virtual>>,
     mut dwell: ResMut<PinDwell>,
     mut last_gen: Local<u64>,
@@ -705,6 +710,12 @@ fn pin_fruit_bodies(
             let bend = unyaw(plan.bend);
             let tilt = unyaw(plan.tilt);
 
+            // The species this flush erupts as. One genet, one species; the whole flush inherits it.
+            // Phase 1 is the death cap (row 0) only — the seed-weighted, room-affinity choice lands in a
+            // later phase, keyed off this same nucleus seed so a cluster stays one species.
+            let species = SpeciesId(0);
+            let geom = table.get(species);
+
             let base = Vec3::new(plan.base.x, 0.0, plan.base.y);
             commands.spawn((
                 Name::new("mycelia_fruit_body"),
@@ -719,9 +730,10 @@ fn pin_fruit_bodies(
                     cap_ab: cap_ab_for(nucleus, seed),
                     bend,
                     tilt,
+                    species,
                 },
                 // Spawns fully sunk: `rise = 0` puts the egg's crown exactly level with the floor.
-                Transform::from_translation(base - Vec3::Y * (EGG_HEIGHT_M * scale))
+                Transform::from_translation(base - Vec3::Y * (geom.egg_height_m * scale))
                     .with_rotation(Quat::from_rotation_y(yaw))
                     .with_scale(Vec3::splat(scale)),
                 Visibility::default(),
@@ -729,7 +741,7 @@ fn pin_fruit_bodies(
                 // `grow_fruit_bodies`. The vegetative mat stays dark-loving; only the fruiting body is
                 // light-grown, which is exactly the real biology (Zhang et al. 2015).
                 crate::light::Phototropic,
-                WorldAssetRoot(scene.0.clone()),
+                WorldAssetRoot(scenes.handle(species)),
             ));
             live += 1;
             pinned_this_run.push((nucleus, base));
@@ -770,6 +782,7 @@ fn crowded_by_another_cluster(
 fn grow_fruit_bodies(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
+    table: Res<SpeciesTable>,
     coarse: Res<MoldCoarse>,
     fog: Res<FogGrid>,
     view: Res<crate::camera::CameraView>,
@@ -791,6 +804,10 @@ fn grow_fruit_bodies(
             body.veil_triggered = true;
         }
 
+        // Per-species growth geometry (heights, morph-segment displacements, bend zone). The integrator
+        // below is one path for every species — only the numbers it integrates against differ.
+        let geom = table.get(body.species);
+
         let local_v = coarse.v_at(Vec2::new(transform.translation.x, transform.translation.z));
         let stalled = body.growth >= VEIL_RUPTURE_T && !body.veil_triggered;
         let gate = if local_v < cfg.maintain_v {
@@ -803,12 +820,12 @@ fn grow_fruit_bodies(
 
         // Emergence and morph are one continuous clock: the body rises out of the mat first, then blends.
         // Reabsorption runs the same clock backwards, in the same order, reversed.
-        let sink = EGG_HEIGHT_M * body.scale;
+        let sink = geom.egg_height_m * body.scale;
         let rise_rate = budget / sink;
         // A bent stem spends growth on curvature, so it crosses its bending segment slower. The bend's
         // extra vertex travel is charged to the same speed limit as the morph's — see `perceptual`.
         let morph_rate =
-            growth_rate(body.growth, body.scale, body.bend.length(), body.tilt.length(), budget);
+            geom.growth_rate(body.growth, body.scale, body.bend.length(), body.tilt.length(), budget);
 
         if gate > 0.0 {
             if body.rise < 1.0 {
@@ -899,9 +916,10 @@ fn drive_morph_weights(
             let slots = mw.weights_mut();
             if slots.len() != MORPH_TARGET_COUNT {
                 return Err(format!(
-                    "mycelia: {DEATH_CAP_GLB} exposes {} morph targets, expected {MORPH_TARGET_COUNT}; \
-                     perceptual::STAGE_MAX_DISP describes a different mesh and the growth speed limit \
-                     would be a lie",
+                    "mycelia: a fruit body mesh (species {}) exposes {} morph targets, expected \
+                     {MORPH_TARGET_COUNT}; its SpeciesGeometry describes a different mesh and the growth \
+                     speed limit would be a lie",
+                    body.species.0,
                     slots.len()
                 )
                 .into());
@@ -1015,6 +1033,7 @@ mod tests {
             cap_ab: Vec2::ZERO,
             bend: Vec2::ZERO,
             tilt: Vec2::ZERO,
+            species: SpeciesId::default(),
         }
     }
 
@@ -1087,7 +1106,10 @@ mod tests {
         for viewport in [MIN_ZOOM, 12.0, MAX_ZOOM] {
             let budget = vmax(THRESH, FOV, viewport);
             let b = body();
-            let sink = EGG_HEIGHT_M * b.scale;
+            let geom = crate::mycelia::species::SpeciesGeometry::from_data(
+                &crate::mycelia::species::death_cap_data(),
+            );
+            let sink = geom.egg_height_m * b.scale;
             let rise_rate = budget / sink; // per second, in `rise` units
             // `rise` spans [0,1] over `sink` metres, so world speed is `rise_rate * sink`.
             let world_speed = rise_rate * sink;
@@ -1182,7 +1204,12 @@ mod tests {
                 crate::mycelia::CONTROL_SIZE as usize,
                 crate::mycelia::CONTROL_SIZE as usize,
             ))
-            .insert_resource(DeathCapScene(Handle::default()))
+            .insert_resource(SpeciesScenes(vec![Handle::default()]))
+            .insert_resource(SpeciesTable(vec![
+                crate::mycelia::species::SpeciesGeometry::from_data(
+                    &crate::mycelia::species::death_cap_data(),
+                ),
+            ]))
             .insert_resource(PinDwell::default())
             .insert_resource(Time::<Virtual>::default())
             .add_systems(Update, pin_fruit_bodies);
