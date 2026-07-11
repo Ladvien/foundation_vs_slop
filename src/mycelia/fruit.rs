@@ -261,6 +261,7 @@ pub(super) fn build(app: &mut App) {
             (
                 pin_fruit_bodies,
                 grow_fruit_bodies,
+                bend_toward_light,
                 drive_morph_weights,
                 coat_fruit_bodies,
                 tint_fruit_bodies,
@@ -348,6 +349,12 @@ const RESEAT_ATTEMPTS: usize = 4;
 const LEAN_FRACTION: f32 = 0.18;
 /// Per-body size jitter, ±this fraction of `body_scale`. A flush is not a set of clones.
 const SCALE_JITTER: f32 = 0.18;
+
+/// How far, as a fraction of the bend ceiling, a phototropic stem will lean toward the brightest
+/// neighbour. Below `1.0` so the light-lean and the thigmotropic wall-escape can coexist without the
+/// stem ever reading as snapped. *Coprinus* is the textbook positively-phototropic mushroom (Greening,
+/// Sánchez & Moore 1997, 10.1139/b97-830).
+const PHOTOTROPIC_BEND_FRAC: f32 = 0.6;
 
 /// Radius of the disc, in **native-scale metres**, that any admissible adult pose can reach around its base.
 ///
@@ -942,6 +949,47 @@ fn grow_fruit_bodies(
     }
 }
 
+/// Phototropism: a light-loving stem leans toward the brightest neighbour as it grows.
+///
+/// Only [`crate::light::Phototropic`] species bend (the leggy gilled ones — Ink Caps, Enoki,
+/// Champignon…). Photophilic species merely swell toward light; photophobic ones ignore it. The lean is
+/// an *autonomous* motion, so it obeys the same perceptual speed limit as growth — eased into `bend`
+/// (object space, native metres) no faster than the per-frame budget, and clamped to the bend ceiling so
+/// it never reads as snapped. `bend` feeds the vertex shader (via `tint_fruit_bodies`) and, because it is
+/// charged for by `growth_rate`, a leaning mushroom also grows slightly slower — the same growth resource
+/// spent on curvature instead of extension (Moore 1991).
+fn bend_toward_light(
+    time: Res<Time<Virtual>>,
+    cfg: Res<MyceliaConfig>,
+    table: Res<SpeciesTable>,
+    light_field: Res<crate::light::LightField>,
+    dungeon: Res<Dungeon>,
+    view: Res<crate::camera::CameraView>,
+    mut bodies: Query<(&mut FruitBody, &Transform), With<crate::light::Phototropic>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
+    for (mut body, transform) in &mut bodies {
+        let geom = table.get(body.species);
+        let g = light_field.gradient(&dungeon, transform.translation);
+        if g == Vec2::ZERO {
+            continue;
+        }
+        // Target deflection: toward the light, in the body's own object space (undo the entity yaw).
+        let yaw = transform.rotation.to_euler(EulerRot::YXZ).0;
+        let world = Quat::from_rotation_y(-yaw) * Vec3::new(g.x, 0.0, g.y).normalize_or_zero();
+        let target = Vec2::new(world.x, world.z) * (PHOTOTROPIC_BEND_FRAC * geom.max_bend_m);
+        // Ease toward it at the speed limit: the apex may sweep no faster than `budget` world units/s,
+        // i.e. `budget * dt / scale` native metres this frame.
+        let max_step = (budget * dt / body.scale).max(0.0);
+        let delta = (target - body.bend).clamp_length_max(max_step);
+        body.bend = (body.bend + delta).clamp_length_max(geom.max_bend_m);
+    }
+}
+
 /// Push each body's `growth` into its glTF morph weights.
 ///
 /// Bevy 0.19 puts `MorphWeights` on the **node** entity and gives each primitive a
@@ -1062,15 +1110,19 @@ fn tint_fruit_bodies(
 ) {
     for (body, FruitMaterial(handle)) in &bodies {
         // `Assets::get_mut` emits `AssetEvent::Modified`, which re-uploads the uniform. A mature body's
-        // tint stops changing, so only touch the asset when it actually moved.
-        let unchanged = materials.get(handle).is_some_and(|m| (m.extension.tint() - body.tint).abs() < 1e-5);
-        if unchanged {
+        // tint and (phototropic) bend both stop changing, so only touch the asset when one actually moved.
+        let synced = materials.get(handle).is_some_and(|m| {
+            (m.extension.tint() - body.tint).abs() < 1e-5
+                && m.extension.bend().distance(body.bend) < 1e-5
+        });
+        if synced {
             continue;
         }
         let Some(mut material) = materials.get_mut(handle) else {
             continue;
         };
         material.extension.set_tint(body.tint);
+        material.extension.set_bend(body.bend);
     }
 }
 

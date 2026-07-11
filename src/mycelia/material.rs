@@ -199,6 +199,18 @@ impl MoldFruitExt {
     pub fn tint(&self) -> f32 {
         self.fruit.tint
     }
+
+    /// Publish this body's stem deflection to its shader. Fixed at spawn for most bodies, but a
+    /// phototropic species leans toward lamp light as it grows (`fruit::bend_toward_light`), so its
+    /// bend is re-uploaded when it moves.
+    pub fn set_bend(&mut self, bend: Vec2) {
+        self.fruit.bend = bend;
+    }
+
+    /// The bend currently uploaded, so the caller can skip a no-op re-upload.
+    pub fn bend(&self) -> Vec2 {
+        self.fruit.bend
+    }
 }
 
 impl MaterialExtension for MoldFruitExt {
