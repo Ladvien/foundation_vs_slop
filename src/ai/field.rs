@@ -99,6 +99,9 @@ pub struct Stig {
     defs: [ChannelDef; CHANNEL_COUNT],
     /// Reused double-buffer for the diffusion pass (avoids per-frame allocation).
     scratch: Vec<f32>,
+    /// Row-major indices of the floor cells (the only cells that ever carry value). Precomputed once so the
+    /// per-tick evaporation/diffusion/hotspot passes skip the rock cells. See [`floor_cell_indices`].
+    floor_cells: Vec<usize>,
 }
 
 /// Walk the floor cells within `radius` (in cells) of `pos`, calling `emit(cell_index, falloff)` with the
@@ -132,6 +135,24 @@ fn deposit_disc(
     }
 }
 
+/// Row-major indices of every floor cell, in ascending index order, precomputed once from the (static)
+/// dungeon. The per-tick field passes iterate only these: a rock cell never carries field value — deposits
+/// are floor-masked (`deposit_disc`), evaporation of 0 is 0, and the diffusion double-buffer's rock cells
+/// stay 0 across the swap — so skipping the ~half-to-two-thirds of the grid that is rock is **bit-identical**
+/// to scanning the whole grid, not an approximation.
+fn floor_cell_indices(dungeon: &Dungeon) -> Vec<usize> {
+    let mut cells = Vec::new();
+    for y in 0..dungeon.height as i32 {
+        for x in 0..dungeon.width as i32 {
+            let c = IVec2::new(x, y);
+            if dungeon.is_floor(c) {
+                cells.push(crate::util::row_major(c, dungeon.width));
+            }
+        }
+    }
+    cells
+}
+
 impl Stig {
     /// Allocate empty grids sized to the dungeon. `defs` come from tuning.
     pub fn new(dungeon: &Dungeon, defs: [ChannelDef; CHANNEL_COUNT]) -> Self {
@@ -142,6 +163,7 @@ impl Stig {
             channels: std::array::from_fn(|_| vec![0.0; cells]),
             defs,
             scratch: vec![0.0; cells],
+            floor_cells: floor_cell_indices(dungeon),
         }
     }
 
@@ -193,39 +215,43 @@ impl Stig {
     /// One evaporation + diffusion step for every channel (Ch.29 diffusion, ACO evaporation). `dt` in
     /// seconds. Diffusion blends only between floor cells so influence doesn't seep through walls.
     fn evaporate_diffuse(&mut self, dungeon: &Dungeon, dt: f32) {
+        // Only floor cells ever hold value (rock cells are invariantly 0), so both passes iterate
+        // `floor_cells` rather than the whole grid. This is bit-identical, not an approximation: evaporating
+        // a rock cell (0·retain) and diffusion's old `scratch[rock] = grid[rock]` (0) were both no-ops, and
+        // the double-buffer's rock cells stay 0 across the swap. The neighbour sum keeps its fixed
+        // E/W/S/N order — float add is non-associative, so the order is load-bearing.
+        let w = self.width;
+        let h = self.height;
         for ch in 0..CHANNEL_COUNT {
             let def = self.defs[ch];
             let retain = (1.0 - def.evaporate * dt).clamp(0.0, 1.0);
-            let grid = &mut self.channels[ch];
-            for v in grid.iter_mut() {
-                *v *= retain;
+            {
+                let grid = &mut self.channels[ch];
+                for &i in &self.floor_cells {
+                    grid[i] *= retain;
+                }
             }
             if def.diffuse <= 0.0 {
                 continue;
             }
             // Blend each floor cell toward the average of its floor neighbours (double-buffered).
-            let w = self.width as i32;
-            let h = self.height as i32;
-            for y in 0..h {
-                for x in 0..w {
-                    let cell = IVec2::new(x, y);
-                    let i = (y as usize) * self.width + x as usize;
-                    if !dungeon.is_floor(cell) {
-                        self.scratch[i] = grid[i];
-                        continue;
+            let diffuse = def.diffuse;
+            let grid = &self.channels[ch];
+            let scratch = &mut self.scratch;
+            for &i in &self.floor_cells {
+                let x = (i % w) as i32;
+                let y = (i / w) as i32;
+                let mut sum = 0.0;
+                let mut n = 0.0;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let nb = IVec2::new(x + dx, y + dy);
+                    if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h && dungeon.is_floor(nb) {
+                        sum += grid[(nb.y as usize) * w + nb.x as usize];
+                        n += 1.0;
                     }
-                    let mut sum = 0.0;
-                    let mut n = 0.0;
-                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let nb = IVec2::new(x + dx, y + dy);
-                        if nb.x >= 0 && nb.y >= 0 && nb.x < w && nb.y < h && dungeon.is_floor(nb) {
-                            sum += grid[(nb.y as usize) * self.width + nb.x as usize];
-                            n += 1.0;
-                        }
-                    }
-                    let avg = if n > 0.0 { sum / n } else { grid[i] };
-                    self.scratch[i] = grid[i] * (1.0 - def.diffuse) + avg * def.diffuse;
                 }
+                let avg = if n > 0.0 { sum / n } else { grid[i] };
+                scratch[i] = grid[i] * (1.0 - diffuse) + avg * diffuse;
             }
             std::mem::swap(&mut self.channels[ch], &mut self.scratch);
         }
@@ -237,7 +263,10 @@ impl Stig {
         let grid = &self.channels[field.0];
         let mut best = 0.0f32;
         let mut best_cell = dungeon.spawn;
-        for (i, &v) in grid.iter().enumerate() {
+        // `floor_cells` is ascending-index order, and rock cells are 0 (can never beat `best` under the
+        // strict `>`), so this yields the identical first-max-wins result as scanning the whole grid.
+        for &i in &self.floor_cells {
+            let v = grid[i];
             if v > best {
                 best = v;
                 best_cell = IVec2::new((i % self.width) as i32, (i / self.width) as i32);
@@ -349,6 +378,9 @@ pub struct RallyField {
     decay: f32,
     accumulate: f32,
     deposit_radius: f32,
+    /// Floor-cell indices (only floor cells receive value), so evaporation skips the rock cells. See
+    /// [`floor_cell_indices`].
+    floor_cells: Vec<usize>,
 }
 
 impl RallyField {
@@ -362,6 +394,7 @@ impl RallyField {
             decay: def.decay,
             accumulate: def.accumulate,
             deposit_radius: def.deposit_radius,
+            floor_cells: floor_cell_indices(dungeon),
         }
     }
 
@@ -400,8 +433,10 @@ impl RallyField {
     /// One evaporation step: decay every cell toward zero (the `(1 - c_d)` term / the automatic call-off).
     fn evaporate(&mut self, dt: f32) {
         let retain = (1.0 - self.decay * dt).clamp(0.0, 1.0);
-        for v in self.grid.iter_mut() {
-            *v *= retain;
+        // Only floor cells ever hold a vector (deposits are floor-masked), so scaling the rock cells is a
+        // no-op — iterate floor cells only (bit-identical).
+        for &i in &self.floor_cells {
+            self.grid[i] *= retain;
         }
     }
 }
