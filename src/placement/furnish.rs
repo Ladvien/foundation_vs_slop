@@ -39,33 +39,14 @@ use super::{splitmix64, PlacedIn, PlacementSolvers, PLACEMENT_SEED};
 /// must agree.
 const FURNITURE_SCALE: f32 = 1.0;
 
-/// Cap on tiled decor props per room, so floors don't fill with scatter.
-const TILED_PER_ROOM: usize = 2;
-
-/// Cap on freestanding furniture pieces per room (modest so a 4–5 tile room reads furnished without
-/// crowding).
-const FREESTANDING_PER_ROOM: usize = 2;
-
-/// Minimum centre-to-centre spacing (metres) requested between freestanding pieces, so a room reads as
-/// sparse scatter (backrooms) rather than a clump. Emitted as a Soft `MinDistance` the Metropolis
-/// solver honors via `w_min_distance` — sparseness, independent of the `coherence` arrangement knob.
-const FREESTANDING_MIN_GAP: f32 = 1.5;
-
-/// Maximum centre-to-centre distance (metres) a `Near` grouping band pulls same-`group` pieces to, so
-/// a bathroom's toilet + sink cluster on one wall instead of scattering. Larger than the pieces so they
-/// sit adjacent (overlap is prevented separately by the solver's `w_overlap`), smaller than
-/// `FREESTANDING_MIN_GAP` so grouping wins over the default spread.
-const GROUP_NEAR_MAX: f32 = 1.2;
-
-/// Cap on scatter props (lamp/plant/TV) rested on support surfaces per room, so a desk isn't buried.
-const SCATTER_PER_ROOM: usize = 3;
+/// The per-room counts and spacing distances — how much furniture a room gets. Promoted out of module
+/// constants into config (`crate::config::PlacementDensity`) so the offline level search can evolve
+/// furniture amount and a chosen elite is a readable RON diff. See that struct for each field.
+pub(crate) use crate::config::PlacementDensity;
 
 /// Inset (metres) from a support surface's footprint edge to the usable top, so a rested prop doesn't
 /// perch flush with the edge and read as about to fall off.
 const SURFACE_INSET: f32 = 0.08;
-
-/// Wall lights placed per room — a sparse accent on a full-height wall (see the wall-anchor pass).
-const WALL_LIGHTS_PER_ROOM: usize = 1;
 
 /// Height up the wall to seat a wall light's origin (a sconce sits above head height).
 const WALL_LIGHT_HEIGHT: f32 = 1.8;
@@ -73,6 +54,10 @@ const WALL_LIGHT_HEIGHT: f32 = 1.8;
 /// The parsed furniture catalogue, held in the ECS world for the furnish pass.
 #[derive(Resource)]
 pub struct Manifest(pub FurnitureManifest);
+
+/// The furniture density knobs, held in the ECS world for the furnish pass (see [`PlacementDensity`]).
+#[derive(Resource)]
+pub struct Density(pub PlacementDensity);
 
 /// A resolved thing to spawn — computed in the parallel solve phase, consumed by the serial spawn.
 struct SpawnReq {
@@ -250,16 +235,18 @@ pub fn furnish_regions(
     dungeon: Res<Dungeon>,
     solvers: Res<PlacementSolvers>,
     manifest: Res<Manifest>,
+    density: Res<Density>,
     assets: Res<AssetServer>,
 ) {
     let parts = RolePartitions::from_catalogue(&manifest.0);
 
     // ---- Parallel solve: each region is independent, so fan out over rayon. ----
     let orchestrator = &solvers.0;
+    let density = &density.0;
     let requests: Vec<SpawnReq> = dungeon
         .regions
         .par_iter()
-        .flat_map_iter(|region| furnish_region(&dungeon, orchestrator, region, &parts))
+        .flat_map_iter(|region| furnish_region(&dungeon, orchestrator, region, &parts, density))
         .collect();
 
     // ---- Serial spawn. ----
@@ -295,6 +282,7 @@ fn furnish_region(
     orchestrator: &super::solver::Orchestrator,
     region: &Region,
     parts: &RolePartitions,
+    density: &PlacementDensity,
 ) -> Vec<SpawnReq> {
     let RolePartitions {
         ceiling,
@@ -332,9 +320,9 @@ fn furnish_region(
     if let Some(light) = wall_lights.first() {
         let faces = full_height_wall_faces(&dungeon, region);
         let n = faces.len();
-        for i in 0..WALL_LIGHTS_PER_ROOM.min(n) {
+        for i in 0..density.wall_lights_per_room.min(n) {
             // Space the lights evenly along the collected faces (mid-wall for a single light).
-            let (face, normal) = faces[(i * n + n / 2) / WALL_LIGHTS_PER_ROOM.max(1)];
+            let (face, normal) = faces[(i * n + n / 2) / density.wall_lights_per_room.max(1)];
             let pos = face.with_y(WALL_LIGHT_HEIGHT) + normal * 0.02;
             // Yaw the sconce so its front points into the room along the inward normal.
             let yaw = normal.x.atan2(normal.z);
@@ -362,7 +350,7 @@ fn furnish_region(
         };
         let mut placed = solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled");
         shuffle_placements(&mut placed, &mut rng);
-        for p in placed.into_iter().take(TILED_PER_ROOM) {
+        for p in placed.into_iter().take(density.tiled_per_room) {
             if let Some(item) = tiled.get(p.candidate) {
                 let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
                 let pos = dungeon.cell_center(cell);
@@ -396,7 +384,7 @@ fn furnish_region(
         region.id,
         &region.props.tags,
         &freestanding,
-        FREESTANDING_PER_ROOM,
+        density.freestanding_per_room,
     );
     if !profile.is_empty() {
         let candidates: Arc<[Candidate]> = profile
@@ -404,7 +392,7 @@ fn furnish_region(
             .map(|it| to_candidate(it))
             .collect::<Vec<_>>()
             .into();
-        let constraints = freestanding_constraints(&profile);
+        let constraints = freestanding_constraints(&profile, density);
         let problem = PlacementProblem {
             region,
             candidates,
@@ -449,7 +437,7 @@ fn furnish_region(
         if !surfaces.is_empty() {
             // A small, region-rotated set of props so same-type rooms don't get identical tops.
             let start = region.id as usize % scatter.len();
-            let chosen: Vec<&ManifestItem> = (0..scatter.len().min(SCATTER_PER_ROOM))
+            let chosen: Vec<&ManifestItem> = (0..scatter.len().min(density.scatter_per_room))
                 .map(|k| scatter[(start + k) % scatter.len()])
                 .collect();
             let props: Vec<scatter::ScatterProp> = chosen
@@ -476,6 +464,26 @@ fn furnish_region(
         }
     }
     out
+}
+
+/// Furnish every region and return each placed piece as `(region, world position)` — the GPU-free,
+/// engine-free entry point the offline level search (`crate::squad_ai::level_eval`) uses to score
+/// furniture amount without spawning ECS entities. Runs the same per-region pipeline as
+/// [`furnish_regions`] minus the serial spawn; deterministic under the per-region seeded sub-streams.
+pub(crate) fn furnish_all(
+    dungeon: &Dungeon,
+    manifest: &FurnitureManifest,
+    weights: crate::placement::solvers::metropolis::MetropolisWeights,
+    density: &PlacementDensity,
+) -> Vec<(RegionId, Vec3)> {
+    let parts = RolePartitions::from_catalogue(manifest);
+    let orchestrator = super::build_solvers(weights);
+    dungeon
+        .regions
+        .iter()
+        .flat_map(|region| furnish_region(dungeon, &orchestrator, region, &parts, density))
+        .map(|req| (req.region, req.pos))
+        .collect()
 }
 
 /// Deterministic Fisher–Yates shuffle of solver placements via the region's seeded RNG. Used to spread
@@ -516,7 +524,7 @@ fn solve_placements(
 /// asked to face a screen so a sofa faces its TV. The relation is selected by AFFORDANCE ("sit" faces
 /// "emit"), not by hardcoded asset keys, so it survives an asset-kit swap; its arrangement strength is
 /// scaled by `coherence` in the solver's cost.
-fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
+fn freestanding_constraints(profile: &[&ManifestItem], density: &PlacementDensity) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     let mut id = 0u32;
     // Back-to-wall: HARD for pieces that must sit flush to a wall (plumbing fixtures, a fridge —
@@ -548,9 +556,9 @@ fn freestanding_constraints(profile: &[&ManifestItem]) -> Vec<Constraint> {
                 (Some(a), Some(b)) if a == b
             );
             let predicate = if same_group {
-                Predicate::Near(GROUP_NEAR_MAX)
+                Predicate::Near(density.group_near_max)
             } else {
-                Predicate::MinDistance(FREESTANDING_MIN_GAP)
+                Predicate::MinDistance(density.freestanding_min_gap)
             };
             constraints.push(Constraint {
                 id,
@@ -677,6 +685,16 @@ mod tests {
     use super::*;
     use crate::placement::ir::{Predicate, Role};
 
+    /// The shipped density knobs, inlined so the unit tests don't need the config file.
+    const TEST_DENSITY: PlacementDensity = PlacementDensity {
+        tiled_per_room: 2,
+        freestanding_per_room: 2,
+        scatter_per_room: 3,
+        wall_lights_per_room: 1,
+        freestanding_min_gap: 1.5,
+        group_near_max: 1.2,
+    };
+
     fn item(key: &str, tags: &[&str], affs: &[&str]) -> ManifestItem {
         ManifestItem {
             key: key.into(),
@@ -712,7 +730,7 @@ mod tests {
         let refs: Vec<&ManifestItem> = items.iter().collect();
         let living = vec!["room".to_string(), "living".to_string()];
         for region_id in [0u32, 3, 4, 7, 8, 11] {
-            let profile = room_profile(region_id, &living, &refs, FREESTANDING_PER_ROOM);
+            let profile = room_profile(region_id, &living, &refs, TEST_DENSITY.freestanding_per_room);
             let has_seat = profile.iter().any(|it| affords(it, "sit"));
             let has_screen = profile.iter().any(|it| affords(it, "emit"));
             assert!(
@@ -731,7 +749,7 @@ mod tests {
         let refs: Vec<&ManifestItem> = items.iter().collect();
         let living = vec!["room".to_string(), "living".to_string()];
         let keys = |rid| {
-            let mut k: Vec<&str> = room_profile(rid, &living, &refs, FREESTANDING_PER_ROOM)
+            let mut k: Vec<&str> = room_profile(rid, &living, &refs, TEST_DENSITY.freestanding_per_room)
                 .iter()
                 .map(|it| it.key.as_str())
                 .collect();
@@ -793,7 +811,7 @@ mod tests {
         let sofa = item("sofa", &["living"], &["sit"]); // not back_to_wall, no group
         let items = vec![toilet, sink, sofa];
         let refs: Vec<&ManifestItem> = items.iter().collect();
-        let cs = freestanding_constraints(&refs);
+        let cs = freestanding_constraints(&refs, &TEST_DENSITY);
 
         let against = |i: usize| {
             cs.iter()
@@ -844,7 +862,7 @@ mod tests {
             item("monitor", &["lounge"], &["emit"]),
         ];
         let refs: Vec<&ManifestItem> = items.iter().collect();
-        let cs = freestanding_constraints(&refs);
+        let cs = freestanding_constraints(&refs, &TEST_DENSITY);
         assert!(
             cs.iter().any(|c| matches!(c.predicate, Predicate::Facing(_))),
             "a seat + screen (by affordance) should emit a Facing relation regardless of asset keys"
@@ -896,7 +914,7 @@ mod tests {
         orch.register(Box::new(MetropolisSolver::new(weights)));
         orch.register(Box::new(ConstraintSolver));
 
-        let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts);
+        let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts, &cfg.placement.density);
         assert!(!reqs.is_empty(), "the office room should be furnished");
 
         // Phase 3: at least one scatter prop rests on the desk surface. Floor furniture sits at y≈0, the

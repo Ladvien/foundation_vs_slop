@@ -24,11 +24,25 @@ pub mod dialogue;
 pub mod coevolve;
 #[cfg(feature = "test-harness")]
 pub mod evaluate;
+/// The standalone level-generation MAP-Elites search + readable `elites_levels.ron` handoff. Gated
+/// because it reuses `coevolve::Population`; the genome/quality/eval it drives are all ungated.
+#[cfg(feature = "test-harness")]
+pub mod level_search;
 /// Multi-process fan-out for the offline search: a pool of `train worker` subprocesses evaluate rollouts
 /// in parallel (the only determinism-safe axis, since the harness pins each process to one thread).
 #[cfg(feature = "test-harness")]
 pub mod parallel;
 pub mod genome;
+/// The level-config genome (dungeon architecture + furniture amount + mushroom amount) the offline
+/// search evolves as a fourth, standalone population under a static level-quality objective. Pure logic
+/// like `genome`/`world_genome`; GPU-free and unit-testable without the harness.
+pub mod level_genome;
+/// Static, GPU-free structural metrics scoring a generated level (connectivity, coverage, furniture
+/// occupancy, mushroom distribution) — the level search's fitness. Pure logic.
+pub mod level_quality;
+/// Generate-and-measure evaluator: decode a level genome, run the pure `Dungeon::generate` / `furnish_all`
+/// / `habitat::build` pipeline, and score it with `level_quality`. GPU-free, deterministic.
+pub mod level_eval;
 pub mod perception;
 pub mod persona;
 pub mod policy;

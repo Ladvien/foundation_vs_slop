@@ -136,6 +136,10 @@ The canonical map of what pins what. Update this table when you add or retire a 
 | `placement/solvers/wfc.rs` | Tiled-WFC placement — stays inside the region rect, no candidates → empty, deterministic under a seed. |
 | `placement/solvers/metropolis.rs` | Metropolis layout — objects stay inside & non-overlapping, deterministic under a seed. |
 | `placement/solvers/constraint.rs` | Door constraints — exactly one door per room, count places distinct doors, over-count clamped to sites, deterministic selection. |
+| `squad_ai/level_genome.rs` | The level genome (dungeon/furniture/mushroom config) — `authored` decodes to the shipped config within f32 precision, mutation stays feasible across 300 draws (every subsystem validator passes), a mutation actually moves a gene, and dropping every room type still keeps ≥1 (+ a matching damp table). |
+| `squad_ai/level_quality.rs` | The static level-quality objective — a disconnected level fails the minimal criterion (fitness `None`), one room is fully reachable, infestation & room/corridor split read correctly from the habitat mask, band/reward helpers behave. |
+| `squad_ai/level_eval.rs` | The generate-and-measure evaluator (GPU-free) — the shipped level scores in (0,1] and evaluates **reproducibly**; mutated genomes either score or cleanly reject (never panic). Runs the real `Dungeon::generate` / `furnish_all` / `habitat::build` pipeline. |
+| `squad_ai/level_search.rs` (`test-harness`) | The level MAP-Elites loop — a short search fills ≥1 archive niche and its archive doc serialises to readable RON. |
 
 ### `tests/` integration files
 

@@ -52,7 +52,7 @@ pub struct PlacementSolvers(pub Orchestrator);
 /// backends have disjoint capability profiles, so a constraint group routes to exactly the right one:
 /// WFC = Hard+Local (tiled scatter), Metropolis = Soft+Relational (freestanding layout),
 /// ConstraintSolver = Hard+Global+Cardinality (counts / global rules like one-door-per-room).
-fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrator {
+pub(crate) fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrator {
     let mut orch = Orchestrator::new();
     orch.register(Box::new(WfcSolver));
     orch.register(Box::new(MetropolisSolver::new(metropolis_weights)));
@@ -76,8 +76,14 @@ impl Plugin for PlacementPlugin {
             let cfg = app.world().resource::<crate::config::GameConfig>();
             (cfg.placement.metropolis.clone(), cfg.placement.furniture.clone())
         };
+        let density = app
+            .world()
+            .resource::<crate::config::GameConfig>()
+            .placement
+            .density;
         app.insert_resource(PlacementSolvers(build_solvers(weights)));
         app.insert_resource(furnish::Manifest(catalogue));
+        app.insert_resource(furnish::Density(density));
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
         app.add_systems(Startup, furnish::furnish_regions);

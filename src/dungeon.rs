@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use avian3d::prelude::*;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::geom::{self, Point};
 use crate::placement::ir::{Opening, PropertyBag, Rect2, Region};
@@ -180,7 +180,7 @@ fn update_cutaway(
 /// default, unchanged). `Graph` places rooms irregularly (Poisson-disk sites connected by a Delaunay
 /// graph collapsed with `wfc::collapse_graph`) for an organic, non-lattice look. This is config-selected
 /// routing, not a fallback — each topology fails loud if it can't yield a usable dungeon (one path).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub enum Topology {
     #[default]
     Grid,
@@ -192,7 +192,7 @@ pub enum Topology {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DungeonConfig {
     /// Coarse WFC grid, in room slots. Each slot expands to a `block`×`block` fine-tile patch. For
     /// `Topology::Graph` this defines the level extent (`coarse_w*block × coarse_h*block`) that the
@@ -232,7 +232,7 @@ pub struct DungeonConfig {
 }
 
 /// The six coarse WFC base-prototype weights, in `wfc::build_prototypes` order.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfcWeights {
     pub rock: f64,
     pub dead_end: f64,
@@ -245,7 +245,7 @@ pub struct WfcWeights {
 /// One weighted room class. `area` in m² (= tiles², since 1 tile = 1 m); `aspect` = long/short (≥ 1).
 /// Realistic residential ranges: Merrell, Schkufza & Koltun, "Computer-Generated Residential Building
 /// Layouts"; Smelik et al., "A Survey on Procedural Modelling for Virtual Worlds" (cgf.12276).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RoomType {
     pub tag: String,
     pub area_min: f32,
@@ -268,7 +268,7 @@ pub struct RoomType {
 /// is always intact: the room stays connected, the block-centre corridor still lands on floor, and the
 /// doorway derivation is unchanged. Purely a shape knob; walls/fog/collision/nav follow the per-cell
 /// walkable mask and need no changes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotchConfig {
     /// Probability an *eligible* room (min side ≥ `min_side`) gets any notches at all.
     pub chance: f64,
