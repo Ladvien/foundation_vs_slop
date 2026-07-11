@@ -147,6 +147,18 @@ pub struct MoldFruitParams {
     /// so it can never complete faster than the slow-change-blindness window (see
     /// `perceptual::MIN_APPEARANCE_RAMP_SECS`).
     tint: f32,
+    /// Per-species flat part colours (linear RGB), from the `mycelia.species` table. The cap mixes
+    /// `young → old` with `tint`; the stipe/volva/substrate tint the other `COLOR_0` parts. The death cap
+    /// carries the values previously hard-coded in the shader, so it renders byte-identical.
+    cap_young: Vec3,
+    cap_old: Vec3,
+    stipe: Vec3,
+    volva: Vec3,
+    substrate: Vec3,
+    /// This species' stipe bending zone (native-scale metres). Per-species so a short mushroom bends over
+    /// its own upper stipe rather than a zone that sits above its whole height. Feeds the vertex shader.
+    bend_lo: f32,
+    bend_hi: f32,
 }
 
 /// The fruit body. Reuses [`MoldSurfaceParams`] so a mushroom inherits the mat's palette, hyphal fibre
@@ -172,6 +184,7 @@ pub struct MoldFruitExt {
 }
 
 impl MoldFruitExt {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: &MyceliaConfig,
         display: Handle<Image>,
@@ -180,12 +193,27 @@ impl MoldFruitExt {
         bend: Vec2,
         tilt: Vec2,
         cap_ab: Vec2,
+        colors: &super::species::SpeciesColors,
+        bend_lo: f32,
+        bend_hi: f32,
     ) -> Self {
         Self {
             params: MoldSurfaceParams::new(cfg),
             display,
             control,
-            fruit: MoldFruitParams { bend, tilt, cap_ab, tint },
+            fruit: MoldFruitParams {
+                bend,
+                tilt,
+                cap_ab,
+                tint,
+                cap_young: Vec3::from_array(colors.cap_young),
+                cap_old: Vec3::from_array(colors.cap_old),
+                stipe: Vec3::from_array(colors.stipe),
+                volva: Vec3::from_array(colors.volva),
+                substrate: Vec3::from_array(colors.substrate),
+                bend_lo,
+                bend_hi,
+            },
         }
     }
 

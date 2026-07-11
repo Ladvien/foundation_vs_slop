@@ -1077,6 +1077,7 @@ fn coat_fruit_bodies(
             let handle = match already {
                 Some(h) => h,
                 None => {
+                    let sc = &cfg.species[body.species.0 as usize];
                     let h = fruit_materials.add(MoldFruitMaterial {
                         base: base.clone(),
                         extension: MoldFruitExt::new(
@@ -1087,6 +1088,9 @@ fn coat_fruit_bodies(
                             body.bend,
                             body.tilt,
                             body.cap_ab,
+                            &sc.colors,
+                            sc.geom.bend_lo_m,
+                            sc.geom.bend_hi_m,
                         ),
                     });
                     commands.entity(root).insert(FruitMaterial(h.clone()));
