@@ -21,6 +21,7 @@ use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
+use crate::sim::SimTuning;
 use crate::squad::{AimTarget, Unit, Velocity, UNIT_SPEED};
 use crate::util::rand01;
 
@@ -33,8 +34,6 @@ const LASER_LIFE: f32 = 1.2;
 /// Half-width of a bolt for wall sweeps (thin — it's a bolt). Only used by `resolve_move` so the bolt
 /// stops on the room-side wall face rather than passing through the slab.
 const LASER_HALF: f32 = 0.02;
-/// Hit points removed from an enemy per bolt.
-const LASER_DAMAGE: f32 = 10.0; // full combat power (~3 hits to down a 25 HP crab); drop to ~0.2 (1/50) to keep the swarm alive for observation
 /// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
 /// for hits against the small enemy hitbox.
 const BASE_SPREAD: f32 = 0.06;
@@ -49,13 +48,6 @@ const DIST_SPREAD_RANGE: f32 = 14.0;
 /// more than this half-angle off the unit's forward are ignored — so a crab on a unit's back is safe
 /// from that unit's own gun (only a teammate facing it can shoot it off). cos(75°) ≈ 0.26.
 const FRONT_ARC_COS: f32 = 0.26;
-/// When a bolt shoots a crab that's latched onto a squad member, this is the chance it *also* wounds
-/// the host (a stray round through the crab into your own guy) and how much it hurts.
-const FRIENDLY_FIRE_CHANCE: f32 = 0.2;
-const FRIENDLY_FIRE_DAMAGE: f32 = 5.0;
-/// THREAT deposited into the stigmergy field per shot fired / per bolt landed — the swarm reads this
-/// as danger and (once it has a fear drive) scatters from sustained fire.
-const THREAT_PER_SHOT: f32 = 0.6;
 
 /// A live laser bolt: its constant velocity, remaining lifetime (seconds), and the unit that fired it
 /// (so a bolt that strikes the smiley watcher can attribute the hit to its real shooter — the watcher
@@ -161,6 +153,7 @@ fn fire_laser(
     // `Option<&SmileyState>` marks the smiley boss among hostiles: the squad leaves the neutral watcher
     // alone and only fires on it once it turns angry (crabs/nests have no `SmileyState` → always targeted).
     enemies: Query<(&Transform, Option<&SmileyState>), (With<Hostile>, Without<Unit>)>,
+    sim: Res<SimTuning>,
 ) {
     // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. Target selection runs
     // EVERY tick (so each unit's `AimTarget` — hence its facing, `squad::unit_movement` — stays fresh and
@@ -245,8 +238,8 @@ fn fire_laser(
         // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
         deposits.0.push(Deposit {
             pos: unit.translation,
-            field: FieldId::THREAT,
-            amount: THREAT_PER_SHOT,
+            field: FieldId::THREAT_GUN,
+            amount: sim.deposit.threat_per_shot,
         });
     }
 }
@@ -277,6 +270,7 @@ fn update_lasers(
     mut lasers: Query<(Entity, &mut Transform, &mut Laser), Without<Hostile>>,
     mut deposits: ResMut<StigDeposits>,
     mut lrng: ResMut<LaserRng>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
 
@@ -314,7 +308,7 @@ fn update_lasers(
         }
         if let Some((hit_entity, _, hit_point)) = best {
             if let Ok(mut hp) = healths.get_mut(hit_entity) {
-                hp.current -= LASER_DAMAGE;
+                hp.current -= sim.combat.laser_damage;
             }
             // If we hit the watcher, record WHO fired this bolt so it retaliates against the real shooter
             // (only the boss carries `LastAttacker`, so this no-ops for crabs/nests).
@@ -330,10 +324,10 @@ fn update_lasers(
             // it into your own guy (rule 4). Rolls per hit. (A nest has no host.)
             if let Ok(att) = attached.get(hit_entity)
                 && let Some(host) = att.host
-                && rand01(&mut lrng.friendly) < FRIENDLY_FIRE_CHANCE
+                && rand01(&mut lrng.friendly) < sim.combat.friendly_fire_chance
                 && let Ok(mut host_hp) = unit_healths.get_mut(host)
             {
-                host_hp.current -= FRIENDLY_FIRE_DAMAGE;
+                host_hp.current -= sim.combat.friendly_fire_damage;
             }
             if !is_nest {
                 // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the spark
@@ -349,8 +343,8 @@ fn update_lasers(
                 // A bolt landing on flesh spikes THREAT where it hit — danger the swarm can read.
                 deposits.0.push(Deposit {
                     pos: hit_point,
-                    field: FieldId::THREAT,
-                    amount: THREAT_PER_SHOT,
+                    field: FieldId::THREAT_GUN,
+                    amount: sim.deposit.threat_per_shot,
                 });
             }
             commands.entity(entity).despawn();

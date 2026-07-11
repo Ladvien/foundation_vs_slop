@@ -54,26 +54,56 @@ impl Plugin for DialoguePlugin {
     }
 }
 
-/// Dev hook until conversations are driven by gameplay: `T` starts the demo conversation, `Y` fires a
-/// sample thought bark. (Keystroke injection is blocked in the dev environment, so this is the manual
-/// way to exercise the feature; it's harmless to keep as a first gameplay trigger.)
+/// Render the squad AI's generated lines as speech bubbles: `SquadLine` → [`Bark`].
+///
+/// This is the adapter `squad_ai::dialogue` was written against and which never landed. Until now
+/// `SquadLine` had exactly one writer and **zero readers** — the squad's whole observation-driven
+/// dialogue system (personas, verbosity throttle, memory stream, cooldown) ran every frame and its only
+/// visible effect was a `debug!` log. The lines existed; nothing put them on screen.
+///
+/// `Bark` addresses speakers by squad-member index (the authored conversation script does too), so the
+/// speaker `Entity` is mapped back through `SquadMember`. An utterance from an entity that is not a
+/// squad member cannot be rendered — that would be a bug in the emitter, not a condition to paper over —
+/// so it is reported rather than silently dropped.
+///
+/// Registered by `runtime::plugin` immediately before `emit_barks` consumes the message.
+fn bark_squad_lines(
+    mut lines: MessageReader<crate::squad_ai::dialogue::SquadLine>,
+    mut barks: MessageWriter<Bark>,
+    members: Query<&crate::squad::SquadMember>,
+) {
+    for line in lines.read() {
+        match members.get(line.speaker) {
+            Ok(member) => {
+                barks.write(Bark {
+                    speaker: member.0,
+                    // Barks are said aloud; the thought channel belongs to the authored script.
+                    kind: BubbleKind::Speech,
+                    emotion: line.emotion,
+                    text: line.text.clone(),
+                });
+            }
+            Err(e) => warn!(
+                "dialogue: SquadLine from {:?}, which is not a squad member ({e}); line dropped: {:?}",
+                line.speaker, line.text,
+            ),
+        }
+    }
+}
+
+/// Dev hook: `T` starts the demo conversation.
+///
+/// The `Y` "sample thought bark" hook is gone — barks now come from real gameplay via
+/// [`bark_squad_lines`]. Conversations still have no gameplay trigger and the corpus is a single authored
+/// `"intro"`, so this stays until one exists.
 fn demo_input(
     keys: Res<ButtonInput<KeyCode>>,
     lock: Option<Res<ConversationLock>>,
     mut starts: MessageWriter<StartConversation>,
-    mut barks: MessageWriter<Bark>,
 ) {
     if keys.just_pressed(KeyCode::KeyT) && lock.is_none() {
         starts.write(StartConversation {
             id: "intro".into(),
-        });
-    }
-    if keys.just_pressed(KeyCode::KeyY) {
-        barks.write(Bark {
-            speaker: 1,
-            kind: BubbleKind::Thought,
-            emotion: Emotion::Fear,
-            text: "I don't like this hallway.".into(),
         });
     }
 }

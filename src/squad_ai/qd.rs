@@ -13,10 +13,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// A 2-D behaviour characterisation of one squad configuration, each axis in `[0,1]`:
 /// - `aggression`: how much the squad engages threats vs. avoids (combat share of actions).
 /// - `exploration`: how much of the map the squad covered (visitation coverage / reachable area).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorDescriptor {
     pub aggression: f32,
     pub exploration: f32,
@@ -78,9 +80,39 @@ impl MapElitesArchive {
         }
     }
 
+    /// The elite currently holding `descriptor`'s cell, if any. `Elite` is `Copy`, so this hands back a
+    /// value — letting the search re-evaluate that incumbent under a challenger's conditions before the
+    /// (non-stationary) elitism test, without holding a borrow on the archive (POET's `EVALUATE_CANDIDATES`
+    /// common-opponent comparison; Wang et al., arXiv:1901.01753).
+    pub fn incumbent(&self, descriptor: BehaviorDescriptor) -> Option<Elite> {
+        self.cells.get(&descriptor.cell(self.res)).copied()
+    }
+
+    /// Place an elite **unconditionally**, bypassing `insert`'s elitism test. Used only after the search
+    /// loop has already decided the winner by a common-opponent comparison (see
+    /// `coevolve::Population::try_insert_with_reeval`); this just commits it into the cell.
+    pub fn place(&mut self, descriptor: BehaviorDescriptor, fitness: f32, genome: u64) {
+        self.cells.insert(descriptor.cell(self.res), Elite { descriptor, fitness, genome });
+    }
+
     /// How many behaviour niches are occupied — the QD "coverage" metric (breadth of playstyles found).
     pub fn coverage(&self) -> usize {
         self.cells.len()
+    }
+
+    /// Every occupied niche, in the archive's fixed sorted cell order (the `BTreeMap` is deliberate —
+    /// see the type docs). Used to sample a MAP-Elites parent and to sample coevolutionary opponents.
+    pub fn iter(&self) -> impl Iterator<Item = (&(usize, usize), &Elite)> {
+        self.cells.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// The archive resolution (cells per axis).
+    pub fn resolution(&self) -> usize {
+        self.res
     }
 
     /// The single highest-fitness elite across the whole archive.

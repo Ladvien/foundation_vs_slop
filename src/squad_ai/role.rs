@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::brain::Brain;
 use crate::ai::drives::{DriveId, DRIVE_COUNT};
@@ -20,7 +20,7 @@ use crate::ai::utility::{Behavior, Consideration, Curve, Fact, Input, Mode, Targ
 
 /// Which SCP task-force role a unit plays. `Deserialize`/`Hash`/`Eq` so it keys the `roles.ron` map and
 /// the [`RoleBrains`] registry.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 pub enum RoleId {
     Gunman,
     Researcher,
@@ -42,7 +42,7 @@ impl RoleId {
 
 /// A role's authored repertoire, as it appears in `roles.ron`. One list of behaviours — the same
 /// [`Behavior`] literal the engine already scores, now `Deserialize`.
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RoleDef {
     pub behaviors: Vec<Behavior>,
 }
@@ -128,6 +128,36 @@ pub fn validate_role_defs(defs: &HashMap<RoleId, RoleDef>) -> Result<(), String>
     Ok(())
 }
 
+/// A role's behaviours must form a strict priority ladder — no two may share a rank.
+///
+/// `decide` picks *weighted-randomly* among the eligible behaviours in the winning rank bucket, re-rolling
+/// on every think. For a crab that is a feature (Latch and SeekMeat legitimately tie, and the swarm reads
+/// as varied). For a named squad member with no commitment mechanism it is a bug: `Ward` and the shared
+/// `regroup()` both sat at rank 3, so a strayed Psionic beside a downed ally coin-flipped between standing
+/// still and running home every 0.3 s.
+///
+/// Until a min-dwell / commitment mechanism exists, roles get determinism instead of variety, and an author
+/// who reintroduces a tie in `roles.ron` hears about it at startup rather than watching a unit vibrate.
+///
+/// Called on each role's **final** repertoire (`squad_ai::load_role_brains`) rather than from
+/// [`validate_role_defs`], so it covers the code-literal defaults as well as RON overrides — one check, one
+/// path, no repertoire unvalidated.
+pub fn validate_rank_ladder(role: RoleId, behaviors: &[Behavior]) -> Result<(), String> {
+    let mut ranks: Vec<u8> = behaviors.iter().map(|b| b.rank).collect();
+    ranks.sort_unstable();
+    if let Some(dup) = ranks.windows(2).find(|w| w[0] == w[1]).map(|w| w[0]) {
+        let modes: Vec<Mode> =
+            behaviors.iter().filter(|b| b.rank == dup).map(|b| b.mode).collect();
+        return Err(format!(
+            "role {role:?} has {} behaviours sharing rank {dup} ({modes:?}); `decide` would re-roll a \
+             weighted-random choice between them on every think, so the unit would thrash between modes. \
+             Role behaviours must form a strict priority ladder.",
+            modes.len()
+        ));
+    }
+    Ok(())
+}
+
 // --- Shared behaviour fragments (every role carries these tails) ---
 
 /// Distance (world units) past which a strayed unit is strongly pulled back to the anchor — the
@@ -139,7 +169,7 @@ pub const LEASH: f32 = 6.0;
 fn flee() -> Behavior {
     Behavior {
         mode: Mode::Flee,
-        rank: 5,
+        rank: 6,
         target: TargetKind::None,
         considerations: vec![Consideration {
             input: Input::Drive(DriveId::FEAR),
@@ -148,17 +178,23 @@ fn flee() -> Behavior {
     }
 }
 
-/// Cohesion pull: return toward the squad anchor once past the leash. A soft threshold on anchor
-/// distance, so a unit doing role work nearby is un-pulled but a strayed one snaps back.
+/// Cohesion pull: return toward the squad anchor once past the leash.
+///
+/// **Outranks role work** (rank 5 vs the duties' 4), which is the whole point: `decide` keeps only the
+/// highest eligible rank bucket, so while Regroup sat at rank 3 it was *excluded outright* whenever any
+/// duty gate was on — no matter how far the unit had strayed. Since `EXAMINE_SIGHT` (8.0) exceeds `LEASH`
+/// (6.0), a Researcher could always see one more subject just past the leash and chained furniture across
+/// the map. The leash was inert, and this doc-comment used to claim the opposite.
+///
+/// The gate is the *hysteretic* `PastLeash` fact rather than a soft `Logistic` on raw `AnchorDist`: it
+/// already carries the 6.0-out / 4.0-in dead band from `squad_ai::PerceptionLatch`, so a unit loitering at
+/// exactly the leash distance can't alternate Regroup / role-work every think.
 fn regroup() -> Behavior {
     Behavior {
         mode: Mode::Regroup,
-        rank: 3,
+        rank: 5,
         target: TargetKind::SquadAnchor,
-        considerations: vec![Consideration {
-            input: Input::Perc(Fact::AnchorDist),
-            curve: Curve::Logistic { k: 1.0, x0: LEASH },
-        }],
+        considerations: vec![gate(Fact::PastLeash)],
     }
 }
 
@@ -189,6 +225,20 @@ fn wander() -> Behavior {
 }
 
 /// The tail every role shares: flee, regroup, follow, wander.
+///
+/// The full ladder, highest first — `decide` keeps ONLY the highest bucket that clears `MIN_SCORE`, so a
+/// rank here is an absolute override of everything below it, not a tiebreak:
+///
+/// | rank | behaviour     | meaning                                          |
+/// |------|---------------|--------------------------------------------------|
+/// | 6    | `Flee`        | survival — nothing outranks staying alive         |
+/// | 5    | `Regroup`     | the cohesion leash — a strayed unit comes home    |
+/// | 4    | *role duty*   | Overwatch / Examine / PsiScan / TendWounded / SecureDoor |
+/// | 2–3  | *role support*| Ward, Engage, Commune                             |
+/// | 1    | `FollowAnchor`| in-formation drift (the unconditional floor)      |
+/// | 0    | `Wander`      | unreachable while `FollowAnchor` scores 0.3       |
+///
+/// Every rank must be unique within a role (`validate_rank_ladder`).
 fn tail() -> Vec<Behavior> {
     vec![flee(), regroup(), follow_anchor(), wander()]
 }
@@ -349,27 +399,110 @@ mod tests {
 
     #[test]
     fn any_role_flees_when_afraid() {
-        // Fear (rank 5) trumps every role's duty. Check all five.
+        // Fear (rank 6) trumps every role's duty AND the leash. Check all five.
         for role in RoleId::ALL {
             let mut p = perc();
             p.drives[DriveId::FEAR.0] = 0.95;
-            // Even with a live duty cue, survival wins.
+            // Even with a live duty cue and a broken leash, survival wins.
             p.squad.has_unexamined = 1.0;
             p.squad.threat_bearing_known = 1.0;
             p.squad.anomaly_residue = 1.0;
             p.squad.ally_down = 1.0;
+            p.squad.past_leash = 1.0;
             assert_eq!(chosen_mode(role, &p), Mode::Flee, "role {role:?} should flee");
         }
     }
 
     #[test]
     fn strayed_unit_regroups() {
-        // Far from the anchor with no duty cue → the cohesion pull (rank 3) beats FollowAnchor (1).
+        // Past the leash with no duty cue → the cohesion pull (rank 5) beats FollowAnchor (1).
         for role in RoleId::ALL {
             let mut p = perc();
             p.squad.anchor_dist = 30.0;
+            p.squad.past_leash = 1.0;
             assert_eq!(chosen_mode(role, &p), Mode::Regroup, "role {role:?} should regroup");
         }
+    }
+
+    #[test]
+    fn the_leash_outranks_role_work() {
+        // THE regression lock for "the squad scatters". Role duties are rank 4 and Regroup was rank 3, so
+        // `decide` — which keeps only the highest eligible bucket — excluded Regroup outright whenever a
+        // duty gate was on, however far the unit had strayed. With EXAMINE_SIGHT (8.0) > LEASH (6.0), a
+        // Researcher always had one more subject just past the leash and chained furniture across the map.
+        // Now a strayed unit comes home even with every duty cue screaming.
+        for role in RoleId::ALL {
+            let mut p = perc();
+            p.squad.past_leash = 1.0;
+            p.squad.anchor_dist = 30.0;
+            p.squad.has_unexamined = 1.0;
+            p.drives[DriveId::CURIOSITY.0] = 0.8;
+            p.squad.threat_bearing_known = 1.0;
+            p.squad.anomaly_residue = 1.0;
+            p.squad.ally_down = 1.0;
+            p.squad.wounded_ally_dist = 3.0;
+            assert_eq!(
+                chosen_mode(role, &p),
+                Mode::Regroup,
+                "role {role:?} must obey the leash instead of chasing duty across the map",
+            );
+        }
+    }
+
+    #[test]
+    fn a_strayed_psionic_beside_a_downed_ally_commits_to_one_mode() {
+        // THE regression lock for the Ward↔Regroup coin-flip. `Ward` was rank 3 and the shared `regroup()`
+        // was ALSO rank 3, so `decide`'s weighted-random re-roll picked between them afresh every 0.3 s.
+        // Sweep the per-unit RNG across many seeds: the choice must be the same every time.
+        let mut p = perc();
+        p.squad.past_leash = 1.0;
+        p.squad.anchor_dist = 30.0;
+        p.squad.ally_down = 1.0;
+
+        let brain = Brain { behaviors: default_behaviors(RoleId::Psionic) };
+        let pick = |seed: u32| {
+            let mut rng = seed * 2 + 1; // LCG state must be odd/non-zero
+            brain.behaviors[decide(&brain.behaviors, &p, &mut rng)].mode
+        };
+        for seed in 0..512 {
+            assert_eq!(
+                pick(seed),
+                Mode::Regroup,
+                "seed {seed} chose a different mode — the Psionic is coin-flipping, not committing",
+            );
+        }
+    }
+
+    #[test]
+    fn every_default_role_forms_a_strict_priority_ladder() {
+        // No two behaviours in a role may share a rank, or `decide` re-rolls between them each think.
+        // `load_role_brains` enforces this at startup; assert it in CI so a brain edit fails here first.
+        for role in RoleId::ALL {
+            validate_rank_ladder(role, &default_behaviors(role))
+                .unwrap_or_else(|e| panic!("{role:?} default repertoire is not a ladder: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rank_ladder_rejects_a_tie() {
+        // The exact shape of the old Psionic bug: a support behaviour sharing a rank with the shared tail.
+        let behaviors = vec![
+            Behavior {
+                mode: Mode::Ward,
+                rank: 3,
+                target: TargetKind::None,
+                considerations: vec![gate(Fact::AllyDownNearby)],
+            },
+            Behavior {
+                mode: Mode::Regroup,
+                rank: 3,
+                target: TargetKind::SquadAnchor,
+                considerations: vec![gate(Fact::PastLeash)],
+            },
+        ];
+        let err = validate_rank_ladder(RoleId::Psionic, &behaviors)
+            .expect_err("a same-rank tie must be rejected");
+        assert!(err.contains("rank 3") && err.contains("thrash"), "unhelpful error: {err}");
     }
 
     #[test]
@@ -378,6 +511,21 @@ mod tests {
         for role in RoleId::ALL {
             let p = perc();
             assert_eq!(chosen_mode(role, &p), Mode::FollowAnchor, "role {role:?} should follow");
+        }
+    }
+
+    #[test]
+    fn every_shipped_role_brain_has_an_unconditional_default() {
+        // Mirror of the creature-brain check in `ai::brain`. If every behaviour in a role's repertoire is
+        // gated on perception, `decide` finds no eligible bucket and falls through to behaviour 0 — which
+        // for a role brain is the rank-4 DUTY, so the unit would silently examine/heal/breach instead of
+        // standing down. The shared `follow_anchor` tail is the unconditional floor that prevents it.
+        for role in RoleId::ALL {
+            crate::ai::utility::validate_unconditional_default(
+                &default_behaviors(role),
+                &format!("role {role:?}"),
+            )
+            .unwrap_or_else(|e| panic!("{role:?} must ship an unconditional default: {e}"));
         }
     }
 

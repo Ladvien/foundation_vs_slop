@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
 use crate::ai::drives::{DriveId, Drives};
-use crate::ai::utility::{Mode, Perception, SquadFields};
+use crate::ai::utility::{Mode, Perception, SquadFields, NO_TARGET_DIST};
 use crate::crab::Crab;
 use crate::dungeon::Dungeon;
 use crate::enemy::Enemy;
@@ -35,14 +35,86 @@ use super::role::{RoleId, RoleBrains, LEASH};
 #[derive(Component)]
 pub struct Examined;
 
+/// Per-unit **Schmitt latches** for the boolean perception gates.
+///
+/// Every gate a role brain reads is a hard threshold fed through `Curve::Step`, and a `Step` zeroes the
+/// behaviour's product-score outright. So a threat hovering at exactly `THREAT_SIGHT` used to flip
+/// `threat_bearing_known` 1↔0 on consecutive thinks, and the Gunman flip-flopped Overwatch↔FollowAnchor
+/// every 0.3 s. The `ThinkTimer` bounds how *fast* that thrash runs; it cannot stop it.
+///
+/// A mode-commitment bonus in `decide` would not help either — a gated-off behaviour scores zero no matter
+/// how committed the unit is — and `decide` is shared with the crab and boss brains, so changing it would
+/// detune the swarm. The flicker has to die at the *fact*, which is a squad-only perception concern. Hence
+/// an enter/exit band per gate, latched here (Schmitt trigger; the same idea as `FOLLOW_DEADZONE`).
+///
+/// Determinism: this is per-unit state, so it is inserted on **every** unit at spawn (a component on only
+/// some units would split the hashed archetype — see the `Leader` note in `squad.rs`). Its update is a pure
+/// function of the previous latch and this tick's scalars.
+#[derive(Component, Default)]
+pub struct PerceptionLatch {
+    pub threat: bool,
+    pub examinable: bool,
+    pub anomaly: bool,
+    pub ally_down: bool,
+    pub past_leash: bool,
+}
+
+/// The planar distance of a [`nearest_planar`] hit, or [`NO_TARGET_DIST`] when there is no candidate at
+/// all. "No candidate" and "candidate far away" must read the same to the latches, so an emptied query
+/// (the last crab died) releases a gate exactly as a retreating one does.
+fn dist_of<T>(hit: Option<(T, Vec3, f32)>) -> f32 {
+    hit.map_or(NO_TARGET_DIST, |(_, _, d)| d)
+}
+
+/// A latch that turns **on** when `value` falls to `enter` and off only once it climbs back past `exit`.
+/// Requires `exit >= enter`; the gap is the dead band that kills boundary thrash.
+///
+/// Pure, so the anti-thrash property is unit-testable without an ECS.
+fn latch_when_below(prev: bool, value: f32, enter: f32, exit: f32) -> bool {
+    debug_assert!(exit >= enter, "hysteresis band must be non-negative");
+    if prev {
+        value <= exit
+    } else {
+        value <= enter
+    }
+}
+
+/// The mirror of [`latch_when_below`]: on when `value` rises to `enter`, off only once it drops below
+/// `exit`. Requires `exit <= enter`.
+fn latch_when_above(prev: bool, value: f32, enter: f32, exit: f32) -> bool {
+    debug_assert!(exit <= enter, "hysteresis band must be non-negative");
+    if prev {
+        value >= exit
+    } else {
+        value >= enter
+    }
+}
+
 /// How far a unit perceives examinables (furniture / bodies) — the squad vision radius.
 const EXAMINE_SIGHT: f32 = 8.0;
+/// An examinable already being studied is kept until it drifts past this — the Researcher doesn't drop a
+/// subject that jitters across the sight radius.
+const EXAMINE_SIGHT_RELEASE: f32 = 9.0;
 /// How far a unit perceives a hostile creature as a threat (line-of-sight bounded in the reveal grid).
 const THREAT_SIGHT: f32 = 12.0;
+/// A tracked threat stays tracked until it retreats past this — a crab pacing the sight boundary must not
+/// make the Gunman drop and re-acquire Overwatch every think.
+const THREAT_SIGHT_RELEASE: f32 = 13.5;
 /// How far the Psionic senses the watcher's anomaly signature — through walls (psi, not LOS).
 const PSI_SIGHT: f32 = 16.0;
+/// The anomaly's residue lingers in the Psionic's sense a little past the range it was acquired at.
+const PSI_SIGHT_RELEASE: f32 = 17.5;
 /// An ally at or below this health fraction is "down" and draws the Medic.
 const WOUNDED_FRAC: f32 = 0.5;
+/// A patient stays the Medic's patient until healed a little clear of the trigger — otherwise the first
+/// tick of healing un-declares the emergency and the Medic walks away mid-treatment.
+const WOUNDED_FRAC_RELEASE: f32 = 0.55;
+/// A unit is "strayed" once this far from the anchor (the cohesion leash — see `role::LEASH`).
+const LEASH_OUT: f32 = LEASH;
+/// ...and stops being strayed only once it has come back well inside, so a unit loitering at exactly the
+/// leash distance doesn't alternate Regroup / role-work every think. Sits above `FOLLOW_DEADZONE` so a
+/// regrouping unit hands off cleanly to `FollowAnchor` and settles.
+const LEASH_IN: f32 = 4.0;
 
 /// Build perception, decide (throttled), resolve the movement goal, and cache both — for every unit.
 #[allow(clippy::type_complexity)]
@@ -67,6 +139,7 @@ pub fn squad_think(
             &mut ActiveBehavior,
             &mut ThinkTimer,
             &mut DesiredMove,
+            &mut PerceptionLatch,
             &Health,
             Option<&crate::squad::MoveOrder>,
             &SquadMember,
@@ -87,63 +160,101 @@ pub fn squad_think(
     // the mutable unit query twice.
     let unit_snapshot: Vec<(Entity, Vec3, f32)> = units
         .iter()
-        .map(|(e, t, _, _, _, _, _, h, _, _)| (e, t.translation, health_frac(h)))
+        .map(|(e, t, _, _, _, _, _, _, h, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
     let dt = time.delta_secs();
 
-    for (entity, tf, role, mut drives, mut active, mut timer, mut desired, health, order, member) in
-        &mut units
+    for (
+        entity,
+        tf,
+        role,
+        mut drives,
+        mut active,
+        mut timer,
+        mut desired,
+        mut latch,
+        health,
+        order,
+        member,
+    ) in &mut units
     {
         let pos = tf.translation;
 
-        // Nearest hostile (for threat-driven behaviours). Bounded by THREAT_SIGHT.
-        let threat = nearest_planar(pos, threat_pos.iter().map(|&p| ((), p)))
-            .filter(|(_, _, d)| *d <= THREAT_SIGHT);
-        // Nearest examinable within sight (furniture / body not yet studied).
-        let examinable = nearest_planar(pos, examinable_pos.iter().map(|&p| ((), p)))
-            .filter(|(_, _, d)| *d <= EXAMINE_SIGHT);
-        // Nearest OTHER wounded ally within support sight.
-        let wounded = nearest_planar(
+        // Each cue is resolved to its nearest candidate WITHOUT a range filter, then admitted through a
+        // Schmitt band. Filtering first and latching second would be a bug: a threat that steps one
+        // millimetre past the sight radius would vanish from the cue entirely, and the latch would have
+        // nothing to hold on to.
+        let nearest_threat = nearest_planar(pos, threat_pos.iter().map(|&p| ((), p)));
+        let nearest_examinable = nearest_planar(pos, examinable_pos.iter().map(|&p| ((), p)));
+        let nearest_boss = nearest_planar(pos, boss_pos.iter().map(|&p| ((), p)));
+        // Nearest OTHER ally hurt enough to count as "down". Hysteresis lives in the *threshold*, not in a
+        // post-hoc test of the nearest ally's health: a Medic already treating someone keeps looking for
+        // patients up to `WOUNDED_FRAC_RELEASE`, so the first tick of healing doesn't un-declare the
+        // emergency and walk them away mid-treatment. (Filtering by distance first and health second would
+        // let a healthy ally standing closer mask a wounded one further off.)
+        let wounded_cut =
+            if latch.ally_down { WOUNDED_FRAC_RELEASE } else { WOUNDED_FRAC };
+        let nearest_wounded = nearest_planar(
             pos,
             unit_snapshot
                 .iter()
-                .filter(|(e, _, hf)| *e != entity && *hf <= WOUNDED_FRAC)
+                .filter(|(e, _, hf)| *e != entity && *hf <= wounded_cut)
                 .map(|&(_, p, _)| ((), p)),
         )
         .filter(|(_, _, d)| *d <= THREAT_SIGHT);
-        // The watcher's anomaly signature — sensed through walls within PSI range.
-        let anomaly = nearest_planar(pos, boss_pos.iter().map(|&p| ((), p)))
-            .is_some_and(|(_, _, d)| d <= PSI_SIGHT);
 
         let anchor_dist = if anchor.valid {
             (anchor.pos - pos).length()
         } else {
-            999.0
+            NO_TARGET_DIST
         };
 
+        // --- Latch every boolean gate through its dead band (pure; see `latch_when_below`). ---
+        latch.threat =
+            latch_when_below(latch.threat, dist_of(nearest_threat), THREAT_SIGHT, THREAT_SIGHT_RELEASE);
+        latch.examinable = latch_when_below(
+            latch.examinable,
+            dist_of(nearest_examinable),
+            EXAMINE_SIGHT,
+            EXAMINE_SIGHT_RELEASE,
+        );
+        latch.anomaly =
+            latch_when_below(latch.anomaly, dist_of(nearest_boss), PSI_SIGHT, PSI_SIGHT_RELEASE);
+        // The band is already applied via `wounded_cut` above, so the latch just records the outcome for
+        // the next tick's threshold.
+        latch.ally_down = nearest_wounded.is_some();
+        latch.past_leash = latch_when_above(latch.past_leash, anchor_dist, LEASH_OUT, LEASH_IN);
+
+        // A cue is only *admitted* to perception once its latch is on, so `resolve_goal` can never aim at a
+        // subject the brain was not allowed to see.
+        let threat = if latch.threat { nearest_threat } else { None };
+        let examinable = if latch.examinable { nearest_examinable } else { None };
+        let wounded = nearest_wounded;
+
         // Feed perception-derived squad drives (curiosity near study targets, cohesion when strayed).
-        drives.set(DriveId::CURIOSITY, if examinable.is_some() { 0.8 } else { 0.0 });
+        drives.set(DriveId::CURIOSITY, if latch.examinable { 0.8 } else { 0.0 });
         drives.set(DriveId::COHESION, (anchor_dist / LEASH).clamp(0.0, 1.0));
 
         let squad = SquadFields {
             anchor: anchor.valid.then_some(anchor.pos),
             anchor_dist,
             nearest_examinable: examinable.map(|(_, p, _)| p),
-            examinable_dist: examinable.map(|(_, _, d)| d).unwrap_or(999.0),
-            has_unexamined: if examinable.is_some() { 1.0 } else { 0.0 },
+            examinable_dist: dist_of(examinable),
+            has_unexamined: if latch.examinable { 1.0 } else { 0.0 },
             nearest_wounded_ally: wounded.map(|(_, p, _)| p),
-            wounded_ally_dist: wounded.map(|(_, _, d)| d).unwrap_or(999.0),
-            ally_down: if wounded.is_some() { 1.0 } else { 0.0 },
+            wounded_ally_dist: wounded.map_or(NO_TARGET_DIST, |(_, _, d)| d),
+            ally_down: if latch.ally_down { 1.0 } else { 0.0 },
             tracked_threat: threat.map(|(_, p, _)| p),
-            threat_bearing_known: if threat.is_some() { 1.0 } else { 0.0 },
-            anomaly_residue: if anomaly { 1.0 } else { 0.0 },
+            threat_bearing_known: if latch.threat { 1.0 } else { 0.0 },
+            anomaly_residue: if latch.anomaly { 1.0 } else { 0.0 },
+            past_leash: if latch.past_leash { 1.0 } else { 0.0 },
         };
 
         let perc = Perception {
             pos,
             nearest_unit: threat.map(|(_, p, _)| p),
-            nearest_dist: threat.map(|(_, _, d)| d).unwrap_or(999.0),
+            nearest_dist: dist_of(threat),
             health_frac: health_frac(health),
             drives: drives.v,
             scent_hotspot: Vec3::ZERO,
@@ -165,6 +276,9 @@ pub fn squad_think(
             let brain = brains.get(*role);
             let idx = policy.0.choose(&perc, &brain.behaviors, &mut active.rng);
             active.mode = brain.behaviors[idx].mode;
+            // A real decision. `squad_ai::trace` samples on this, NOT on `Changed<ActiveBehavior>` — the
+            // unconditional `active.target` write below marks the component changed every tick.
+            active.decision = active.decision.wrapping_add(1);
         }
 
         // Resolve the movement goal from the (possibly cached) mode + fresh perception every tick, so
@@ -216,12 +330,16 @@ fn health_frac(h: &Health) -> f32 {
 fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<Vec3> {
     let anchor_goal = anchor.valid.then_some(anchor.pos);
     match mode {
-        // Cohesion: a strayed unit heads straight for the group reference point.
-        Mode::Regroup => anchor_goal,
-        // Loose formation: only steer toward the anchor when OUTSIDE the deadband; within it, hold
-        // (None) so the idle squad settles into a loose blob instead of all piling onto the identical
-        // centroid and vibrating in place (the moving anchor still pulls the band along).
-        Mode::FollowAnchor => {
+        // Both cohesion modes aim at the group reference point, and both stop short of it: outside the
+        // deadband they steer to the anchor; within it they hold (None), so the squad settles into a loose
+        // blob (ORCA spaces the members) instead of every unit converging on one identical point and
+        // vibrating there. The moving anchor still pulls the band along.
+        //
+        // `Regroup` needs the deadband too, not just `FollowAnchor`. Modes are cached between thinks (up to
+        // `THINK_INTERVAL`), so a unit that has just run home is still in `Regroup` for a fraction of a
+        // second after arriving — without the deadband it would spend that time steering into the exact
+        // centroid, and `avoids: true` would keep it from reading as settled to ORCA.
+        Mode::Regroup | Mode::FollowAnchor => {
             if perc.squad.anchor_dist > FOLLOW_DEADZONE {
                 anchor_goal
             } else {
@@ -259,8 +377,19 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
         | Mode::Ward
         | Mode::DeploySensor
         | Mode::Wander => None,
-        // Creature modes never chosen by a unit brain — hold.
-        _ => None,
+        // Creature modes, never chosen by a unit brain — hold. Enumerated rather than caught by a `_`
+        // wildcard so that adding a `Mode` is a COMPILE ERROR here instead of a silent hold: a new squad
+        // action that forgot its goal mapping would otherwise stand still and look like an AI bug.
+        Mode::Forage
+        | Mode::Latch
+        | Mode::Chase
+        | Mode::HuntBlood
+        | Mode::SeekMeat
+        | Mode::Carry
+        | Mode::Scout
+        | Mode::Mark
+        | Mode::Rally
+        | Mode::Muster => None,
     }
 }
 
@@ -320,14 +449,20 @@ mod tests {
     }
 
     #[test]
-    fn followanchor_holds_inside_the_deadband() {
+    fn both_cohesion_modes_hold_inside_the_deadband() {
         // Within the loose-formation deadband a unit holds (no goal) so the idle squad settles instead
         // of piling onto the exact centroid; outside it, the anchor pulls it back.
+        //
+        // `Regroup` is included deliberately: modes are cached between thinks, so a unit that has just run
+        // home is still in Regroup for a fraction of a second after arriving. Without the deadband it
+        // would steer into the exact centroid for that window, and never read as settled to ORCA.
         let a = anchor_at(Vec3::new(2.0, 0.0, 0.0));
-        let near = perc_with(SquadFields { anchor_dist: 1.0, ..SquadFields::neutral() });
-        assert_eq!(resolve_goal(Mode::FollowAnchor, &near, &a), None, "inside deadband → hold");
-        let far = perc_with(SquadFields { anchor_dist: 5.0, ..SquadFields::neutral() });
-        assert_eq!(resolve_goal(Mode::FollowAnchor, &far, &a), Some(a.pos), "outside deadband → pull");
+        for mode in [Mode::FollowAnchor, Mode::Regroup] {
+            let near = perc_with(SquadFields { anchor_dist: 1.0, ..SquadFields::neutral() });
+            assert_eq!(resolve_goal(mode, &near, &a), None, "{mode:?} inside deadband → hold");
+            let far = perc_with(SquadFields { anchor_dist: 5.0, ..SquadFields::neutral() });
+            assert_eq!(resolve_goal(mode, &far, &a), Some(a.pos), "{mode:?} outside deadband → pull");
+        }
     }
 
     #[test]
@@ -357,6 +492,61 @@ mod tests {
         for mode in [Mode::Overwatch, Mode::PsiScan, Mode::Commune, Mode::Ward, Mode::Wander] {
             assert_eq!(resolve_goal(mode, &p, &anchor_at(Vec3::ZERO)), None, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn latch_enters_at_the_tight_bound_and_releases_only_past_the_band() {
+        // The core Schmitt property. Acquire at 12.0, hold anywhere inside the band, release only beyond
+        // 13.5 — and, coming back, re-acquire only at 12.0 again.
+        assert!(!latch_when_below(false, 12.5, 12.0, 13.5), "must not acquire inside the band");
+        assert!(latch_when_below(false, 12.0, 12.0, 13.5), "acquires at the tight bound");
+        assert!(latch_when_below(true, 13.5, 12.0, 13.5), "holds to the far edge of the band");
+        assert!(!latch_when_below(true, 13.6, 12.0, 13.5), "releases past the band");
+    }
+
+    #[test]
+    fn a_subject_oscillating_inside_the_band_never_thrashes() {
+        // THE regression lock for the Gunman flip-flopping Overwatch↔FollowAnchor. A crab pacing across
+        // the raw sight radius used to toggle `threat_bearing_known` on every think; with the band, one
+        // acquisition survives the whole oscillation, and one release survives the way back out.
+        let mut on = false;
+        for step in 0..40 {
+            // Sweep 11.8 ↔ 13.2 — straddling the 12.0 trigger, entirely inside the 12.0–13.5 band.
+            let d = if step % 2 == 0 { 11.8 } else { 13.2 };
+            let next = latch_when_below(on, d, THREAT_SIGHT, THREAT_SIGHT_RELEASE);
+            if step > 0 {
+                assert_eq!(next, on, "latch flipped at step {step} (d={d}) — that is the thrash");
+            }
+            on = next;
+        }
+        assert!(on, "the sweep dips inside the trigger, so the threat should be acquired and held");
+    }
+
+    #[test]
+    fn latch_when_above_is_the_mirror_image() {
+        // The leash: strayed once past LEASH_OUT, un-strayed only once well back inside LEASH_IN.
+        assert!(!latch_when_above(false, 5.9, LEASH_OUT, LEASH_IN), "not yet strayed");
+        assert!(latch_when_above(false, 6.0, LEASH_OUT, LEASH_IN), "strays at the leash");
+        assert!(latch_when_above(true, 4.0, LEASH_OUT, LEASH_IN), "still coming home at the band edge");
+        assert!(!latch_when_above(true, 3.9, LEASH_OUT, LEASH_IN), "home once well inside");
+    }
+
+    #[test]
+    fn an_absent_subject_reads_as_far_away_and_releases_the_latch() {
+        // "No candidate at all" (the last crab died) must release a gate exactly as a retreating one does,
+        // rather than freezing the latch on its last value.
+        let none: Option<((), Vec3, f32)> = None;
+        assert_eq!(dist_of(none), NO_TARGET_DIST);
+        assert!(!latch_when_below(true, dist_of(none), THREAT_SIGHT, THREAT_SIGHT_RELEASE));
+    }
+
+    #[test]
+    fn the_leash_band_sits_outside_the_follow_deadzone() {
+        // A regrouping unit releases its leash latch at LEASH_IN and is then owned by FollowAnchor, which
+        // holds inside FOLLOW_DEADZONE. If the release landed *inside* the deadzone the unit would arrive,
+        // stop being strayed, hold, drift out, and re-stray — a slow oscillation instead of settling.
+        assert!(LEASH_IN > FOLLOW_DEADZONE, "leash release must hand off to FollowAnchor, not to itself");
+        assert!(LEASH_OUT > LEASH_IN, "the leash band must have width");
     }
 
     #[test]

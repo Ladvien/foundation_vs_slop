@@ -10,13 +10,14 @@ oracle choice is the difference between a golden regression net and a test that 
 
 ```bash
 cargo test                                                # deterministic core — fast, GPU-free, the CI hard gate
-cargo test --features test-harness -- --test-threads=1    # + headless replay / liveness / SSIM (needs a GPU)
+cargo test --features test-harness -- --test-threads=1    # + headless replay / liveness / SSIM (GPU-free)
 ```
 
 - **`cargo test`** runs the pure-logic + golden layer (RNG, WFC, utility-AI, ORCA, laser, geometry,
   placement). No GPU, no window, ~instant. **This is what CI blocks on.**
 - **`--features test-harness`** additionally boots the *real game* headless and runs replay + liveness +
-  visual tests. These need a render device (Metal locally, software Vulkan on CI). They open no window.
+  visual tests. They open no window and need **no GPU**: the harness sets `RenderPlugin` with
+  `backends: None`, so every render type is registered but no adapter/device is ever created.
 
 ---
 
@@ -65,8 +66,8 @@ These are the hard-won constraints. Violating any one either flakes the suite or
    solver (`src/placement/`), which draws from a **seeded** `rand_chacha::ChaCha8Rng` — no entropy, fully
    reproducible. New per-agent randomness threads a `u32` seed through `util::rand01`, or a seeded
    resource (see `LaserRng`).
-4. **One App at a time.** Two headless Apps in one process share Bevy's global task pool + the GPU device
-   and interfere. Every harness test takes `let _serial = serial_guard();` first and holds it for the App's
+4. **One App at a time.** Two headless Apps in one process share Bevy's global task pool (and, when a
+   backend exists, the GPU device) and interfere. Every harness test takes `let _serial = serial_guard();` first and holds it for the App's
    lifetime. (`--test-threads=1` in CI is belt-and-suspenders; `serial_guard` alone is sufficient.)
 5. **Single-threaded.** `build_headless_app` forces the compute pool *and* rayon to one thread before any
    plugin initializes. Multithreading, rayon work-stealing, and concurrent Apps each break determinism —
@@ -89,10 +90,19 @@ These are the hard-won constraints. Violating any one either flakes the suite or
 Pure functions called directly — **no Bevy `App`**. Fast, deterministic, no GPU. This is the CI hard gate.
 See the **Test inventory** below for the full per-module breakdown.
 
-### 2. Headless replay harness (`--features test-harness`, GPU)
+### 2. Headless replay harness (`--features test-harness`, GPU-free)
 
-`src/sim_harness.rs` boots the **real game plugins** with no window (GPU device present, `WinitPlugin`
-disabled). `tests/replay.rs` and `tests/liveness.rs` run against it.
+`src/sim_harness.rs` boots the **real game plugins** with no window and no wgpu backend (`WinitPlugin`
+disabled; `RenderPlugin { backends: None }`). `tests/replay.rs` and `tests/liveness.rs` run against it.
+
+Dropping the backend is sound, not a shortcut: `snapshot_hash` covers `(Transform, Health)`, every writer
+of which is on `FixedUpdate`, and rendering only *reads* sim state. It was verified by measurement — with a
+real Metal backend and with no backend, seed `0x5C09191` × 1800 ticks hash to the same value, with the whole
+suite passing. That deterministic-core golden is now pinned as an absolute value by
+`migrated_defaults_reproduce_the_shipped_golden_hash` (currently `0xec1add310772895c`; it tracks gameplay, so
+committing a deliberate balance change updates it — the earlier `716d0cfbb69b778e` predates the
+faction-relative-fear / psionic-field-sight work and is stale). It also made the harness ~2.9× faster (that episode:
+9.31 s → 3.18 s), because ~84% of a headless run was render-extract rather than simulation.
 
 ### 3. Visual regression (`src/visual_regression.rs`)
 
@@ -133,8 +143,8 @@ The canonical map of what pins what. Update this table when you add or retire a 
 |---|---|---|
 | `tests/rng_guard.rs` | GPU-free (no feature) | Freezes the exact bit output of every generator — `util` (`next_u32`, `rand01`, `hash01_u32`), `autogib::hash_f32`, and `rng::seeded` ChaCha8 (`raw_u64`, `unit`, `below`). A silent constant change trips here first. |
 | `tests/wfc_pin.rs` | GPU-free (no feature) | Golden FNV-1a hash of `wfc::generate` over a 5-seed corpus + in-process reproducibility + the "a floor link only ever joins two floors" invariant. |
-| `tests/replay.rs` | `test-harness` (GPU) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. |
-| `tests/liveness.rs` | `test-harness` (GPU) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. |
+| `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. |
+| `tests/liveness.rs` | `test-harness` (GPU-free) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. |
 
 ---
 
@@ -219,8 +229,9 @@ feature already enables `bevy/debug`, which prints the real system + resource na
   push. Installs Bevy's Linux build deps (alsa/udev/wayland/xkb).
 - **Advisory**: `cargo fmt --check` + `cargo clippy` run but **don't block** — the repo predates style
   enforcement (no `rustfmt.toml`, standing clippy lints), so blocking would fail on untouched code.
-- **GPU lane** (`harness` job, `continue-on-error`): tries the replay/liveness/SSIM tests under Mesa
-  lavapipe (software Vulkan). Best-effort — never reddens the build; locally these run on the real GPU.
+- **Harness lane** (`harness` job, `continue-on-error`): runs the replay/liveness/SSIM tests. Since the
+  harness took `backends: None` it needs no GPU and no lavapipe, so this lane is a candidate for promotion
+  to a hard gate.
 
 Pin determinism on a **single** CI target: the RNG is bit-stable, but `f32` gameplay math may diverge across
 CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves to fixed-point.
@@ -229,8 +240,8 @@ CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves 
 
 ## Constraints & "not yet automated"
 
-- **The harness needs a GPU** (render device). It's headless (no *window*) but not GPU-free. Pure-CPU CI
-  runs only the deterministic core; the harness runs locally or on the GPU lane.
+- **The harness no longer needs a GPU.** It runs with `RenderPlugin { backends: None }` (see "What's in
+  the box" §2). The *windowed* game obviously still needs a real backend; only `build_headless_app` omits it.
 - **`devshot` can't run inside the harness** — `Screenshot::primary_window()` needs a window, and the
   harness has none. Full SSIM visual-regression therefore needs the *windowed* game driven by `devshot`
   (`touch screenshot.request`; see `CLAUDE.md` → "Taking screenshots"), plus decoding `screenshot.png`.

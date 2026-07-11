@@ -26,6 +26,7 @@ use crate::impact_fx::ImpactFxSettings;
 use crate::mycelia::{self, MyceliaConfig};
 use crate::placement::manifest::{self, FurnitureManifest};
 use crate::placement::solvers::metropolis::MetropolisWeights;
+use crate::sim::{self, SimTuning};
 use crate::vhs::VhsConfig;
 
 /// Path to the unified config file, relative to the project-root working directory (matches the old
@@ -49,9 +50,21 @@ pub struct GameConfig {
     pub gore: GoreSettings,
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
+    pub sim: SimTuning,
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
     pub dialogue: DialogueScript,
+}
+
+/// The evolvable **world-dynamics** surface, as one value: the field-propagation tuning (`ai_tuning`)
+/// plus the simulation-dynamics tuning (`sim`). This is the slice-pair the offline search evolves (see
+/// `squad_ai::world_genome`) and the harness installs for one rollout (`sim_harness::SimConfig::config`).
+/// Both members are `Copy` + `Serialize`, so an evolved world decodes to a readable RON diff — the
+/// reward-hacking guard (Skalse et al., "Defining and Characterizing Reward Hacking", arXiv:2209.13085).
+#[derive(Clone, Copy)]
+pub struct WorldConfig {
+    pub ai: AiTuning,
+    pub sim: SimTuning,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
@@ -71,6 +84,8 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     // slice can check this alone, and this is the one place both are in hand. A missing tag would otherwise
     // surface as a runtime error deep in habitat selection, on some seeds only.
     mycelia::validate_damp_coverage(&cfg.mycelia, &cfg.dungeon.room_types)?;
+    crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
+    sim::validate_tuning(&cfg.sim)?;
     model::validate_script(&cfg.dialogue)?;
     Ok(cfg)
 }

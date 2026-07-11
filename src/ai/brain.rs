@@ -70,6 +70,19 @@ pub struct ActiveBehavior {
     pub mode: Mode,
     pub target: Option<Vec3>,
     pub rng: u32,
+    /// Monotonic count of *actual* decisions — incremented once per `ThinkTimer` firing, in `think` and
+    /// in `squad_ai::perception::squad_think`.
+    ///
+    /// Exists because Bevy's `Changed<ActiveBehavior>` **cannot** identify decision points for units:
+    /// `squad_think` re-resolves `target` from fresh perception on *every* tick (so cohesion tracks the
+    /// moving anchor), and that `DerefMut` marks the component changed 18× per decision at the 0.3 s
+    /// think interval. A recorder keyed on `Changed` therefore oversampled the squad ~18× with ~94%
+    /// self-transitions, which silently made `surprise::learnability` — whose whole job is to measure
+    /// transition structure — read every brain as maximally predictable. Creatures were unaffected
+    /// (`think` `continue`s before touching `active`), so the bug was invisible on the swarm side.
+    ///
+    /// `squad_ai::trace` samples on this counter advancing. Never reset.
+    pub decision: u32,
 }
 
 impl ActiveBehavior {
@@ -82,6 +95,7 @@ impl ActiveBehavior {
             target: None,
             rng: (hash01_u32(rand_seed.wrapping_mul(0x9E37_79B1).wrapping_add(7)) * 4_000_000.0) as u32
                 | 1,
+            decision: 0,
         }
     }
 }
@@ -177,6 +191,7 @@ pub fn think(
             continue;
         }
         timer.0 = THINK_INTERVAL;
+        active.decision = active.decision.wrapping_add(1);
 
         let pos = tf.translation;
         // Nearest target via the shared ranking. Crabs and scouts scan all prey (units + boss); the boss
@@ -266,13 +281,73 @@ pub fn think(
     }
 }
 
-/// Insert the brain registry (the developer's behaviour catalogue).
-pub fn init_brains(mut commands: Commands) {
-    commands.insert_resource(AiBrains {
-        smiley: smiley_brain(),
-        crab: crab_brain(),
-        scout: scout_brain(),
-    });
+/// The code-literal creature repertoires — the *templates* the offline behaviour search mutates, and the
+/// reference brain whose realised mode distribution becomes the player's baseline expectation
+/// (`squad_ai::surprise::ModePrior`).
+pub fn authored_brains() -> AiBrains {
+    AiBrains { smiley: smiley_brain(), crab: crab_brain(), scout: scout_brain() }
+}
+
+/// Where a repertoire comes from. **Always present** (`AiPlugin` `init_resource`s the `Authored`
+/// default), so this is a parameter, not a fallback: the shipped game and a headless evaluation take the
+/// same one code path with different data, and the match below is exhaustive.
+///
+/// The offline behaviour search (`squad_ai::genome`) mutates the *authored* repertoires and needs to run
+/// the real simulation on the result. Rather than a second policy implementation — which would fork the
+/// decision layer and lose the startup guards — a candidate simply replaces the brain data that
+/// `utility::decide` already scores.
+#[derive(Resource, Clone, Default)]
+pub enum BrainSource {
+    /// The code-literal defaults, plus any `assets/config/roles.ron` overlay (the shipped game).
+    #[default]
+    Authored,
+    /// A candidate produced by the offline search. Every repertoire is validated below exactly as the
+    /// authored ones are — an infeasible candidate is a loud failure, never a degraded brain.
+    Candidate(Box<CandidateBrains>),
+}
+
+/// One point in the joint squad × swarm behaviour space: a full repertoire for every role and every
+/// creature. Both sides are carried together because they co-adapt, and an evaluation of one is
+/// meaningless without pinning the other.
+#[derive(Clone)]
+pub struct CandidateBrains {
+    pub roles: std::collections::HashMap<crate::squad_ai::role::RoleId, Vec<Behavior>>,
+    pub crab: Vec<Behavior>,
+    pub scout: Vec<Behavior>,
+    pub smiley: Vec<Behavior>,
+}
+
+/// Insert the creature brain registry (the developer's behaviour catalogue), or the candidate under
+/// evaluation. Validation is shared: whichever source supplied them, every creature brain must keep an
+/// unconditional low-rank default (Wander/Forage) or `decide` would have no eligible behaviour.
+///
+/// Creature brains deliberately **share ranks** (`Chase` and `HuntBlood` tie so the stronger pull wins;
+/// so do `Latch` and `SeekMeat`), which reads as swarm variety rather than as thrash. So
+/// `validate_rank_ladder` — a *role* invariant — is correctly not applied here.
+pub fn init_brains(mut commands: Commands, source: Res<BrainSource>) {
+    let brains = match &*source {
+        BrainSource::Authored => AiBrains {
+            smiley: smiley_brain(),
+            crab: crab_brain(),
+            scout: scout_brain(),
+        },
+        BrainSource::Candidate(candidate) => AiBrains {
+            smiley: Brain { behaviors: candidate.smiley.clone() },
+            crab: Brain { behaviors: candidate.crab.clone() },
+            scout: Brain { behaviors: candidate.scout.clone() },
+        },
+    };
+    // Checked once, loudly, at startup — see `utility::validate_unconditional_default`.
+    for (who, brain) in [
+        ("smiley_brain", &brains.smiley),
+        ("crab_brain", &brains.crab),
+        ("scout_brain", &brains.scout),
+    ] {
+        if let Err(e) = crate::ai::utility::validate_unconditional_default(&brain.behaviors, who) {
+            panic!("{e}");
+        }
+    }
+    commands.insert_resource(brains);
 }
 
 /// The smiley boss: hunt the nearest unit, but be **drawn to the biggest blood frenzy** (it reads the
@@ -579,5 +654,29 @@ fn scout_brain() -> Brain {
                 ],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Pure brain-shape checks — no App, no ECS (the seed-in/assert-out convention of `wfc.rs`).
+    use super::*;
+    use crate::ai::utility::validate_unconditional_default;
+
+    #[test]
+    fn every_shipped_creature_brain_has_an_unconditional_default() {
+        // `decide` screens out every behaviour scoring below MIN_SCORE. If a brain's whole repertoire is
+        // gated on perception, nothing is eligible and `decide` falls through to behaviour 0 — a silent
+        // wrong-action bug. Each creature brain must therefore keep a constant-score tail (Wander /
+        // Forage). `init_brains` enforces this at startup; this test enforces it at compile-and-test time,
+        // so a brain edit fails in CI rather than at launch.
+        for (who, brain) in [
+            ("smiley_brain", smiley_brain()),
+            ("crab_brain", crab_brain()),
+            ("scout_brain", scout_brain()),
+        ] {
+            validate_unconditional_default(&brain.behaviors, who)
+                .unwrap_or_else(|e| panic!("{who} must ship an unconditional default: {e}"));
+        }
     }
 }

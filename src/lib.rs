@@ -19,6 +19,7 @@ pub mod audio;
 pub mod autogib;
 pub mod blood_lens;
 pub mod ai;
+pub mod ai_overlay;
 pub mod camera;
 pub mod config;
 pub mod crab;
@@ -39,10 +40,14 @@ pub mod mycelia;
 pub mod nest;
 pub mod orca;
 pub mod pathfind;
+pub mod psi_vision;
 pub mod placement;
 pub mod rng;
 pub mod selection;
 pub mod settings;
+/// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
+/// config slice. Mirrors `ai::tuning`; together they form the `WorldConfig` the offline search evolves.
+pub mod sim;
 /// Headless deterministic replay/liveness harness — opt-in so it never enters the shipped binary.
 #[cfg(feature = "test-harness")]
 pub mod sim_harness;
@@ -146,7 +151,17 @@ pub fn run() {
             // Both registered only here, never in the headless harness, so they stay outside the
             // deterministic core (see `ui` docs). Dialogue needs `MenuState` (from `UiPlugin`) for the
             // sim-freeze during a modal exchange; it is cosmetic/`Update`, never `FixedUpdate`.
-            (ui::UiPlugin, dialogue::DialoguePlugin),
+            //
+            // `PsiVisionPlugin` (the Psionic's diegetic field-sight — a mechanic) and `AiOverlayPlugin`
+            // (the F3 squad-AI state label — a dev tool) sit in this group because both read the bubble
+            // assets `DialoguePlugin` sets up, and both are cosmetic `Update` systems that the harness
+            // never registers. Grouped in a nested tuple to stay under Bevy's 16-element plugin limit.
+            (
+                ui::UiPlugin,
+                dialogue::DialoguePlugin,
+                psi_vision::PsiVisionPlugin,
+                ai_overlay::AiOverlayPlugin,
+            ),
         ));
 
     // Pinned simulation runs on `FixedUpdate` at a fixed 60 Hz, so gameplay advances at the same rate

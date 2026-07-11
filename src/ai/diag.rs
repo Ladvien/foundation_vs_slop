@@ -35,7 +35,7 @@ pub fn log_fields(
     }
     *t = 0.0;
     let (sc_pos, sc) = stig.hotspot(FieldId::SCENT, &dungeon);
-    let (th_pos, th) = stig.hotspot(FieldId::THREAT, &dungeon);
+    let (th_pos, th) = stig.hotspot(FieldId::THREAT_GUN, &dungeon);
     let (cd_pos, cd) = stig.hotspot(FieldId::CRAB_DENSITY, &dungeon);
     let (mt_pos, mt) = stig.hotspot(FieldId::MEAT, &dungeon);
     let (al_pos, al) = stig.hotspot(FieldId::ALARM, &dungeon);

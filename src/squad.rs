@@ -20,6 +20,7 @@ use crate::flowfield::FlowField;
 use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::orca::{self, Agent};
+use crate::sim::SimTuning;
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
 use crate::ai::drives::Drives;
 use crate::squad_ai::actions::UtterCooldown;
@@ -136,14 +137,11 @@ const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.22);
 /// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
 /// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
 pub const UNIT_SPEED: f32 = 6.0;
-/// Encumbrance: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
-/// movement down. Effective speed = `UNIT_SPEED / (1 + crabs * CRAB_DRAG)`, floored at `MIN_ENCUMBER`
-/// so a heavily-swarmed unit crawls (piranha weight) but is never frozen solid. Diminishing per crab:
-/// 3 ≈ 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×.
-const CRAB_DRAG: f32 = 0.15;
+/// Encumbrance floor: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
+/// movement down to `UNIT_SPEED / (1 + crabs * sim.combat.crab_drag)`, floored here so a heavily-swarmed
+/// unit crawls (piranha weight) but is never frozen solid. At the shipped `crab_drag` (0.15): 3 crabs ≈
+/// 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×. (`crab_drag` and unit HP now live in the `sim:` config slice.)
 const MIN_ENCUMBER: f32 = 0.15;
-/// Squad member hit points (drives the floating health bar; units take no damage yet).
-const UNIT_HP: f32 = 100.0;
 /// How fast a unit turns to face its travel direction (per-second slerp rate, clamped per frame).
 const TURN_SPEED: f32 = 14.0;
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
@@ -223,9 +221,22 @@ impl Plugin for SquadPlugin {
         // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
         app.add_systems(Startup, spawn_squad)
+            // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
+            // `AiSet::Think`, so that edge is pinned explicitly rather than left to registration order.
+            // Both are on `FixedUpdate`, so without the constraint Bevy is free to run them in either
+            // order — an ambiguity that would silently cost a tick of latency (or shift the replay hash)
+            // in a codebase that value-sorts ORCA neighbours to keep the sim reproducible.
+            //
             // `unit_facing` after `unit_movement` so it turns units (moving OR idle) toward their aim/travel
             // once this tick's velocity is settled. Pinned (rotation feeds the smiley's gaze test).
-            .add_systems(FixedUpdate, (unit_movement, unit_facing.after(unit_movement), despawn_dead_units))
+            .add_systems(
+                FixedUpdate,
+                (
+                    unit_movement.after(crate::ai::AiSet::Think),
+                    unit_facing.after(unit_movement),
+                    despawn_dead_units,
+                ),
+            )
             .add_systems(Update, recolor_units);
         // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
         // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
@@ -237,7 +248,7 @@ impl Plugin for SquadPlugin {
     }
 }
 
-fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>) {
+fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>, sim: Res<SimTuning>) {
     // Pick five distinct floor cells clustered around the dungeon spawn.
     let base = dungeon.spawn;
     let cells: Vec<IVec2> = SPAWN_SPIRAL
@@ -272,7 +283,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
                 AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
-                Health::new(UNIT_HP),
+                Health::new(sim.combat.unit_hp),
                 Outfit(outfit),
                 // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
                 // decision + think throttle, and the autonomous movement goal (see `squad_ai`).
@@ -280,13 +291,28 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                     RoleId::ALL[i],
                     personas[i].clone(),
                     Drives::new(),
+                    // Units fear the creatures (THREAT_CRAB / THREAT_ANOMALY), never their own gunfire.
+                    crate::ai::faction::Faction::Foundation,
                     ActiveBehavior::new(seed),
                     ThinkTimer::staggered(seed),
                     DesiredMove::default(),
+                    // On EVERY unit, never a subset: a component present on only some units would split
+                    // the hashed squad archetype and make iteration order run-dependent (see the `Leader`
+                    // note below).
+                    crate::squad_ai::perception::PerceptionLatch::default(),
                     UtterCooldown::default(),
                     MemoryStream::default(),
+                    crate::squad_ai::dialogue::SpokenLines::default(),
                 ),
                 FigurineSource(figurine.clone()),
+                // The `Unit` carries no mesh of its own (the figurine is a cosmetic child), so nothing
+                // auto-inserted `Visibility` here. Two things needed it and quietly went without:
+                // the cosmetic children logged `B0004: parent without InheritedVisibility` every frame,
+                // and `dialogue::bubble::track_bubbles` — whose owner query is `(&Transform, &Visibility)`
+                // — never matched a unit, so it despawned every speech bubble on the frame it spawned.
+                // Squad dialogue could not render at all. Uniform across all five units, so it does not
+                // split the hashed archetype, and `snapshot_hash` reads only Transform + Health.
+                Visibility::default(),
                 Transform::from_translation(dungeon.cell_center(cell))
                     .with_scale(Vec3::splat(FIGURINE_SCALE)),
                 // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
@@ -335,50 +361,42 @@ pub(crate) fn ensure_leader(
     }
 }
 
-/// Debug safeguard: never let the whole squad wipe. At least [`MIN_LIVING_UNITS`] member always
-/// survives — so of five units, four can die but the last cannot. (Remove this floor for real
-/// lose conditions.)
-const MIN_LIVING_UNITS: usize = 1;
-
 /// Remove squad members whose health has run out (enemies gnaw them down — see `enemy`). Despawning
 /// a unit takes its figurine + carried gun with it; its floating health bar is cleaned up as an
-/// orphan by `health::update_health_bars`. A small burst at chest height marks the death. The last
-/// [`MIN_LIVING_UNITS`] can't be despawned: a protected survivor has its health floored so it lingers
-/// (bar shows a sliver) instead of dying.
+/// orphan by `health::update_health_bars`. A small burst at chest height marks the death.
+///
+/// Every unit can die, including the last: a total wipe is a real outcome. `cohesion::update_anchor`
+/// clears `SquadAnchor::valid` on an empty squad and `pick_leader` no-ops, so the zero-unit world is
+/// well-defined rather than a state the sim is protected from. This matters beyond lose conditions:
+/// the offline behaviour search (`squad_ai::qd`) scores `survivors` and gates on "the squad was not
+/// wiped", and a floor that silently resurrects the last member would make both signals a lie.
 fn despawn_dead_units(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
-    mut units: Query<(Entity, &mut Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
+    units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
 ) {
-    // How many dead units we may actually remove this frame while keeping the living floor.
-    let mut removable = units.iter().count().saturating_sub(MIN_LIVING_UNITS);
-    for (entity, mut hp, transform, outfit, figurine) in &mut units {
-        if hp.current <= 0.0 {
-            if removable > 0 {
-                // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
-                // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
-                gore.0.push(GoreEvent {
-                    pos: transform.translation + Vec3::Y * 0.5,
-                    kind: GoreKind::UnitCrunch,
-                    tint: outfit.0,
-                    // The figurine's baked fracture set: spawn from its foot origin at its render scale.
-                    gib: Some(GibSource {
-                        source: figurine.0.id(),
-                        origin: transform.translation,
-                        scale: transform.scale.x,
-                    }),
-                    // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
-                    intensity: 0.6,
-                });
-                sfx.write(Sfx::UnitDeath(transform.translation));
-                commands.entity(entity).despawn();
-                removable -= 1;
-            } else {
-                // Protected survivor — clamp so it can't die and its bar keeps a sliver.
-                hp.current = hp.current.max(1.0);
-            }
+    for (entity, hp, transform, outfit, figurine) in &units {
+        if hp.current > 0.0 {
+            continue;
         }
+        // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
+        // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
+        gore.0.push(GoreEvent {
+            pos: transform.translation + Vec3::Y * 0.5,
+            kind: GoreKind::UnitCrunch,
+            tint: outfit.0,
+            // The figurine's baked fracture set: spawn from its foot origin at its render scale.
+            gib: Some(GibSource {
+                source: figurine.0.id(),
+                origin: transform.translation,
+                scale: transform.scale.x,
+            }),
+            // Losing one of your own is a real gut-punch — a solid (but not boss-sized) kick.
+            intensity: 0.6,
+        });
+        sfx.write(Sfx::UnitDeath(transform.translation));
+        commands.entity(entity).despawn();
     }
 }
 
@@ -450,12 +468,17 @@ fn unit_movement(
             &MoveSpeed,
             &mut Velocity,
             Option<&mut MoveOrder>,
-            Option<&mut crate::squad_ai::cohesion::DesiredMove>,
+            // Read-only on purpose: `squad_ai::squad_think` is the single owner of `DesiredMove.goal`.
+            // Taking `&mut` here once tempted this system into clearing the goal on arrival — a write
+            // nothing could observe, since `squad_think` re-resolves the goal every tick before this
+            // system runs. `&` makes a second writer a compile error rather than a comment.
+            Option<&crate::squad_ai::cohesion::DesiredMove>,
         ),
         With<Unit>,
     >,
     // Crabs clinging to units, for the encumbrance slowdown (a piranha pile bogs a unit down).
     attached: Query<&CrabAttached>,
+    sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     if dt <= 0.0 {
@@ -494,13 +517,13 @@ fn unit_movement(
         })
         .collect();
 
-    for (entity, mut transform, speed, mut velocity, mut order, mut desired) in &mut units {
+    for (entity, mut transform, speed, mut velocity, mut order, desired) in &mut units {
         let pos = transform.translation;
         let self_pos = pos.xz();
 
         // Encumbrance: crabs clinging to this unit drag its top speed down (never to a dead stop).
         let crabs = crab_load.get(&entity).copied().unwrap_or(0);
-        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * CRAB_DRAG)).max(MIN_ENCUMBER);
+        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * sim.combat.crab_drag)).max(MIN_ENCUMBER);
 
         // Preferred velocity + goal from the authoritative source. Player order first (unchanged flow-
         // field steer); else the AI goal (straight steer); else hold.
@@ -605,11 +628,14 @@ fn unit_movement(
                 velocity.0 = Vec2::ZERO;
             }
         } else if new_goal_dist < ARRIVE_RADIUS {
-            // --- AI-goal arrival: reached the cohesion/role goal → clear it and hold (no blob/stall
-            // logic; autonomous goals are short-range and re-planned each think). ---
-            if let Some(d) = desired.as_mut() {
-                d.goal = None;
-            }
+            // --- AI-goal arrival: reached the cohesion/role goal → come to rest for this tick. ---
+            //
+            // We do NOT clear `desired.goal` here. `squad_think` re-resolves it from scratch every tick
+            // (it runs earlier in `FixedUpdate`, see `SquadPlugin`), so it is the single owner; a write
+            // here would be overwritten before anything could read it — including the `agents` snapshot
+            // above, which is built at the top of this system, i.e. *after* this tick's `squad_think`.
+            // What actually lets a unit settle is the Regroup/FollowAnchor deadband in `resolve_goal`,
+            // which yields `None` near the anchor (see the `agents` comment above).
             velocity.0 = Vec2::ZERO;
         }
 

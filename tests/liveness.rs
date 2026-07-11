@@ -65,3 +65,98 @@ fn squad_survives_a_long_unattended_run() {
         assert!(v.is_empty(), "liveness violated at tick {}: {v:?}", checkpoint * 30);
     }
 }
+
+#[test]
+fn every_drives_carrier_has_a_faction_throughout_a_live_run() {
+    // `update_drives` picks an agent's fear sources by `Faction`. `ai::faction::validate_factions` covers
+    // the Startup population, but crabs are also bred at runtime (`nest::nest_reproduce`) — an untagged
+    // agent there would simply never feel fear, an invisible-in-play bug rather than a crash. Both crab
+    // paths funnel through `crab::spawn_crab_on_patch`, so the tag is structural; this asserts it stays so
+    // over a long unattended run, while the swarm hunts and breeds.
+    use bevy::prelude::{Entity, With, Without};
+    use foundation_vs_slop::ai::drives::Drives;
+    use foundation_vs_slop::ai::faction::Faction;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::default();
+    let mut app = build_headless_app(&cfg);
+
+    let mut agents_seen = 0usize;
+    for checkpoint in 1..=20 {
+        step(&mut app, &cfg, 30);
+        let world = app.world_mut();
+        let mut untagged = world.query_filtered::<Entity, (With<Drives>, Without<Faction>)>();
+        let missing: Vec<Entity> = untagged.iter(world).collect();
+        assert!(
+            missing.is_empty(),
+            "at tick {}: {} agent(s) carry Drives without a Faction (first {:?}) — they would never feel fear",
+            checkpoint * 30,
+            missing.len(),
+            missing.first(),
+        );
+        let mut tagged = world.query_filtered::<Entity, (With<Drives>, With<Faction>)>();
+        agents_seen = agents_seen.max(tagged.iter(world).count());
+    }
+    // Guard against the assertion above passing vacuously on an empty world.
+    assert!(agents_seen > 5, "expected the squad plus a swarm to exist, saw {agents_seen} agents");
+}
+
+/// The regression net for "the squad flees from its own gunfire".
+///
+/// Unit tests already assert that no faction fears a channel it emits. This drives the whole real
+/// pipeline instead — deposit → drain → evaporate → `update_drives` → FEAR — and checks the outcome on
+/// live `Unit` entities, so a future rewiring of `laser.rs`, the deposit sets, or the drive registry
+/// cannot quietly restore the coupling.
+#[test]
+fn a_units_fear_ignores_gunfire_and_answers_to_creatures() {
+    use bevy::prelude::{App, Transform, With};
+    use foundation_vs_slop::ai::drives::{DriveId, Drives};
+    use foundation_vs_slop::ai::field::{Deposit, FieldId, StigDeposits};
+    use foundation_vs_slop::squad::Unit;
+
+    let _serial = serial_guard();
+    // Physics-off core: we want the drive pipeline, not the Avian solver.
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1);
+
+    /// Flood one channel at every unit's own position for a while, then report the max FEAR reached.
+    fn flood(app: &mut App, cfg: &SimConfig, field: FieldId, amount: f32) -> f32 {
+        for _ in 0..90 {
+            let world = app.world_mut();
+            let mut q = world.query_filtered::<&Transform, With<Unit>>();
+            let spots: Vec<_> = q.iter(world).map(|t| t.translation).collect();
+            let mut deposits = world.resource_mut::<StigDeposits>();
+            for pos in spots {
+                deposits.0.push(Deposit { pos, field, amount });
+            }
+            step(app, cfg, 1);
+        }
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&Drives, With<Unit>>();
+        q.iter(world).map(|d| d.get(DriveId::FEAR)).fold(0.0f32, f32::max)
+    }
+
+    // A unit standing in its own muzzle flash. `fire_laser` deposits THREAT_GUN at the SHOOTER's own
+    // position ~6.7x/second, so this is a faithful — in fact gentler — model of sustained fire. Before the
+    // channels were split by emitter, FEAR here saturated to ~1.0 within a second and `Flee` (the top rank
+    // for every role) preempted Overwatch, Ward, TendWounded and the rest, forever.
+    //
+    // A tolerance rather than an exact zero: the swarm exists in this world too, so a crab that wanders
+    // into range during the 1.5 s flood is a *legitimate* fear source. What must not happen is the squad's
+    // own muzzle driving FEAR anywhere near `Flee`'s ~0.28 onset.
+    let fear_from_own_gunfire = flood(&mut app, &cfg, FieldId::THREAT_GUN, 0.6);
+    assert!(
+        fear_from_own_gunfire < 0.05,
+        "units are afraid of their own gunfire again (FEAR {fear_from_own_gunfire})",
+    );
+
+    // The same flood on a channel a *crab* emits must frighten them past the Flee onset, or the fix has
+    // simply deafened the squad to danger rather than pointing it at the right source.
+    let fear_from_crabs = flood(&mut app, &cfg, FieldId::THREAT_CRAB, 0.6);
+    assert!(
+        fear_from_crabs > 0.28,
+        "units no longer fear crabs enough to break (FEAR {fear_from_crabs}) — the squad is deaf to \
+         danger, not merely brave",
+    );
+}

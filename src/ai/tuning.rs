@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::field::{ChannelDef, RallyDef, CHANNEL_COUNT, FieldId};
 
 /// Per-channel tuning (mirrors [`ChannelDef`]).
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ChannelTuning {
     pub evaporate: f32,
     pub diffuse: f32,
@@ -29,13 +29,18 @@ impl From<ChannelTuning> for ChannelDef {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct FieldsTuning {
     pub scent: ChannelTuning,
-    pub threat: ChannelTuning,
+    /// Danger emitted by the squad's weapons (read by crabs and the boss).
+    pub threat_gun: ChannelTuning,
     pub crab_density: ChannelTuning,
     pub meat: ChannelTuning,
     pub alarm: ChannelTuning,
+    /// Danger emitted by crabs (read by units).
+    pub threat_crab: ChannelTuning,
+    /// Danger emitted by the watcher (read by units).
+    pub threat_anomaly: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -43,17 +48,19 @@ impl FieldsTuning {
     pub fn channel_defs(&self) -> [ChannelDef; CHANNEL_COUNT] {
         let mut defs = [ChannelDef::default(); CHANNEL_COUNT];
         defs[FieldId::SCENT.0] = self.scent.into();
-        defs[FieldId::THREAT.0] = self.threat.into();
+        defs[FieldId::THREAT_GUN.0] = self.threat_gun.into();
         defs[FieldId::CRAB_DENSITY.0] = self.crab_density.into();
         defs[FieldId::MEAT.0] = self.meat.into();
         defs[FieldId::ALARM.0] = self.alarm.into();
+        defs[FieldId::THREAT_CRAB.0] = self.threat_crab.into();
+        defs[FieldId::THREAT_ANOMALY.0] = self.threat_anomaly.into();
         defs
     }
 }
 
 /// Tuning for the vectorial rally pheromone (mirrors [`RallyDef`]). Not a scalar channel — it has its
 /// own decay/accumulate model (Tang et al. 2019), so it lives outside [`FieldsTuning`].
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct RallyTuning {
     pub decay: f32,
     pub accumulate: f32,
@@ -71,7 +78,7 @@ impl From<RallyTuning> for RallyDef {
 }
 
 /// Root tuning resource. Extend with new sections (`drives`, `steer`, `think`) in later phases.
-#[derive(Resource, Clone, Copy, Serialize, Deserialize)]
+#[derive(Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct AiTuning {
     pub fields: FieldsTuning,
     pub rally: RallyTuning,
@@ -87,7 +94,7 @@ impl Default for AiTuning {
                     diffuse: 0.15,
                     deposit_radius: 1.5,
                 },
-                threat: ChannelTuning {
+                threat_gun: ChannelTuning {
                     evaporate: 0.6,
                     diffuse: 0.1,
                     deposit_radius: 2.0,
@@ -111,6 +118,21 @@ impl Default for AiTuning {
                     diffuse: 0.0,
                     deposit_radius: 5.0,
                 },
+                // Crab menace: each crab lays at ≈ this evaporation rate, so a cell's value tracks the
+                // local crab COUNT (the `DENSITY_RATE` idiom). A wider radius + gentle diffusion than
+                // CRAB_DENSITY, because dread should be felt from further off than crowding is.
+                threat_crab: ChannelTuning {
+                    evaporate: 0.5,
+                    diffuse: 0.12,
+                    deposit_radius: 3.0,
+                },
+                // The watcher's aura: broad, slow-fading, and diffuse — it seeps down a corridor, which is
+                // what makes the Psionic's through-wall sense read as dread rather than as a proximity ping.
+                threat_anomaly: ChannelTuning {
+                    evaporate: 0.4,
+                    diffuse: 0.2,
+                    deposit_radius: 6.0,
+                },
             },
             // Rally vectors decay over a few seconds (call-off), accumulate scout deposits, and smear a
             // couple of cells so the massing swarm reads a smooth bearing toward the prey.
@@ -121,4 +143,49 @@ impl Default for AiTuning {
             },
         }
     }
+}
+
+/// Range-check the field-propagation knobs. One path, no fallback: an out-of-range value is a loud `Err`
+/// the loader (`config::load_game_config`) surfaces, never a silent clamp. `diffuse` is the load-bearing
+/// bound — it is an unclamped blur lerp weight (see `field.rs`), so a value ≥ 1 blows the diffusion up;
+/// `evaporate` and `deposit_radius` must be positive. This guards the shipped config and any hand edit; the
+/// offline search's `world_genome::BOUNDS` is tighter still (it also caps the *upper* end per knob).
+pub fn validate_tuning(t: &AiTuning) -> Result<(), String> {
+    let channel = |name: &str, c: &ChannelTuning| -> Result<(), String> {
+        if !(c.evaporate > 0.0 && c.evaporate.is_finite()) {
+            return Err(format!("ai_tuning.fields.{name}.evaporate must be finite and > 0 (got {})", c.evaporate));
+        }
+        if !(0.0..1.0).contains(&c.diffuse) {
+            return Err(format!(
+                "ai_tuning.fields.{name}.diffuse must be in [0, 1) — it is a blur lerp weight (got {})",
+                c.diffuse
+            ));
+        }
+        if !(c.deposit_radius > 0.0 && c.deposit_radius.is_finite()) {
+            return Err(format!(
+                "ai_tuning.fields.{name}.deposit_radius must be finite and > 0 (got {})",
+                c.deposit_radius
+            ));
+        }
+        Ok(())
+    };
+    let f = &t.fields;
+    channel("scent", &f.scent)?;
+    channel("threat_gun", &f.threat_gun)?;
+    channel("crab_density", &f.crab_density)?;
+    channel("meat", &f.meat)?;
+    channel("alarm", &f.alarm)?;
+    channel("threat_crab", &f.threat_crab)?;
+    channel("threat_anomaly", &f.threat_anomaly)?;
+    let positive = |name: &str, v: f32| -> Result<(), String> {
+        if v > 0.0 && v.is_finite() {
+            Ok(())
+        } else {
+            Err(format!("ai_tuning.rally.{name} must be finite and > 0 (got {v})"))
+        }
+    };
+    positive("decay", t.rally.decay)?;
+    positive("accumulate", t.rally.accumulate)?;
+    positive("deposit_radius", t.rally.deposit_radius)?;
+    Ok(())
 }
