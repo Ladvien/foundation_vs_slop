@@ -40,7 +40,7 @@
 mod agents;
 mod control;
 mod field;
-mod habitat;
+pub(crate) mod habitat;
 mod grazing;
 pub mod fruit;
 mod material;
@@ -55,7 +55,7 @@ use bevy::render::gpu_readback::Readback;
 use bevy::render::render_resource::{ShaderType, TextureFormat};
 use bevy::render::storage::ShaderBuffer;
 use bevy::render::RenderApp;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dungeon::Wall;
 
@@ -133,7 +133,7 @@ pub const COARSE_SIZE: u32 = 128;
 /// fog-of-war "a unit can see this cell" is the light/gaze proxy. Habituation follows Boisseau, Vogel &
 /// Dussutour (2016), 10.1098/rspb.2016.0446: *P. polycephalum* learns to ignore a repeatedly-presented
 /// *harmless* repellent, showing both responsiveness decline AND spontaneous recovery once it is withheld.
-#[derive(Resource, Deserialize, Clone, Debug)]
+#[derive(Resource, Deserialize, Serialize, Clone, Debug)]
 pub struct MyceliaConfig {
     // ── Field geometry ────────────────────────────────────────────────────────────────────────────────
     /// Side length (texels) of the square world-space mold field. Must be a multiple of [`WORKGROUP_SIZE`].
@@ -370,7 +370,7 @@ pub struct MyceliaConfig {
 }
 
 /// One row of [`MyceliaConfig::damp_weights`] — how readily a room type rots.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DampWeight {
     /// The room-type tag, as stamped into `Region::props.tags` by `dungeon::pick_room`.
     pub tag: String,

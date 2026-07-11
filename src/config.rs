@@ -16,7 +16,7 @@
 //! single file; merging it would defeat that. The acceptance test loads it directly.
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::tuning::AiTuning;
 use crate::dialogue::model::{self, DialogueScript};
@@ -33,12 +33,66 @@ use crate::vhs::VhsConfig;
 /// per-file paths, which were also cwd-relative). Required: a missing file is a loud startup panic.
 const GAME_CONFIG_PATH: &str = "assets/config/config.ron";
 
-/// The `placement:` section: the furniture manifest (asset adapter) plus the Metropolis layout weights.
-/// A nested struct so the two placement inputs read as one logical group in the RON.
+/// The `placement:` section: the furniture manifest (asset adapter), the Metropolis layout weights,
+/// and the density knobs (how much furniture per room). A nested struct so the placement inputs read
+/// as one logical group in the RON.
 #[derive(Deserialize)]
 pub struct PlacementConfig {
     pub furniture: FurnitureManifest,
     pub metropolis: MetropolisWeights,
+    pub density: PlacementDensity,
+}
+
+/// The furniture *density* knobs — how much furniture a room gets and how it is spaced. Previously
+/// hardcoded in `placement::furnish`; promoted to config so the offline level search (`squad_ai::
+/// level_genome`) can evolve furniture amount the way `mycelia` already exposes mushroom amount, and so
+/// a chosen elite is a readable RON diff. `Copy` so the search can pass it by value into `furnish_all`.
+/// (The pure rendering-fit contracts — `FURNITURE_SCALE`, `SURFACE_INSET`, `WALL_LIGHT_HEIGHT` — stay in
+/// code: rescaling furniture would push pieces through the 2.4 m ceiling, so they are not "amount" dials.)
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+pub struct PlacementDensity {
+    /// Cap on tiled decor props (WFC scatter) per room.
+    pub tiled_per_room: usize,
+    /// Cap on freestanding furniture pieces per room.
+    pub freestanding_per_room: usize,
+    /// Cap on scatter props rested on support surfaces per room.
+    pub scatter_per_room: usize,
+    /// Wall lights (sconces) placed per room.
+    pub wall_lights_per_room: usize,
+    /// Minimum centre-to-centre spacing (metres) between freestanding pieces (a Soft `MinDistance`).
+    pub freestanding_min_gap: f32,
+    /// Max centre-to-centre distance (metres) a `Near` band pulls same-`group` pieces (toilet + sink).
+    pub group_near_max: f32,
+}
+
+/// Validate the density knobs. Counts are capped so a runaway search can't request thousands of props
+/// per room; the two spacing distances must be finite and positive. One `Err`, no fallback.
+pub fn validate_density(d: &PlacementDensity) -> Result<(), String> {
+    /// Sane per-room ceiling — well above any authored value, a guard against a degenerate genome.
+    const MAX_PER_ROOM: usize = 64;
+    for (name, n) in [
+        ("tiled_per_room", d.tiled_per_room),
+        ("freestanding_per_room", d.freestanding_per_room),
+        ("scatter_per_room", d.scatter_per_room),
+        ("wall_lights_per_room", d.wall_lights_per_room),
+    ] {
+        if n > MAX_PER_ROOM {
+            return Err(format!("placement.density.{name} = {n} exceeds the {MAX_PER_ROOM} ceiling"));
+        }
+    }
+    if !(d.freestanding_min_gap.is_finite() && d.freestanding_min_gap > 0.0) {
+        return Err(format!(
+            "placement.density.freestanding_min_gap must be finite and > 0 (got {})",
+            d.freestanding_min_gap
+        ));
+    }
+    if !(d.group_near_max.is_finite() && d.group_near_max > 0.0) {
+        return Err(format!(
+            "placement.density.group_near_max must be finite and > 0 (got {})",
+            d.group_near_max
+        ));
+    }
+    Ok(())
 }
 
 /// The whole game's data-driven configuration, deserialized from [`GAME_CONFIG_PATH`]. Each field is the
@@ -78,6 +132,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
         ron::from_str(&text).map_err(|e| format!("{GAME_CONFIG_PATH} parse error: {e}"))?;
     dungeon::validate_config(&cfg.dungeon)?;
     manifest::validate_manifest(&cfg.placement.furniture)?;
+    validate_density(&cfg.placement.density)?;
     gore::validate_settings(&cfg.gore)?;
     mycelia::validate_config(&cfg.mycelia)?;
     // Cross-slice: the mold's damp table must name exactly the room types the dungeon can emit. Neither

@@ -31,6 +31,8 @@ use foundation_vs_slop::squad_ai::coevolve::{
     search, squad_archive_doc, swarm_archive_doc, sweep_prior, world_archive_doc, SearchConfig,
     SearchResult, Templates,
 };
+use foundation_vs_slop::squad_ai::level_eval;
+use foundation_vs_slop::squad_ai::level_search::{self, LevelSearchConfig};
 
 /// Where the frozen baseline expectation lives. Committed, and validated on load.
 const PRIOR_PATH: &str = "assets/config/baseline_prior.ron";
@@ -38,6 +40,8 @@ const PRIOR_PATH: &str = "assets/config/baseline_prior.ron";
 const SQUAD_ARCHIVE_PATH: &str = "assets/config/elites_squad.ron";
 const SWARM_ARCHIVE_PATH: &str = "assets/config/elites_swarm.ron";
 const WORLD_ARCHIVE_PATH: &str = "assets/config/elites_world.ron";
+/// The illuminated *level* archive: evolved dungeon architecture + furniture amount + mushroom amount.
+const LEVELS_ARCHIVE_PATH: &str = "assets/config/elites_levels.ron";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -59,12 +63,15 @@ fn main() {
         "prior" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| prior(ticks, &seeds)),
         "evolve" => parse_evolve(&args[1..]).and_then(evolve),
         "evolve3" => parse_evolve(&args[1..]).and_then(evolve3),
+        // Standalone level search: evolve dungeon/furniture/mushroom config under the static
+        // level-quality objective. GPU-free, no `prior` needed (the objective isn't behavioural).
+        "levels" => parse_evolve(&args[1..]).and_then(levels),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3)"
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels)"
         )),
     };
     if let Err(e) = result {
@@ -252,6 +259,47 @@ fn evolve3(args: EvolveArgs) -> Result<(), String> {
     println!("wrote {SQUAD_ARCHIVE_PATH} ({} elites)", result.squad.archive.coverage());
     println!("wrote {SWARM_ARCHIVE_PATH} ({} elites)", result.swarm.archive.coverage());
     println!("wrote {WORLD_ARCHIVE_PATH} ({} elites)", result.world.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// Standalone level search: evolve dungeon architecture + furniture amount + mushroom amount under the
+/// static level-quality objective, and commit the illuminated archive. GPU-free and fast (each genome is
+/// generate-and-measure, not a rollout), so it needs no `prior` and no `--jobs`. Reuses the `--generations
+/// / --batch / --res / --seed / --seeds` flags; `--seeds` are the held-in dungeon seeds each level is
+/// scored across (and must clear the criterion on all of them).
+fn levels(args: EvolveArgs) -> Result<(), String> {
+    let (base, manifest) = level_eval::load_base()?;
+    let c = args.cfg;
+    let cfg = LevelSearchConfig {
+        seed: c.seed,
+        generations: c.generations,
+        batch: c.batch,
+        sigma: 0.3,
+        resolution: c.resolution,
+        dungeon_seeds: c.dungeon_seeds,
+    };
+    println!(
+        "evolving levels: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, sigma {}",
+        cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.sigma
+    );
+
+    let result = level_search::search(&base, &manifest, &cfg, |generation, r| {
+        let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
+        println!(
+            "  gen {generation:>3}: levels {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
+            r.pop.archive.coverage(),
+            r.pop.archive.qd_score(),
+            best,
+            r.evaluations,
+            r.rejected_infeasible,
+            r.rejected_by_criterion
+        );
+    })?;
+
+    write_ron(LEVELS_ARCHIVE_PATH, &level_search::level_archive_doc(&result.pop, &base)?)?;
+    println!();
+    println!("wrote {LEVELS_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }

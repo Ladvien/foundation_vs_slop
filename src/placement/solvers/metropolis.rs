@@ -14,7 +14,7 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use rand_chacha::ChaCha8Rng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dungeon::WALL_THICKNESS;
 use crate::placement::ir::{
@@ -29,7 +29,7 @@ use crate::rng::DetRng;
 const WALL_INSET: f32 = WALL_THICKNESS;
 
 /// Tunable cost weights + MH schedule, loaded from RON (Merrell 2011 density terms).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetropolisWeights {
     pub iterations: u32,
     pub temp_start: f64,

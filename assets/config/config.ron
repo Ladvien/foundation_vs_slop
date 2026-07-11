@@ -191,6 +191,19 @@
             coherence: 0.3,         // [0,1] how coherently related furniture is arranged (scales Facing):
                                     // 0 = backrooms-random, 1 = sofa firmly faces the TV
         ),
+
+        // Furniture density — how much furniture a room gets and how it is spaced. Promoted from code
+        // constants (src/placement/furnish.rs) so the offline level search can evolve furniture amount
+        // and a chosen elite is a readable RON diff. Shipped values are the former hardcoded defaults.
+        density: (
+            tiled_per_room: 2,          // WFC scatter props per room (so floors don't fill with clutter)
+            freestanding_per_room: 2,   // freestanding furniture per room (sparse: a 4-5 tile room reads
+                                        // furnished without crowding)
+            scatter_per_room: 3,        // props rested on support surfaces per room (so a desk isn't buried)
+            wall_lights_per_room: 1,    // sconces per room
+            freestanding_min_gap: 1.5,  // min centre-to-centre spacing (m) between freestanding pieces
+            group_near_max: 1.2,        // max distance (m) a Near band pulls same-group pieces (toilet+sink)
+        ),
     ),
 
     // =============================================================================================
