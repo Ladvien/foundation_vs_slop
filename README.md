@@ -1,5 +1,9 @@
 ## ISSUES
-_(none open — remaining work is in TODO; landed work is in DONE)_
+- Smiley shader/mesh is still clipping through the walls
+- Wall corner pieces don't line up correctly
+- Squad members can get stuck in doorways when there are one or more in a doorway
+- Lamps are floating near the ceiling instead of on a desk
+- Trashcans are being placed inside couches
 
 
 ### TODO

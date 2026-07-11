@@ -341,7 +341,9 @@ impl Plugin for CrabPlugin {
                     // Move after the brain has chosen this tick's mode (see `crate::ai`).
                     crab_locomotion
                         .after(rebuild_crab_field)
-                        .after(crate::ai::AiSet::Think),
+                        .after(crate::ai::AiSet::Think)
+                        // Read the light field the tick it was baked (mirrors the `fog::LosWritten` gate).
+                        .after(crate::light::LightFieldWritten),
                     // Pounce owns the transform of mid-jump crabs; runs after locomotion set the rest.
                     crab_jump.after(crab_locomotion),
                     // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
@@ -643,6 +645,11 @@ fn spawn_crab_on_patch(
     // Caste hysteresis timer + the immortal spawn seed, so `re_role_crabs` can flip this crab's role
     // deterministically as the swarm's needs shift (see that system's determinism note).
     ec.insert((Caste { cooldown: 0.0 }, CrabSeed(rand_seed)));
+    // Crabs are photophobic — they steer down the `LightField` gradient toward shadow (see
+    // `crab_locomotion` and `light::Photophobic`), so lit rooms become refuges and the swarm pools in the
+    // dark. Added at spawn (stable archetype; `re_role_crabs` never touches it), so light response is a
+    // fixed trait of the creature and can't churn the hashed sim actor's archetype at runtime.
+    ec.insert(crate::light::Photophobic);
     if is_scout {
         ec.insert(Scout::new(rand_seed));
     }
@@ -698,6 +705,10 @@ fn crab_locomotion(
     dungeon: Res<Dungeon>,
     stig: Res<crate::ai::field::Stig>,
     rally: Res<crate::ai::field::RallyField>,
+    // The gameplay light field (baked in `light::LightFieldWritten`, ordered before this system) and the
+    // config gains — for the photophobic/-philic light nudge below.
+    light_field: Res<crate::light::LightField>,
+    config: Res<crate::config::GameConfig>,
     units: Query<(Entity, &Transform), (With<Prey>, Without<Crab>)>,
     // Gib transforms, for a `SeekMeat`/`Carry` crab to steer to the specific chunk it's committed to.
     gibs: Query<&Transform, (With<crate::gore::GibChunk>, Without<Crab>, Without<Unit>)>,
@@ -711,6 +722,9 @@ fn crab_locomotion(
             Option<&CrabCarry>,
             Option<&CrabJump>,
             Option<&mut Scout>,
+            // Light response (`light::Photophobic`/`Photophilic`) — added at spawn; drives the light nudge.
+            Option<&crate::light::Photophobic>,
+            Option<&crate::light::Photophilic>,
         ),
         With<Crab>,
     >,
@@ -740,14 +754,24 @@ fn crab_locomotion(
     for v in hash.values_mut() {
         v.clear();
     }
-    for (motion, _, _, _, _, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
     }
 
-    for (mut motion, mut state, mut attached, mut transform, active, carry, jump, mut scout) in
-        &mut crabs
+    for (
+        mut motion,
+        mut state,
+        mut attached,
+        mut transform,
+        active,
+        carry,
+        jump,
+        mut scout,
+        photophobic,
+        photophilic,
+    ) in &mut crabs
     {
         // Mid-pounce crabs are owned by `crab_jump` (it drives their arc + transform) — skip them here.
         if jump.is_some_and(|j| j.phase != JumpPhase::Ready) {
@@ -944,6 +968,29 @@ fn crab_locomotion(
                 }
             }
         };
+
+        // Light response: a photophobic (or photophilic) crab drifts down (or up) the LightField gradient
+        // on top of whatever its mode is doing — light as a constant environmental force (Physarum
+        // minimum-risk routing over an illumination field, Nakagaki et al. 2007). Skipped while latching:
+        // a piranha crab rides a unit's body, off the floor light field. Deterministic (field + gradient +
+        // config gain) on the pinned FixedUpdate path, so it folds into the replay hash like any crab
+        // motion. `clamp_to_patch` keeps the nudge on the current surface patch (gate crossings stay with
+        // the mode's flow-field).
+        if !latching {
+            let signed_gain = if photophobic.is_some() {
+                -config.lighting.photophobic_gain
+            } else if photophilic.is_some() {
+                config.lighting.photophilic_gain
+            } else {
+                0.0
+            };
+            let push = crate::light::light_push(&light_field, &dungeon, motion.pos, signed_gain);
+            if push.length_squared() > 1.0e-9 {
+                let p = graph.patch(motion.patch);
+                motion.pos += project_tangent(push, p.normal) * dt;
+                motion.pos = clamp_to_patch(motion.pos, p);
+            }
+        }
 
         // Seat & orient flat to the current surface (floor, wall, or a unit's body).
         transform.translation = motion.pos + motion.normal * CRAB_BODY_CENTER;

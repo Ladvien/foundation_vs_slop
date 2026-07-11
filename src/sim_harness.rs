@@ -221,7 +221,10 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // too — they run harmlessly headless and keep the plugin graph identical, which matters because some
     // sim systems are ordered relative to them.
     app.add_plugins((
-        (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin),
+        // `LightFieldPlugin` grouped with dungeon+placement (it needs both) and kept harness-visible so
+        // the exact-hash gate covers its bake once Phase-2 creature light-response reads it. The windowed
+        // `LightingPlugin` (real lights/FX) is deliberately NOT here.
+        (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin, crate::light::LightFieldPlugin),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
         // Squad movement AND squad AI — registered together, exactly as production `lib::run` does, so
@@ -346,6 +349,12 @@ pub fn field_hash(app: &mut App) -> u64 {
     }
     if let Some(rally) = world.get_resource::<crate::ai::field::RallyField>() {
         rally.fold_fingerprint(&mut hash);
+    }
+    // The gameplay light field feeds crab locomotion (photophobia), so a broken bake/occlusion that shifts
+    // a crab would move the replay hash — but a bake bug that *doesn't* happen to relocate a crab would be
+    // invisible to `snapshot_hash`. Fold the field itself too, exactly as Stig/Rally above.
+    if let Some(light) = world.get_resource::<crate::light::LightField>() {
+        light.fold_fingerprint(&mut hash);
     }
     hash
 }

@@ -107,6 +107,7 @@ pub struct GameConfig {
     pub sim: SimTuning,
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
+    pub lighting: crate::light::LightingConfig,
     pub dialogue: DialogueScript,
 }
 
@@ -141,6 +142,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     mycelia::validate_damp_coverage(&cfg.mycelia, &cfg.dungeon.room_types)?;
     crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
     sim::validate_tuning(&cfg.sim)?;
+    crate::light::validate_config(&cfg.lighting)?;
     model::validate_script(&cfg.dialogue)?;
     Ok(cfg)
 }

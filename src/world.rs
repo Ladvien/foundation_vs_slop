@@ -5,26 +5,33 @@
 
 use bevy::prelude::*;
 
+use crate::config::GameConfig;
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
+        // Pull the environment-fill values from the one `lighting:` config slice (shared with
+        // `light::LightingPlugin`, which owns the fixtures) so there is a single source of truth for
+        // every light knob — one path, no hardcoded second copy. `ConfigPlugin` runs first, so
+        // `GameConfig` exists here at build time (same seam every consumer plugin uses).
+        let cfg = app.world().resource::<GameConfig>().lighting.clone();
         app.insert_resource(GlobalAmbientLight {
-            // Warm fluorescent fill — bright and even, the Backrooms' flat glow.
-            color: Color::srgb(1.0, 0.98, 0.9),
-            brightness: 500.0,
+            // Warm fluorescent fill — the Backrooms' flat glow, dimmed enough that fixtures read.
+            color: Color::srgb(cfg.ambient_color[0], cfg.ambient_color[1], cfg.ambient_color[2]),
+            brightness: cfg.ambient_brightness,
             ..default()
         })
         .add_systems(Startup, setup_lighting);
     }
 }
 
-fn setup_lighting(mut commands: Commands) {
+fn setup_lighting(mut commands: Commands, config: Res<GameConfig>) {
     // A weak, steep key light so the low-poly tiles have some directional shading
     // without washing out the torch-lit fog gradient.
     commands.spawn((
         DirectionalLight {
-            illuminance: 2_500.0,
+            illuminance: config.lighting.key_illuminance,
             shadow_maps_enabled: false,
             ..default()
         },

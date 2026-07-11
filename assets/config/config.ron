@@ -726,4 +726,27 @@
             ),
         },
     ),
+
+    // =============================================================================================
+    // lighting — diegetic fluorescent fixtures + environment fill (see `light::LightingConfig`).
+    // Fixtures are placed as furniture (`category: "light"`, `affordances: ["emit"]`); each becomes one
+    // real clustered PointLight in the windowed game. ambient/directional are the flat Backrooms fill,
+    // read by `world::WorldPlugin` (also present in the headless harness — pure light data).
+    // =============================================================================================
+    lighting: (
+        ambient_brightness: 200.0,             // was a flat 500; dimmed so fixtures read as lit pools
+        ambient_color: (1.0, 0.98, 0.9),       // warm fluorescent white
+        key_illuminance: 2000.0,               // weak steep directional fill (lux)
+        fixture_intensity: 120000.0,           // per-fixture lumens (Bevy's default cinema light = 1e6)
+        fixture_range: 7.0,                    // metres — area-of-effect cutoff, tuned with intensity
+        fixture_color: (0.92, 1.0, 0.94),      // cool white, faint green cast (low-CRI halophosphate)
+        fixture_emissive: 2.2,                 // mesh-glow strength (LDR); the visible "light is on" cue
+        field_intensity: 1.0,                  // gameplay illuminance per fixture in the LightField (0..1-ish)
+        photophobic_gain: 14.0,                // crabs steer down the light gradient (toward dark) at this strength
+        photophilic_gain: 14.0,                // light-seekers steer up the gradient (toolkit; no carrier yet)
+        mushroom_light_size_bonus: 0.5,        // death caps grow up to +50% bigger under a lamp (photomorphogenesis)
+        mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)
+        flicker_hum_depth: 0.06,               // cosmetic fluorescent shimmer depth (fraction)
+        flicker_fail_ratio: 0.12,              // ~1 in 8 tubes is a failing/strobing Backrooms fluorescent
+    ),
 )

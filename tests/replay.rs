@@ -55,11 +55,12 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // a gameplay value. This is the absolute-value lock the same-seed reproducibility tests above cannot
     // provide.
     //
-    // Proven byte-identical across the migration: pre-migration HEAD and the post-migration tree BOTH hash to
-    // exactly this at 1800 ticks (measured by stashing the migration and re-running). It supersedes the older
-    // `0x716d0cfbb69b778e` quoted in TESTING.md, which predates this branch's gameplay changes
-    // (faction-relative fear, psionic field-sight) and is stale.
-    const GOLDEN: u64 = 0xec1add310772895c;
+    // Re-pinned for the diegetic-lighting feature: crabs are now photophobic — they steer down the
+    // `light::LightField` gradient in `crab_locomotion` — so the deterministic core moved from the
+    // migration-era `0xec1add310772895c` to the value below. Legitimate: the same-seed reproducibility
+    // tests above (`deterministic_core_is_bit_identical`, `..._across_many_builds`) still pass, so the
+    // sim is still bit-reproducible — just different, because a real gameplay behaviour changed.
+    const GOLDEN: u64 = 0x3ecce611f2403172;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -81,7 +82,10 @@ fn field_passes_are_bit_identical() {
     // Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
     // neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
     // deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
-    const GOLDEN_FIELD: u64 = 0x9e33_16af_f944_c5f8;
+    // Re-pinned for the diegetic-lighting feature: `field_hash` now also folds the `light::LightField`
+    // grid (see `sim_harness::field_hash`), so this moved from `0x9e33_16af_f944_c5f8`. Same deterministic
+    // core + tick count as the actor golden, so the two stay directly comparable.
+    const GOLDEN_FIELD: u64 = 0xed13_5893_7b44_99c0;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -109,7 +113,7 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        0xec1add310772895c,
+        0x3ecce611f2403172,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
@@ -337,4 +341,50 @@ fn full_sim_stays_live() {
         let v = liveness_violations(&mut app);
         assert!(v.is_empty(), "liveness violated at tick {}: {v:?}", checkpoint * 30);
     }
+}
+
+#[test]
+fn photophobia_pulls_crabs_into_shadow() {
+    // Ecosystem liveness (Phase 2): crabs carry `light::Photophobic` and steer down the `LightField`
+    // gradient, so they should settle into darker cells than they otherwise would. A/B isolation — the
+    // SAME seed and tick count, differing ONLY in `lighting.photophobic_gain` (shipped vs 0) — so any gap
+    // in mean illuminance-at-crabs is caused by the photophobia and nothing else. Behavioural oracle over
+    // the light field, not an exact hash (Physarum-style photoavoidance, Nakagaki et al., PRL 2007).
+    use bevy::prelude::{Transform, Vec3, With};
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::crab::Crab;
+    use foundation_vs_slop::dungeon::Dungeon;
+    use foundation_vs_slop::light::LightField;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+
+    fn mean_crab_light(cfg: &SimConfig, gain_override: Option<f32>, ticks: u32) -> f32 {
+        let mut app = build_headless_app_unfinished(cfg);
+        // `photophobic_gain` is read live by `crab_locomotion` (not at plugin build), so overriding it
+        // here before stepping cleanly selects the A/B arm — the "mutate GameConfig at the seam" trick the
+        // harness already uses for `dungeon_seed`.
+        if let Some(g) = gain_override {
+            app.world_mut().resource_mut::<GameConfig>().lighting.photophobic_gain = g;
+        }
+        app.finish();
+        app.cleanup();
+        step(&mut app, cfg, ticks);
+        let mut q = app.world_mut().query_filtered::<&Transform, With<Crab>>();
+        let positions: Vec<Vec3> = q.iter(app.world()).map(|t| t.translation).collect();
+        assert!(!positions.is_empty(), "the sim must have crabs to measure");
+        let dungeon = app.world().resource::<Dungeon>();
+        let field = app.world().resource::<LightField>();
+        positions.iter().map(|p| field.sample(dungeon, *p)).sum::<f32>() / positions.len() as f32
+    }
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    const TICKS: u32 = 360; // ~6 s — long enough for the light bias to accumulate against mode motion
+
+    let mean_off = mean_crab_light(&cfg, Some(0.0), TICKS);
+    let mean_on = mean_crab_light(&cfg, None, TICKS); // shipped photophobic_gain
+
+    assert!(
+        mean_on < mean_off,
+        "photophobic crabs (gain>0) should occupy darker cells than gain=0 crabs: on={mean_on} off={mean_off}"
+    );
 }

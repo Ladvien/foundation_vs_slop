@@ -36,6 +36,7 @@ pub mod health;
 pub mod juice;
 pub mod impact_fx;
 pub mod laser;
+pub mod light;
 pub mod mycelia;
 pub mod nest;
 pub mod orca;
@@ -119,7 +120,11 @@ pub fn run() {
         // which FogPlugin reads at build time to size the fog grid.
         .add_plugins((
             config::ConfigPlugin,
-            (dungeon::DungeonPlugin, placement::PlacementPlugin),
+            // `LightFieldPlugin` (the CPU illuminance grid creatures read) is grouped with dungeon+placement
+            // it depends on, and kept harness-visible — unlike the windowed `LightingPlugin` below — so the
+            // determinism gate covers its bake. Nested here (not a 16th top-level element) to stay under
+            // Bevy's 15-plugin tuple cap.
+            (dungeon::DungeonPlugin, placement::PlacementPlugin, light::LightFieldPlugin),
             world::WorldPlugin,
             camera::CameraPlugin,
             (squad::SquadPlugin, squad_ai::SquadAiPlugin),
@@ -146,7 +151,11 @@ pub fn run() {
             // deterministic core. Its `grazing` systems DO steer crabs (hunger + the MEAT field) and run on
             // `FixedUpdate`; the harness never registers this plugin, so they cannot perturb `snapshot_hash`.
             // See the `mycelia` module docs before moving any of it.
-            (vhs::VhsPlugin, blood_lens::BloodLensPlugin, mycelia::MyceliaPlugin),
+            // `LightingPlugin` (real fixture lights + GTAO/contact shadows) sits here because it is
+            // cosmetic/GPU and windowed-only — deliberately NOT in `sim_harness`, so the deterministic
+            // core never depends on a GPU (the harness keeps the plain `world` ambient+directional). The
+            // gameplay `LightField` it will own is registered separately so the harness CAN see it.
+            (vhs::VhsPlugin, blood_lens::BloodLensPlugin, mycelia::MyceliaPlugin, light::LightingPlugin),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
             // deterministic core (see `ui` docs). Dialogue needs `MenuState` (from `UiPlugin`) for the

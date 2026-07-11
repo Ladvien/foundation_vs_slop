@@ -725,6 +725,10 @@ fn pin_fruit_bodies(
                     .with_rotation(Quat::from_rotation_y(yaw))
                     .with_scale(Vec3::splat(scale)),
                 Visibility::default(),
+                // Phototropic: the cap enlarges under lamp light (photomorphogenesis) — see
+                // `grow_fruit_bodies`. The vegetative mat stays dark-loving; only the fruiting body is
+                // light-grown, which is exactly the real biology (Zhang et al. 2015).
+                crate::light::Phototropic,
                 WorldAssetRoot(scene.0.clone()),
             ));
             live += 1;
@@ -770,13 +774,18 @@ fn grow_fruit_bodies(
     fog: Res<FogGrid>,
     view: Res<crate::camera::CameraView>,
     time: Res<Time<Virtual>>,
-    mut bodies: Query<(Entity, &mut FruitBody, &mut Transform)>,
+    // Lamp illumination (the gameplay light field) + the config knobs for photomorphogenesis. Distinct
+    // from `fog` (gaze) above: the mat flees gaze, but the fruiting body grows toward *lamp* light.
+    light_field: Res<crate::light::LightField>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+    game_config: Res<crate::config::GameConfig>,
+    mut bodies: Query<(Entity, &mut FruitBody, &mut Transform, Option<&crate::light::Phototropic>)>,
 ) {
     let dt = time.delta_secs();
     // The whole perceptual budget, in world units per second, at the zoom the player is actually at.
     let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
 
-    for (entity, mut body, mut transform) in &mut bodies {
+    for (entity, mut body, mut transform, phototropic) in &mut bodies {
         // Light-induced transition: once seen, the veil may rupture — and stays permitted thereafter.
         if fog.visible_at(body.cell) {
             body.veil_triggered = true;
@@ -824,6 +833,31 @@ fn grow_fruit_bodies(
         // out, where motion may run 7x faster, it does.
         let tint_step = dt / MIN_APPEARANCE_RAMP_SECS;
         body.tint += (body.growth - body.tint).clamp(-tint_step, tint_step);
+
+        // Photomorphogenesis: a phototropic fruit body grows a bigger cap under LAMP light — fungal
+        // fruiting-body development is light-gated (Zhang et al., PLoS ONE 2015). Sampled from the lamp
+        // `LightField` (NOT the fog/gaze the mat flees), normalised to the field peak, and eased into the
+        // rendered scale toward `base·(1 + bonus·light)`. The base `body.scale` is left untouched (it still
+        // drives the morph speed limit + `energy()`), so this is a pure additional slow enlargement, kept
+        // below motion perception like everything else the mold animates. In a lit room the caps swell;
+        // crabs (photophobic) won't cross the light to graze them — big mushrooms grow safe in the light.
+        if phototropic.is_some() {
+            let lc = &game_config.lighting;
+            let peak = light_field.peak();
+            let light01 = if peak > 0.0 {
+                (light_field.sample(&dungeon, transform.translation) / peak).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let next = crate::light::phototropic_scale(
+                body.scale,
+                transform.scale.x,
+                light01,
+                lc.mushroom_light_size_bonus,
+                lc.mushroom_light_size_rate * dt,
+            );
+            transform.scale = Vec3::splat(next);
+        }
 
         transform.translation.y = -sink * (1.0 - body.rise);
     }

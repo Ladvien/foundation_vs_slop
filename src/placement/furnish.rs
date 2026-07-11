@@ -69,6 +69,11 @@ struct SpawnReq {
     /// `CutawayMounted` so it hides when Q/E rotation makes that wall a near knee wall — otherwise the
     /// sconce would float in the cutaway gap. `None` for floor/ceiling props (unaffected by the cutaway).
     cutaway_outward: Option<Vec3>,
+    /// True when the piece `affords("emit")` — a light source (ceiling tube, sconce, lamp, screen). The
+    /// serial spawn tags it `light::LightEmitter` so the lighting system lights it and the `LightField`
+    /// bake reads its position. Kit-agnostic (affordance, not asset key) — an asset kit lights its rooms
+    /// with zero code change.
+    emits: bool,
 }
 
 /// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
@@ -299,6 +304,12 @@ pub fn furnish_regions(
                 base_scale: Vec3::splat(FURNITURE_SCALE),
             });
         }
+        // A light-emitting piece: tag it so `light::LightingPlugin` gives it a real light and the
+        // `LightField` bake reads its position. Added at spawn (archetype fixed here), so it never
+        // churns iteration order later — furniture is not a sim actor, so this is harness-safe.
+        if req.emits {
+            entity.insert(crate::light::LightEmitter);
+        }
     }
 }
 
@@ -336,6 +347,7 @@ fn furnish_region(
                 pos,
                 rot: Quat::from_rotation_x(PI),
                 cutaway_outward: None,
+                emits: affords(item, "emit"),
             });
         }
     }
@@ -364,6 +376,7 @@ fn furnish_region(
                 // hides when Q/E rotation squashes that wall to knee height — otherwise it would
                 // float in the cutaway gap.
                 cutaway_outward: Some(-normal),
+                emits: affords(light, "emit"),
             });
         }
     }
@@ -397,6 +410,7 @@ fn furnish_region(
                     pos,
                     rot: Quat::from_rotation_y(p.yaw),
                     cutaway_outward: None,
+                    emits: affords(item, "emit"),
                 });
             }
         }
@@ -445,6 +459,7 @@ fn furnish_region(
                     pos,
                     rot: Quat::from_rotation_y(p.yaw),
                     cutaway_outward: None,
+                    emits: affords(item, "emit"),
                 });
                 if affords(item, "support") {
                     placed_supports.push((*item, pos, p.yaw));
@@ -487,6 +502,7 @@ fn furnish_region(
                         pos,
                         rot: Quat::from_rotation_y(pl.yaw),
                         cutaway_outward: None,
+                        emits: affords(item, "emit"),
                     });
                 }
             }
