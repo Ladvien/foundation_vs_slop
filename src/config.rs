@@ -19,6 +19,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ai::tuning::AiTuning;
+use crate::audio_tuning::{self, AudioTuning};
 use crate::dialogue::model::{self, DialogueScript};
 use crate::dungeon::{self, DungeonConfig};
 use crate::gore::{self, GoreSettings};
@@ -108,6 +109,7 @@ pub struct GameConfig {
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
     pub dialogue: DialogueScript,
+    pub audio: AudioTuning,
 }
 
 /// The evolvable **world-dynamics** surface, as one value: the field-propagation tuning (`ai_tuning`)
@@ -142,6 +144,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
     sim::validate_tuning(&cfg.sim)?;
     model::validate_script(&cfg.dialogue)?;
+    audio_tuning::validate_tuning(&cfg.audio)?;
     Ok(cfg)
 }
 

@@ -39,6 +39,11 @@ pub enum Mode {
     /// Muster: a nearby crab was just wounded — converge on the squad and press (a retaliatory surge,
     /// driven by the local ALARM pheromone). The twin of Rally, but recruited by kin damage, not a scout.
     Muster,
+    /// Investigate: drawn toward the squad's audible din (`NOISE_SQUAD`) — the swarm converging on the
+    /// *sound* of a firefight. Gated + scaled by the `audio:` slice (`crab_draw_to_din`,
+    /// `investigate_threshold`), so it is dormant unless the audio search turns it on. Rally-tier: beats
+    /// foraging but yields to the bite (Latch) once a crab reaches a unit, and to Flee/Muster above it.
+    Investigate,
 
     // --- Squad role actions (units only). Each is one entry in the shared action vocabulary, so it
     // doubles as the discrete high-level action of an RL policy (Wu et al., "Hierarchical Macro Strategy
@@ -74,7 +79,7 @@ impl Mode {
     /// (`squad_ai::surprise` indexes mode distributions by `Mode::index`). Pinned by
     /// `mode_all_is_dense_and_in_discriminant_order`, so adding a variant without listing it here is a
     /// loud test failure rather than a silently truncated distribution.
-    pub const ALL: [Mode; 24] = [
+    pub const ALL: [Mode; 25] = [
         Mode::Forage,
         Mode::Latch,
         Mode::Flee,
@@ -87,6 +92,7 @@ impl Mode {
         Mode::Mark,
         Mode::Rally,
         Mode::Muster,
+        Mode::Investigate,
         Mode::Examine,
         Mode::Overwatch,
         Mode::Engage,
@@ -137,6 +143,11 @@ pub enum Fact {
     /// this so it pursues whenever it is visible AT ANY RANGE, not only inside the distance leash — a slow
     /// boss shot from across the room must still advance, not drift into Wander.
     SeenBySquad,
+    /// The squad's audible-din draw (peak `NOISE_SQUAD`, gated by `investigate_threshold` and scaled by
+    /// `crab_draw_to_din`, both from the `audio:` slice, applied in `think`). Latches the crab
+    /// `Investigate` behaviour — 0.0 (dormant) unless the audio search raised `crab_draw_to_din`, so this
+    /// is the config seam that turns "the swarm converges on the sound of the guns" on and sets its pull.
+    NoiseDraw,
 
     // --- Squad-unit facts (built by `squad_ai::perception`). Neutral (0 / far) for crabs & the boss. ---
     /// Planar distance from this unit to the squad anchor (large when no anchor). Drives Regroup.
@@ -213,6 +224,8 @@ pub enum TargetKind {
     ScentHotspot,
     /// The peak of the MEAT field (coarse aim; the exact gib is a per-crab entity link).
     MeatHotspot,
+    /// The peak of the `NOISE_SQUAD` field — where the squad's din is loudest (the Investigate aim).
+    NoiseHotspot,
     /// The crab's home nest (Carry destination; resolved from the carried gib, not from `decide`).
     Nest,
     /// A marking scout's live prey sighting — it approaches this to keep the rally pheromone fresh
@@ -279,6 +292,11 @@ pub struct Perception {
     /// 1.0 while this agent's cell is in the squad's live LOS (see [`Fact::SeenBySquad`]); the boss's
     /// "pursue whenever seen, at any range" aggro term.
     pub seen_by_squad: f32,
+    /// The squad's audible-din draw at this crab (see [`Fact::NoiseDraw`]): the peak `NOISE_SQUAD` value,
+    /// already gated by `audio.perception.investigate_threshold` and scaled by `crab_draw_to_din` in
+    /// `think`. 0.0 unless the audio search turned the investigate behaviour on — so it is the single
+    /// config-tuned knob that decides whether the swarm converges on the sound of a firefight.
+    pub noise_draw: f32,
 
     /// Squad-unit perception (built by `squad_ai::perception`). Crab/boss `think` splats one neutral
     /// value: `squad: SquadFields::neutral()`.
@@ -351,6 +369,7 @@ impl Perception {
             Input::Perc(Fact::RallyHere) => self.rally_val,
             Input::Perc(Fact::AlarmHere) => self.alarm_val,
             Input::Perc(Fact::SeenBySquad) => self.seen_by_squad,
+            Input::Perc(Fact::NoiseDraw) => self.noise_draw,
             Input::Perc(Fact::AnchorDist) => self.squad.anchor_dist,
             Input::Perc(Fact::NearestExaminableDist) => self.squad.examinable_dist,
             Input::Perc(Fact::HasUnexaminedNearby) => self.squad.has_unexamined,
@@ -484,6 +503,7 @@ mod tests {
             rally_val: 0.0,
             alarm_val: 0.0,
             seen_by_squad: 0.0,
+            noise_draw: 0.0,
             squad: SquadFields::neutral(),
         }
     }

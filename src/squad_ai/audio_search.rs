@@ -1,0 +1,163 @@
+//! The **audio search**: a single-population MAP-Elites (Quality-Diversity) loop that evolves the
+//! [`AudioGenome`] under the witnessed-learnable-surprise objective (`super::audio_eval`).
+//!
+//! Structurally it is the level search's plain propose → evaluate → archive loop (Mouret & Clune 2015,
+//! MAP-Elites), reusing [`super::coevolve::Population`] + [`ArchiveDoc`] — but its fitness is a *behavioural*
+//! full-simulation rollout, not a static metric, so it takes the frozen baseline `prior` (like the world
+//! population) rather than being self-contained. It is NOT co-evolutionary: the brains and world are the
+//! authored baseline, and only the `audio:` slice moves, so there is no opponent sampling and no
+//! non-stationarity — one config knob set, illuminated across the swarm-behaviour descriptor.
+//!
+//! Feasible-by-construction mutation means most children generate; the loud reject paths
+//! (`rejected_infeasible` / `rejected_by_criterion`) count what the bounds and the minimal criterion turn
+//! away, so a run that fills nothing is visible rather than silent.
+
+use serde::Serialize;
+
+use crate::audio_tuning::AudioTuning;
+use crate::rng::seeded;
+
+use super::audio_eval;
+use super::audio_genome::{self, authored, mutate, AudioGenome};
+use super::coevolve::{ArchiveDoc, Population};
+use super::qd::BehaviorDescriptor;
+use super::surprise::ModePrior;
+
+/// Knobs for an audio search. `dungeon_seeds` are the worlds each genome is scored across (the learnability
+/// pair uses the first two, which must differ); `resolution` is the MAP-Elites grid side over the
+/// swarm-behaviour axes (aggression × persistence).
+#[derive(Clone, Debug)]
+pub struct AudioSearchConfig {
+    pub seed: u64,
+    pub generations: u32,
+    pub batch: u32,
+    pub sigma: f32,
+    pub resolution: usize,
+    pub dungeon_seeds: Vec<u64>,
+    pub episode_ticks: u32,
+}
+
+impl Default for AudioSearchConfig {
+    fn default() -> Self {
+        AudioSearchConfig {
+            seed: 0xA0D10_5EED,
+            generations: 40,
+            batch: 32,
+            sigma: 0.3,
+            resolution: 8,
+            dungeon_seeds: vec![0x5C09191, 0xA11CE, 0xBEEF],
+            episode_ticks: 1800,
+        }
+    }
+}
+
+/// The outcome of an audio search: the illuminated archive plus reject tallies.
+pub struct AudioSearchResult {
+    pub pop: Population<AudioGenome>,
+    pub evaluations: u32,
+    pub rejected_infeasible: u32,
+    pub rejected_by_criterion: u32,
+}
+
+/// Run the audio search. `report(generation, &result)` is called after each generation; `search` itself
+/// writes nothing to disk (the `train.rs` driver does). One path: an infeasible or criterion-failing child
+/// is counted and dropped, never scored with a degraded fallback.
+pub fn search(
+    prior: &ModePrior,
+    cfg: &AudioSearchConfig,
+    mut report: impl FnMut(u32, &AudioSearchResult),
+) -> Result<AudioSearchResult, String> {
+    if cfg.dungeon_seeds.len() < 2 {
+        return Err(
+            "audio search needs >= 2 dungeon seeds: the learnability pair must run on DIFFERENT worlds, \
+             or fitness measures a memorised map rather than a behaviour"
+                .into(),
+        );
+    }
+    let mut rng = seeded(cfg.seed);
+    let authored_g = authored();
+    // The shipped audio config must itself be feasible — a loud failure here means the base is broken.
+    audio_genome::is_feasible(&authored_g)
+        .map_err(|e| format!("the shipped audio config is infeasible: {e}"))?;
+
+    let mut result = AudioSearchResult {
+        pop: Population::new(cfg.resolution),
+        evaluations: 0,
+        rejected_infeasible: 0,
+        rejected_by_criterion: 0,
+    };
+
+    // Seed the archive with the authored audio config so `sample_parent` has somewhere to start.
+    match audio_eval::evaluate(&authored_g, prior, &cfg.dungeon_seeds, cfg.episode_ticks) {
+        Some(ev) => {
+            let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
+            result.pop.insert(d, ev.fitness, authored_g.clone());
+            result.evaluations += 1;
+        }
+        None => {
+            return Err("the shipped audio config failed the minimal criterion on the held-in seeds".into())
+        }
+    }
+
+    for generation in 0..cfg.generations {
+        for _ in 0..cfg.batch {
+            let parent = result
+                .pop
+                .sample_parent(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| authored_g.clone());
+            let child = mutate(&parent, cfg.sigma, &mut rng)?;
+            // Cheap feasibility gate before the (expensive) full-sim evaluation.
+            if audio_genome::is_feasible(&child).is_err() {
+                result.rejected_infeasible += 1;
+                continue;
+            }
+            match audio_eval::evaluate(&child, prior, &cfg.dungeon_seeds, cfg.episode_ticks) {
+                Some(ev) => {
+                    let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
+                    result.pop.insert(d, ev.fitness, child);
+                    result.evaluations += 1;
+                }
+                None => result.rejected_by_criterion += 1,
+            }
+        }
+        report(generation, &result);
+    }
+    Ok(result)
+}
+
+/// One archived audio config, decoded to the exact `audio:` RON a designer authors by hand — so an elite
+/// is a readable diff of audio dials, the reward-hacking guard (Skalse et al., arXiv:2209.13085). Copy the
+/// slice into `config.ron` to ship it.
+#[derive(Serialize)]
+pub struct AudioEliteDoc {
+    pub cell: (usize, usize),
+    /// Descriptor axis 1 — swarm aggression.
+    pub aggression: f32,
+    /// Descriptor axis 2 — swarm persistence.
+    pub persistence: f32,
+    pub fitness: f32,
+    pub audio: AudioTuning,
+}
+
+/// Build the serializable archive document — every elite decoded back to a readable `AudioTuning` slice.
+pub fn audio_archive_doc(pop: &Population<AudioGenome>) -> Result<ArchiveDoc<AudioEliteDoc>, String> {
+    let mut elites = Vec::new();
+    for (cell, elite) in pop.archive.iter() {
+        let g = pop.get(elite.genome).ok_or("dangling elite handle")?;
+        let audio = audio_genome::decode(g)?;
+        elites.push(AudioEliteDoc {
+            cell: *cell,
+            aggression: elite.descriptor.aggression,
+            persistence: elite.descriptor.exploration,
+            fitness: elite.fitness,
+            audio,
+        });
+    }
+    Ok(ArchiveDoc {
+        resolution: pop.archive.resolution(),
+        coverage: pop.archive.coverage(),
+        qd_score: pop.archive.qd_score(),
+        elites,
+    })
+}

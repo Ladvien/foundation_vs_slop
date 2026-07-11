@@ -30,6 +30,7 @@ use faction::{Faction, FACTION_COUNT};
 use field::{FieldId, RallyDeposits, RallyField, Stig, StigDeposits};
 use tuning::AiTuning;
 
+use crate::audio_tuning::AudioTuning;
 use crate::sim::SimTuning;
 
 /// Ordering of the AI pipeline within `Update`, so downstream creature decision systems (in other
@@ -61,8 +62,13 @@ impl Plugin for AiPlugin {
         // inserted as a global resource so every FixedUpdate consumer (crab/laser/enemy/nest) and the
         // `init_drives` Startup system reads `Res<SimTuning>` — the same one-path config seam as `AiTuning`.
         let sim = app.world().resource::<crate::config::GameConfig>().sim;
+        // The `audio:` slice — the acoustic-stimulus propagation/salience/perception knobs. Read once
+        // here (same one-path config seam as `AiTuning`/`SimTuning`) and inserted so `init_fields` can
+        // compose the acoustic channel defs and `init_drives` can read the per-faction din-fear gains.
+        let audio = app.world().resource::<crate::config::GameConfig>().audio;
         app.insert_resource(tuning)
             .insert_resource(sim)
+            .insert_resource(audio)
             .init_resource::<StigDeposits>()
             .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()
@@ -125,8 +131,20 @@ impl Plugin for AiPlugin {
 
 /// Allocate the stigmergy grids sized to the dungeon, with per-channel behaviour from tuning, plus the
 /// vectorial rally pheromone map (Tang et al. 2019) with its own decay/accumulate tuning.
-fn init_fields(mut commands: Commands, dungeon: Res<Dungeon>, tuning: Res<AiTuning>) {
-    commands.insert_resource(Stig::new(&dungeon, tuning.fields.channel_defs()));
+fn init_fields(
+    mut commands: Commands,
+    dungeon: Res<Dungeon>,
+    tuning: Res<AiTuning>,
+    audio: Res<AudioTuning>,
+) {
+    // Channels 0..6 come from `ai_tuning.fields`; the acoustic channels (`NOISE_SQUAD`/`NOISE_SWARM`)
+    // come from the `audio:` slice, composed here so the audio search evolves their propagation
+    // independently of `AiTuning`. `channel_defs()` already sized the array to `CHANNEL_COUNT` with the
+    // acoustic slots defaulted; overwrite them with the tuned defs (asserted non-default in tests).
+    let mut defs = tuning.fields.channel_defs();
+    defs[FieldId::NOISE_SQUAD.0] = audio.stimulus.noise_squad.into();
+    defs[FieldId::NOISE_SWARM.0] = audio.stimulus.noise_swarm.into();
+    commands.insert_resource(Stig::new(&dungeon, defs));
     commands.insert_resource(RallyField::new(&dungeon, tuning.rally.into()));
 }
 
@@ -145,22 +163,30 @@ const CRAB_FEAR_CHANNELS: [FieldId; 1] = [FieldId::THREAT_GUN];
 ///
 /// Fear is faction-relative: each side tracks only its *enemies'* threat channels. Nothing fears its own
 /// emissions, which is what stops a firing unit from reading its own muzzle deposit back as terror.
-fn init_drives(mut commands: Commands, sim: Res<SimTuning>) {
+fn init_drives(mut commands: Commands, sim: Res<SimTuning>, audio: Res<AudioTuning>) {
     let mut by_faction: [Vec<DriveDef>; FACTION_COUNT] = Default::default();
 
-    // The squad: fear the creatures. No HUNGER rule — units don't forage, and no role behaviour reads the
-    // drive, so the old global rule was ramping a number nobody consulted.
+    // The squad: fear the creatures (menace channels, gains from `sim.fear`) with the audible din of the
+    // swarm (`NOISE_SWARM`, gain from the `audio:` slice) ADDED on top. Creature threats `max`-reduce (two
+    // mild dangers ≠ panic); the din is additive because the menace field saturates (~24) and would
+    // otherwise drown any din term in the max — so the sound of the swarm dying could never register. Din
+    // gain ships at 0 (dormant), so this is exactly the old creature-only fear at the shipped config.
     by_faction[Faction::Foundation.index()] = vec![DriveDef {
         id: DriveId::FEAR,
-        rule: DriveRule::TrackMaxFields {
-            sources: vec![
+        rule: DriveRule::TrackMaxPlusDin {
+            threats: vec![
                 (FOUNDATION_FEAR_CHANNELS[0], sim.fear.per_crab),
                 (FOUNDATION_FEAR_CHANNELS[1], sim.fear.of_anomaly),
             ],
+            din: vec![(FieldId::NOISE_SWARM, audio.perception.unit_fear_of_din)],
         },
     }];
 
-    // The swarm: hunger rises steadily → pushes foraging/feeding; fear tracks the squad's gunfire.
+    // The swarm: hunger rises steadily → pushes foraging/feeding; fear tracks the squad's gunfire
+    // (`THREAT_GUN`, from `sim.fear`) with the squad's audible din (`NOISE_SQUAD`, from the `audio:` slice)
+    // ADDED on top (same reason as the squad: an additive nudge the search can climb, not a max-shadowed
+    // term). NOISE_SQUAD is *also* what the swarm may be drawn toward (the investigate behaviour) —
+    // whether the sound of a firefight scatters or attracts the swarm is the emergent, RL-tuned sign.
     by_faction[Faction::Crab.index()] = vec![
         DriveDef {
             id: DriveId::HUNGER,
@@ -168,8 +194,9 @@ fn init_drives(mut commands: Commands, sim: Res<SimTuning>) {
         },
         DriveDef {
             id: DriveId::FEAR,
-            rule: DriveRule::TrackMaxFields {
-                sources: vec![(CRAB_FEAR_CHANNELS[0], sim.fear.crab_of_gunfire)],
+            rule: DriveRule::TrackMaxPlusDin {
+                threats: vec![(CRAB_FEAR_CHANNELS[0], sim.fear.crab_of_gunfire)],
+                din: vec![(FieldId::NOISE_SQUAD, audio.perception.crab_fear_of_din)],
             },
         },
     ];
@@ -187,14 +214,23 @@ mod tests {
     use super::*;
     use crate::ai::field::{CHANNEL_COUNT, UNIT_THREAT_CHANNELS};
 
-    /// The channels each faction *emits*. Kept next to the assertion it feeds, so a new emitter that is
-    /// wired up without extending this list makes the test lie loudly rather than quietly.
+    /// The acoustic din channels — a distinct category from creature menace (they are NOT in
+    /// `UNIT_THREAT_CHANNELS`, so psi-vision ignores them). Used to split the invariants below.
+    const ACOUSTIC_CHANNELS: [FieldId; 2] = [FieldId::NOISE_SQUAD, FieldId::NOISE_SWARM];
+    fn is_acoustic(f: FieldId) -> bool {
+        ACOUSTIC_CHANNELS.contains(&f)
+    }
+
+    /// The channels each faction *emits*, creature-menace and acoustic din alike. Kept next to the
+    /// assertion it feeds, so a new emitter that is wired up without extending this list makes the test
+    /// lie loudly rather than quietly.
     fn emits(faction: Faction) -> &'static [FieldId] {
         match faction {
-            // `laser::fire_laser` (muzzle) + `laser::update_lasers` (impact).
-            Faction::Foundation => &[FieldId::THREAT_GUN],
-            // `crab::deposit_crab_fields`.
-            Faction::Crab => &[FieldId::THREAT_CRAB],
+            // `laser::fire_laser` (muzzle) + `laser::update_lasers` (impact); NOISE_SQUAD at the same
+            // sites + `squad`'s unit-death.
+            Faction::Foundation => &[FieldId::THREAT_GUN, FieldId::NOISE_SQUAD],
+            // `crab::deposit_crab_fields`; NOISE_SWARM at the crab-death site.
+            Faction::Crab => &[FieldId::THREAT_CRAB, FieldId::NOISE_SWARM],
             // `enemy::deposit_anomaly_aura`.
             Faction::Anomaly => &[FieldId::THREAT_ANOMALY],
         }
@@ -202,14 +238,21 @@ mod tests {
 
     fn fear_sources(faction: Faction) -> Vec<(FieldId, f32)> {
         // Gains come from the shipped config defaults (the same values `init_drives` reads at runtime);
-        // channel identity comes from the code-owned channel lists.
+        // creature-menace gains from `sim.fear`, acoustic-din gains from the `audio:` slice. Channel
+        // identity comes from the code-owned channel lists. The acoustic source is listed LAST so the
+        // creature-only prefix equals `UNIT_THREAT_CHANNELS`.
         let fear = SimTuning::default().fear;
+        let perc = AudioTuning::default().perception;
         match faction {
             Faction::Foundation => vec![
                 (FOUNDATION_FEAR_CHANNELS[0], fear.per_crab),
                 (FOUNDATION_FEAR_CHANNELS[1], fear.of_anomaly),
+                (FieldId::NOISE_SWARM, perc.unit_fear_of_din),
             ],
-            Faction::Crab => vec![(CRAB_FEAR_CHANNELS[0], fear.crab_of_gunfire)],
+            Faction::Crab => vec![
+                (CRAB_FEAR_CHANNELS[0], fear.crab_of_gunfire),
+                (FieldId::NOISE_SQUAD, perc.crab_fear_of_din),
+            ],
             Faction::Anomaly => vec![],
         }
     }
@@ -233,9 +276,15 @@ mod tests {
     #[test]
     fn units_fear_every_hostile_creature_channel() {
         // A creature type that emits dread nobody reads is a monster the squad walks past unafraid.
-        let feared: Vec<FieldId> = fear_sources(Faction::Foundation).iter().map(|&(f, _)| f).collect();
+        // Creature-menace channels only — acoustic din is a separate category (checked below), and the
+        // creature prefix must equal `UNIT_THREAT_CHANNELS` (what psi-vision renders).
+        let feared: Vec<FieldId> = fear_sources(Faction::Foundation)
+            .iter()
+            .map(|&(f, _)| f)
+            .filter(|&f| !is_acoustic(f))
+            .collect();
         for hostile in [Faction::Crab, Faction::Anomaly] {
-            for channel in emits(hostile) {
+            for channel in emits(hostile).iter().filter(|&&f| !is_acoustic(f)) {
                 assert!(feared.contains(channel), "units ignore {hostile:?}'s threat channel");
             }
         }
@@ -243,11 +292,34 @@ mod tests {
     }
 
     #[test]
+    fn each_faction_is_wired_to_the_other_factions_din() {
+        // The acoustic dual of the creature-channel lock: a din channel nobody reads is a dead channel
+        // (and would leave the audio search with a knob that moves nothing). Crabs must be WIRED to the
+        // squad's din; units to the swarm's din — present in the fear def, ready to react once the gain is
+        // raised (it ships at 0, dormant). `no_faction_fears_a_channel_it_emits` above already proves
+        // neither is wired to its OWN din.
+        let hears = |faction| -> Vec<FieldId> {
+            fear_sources(faction).iter().map(|&(f, _)| f).filter(|&f| is_acoustic(f)).collect()
+        };
+        assert!(hears(Faction::Crab).contains(&FieldId::NOISE_SQUAD), "crabs ignore the squad's din");
+        assert!(hears(Faction::Foundation).contains(&FieldId::NOISE_SWARM), "units ignore the swarm's din");
+    }
+
+    #[test]
     fn fear_sources_name_real_channels_with_positive_gains() {
         for faction in Faction::ALL {
             for &(field, gain) in fear_sources(faction).iter() {
-                assert!(gain > 0.0, "{faction:?} has a non-positive fear gain");
                 assert!(field.0 < CHANNEL_COUNT, "{faction:?} fears an out-of-range channel slot");
+                // Creature-menace gains must be positive (a 0 gain = a monster nobody fears). Acoustic-din
+                // gains ship at 0 ON PURPOSE — the channel is wired but dormant, so the shipped sim is the
+                // creature-only-fear game and the audio search is what turns the din up. So din is allowed
+                // to be 0 but never negative (a negative gain would make din SOOTHE, which the additive
+                // `TrackMaxPlusDin` does not model).
+                if is_acoustic(field) {
+                    assert!(gain >= 0.0, "{faction:?} has a negative din gain");
+                } else {
+                    assert!(gain > 0.0, "{faction:?} has a non-positive creature-fear gain");
+                }
             }
         }
     }

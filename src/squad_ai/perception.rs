@@ -266,6 +266,8 @@ pub fn squad_think(
             rally_val: 0.0,
             alarm_val: 0.0,
             seen_by_squad: if fog.visible_at(dungeon.world_to_cell(pos)) { 1.0 } else { 0.0 },
+            // Units don't investigate the din (the acoustic Investigate behaviour is crab-only).
+            noise_draw: 0.0,
             squad,
         };
 
@@ -389,7 +391,8 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
         | Mode::Scout
         | Mode::Mark
         | Mode::Rally
-        | Mode::Muster => None,
+        | Mode::Muster
+        | Mode::Investigate => None,
     }
 }
 
@@ -414,6 +417,7 @@ mod tests {
             rally_val: 0.0,
             alarm_val: 0.0,
             seen_by_squad: 0.0,
+            noise_draw: 0.0,
             squad,
         }
     }

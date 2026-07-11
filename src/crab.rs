@@ -794,6 +794,9 @@ fn crab_locomotion(
         let scouting = matches!(active.mode, crate::ai::utility::Mode::Scout);
         let marking = matches!(active.mode, crate::ai::utility::Mode::Mark);
         let rallying = matches!(active.mode, crate::ai::utility::Mode::Rally);
+        // Investigate: drawn toward the squad's audible din (`NOISE_SQUAD`) — steer to the noise hotspot
+        // the brain aimed at (dormant unless the audio search turned it on; see `ai::brain::crab_brain`).
+        let investigating = matches!(active.mode, crate::ai::utility::Mode::Investigate);
         // Muster: alarmed by a wounded neighbour — pursue the squad (same surface flow-field path as a
         // forage) but at a faster surge speed, so the retaliation reads as an aggressive charge.
         let mustering = matches!(active.mode, crate::ai::utility::Mode::Muster);
@@ -864,6 +867,19 @@ fn crab_locomotion(
             let prey_pos = active.target;
             let desired = prey_pos.map(|p| p - motion.pos).unwrap_or(motion.heading);
             if steer_surface(&mut motion, &graph, &dungeon, desired, None, CRAB_SPEED * SCOUT_SPEED_MUL, sep, dt, t) {
+                CrabState::Walk
+            } else {
+                CrabState::Idle
+            }
+        } else if investigating {
+            // --- INVESTIGATE: steer toward the NOISE_SQUAD hotspot the brain aimed at — the swarm
+            // converging on the sound of the guns. Same point-steering as Mark (no final-approach snap;
+            // hold heading if the din is gone). Self-limiting: as the din evaporates the brain drops
+            // Investigate and the crab reverts to foraging/fear. ---
+            attached.host = None;
+            let din_pos = active.target;
+            let desired = din_pos.map(|p| p - motion.pos).unwrap_or(motion.heading);
+            if steer_surface(&mut motion, &graph, &dungeon, desired, None, CRAB_SPEED, sep, dt, t) {
                 CrabState::Walk
             } else {
                 CrabState::Idle
@@ -1403,6 +1419,7 @@ fn crab_despawn_dead(
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     crabs: Query<(Entity, &Health, &Transform, Option<&Culled>, &CrabSeed), With<Crab>>,
     sim: Res<SimTuning>,
+    audio: Res<crate::audio_tuning::AudioTuning>,
 ) {
     // Emit gore + despawn deaths in a STABLE order (by `CrabSeed`, unique+deterministic), NOT crab query
     // order — which is not reproducible across same-seed runs (see `util::nearest_planar`). The gore
@@ -1445,6 +1462,12 @@ fn crab_despawn_dead(
                 amount: sim.deposit.blood_scent,
             });
             sfx.write(Sfx::EnemyDeath(pos));
+            // The wet crunch of a crab death carries as swarm din (`NOISE_SWARM`); the *units* read it.
+            deposits.0.push(crate::ai::field::Deposit {
+                pos,
+                field: crate::ai::field::FieldId::NOISE_SWARM,
+                amount: audio.stimulus.enemy_death_loudness,
+            });
         }
         commands.entity(entity).despawn();
     }

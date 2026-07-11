@@ -93,6 +93,14 @@ pub enum DriveRule {
     /// so `init_drives` builds them from the loaded config. The `max` reduction is unchanged, so this stays
     /// order-independent and determinism-neutral.
     TrackMaxFields { sources: Vec<(FieldId, f32)> },
+    /// Like [`Self::TrackMaxFields`] for the creature-threat `threats` (max-reduced — two mild dangers must
+    /// not sum to panic), but the acoustic-din `din` channels ADD on top of that max. Audible din is an
+    /// INDEPENDENT stimulus, not a competing threat: a stigmergy menace field routinely saturates (the crab
+    /// menace peaks ~24), so a `max` reduction would drown any din term 30–70× over and make sound inert.
+    /// Adding it means the din nudges fear even beside a loud threat — the whole point of sound-as-stimulus.
+    /// `din` gains ship at 0 (dormant, so the golden is unchanged); the offline audio search raises them,
+    /// which is why the term must be additive (a live gradient) rather than max-shadowed (flat).
+    TrackMaxPlusDin { threats: Vec<(FieldId, f32)>, din: Vec<(FieldId, f32)> },
 }
 
 /// The level a `TrackMaxFields` drive eases toward, given each source's `(sample, gain)`.
@@ -109,6 +117,23 @@ pub fn track_max_target(samples: impl IntoIterator<Item = (f32, f32)>) -> f32 {
         .min(1.0)
 }
 
+/// The level a `TrackMaxPlusDin` drive eases toward: the `max` over the creature-`threats` (as
+/// [`track_max_target`]) PLUS the sum of the acoustic-`din` contributions, saturating at 1.
+///
+/// The din is summed, not `max`-ed, so it lifts fear even when a saturated menace field already wins the
+/// threat max — that additivity is what gives the offline audio search a gradient to climb. Determinism:
+/// the din source list is a fixed-order `Vec` built once in `init_drives` (and is one channel per faction
+/// in the shipped repertoire), so the running sum is order-stable across same-seed runs — the reordering
+/// hazard the `max` note warns about does not arise here.
+pub fn track_max_plus_din_target(
+    threats: impl IntoIterator<Item = (f32, f32)>,
+    din: impl IntoIterator<Item = (f32, f32)>,
+) -> f32 {
+    let base = threats.into_iter().map(|(sample, gain)| sample * gain).fold(0.0f32, f32::max);
+    let added: f32 = din.into_iter().map(|(sample, gain)| sample * gain).sum();
+    (base + added).min(1.0)
+}
+
 impl DriveRule {
     /// The drive's next value under this rule, before clamping.
     fn step(&self, prev: f32, dt: f32, stig: &Stig, dungeon: &Dungeon, pos: Vec3) -> f32 {
@@ -117,6 +142,13 @@ impl DriveRule {
             DriveRule::TrackMaxFields { sources } => {
                 let target = track_max_target(
                     sources.iter().map(|&(field, gain)| (stig.sample(field, dungeon, pos), gain)),
+                );
+                prev + (target - prev) * (TRACK_EASE * dt).min(1.0)
+            }
+            DriveRule::TrackMaxPlusDin { threats, din } => {
+                let target = track_max_plus_din_target(
+                    threats.iter().map(|&(field, gain)| (stig.sample(field, dungeon, pos), gain)),
+                    din.iter().map(|&(field, gain)| (stig.sample(field, dungeon, pos), gain)),
                 );
                 prev + (target - prev) * (TRACK_EASE * dt).min(1.0)
             }
@@ -201,5 +233,34 @@ mod tests {
     fn track_max_of_nothing_is_zero() {
         // A faction with no fear sources (the watcher) eases toward 0, not toward some sentinel.
         assert_eq!(track_max_target([]), 0.0);
+    }
+
+    #[test]
+    fn track_max_plus_din_adds_din_on_top_of_the_threat_max() {
+        // Creature threats still reduce by `max` (0.5 wins over 0.4), but the din ADDS on top: 0.5 + 0.3.
+        // This is the property `max` destroys — a din beside an already-loud threat still lifts fear —
+        // and the whole reason sound-as-stimulus needs its own additive term rather than a fourth max
+        // source that a saturated menace field would drown.
+        assert_eq!(track_max_plus_din_target([(1.0, 0.5), (1.0, 0.4)], [(1.0, 0.3)]), 0.8);
+    }
+
+    #[test]
+    fn a_zero_gain_din_is_a_bit_exact_no_op() {
+        // THE golden-stability lock: the shipped din gains are 0, and a 0-gain din must reproduce the pure
+        // creature-only `track_max_target` BIT-FOR-BIT — else adding the acoustic wiring would silently
+        // drift the deterministic-core replay hash even though nothing reacts to sound yet.
+        assert_eq!(
+            track_max_plus_din_target([(1.0, 0.5), (2.0, 0.3)], [(1.0, 0.0), (5.0, 0.0)]).to_bits(),
+            track_max_target([(1.0, 0.5), (2.0, 0.3)]).to_bits(),
+        );
+    }
+
+    #[test]
+    fn track_max_plus_din_saturates_and_hears_din_without_a_threat() {
+        // Fear still caps at 1 even when threat + din overflow.
+        assert_eq!(track_max_plus_din_target([(1.0, 0.9)], [(1.0, 0.5)]), 1.0);
+        // Din with no live threat still drives fear — the death-din a unit hears where crabs fell but none
+        // remain (NOISE_SWARM high, THREAT_CRAB decayed): the case a pure creature-menace model misses.
+        assert_eq!(track_max_plus_din_target([], [(1.0, 0.4)]), 0.4);
     }
 }

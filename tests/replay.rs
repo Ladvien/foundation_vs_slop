@@ -81,7 +81,14 @@ fn field_passes_are_bit_identical() {
     // Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
     // neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
     // deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
-    const GOLDEN_FIELD: u64 = 0x9e33_16af_f944_c5f8;
+    //
+    // Re-pinned on the audio-stimulus branch (was `0x9e33_16af_f944_c5f8`): the two acoustic channels
+    // (`NOISE_SQUAD`/`NOISE_SWARM`) grew `CHANNEL_COUNT` 7 → 9, so `field_hash` folds two more grids, and
+    // the fire/impact/death deposit sites write din into them. The ACTOR golden above is UNCHANGED — at the
+    // shipped `audio:` config the din-fear gains are tiny and `crab_draw_to_din = 0`, and this no-player
+    // sweep generates no combat/din anyway, so agent Transforms don't move (see
+    // `a_mutated_audio_config_changes_the_sim`, which drives real combat to exercise the coupling).
+    const GOLDEN_FIELD: u64 = 0x0f35_ee74_3ff7_96d6;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -141,6 +148,47 @@ fn a_mutated_world_config_changes_the_sim() {
     assert_ne!(
         ha, hb,
         "a mutated world config produced an identical sim — the config override is not reaching gameplay"
+    );
+}
+
+#[test]
+fn a_mutated_audio_config_changes_the_sim() {
+    // The acoustic-stimulus analogue of `a_mutated_world_config_changes_the_sim`. Audio only reaches agents
+    // THROUGH din, and din is only emitted by combat — so a bare `build + step` with no player never fights,
+    // makes no din, and the knobs are correctly inert (that is why the shipped no-player golden above is
+    // unchanged by this branch — expected, not a bug). So this drives a real episode through `rollout`.
+    //
+    // The lever that bites in the OFFLINE rollout is `unit_fear_of_din`. The squad never fires here (crabs
+    // die to the boss cull, not gunfire — measured: zero THREAT_GUN deposits on every held-in seed), so
+    // NOISE_SQUAD is empty and the crab-side din (fear + the investigate draw) is dormant offline — those
+    // are live-play features. But crab DEATHS fill NOISE_SWARM every episode, and the additive
+    // `DriveRule::TrackMaxPlusDin` lets that din lift the squad's FEAR above the (saturated) crab-menace it
+    // co-occurs with — where a `max` reduction would drown it. So a cranked `unit_fear_of_din` provably
+    // moves the squad, which is exactly the additive-din gradient the audio search climbs.
+    //
+    // `rollout` takes `serial_guard` internally, so this test must NOT hold it (a second lock deadlocks).
+    use foundation_vs_slop::ai::brain::BrainSource;
+    use foundation_vs_slop::audio_tuning::AudioTuning;
+    use foundation_vs_slop::squad_ai::evaluate::rollout;
+
+    let seed = 0x5C09191;
+    let ticks = 1800;
+
+    let base = rollout(BrainSource::Authored, None, None, seed, ticks);
+
+    // Crank the din-fear gains off their dormant (0.0) default. `unit_fear_of_din` reacts to the crab-death
+    // din (NOISE_SWARM), which the rollout actually produces; `crab_fear_of_din` is the swarm analogue,
+    // dormant offline (no gunfire → no NOISE_SQUAD) but set here to document the intended symmetric lever.
+    let mut audio = AudioTuning::default();
+    audio.perception.unit_fear_of_din = 0.5;
+    audio.perception.crab_fear_of_din = 0.5;
+    let mutant = rollout(BrainSource::Authored, None, Some(audio), seed, ticks);
+
+    // DECISIVE: the final actor state (Transform+Health) must differ. Same world, brains and seed — the ONLY
+    // difference is the audio slice, so a changed final state proves the acoustic din reaches gameplay.
+    assert_ne!(
+        base.snapshot, mutant.snapshot,
+        "a cranked audio config produced a byte-identical final state — the acoustic coupling is inert"
     );
 }
 

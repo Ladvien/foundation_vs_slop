@@ -726,4 +726,26 @@
             ),
         },
     ),
+    // Acoustic-stimulus + audio tuning (src/audio_tuning.rs). Makes sound a perception stimulus:
+    // gameplay sounds deposit into the acoustic stigmergy channels (ai::field::NOISE_*) and agents
+    // react to them. `stimulus` = channel propagation (evaporate/diffuse/deposit_radius, same model as
+    // ai_tuning.fields) + per-event loudness (deposit amount). `perception` = per-faction reaction gains.
+    // The cosmetic waveform mix stays in code (src/audio.rs) and is NOT tuned here.
+    audio: (
+        stimulus: (
+            noise_squad: (evaporate: 0.8, diffuse: 0.18, deposit_radius: 5.0),
+            noise_swarm: (evaporate: 0.7, diffuse: 0.15, deposit_radius: 4.0),
+            fire_loudness: 0.6,
+            impact_wall_loudness: 0.3,
+            impact_flesh_loudness: 0.5,
+            enemy_death_loudness: 0.7,
+            unit_death_loudness: 0.9,
+        ),
+        perception: (
+            crab_fear_of_din: 0.0,
+            unit_fear_of_din: 0.0,
+            crab_draw_to_din: 0.0,
+            investigate_threshold: 0.5,
+        ),
+    ),
 )

@@ -16,6 +16,11 @@
 #![allow(clippy::type_complexity)]
 
 pub mod audio;
+/// Data-driven acoustic-stimulus + audio tuning — the `audio:` config slice. The propagation/salience
+/// of the acoustic stigmergy channels (`ai::field::NOISE_*`) and the per-faction perception gains that
+/// turn sound into a stimulus agents react to; evolvable by the offline audio search (`squad_ai::
+/// audio_genome`). Mirrors `ai::tuning` / `sim`.
+pub mod audio_tuning;
 pub mod autogib;
 pub mod blood_lens;
 pub mod ai;

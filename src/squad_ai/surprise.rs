@@ -62,16 +62,16 @@ use crate::squad_ai::role::RoleId;
 ///   and it applies only here.
 /// - In [`ModePrior::prob`] it is a plug-in divergence estimate, not a code length. KT has no minimax
 ///   warrant there. Add-½ is chosen instead because it is the Jeffreys reference prior for a multinomial
-///   and because Laplace's `1.0` injects `MODE_COUNT = 24` pseudo-counts, which over a few hundred real
+///   and because Laplace's `1.0` injects `MODE_COUNT = 25` pseudo-counts, which over a few hundred real
 ///   decisions drags every distribution toward uniform: it caps a *deterministic* transition at
-///   `(n+1)/(n+24)` and makes the baseline look surprising to itself. Both effects are measured by
+///   `(n+1)/(n+25)` and makes the baseline look surprising to itself. Both effects are measured by
 ///   `smoothing_bias_shrinks_as_the_prior_gains_evidence`.
 ///
 /// Only the **prior** `q` is smoothed. The candidate's `p` is the raw empirical frequency, and terms with
 /// `p = 0` drop out (`0*ln 0 = 0`).
 ///
 /// Smoothing `p` symmetrically is the textbook answer to the plug-in KL's upward bias, and it is **wrong
-/// here**, measurably: with `MODE_COUNT = 24`, add-half injects 12 pseudo-counts, which swamps any context
+/// here**, measurably: with `MODE_COUNT = 25`, add-half injects 12.5 pseudo-counts, which swamps any context
 /// holding a small sample and drags `p` toward uniform. Against a peaked prior that *inflates* rather than
 /// deflates the estimate — a self-surprise that should read ~0 measured **2.81 nats** at `n = 4`. The bias
 /// direction inverts.

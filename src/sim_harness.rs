@@ -64,6 +64,11 @@ pub struct SimConfig {
     /// `Some(w)` installs an evolved world for one rollout. Like `dungeon_seed`, this is a knob applied at
     /// the single `GameConfig` seam before the consumer plugins build — exactly one config reaches them.
     pub config: Option<crate::config::WorldConfig>,
+    /// Override the acoustic-stimulus + audio tuning (`audio:` slice). `None` runs the shipped slice (what
+    /// the replay goldens pin); `Some(a)` installs an evolved `AudioTuning` for one rollout — the
+    /// audio-population analogue of [`Self::config`], applied at the same `GameConfig` seam before
+    /// `AiPlugin` reads `gc.audio` into its resources.
+    pub audio: Option<crate::audio_tuning::AudioTuning>,
 }
 
 impl Default for SimConfig {
@@ -76,6 +81,7 @@ impl Default for SimConfig {
             brains: crate::ai::brain::BrainSource::Authored,
             dungeon_seed: None,
             config: None,
+            audio: None,
         }
     }
 }
@@ -102,6 +108,13 @@ impl SimConfig {
     /// [`with_brains`]. Applied at the same `GameConfig` seam as `dungeon_seed` (see `build_headless_app`).
     pub fn with_world_config(mut self, config: crate::config::WorldConfig) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Install an evolved acoustic/audio config for one evaluation rollout — the audio-population
+    /// analogue of [`with_world_config`]. Applied at the same `GameConfig` seam (see `build_headless_app`).
+    pub fn with_audio_config(mut self, audio: crate::audio_tuning::AudioTuning) -> Self {
+        self.audio = Some(audio);
         self
     }
 }
@@ -208,6 +221,11 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // the consumer plugins read them at build (`AiPlugin` reads `ai_tuning` + `sim` into resources). `None`
     // runs the shipped config the goldens pin; `Some(w)` installs an evolved world for one rollout. Same
     // "mutate GameConfig at the seam" mechanism as `dungeon_seed` — one config reaches the consumers.
+    if let Some(a) = cfg.audio {
+        // Same seam as the world/dungeon overrides: install the evolved `audio:` slice before `AiPlugin`
+        // reads `gc.audio` into `AudioTuning`/the channel defs/the din-fear gains. `None` → shipped slice.
+        app.world_mut().resource_mut::<crate::config::GameConfig>().audio = a;
+    }
     if let Some(w) = cfg.config {
         let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
         gc.ai_tuning = w.ai;
@@ -434,6 +452,24 @@ pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
     };
     let dungeon = world.resource::<crate::dungeon::Dungeon>();
     positions.iter().map(|p| dungeon.world_to_cell(*p)).collect()
+}
+
+/// The squad's centroid cell. The offline tour uses this ONCE at plan time to order the crab hubs
+/// nearest-first, so the fast squad reaches the slow swarm early in the episode. Read at tour-planning
+/// time (right after spawn), so it reflects the deterministic spawn layout, not brain-driven movement —
+/// the tour schedule stays independent of the brain under test.
+pub fn squad_centroid_cell(app: &mut App) -> IVec2 {
+    let world = app.world_mut();
+    let positions: Vec<Vec3> = {
+        let mut q = world.query_filtered::<&Transform, With<crate::squad::Unit>>();
+        q.iter(world).map(|t| t.translation).collect()
+    };
+    let dungeon = world.resource::<crate::dungeon::Dungeon>();
+    if positions.is_empty() {
+        return dungeon.spawn;
+    }
+    let mean = positions.iter().copied().sum::<Vec3>() / positions.len() as f32;
+    dungeon.world_to_cell(mean)
 }
 
 /// Every floor cell of the generated dungeon (goal-selection source + coverage denominator).

@@ -498,11 +498,11 @@ fn score_triple(
     episode_ticks: u32,
 ) -> Result<Option<Triple>, String> {
     let wc = world_genome::decode(world)?;
-    let a = rollout(brains_of(t, squad, swarm)?, Some(wc), seed_a, episode_ticks);
+    let a = rollout(brains_of(t, squad, swarm)?, Some(wc), None, seed_a, episode_ticks);
     if minimal_criterion(&a.outcome).is_err() {
         return Ok(None);
     }
-    let b = rollout(brains_of(t, squad, swarm)?, Some(wc), seed_b, episode_ticks);
+    let b = rollout(brains_of(t, squad, swarm)?, Some(wc), None, seed_b, episode_ticks);
     if minimal_criterion(&b.outcome).is_err() {
         return Ok(None);
     }
@@ -1316,7 +1316,7 @@ pub fn sweep_prior(t: &Templates, seeds: &[u64], episode_ticks: u32) -> Result<M
     let swarm = SwarmGenome::authored(t);
     let mut prior = ModePrior::default();
     for &seed in seeds {
-        let r = rollout(brains_of(t, &squad, &swarm)?, None, seed, episode_ticks);
+        let r = rollout(brains_of(t, &squad, &swarm)?, None, None, seed, episode_ticks);
         prior.observe(&r.trace);
     }
     Ok(prior)

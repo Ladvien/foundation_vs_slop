@@ -374,6 +374,8 @@ fn despawn_dead_units(
     mut commands: Commands,
     mut gore: ResMut<GoreQueue>,
     mut sfx: MessageWriter<Sfx>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    audio: Res<crate::audio_tuning::AudioTuning>,
     units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
 ) {
     for (entity, hp, transform, outfit, figurine) in &units {
@@ -396,6 +398,13 @@ fn despawn_dead_units(
             intensity: 0.6,
         });
         sfx.write(Sfx::UnitDeath(transform.translation));
+        // A unit's death is the loudest squad acoustic event: its din (`NOISE_SQUAD`) marks where the
+        // fight turned costly, so the swarm keeps reading the spot even after the guns fall silent.
+        deposits.0.push(crate::ai::field::Deposit {
+            pos: transform.translation,
+            field: crate::ai::field::FieldId::NOISE_SQUAD,
+            amount: audio.stimulus.unit_death_loudness,
+        });
         commands.entity(entity).despawn();
     }
 }

@@ -153,6 +153,7 @@ mod tests {
             rally_val: 0.0,
             alarm_val: 0.0,
             seen_by_squad: 0.0,
+            noise_draw: 0.0,
             squad: SquadFields { anchor_dist: 0.0, ..SquadFields::neutral() },
         }
     }
