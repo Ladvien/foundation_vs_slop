@@ -31,6 +31,7 @@ use foundation_vs_slop::squad_ai::coevolve::{
     search, squad_archive_doc, swarm_archive_doc, sweep_prior, world_archive_doc, SearchConfig,
     SearchResult, Templates,
 };
+use foundation_vs_slop::squad_ai::audio_search::{self, AudioSearchConfig};
 use foundation_vs_slop::squad_ai::level_eval;
 use foundation_vs_slop::squad_ai::level_search::{self, LevelSearchConfig};
 
@@ -42,6 +43,8 @@ const SWARM_ARCHIVE_PATH: &str = "assets/config/elites_swarm.ron";
 const WORLD_ARCHIVE_PATH: &str = "assets/config/elites_world.ron";
 /// The illuminated *level* archive: evolved dungeon architecture + furniture amount + mushroom amount.
 const LEVELS_ARCHIVE_PATH: &str = "assets/config/elites_levels.ron";
+/// The illuminated *audio* archive: evolved acoustic-stimulus config (propagation + loudness + perception).
+const AUDIO_ARCHIVE_PATH: &str = "assets/config/elites_audio.ron";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -66,12 +69,16 @@ fn main() {
         // Standalone level search: evolve dungeon/furniture/mushroom config under the static
         // level-quality objective. GPU-free, no `prior` needed (the objective isn't behavioural).
         "levels" => parse_evolve(&args[1..]).and_then(levels),
+        // Standalone audio search: evolve the acoustic-stimulus config under the SAME behavioural
+        // witnessed-surprise objective as the world population (audio feeds agent perception). Needs the
+        // `prior` (`train prior` first) — regenerate it after any Mode change (MODE_COUNT is now 25).
+        "audio" => parse_evolve(&args[1..]).and_then(audio),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels)"
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio)"
         )),
     };
     if let Err(e) = result {
@@ -96,7 +103,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let swarm = SwarmGenome::authored(&t);
 
     for &seed in seeds {
-        let r = rollout(brains_of(&t, &squad, &swarm)?, None, seed, ticks);
+        let r = rollout(brains_of(&t, &squad, &swarm)?, None, None, seed, ticks);
         let o = &r.outcome;
         let coverage = if o.reachable_cells > 0 {
             o.cells_covered as f32 / o.reachable_cells as f32
@@ -300,6 +307,53 @@ fn levels(args: EvolveArgs) -> Result<(), String> {
     write_ron(LEVELS_ARCHIVE_PATH, &level_search::level_archive_doc(&result.pop, &base)?)?;
     println!();
     println!("wrote {LEVELS_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// Standalone audio search: evolve the acoustic-stimulus config (channel propagation + per-event loudness
+/// + per-faction perception gains) under the witnessed-learnable-surprise objective, and commit the
+/// illuminated archive. Unlike `levels`, its fitness is a full-sim rollout (sound feeds agent perception),
+/// so it needs the frozen `prior` — run `train prior` first, and REGENERATE it after any `Mode` change
+/// (this branch added `Mode::Investigate`, so `MODE_COUNT` is 25). Reuses the `--generations / --batch /
+/// --res / --seed / --seeds / --ticks` flags; `--seeds` are the held-in worlds (the learnability pair uses
+/// the first two, which must differ).
+fn audio(args: EvolveArgs) -> Result<(), String> {
+    let src = std::fs::read_to_string(PRIOR_PATH)
+        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
+    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
+
+    let c = args.cfg;
+    let cfg = AudioSearchConfig {
+        seed: c.seed,
+        generations: c.generations,
+        batch: c.batch,
+        sigma: 0.3,
+        resolution: c.resolution,
+        dungeon_seeds: c.dungeon_seeds,
+        episode_ticks: c.episode_ticks,
+    };
+    println!(
+        "evolving audio: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
+        cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.episode_ticks
+    );
+
+    let result = audio_search::search(&prior, &cfg, |generation, r| {
+        let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
+        println!(
+            "  gen {generation:>3}: audio {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
+            r.pop.archive.coverage(),
+            r.pop.archive.qd_score(),
+            best,
+            r.evaluations,
+            r.rejected_infeasible,
+            r.rejected_by_criterion
+        );
+    })?;
+
+    write_ron(AUDIO_ARCHIVE_PATH, &audio_search::audio_archive_doc(&result.pop)?)?;
+    println!();
+    println!("wrote {AUDIO_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }

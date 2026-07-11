@@ -118,6 +118,9 @@ impl ThinkTimer {
 pub struct FieldHotspots {
     pub scent: (Vec3, f32),
     pub meat: (Vec3, f32),
+    /// Peak of the squad's audible din (`NOISE_SQUAD`) — where a firefight is loudest. The aim point for
+    /// the crab `Investigate` behaviour (the swarm converging on the sound of the guns).
+    pub noise_squad: (Vec3, f32),
 }
 
 /// Recompute the field hotspots once per frame (runs in `AiSet::FieldUpdate`). RALLY has no global peak
@@ -126,6 +129,7 @@ pub fn update_hotspots(mut hot: ResMut<FieldHotspots>, stig: Option<Res<Stig>>, 
     if let Some(stig) = stig {
         hot.scent = stig.hotspot(FieldId::SCENT, &dungeon);
         hot.meat = stig.hotspot(FieldId::MEAT, &dungeon);
+        hot.noise_squad = stig.hotspot(FieldId::NOISE_SQUAD, &dungeon);
     }
 }
 
@@ -166,6 +170,8 @@ pub fn think(
     hotspots: Res<FieldHotspots>,
     brains: Res<AiBrains>,
     fog: Res<crate::fog::FogGrid>,
+    // The `audio:` slice — used to gate + scale the acoustic-din draw that latches `Mode::Investigate`.
+    audio: Res<crate::audio_tuning::AudioTuning>,
     units: Query<&Transform, With<Unit>>,
     // Prey = units + the smiley boss. Crabs hunt any prey (nearest wins); the boss hunts only units
     // (it is Prey itself, so scanning Prey would make it target its own position).
@@ -247,6 +253,18 @@ pub fn think(
             } else {
                 0.0
             },
+            // The squad's audible din, gated by `investigate_threshold` and scaled by `crab_draw_to_din`
+            // (both from the `audio:` slice). Uses the GLOBAL `NOISE_SQUAD` peak (like MeatHotspot/
+            // ScentHotspot), so the whole swarm shares one "where's the fight" pull. 0.0 unless the audio
+            // search raised `crab_draw_to_din` — so `Mode::Investigate` is dormant at the shipped config.
+            noise_draw: {
+                let peak = hotspots.noise_squad.1;
+                if peak >= audio.perception.investigate_threshold {
+                    peak * audio.perception.crab_draw_to_din
+                } else {
+                    0.0
+                }
+            },
             // Crabs and the boss have no squad context — neutral unit fields (the squad brains never
             // run here; `think` is `Without<Unit>`).
             squad: SquadFields::neutral(),
@@ -265,6 +283,7 @@ pub fn think(
             TargetKind::NearestUnit => nearest_unit,
             TargetKind::ScentHotspot => Some(hotspots.scent.0),
             TargetKind::MeatHotspot => Some(hotspots.meat.0),
+            TargetKind::NoiseHotspot => Some(hotspots.noise_squad.0),
             // The Carry destination (the nest) is resolved per-crab by `carry_gibs` from the lifted
             // gib, not from the global hotspot — decide() only picks the mode here.
             TargetKind::Nest => None,
@@ -550,6 +569,29 @@ fn crab_brain() -> Brain {
                         below: 0.0,
                         above: 1.0,
                     },
+                }],
+            },
+            // Investigate: drawn toward the SOUND of the squad's guns (`NOISE_SQUAD`), the swarm
+            // converging on a firefight. Rank 2, the forage/engage tier: it competes BY SCORE with
+            // SeekMeat/Latch, so a loud-enough draw pulls a foraging crab off its meat and toward the din,
+            // while a crab already latched onto a unit (high Latch score) keeps biting. Rank 1 was a dead
+            // lever — the din only exists where the fight is, and there the rank-2 SeekMeat/Latch always
+            // preempted a rank-1 Investigate, so it could never fire (measured: 0 investigate decisions even
+            // at max draw). It still yields to Flee (rank 4): a crab fleeing gunfire does not turn to face
+            // it. Steering follows the din hotspot in `crab_movement`. DORMANT at the shipped config:
+            // `Fact::NoiseDraw` is `peak · crab_draw_to_din` (gated by `investigate_threshold` in `think`),
+            // and `crab_draw_to_din` defaults to 0 — so this never clears MIN_SCORE until the audio search
+            // raises it. That knob IS the emergent question "does the swarm run from the guns, or toward
+            // them?". Self-limiting: the din evaporates, the score falls below MIN_SCORE, the crab reverts.
+            Behavior {
+                mode: Mode::Investigate,
+                rank: 2,
+                target: TargetKind::NoiseHotspot,
+                considerations: vec![Consideration {
+                    input: Input::Perc(Fact::NoiseDraw),
+                    // Score IS the config-scaled draw; a plain pass-through so a louder fight / larger
+                    // draw gain pulls harder. 0 (the shipped default) → ineligible.
+                    curve: Curve::Linear { m: 1.0, b: 0.0 },
                 }],
             },
             // Panic: flee down the THREAT gradient when afraid — outranks everything (drops the load).

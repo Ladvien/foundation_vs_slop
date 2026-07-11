@@ -19,10 +19,12 @@ use bevy::math::IVec2;
 use bevy::prelude::App;
 
 use crate::ai::brain::BrainSource;
+use crate::audio_tuning::AudioTuning;
 use crate::config::WorldConfig;
 use crate::sim_harness::{
     build_headless_app, clear_squad_orders, field_saturation, floor_cells, issue_squad_order,
-    liveness_violations, nest_cells, ordered_unit_count, serial_guard, step, SimConfig,
+    liveness_violations, nest_cells, ordered_unit_count, serial_guard, snapshot_hash, squad_centroid_cell,
+    step, SimConfig,
 };
 
 use super::surprise::{EpisodeOutcome, EpisodeTrace};
@@ -49,6 +51,14 @@ const ADVANCE_TICKS: u32 = 300;
 /// advances the squad, then watches the fight.
 const ENGAGE_TICKS: u32 = 300;
 
+/// Advance windows spent DWELLING toward each crab hub before the engage window. The squad is fast and the
+/// swarm is slow, but crabs forage away from their nests, so a single ADVANCE window (~30 world-units) never
+/// closes the gap — measured, the squad stalled ~30 units off the nearest crab and never fired. Three
+/// windows (~90 units of unbroken travel, no engage drift between them) reliably lands it on the hub, where
+/// breeding respawns crabs into firing range. Keep it a FIXED count (not an arrival check) so the tour
+/// schedule stays independent of the brain under test.
+const DWELL_ADVANCES: u32 = 3;
+
 /// Floor goals interleaved between nests, so the tour both explores and fights.
 const FLOOR_GOALS: usize = 4;
 
@@ -56,6 +66,12 @@ const FLOOR_GOALS: usize = 4;
 pub struct Rollout {
     pub trace: EpisodeTrace,
     pub outcome: EpisodeOutcome,
+    /// `snapshot_hash` (folded `Transform` + `Health` of every actor) at the final tick. The exact-value
+    /// oracle for "did this config change where the agents ended up", independent of the trace's mode
+    /// counts — a config that only shifts *steering* (not which discrete mode is chosen) moves this but not
+    /// the mode histogram. Used by `a_mutated_audio_config_changes_the_sim` to prove the acoustic coupling
+    /// reaches gameplay.
+    pub snapshot: u64,
 }
 
 /// **The synthetic player.**
@@ -108,6 +124,7 @@ fn tour_goals(app: &mut App) -> Vec<IVec2> {
 pub fn rollout(
     brains: BrainSource,
     config: Option<WorldConfig>,
+    audio: Option<AudioTuning>,
     dungeon_seed: u64,
     ticks: u32,
 ) -> Rollout {
@@ -120,11 +137,30 @@ pub fn rollout(
     if let Some(w) = config {
         cfg = cfg.with_world_config(w);
     }
+    // Likewise the acoustic-stimulus slice: `None` runs the shipped `audio:` config (the prior sweep and
+    // every non-audio population pass `None`); `Some(a)` installs an evolved `AudioTuning` for the audio
+    // population's rollout. Same single `GameConfig` seam.
+    if let Some(a) = audio {
+        cfg = cfg.with_audio_config(a);
+    }
     let mut app = build_headless_app(&cfg);
 
     // One tick so the dungeon and squad exist before the tour is planned.
     step(&mut app, &cfg, 1);
-    let goals = tour_goals(&mut app);
+    // The tour heads for the CRAB HUBS (nests), nearest-first from the spawn layout, and DWELLS on each so
+    // the squad actually reaches firing range and a firefight happens (its NOISE_SQUAD din is then a
+    // stimulus the swarm reacts to). Falls back to the floor spread only on a nest-less map. Ordering by
+    // the spawn-time centroid keeps the schedule brain-independent.
+    let hubs = {
+        let mut nests = nest_cells(&mut app);
+        if nests.is_empty() {
+            tour_goals(&mut app)
+        } else {
+            let from = squad_centroid_cell(&mut app).as_vec2();
+            nests.sort_by_key(|c| (c.as_vec2().distance_squared(from) * 100.0) as i64);
+            nests
+        }
+    };
 
     // Enable recording *after* `Startup` and the warm-up tick, so the recorder never counts the spawn
     // frame's initial `ActiveBehavior` writes as decisions.
@@ -135,35 +171,34 @@ pub fn rollout(
     let mut peak_field = 0.0f32;
     let mut field_flatness = 0.0f32;
     let mut elapsed = 0u32;
-    let mut next_goal = 0usize;
+    let mut hub_idx = 0usize;
     // Ticks in which at least one unit was under a player order — reported so an evaluation that has
     // silently reverted to "the player drives everything" is visible rather than assumed away.
     let mut ordered_ticks = 0u32;
 
     while elapsed < ticks {
-        // ── advance: the player orders the squad toward the next goal ──
-        if !goals.is_empty() {
-            // An unreachable goal is skipped, not retried: the tour is a fixed schedule, and stalling on
-            // one goal would make episode length depend on the dungeon.
-            issue_squad_order(&mut app, goals[next_goal % goals.len()]);
-            next_goal += 1;
-        }
-        elapsed += run(
-            &mut app,
-            &cfg,
-            ADVANCE_TICKS.min(ticks - elapsed),
-            &mut violations,
-            &mut peak_field,
-            &mut field_flatness,
-        );
-        if ordered_unit_count(&mut app) > 0 {
-            ordered_ticks += ADVANCE_TICKS;
+        let hub = hubs.get(hub_idx % hubs.len().max(1)).copied();
+        // ── dwell-advance: drive the squad onto the crab hub over several unbroken windows ──
+        for _ in 0..DWELL_ADVANCES {
+            if elapsed >= ticks {
+                break;
+            }
+            // An unreachable hub is skipped, not retried (a bad flow-field returns false): the schedule is
+            // fixed, and stalling on one hub would make episode length depend on the dungeon.
+            if let Some(hub) = hub {
+                issue_squad_order(&mut app, hub);
+            }
+            let stepped = ADVANCE_TICKS.min(ticks - elapsed);
+            elapsed += run(&mut app, &cfg, stepped, &mut violations, &mut peak_field, &mut field_flatness);
+            if ordered_unit_count(&mut app) > 0 {
+                ordered_ticks += stepped;
+            }
         }
         if elapsed >= ticks {
             break;
         }
 
-        // ── engage: hand the squad back to its brain ──
+        // ── engage: hand the squad back to its brain to fight the crabs now within reach ──
         clear_squad_orders(&mut app);
         elapsed += run(
             &mut app,
@@ -173,6 +208,7 @@ pub fn rollout(
             &mut peak_field,
             &mut field_flatness,
         );
+        hub_idx += 1;
     }
 
     let mut rollout = finish_recording(&mut app, violations, peak_field, field_flatness);
@@ -210,11 +246,13 @@ fn start_recording(app: &mut App) {
 }
 
 fn finish_recording(app: &mut App, liveness_violations: u32, peak_field: f32, field_flatness: f32) -> Rollout {
+    // Fold the final actor state BEFORE borrowing `Recording` (both need `&mut app`).
+    let snapshot = snapshot_hash(app);
     let mut rec = app.world_mut().resource_mut::<Recording>();
     rec.enabled = false;
     let mut outcome = rec.outcome;
     outcome.liveness_violations = liveness_violations;
     outcome.peak_field = peak_field;
     outcome.field_flatness = field_flatness;
-    Rollout { trace: std::mem::take(&mut rec.trace), outcome }
+    Rollout { trace: std::mem::take(&mut rec.trace), outcome, snapshot }
 }

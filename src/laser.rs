@@ -13,6 +13,7 @@
 use bevy::prelude::*;
 
 use crate::ai::field::{Deposit, FieldId, StigDeposits};
+use crate::audio_tuning::AudioTuning;
 use crate::audio::Sfx;
 use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
@@ -154,6 +155,7 @@ fn fire_laser(
     // alone and only fires on it once it turns angry (crabs/nests have no `SmileyState` → always targeted).
     enemies: Query<(&Transform, Option<&SmileyState>), (With<Hostile>, Without<Unit>)>,
     sim: Res<SimTuning>,
+    audio: Res<AudioTuning>,
 ) {
     // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. Target selection runs
     // EVERY tick (so each unit's `AimTarget` — hence its facing, `squad::unit_movement` — stays fresh and
@@ -241,6 +243,14 @@ fn fire_laser(
             field: FieldId::THREAT_GUN,
             amount: sim.deposit.threat_per_shot,
         });
+        // …and its audible din (`NOISE_SQUAD`) at the same spot — the *sound* of the shot, which the
+        // swarm reads as a stimulus (fear and/or investigate). Distinct channel from THREAT_GUN: it
+        // propagates on the `audio:` slice's tuning and carries an evolvable perception sign.
+        deposits.0.push(Deposit {
+            pos: unit.translation,
+            field: FieldId::NOISE_SQUAD,
+            amount: audio.stimulus.fire_loudness,
+        });
     }
 }
 
@@ -270,7 +280,9 @@ fn update_lasers(
     mut lasers: Query<(Entity, &mut Transform, &mut Laser), Without<Hostile>>,
     mut deposits: ResMut<StigDeposits>,
     mut lrng: ResMut<LaserRng>,
-    sim: Res<SimTuning>,
+    // Bundled into one tuple param to stay within Bevy's 16-param system cap (adding `audio` alongside
+    // the existing 16 would overflow). Both are read-only config slices.
+    (sim, audio): (Res<SimTuning>, Res<AudioTuning>),
 ) {
     let dt = time.delta_secs();
 
@@ -346,6 +358,12 @@ fn update_lasers(
                     field: FieldId::THREAT_GUN,
                     amount: sim.deposit.threat_per_shot,
                 });
+                // …and the wet impact's audible din (`NOISE_SQUAD`) at the strike point.
+                deposits.0.push(Deposit {
+                    pos: hit_point,
+                    field: FieldId::NOISE_SQUAD,
+                    amount: audio.stimulus.impact_flesh_loudness,
+                });
             }
             commands.entity(entity).despawn();
             continue;
@@ -372,6 +390,13 @@ fn update_lasers(
             if hit_wall {
                 impacts.0.push(transform.translation);
                 sfx.write(Sfx::ImpactWall(transform.translation));
+                // The crack of a bolt on stone carries as din (`NOISE_SQUAD`) — quieter than a discharge
+                // or a wet hit, but it still marks "a fight is happening here" for the swarm to read.
+                deposits.0.push(Deposit {
+                    pos: transform.translation,
+                    field: FieldId::NOISE_SQUAD,
+                    amount: audio.stimulus.impact_wall_loudness,
+                });
             }
             commands.entity(entity).despawn();
         }

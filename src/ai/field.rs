@@ -46,12 +46,30 @@ impl FieldId {
     /// Danger **emitted by the watcher** — its standing anomaly aura, deposited every tick while it lives.
     /// Read by units; it is what the Psionic's field-sight renders and what `PsiScan` reacts to.
     pub const THREAT_ANOMALY: FieldId = FieldId(6);
+
+    // --- Acoustic stimulus channels: sound as a perception field (not a one-way cosmetic output). The
+    // gameplay sites that emit an `audio::Sfx` also deposit into these, so the *audible din* of a fight
+    // propagates through the dungeon and creatures react to it. Faction-partitioned exactly like
+    // THREAT_GUN vs THREAT_CRAB, so the "nothing fears a channel it emits" invariant holds by
+    // construction. Propagation/salience/perception knobs live in the `audio:` config slice
+    // (`crate::audio_tuning::AudioTuning`) so the offline audio search can evolve them. Deliberately
+    // NOT in [`UNIT_THREAT_CHANNELS`]: audible din is a distinct category from creature menace, and the
+    // Psionic's field-sight should render dread from monsters, not the squad's own muzzle echoes.
+
+    /// Audible din **emitted by the squad** — muzzle fire, bolt impacts, a unit's death. Read by crabs
+    /// (fear and/or investigate), never by units. Kept distinct from [`Self::THREAT_GUN`]: same emit
+    /// sites, but THREAT_GUN is an abstract danger a crab flees, whereas this is the *sound* of the fight,
+    /// which the swarm may be drawn toward — a different radius/decay and an evolvable perception sign.
+    pub const NOISE_SQUAD: FieldId = FieldId(7);
+    /// Audible din **emitted by crabs** — a crab's death squelch. Read by units, never by crabs (which
+    /// would otherwise react to the sound of their own dying kin).
+    pub const NOISE_SWARM: FieldId = FieldId(8);
     // NOTE: the rally beacon is NOT a scalar channel — it's a *vectorial* pheromone (see [`RallyField`]
     // below), which stores a direction toward the moving prey rather than a scalar concentration.
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 7;
+pub const CHANNEL_COUNT: usize = 9;
 
 /// The danger channels a *unit* reads. One per hostile creature type, so nothing ever fears its own
 /// emissions. Ordered, but consumed by an order-independent `max` (see `DriveRule::TrackMaxFields`).
