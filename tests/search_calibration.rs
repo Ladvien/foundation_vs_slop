@@ -44,7 +44,7 @@ fn the_authored_brains_produce_a_real_encounter_on_every_world() {
 
     for world in WORLDS {
         let brains = brains_of(&t, &squad, &swarm).expect("decode the authored pairing");
-        let r = rollout(brains, None, world, EPISODE_TICKS);
+        let r = rollout(brains, None, None, world, EPISODE_TICKS);
 
         // The synthetic player must actually drive the squad. Without it the squad idles at spawn.
         assert!(
@@ -85,7 +85,7 @@ fn the_recorder_sees_both_sides_and_the_witness_filter_bites() {
     let squad = SquadGenome::authored(&t);
     let swarm = SwarmGenome::authored(&t);
     let brains = brains_of(&t, &squad, &swarm).expect("decode");
-    let r = rollout(brains, None, WORLDS[0], EPISODE_TICKS);
+    let r = rollout(brains, None, None, WORLDS[0], EPISODE_TICKS);
 
     // Both populations must appear, or a co-evolutionary descriptor is silently zero.
     let squad_d = squad_descriptor(&r.trace, &r.outcome);

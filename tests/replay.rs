@@ -55,12 +55,13 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // a gameplay value. This is the absolute-value lock the same-seed reproducibility tests above cannot
     // provide.
     //
-    // Re-pinned for the diegetic-lighting feature: crabs are now photophobic — they steer down the
-    // `light::LightField` gradient in `crab_locomotion` — so the deterministic core moved from the
-    // migration-era `0xec1add310772895c` to the value below. Legitimate: the same-seed reproducibility
-    // tests above (`deterministic_core_is_bit_identical`, `..._across_many_builds`) still pass, so the
-    // sim is still bit-reproducible — just different, because a real gameplay behaviour changed.
-    const GOLDEN: u64 = 0x3ecce611f2403172;
+    // Re-pinned twice since the migration: first for diegetic lighting (crabs went photophobic), then for
+    // the SCP-150 parasite — mancae now spawn into the core, hunt/embed hosts, and (over 1800 ticks)
+    // manipulate infested units + trip the crab alarm on embed, all of which move actors. So the core
+    // moved from the lighting-era `0x3ecce611f2403172` to the value below. Legitimate: the same-seed
+    // reproducibility tests above (`deterministic_core_is_bit_identical`, `..._across_many_builds`) still
+    // pass, so the sim is still bit-reproducible — just different, because a real feature was added.
+    const GOLDEN: u64 = 0x4b6f6d7f454559c7;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -82,12 +83,11 @@ fn field_passes_are_bit_identical() {
     // Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
     // neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
     // deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
-    // Re-pinned for BOTH merged features (was `0x9e33_16af_f944_c5f8`): `field_hash` now folds the audio
-    // branch's two new acoustic channels (`NOISE_SQUAD`/`NOISE_SWARM`, `CHANNEL_COUNT` 7 → 9) AND the
-    // `light::LightField` grid (see `sim_harness::field_hash`), so this value is recomputed on the MERGED
-    // tree — it is neither branch's. The ACTOR golden above is the lighting value (photophobia moves
-    // crabs); audio leaves it unchanged at the shipped config (din gains tiny, no combat in this sweep).
-    const GOLDEN_FIELD: u64 = 0xf56b_eabb_d8d3_aa57;
+    // Re-pinned again for the SCP-150 parasite (was `0xf56b_eabb_d8d3_aa57`): mancae embed hosts, which
+    // damages crabs and trips the ALARM channel, and manipulated units move — both perturb the stigmergy
+    // grids `field_hash` folds. Previously re-pinned for the audio + lighting merge (`field_hash` folds the
+    // `NOISE_SQUAD`/`NOISE_SWARM` channels and the `light::LightField` grid).
+    const GOLDEN_FIELD: u64 = 0xa35b_eaeb_288a_fbca;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -115,7 +115,7 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        0x3ecce611f2403172,
+        0x4b6f6d7f454559c7,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
@@ -408,6 +408,13 @@ fn photophobia_pulls_crabs_into_shadow() {
         if let Some(g) = gain_override {
             app.world_mut().resource_mut::<GameConfig>().lighting.photophobic_gain = g;
         }
+        // Isolate the variable under study (photophobia) from the SCP-150 parasite: zero the initial mancae
+        // so their embed-damage can't trip the crab alarm → muster, which pulls crabs OUT of shadow and
+        // would mask the light response. Same "mutate tuning at the seam" trick as the gain override above.
+        app.world_mut()
+            .resource_mut::<foundation_vs_slop::sim::SimTuning>()
+            .parasite
+            .initial_count = 0;
         app.finish();
         app.cleanup();
         step(&mut app, cfg, ticks);

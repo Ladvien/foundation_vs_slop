@@ -34,7 +34,7 @@ use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::{Health, NoHealthBar};
 use crate::sim::SimTuning;
 use crate::squad::{Prey, Unit};
-use crate::surface_nav::{SurfaceField, SurfaceGraph};
+use crate::surface_nav::{clamp_to_patch, project_tangent, surface_orientation, SurfaceField, SurfaceGraph};
 use crate::util::{hash01_u32, rand01, unit_is_facing};
 
 /// Total crabs across the level, split into `CRAB_CLUSTERS` nests in far rooms.
@@ -650,6 +650,10 @@ fn spawn_crab_on_patch(
     // dark. Added at spawn (stable archetype; `re_role_crabs` never touches it), so light response is a
     // fixed trait of the creature and can't churn the hashed sim actor's archetype at runtime.
     ec.insert(crate::light::Photophobic);
+    // SCP-150 host state: a crab is also a parasitizable host (the three-body web — parasite ↔ crab ↔
+    // squad). Always-present + inert until infested, added here so `nest_reproduce`'s bred crabs inherit
+    // it too; a flipped field never splits the hashed crab archetype.
+    ec.insert(crate::parasite::host_infestation_bundle());
     if is_scout {
         ec.insert(Scout::new(rand_seed));
     }
@@ -2390,33 +2394,6 @@ fn nest_reproduce(
             info!("nest: RESPAWN total={total}");
         }
     }
-}
-
-/// Project a world vector onto the plane with the given normal (drop the normal component).
-fn project_tangent(v: Vec3, normal: Vec3) -> Vec3 {
-    v - normal * v.dot(normal)
-}
-
-/// Clamp a world point onto a patch's rectangle (keeps a crab on its current surface). The bounds are
-/// asymmetric: a floor patch's walled edges are inset to the wall's inner face minus a body clearance
-/// (see `SurfaceGraph::build`), so a crab pushed sideways by separation/jitter can't wedge into the
-/// bounding wall slab, while open edges keep the full half-tile so gate transfers still commit.
-fn clamp_to_patch(pos: Vec3, p: &crate::surface_nav::Patch) -> Vec3 {
-    let d = pos - p.center;
-    let u = d.dot(p.tan_u).clamp(p.min.x, p.max.x);
-    let v = d.dot(p.tan_v).clamp(p.min.y, p.max.y);
-    p.center + p.tan_u * u + p.tan_v * v
-}
-
-/// Orientation that lays the crab flat on a surface (model up → `normal`) facing `heading`. Uses
-/// `look_to` (−Z toward the facing dir, +Y toward the normal); `heading` is projected perpendicular to
-/// the normal first so the up axis is exact.
-fn surface_orientation(heading: Vec3, normal: Vec3) -> Quat {
-    let up = normal.normalize_or(Vec3::Y);
-    let fwd = project_tangent(heading, up).normalize_or(up.any_orthonormal_vector());
-    let mut t = Transform::IDENTITY;
-    t.look_to(fwd, up);
-    t.rotation
 }
 
 #[cfg(test)]

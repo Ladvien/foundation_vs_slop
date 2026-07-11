@@ -125,6 +125,43 @@ pub struct BossTuning {
     pub cull_cooldown: f32,
 }
 
+/// SCP-150 parasite dynamics — the free manca's population/combat/gait knobs, the gestation clock, the
+/// brood size, and the host-manipulation strengths. Geometry/render constants (collider radius, model
+/// scale/seat) stay as code consts in `crate::parasite`; only the gameplay-dynamics numbers live here, so
+/// the offline search can evolve the parasite like the crab swarm. `manca_count_max` is the load-bearing
+/// cap that keeps the burst→brood→infest loop from exploding.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ParasiteTuning {
+    /// Free mancae seeded at level start.
+    pub initial_count: usize,
+    /// Hard cap on live mancae (bounds the reproduction loop).
+    pub manca_count_max: usize,
+    /// A manca's hit points.
+    pub manca_hp: f32,
+    /// Free-crawl / stalk speed on the floor (world units/s).
+    pub crawl_speed: f32,
+    /// Wall-climb speed (world units/s).
+    pub climb_speed: f32,
+    /// Ballistic-leap reach: a manca lunges at a host within this planar distance.
+    pub leap_len: f32,
+    /// Seconds between a manca's leaps.
+    pub leap_cooldown: f32,
+    /// Bite damage dealt to the host at the moment of burrowing in.
+    pub embed_damage: f32,
+    /// Seconds a parasite gestates inside a host before it bursts out.
+    pub gestation_seconds: f32,
+    /// Brood size on burst is drawn from `[brood_min, brood_max]`.
+    pub brood_min: u32,
+    pub brood_max: u32,
+    /// Host manipulation: the COHESION an infested unit is forced to (low ⇒ stops rejoining the squad).
+    pub manip_cohesion_drop: f32,
+    /// Host manipulation: the CURIOSITY an infested unit is forced to (high ⇒ wanders off).
+    pub manip_curiosity_gain: f32,
+    /// Host manipulation: how far (world units) an infested unit's goal is pushed down the light gradient
+    /// toward shadow.
+    pub manip_dark_gain: f32,
+}
+
 /// Root simulation-tuning resource. Extend with new sections as later phases need them; keep
 /// [`SimTuning::default`] bit-identical to the shipped consts, guarded by the deterministic-core hash.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -134,6 +171,7 @@ pub struct SimTuning {
     pub combat: CombatTuning,
     pub breeding: BreedingTuning,
     pub boss: BossTuning,
+    pub parasite: ParasiteTuning,
 }
 
 impl Default for SimTuning {
@@ -185,6 +223,22 @@ impl Default for SimTuning {
                 cull_radius: 1.4,
                 cull_max: 6,
                 cull_cooldown: 2.0,
+            },
+            parasite: ParasiteTuning {
+                initial_count: 3,
+                manca_count_max: 12,
+                manca_hp: 18.0,
+                crawl_speed: 1.8,
+                climb_speed: 1.8,
+                leap_len: 1.9,
+                leap_cooldown: 2.5,
+                embed_damage: 12.0,
+                gestation_seconds: 120.0,
+                brood_min: 2,
+                brood_max: 3,
+                manip_cohesion_drop: 0.05,
+                manip_curiosity_gain: 0.9,
+                manip_dark_gain: 3.0,
             },
         }
     }
@@ -274,6 +328,27 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
         return Err("sim tuning: boss.cull_max must be >= 1".into());
     }
     positive("boss.cull_cooldown", t.boss.cull_cooldown)?;
+
+    // Parasite (SCP-150).
+    if t.parasite.manca_count_max == 0 {
+        return Err("sim tuning: parasite.manca_count_max must be >= 1".into());
+    }
+    positive("parasite.manca_hp", t.parasite.manca_hp)?;
+    positive("parasite.crawl_speed", t.parasite.crawl_speed)?;
+    positive("parasite.climb_speed", t.parasite.climb_speed)?;
+    positive("parasite.leap_len", t.parasite.leap_len)?;
+    positive("parasite.leap_cooldown", t.parasite.leap_cooldown)?;
+    non_negative("parasite.embed_damage", t.parasite.embed_damage)?;
+    positive("parasite.gestation_seconds", t.parasite.gestation_seconds)?;
+    if !(t.parasite.brood_min >= 1 && t.parasite.brood_max >= t.parasite.brood_min) {
+        return Err(format!(
+            "sim tuning: parasite brood must satisfy 1 <= brood_min <= brood_max (got {} .. {})",
+            t.parasite.brood_min, t.parasite.brood_max
+        ));
+    }
+    probability("parasite.manip_cohesion_drop", t.parasite.manip_cohesion_drop)?;
+    probability("parasite.manip_curiosity_gain", t.parasite.manip_curiosity_gain)?;
+    positive("parasite.manip_dark_gain", t.parasite.manip_dark_gain)?;
 
     Ok(())
 }

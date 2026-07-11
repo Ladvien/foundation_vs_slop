@@ -262,6 +262,9 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             crate::enemy::EnemyPlugin,
             crate::crab::CrabPlugin,
             crate::nest::NestPlugin,
+            // SCP-150 parasite: its lifecycle (spawn/hunt/leap, later embed/gestate/burst) changes pinned
+            // Transform/Health/timer state, so the exact-hash determinism gate must cover it.
+            crate::parasite::ParasitePlugin,
         ),
         crate::laser::LaserPlugin,
         crate::impact_fx::ImpactFxPlugin,
