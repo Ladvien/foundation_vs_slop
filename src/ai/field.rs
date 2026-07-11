@@ -99,9 +99,9 @@ pub struct Stig {
     defs: [ChannelDef; CHANNEL_COUNT],
     /// Reused double-buffer for the diffusion pass (avoids per-frame allocation).
     scratch: Vec<f32>,
-    /// Row-major indices of the floor cells (the only cells that ever carry value). Precomputed once so the
-    /// per-tick evaporation/diffusion/hotspot passes skip the rock cells. See [`floor_cell_indices`].
-    floor_cells: Vec<usize>,
+    /// The floor cells (the only cells that ever carry value), precomputed once so the per-tick
+    /// evaporation/diffusion/hotspot passes skip the rock cells. See [`floor_cells_of`].
+    floor_cells: Vec<FloorCell>,
 }
 
 /// Walk the floor cells within `radius` (in cells) of `pos`, calling `emit(cell_index, falloff)` with the
@@ -135,21 +135,27 @@ fn deposit_disc(
     }
 }
 
-/// Row-major indices of every floor cell, in ascending index order, precomputed once from the (static)
-/// dungeon. The per-tick field passes iterate only these: a rock cell never carries field value — deposits
-/// are floor-masked (`deposit_disc`), evaporation of 0 is 0, and the diffusion double-buffer's rock cells
-/// stay 0 across the swap — so skipping the ~half-to-two-thirds of the grid that is rock is **bit-identical**
-/// to scanning the whole grid, not an approximation.
-fn floor_cell_indices(dungeon: &Dungeon) -> Vec<usize> {
-    let mut cells = Vec::new();
-    for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let c = IVec2::new(x, y);
-            if dungeon.is_floor(c) {
-                cells.push(crate::util::row_major(c, dungeon.width));
-            }
-        }
-    }
+/// A precomputed floor cell: its row-major grid index and its `(x, y)` coordinates, carried together so the
+/// per-tick passes need neither an `is_floor` test nor an `i % w` / `i / w` recompute. `idx == row_major(pos)`.
+#[derive(Clone, Copy)]
+struct FloorCell {
+    idx: usize,
+    pos: IVec2,
+}
+
+/// Every floor cell of the (static) dungeon, precomputed once in ascending row-major order. The per-tick
+/// field passes iterate only these: a rock cell never carries field value — deposits are floor-masked
+/// (`deposit_disc`), evaporation of 0 is 0, and the diffusion double-buffer's rock cells stay 0 across the
+/// swap — so skipping the ~half-to-two-thirds of the grid that is rock is **bit-identical** to scanning the
+/// whole grid, not an approximation. The floor set comes from the shared [`Dungeon::floor_cells`] so it can
+/// never drift from the harness coverage denominator or the habitat mask.
+fn floor_cells_of(dungeon: &Dungeon) -> Vec<FloorCell> {
+    let mut cells = Vec::with_capacity(dungeon.width * dungeon.height);
+    cells.extend(
+        dungeon
+            .floor_cells()
+            .map(|c| FloorCell { idx: crate::util::row_major(c, dungeon.width), pos: c }),
+    );
     cells
 }
 
@@ -163,7 +169,7 @@ impl Stig {
             channels: std::array::from_fn(|_| vec![0.0; cells]),
             defs,
             scratch: vec![0.0; cells],
-            floor_cells: floor_cell_indices(dungeon),
+            floor_cells: floor_cells_of(dungeon),
         }
     }
 
@@ -227,8 +233,8 @@ impl Stig {
             let retain = (1.0 - def.evaporate * dt).clamp(0.0, 1.0);
             {
                 let grid = &mut self.channels[ch];
-                for &i in &self.floor_cells {
-                    grid[i] *= retain;
+                for fc in &self.floor_cells {
+                    grid[fc.idx] *= retain;
                 }
             }
             if def.diffuse <= 0.0 {
@@ -238,9 +244,8 @@ impl Stig {
             let diffuse = def.diffuse;
             let grid = &self.channels[ch];
             let scratch = &mut self.scratch;
-            for &i in &self.floor_cells {
-                let x = (i % w) as i32;
-                let y = (i / w) as i32;
+            for fc in &self.floor_cells {
+                let (x, y) = (fc.pos.x, fc.pos.y);
                 let mut sum = 0.0;
                 let mut n = 0.0;
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -250,8 +255,8 @@ impl Stig {
                         n += 1.0;
                     }
                 }
-                let avg = if n > 0.0 { sum / n } else { grid[i] };
-                scratch[i] = grid[i] * (1.0 - diffuse) + avg * diffuse;
+                let avg = if n > 0.0 { sum / n } else { grid[fc.idx] };
+                scratch[fc.idx] = grid[fc.idx] * (1.0 - diffuse) + avg * diffuse;
             }
             std::mem::swap(&mut self.channels[ch], &mut self.scratch);
         }
@@ -265,11 +270,11 @@ impl Stig {
         let mut best_cell = dungeon.spawn;
         // `floor_cells` is ascending-index order, and rock cells are 0 (can never beat `best` under the
         // strict `>`), so this yields the identical first-max-wins result as scanning the whole grid.
-        for &i in &self.floor_cells {
-            let v = grid[i];
+        for fc in &self.floor_cells {
+            let v = grid[fc.idx];
             if v > best {
                 best = v;
-                best_cell = IVec2::new((i % self.width) as i32, (i / self.width) as i32);
+                best_cell = fc.pos;
             }
         }
         (dungeon.cell_center(best_cell), best)
@@ -282,34 +287,42 @@ impl Stig {
     /// whole-map smear (huge radius/diffusion) is high *and* uniform (flatness → 1), so agents cannot
     /// navigate its gradient. Read-only and order-independent (`max`/count), so it never perturbs the
     /// pinned sim — it is sampled from `squad_ai::evaluate::rollout`, not a system.
-    pub fn saturation_stats(&self, dungeon: &Dungeon) -> (f32, f32) {
+    pub fn saturation_stats(&self) -> (f32, f32) {
         let per_cell_max =
             |i: usize| (0..CHANNEL_COUNT).map(|ch| self.channels[ch][i]).fold(0.0f32, f32::max);
-        let mut peak = 0.0f32;
-        let mut floor = 0usize;
-        for y in 0..self.height as i32 {
-            for x in 0..self.width as i32 {
-                let cell = IVec2::new(x, y);
-                if dungeon.is_floor(cell) {
-                    peak = peak.max(per_cell_max(self.index(cell)));
-                    floor += 1;
-                }
-            }
-        }
+        let floor = self.floor_cells.len();
+        let peak = self.floor_cells.iter().map(|fc| per_cell_max(fc.idx)).fold(0.0f32, f32::max);
         if floor == 0 || peak <= 0.0 {
             return (peak, 0.0);
         }
         let thresh = 0.5 * peak;
-        let mut hot = 0usize;
-        for y in 0..self.height as i32 {
-            for x in 0..self.width as i32 {
-                let cell = IVec2::new(x, y);
-                if dungeon.is_floor(cell) && per_cell_max(self.index(cell)) >= thresh {
-                    hot += 1;
-                }
+        let hot = self.floor_cells.iter().filter(|fc| per_cell_max(fc.idx) >= thresh).count();
+        (peak, hot as f32 / floor as f32)
+    }
+
+    /// FNV-1a-fold the exact bit pattern of every channel cell (the **full** grid, so the rock-cells-stay-0
+    /// invariant is pinned too) plus the derived `saturation_stats`, into `hash`. The determinism oracle for
+    /// the field passes: `snapshot_hash` hashes only actor Transform+Health, so without this a reordered
+    /// neighbour sum or broken floor mask that doesn't happen to move an agent would ship silently. Test-only.
+    #[cfg(feature = "test-harness")]
+    pub fn fold_fingerprint(&self, hash: &mut u64) {
+        for ch in &self.channels {
+            for &v in ch {
+                fnv1a_fold(&v.to_bits().to_le_bytes(), hash);
             }
         }
-        (peak, hot as f32 / floor as f32)
+        let (peak, flatness) = self.saturation_stats();
+        fnv1a_fold(&peak.to_bits().to_le_bytes(), hash);
+        fnv1a_fold(&flatness.to_bits().to_le_bytes(), hash);
+    }
+}
+
+/// FNV-1a byte fold — the same mix `snapshot_hash` uses, shared by the field fingerprints.
+#[cfg(feature = "test-harness")]
+fn fnv1a_fold(bytes: &[u8], hash: &mut u64) {
+    for &b in bytes {
+        *hash ^= b as u64;
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
 }
 
@@ -378,9 +391,9 @@ pub struct RallyField {
     decay: f32,
     accumulate: f32,
     deposit_radius: f32,
-    /// Floor-cell indices (only floor cells receive value), so evaporation skips the rock cells. See
-    /// [`floor_cell_indices`].
-    floor_cells: Vec<usize>,
+    /// The floor cells (only floor cells receive value), so evaporation skips the rock cells. See
+    /// [`floor_cells_of`].
+    floor_cells: Vec<FloorCell>,
 }
 
 impl RallyField {
@@ -394,7 +407,7 @@ impl RallyField {
             decay: def.decay,
             accumulate: def.accumulate,
             deposit_radius: def.deposit_radius,
-            floor_cells: floor_cell_indices(dungeon),
+            floor_cells: floor_cells_of(dungeon),
         }
     }
 
@@ -435,8 +448,18 @@ impl RallyField {
         let retain = (1.0 - self.decay * dt).clamp(0.0, 1.0);
         // Only floor cells ever hold a vector (deposits are floor-masked), so scaling the rock cells is a
         // no-op — iterate floor cells only (bit-identical).
-        for &i in &self.floor_cells {
-            self.grid[i] *= retain;
+        for fc in &self.floor_cells {
+            self.grid[fc.idx] *= retain;
+        }
+    }
+
+    /// FNV-1a-fold the exact bit pattern of every cell's direction vector (full grid) into `hash`. The
+    /// vectorial-field half of the determinism oracle — see [`Stig::fold_fingerprint`]. Test-only.
+    #[cfg(feature = "test-harness")]
+    pub fn fold_fingerprint(&self, hash: &mut u64) {
+        for v in &self.grid {
+            fnv1a_fold(&v.x.to_bits().to_le_bytes(), hash);
+            fnv1a_fold(&v.y.to_bits().to_le_bytes(), hash);
         }
     }
 }

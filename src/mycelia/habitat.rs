@@ -254,7 +254,7 @@ pub fn build(dungeon: &Dungeon, cfg: &MyceliaConfig) -> Result<Vec<u8>, String> 
     }
     let cell_at = |i: usize| IVec2::new((i % cells) as i32, (i / cells) as i32);
 
-    let floor_total = (0..cells * cells).filter(|&i| dungeon.is_floor(cell_at(i))).count();
+    let floor_total = dungeon.floor_cells().count();
     if floor_total == 0 {
         return Err("mycelia::habitat: dungeon has no walkable floor".to_string());
     }
@@ -557,15 +557,8 @@ mod tests {
 
     /// Measured coverage of a built mask, as a fraction of walkable floor.
     fn coverage(d: &Dungeon, bytes: &[u8], field: usize) -> f32 {
-        let n = CONTROL_SIZE as usize;
-        let cell = |i: usize| IVec2::new((i % n) as i32, (i / n) as i32);
-        let floor = (0..n * n).filter(|&i| d.is_floor(cell(i))).count();
-        let cov = (0..n * n)
-            .filter(|&i| {
-                let c = cell(i);
-                d.is_floor(c) && covered(bytes, field, c.x, c.y)
-            })
-            .count();
+        let floor = d.floor_cells().count();
+        let cov = d.floor_cells().filter(|c| covered(bytes, field, c.x, c.y)).count();
         cov as f32 / floor as f32
     }
 

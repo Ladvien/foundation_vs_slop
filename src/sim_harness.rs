@@ -332,6 +332,24 @@ pub fn snapshot_hash(app: &mut App) -> u64 {
     hash
 }
 
+/// A deterministic hash of the stigmergy field grids — the determinism oracle `snapshot_hash` cannot
+/// provide. `snapshot_hash` folds only actor Transform+Health, never a field cell, so a reordered diffusion
+/// neighbour sum or a broken floor mask that doesn't happen to relocate an agent is invisible to it. This
+/// folds every `Stig` channel cell and every `RallyField` vector (full grid, so rock-cells-stay-0 is pinned
+/// too) plus the derived `saturation_stats`, into one FNV-1a hash. Same seed ⇒ same hash. Test-only.
+#[cfg(feature = "test-harness")]
+pub fn field_hash(app: &mut App) -> u64 {
+    let world = app.world();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    if let Some(stig) = world.get_resource::<crate::ai::field::Stig>() {
+        stig.fold_fingerprint(&mut hash);
+    }
+    if let Some(rally) = world.get_resource::<crate::ai::field::RallyField>() {
+        rally.fold_fingerprint(&mut hash);
+    }
+    hash
+}
+
 /// Issue a squad move order toward `goal` (a dungeon cell): build one shared flow field and insert a
 /// `MoveOrder` on every unit. This is the headless-safe way to drive the squad — it bypasses
 /// `selection::command_input`, which needs a cursor + window the harness doesn't have (Bécares: replay
@@ -389,7 +407,7 @@ pub fn field_saturation(app: &mut App) -> (f32, f32) {
         world.get_resource::<crate::ai::field::Stig>(),
         world.get_resource::<crate::dungeon::Dungeon>(),
     ) {
-        (Some(stig), Some(dungeon)) => stig.saturation_stats(dungeon),
+        (Some(stig), Some(_dungeon)) => stig.saturation_stats(),
         _ => (0.0, 0.0),
     }
 }
@@ -422,16 +440,7 @@ pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
 pub fn floor_cells(app: &mut App) -> Vec<IVec2> {
     let world = app.world_mut();
     let dungeon = world.resource::<crate::dungeon::Dungeon>();
-    let mut out = Vec::new();
-    for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let c = IVec2::new(x, y);
-            if dungeon.is_floor(c) {
-                out.push(c);
-            }
-        }
-    }
-    out
+    dungeon.floor_cells().collect()
 }
 
 /// Liveness oracle for the FULL (physics-inclusive) sim, whose Avian layer is not bit-reproducible so

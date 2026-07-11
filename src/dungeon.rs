@@ -1211,6 +1211,17 @@ impl Dungeon {
         self.in_bounds(c) && self.walkable[self.index(c)]
     }
 
+    /// Every floor cell, in row-major order (y outer, x inner). The single source of truth for "which
+    /// cells carry field value" — the field passes, the harness coverage denominator, and the habitat
+    /// mask all draw the floor set from here so they cannot drift apart. Ascending order is load-bearing:
+    /// callers such as `Stig::hotspot` rely on a stable first-max-wins scan.
+    pub fn floor_cells(&self) -> impl Iterator<Item = IVec2> + '_ {
+        let (w, h) = (self.width as i32, self.height as i32);
+        (0..h)
+            .flat_map(move |y| (0..w).map(move |x| IVec2::new(x, y)))
+            .filter(move |&c| self.is_floor(c))
+    }
+
     /// Which corridor run (adjacency-edge index) owns this cell, or `None` for room floor and rock.
     ///
     /// Gated on `is_floor`, so a doorway cell the necking pass closed reports `None` even though the

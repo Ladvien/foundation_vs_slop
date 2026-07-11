@@ -13,7 +13,7 @@
 #![cfg(feature = "test-harness")]
 
 use foundation_vs_slop::sim_harness::{
-    build_headless_app, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
+    build_headless_app, field_hash, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
 };
 
 #[test]
@@ -69,6 +69,28 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
         GOLDEN,
         "deterministic-core hash drifted from the pre-migration golden — the const→config promotion \
          changed a gameplay value (or the shipped `sim:` slice differs from SimTuning::default())"
+    );
+}
+
+#[test]
+fn field_passes_are_bit_identical() {
+    // The direct oracle for the "iterate only floor cells" optimization of the evaporate/diffuse/hotspot
+    // passes (commit 973319d). `snapshot_hash` folds only actor Transform+Health, so it catches a diffusion
+    // regression only *transitively* — if the perturbed gradient happens to move a crab to a different cell —
+    // and never exercises `saturation_stats` at all. `field_hash` folds the field grids themselves (every
+    // Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
+    // neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
+    // deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
+    const GOLDEN_FIELD: u64 = 0x9e33_16af_f944_c5f8;
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1800);
+    assert_eq!(
+        field_hash(&mut app),
+        GOLDEN_FIELD,
+        "stigmergy field grids drifted from the golden — the evaporate/diffuse/hotspot floor-cell \
+         iteration is no longer bit-identical to the full-grid scan"
     );
 }
 
