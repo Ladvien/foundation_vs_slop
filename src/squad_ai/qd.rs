@@ -13,10 +13,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// A 2-D behaviour characterisation of one squad configuration, each axis in `[0,1]`:
 /// - `aggression`: how much the squad engages threats vs. avoids (combat share of actions).
 /// - `exploration`: how much of the map the squad covered (visitation coverage / reachable area).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorDescriptor {
     pub aggression: f32,
     pub exploration: f32,
