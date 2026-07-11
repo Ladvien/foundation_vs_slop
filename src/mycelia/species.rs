@@ -63,6 +63,10 @@ pub struct SpeciesGeometryData {
 pub struct SpeciesConfig {
     /// Human-readable name, e.g. `"Death Cap"`. For diagnostics and error messages.
     pub name: String,
+    /// Growth archetype, e.g. `"veiled_egg"`, `"gilled_plain"`, `"bracket"`. The bracket archetypes
+    /// (Turkey Tail, Oyster, Chicken of the Woods) grow on walls; the rest on the floor. Drives the
+    /// mount pose strategy at pin time.
+    pub archetype: String,
     /// Asset path of the growth glb (six morph targets), relative to `assets/`.
     pub growth_glb: String,
     /// Uniform scale applied to the native-scale mesh. The death cap ships at 4.0 (13.9 cm → 56 cm).
@@ -196,6 +200,7 @@ pub fn death_cap_data() -> SpeciesGeometryData {
 pub fn death_cap_config_row() -> SpeciesConfig {
     SpeciesConfig {
         name: "Death Cap".to_string(),
+        archetype: "veiled_egg".to_string(),
         growth_glb: "death_cap/death_cap_growth.glb".to_string(),
         body_scale: 4.0,
         geom: death_cap_data(),
@@ -225,5 +230,90 @@ impl SpeciesScenes {
     /// A clone of a species' scene handle.
     pub fn handle(&self, id: SpeciesId) -> Handle<WorldAsset> {
         self.0[id.0 as usize].clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera::{MAX_ZOOM, MIN_ZOOM};
+    use crate::mycelia::perceptual::{v_max, NOMINAL_MOTION_THRESHOLD_DEG_PER_S, NOMINAL_SCREEN_FOV_DEG_V};
+
+    /// Every species declared in the shipped config, resolved to runtime geometry. This is the fixture
+    /// the invariants below sweep over — it proves the guarantees hold for *all* mushrooms, not just the
+    /// death cap.
+    fn all_species() -> Vec<(String, SpeciesGeometry)> {
+        let cfg = crate::config::load_game_config().expect("shipped config must load").mycelia;
+        cfg.species
+            .iter()
+            .map(|s| (s.name.clone(), SpeciesGeometry::from_data(&s.geom)))
+            .collect()
+    }
+
+    /// The shipped table must name every mushroom, with the death cap first.
+    #[test]
+    fn the_table_has_all_sixteen_species_with_the_death_cap_first() {
+        let species = all_species();
+        assert_eq!(species.len(), 16, "expected 16 species, got {}", species.len());
+        assert_eq!(species[0].0, "Death Cap", "the death cap must be row 0");
+    }
+
+    /// **The invariant, for every species.** For each morph segment and every zoom the player can reach,
+    /// the fastest vertex must move no faster than the motion-detection threshold. Growth being data-driven,
+    /// this is the guarantee that *all sixteen* species grow imperceptibly slowly, not just the reference one.
+    #[test]
+    fn no_species_ever_outruns_the_motion_threshold() {
+        let thresh = NOMINAL_MOTION_THRESHOLD_DEG_PER_S;
+        let fov = NOMINAL_SCREEN_FOV_DEG_V;
+        for (name, geom) in all_species() {
+            let scale = 4.0;
+            for bend in [0.0, 0.5 * geom.max_bend_m, geom.max_bend_m] {
+                for tilt in [0.0, MAX_TILT] {
+                    for steps in 0..=16u32 {
+                        let viewport = MIN_ZOOM + (MAX_ZOOM - MIN_ZOOM) * (steps as f32 / 16.0);
+                        let budget = v_max(thresh, fov, viewport);
+                        for growth in [0.0, 0.12, 0.28, 0.45, 0.62, 0.80, 0.99] {
+                            let rate = geom.growth_rate(growth, scale, bend, tilt, budget);
+                            let k = crate::mycelia::perceptual::segment_index(growth);
+                            let span = STAGE_T[k + 1] - STAGE_T[k];
+                            // Fastest vertex speed = chord * (dgrowth/dt) / span. By construction it equals
+                            // the budget; assert it never exceeds it.
+                            let travel = geom.stage_max_disp[k]
+                                + geom.stage_bend_fraction[k] * bend.abs().min(geom.max_bend_m)
+                                + geom.stage_height_delta[k] * tilt.abs().min(MAX_TILT);
+                            let speed = travel * scale * rate / span;
+                            assert!(
+                                speed <= budget * (1.0 + 1e-4),
+                                "{name}: growth {growth} bend {bend} tilt {tilt} zoom {viewport}: \
+                                 vertex speed {speed} exceeds budget {budget}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Growth geometry must be well-formed for every species, or the speed limit is undefined: heights
+    /// non-decreasing (a body never shrinks as it matures) and every morph segment moves (a zero segment
+    /// would make `growth_rate` divide by zero).
+    #[test]
+    fn every_species_geometry_is_well_formed() {
+        for (name, geom) in all_species() {
+            for k in 0..6 {
+                // Heights are non-decreasing bar a sub-millimetre settle as the sealed egg compacts
+                // before it rises (the death cap does exactly this: 4.85 → 4.84 cm). A 2 mm tolerance
+                // admits that while still catching a real height collapse.
+                assert!(
+                    geom.stage_height_m[k + 1] >= geom.stage_height_m[k] - 0.002,
+                    "{name}: height drops {:.4} m at stage {k}",
+                    geom.stage_height_m[k] - geom.stage_height_m[k + 1]
+                );
+                assert!(geom.stage_max_disp[k] > 0.0, "{name}: zero displacement at segment {k}");
+            }
+            assert!(geom.egg_height_m > 0.0, "{name}: non-positive egg height");
+            assert!(geom.cap_radius_m > 0.0 && geom.volva_radius_m > 0.0, "{name}: non-positive radius");
+            assert!(geom.bend_lo_m < geom.bend_hi_m, "{name}: bend zone inverted");
+        }
     }
 }
