@@ -60,6 +60,9 @@ fn main() {
         "evolve" => parse_evolve(&args[1..]).and_then(evolve),
         "evolve3" => parse_evolve(&args[1..]).and_then(evolve3),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
+        // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
+        // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
+        "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
             "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3)"
         )),
@@ -168,6 +171,9 @@ fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
             "--res" => cfg.resolution = parse_u32(value()?)? as usize,
             "--seed" => cfg.seed = parse_u64(value()?)?,
             "--seeds" => cfg.dungeon_seeds = parse_seeds(value()?)?,
+            // Worker processes for parallel rollout evaluation. `1` (default) runs inline. The archives are
+            // byte-identical regardless — `--jobs` only trades CPU for wall-clock, capped at OPPONENTS (3).
+            "--jobs" => cfg.jobs = parse_u32(value()?)? as usize,
             other => return Err(format!("unknown flag {other:?}")),
         }
         i += 2;
@@ -195,8 +201,8 @@ fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), Strin
     let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
 
     println!(
-        "co-evolving {} generations x {} children/side, {} ticks/episode, worlds {:?}, seed 0x{:X}",
-        cfg.generations, cfg.batch, cfg.episode_ticks, cfg.dungeon_seeds, cfg.seed
+        "co-evolving {} generations x {} children/side, {} ticks/episode, worlds {:?}, seed 0x{:X}, {} worker(s)",
+        cfg.generations, cfg.batch, cfg.episode_ticks, cfg.dungeon_seeds, cfg.seed, cfg.jobs.max(1)
     );
 
     let result = search(&templates, &prior, &cfg, |generation, r| {

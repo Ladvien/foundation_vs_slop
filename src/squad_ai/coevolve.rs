@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use rand_chacha::ChaCha8Rng;
 
@@ -100,13 +100,13 @@ impl Templates {
 }
 
 /// One squad candidate: a genome per role, in `RoleId::ALL` order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SquadGenome(pub Vec<Genome>);
 
 /// One swarm candidate: the three creature repertoires that co-adapt as a unit. They are carried
 /// together because they share a world — a scout that marks prey is only meaningful beside crabs that
 /// rally on the mark.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SwarmGenome {
     pub crab: Genome,
     pub scout: Genome,
@@ -431,6 +431,16 @@ pub struct SearchConfig {
     /// learnability measures behaviour that generalises across worlds rather than a memorised map.
     pub dungeon_seeds: Vec<u64>,
     pub resolution: usize,
+    /// How many worker **processes** evaluate rollouts in parallel. `1` (the default) runs every rollout
+    /// inline in this process — the reference path. `N > 1` spawns `N` `train worker` subprocesses and
+    /// fans the `OPPONENTS` independent triples of each candidate across them. Parallelism must be across
+    /// *processes*, never threads: `sim_harness` holds a process-wide lock and pins the compute pool to one
+    /// thread for determinism (see `evaluate` module doc). Because `score_triple` draws no search RNG and a
+    /// rollout is a pure function of its `(brains, world, seed, ticks)`, the fan-out reduces in the exact
+    /// input order and the archives are **byte-identical** to `jobs = 1` (proved by
+    /// `tests/search_parallel.rs`). The ceiling is `OPPONENTS`: children are sequential (each reads the
+    /// archive the previous one just mutated), so raising `jobs` past `OPPONENTS` adds no speedup.
+    pub jobs: usize,
 }
 
 impl Default for SearchConfig {
@@ -442,6 +452,7 @@ impl Default for SearchConfig {
             episode_ticks: 7200,
             dungeon_seeds: vec![0x5C09191, 0xA11CE, 0xBEEF],
             resolution: 8,
+            jobs: 1,
         }
     }
 }
@@ -503,6 +514,76 @@ fn score_triple(
     }))
 }
 
+/// One triple to evaluate: the three genomes and the seed pair. The unit of parallel work — a worker
+/// process needs nothing else (it rebuilds `Templates` and holds the frozen prior), and a rollout is a
+/// pure function of `(brains, world, seed, ticks)`, so this is a self-contained, order-independent job.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct TripleJob {
+    pub squad: SquadGenome,
+    pub swarm: SwarmGenome,
+    pub world: WorldGenome,
+    pub seed_a: u64,
+    pub seed_b: u64,
+    pub ticks: u32,
+}
+
+/// The wire-friendly result of a [`TripleJob`]: the scalar fitness plus all three descriptors (cheap —
+/// four `f32` pairs). The heavy `EpisodeTrace` is reduced worker-side and never crosses the process
+/// boundary. `None` (at the `Option` layer above) means the triple failed the minimal criterion.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct TripleScore {
+    pub score: f32,
+    pub squad: BehaviorDescriptor,
+    pub swarm: BehaviorDescriptor,
+    pub world: BehaviorDescriptor,
+}
+
+/// [`score_triple`] reduced to the compact [`TripleScore`] — the exact computation a worker performs, and
+/// the inline path performs too, so both routes are provably identical.
+pub(crate) fn score_triple_compact(
+    t: &Templates,
+    squad: &SquadGenome,
+    swarm: &SwarmGenome,
+    world: &WorldGenome,
+    prior: &ModePrior,
+    seed_a: u64,
+    seed_b: u64,
+    episode_ticks: u32,
+) -> Result<Option<TripleScore>, String> {
+    Ok(score_triple(t, squad, swarm, world, prior, seed_a, seed_b, episode_ticks)?.map(|tr| TripleScore {
+        score: tr.fitness.score(),
+        squad: tr.squad,
+        swarm: tr.swarm,
+        world: tr.world,
+    }))
+}
+
+/// Where a batch of [`TripleJob`]s is evaluated. `Inline` runs them in this process (the reference path,
+/// and what the tests and single-core runs use); `Pool` fans them across worker processes. Both call the
+/// identical [`score_triple_compact`], and both return results in input order, so the choice never changes
+/// what the search computes — only how fast.
+pub(crate) enum Evaluator<'a> {
+    Inline { t: &'a Templates, prior: &'a ModePrior },
+    Pool(super::parallel::WorkerPool),
+}
+
+impl Evaluator<'_> {
+    /// Evaluate `jobs`, preserving order. Any error (a decode/feasibility bug, or a worker dying) is fatal
+    /// and propagates — never a silent skip, which would corrupt the archive with a candidate scored on
+    /// fewer opponents than it was credited for.
+    fn eval(&self, jobs: &[TripleJob]) -> Result<Vec<Option<TripleScore>>, String> {
+        match self {
+            Evaluator::Inline { t, prior } => jobs
+                .iter()
+                .map(|j| {
+                    score_triple_compact(t, &j.squad, &j.swarm, &j.world, prior, j.seed_a, j.seed_b, j.ticks)
+                })
+                .collect(),
+            Evaluator::Pool(pool) => pool.eval(jobs),
+        }
+    }
+}
+
 /// Both archives after a run.
 pub struct SearchResult {
     pub squad: Population<SquadGenome>,
@@ -540,6 +621,15 @@ pub fn search(
         rejected_by_criterion: 0,
     };
 
+    // Where rollouts run. `jobs = 1` (default) evaluates inline in this process — the reference path the
+    // tests pin. `jobs > 1` spawns a worker pool; it changes only *where* each triple is scored, never the
+    // result (see `parallel` module doc). The pool lives for the whole search and is torn down on return.
+    let evaluator = if cfg.jobs <= 1 {
+        Evaluator::Inline { t, prior }
+    } else {
+        Evaluator::Pool(super::parallel::WorkerPool::spawn(cfg.jobs, prior)?)
+    };
+
     // Each generation mutates one child per population and scores it against `OPPONENTS` pairs drawn from
     // the OTHER two archives (three-way co-evolution in the spirit of POET, arXiv:1901.01753, and multi-
     // agent autocurricula, Baker et al. arXiv:1909.07528): a squad child fights (swarm, world) pairs, a
@@ -551,21 +641,21 @@ pub fn search(
             let child = propose_squad(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
             let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
             let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
-            score_and_insert_squad(t, prior, cfg, &mut rng, &mut result, &child, &swarm_opps, &world_opps)?;
+            score_and_insert_squad(t, cfg, &mut rng, &mut result, &evaluator, &child, &swarm_opps, &world_opps)?;
 
             // ── swarm child vs (squad, world) opponents ──
             let parent = result.swarm.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_swarm.clone());
             let child = propose_swarm(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
             let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
             let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
-            score_and_insert_swarm(t, prior, cfg, &mut rng, &mut result, &child, &squad_opps, &world_opps)?;
+            score_and_insert_swarm(t, cfg, &mut rng, &mut result, &evaluator, &child, &squad_opps, &world_opps)?;
 
             // ── world child vs (squad, swarm) opponents ──
             let parent = result.world.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_world.clone());
             let child = propose_world(&parent, &mut rng)?;
             let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
             let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
-            score_and_insert_world(t, prior, cfg, &mut rng, &mut result, &child, &squad_opps, &swarm_opps)?;
+            score_and_insert_world(t, cfg, &mut rng, &mut result, &evaluator, &child, &squad_opps, &swarm_opps)?;
         }
         report(generation, &result);
     }
@@ -587,19 +677,21 @@ fn sample_or_authored<G: Clone>(pop: &Population<G>, authored: &G, rng: &mut Cha
 
 fn score_and_insert_squad(
     t: &Templates,
-    prior: &ModePrior,
     cfg: &SearchConfig,
     rng: &mut ChaCha8Rng,
     result: &mut SearchResult,
+    evaluator: &Evaluator,
     child: &SquadGenome,
     swarm_opps: &[SwarmGenome],
     world_opps: &[WorldGenome],
 ) -> Result<(), String> {
-    let mut scores = Vec::new();
-    let mut descriptors = Vec::new();
-    // Record each PASSING triple's exact (opponents, seeds) so the incumbent can be re-scored on identical
-    // conditions in the Phase-5 common-opponent comparison.
-    let mut recorded: Vec<(SwarmGenome, WorldGenome, u64, u64)> = Vec::new();
+    // Phase 1 — sequential: screen each pairing and draw its seed pair, in opponent order. `draw_two_seeds`
+    // is the only RNG here, so building the whole job list up front leaves the RNG stream byte-identical to
+    // scoring the triples one at a time (`score_triple` draws none).
+    let mut jobs = Vec::with_capacity(swarm_opps.len());
+    // Each triple's exact (opponents, seeds), so a surviving incumbent can be re-scored on identical
+    // conditions in the common-opponent comparison.
+    let mut recorded: Vec<(SwarmGenome, WorldGenome, u64, u64)> = Vec::with_capacity(swarm_opps.len());
     for (swarm, world) in swarm_opps.iter().zip(world_opps) {
         // Feasible by construction (`propose_*` screens children; archive members were screened on entry).
         // A failure here is a bug, not a candidate to skip.
@@ -607,11 +699,30 @@ fn score_and_insert_squad(
         world_genome::is_feasible(world)?;
         result.evaluations += 1;
         let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
-        match score_triple(t, child, swarm, world, prior, sa, sb, cfg.episode_ticks)? {
-            Some(tr) => {
-                scores.push(tr.fitness.score());
-                descriptors.push(tr.squad);
-                recorded.push((swarm.clone(), world.clone(), sa, sb));
+        jobs.push(TripleJob {
+            squad: child.clone(),
+            swarm: swarm.clone(),
+            world: world.clone(),
+            seed_a: sa,
+            seed_b: sb,
+            ticks: cfg.episode_ticks,
+        });
+        recorded.push((swarm.clone(), world.clone(), sa, sb));
+    }
+
+    // Phase 2 — parallel or inline: evaluate every triple, order preserved.
+    let outcomes = evaluator.eval(&jobs)?;
+
+    // Phase 3 — sequential: reduce in opponent order, keeping only PASSING triples' descriptors + records.
+    let mut scores = Vec::new();
+    let mut descriptors = Vec::new();
+    let mut kept: Vec<(SwarmGenome, WorldGenome, u64, u64)> = Vec::new();
+    for (outcome, rec) in outcomes.into_iter().zip(recorded) {
+        match outcome {
+            Some(s) => {
+                scores.push(s.score);
+                descriptors.push(s.squad);
+                kept.push(rec);
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -622,34 +733,52 @@ fn score_and_insert_squad(
     let descriptor = mean_descriptor(&descriptors);
     let challenger_fitness = mean(&scores);
     result.squad.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
-        reeval_squad(t, incumbent, prior, &recorded, cfg.episode_ticks)
+        reeval_squad(evaluator, incumbent, &kept, cfg.episode_ticks)
     })?;
     Ok(())
 }
 
 fn score_and_insert_swarm(
     t: &Templates,
-    prior: &ModePrior,
     cfg: &SearchConfig,
     rng: &mut ChaCha8Rng,
     result: &mut SearchResult,
+    evaluator: &Evaluator,
     child: &SwarmGenome,
     squad_opps: &[SquadGenome],
     world_opps: &[WorldGenome],
 ) -> Result<(), String> {
-    let mut scores = Vec::new();
-    let mut descriptors = Vec::new();
-    let mut recorded: Vec<(SquadGenome, WorldGenome, u64, u64)> = Vec::new();
+    // Phases as in `score_and_insert_squad`: draw all seeds sequentially (RNG order preserved), evaluate
+    // the batch, reduce in order.
+    let mut jobs = Vec::with_capacity(squad_opps.len());
+    let mut recorded: Vec<(SquadGenome, WorldGenome, u64, u64)> = Vec::with_capacity(squad_opps.len());
     for (squad, world) in squad_opps.iter().zip(world_opps) {
         feasible(t, squad, child)?;
         world_genome::is_feasible(world)?;
         result.evaluations += 1;
         let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
-        match score_triple(t, squad, child, world, prior, sa, sb, cfg.episode_ticks)? {
-            Some(tr) => {
-                scores.push(tr.fitness.score());
-                descriptors.push(tr.swarm);
-                recorded.push((squad.clone(), world.clone(), sa, sb));
+        jobs.push(TripleJob {
+            squad: squad.clone(),
+            swarm: child.clone(),
+            world: world.clone(),
+            seed_a: sa,
+            seed_b: sb,
+            ticks: cfg.episode_ticks,
+        });
+        recorded.push((squad.clone(), world.clone(), sa, sb));
+    }
+
+    let outcomes = evaluator.eval(&jobs)?;
+
+    let mut scores = Vec::new();
+    let mut descriptors = Vec::new();
+    let mut kept: Vec<(SquadGenome, WorldGenome, u64, u64)> = Vec::new();
+    for (outcome, rec) in outcomes.into_iter().zip(recorded) {
+        match outcome {
+            Some(s) => {
+                scores.push(s.score);
+                descriptors.push(s.swarm);
+                kept.push(rec);
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -660,34 +789,50 @@ fn score_and_insert_swarm(
     let descriptor = mean_descriptor(&descriptors);
     let challenger_fitness = mean(&scores);
     result.swarm.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
-        reeval_swarm(t, incumbent, prior, &recorded, cfg.episode_ticks)
+        reeval_swarm(evaluator, incumbent, &kept, cfg.episode_ticks)
     })?;
     Ok(())
 }
 
 fn score_and_insert_world(
     t: &Templates,
-    prior: &ModePrior,
     cfg: &SearchConfig,
     rng: &mut ChaCha8Rng,
     result: &mut SearchResult,
+    evaluator: &Evaluator,
     child: &WorldGenome,
     squad_opps: &[SquadGenome],
     swarm_opps: &[SwarmGenome],
 ) -> Result<(), String> {
     world_genome::is_feasible(child)?;
-    let mut scores = Vec::new();
-    let mut descriptors = Vec::new();
-    let mut recorded: Vec<(SquadGenome, SwarmGenome, u64, u64)> = Vec::new();
+    let mut jobs = Vec::with_capacity(squad_opps.len());
+    let mut recorded: Vec<(SquadGenome, SwarmGenome, u64, u64)> = Vec::with_capacity(squad_opps.len());
     for (squad, swarm) in squad_opps.iter().zip(swarm_opps) {
         feasible(t, squad, swarm)?;
         result.evaluations += 1;
         let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
-        match score_triple(t, squad, swarm, child, prior, sa, sb, cfg.episode_ticks)? {
-            Some(tr) => {
-                scores.push(tr.fitness.score());
-                descriptors.push(tr.world);
-                recorded.push((squad.clone(), swarm.clone(), sa, sb));
+        jobs.push(TripleJob {
+            squad: squad.clone(),
+            swarm: swarm.clone(),
+            world: child.clone(),
+            seed_a: sa,
+            seed_b: sb,
+            ticks: cfg.episode_ticks,
+        });
+        recorded.push((squad.clone(), swarm.clone(), sa, sb));
+    }
+
+    let outcomes = evaluator.eval(&jobs)?;
+
+    let mut scores = Vec::new();
+    let mut descriptors = Vec::new();
+    let mut kept: Vec<(SquadGenome, SwarmGenome, u64, u64)> = Vec::new();
+    for (outcome, rec) in outcomes.into_iter().zip(recorded) {
+        match outcome {
+            Some(s) => {
+                scores.push(s.score);
+                descriptors.push(s.world);
+                kept.push(rec);
             }
             None => result.rejected_by_criterion += 1,
         }
@@ -698,7 +843,7 @@ fn score_and_insert_world(
     let descriptor = mean_descriptor(&descriptors);
     let challenger_fitness = mean(&scores);
     result.world.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
-        reeval_world(t, incumbent, prior, &recorded, cfg.episode_ticks)
+        reeval_world(evaluator, incumbent, &kept, cfg.episode_ticks)
     })?;
     Ok(())
 }
@@ -716,50 +861,65 @@ fn score_and_insert_world(
 // the very first re-eval on the lock the loop already holds.
 
 fn reeval_squad(
-    t: &Templates,
+    evaluator: &Evaluator,
     incumbent: &SquadGenome,
-    prior: &ModePrior,
     recorded: &[(SwarmGenome, WorldGenome, u64, u64)],
     episode_ticks: u32,
 ) -> Result<Option<f32>, String> {
-    let mut scores = Vec::new();
-    for (swarm, world, sa, sb) in recorded {
-        if let Some(tr) = score_triple(t, incumbent, swarm, world, prior, *sa, *sb, episode_ticks)? {
-            scores.push(tr.fitness.score());
-        }
-    }
+    let jobs: Vec<TripleJob> = recorded
+        .iter()
+        .map(|(swarm, world, sa, sb)| TripleJob {
+            squad: incumbent.clone(),
+            swarm: swarm.clone(),
+            world: world.clone(),
+            seed_a: *sa,
+            seed_b: *sb,
+            ticks: episode_ticks,
+        })
+        .collect();
+    let scores: Vec<f32> = evaluator.eval(&jobs)?.into_iter().flatten().map(|s| s.score).collect();
     Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
 }
 
 fn reeval_swarm(
-    t: &Templates,
+    evaluator: &Evaluator,
     incumbent: &SwarmGenome,
-    prior: &ModePrior,
     recorded: &[(SquadGenome, WorldGenome, u64, u64)],
     episode_ticks: u32,
 ) -> Result<Option<f32>, String> {
-    let mut scores = Vec::new();
-    for (squad, world, sa, sb) in recorded {
-        if let Some(tr) = score_triple(t, squad, incumbent, world, prior, *sa, *sb, episode_ticks)? {
-            scores.push(tr.fitness.score());
-        }
-    }
+    let jobs: Vec<TripleJob> = recorded
+        .iter()
+        .map(|(squad, world, sa, sb)| TripleJob {
+            squad: squad.clone(),
+            swarm: incumbent.clone(),
+            world: world.clone(),
+            seed_a: *sa,
+            seed_b: *sb,
+            ticks: episode_ticks,
+        })
+        .collect();
+    let scores: Vec<f32> = evaluator.eval(&jobs)?.into_iter().flatten().map(|s| s.score).collect();
     Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
 }
 
 fn reeval_world(
-    t: &Templates,
+    evaluator: &Evaluator,
     incumbent: &WorldGenome,
-    prior: &ModePrior,
     recorded: &[(SquadGenome, SwarmGenome, u64, u64)],
     episode_ticks: u32,
 ) -> Result<Option<f32>, String> {
-    let mut scores = Vec::new();
-    for (squad, swarm, sa, sb) in recorded {
-        if let Some(tr) = score_triple(t, squad, swarm, incumbent, prior, *sa, *sb, episode_ticks)? {
-            scores.push(tr.fitness.score());
-        }
-    }
+    let jobs: Vec<TripleJob> = recorded
+        .iter()
+        .map(|(squad, swarm, sa, sb)| TripleJob {
+            squad: squad.clone(),
+            swarm: swarm.clone(),
+            world: incumbent.clone(),
+            seed_a: *sa,
+            seed_b: *sb,
+            ticks: episode_ticks,
+        })
+        .collect();
+    let scores: Vec<f32> = evaluator.eval(&jobs)?.into_iter().flatten().map(|s| s.score).collect();
     Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
 }
 

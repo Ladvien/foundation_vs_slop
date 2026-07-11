@@ -23,6 +23,7 @@
 //! proportional to the shipped value, but can never leave the playable range.
 
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::tuning::{AiTuning, ChannelTuning, FieldsTuning, RallyTuning};
 use crate::config::WorldConfig;
@@ -96,7 +97,7 @@ static BOUNDS: [(f32, f32); N] = [
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldGenome(pub Vec<f32>);
 
 fn push_channel(v: &mut Vec<f32>, c: &ChannelTuning) {

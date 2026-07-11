@@ -25,6 +25,7 @@
 //! width around its authored value, so the search explores in units the author chose.
 
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::utility::{validate_unconditional_default, Behavior, Curve};
 use crate::rng::DetRng;
@@ -45,7 +46,7 @@ const BAND: f32 = 4.0;
 ///
 /// A `Genome` is meaningless without the template repertoire it was encoded from — it carries values,
 /// not structure. [`decode`] reunites them and fails loudly on any mismatch.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Genome {
     pub params: Vec<f32>,
     pub ranks: Vec<u8>,

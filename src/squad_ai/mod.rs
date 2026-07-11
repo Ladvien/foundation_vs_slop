@@ -24,6 +24,10 @@ pub mod dialogue;
 pub mod coevolve;
 #[cfg(feature = "test-harness")]
 pub mod evaluate;
+/// Multi-process fan-out for the offline search: a pool of `train worker` subprocesses evaluate rollouts
+/// in parallel (the only determinism-safe axis, since the harness pins each process to one thread).
+#[cfg(feature = "test-harness")]
+pub mod parallel;
 pub mod genome;
 pub mod perception;
 pub mod persona;
