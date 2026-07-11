@@ -662,9 +662,17 @@ fn pin_fruit_bodies(
 
         // One flush, one species: chosen once per nucleus from the room's saprotrophic affinity, so the
         // whole flush is one genet. Bracket (wall) species are excluded here — they grow on walls.
-        let species = pick_species(&cfg, &dungeon, dcell, nucleus);
+        let wall_available = (0..4).any(|d| dungeon.walled(dcell, d));
+        let species = pick_species(&cfg, &dungeon, dcell, nucleus, wall_available);
         let geom = table.get(species);
         let light = cfg.species[species.0 as usize].light;
+        // Bracket species grow on a wall face; everything else stands on the floor. Two complete pose
+        // strategies, chosen by species data — not a fallback.
+        let wall_mount = if cfg.species[species.0 as usize].archetype == "bracket" {
+            wall_face(&dungeon, dcell, nucleus)
+        } else {
+            None
+        };
 
         // The flush. Its layout is a pure function of the nucleus's seed, so a pin is reproducible whatever
         // frame the readback happened to land on. Member 0 sits at the nucleus.
@@ -698,6 +706,43 @@ fn pin_fruit_bodies(
                     cfg.cluster_spacing,
                 )
             {
+                continue;
+            }
+
+            // Bracket fungi grow *out of the wall* as a shelf, not up from the floor. Mount rotated on
+            // the wall face; the flush's `offset` maps onto the wall plane (x along the wall, y up it).
+            // No `plan_body` — a bracket wants the wall the floor solver flees. `WallGrown` tells the
+            // growth system to leave its vertical position alone (it emerges by morph, not by rising);
+            // `CutawayMounted` hides it when the camera cuts its wall away, like any wall-hung prop.
+            if let Some((face, into_room, outward)) = wall_mount {
+                let tangent = Vec3::Y.cross(into_room).normalize_or_zero();
+                let h = (WALL_MOUNT_HEIGHT + offset.y).clamp(0.2, crate::dungeon::WALL_HEIGHT - 0.3);
+                let pos = face + tangent * offset.x + Vec3::Y * h;
+                let rot = Quat::from_rotation_arc(Vec3::Y, into_room)
+                    * Quat::from_axis_angle(Vec3::Y, yaw * 0.15);
+                commands.spawn((
+                    Name::new("mycelia_fruit_body"),
+                    FruitBody {
+                        growth: 0.0,
+                        rise: 1.0, // no floor emergence; a bracket grows out of the wall by morph alone
+                        scale,
+                        cell: dcell, // fog gates on the adjacent floor cell; a wall has no fog cell
+                        veil_triggered: true, // no universal veil to wait on
+                        tint: 0.0,
+                        cluster: nucleus,
+                        cap_ab: cap_ab_for(nucleus, seed),
+                        bend: Vec2::ZERO,
+                        tilt: Vec2::ZERO,
+                        species,
+                    },
+                    Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
+                    Visibility::default(),
+                    WallGrown,
+                    crate::dungeon::CutawayMounted { outward, base_scale: Vec3::splat(scale) },
+                    WorldAssetRoot(scenes.handle(species)),
+                ));
+                live += 1;
+                pinned_this_run.push((nucleus, pos));
                 continue;
             }
 
@@ -767,12 +812,23 @@ fn pin_fruit_bodies(
     }
 }
 
-/// The room-affinity weight a species has for the room type at `cell` — its saprotrophic preference.
+/// Marks a fruit body that grew out of a **wall** (a bracket fungus — Turkey Tail, Oyster, Chicken of
+/// the Woods) rather than up from the floor. Its emergence and morph are the same, but it is mounted
+/// rotated onto a wall face and does not rise/sink along world Y, so `grow_fruit_bodies` leaves its
+/// vertical position alone. See [`wall_face`].
+#[derive(Component)]
+struct WallGrown;
+
+/// How far up a wall (world units) a bracket's mount sits before its per-member vertical offset. Brackets
+/// grow at chest height, where the mold has crept up out of the floor/wall corner.
+const WALL_MOUNT_HEIGHT: f32 = 0.8;
+
+/// The room-affinity weight a species has for the room type at a cell — its saprotrophic preference.
 /// A listed matching tag gives that weight; an unlisted room is neutral (`1.0`), so a species is
-/// eligible everywhere but favours its preferred substrate. Bracket (wall) species score `0` on the
-/// floor: they erupt from walls via a separate pin path, not here.
-fn species_floor_weight(s: &super::species::SpeciesConfig, tags: &[String]) -> f32 {
-    if s.archetype == "bracket" {
+/// eligible everywhere but favours its preferred substrate. Bracket (wall) species score `0` unless a
+/// wall face is available at the pin cell — they cannot erupt from open floor.
+fn species_weight(s: &super::species::SpeciesConfig, tags: &[String], wall_available: bool) -> f32 {
+    if s.archetype == "bracket" && !wall_available {
         return 0.0;
     }
     let mut w = 1.0f32;
@@ -786,18 +842,36 @@ fn species_floor_weight(s: &super::species::SpeciesConfig, tags: &[String]) -> f
     w
 }
 
+/// The mount point + orientation for a bracket fungus on a wall of `cell`. Picks one of the cell's walled
+/// edges (seeded), and returns `(face_point, into_room, outward)`: a point on the wall's inner face, the
+/// horizontal unit normal pointing **into the room** (the direction the shelf grows and its local `+Y`
+/// maps onto), and the wall's outward normal. `None` if the cell has no walled edge.
+fn wall_face(dungeon: &Dungeon, cell: IVec2, seed: u32) -> Option<(Vec3, Vec3, Vec3)> {
+    // Edge order matches `Dungeon::neighbor`: N, E, S, W.
+    const OFF: [IVec2; 4] = [IVec2::new(0, -1), IVec2::new(1, 0), IVec2::new(0, 1), IVec2::new(-1, 0)];
+    let dirs: Vec<usize> = (0..4).filter(|&d| dungeon.walled(cell, d)).collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    let dir = dirs[((hash01_u32(seed ^ 0x7A11) * dirs.len() as f32) as usize).min(dirs.len() - 1)];
+    let off = OFF[dir];
+    let outward = Vec3::new(off.x as f32, 0.0, off.y as f32); // from the room toward the wall/rock
+    let center = dungeon.cell_center(cell);
+    let face = center + outward * (0.5 * crate::dungeon::TILE_SIZE - crate::dungeon::WALL_THICKNESS);
+    Some((face, -outward, outward))
+}
+
 /// Choose the species a flush erupts as: a seed-derived weighted draw over the species' room affinity
 /// at the pin cell. Deterministic (`hash01_u32`, no entropy), one draw per nucleus, so a whole flush is
-/// one genet of one species. Falls back to the death cap if nothing is eligible (never happens with the
-/// shipped table, but the pin must always yield a species).
-fn pick_species(cfg: &MyceliaConfig, dungeon: &Dungeon, cell: IVec2, seed: u32) -> SpeciesId {
+/// one genet of one species. `wall_available` gates the bracket (wall) species in.
+fn pick_species(cfg: &MyceliaConfig, dungeon: &Dungeon, cell: IVec2, seed: u32, wall_available: bool) -> SpeciesId {
     let tags: &[String] = dungeon
         .regions
         .iter()
         .find(|r| r.rect.contains([cell.x, cell.y]))
         .map(|r| r.props.tags.as_slice())
         .unwrap_or(&[]);
-    let weights: Vec<f32> = cfg.species.iter().map(|s| species_floor_weight(s, tags)).collect();
+    let weights: Vec<f32> = cfg.species.iter().map(|s| species_weight(s, tags, wall_available)).collect();
     let total: f32 = weights.iter().sum();
     if total <= 0.0 {
         return SpeciesId(0);
@@ -861,13 +935,17 @@ fn grow_fruit_bodies(
         &mut Transform,
         Option<&crate::light::Phototropic>,
         Option<&crate::light::Photophilic>,
+        Option<&WallGrown>,
     )>,
 ) {
     let dt = time.delta_secs();
     // The whole perceptual budget, in world units per second, at the zoom the player is actually at.
     let budget = v_max(cfg.motion_threshold_deg_per_s, cfg.screen_fov_deg_v, view.viewport_height);
 
-    for (entity, mut body, mut transform, phototropic, photophilic) in &mut bodies {
+    for (entity, mut body, mut transform, phototropic, photophilic, wall) in &mut bodies {
+        // A wall-mounted bracket does not rise/sink along world Y and its scale is owned by the cutaway
+        // system, so the floor-emergence and photomorphogenesis-swell branches below are skipped for it.
+        let wall = wall.is_some();
         // Light-induced transition: once seen, the veil may rupture — and stays permitted thereafter.
         if fog.visible_at(body.cell) {
             body.veil_triggered = true;
@@ -927,7 +1005,7 @@ fn grow_fruit_bodies(
         // drives the morph speed limit + `energy()`), so this is a pure additional slow enlargement, kept
         // below motion perception like everything else the mold animates. In a lit room the caps swell;
         // crabs (photophobic) won't cross the light to graze them — big mushrooms grow safe in the light.
-        if phototropic.is_some() || photophilic.is_some() {
+        if !wall && (phototropic.is_some() || photophilic.is_some()) {
             let lc = &game_config.lighting;
             let peak = light_field.peak();
             let light01 = if peak > 0.0 {
@@ -945,7 +1023,11 @@ fn grow_fruit_bodies(
             transform.scale = Vec3::splat(next);
         }
 
-        transform.translation.y = -sink * (1.0 - body.rise);
+        // A floor body's crown tracks its emergence out of the mat; a wall bracket keeps the vertical
+        // position it was mounted at.
+        if !wall {
+            transform.translation.y = -sink * (1.0 - body.rise);
+        }
     }
 }
 
