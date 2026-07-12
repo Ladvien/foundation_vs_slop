@@ -98,10 +98,28 @@ pub struct Velocity(pub Vec2);
 #[derive(Component, Default)]
 pub struct AimTarget(pub Option<Vec3>);
 
+/// An explicit world point this unit's body should turn to face, overriding both `AimTarget` and the
+/// travel-direction fallback in `unit_facing`. Used by the Researcher's flashlight: when its AI enters
+/// `Mode::Ward` it aims the beam at the light-averse threat it is herding (`squad_ai::perception`).
+/// `None` on every other unit and on the Researcher when not warding — then facing falls back to aim,
+/// then to travel direction. Present on EVERY unit (spawned `None`) so it never splits the hashed squad
+/// archetype, exactly like `AimTarget`.
+#[derive(Component, Default)]
+pub struct FacingOverride(pub Option<Vec3>);
+
 /// Marks the gun sub-model so the outfit recolor skips it (the blaster keeps its own colors) and so
-/// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture.
+/// `autogib` can bake it as a separate intact chunk instead of folding it into the body fracture. The
+/// Researcher's flashlight carries this marker too — it is the unit's held item, so it inherits the same
+/// recolor-skip and death-fling behavior for free (see the spawn branch below).
 #[derive(Component)]
 pub struct GunModel;
+
+/// Marks the Researcher's flashlight sub-model (a sibling of [`GunModel`]'s role) so the windowed-only
+/// cosmetic `SpotLight` system (`light::attach_flashlight_spots`) can find it and give it a real beam.
+/// Gameplay light goes through the `LightField` cone instead (see `light::apply_dynamic_lights`); this
+/// marker is purely for the rendered glow.
+#[derive(Component)]
+pub struct FlashlightModel;
 
 /// Marks the figurine child entity that carries the unit's async body scene (`WorldAssetRoot`). The
 /// figurine lives on a *child*, not the `Unit` sim entity, so the scene spawner's async
@@ -185,6 +203,17 @@ const GUN_SCALE: f32 = 0.35;
 const GUN_YAW: f32 = 0.0;
 /// The gun's barrel tip in figurine-local space — laser bolts spawn here (see `laser`).
 pub const MUZZLE_LOCAL: Vec3 = Vec3::new(GUN_OFFSET.x, GUN_OFFSET.y, GUN_OFFSET.z - 0.35);
+
+/// The Researcher carries this handheld flashlight instead of the blaster (CC0, authored via BlenderMCP;
+/// see `/mnt/codex_fs/game_assets/low_poly_flashlight`). The lens faces the model's local +Y after the
+/// Y-up glTF export, and the model stands ~2.5 units tall on its tail cap, so we scale it down and pitch
+/// it so the beam points forward out of the figurine's hand. These transform constants are cosmetic only
+/// — the gameplay light cone points along the unit's facing, not the model (see `light`).
+const FLASHLIGHT_GLB: &str = "low_poly_flashlight/low_poly_flashlight.glb";
+const FLASHLIGHT_OFFSET: Vec3 = Vec3::new(0.18, 0.3, -0.2);
+const FLASHLIGHT_SCALE: f32 = 0.12;
+/// Pitch that tips the model's local +Y (lens up) forward to the unit's −Z; tuned by screenshot.
+const FLASHLIGHT_PITCH: f32 = -std::f32::consts::FRAC_PI_2;
 
 /// Five distinct outfit colors, one per squad member (index-matched to spawn order).
 const OUTFITS: [Color; 5] = [
@@ -283,6 +312,8 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 MoveSpeed(UNIT_SPEED),
                 Velocity(Vec2::ZERO),
                 AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
+                FacingOverride(None), // set by `squad_think` when the Researcher wards; wins over aim
+
                 Health::new(sim.combat.unit_hp),
                 Outfit(outfit),
                 // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
@@ -333,14 +364,32 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
             WorldAssetRoot(figurine),
             Transform::default(),
         ));
-        // Carried blaster (kept from the shooter feature; fires from selected units, see `laser`).
-        unit.with_child((
-            GunModel,
-            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
-            Transform::from_translation(GUN_OFFSET)
-                .with_scale(Vec3::splat(GUN_SCALE))
-                .with_rotation(Quat::from_rotation_y(GUN_YAW)),
-        ));
+        // Held item. The Researcher (the "Scientist" archetype) trades the blaster for a flashlight and
+        // becomes a light-based crowd-control unit — its beam repels photophobic creatures rather than
+        // dealing damage (see `laser::fire_laser`, which skips it, and `light::apply_dynamic_lights`).
+        // Ref: Björk & Michelsen, FDG 2014 — the flashlight as a vision-limiting, non-lethal deterrent.
+        // Branch on the role *value* (every unit already carries `RoleId`), never a marker component, so
+        // the hashed squad archetype stays uniform across the five members. Both items keep the `GunModel`
+        // marker: it is "the held item" for the recolor-skip and the autogib death-fling, which apply to
+        // the flashlight identically.
+        if RoleId::ALL[i] == RoleId::Researcher {
+            unit.with_child((
+                GunModel,
+                FlashlightModel,
+                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FLASHLIGHT_GLB))),
+                Transform::from_translation(FLASHLIGHT_OFFSET)
+                    .with_scale(Vec3::splat(FLASHLIGHT_SCALE))
+                    .with_rotation(Quat::from_rotation_x(FLASHLIGHT_PITCH)),
+            ));
+        } else {
+            unit.with_child((
+                GunModel,
+                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
+                Transform::from_translation(GUN_OFFSET)
+                    .with_scale(Vec3::splat(GUN_SCALE))
+                    .with_rotation(Quat::from_rotation_y(GUN_YAW)),
+            ));
+        }
     }
 }
 
@@ -662,16 +711,21 @@ fn unit_movement(
 /// facing in `unit_movement`, which only turned commanded/moving units), so a stationary unit visibly
 /// pivots to aim. This is why the smiley watcher's "is a unit looking at it" gaze test (which reads body
 /// facing) matches what the player sees: body facing == aim (Rabin, "Vision Zones", GameAIPro2 Ch.4).
-fn unit_facing(time: Res<Time>, mut units: Query<(&mut Transform, &Velocity, &AimTarget), With<Unit>>) {
+fn unit_facing(
+    time: Res<Time>,
+    mut units: Query<(&mut Transform, &Velocity, &AimTarget, &FacingOverride), With<Unit>>,
+) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     if dt <= 0.0 {
         return;
     }
-    for (mut transform, velocity, aim) in &mut units {
-        // Prefer the fire target (flattened to the unit's own height so it yaws, never pitches); else the
-        // travel direction. `None` on both ⇒ hold the current facing.
-        let target = aim
+    for (mut transform, velocity, aim, facing_override) in &mut units {
+        // Precedence: an explicit `FacingOverride` (the Researcher aiming its warding beam) wins; else the
+        // fire target (flattened to the unit's own height so it yaws, never pitches); else the travel
+        // direction. `None` on all three ⇒ hold the current facing.
+        let target = facing_override
             .0
+            .or(aim.0)
             .map(|t| Vec3::new(t.x, transform.translation.y, t.z))
             .or_else(|| {
                 let v = Vec3::new(velocity.0.x, 0.0, velocity.0.y);

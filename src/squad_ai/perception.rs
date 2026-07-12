@@ -60,6 +60,8 @@ pub struct PerceptionLatch {
     pub anomaly: bool,
     pub ally_down: bool,
     pub past_leash: bool,
+    /// A light-averse creature is within the Researcher's warding range (latches `Mode::Ward`).
+    pub photophobe: bool,
 }
 
 /// The planar distance of a [`nearest_planar`] hit, or [`NO_TARGET_DIST`] when there is no candidate at
@@ -112,6 +114,12 @@ const WOUNDED_FRAC: f32 = 0.5;
 /// A patient stays the Medic's patient until healed a little clear of the trigger — otherwise the first
 /// tick of healing un-declares the emergency and the Medic walks away mid-treatment.
 const WOUNDED_FRAC_RELEASE: f32 = 0.55;
+/// How close a light-averse creature must come before the Researcher wards it with the flashlight. A
+/// touch shorter than `THREAT_SIGHT` — warding is close-range crowd-control, not a long-range alert.
+const WARD_SIGHT: f32 = 10.0;
+/// ...and it stays the ward target until it flees past this, so a crab pacing the beam edge doesn't make
+/// the Researcher drop and re-acquire the ward every think (the same anti-thrash band as the others).
+const WARD_SIGHT_RELEASE: f32 = 11.5;
 /// A unit is "strayed" once this far from the anchor (the cohesion leash — see `role::LEASH`).
 const LEASH_OUT: f32 = LEASH;
 /// ...and stops being strayed only once it has come back well inside, so a unit loitering at exactly the
@@ -136,6 +144,9 @@ pub fn squad_think(
     sim: Res<SimTuning>,
     threats: Query<&Transform, (Or<(With<Crab>, With<Enemy>)>, Without<Unit>)>,
     bosses: Query<&Transform, With<Enemy>>,
+    // Light-averse creatures the Researcher wards with its beam — crabs AND parasite mancas (mancas are
+    // photophobic but neither `Crab` nor `Enemy`, so they are not in `threats`). Read-only, `Without<Unit>`.
+    photophobes: Query<&Transform, (With<crate::light::Photophobic>, Without<Unit>)>,
     furniture: Query<&Transform, (With<PlacedIn>, Without<Examined>)>,
     bodies: Query<&Transform, (With<Carryable>, Without<Examined>)>,
     mut units: Query<
@@ -153,6 +164,8 @@ pub fn squad_think(
             &SquadMember,
             // Always-present SCP-150 host state (Phase 4 manipulation reads `active`).
             &Infestation,
+            // The Researcher aims its warding beam here; `None` for every other unit and mode.
+            &mut crate::squad::FacingOverride,
         ),
         With<Unit>,
     >,
@@ -160,6 +173,7 @@ pub fn squad_think(
     // World signals gathered once (planar positions), reused across all units.
     let threat_pos: Vec<Vec3> = threats.iter().map(|t| t.translation).collect();
     let boss_pos: Vec<Vec3> = bosses.iter().map(|t| t.translation).collect();
+    let photophobe_pos: Vec<Vec3> = photophobes.iter().map(|t| t.translation).collect();
     let examinable_pos: Vec<Vec3> = furniture
         .iter()
         .chain(bodies.iter())
@@ -170,7 +184,7 @@ pub fn squad_think(
     // the mutable unit query twice.
     let unit_snapshot: Vec<(Entity, Vec3, f32)> = units
         .iter()
-        .map(|(e, t, _, _, _, _, _, _, h, _, _, _)| (e, t.translation, health_frac(h)))
+        .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
     let dt = time.delta_secs();
@@ -188,6 +202,7 @@ pub fn squad_think(
         order,
         member,
         infestation,
+        mut facing_override,
     ) in &mut units
     {
         let pos = tf.translation;
@@ -199,6 +214,7 @@ pub fn squad_think(
         let nearest_threat = nearest_planar(pos, threat_pos.iter().map(|&p| ((), p)));
         let nearest_examinable = nearest_planar(pos, examinable_pos.iter().map(|&p| ((), p)));
         let nearest_boss = nearest_planar(pos, boss_pos.iter().map(|&p| ((), p)));
+        let nearest_photophobe = nearest_planar(pos, photophobe_pos.iter().map(|&p| ((), p)));
         // Nearest OTHER ally hurt enough to count as "down". Hysteresis lives in the *threshold*, not in a
         // post-hoc test of the nearest ally's health: a Medic already treating someone keeps looking for
         // patients up to `WOUNDED_FRAC_RELEASE`, so the first tick of healing doesn't un-declare the
@@ -232,6 +248,12 @@ pub fn squad_think(
         );
         latch.anomaly =
             latch_when_below(latch.anomaly, dist_of(nearest_boss), PSI_SIGHT, PSI_SIGHT_RELEASE);
+        latch.photophobe = latch_when_below(
+            latch.photophobe,
+            dist_of(nearest_photophobe),
+            WARD_SIGHT,
+            WARD_SIGHT_RELEASE,
+        );
         // The band is already applied via `wounded_cut` above, so the latch just records the outcome for
         // the next tick's threshold.
         latch.ally_down = nearest_wounded.is_some();
@@ -241,6 +263,7 @@ pub fn squad_think(
         // subject the brain was not allowed to see.
         let threat = if latch.threat { nearest_threat } else { None };
         let examinable = if latch.examinable { nearest_examinable } else { None };
+        let photophobe = if latch.photophobe { nearest_photophobe } else { None };
         let wounded = nearest_wounded;
 
         // Feed perception-derived squad drives (curiosity near study targets, cohesion when strayed).
@@ -271,6 +294,8 @@ pub fn squad_think(
             threat_bearing_known: if latch.threat { 1.0 } else { 0.0 },
             anomaly_residue: if latch.anomaly { 1.0 } else { 0.0 },
             past_leash: if latch.past_leash { 1.0 } else { 0.0 },
+            nearest_photophobe: photophobe.map(|(_, p, _)| p),
+            photophobe_bearing_known: if latch.photophobe { 1.0 } else { 0.0 },
         };
 
         let perc = Perception {
@@ -304,6 +329,19 @@ pub fn squad_think(
             // unconditional `active.target` write below marks the component changed every tick.
             active.decision = active.decision.wrapping_add(1);
         }
+
+        // The Researcher aims its warding beam. When its AI holds `Mode::Ward` (a photophobe is in range),
+        // turn the body to face that creature: `unit_facing` reads `FacingOverride` above aim/travel, and
+        // the flashlight cone in `light::apply_dynamic_lights` follows the resulting facing, shoving the
+        // creature down-light. The target refreshes every tick (fresh nearest) so the beam tracks a moving
+        // crab smoothly even between throttled decisions. Role-gated so the Psionic's own `Mode::Ward`
+        // (guard a downed ally) is untouched; `None` for every other unit and whenever not warding, so
+        // facing falls back to aim then travel. Ref: Björk & Michelsen, FDG 2014 — light as a deterrent.
+        facing_override.0 = if *role == RoleId::Researcher && active.mode == Mode::Ward {
+            photophobe.map(|(_, p, _)| p)
+        } else {
+            None
+        };
 
         // Resolve the movement goal from the (possibly cached) mode + fresh perception every tick, so
         // cohesion tracks the moving anchor without waiting for the next think.

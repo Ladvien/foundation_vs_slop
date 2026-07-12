@@ -74,6 +74,28 @@ pub struct LightingConfig {
     /// Fraction of fixtures that are *failing* tubes — stochastic dropouts / strobe instead of a steady
     /// hum (the classic Backrooms dying-fluorescent). Cosmetic; the gameplay field is unaffected.
     pub flicker_fail_ratio: f32,
+
+    // --- The Researcher's flashlight (a moving directional emitter in the LightField) ---
+    /// **Gameplay** peak illuminance the flashlight adds at the Researcher's own cell, in the field's own
+    /// units (same scale as [`field_intensity`]). Falls linearly to 0 at `flashlight_range`. This is what
+    /// repels photophobic creatures — tune against `photophobic_gain`.
+    pub flashlight_intensity: f32,
+    /// Beam reach in dungeon cells (the cone's radial cut-off, wall-occluded like a fixture).
+    pub flashlight_range: f32,
+    /// Cosine of the beam's half-angle (the wedge width). `cos(35°) ≈ 0.819` is a tight torch; lower =
+    /// wider. Cells whose direction from the source dots `forward` above this are inside the beam.
+    pub flashlight_cone_cos: f32,
+    /// Soft-edge ramp width, in cosine units past `flashlight_cone_cos`, over which the cone fades 0→1.
+    /// Keeps the illuminance gradient smooth at the rim so creature steering doesn't hit a cliff.
+    pub flashlight_edge_softness: f32,
+    /// Cosmetic (windowed-only) real `SpotLight` on the flashlight model — luminous power (lumens).
+    pub flashlight_spot_intensity: f32,
+    /// Cosmetic spot light reach (metres).
+    pub flashlight_spot_range: f32,
+    /// Cosmetic spot light colour (sRGB triple) — a warm torch beam.
+    pub flashlight_spot_color: [f32; 3],
+    /// Cosmetic spot light outer cone half-angle (radians) — the visible beam spread.
+    pub flashlight_spot_outer_angle: f32,
 }
 
 /// Loud, one-path validation (mirrors `config::validate_density` and the other `validate_*` checks).
@@ -90,6 +112,10 @@ pub fn validate_config(c: &LightingConfig) -> Result<(), String> {
         ("mushroom_light_size_rate", c.mushroom_light_size_rate),
         ("flicker_hum_depth", c.flicker_hum_depth),
         ("flicker_fail_ratio", c.flicker_fail_ratio),
+        ("flashlight_intensity", c.flashlight_intensity),
+        ("flashlight_edge_softness", c.flashlight_edge_softness),
+        ("flashlight_spot_intensity", c.flashlight_spot_intensity),
+        ("flashlight_spot_outer_angle", c.flashlight_spot_outer_angle),
     ] {
         if !(v.is_finite() && v >= 0.0) {
             return Err(format!("lighting.{name} must be finite and >= 0 (got {v})"));
@@ -98,7 +124,27 @@ pub fn validate_config(c: &LightingConfig) -> Result<(), String> {
     if !(c.fixture_range.is_finite() && c.fixture_range > 0.0) {
         return Err(format!("lighting.fixture_range must be finite and > 0 (got {})", c.fixture_range));
     }
-    for (name, col) in [("ambient_color", c.ambient_color), ("fixture_color", c.fixture_color)] {
+    if !(c.flashlight_range.is_finite() && c.flashlight_range > 0.0) {
+        return Err(format!("lighting.flashlight_range must be finite and > 0 (got {})", c.flashlight_range));
+    }
+    if !(c.flashlight_spot_range.is_finite() && c.flashlight_spot_range > 0.0) {
+        return Err(format!(
+            "lighting.flashlight_spot_range must be finite and > 0 (got {})",
+            c.flashlight_spot_range
+        ));
+    }
+    // A cosine must be in [-1, 1]; outside that the beam is either everything or nothing (a config typo).
+    if !(c.flashlight_cone_cos.is_finite() && (-1.0..=1.0).contains(&c.flashlight_cone_cos)) {
+        return Err(format!(
+            "lighting.flashlight_cone_cos must be a cosine in [-1, 1] (got {})",
+            c.flashlight_cone_cos
+        ));
+    }
+    for (name, col) in [
+        ("ambient_color", c.ambient_color),
+        ("fixture_color", c.fixture_color),
+        ("flashlight_spot_color", c.flashlight_spot_color),
+    ] {
         if col.iter().any(|ch| !ch.is_finite() || *ch < 0.0) {
             return Err(format!("lighting.{name} channels must be finite and >= 0 (got {col:?})"));
         }
@@ -145,19 +191,27 @@ pub struct LightFieldWritten;
 pub struct LightField {
     width: usize,
     height: usize,
-    /// Illuminance per dungeon cell (gameplay units), row-major. Only floor cells ever carry value.
+    /// **Static baseline** — the cached furniture bake, row-major. Recomputed only when `dirty` (a
+    /// fixture changed), the same event-driven bake as before. "Bake the many": the expensive
+    /// O(fixtures × range²) pass runs rarely.
+    base: Vec<f32>,
+    /// **Final** illuminance the whole game reads (`sample`/`gradient`), row-major: `base` plus the
+    /// per-tick dynamic cones (the Researcher's flashlight). Recomposed every tick by
+    /// [`apply_dynamic_lights`] — cheap, since only the moving cones are added on top of the cached base.
     cells: Vec<f32>,
-    /// Recompute pending. True at startup (bake once fixtures exist) and whenever a fixture changes state
-    /// (Phase 4), gated like `fog::FogGrid::dirty` so the bake is event-driven, not per-frame.
+    /// Recompute pending for `base`. True at startup (bake once fixtures exist) and whenever a fixture
+    /// changes state (Phase 4), gated like `fog::FogGrid::dirty`. Does NOT gate the per-tick dynamic pass,
+    /// which always runs (a moving light can never be dirty-gated).
     dirty: bool,
-    /// Peak cell illuminance from the last bake — lets callers normalise to a 0..1 "brightness".
+    /// Peak cell illuminance of `cells` after the last compose — lets callers normalise to 0..1.
     peak: f32,
 }
 
 impl LightField {
-    /// Empty field sized to the dungeon; starts `dirty` so the first `FixedUpdate` bakes it.
+    /// Empty field sized to the dungeon; starts `dirty` so the first `FixedUpdate` bakes the static base.
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, cells: vec![0.0; width * height], dirty: true, peak: 0.0 }
+        let n = width * height;
+        Self { width, height, base: vec![0.0; n], cells: vec![0.0; n], dirty: true, peak: 0.0 }
     }
 
     /// Point read at a world position (query). Off-grid reads as 0 — the same contract as `Stig::sample`.
@@ -197,7 +251,7 @@ impl LightField {
     /// must arrive in a stable order (the caller sorts by cell) so the per-cell float sum is reproducible
     /// — the discipline `Stig`'s sorted deposits use (float add is non-associative).
     fn bake(&mut self, dungeon: &Dungeon, fixtures: &[(IVec2, f32, f32)]) {
-        for v in self.cells.iter_mut() {
+        for v in self.base.iter_mut() {
             *v = 0.0;
         }
         for &(fcell, intensity, range) in fixtures {
@@ -219,12 +273,60 @@ impl LightField {
                     if !dungeon.line_of_sight(fcell, cell) {
                         continue;
                     }
-                    self.cells[row_major(cell, self.width)] += intensity * (1.0 - dist / range);
+                    self.base[row_major(cell, self.width)] += intensity * (1.0 - dist / range);
+                }
+            }
+        }
+        self.dirty = false;
+    }
+
+    /// Recompose `cells = base + Σ dynamic cones`, then recompute `peak`. Runs EVERY tick (the base is
+    /// cached; only the moving cones are re-added), so a walking flashlight's beam sweeps live. Each cone
+    /// is a directional emitter: within `range`, wall-occluded (`line_of_sight`) and radially attenuated
+    /// like a fixture, but additionally gated by a **cone factor** — a soft-edged wedge around `forward`
+    /// (world-XZ, unit length). **Determinism:** `cones` must arrive sorted (caller sorts by source cell),
+    /// mirroring `bake`'s float-sum discipline, so the per-cell sum folded into the replay hash is stable.
+    /// Ref: Björk & Michelsen, FDG 2014 — the flashlight cone as a moving vision/deterrent field.
+    fn compose(&mut self, dungeon: &Dungeon, cones: &[FlashlightCone]) {
+        self.cells.copy_from_slice(&self.base);
+        for cone in cones {
+            if cone.range <= 0.0 || cone.intensity <= 0.0 {
+                continue;
+            }
+            let r = cone.range.ceil() as i32;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let cell = cone.source + IVec2::new(dx, dy);
+                    if !in_grid(cell, self.width, self.height) || !dungeon.is_floor(cell) {
+                        continue;
+                    }
+                    let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                    if dist > cone.range {
+                        continue;
+                    }
+                    if !dungeon.line_of_sight(cone.source, cell) {
+                        continue;
+                    }
+                    // Cone factor: 1 at the source cell (its own footprint), else a soft-edged wedge —
+                    // `cos θ` between the cell direction and `forward`, ramped from 0 at the beam rim
+                    // (`cone_cos`) to 1 by `edge_softness` further in. Soft so the gradient creatures read
+                    // stays smooth (no hard illuminance cliff at the rim).
+                    let cone_factor = if dx == 0 && dy == 0 {
+                        1.0
+                    } else {
+                        let dir = Vec2::new(dx as f32, dy as f32) / dist;
+                        let c = dir.dot(cone.forward);
+                        ((c - cone.cone_cos) / cone.edge_softness.max(1.0e-4)).clamp(0.0, 1.0)
+                    };
+                    if cone_factor <= 0.0 {
+                        continue;
+                    }
+                    self.cells[row_major(cell, self.width)] +=
+                        cone.intensity * (1.0 - dist / cone.range) * cone_factor;
                 }
             }
         }
         self.peak = self.cells.iter().copied().fold(0.0f32, f32::max);
-        self.dirty = false;
     }
 
     /// Mark the field for recompute (Phase 4: a fixture switched on/off/failing).
@@ -247,11 +349,23 @@ impl LightField {
     }
 }
 
-/// Bake the light field when dirty: collect [`LightEmitter`] fixture cells (stable-sorted for a
-/// deterministic float sum), then recompute. Runs on `FixedUpdate` in [`LightFieldWritten`] so the pinned
-/// creature readers (Phase 2) see a consistent field. Uses fixture `Transform` (world-space at spawn —
-/// furniture never moves), not `GlobalTransform`, to avoid propagation-timing on the first tick. If no
-/// fixtures exist yet (spawn not flushed) it stays dirty and retries next tick.
+/// One moving directional light contributed to the [`LightField`] each tick — the Researcher's flashlight.
+/// `source` is its dungeon cell, `forward` the world-XZ beam direction (unit length), the rest the beam's
+/// reach/brightness/shape (see [`LightingConfig`]). Sorted by `source` before compose for determinism.
+struct FlashlightCone {
+    source: IVec2,
+    forward: Vec2,
+    intensity: f32,
+    range: f32,
+    cone_cos: f32,
+    edge_softness: f32,
+}
+
+/// Bake the STATIC base when dirty: collect [`LightEmitter`] fixture cells (stable-sorted for a
+/// deterministic float sum), then recompute [`LightField::base`]. Runs on `FixedUpdate` in
+/// [`LightFieldWritten`], **chained before** [`apply_dynamic_lights`]. Uses fixture `Transform`
+/// (world-space at spawn — furniture never moves), not `GlobalTransform`, to avoid propagation-timing on
+/// the first tick. If no fixtures exist yet (spawn not flushed) it stays dirty and retries next tick.
 fn bake_light_field(
     mut field: ResMut<LightField>,
     dungeon: Res<Dungeon>,
@@ -275,6 +389,42 @@ fn bake_light_field(
     field.bake(&dungeon, &fx);
 }
 
+/// Recompose the field every tick: `cells = base + Σ flashlight cones`. The Researcher (the "Scientist")
+/// carries the only moving light — its beam points along its facing (`transform.rotation * −Z`, the same
+/// forward `unit_facing` yaws to), so the AI's `Mode::Ward` aim (which turns the body via `FacingOverride`)
+/// is exactly what steers the beam. Photophobic crabs/mancas already flee this field's gradient, so the
+/// cone repels them with no per-creature code. Runs in [`LightFieldWritten`], chained AFTER
+/// [`bake_light_field`], in BOTH the windowed game and the headless harness (the field is hashed).
+/// **Determinism:** cones are sorted by source cell before compose (the `bake` float-sum discipline); the
+/// beam reads the unit's own deterministic `Transform`. Ref: Björk & Michelsen, FDG 2014.
+fn apply_dynamic_lights(
+    mut field: ResMut<LightField>,
+    dungeon: Res<Dungeon>,
+    config: Res<GameConfig>,
+    researchers: Query<(&Transform, &crate::squad_ai::role::RoleId), With<crate::squad::Unit>>,
+) {
+    let c = &config.lighting;
+    let mut cones: Vec<FlashlightCone> = researchers
+        .iter()
+        .filter(|(_, role)| **role == crate::squad_ai::role::RoleId::Researcher)
+        .map(|(t, _)| {
+            let fwd = t.rotation * Vec3::NEG_Z;
+            let forward = Vec2::new(fwd.x, fwd.z).normalize_or(Vec2::new(0.0, -1.0));
+            FlashlightCone {
+                source: dungeon.world_to_cell(t.translation),
+                forward,
+                intensity: c.flashlight_intensity,
+                range: c.flashlight_range,
+                cone_cos: c.flashlight_cone_cos,
+                edge_softness: c.flashlight_edge_softness,
+            }
+        })
+        .collect();
+    // Stable order so the per-cell float summation in `compose` is reproducible across runs/threads.
+    cones.sort_unstable_by_key(|k| (k.source.x, k.source.y));
+    field.compose(&dungeon, &cones);
+}
+
 /// Owns the gameplay [`LightField`]. Registered in BOTH the windowed game and the headless harness
 /// (unlike [`LightingPlugin`]) because the field is CPU gameplay state creature AI reads — so the
 /// deterministic replay gate must cover its bake. Requires `Dungeon` at build (DungeonPlugin precedes it).
@@ -287,8 +437,11 @@ impl Plugin for LightFieldPlugin {
             .get_resource::<Dungeon>()
             .expect("LightFieldPlugin requires DungeonPlugin to be registered first");
         let field = LightField::new(dungeon.width, dungeon.height);
-        app.insert_resource(field)
-            .add_systems(FixedUpdate, bake_light_field.in_set(LightFieldWritten));
+        app.insert_resource(field).add_systems(
+            FixedUpdate,
+            // Static base first, then the moving cones layered on top — one field, one query interface.
+            (bake_light_field, apply_dynamic_lights).chain().in_set(LightFieldWritten),
+        );
     }
 }
 
@@ -375,8 +528,50 @@ pub struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostStartup, setup_camera_fx)
-            .add_systems(Update, (attach_fixture_lights, glow_fixtures, flicker_lights));
+        app.add_systems(PostStartup, setup_camera_fx).add_systems(
+            Update,
+            (attach_fixture_lights, glow_fixtures, flicker_lights, attach_flashlight_spots),
+        );
+    }
+}
+
+/// Idempotency guard: set on a [`crate::squad::FlashlightModel`] once its cosmetic `SpotLight` has been
+/// attached, so `attach_flashlight_spots` lights each Researcher's flashlight exactly once.
+#[derive(Component)]
+struct FlashlightLit;
+
+/// Give the Researcher's flashlight a real (windowed-only) [`SpotLight`] so the beam is visible — the
+/// **cosmetic** counterpart to the gameplay [`LightField`] cone in [`apply_dynamic_lights`]. The spot is a
+/// child of the **unit** (the flashlight model's parent), not the model, so it points straight down the
+/// unit's forward (`−Z`, Bevy's spot axis) regardless of how the model is cosmetically pitched in the hand
+/// — the same forward the gameplay cone uses, so glow and gameplay agree. First `SpotLight` in the
+/// codebase; shadowless like the fixture point lights (clustered, cheap). Runs in [`LightingPlugin`],
+/// never the headless harness.
+fn attach_flashlight_spots(
+    mut commands: Commands,
+    config: Res<GameConfig>,
+    flashlights: Query<(Entity, &ChildOf), (With<crate::squad::FlashlightModel>, Without<FlashlightLit>)>,
+) {
+    let c = &config.lighting;
+    let color =
+        Color::srgb(c.flashlight_spot_color[0], c.flashlight_spot_color[1], c.flashlight_spot_color[2]);
+    for (model, child_of) in &flashlights {
+        // Mark the model (not the unit) so the guard is one-per-flashlight; spawn the light on the unit.
+        commands.entity(model).insert(FlashlightLit);
+        commands.entity(child_of.parent()).with_child((
+            SpotLight {
+                color,
+                intensity: c.flashlight_spot_intensity,
+                range: c.flashlight_spot_range,
+                outer_angle: c.flashlight_spot_outer_angle,
+                inner_angle: c.flashlight_spot_outer_angle * 0.6, // soft-edged cone
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            // Chest height, slightly ahead of the body; identity rotation ⇒ beams along the unit's −Z
+            // forward (the direction `unit_facing` turns to, hence where the gameplay cone points).
+            Transform::from_xyz(0.15, 0.35, -0.3),
+        ));
     }
 }
 
@@ -520,11 +715,19 @@ mod tests {
         Dungeon::from_walkable(7, 1, walkable)
     }
 
+    /// Bake the static base then compose with no flashlight cones — the production `LightField` write path
+    /// (`bake_light_field` chained into `apply_dynamic_lights`) with no dynamic emitters, so `cells`
+    /// reflects the furniture-only field the tests assert on.
+    fn bake_static(field: &mut LightField, d: &Dungeon, fixtures: &[(IVec2, f32, f32)]) {
+        field.bake(d, fixtures);
+        field.compose(d, &[]);
+    }
+
     #[test]
     fn fixture_lights_nearby_floor_with_falloff() {
         let d = corridor_with_wall();
         let mut field = LightField::new(7, 1);
-        field.bake(&d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
+        bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         let at = |x: i32| field.sample(&d, d.cell_center(IVec2::new(x, 0)));
         assert!((at(0) - 1.0).abs() < 1e-6, "peak illuminance at the fixture cell");
         assert!(at(1) > at(2) && at(2) > 0.0, "monotone linear falloff away from the fixture");
@@ -535,7 +738,7 @@ mod tests {
     fn walls_cast_light_shadow() {
         let d = corridor_with_wall();
         let mut field = LightField::new(7, 1);
-        field.bake(&d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
+        bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         let at = |x: i32| field.sample(&d, d.cell_center(IVec2::new(x, 0)));
         assert!(at(2) > 0.0, "cell before the wall is lit");
         assert_eq!(at(3), 0.0, "the wall cell itself carries no light (not floor)");
@@ -549,8 +752,8 @@ mod tests {
         let fixtures = [(IVec2::new(0, 0), 1.0, 6.0), (IVec2::new(6, 0), 0.7, 6.0)];
         let mut a = LightField::new(7, 1);
         let mut b = LightField::new(7, 1);
-        a.bake(&d, &fixtures);
-        b.bake(&d, &fixtures);
+        bake_static(&mut a, &d, &fixtures);
+        bake_static(&mut b, &d, &fixtures);
         assert_eq!(a.cells, b.cells, "same (sorted) input → bit-identical field");
     }
 
@@ -558,12 +761,57 @@ mod tests {
     fn gradient_points_toward_the_light() {
         let d = corridor_with_wall();
         let mut field = LightField::new(7, 1);
-        field.bake(&d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
+        bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         // At cell (1,0) the light rises toward the fixture at x=0, so the +gradient (increasing light)
         // has negative x. A photophobic crab steers along -gradient (+x, into the dark); a photophilic
         // one along +gradient (-x, toward the lamp).
         let g = field.gradient(&d, d.cell_center(IVec2::new(1, 0)));
         assert!(g.x < 0.0, "gradient of increasing illuminance points toward the fixture (-x)");
+    }
+
+    /// A flashlight cone aimed +x over open floor: lights the cells ahead, leaves those behind and to the
+    /// side dark, and layers additively on the cached static base — the "moving deterrent" write path.
+    #[test]
+    fn flashlight_cone_lights_ahead_not_behind() {
+        let d = Dungeon::from_walkable(7, 7, vec![true; 49]);
+        let mut field = LightField::new(7, 7);
+        field.bake(&d, &[]); // no fixtures → base is dark
+        let cone = FlashlightCone {
+            source: IVec2::new(3, 3),
+            forward: Vec2::new(1.0, 0.0),
+            intensity: 3.0,
+            range: 4.0,
+            cone_cos: 0.82, // ~35° half-angle
+            edge_softness: 0.15,
+        };
+        field.compose(&d, &[cone]);
+        let at = |x: i32, y: i32| field.sample(&d, d.cell_center(IVec2::new(x, y)));
+        assert!(at(5, 3) > 0.0, "a cell straight ahead of the beam is lit");
+        assert_eq!(at(1, 3), 0.0, "a cell directly behind the beam is dark (outside the cone)");
+        assert_eq!(at(3, 6), 0.0, "a cell perpendicular to the beam is dark (outside the cone)");
+        assert!(at(4, 3) > at(5, 3), "illuminance falls off with distance along the beam");
+    }
+
+    /// The dynamic compose must be bit-reproducible (it folds into the replay hash): same base + same
+    /// sorted cones → identical `cells`. Mirrors `bake_is_deterministic` for the moving pass.
+    #[test]
+    fn flashlight_compose_is_deterministic() {
+        let d = Dungeon::from_walkable(7, 7, vec![true; 49]);
+        let cone = || FlashlightCone {
+            source: IVec2::new(3, 3),
+            forward: Vec2::new(0.6, 0.8).normalize(),
+            intensity: 2.5,
+            range: 4.0,
+            cone_cos: 0.7,
+            edge_softness: 0.2,
+        };
+        let mut a = LightField::new(7, 7);
+        let mut b = LightField::new(7, 7);
+        a.bake(&d, &[(IVec2::new(0, 0), 1.0, 3.0)]);
+        b.bake(&d, &[(IVec2::new(0, 0), 1.0, 3.0)]);
+        a.compose(&d, &[cone()]);
+        b.compose(&d, &[cone()]);
+        assert_eq!(a.cells, b.cells, "same base + same cone → bit-identical composed field");
     }
 
     #[test]

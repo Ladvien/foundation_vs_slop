@@ -150,7 +150,10 @@ fn fire_laser(
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<StigDeposits>,
-    mut shooters: Query<(Entity, &Transform, &Velocity, &mut AimTarget), (With<Unit>, Without<Hostile>)>,
+    mut shooters: Query<
+        (Entity, &Transform, &Velocity, &mut AimTarget, &crate::squad_ai::role::RoleId),
+        (With<Unit>, Without<Hostile>),
+    >,
     // `Option<&SmileyState>` marks the smiley boss among hostiles: the squad leaves the neutral watcher
     // alone and only fires on it once it turns angry (crabs/nests have no `SmileyState` → always targeted).
     enemies: Query<(&Transform, Option<&SmileyState>), (With<Hostile>, Without<Unit>)>,
@@ -166,7 +169,16 @@ fn fire_laser(
     // Auto-aim: each unit locks the nearest enemy it can currently SEE (fog-hidden enemies aren't
     // targeted — RTS partial observability) and fires from its muzzle toward it, scattered by a cone
     // that widens with the unit's speed. A unit with no visible enemy holds fire — one path.
-    for (unit_entity, unit, velocity, mut aim_target) in &mut shooters {
+    for (unit_entity, unit, velocity, mut aim_target, role) in &mut shooters {
+        // The Researcher (the "Scientist") carries a flashlight, not a blaster — it never fires. Its beam
+        // repels light-averse creatures through the `LightField` instead of dealing damage (one path: no
+        // "flashlight can also shoot" branch). Gate on the role *value*, which every unit carries, so the
+        // hashed squad archetype stays uniform. Its `AimTarget` stays `None` (its spawn value), so
+        // `unit_facing` falls through to the flashlight's `FacingOverride`, then to travel direction.
+        // Ref: Björk & Michelsen, FDG 2014 — light as a non-lethal deterrent.
+        if *role == crate::squad_ai::role::RoleId::Researcher {
+            continue;
+        }
         let muzzle = unit.transform_point(crate::squad::MUZZLE_LOCAL);
         // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
         let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
