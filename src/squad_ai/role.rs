@@ -275,19 +275,33 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
                 considerations: vec![gate(Fact::ThreatBearingKnown)],
             },
         ],
-        // Researcher: study the nearest unexamined subject when one is in range and curiosity is up.
-        RoleId::Researcher => vec![Behavior {
-            mode: Mode::Examine,
-            rank: 4,
-            target: TargetKind::NearestExaminable,
-            considerations: vec![
-                gate(Fact::HasUnexaminedNearby),
-                Consideration {
-                    input: Input::Drive(DriveId::CURIOSITY),
-                    curve: Curve::Linear { m: 1.0, b: 0.2 },
-                },
-            ],
-        }],
+        // Researcher (the "Scientist"): carries a flashlight, not a gun. Its top duty is to WARD off the
+        // nearest light-averse creature — plant and shine the beam on it so it flees the light (the beam
+        // repels photophobes through the `LightField`; see `light::apply_dynamic_lights` and the
+        // Researcher-only `FacingOverride` in `squad_think`). Ward outranks Examine, so a crab creeping in
+        // pulls the Researcher off its subject to drive it back. With no creature near, it studies the
+        // nearest unexamined subject (Examine) as before. Ref: Björk & Michelsen, FDG 2014 — the flashlight
+        // as a non-lethal deterrent.
+        RoleId::Researcher => vec![
+            Behavior {
+                mode: Mode::Ward,
+                rank: 4,
+                target: TargetKind::TrackedThreat,
+                considerations: vec![gate(Fact::PhotophobeBearingKnown)],
+            },
+            Behavior {
+                mode: Mode::Examine,
+                rank: 3,
+                target: TargetKind::NearestExaminable,
+                considerations: vec![
+                    gate(Fact::HasUnexaminedNearby),
+                    Consideration {
+                        input: Input::Drive(DriveId::CURIOSITY),
+                        curve: Curve::Linear { m: 1.0, b: 0.2 },
+                    },
+                ],
+            },
+        ],
         // Psionic detective: scan anomalies (top duty), ward the squad when an ally is down, commune
         // with the watcher when a threat is known.
         RoleId::Psionic => vec![
@@ -381,6 +395,17 @@ mod tests {
         p.squad.has_unexamined = 1.0;
         p.drives[DriveId::CURIOSITY.0] = 0.8;
         assert_eq!(chosen_mode(RoleId::Researcher, &p), Mode::Examine);
+    }
+
+    #[test]
+    fn researcher_wards_a_light_averse_creature_over_examining() {
+        // The flashlight duty: a photophobe in range gates Ward (rank 4), which outranks Examine (rank 3),
+        // so the Researcher turns its beam on the creature to herd it even with a study subject present.
+        let mut p = perc();
+        p.squad.photophobe_bearing_known = 1.0;
+        p.squad.has_unexamined = 1.0; // a study subject is also present…
+        p.drives[DriveId::CURIOSITY.0] = 0.8;
+        assert_eq!(chosen_mode(RoleId::Researcher, &p), Mode::Ward, "warding outranks examining");
     }
 
     #[test]

@@ -168,6 +168,10 @@ pub enum Fact {
     /// Gates `Regroup`, which outranks role work, so a strayed unit comes home instead of chaining duties
     /// across the map.
     PastLeash,
+    /// 1.0 while a light-averse (`light::Photophobic`) creature is within the Researcher's warding range
+    /// (hysteretic — see `SquadFields::photophobe_bearing_known`). Gates the Researcher's `Mode::Ward`, so
+    /// it turns its flashlight onto the crab/manca to herd it off (the beam repels it via the `LightField`).
+    PhotophobeBearingKnown,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -334,6 +338,10 @@ pub struct SquadFields {
     /// well inside it. Already hysteretic when it arrives here (`squad_ai::PerceptionLatch`), so `Regroup`
     /// can gate on it with a plain `Step` without chattering at the leash boundary.
     pub past_leash: f32,
+    /// The nearest light-averse creature's position (the Researcher's warding target), plus its gate flag.
+    /// `None` / 0.0 when none is in range; hysteretic via `squad_ai::PerceptionLatch`.
+    pub nearest_photophobe: Option<Vec3>,
+    pub photophobe_bearing_known: f32,
 }
 
 impl SquadFields {
@@ -352,6 +360,8 @@ impl SquadFields {
             threat_bearing_known: 0.0,
             anomaly_residue: 0.0,
             past_leash: 0.0,
+            nearest_photophobe: None,
+            photophobe_bearing_known: 0.0,
         }
     }
 }
@@ -378,6 +388,7 @@ impl Perception {
             Input::Perc(Fact::ThreatBearingKnown) => self.squad.threat_bearing_known,
             Input::Perc(Fact::AnomalyResidueNearby) => self.squad.anomaly_residue,
             Input::Perc(Fact::PastLeash) => self.squad.past_leash,
+            Input::Perc(Fact::PhotophobeBearingKnown) => self.squad.photophobe_bearing_known,
         }
     }
 }
