@@ -35,3 +35,8 @@ assets/config/elites_world.ron
 
 # Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
 .claude/
+
+# Per-developer Cargo overrides (e.g. a machine-specific build.target-dir for local build isolation).
+# MUST NOT be committed: a hardcoded absolute path broke CI on ubuntu-latest for every commit
+# ("failed to create directory /Users/…: Permission denied"). Each machine keeps its own local copy.
+.cargo/config.toml
