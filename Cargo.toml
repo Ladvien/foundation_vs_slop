@@ -25,6 +25,12 @@ required-features = ["test-harness"]
 avian3d = "0.7.0"
 bevy = "0.19.0"
 ron = "0.12.2"
+# Bit-exact binary framing for the offline search's worker IPC (`squad_ai::parallel`). RON's shortest-
+# decimal `f32` text is NOT a guaranteed bit-identical round-trip across platforms; that 1-ULP perturbation
+# flipped the `>=` elitism and the descriptor `cell()` bin, so the parallel archive diverged from the
+# inline one on x86 while matching on ARM (issue #44). bincode writes `f32` as its 4 raw IEEE-754 bytes
+# (fixed endianness), so genomes and scores cross the process boundary byte-for-byte.
+bincode = "1.3"
 # CPU glyph rasterization for world-space dialogue bubbles (see `dialogue`): Bevy 0.19's text stack
 # (parley/swash) has no public "rasterize a string to a standalone Image" API, and there is no 2D
 # camera to host `Text2d`, so bubbles bake their text into an RGBA image sampled on a billboarded 3D
