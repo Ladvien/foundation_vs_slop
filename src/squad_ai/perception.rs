@@ -22,7 +22,10 @@ use crate::enemy::Enemy;
 use crate::fog::FogGrid;
 use crate::gore::Carryable;
 use crate::health::Health;
+use crate::light::{light_push, LightField};
+use crate::parasite::Infestation;
 use crate::placement::PlacedIn;
+use crate::sim::SimTuning;
 use crate::squad::{SquadMember, Unit};
 use crate::util::nearest_planar;
 
@@ -126,6 +129,11 @@ pub fn squad_think(
     control: Res<SquadControlMode>,
     brains: Res<RoleBrains>,
     policy: Res<ActivePolicy>,
+    // The illuminance grid — an SCP-150-infested unit is steered toward the darkest nearby cell (Phase 4
+    // host manipulation). Read at this schedule slot; a possibly-1-tick-stale field is still deterministic.
+    light: Res<LightField>,
+    // Parasite manipulation strengths (`sim.parasite.manip_*`).
+    sim: Res<SimTuning>,
     threats: Query<&Transform, (Or<(With<Crab>, With<Enemy>)>, Without<Unit>)>,
     bosses: Query<&Transform, With<Enemy>>,
     furniture: Query<&Transform, (With<PlacedIn>, Without<Examined>)>,
@@ -143,6 +151,8 @@ pub fn squad_think(
             &Health,
             Option<&crate::squad::MoveOrder>,
             &SquadMember,
+            // Always-present SCP-150 host state (Phase 4 manipulation reads `active`).
+            &Infestation,
         ),
         With<Unit>,
     >,
@@ -160,7 +170,7 @@ pub fn squad_think(
     // the mutable unit query twice.
     let unit_snapshot: Vec<(Entity, Vec3, f32)> = units
         .iter()
-        .map(|(e, t, _, _, _, _, _, _, h, _, _)| (e, t.translation, health_frac(h)))
+        .map(|(e, t, _, _, _, _, _, _, h, _, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
     let dt = time.delta_secs();
@@ -177,6 +187,7 @@ pub fn squad_think(
         health,
         order,
         member,
+        infestation,
     ) in &mut units
     {
         let pos = tf.translation;
@@ -236,6 +247,17 @@ pub fn squad_think(
         drives.set(DriveId::CURIOSITY, if latch.examinable { 0.8 } else { 0.0 });
         drives.set(DriveId::COHESION, (anchor_dist / LEASH).clamp(0.0, 1.0));
 
+        // SCP-150 host manipulation (the extended phenotype, Heil 2016): an infested unit has its social
+        // drives hijacked — COHESION forced low so it stops rejoining the squad, CURIOSITY forced high so it
+        // wanders off. The parasite is isolating its host before the brood bursts (its movement goal is also
+        // steered toward the dark, below). Applied AFTER the baseline `set()`s so it overrides them; this is
+        // the sole drive/goal owner, so no competing writer.
+        let infested = infestation.active;
+        if infested {
+            drives.set(DriveId::COHESION, sim.parasite.manip_cohesion_drop);
+            drives.set(DriveId::CURIOSITY, sim.parasite.manip_curiosity_gain);
+        }
+
         let squad = SquadFields {
             anchor: anchor.valid.then_some(anchor.pos),
             anchor_dist,
@@ -285,7 +307,15 @@ pub fn squad_think(
 
         // Resolve the movement goal from the (possibly cached) mode + fresh perception every tick, so
         // cohesion tracks the moving anchor without waiting for the next think.
-        let goal = resolve_goal(active.mode, &perc, &anchor);
+        let mut goal = resolve_goal(active.mode, &perc, &anchor);
+        // SCP-150 manipulation: override an infested unit's goal toward the darkest nearby cell (down the
+        // `LightField` gradient), so it drifts into shadow to be isolated. Falls back to its normal goal
+        // where the field is flat.
+        if infested {
+            if let Some(dark) = dark_goal(&light, &dungeon, pos, sim.parasite.manip_dark_gain) {
+                goal = Some(dark);
+            }
+        }
         active.target = goal;
 
         // The player order is authoritative: a unit under a `MoveOrder` ignores the AI goal (its
@@ -325,6 +355,17 @@ fn health_frac(h: &Health) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The darkest-nearby-cell goal for an infested unit: a point `lookahead` world units ahead down the
+/// `LightField` gradient (toward shadow). `None` where the field is flat (no gradient to follow), so the
+/// unit keeps its normal goal there. Reuses `light::light_push` (negative gain ⇒ toward dark), the same
+/// primitive the photophobic crabs steer with. The manipulation strengths themselves live in
+/// `sim::ParasiteTuning` (`manip_*`).
+fn dark_goal(light: &LightField, dungeon: &Dungeon, pos: Vec3, lookahead: f32) -> Option<Vec3> {
+    let toward_dark = light_push(light, dungeon, pos, -1.0);
+    let dir = toward_dark.normalize_or_zero();
+    (dir.length_squared() > 1.0e-6).then(|| pos + dir * lookahead)
 }
 
 /// Map a chosen [`Mode`] to a world-space movement goal using current perception. Stationary actions

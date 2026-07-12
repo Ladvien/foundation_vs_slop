@@ -45,6 +45,7 @@ pub mod light;
 pub mod mycelia;
 pub mod nest;
 pub mod orca;
+pub mod parasite;
 pub mod pathfind;
 pub mod psi_vision;
 pub mod placement;
@@ -141,6 +142,7 @@ pub fn run() {
                 enemy::EnemyPlugin,
                 crab::CrabPlugin,
                 nest::NestPlugin,
+                parasite::ParasitePlugin,
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,

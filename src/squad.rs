@@ -319,6 +319,10 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 // Component + plugin come from avian's `bevy_transform_interpolation` integration.
                 avian3d::prelude::TransformInterpolation,
             ));
+        // SCP-150 host state: every unit is a parasitizable host with an (initially inert) infestation
+        // slot. Always-present (never a runtime insert/remove) so it can't split the hashed squad
+        // archetype — the same invariant the `PerceptionLatch` note above relies on.
+        unit.insert(crate::parasite::host_infestation_bundle());
         // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
         // not here — putting it on one unit in the headless core would split the hashed archetype.
         // The figurine body scene, on a cosmetic child with an identity transform: it inherits the

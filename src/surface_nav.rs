@@ -94,6 +94,41 @@ pub struct Patch {
     pub max: Vec2,
 }
 
+// --- Shared surface-locomotion primitives ---------------------------------------------------------
+// The tiny pure helpers every surface-crawling creature (crab, SCP-150 manca) shares. They live here,
+// in the surface-navigation module, so there is ONE copy — a creature module only reuses them.
+
+/// Component of `v` lying in the surface plane (project out the `normal` component). Used to slide a
+/// move/separation vector along whatever surface a creature is currently on.
+#[inline]
+pub(crate) fn project_tangent(v: Vec3, normal: Vec3) -> Vec3 {
+    v - normal * v.dot(normal)
+}
+
+/// Clamp a world point onto a patch's rectangle (keeps a creature on its current surface). The bounds are
+/// asymmetric: a floor patch's walled edges are inset to the wall's inner face minus a body clearance
+/// (see [`SurfaceGraph::build`]), so a creature pushed sideways by separation/jitter can't wedge into the
+/// bounding wall slab, while open edges keep the full half-tile so gate transfers still commit.
+#[inline]
+pub(crate) fn clamp_to_patch(pos: Vec3, p: &Patch) -> Vec3 {
+    let d = pos - p.center;
+    let u = d.dot(p.tan_u).clamp(p.min.x, p.max.x);
+    let v = d.dot(p.tan_v).clamp(p.min.y, p.max.y);
+    p.center + p.tan_u * u + p.tan_v * v
+}
+
+/// Orientation that lays a creature flat on a surface (model up → `normal`) facing `heading`. Uses
+/// `look_to` (−Z toward the facing dir, +Y toward the normal); `heading` is projected perpendicular to
+/// the normal first so the up axis is exact.
+#[inline]
+pub(crate) fn surface_orientation(heading: Vec3, normal: Vec3) -> Quat {
+    let up = normal.normalize_or(Vec3::Y);
+    let fwd = project_tangent(heading, up).normalize_or(up.any_orthonormal_vector());
+    let mut t = Transform::IDENTITY;
+    t.look_to(fwd, up);
+    t.rotation
+}
+
 /// A directed step in the surface graph: to a neighbor patch, its integer cost (≈10·world distance,
 /// octile-scaled like `flowfield`), and the world-space `gate` — the shared-boundary midpoint a crab
 /// steers toward to make the crossing.

@@ -241,6 +241,9 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             cull_max: to_usize(f!()),
             cull_cooldown: f!(),
         },
+        // The SCP-150 parasite knobs are not part of the evolved genome yet — the world search leaves them
+        // at their shipped defaults (so encode/decode round-trips at the same genome length `N`).
+        parasite: SimTuning::default().parasite,
     };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
     Ok(WorldConfig { ai, sim })

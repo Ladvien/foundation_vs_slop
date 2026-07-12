@@ -381,6 +381,25 @@
             cull_max: 6,              // most crabs one swat removes
             cull_cooldown: 2.0,
         ),
+        // SCP-150 parasite (see src/parasite.rs). The manca's population/combat/gait, the gestation clock,
+        // brood size, and host-manipulation strengths. manca_count_max is the load-bearing cap on the
+        // burst→brood→infest loop. Geometry/render constants stay as code consts in src/parasite.rs.
+        parasite: (
+            initial_count: 3,          // free mancae seeded at level start
+            manca_count_max: 12,       // hard cap on live mancae (bounds the reproduction loop)
+            manca_hp: 18.0,
+            crawl_speed: 1.8,          // floor stalk speed (world units/s)
+            climb_speed: 1.8,          // wall-climb speed
+            leap_len: 1.9,             // ballistic-leap reach
+            leap_cooldown: 2.5,        // seconds between leaps
+            embed_damage: 12.0,        // bite dealt to the host on burrow-in
+            gestation_seconds: 120.0,  // ~2 min real-time before the burst
+            brood_min: 2,              // brood size drawn from [brood_min, brood_max]
+            brood_max: 3,
+            manip_cohesion_drop: 0.05, // forced COHESION on an infested unit (low ⇒ strays)
+            manip_curiosity_gain: 0.9, // forced CURIOSITY on an infested unit (high ⇒ wanders)
+            manip_dark_gain: 3.0,      // world units the infested unit's goal is pushed toward shadow
+        ),
     ),
 
     // =============================================================================================
