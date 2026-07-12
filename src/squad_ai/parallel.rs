@@ -18,11 +18,21 @@
 //! (each samples the archive the previous one just mutated — load-bearing coevolutionary structure, not an
 //! accident). Raising `jobs` past `OPPONENTS` fills no more slots.
 //!
-//! Protocol: length-prefixed (`u32` LE) RON frames over the worker's stdin (driver → worker) and stdout
-//! (worker → driver). The first frame the driver sends is the frozen [`ModePrior`] (handshake), so every
-//! worker scores against the exact reference the driver holds in memory. Workers are spawned with
+//! Protocol: length-prefixed (`u32` LE) **bincode** frames over the worker's stdin (driver → worker) and
+//! stdout (worker → driver). The first frame the driver sends is the frozen [`ModePrior`] (handshake), so
+//! every worker scores against the exact reference the driver holds in memory. Workers are spawned with
 //! `RUST_LOG=off` so the sim's tracing output never contaminates the stdout data channel; their stderr is
 //! inherited so a genuine crash is still visible.
+//!
+//! **Why bincode, not RON text (issue #44).** The frames carry `f32` in both directions — genome params
+//! (`Genome::params`, `WorldGenome`) driver→worker, and the scored [`TripleScore`] worker→driver. RON
+//! serializes floats as shortest-decimal text, whose round-trip is not a guaranteed bit-identical `f32`
+//! across platforms. That 1-ULP perturbation feeds the `mean` fitness and the descriptor `cell()` binning,
+//! flipping the `>=` elitism so a *different* elite wins a niche — the parallel archive diverged from the
+//! inline one on x86 Linux while matching on ARM. bincode writes each `f32` as its 4 raw IEEE-754 bytes
+//! (fixed endianness), so every value crosses the boundary byte-for-byte and the two paths stay identical
+//! on every architecture. The frames are ephemeral IPC (never persisted, never human-read), so losing
+//! RON's readability costs nothing; `test_parallel_wire_roundtrip_is_bit_exact` pins the property.
 
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -137,20 +147,19 @@ impl WorkerPool {
 impl Worker {
     /// Send the frozen prior as the handshake frame.
     fn send_prior(&mut self, prior: &ModePrior) -> Result<(), String> {
-        let payload = ron::to_string(prior).map_err(|e| format!("encode prior: {e}"))?;
-        write_frame(&mut self.stdin, payload.as_bytes())?;
+        let payload = bincode::serialize(prior).map_err(|e| format!("encode prior: {e}"))?;
+        write_frame(&mut self.stdin, &payload)?;
         self.stdin.flush().map_err(|e| format!("flush prior to worker: {e}"))
     }
 
     /// One request/response: send a job, block for its result.
     fn exchange(&mut self, job: &TripleJob) -> Result<Option<TripleScore>, String> {
-        let payload = ron::to_string(job).map_err(|e| format!("encode job: {e}"))?;
-        write_frame(&mut self.stdin, payload.as_bytes())?;
+        let payload = bincode::serialize(job).map_err(|e| format!("encode job: {e}"))?;
+        write_frame(&mut self.stdin, &payload)?;
         self.stdin.flush().map_err(|e| format!("flush job to worker: {e}"))?;
         let resp = read_frame(&mut self.stdout)?
             .ok_or_else(|| "worker closed its output before answering — it likely crashed".to_string())?;
-        let text = std::str::from_utf8(&resp).map_err(|e| format!("worker reply not utf8: {e}"))?;
-        ron::from_str(text).map_err(|e| format!("decode worker reply: {e}"))
+        bincode::deserialize(&resp).map_err(|e| format!("decode worker reply: {e}"))
     }
 }
 
@@ -178,20 +187,16 @@ pub fn worker_main() -> Result<(), String> {
 
     let prior_frame =
         read_frame(&mut reader)?.ok_or_else(|| "worker received no prior handshake".to_string())?;
-    let prior: ModePrior = ron::from_str(
-        std::str::from_utf8(&prior_frame).map_err(|e| format!("prior not utf8: {e}"))?,
-    )
-    .map_err(|e| format!("decode prior: {e}"))?;
+    let prior: ModePrior =
+        bincode::deserialize(&prior_frame).map_err(|e| format!("decode prior: {e}"))?;
 
     while let Some(frame) = read_frame(&mut reader)? {
-        let job: TripleJob =
-            ron::from_str(std::str::from_utf8(&frame).map_err(|e| format!("job not utf8: {e}"))?)
-                .map_err(|e| format!("decode job: {e}"))?;
+        let job: TripleJob = bincode::deserialize(&frame).map_err(|e| format!("decode job: {e}"))?;
         let result = score_triple_compact(
             &t, &job.squad, &job.swarm, &job.world, &prior, job.seed_a, job.seed_b, job.ticks,
         )?;
-        let payload = ron::to_string(&result).map_err(|e| format!("encode result: {e}"))?;
-        write_frame(&mut writer, payload.as_bytes())?;
+        let payload = bincode::serialize(&result).map_err(|e| format!("encode result: {e}"))?;
+        write_frame(&mut writer, &payload)?;
         writer.flush().map_err(|e| format!("flush result: {e}"))?;
     }
     Ok(())
@@ -217,4 +222,90 @@ fn read_frame(r: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf).map_err(|e| format!("read frame body ({n} bytes): {e}"))?;
     Ok(Some(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins the determinism contract of the worker wire (issue #44): every `f32` the search fans across
+    //! processes must survive the encode/decode **bit-for-bit**, or the parallel archive diverges from the
+    //! inline one (a 1-ULP fitness shift flips `>=` elitism; a shifted descriptor lands in a different
+    //! `cell()`). Pure + fast — no rollout, no GPU. If the frame format is ever swapped back to a
+    //! shortest-decimal text codec (RON) this reds, catching the regression that produced #44.
+    use super::*;
+    use crate::squad_ai::coevolve::{SquadGenome, SwarmGenome};
+    use crate::squad_ai::genome::Genome;
+    use crate::squad_ai::qd::BehaviorDescriptor;
+    use crate::squad_ai::world_genome::WorldGenome;
+
+    /// `f32` bit patterns chosen to stress a decimal round-trip: full-precision decimals, values whose
+    /// shortest text is ambiguous, tiny/huge magnitudes, and the smallest subnormal.
+    fn awkward_f32s() -> Vec<f32> {
+        vec![
+            0.1,
+            0.2,
+            0.3,
+            1.0 / 3.0,
+            0.123_456_79_f32,
+            0.999_999_f32,
+            f32::from_bits(0x3DCC_CCCD),
+            f32::from_bits(0x3E99_999A),
+            f32::MIN_POSITIVE,
+            f32::from_bits(1), // smallest positive subnormal
+            123_456.78_f32,
+            1e-20_f32,
+            1e20_f32,
+        ]
+    }
+
+    fn all_bits(job: &TripleJob, score: &TripleScore) -> Vec<u32> {
+        let mut bits = Vec::new();
+        let mut push_genome = |g: &Genome| bits.extend(g.params.iter().map(|x| x.to_bits()));
+        for g in &job.squad.0 {
+            push_genome(g);
+        }
+        push_genome(&job.swarm.crab);
+        push_genome(&job.swarm.scout);
+        push_genome(&job.swarm.smiley);
+        bits.extend(job.world.0.iter().map(|x| x.to_bits()));
+        for d in [&score.squad, &score.swarm, &score.world] {
+            bits.push(d.aggression.to_bits());
+            bits.push(d.exploration.to_bits());
+        }
+        bits.push(score.score.to_bits());
+        bits
+    }
+
+    #[test]
+    fn parallel_wire_roundtrip_is_bit_exact() {
+        let v = awkward_f32s();
+        let genome = || Genome { params: v.clone(), ranks: vec![0u8; v.len()] };
+        // The two wire payloads: a job (driver → worker) and a scored result (worker → driver).
+        let job = TripleJob {
+            squad: SquadGenome(vec![genome(), genome()]),
+            swarm: SwarmGenome { crab: genome(), scout: genome(), smiley: genome() },
+            world: WorldGenome(v.clone()),
+            seed_a: 0x5C0_9191,
+            seed_b: 0xA11CE,
+            ticks: 7200,
+        };
+        let score = TripleScore {
+            score: v[3],
+            squad: BehaviorDescriptor::new(v[0], v[6]),
+            swarm: BehaviorDescriptor::new(v[7], v[9]),
+            world: BehaviorDescriptor::new(v[11], v[12]),
+        };
+
+        // Round-trip through the exact codec the IPC uses, in both wrappers the protocol sends.
+        let job_bytes = bincode::serialize(&job).expect("encode job");
+        let job_back: TripleJob = bincode::deserialize(&job_bytes).expect("decode job");
+        let score_bytes = bincode::serialize(&Some(score)).expect("encode score");
+        let score_back: Option<TripleScore> = bincode::deserialize(&score_bytes).expect("decode score");
+        let score_back = score_back.expect("Some(score) round-trips as Some");
+
+        assert_eq!(
+            all_bits(&job, &score),
+            all_bits(&job_back, &score_back),
+            "an f32 changed bits crossing the worker IPC — the parallel search would diverge from inline"
+        );
+    }
 }
