@@ -335,12 +335,22 @@ impl LightField {
         self.dirty = true;
     }
 
-    /// FNV-1a-fold every cell's bit pattern into `hash` — the determinism oracle for the bake, mirroring
-    /// `Stig::fold_fingerprint`. Once creature steering reads the field (Phase 2) a broken bake/occlusion
-    /// that shifts a crab would change the replay hash; this pins the field itself too. Test-only.
+    /// FNV-1a-fold every **static base** cell's bit pattern into `hash` — the determinism oracle for the
+    /// furniture bake, mirroring `Stig::fold_fingerprint`. A broken bake/occlusion that shifts a crab would
+    /// change the replay hash; this pins the field itself too. Test-only.
+    ///
+    /// **Folds `base`, not `cells`.** `cells` includes the Researcher's dynamic flashlight cone, whose beam
+    /// direction comes from the unit's `Transform.rotation` — and rotation is computed with glam
+    /// quaternion/`slerp` transcendentals that are NOT bit-identical across architectures (which is exactly
+    /// why `sim_harness::snapshot_hash` folds `translation` but never `rotation`). Folding the cone here
+    /// coupled this cross-arch golden to that arch-sensitive rotation, so an ARM-pinned value failed on x86
+    /// CI (issue #44 follow-up). The static `base` is pure scalar-`f32` (arch-stable), so the golden is a
+    /// meaningful cross-arch oracle again. The moving cone stays covered within-arch by
+    /// `deterministic_core_is_bit_identical` (run-twice) and by its own unit tests
+    /// (`flashlight_cone_lights_ahead_not_behind`, `flashlight_compose_is_deterministic`).
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
-        for &v in &self.cells {
+        for &v in &self.base {
             for &b in &v.to_bits().to_le_bytes() {
                 *hash ^= b as u64;
                 *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);

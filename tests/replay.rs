@@ -87,12 +87,15 @@ fn field_passes_are_bit_identical() {
     // damages crabs and trips the ALARM channel, and manipulated units move — both perturb the stigmergy
     // grids `field_hash` folds. Previously re-pinned for the audio + lighting merge (`field_hash` folds the
     // `NOISE_SQUAD`/`NOISE_SWARM` channels and the `light::LightField` grid).
-    // Re-pinned again for the Researcher's flashlight (was `0xa35b_eaeb_288a_fbca`): the Researcher now
-    // emits a moving light cone into the `LightField` every tick (`light::apply_dynamic_lights`), so the
-    // folded field grid legitimately differs. The two snapshot-hash goldens are UNCHANGED — in this
-    // scenario no creature reaches the Researcher, so it never wards, fires, or moves (its Transform/Health
-    // are identical); only the light field it writes changed. Same-seed reproducibility still holds.
-    const GOLDEN_FIELD: u64 = 0x3db0_1bf8_5c5d_d822;
+    // Reverted to `0xa35b_eaeb_288a_fbca` after the flashlight re-pin (`0x3db0_1bf8_5c5d_d822`) proved
+    // ARCH-DEPENDENT: `LightField::fold_fingerprint` now folds the static `base`, not `cells`. The dynamic
+    // flashlight cone in `cells` derives its beam direction from unit `Transform.rotation`, computed with
+    // glam quaternion/`slerp` transcendentals that are not bit-identical across ARM↔x86 — so an ARM-pinned
+    // cone-inclusive value failed `field_passes` on x86 CI while `migrated_defaults` (which folds
+    // translation, never rotation) passed. Folding the arch-stable scalar-`f32` base restores a value that
+    // matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
+    // within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
+    const GOLDEN_FIELD: u64 = 0xa35b_eaeb_288a_fbca;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
