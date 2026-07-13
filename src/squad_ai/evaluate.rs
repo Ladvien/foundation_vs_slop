@@ -133,25 +133,45 @@ pub fn rollout(
     dungeon_seed: u64,
     ticks: u32,
 ) -> Rollout {
+    run_episode(&deterministic_cfg(brains, config, audio, behavior, dungeon_seed), ticks, false)
+}
+
+/// Like [`rollout`], but also records the per-checkpoint **survival-belief series** (`Rollout::belief`) that
+/// `squad_ai::interest` reduces to the human-interest proxies. Only the consumers that read `belief` — `train
+/// probe` and `train poet` — call this and pay for the extra per-checkpoint `squad_health` query; every other
+/// search calls [`rollout`], which skips the sampling entirely.
+pub fn rollout_with_belief(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    audio: Option<AudioTuning>,
+    behavior: Option<crate::behavior_tuning::BehaviorTuning>,
+    dungeon_seed: u64,
+    ticks: u32,
+) -> Rollout {
+    run_episode(&deterministic_cfg(brains, config, audio, behavior, dungeon_seed), ticks, true)
+}
+
+/// Build the deterministic-core `SimConfig` for a rollout, installing whichever candidate slices are present.
+/// `None` runs the shipped slice (what the baseline prior sweep and every non-owning population pass); `Some`
+/// installs an evolved one — one config reaches the sim either way, at the single `GameConfig` seam.
+fn deterministic_cfg(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    audio: Option<AudioTuning>,
+    behavior: Option<crate::behavior_tuning::BehaviorTuning>,
+    dungeon_seed: u64,
+) -> SimConfig {
     let mut cfg = SimConfig::deterministic_core_seeded(dungeon_seed).with_brains(brains);
-    // `None` runs the shipped world (the baseline prior sweep passes `None`); `Some(w)` installs an evolved
-    // world for the third co-evolving population. One config reaches the sim either way.
     if let Some(w) = config {
         cfg = cfg.with_world_config(w);
     }
-    // Likewise the acoustic-stimulus slice: `None` runs the shipped `audio:` config (the prior sweep and
-    // every non-audio population pass `None`); `Some(a)` installs an evolved `AudioTuning` for the audio
-    // population's rollout. Same single `GameConfig` seam.
     if let Some(a) = audio {
         cfg = cfg.with_audio_config(a);
     }
-    // The behaviour slice: `None` runs the shipped `behavior:` config (every non-behaviour population passes
-    // `None`); `Some(b)` installs an evolved `BehaviorTuning` for the behaviour population's rollout. Same
-    // single `GameConfig` seam.
     if let Some(b) = behavior {
         cfg = cfg.with_behavior_config(b);
     }
-    run_episode(&cfg, ticks)
+    cfg
 }
 
 /// Like [`rollout`], but installs a **learned squad controller** (`ActivePolicy`) for the episode — the
@@ -179,13 +199,17 @@ pub fn rollout_with_policy(
     if let Some(b) = behavior {
         cfg = cfg.with_behavior_config(b);
     }
-    run_episode(&cfg, ticks)
+    // The neuroevolution population scores fitness + the squad descriptor, never the belief series → skip it.
+    run_episode(&cfg, ticks, false)
 }
 
 /// Run one headless episode of `ticks` fixed steps under `cfg`, driven by the synthetic player, and report
 /// the trace + outcome. The candidate (brains / world / audio / behaviour / policy) is already baked into
-/// `cfg`; this is the shared body of [`rollout`] and [`rollout_with_policy`].
-fn run_episode(cfg: &SimConfig, ticks: u32) -> Rollout {
+/// `cfg`; this is the shared body of [`rollout`], [`rollout_with_belief`], and [`rollout_with_policy`].
+///
+/// `sample_belief` gates the per-checkpoint survival-belief series: `true` only for the consumers that read
+/// it (`train probe` / `train poet`), so the hot search paths pay nothing for a signal they never use.
+fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
     // Held for the App's whole lifetime (harness invariant 4).
     let _serial = serial_guard();
     let mut app = build_headless_app(cfg);
@@ -213,7 +237,8 @@ fn run_episode(cfg: &SimConfig, ticks: u32) -> Rollout {
 
     // Starting squad health total — the denominator for the survival-belief series (see `run`). Captured
     // after the warm-up tick, before recording, so it is the full-strength squad the player started with.
-    let start_max_health = squad_health(&mut app).1;
+    // `0.0` when belief sampling is off, which `run` reads as the signal to skip the per-checkpoint query.
+    let start_max_health = if sample_belief { squad_health(&mut app).1 } else { 0.0 };
     // Per-checkpoint survival belief, filled by `run` — the input to the interest proxies.
     let mut belief: Vec<f32> = Vec::new();
     let mut violations = 0u32;
@@ -277,8 +302,8 @@ fn run_episode(cfg: &SimConfig, ticks: u32) -> Rollout {
     rollout
 }
 
-/// Step `ticks`, consulting the liveness oracle every [`LIVENESS_EVERY`] and sampling the survival belief at
-/// the same cadence. Returns `ticks`.
+/// Step `ticks`, consulting the liveness oracle every [`LIVENESS_EVERY`] and — when `start_max_health > 0` —
+/// sampling the survival belief at the same cadence. Returns `ticks`.
 #[allow(clippy::too_many_arguments)]
 fn run(
     app: &mut App,
@@ -300,14 +325,14 @@ fn run(
         let (peak, flatness) = field_saturation(app);
         *peak_field = peak_field.max(peak);
         *field_flatness = field_flatness.max(flatness);
-        // Survival-belief sample for the interest proxies: current squad health / the starting total.
-        // `start_max_health <= 0` (no squad at all) yields belief 0 — nothing left to survive.
-        let b = if start_max_health > 0.0 {
-            (squad_health(app).0 / start_max_health).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        belief.push(b);
+        // Survival-belief sample for the interest proxies: current squad health / the starting total. Skipped
+        // entirely (no `squad_health` query, no push) when `start_max_health <= 0` — which the caller sets to
+        // disable sampling on the hot search paths that never read `belief`, and which also holds when the
+        // squad was wiped at spawn (no belief to record). Consumers of an empty series read interest 0.
+        if start_max_health > 0.0 {
+            let b = (squad_health(app).0 / start_max_health).clamp(0.0, 1.0);
+            belief.push(b);
+        }
     }
     ticks
 }
