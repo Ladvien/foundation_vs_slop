@@ -17,6 +17,7 @@ use bevy::prelude::{IVec2, Resource};
 use crate::ai::utility::{Behavior, Mode, Perception};
 
 use super::policy::SquadPolicy;
+use super::role::RoleId;
 
 /// A policy driven by an external reinforcement-learning process. The trainer pushes one action index
 /// per unit per step; between steps (or before the trainer has stepped) the unit **holds** — it
@@ -51,7 +52,7 @@ impl RemotePolicy {
 }
 
 impl SquadPolicy for RemotePolicy {
-    fn choose(&self, _perc: &Perception, behaviors: &[Behavior], _rng: &mut u32) -> usize {
+    fn choose(&self, _perc: &Perception, behaviors: &[Behavior], _role: RoleId, _rng: &mut u32) -> usize {
         match self.queue.lock().ok().and_then(|mut q| q.pop_front()) {
             // A queued action index, clamped into range.
             Some(idx) => idx.min(behaviors.len().saturating_sub(1)),
@@ -170,11 +171,11 @@ mod tests {
         p.push_action(2);
         p.push_action(999); // clamped
         let mut rng = 1u32;
-        assert_eq!(p.choose(&perc(), &behaviors, &mut rng), 2);
-        assert_eq!(p.choose(&perc(), &behaviors, &mut rng), behaviors.len() - 1);
+        assert_eq!(p.choose(&perc(), &behaviors, RoleId::Medic, &mut rng), 2);
+        assert_eq!(p.choose(&perc(), &behaviors, RoleId::Medic, &mut rng), behaviors.len() - 1);
         // Empty → HOLD, which must be the Wander no-op, NOT index 0 (the Medic's index 0 is
         // TendWounded — walking to and healing an ally — so a held controller must not select it).
-        let held = p.choose(&perc(), &behaviors, &mut rng);
+        let held = p.choose(&perc(), &behaviors, RoleId::Medic, &mut rng);
         assert_eq!(behaviors[held].mode, Mode::Wander, "hold must be the Wander no-op, not a duty");
         assert_ne!(held, 0, "the Medic's index 0 (TendWounded) is not a hold");
     }

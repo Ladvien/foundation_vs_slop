@@ -12,7 +12,7 @@
 use bevy::prelude::Resource;
 
 use crate::ai::drives::DRIVE_COUNT;
-use crate::ai::utility::{decide, Behavior, Mode, Perception, TargetKind};
+use crate::ai::utility::{decide, Behavior, Mode, Perception, TargetKind, MODE_COUNT};
 
 use super::role::RoleId;
 
@@ -106,14 +106,17 @@ pub struct Action {
 /// resolves the concrete aim point the same way for every policy), keeping perception, target
 /// resolution, and execution shared across hand-authored and learned controllers.
 pub trait SquadPolicy: Send + Sync {
-    fn choose(&self, perc: &Perception, behaviors: &[Behavior], rng: &mut u32) -> usize;
+    /// `role` is the deciding unit's MTF role — the hand-authored `UtilityPolicy` ignores it (its curves are
+    /// already role-specific via the per-role `behaviors`), but a learned [`NeuralPolicy`] feeds it into the
+    /// observation's role one-hot so one weight set can serve every role.
+    fn choose(&self, perc: &Perception, behaviors: &[Behavior], role: RoleId, rng: &mut u32) -> usize;
 }
 
 /// The default policy: the dual-utility role brain (Dill). Deterministic given the per-unit RNG.
 pub struct UtilityPolicy;
 
 impl SquadPolicy for UtilityPolicy {
-    fn choose(&self, perc: &Perception, behaviors: &[Behavior], rng: &mut u32) -> usize {
+    fn choose(&self, perc: &Perception, behaviors: &[Behavior], _role: RoleId, rng: &mut u32) -> usize {
         decide(behaviors, perc, rng)
     }
 }
@@ -125,8 +128,113 @@ pub struct ScriptedPolicy {
 }
 
 impl SquadPolicy for ScriptedPolicy {
-    fn choose(&self, _perc: &Perception, behaviors: &[Behavior], _rng: &mut u32) -> usize {
+    fn choose(&self, _perc: &Perception, behaviors: &[Behavior], _role: RoleId, _rng: &mut u32) -> usize {
         self.index.min(behaviors.len().saturating_sub(1))
+    }
+}
+
+/// A learned squad controller: a small fixed-topology multilayer perceptron over the [`Observation`]
+/// tensor, scoring each [`Mode`]; `choose` picks the highest-scored behaviour available to the unit's role.
+/// **Deterministic** — a pure `argmax`, no sampling — so an evaluation is bit-reproducible and the policy is
+/// safe on the harness's exact-hash path (`sim_harness`). Its weights are a flat
+/// [`crate::squad_ai::policy_genome::PolicyGenome`] the offline **neuroevolution** search evolves (Salimans
+/// et al. 2017, "Evolution Strategies as a Scalable Alternative to Reinforcement Learning", arXiv:1703.03864
+/// — a gradient-free policy search that slots into the existing MAP-Elites engine, no autodiff). This struct
+/// is the *reader* of a committed `elites_policy.ron`, so it ships in the game binary while the search that
+/// produced it does not.
+///
+/// One hidden layer with `tanh`; input width `Observation::dim()`, output one logit per `Mode`. The output
+/// is over the fixed `Mode` alphabet (not the role's variable-length behaviour slice), so one weight set
+/// serves every role; `choose` maps the argmax back to whichever behaviour carries that mode, and the role
+/// one-hot in the observation lets the net condition on role.
+#[derive(Clone, Debug)]
+pub struct NeuralPolicy {
+    /// input→hidden, row-major `[HIDDEN][IN]`.
+    w1: Vec<f32>,
+    /// hidden bias `[HIDDEN]`.
+    b1: Vec<f32>,
+    /// hidden→output, row-major `[OUT][HIDDEN]`.
+    w2: Vec<f32>,
+    /// output bias `[OUT]`.
+    b2: Vec<f32>,
+}
+
+impl NeuralPolicy {
+    /// Input width — the observation tensor length.
+    pub const IN: usize = Observation::dim();
+    /// Hidden width. Small on purpose: a 25-mode action space over a ~30-D observation does not need a wide
+    /// net, and every extra unit enlarges the neuroevolution search space without adding expressible tactics.
+    pub const HIDDEN: usize = 24;
+    /// Output width — one logit per `Mode`.
+    pub const OUT: usize = MODE_COUNT;
+    /// Total weight count = the flat [`crate::squad_ai::policy_genome::PolicyGenome`] length.
+    pub const WEIGHT_COUNT: usize =
+        Self::HIDDEN * Self::IN + Self::HIDDEN + Self::OUT * Self::HIDDEN + Self::OUT;
+
+    /// Build a policy from a flat weight vector — input→hidden, hidden bias, hidden→output, output bias, in
+    /// that order. `Err` on wrong length (one path, no padding/truncation).
+    pub fn from_weights(w: &[f32]) -> Result<Self, String> {
+        if w.len() != Self::WEIGHT_COUNT {
+            return Err(format!("policy needs {} weights, got {}", Self::WEIGHT_COUNT, w.len()));
+        }
+        let mut i = 0usize;
+        let mut take = |n: usize| -> Vec<f32> {
+            let s = w[i..i + n].to_vec();
+            i += n;
+            s
+        };
+        let w1 = take(Self::HIDDEN * Self::IN);
+        let b1 = take(Self::HIDDEN);
+        let w2 = take(Self::OUT * Self::HIDDEN);
+        let b2 = take(Self::OUT);
+        Ok(NeuralPolicy { w1, b1, w2, b2 })
+    }
+
+    /// Forward pass → one logit per `Mode`. `tanh` hidden activation; the output is linear (argmax is
+    /// scale-invariant, so a deterministic pick needs no softmax).
+    fn logits(&self, x: &[f32]) -> [f32; MODE_COUNT] {
+        let mut h = [0.0f32; Self::HIDDEN];
+        for (j, hj) in h.iter_mut().enumerate() {
+            let mut s = self.b1[j];
+            let base = j * Self::IN;
+            for (i, &xi) in x.iter().enumerate() {
+                s += self.w1[base + i] * xi;
+            }
+            *hj = s.tanh();
+        }
+        let mut o = [0.0f32; MODE_COUNT];
+        for (k, ok) in o.iter_mut().enumerate() {
+            let mut s = self.b2[k];
+            let base = k * Self::HIDDEN;
+            for (j, &hj) in h.iter().enumerate() {
+                s += self.w2[base + j] * hj;
+            }
+            *ok = s;
+        }
+        o
+    }
+}
+
+impl SquadPolicy for NeuralPolicy {
+    fn choose(&self, perc: &Perception, behaviors: &[Behavior], role: RoleId, _rng: &mut u32) -> usize {
+        if behaviors.is_empty() {
+            return 0;
+        }
+        let obs = Observation::from_perception(perc, role).to_vec();
+        let logits = self.logits(&obs);
+        // Pick the AVAILABLE behaviour whose mode scores highest — a deterministic argmax over this role's
+        // own repertoire. Ties resolve to the lowest index, so the choice is a pure function of the weights
+        // (and thus exact-hash safe). Every `Mode::index()` is < MODE_COUNT == OUT, so the index is in range.
+        let mut best = 0usize;
+        let mut best_score = f32::NEG_INFINITY;
+        for (i, b) in behaviors.iter().enumerate() {
+            let s = logits[b.mode.index()];
+            if s > best_score {
+                best_score = s;
+                best = i;
+            }
+        }
+        best
     }
 }
 
@@ -173,7 +281,7 @@ mod tests {
         let policy = UtilityPolicy;
         let mut r1 = 7u32;
         let mut r2 = 7u32;
-        let a = policy.choose(&p, &behaviors, &mut r1);
+        let a = policy.choose(&p, &behaviors, RoleId::Researcher, &mut r1);
         let b = decide(&behaviors, &p, &mut r2);
         assert_eq!(a, b);
         assert_eq!(behaviors[a].mode, Mode::Examine);
@@ -185,7 +293,41 @@ mod tests {
         let policy = ScriptedPolicy { index: 999 };
         let p = zeroed();
         let mut rng = 1u32;
-        let idx = policy.choose(&p, &behaviors, &mut rng);
+        let idx = policy.choose(&p, &behaviors, RoleId::Medic, &mut rng);
         assert_eq!(idx, behaviors.len() - 1);
+    }
+
+    #[test]
+    fn neural_policy_weight_count_matches_layers() {
+        // The genome length the neuroevolution search operates on must equal the MLP's parameter count, or
+        // `from_weights` rejects every genome.
+        assert_eq!(
+            NeuralPolicy::WEIGHT_COUNT,
+            NeuralPolicy::HIDDEN * NeuralPolicy::IN
+                + NeuralPolicy::HIDDEN
+                + NeuralPolicy::OUT * NeuralPolicy::HIDDEN
+                + NeuralPolicy::OUT
+        );
+        assert_eq!(NeuralPolicy::IN, Observation::dim());
+        assert_eq!(NeuralPolicy::OUT, MODE_COUNT);
+        assert!(NeuralPolicy::from_weights(&vec![0.0; NeuralPolicy::WEIGHT_COUNT - 1]).is_err());
+        assert!(NeuralPolicy::from_weights(&vec![0.0; NeuralPolicy::WEIGHT_COUNT]).is_ok());
+    }
+
+    #[test]
+    fn neural_policy_choose_is_deterministic_and_in_range() {
+        // A pure function of the weights + observation: same inputs → same index, every time (exact-hash
+        // safety). And the returned index is always a valid behaviour slot.
+        let behaviors = default_behaviors_for_test(RoleId::Gunman);
+        let weights: Vec<f32> =
+            (0..NeuralPolicy::WEIGHT_COUNT).map(|i| ((i as f32) * 0.017).sin()).collect();
+        let policy = NeuralPolicy::from_weights(&weights).expect("weights");
+        let p = zeroed();
+        let mut r1 = 0u32;
+        let mut r2 = 12345u32; // RNG must not affect a deterministic argmax
+        let a = policy.choose(&p, &behaviors, RoleId::Gunman, &mut r1);
+        let b = policy.choose(&p, &behaviors, RoleId::Gunman, &mut r2);
+        assert_eq!(a, b, "argmax must ignore the RNG");
+        assert!(a < behaviors.len(), "index must be a valid behaviour slot");
     }
 }

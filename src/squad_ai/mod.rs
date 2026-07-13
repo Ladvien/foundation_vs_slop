@@ -28,6 +28,10 @@ pub mod evaluate;
 /// Gated because it reuses `coevolve::Population`.
 #[cfg(feature = "test-harness")]
 pub mod map_elites;
+/// Separable CMA-ES — the adaptive emitter behind the CMA-ME upgrade to `map_elites` (`map_elites_cma_loop`).
+/// Pure numeric logic, but search-only, so gated with the rest of the search machinery.
+#[cfg(feature = "test-harness")]
+pub mod cmaes;
 /// The standalone level-generation MAP-Elites search + readable `elites_levels.ron` handoff. Gated
 /// because it reuses `coevolve::Population`; the genome/quality/eval it drives are all ungated.
 #[cfg(feature = "test-harness")]
@@ -47,6 +51,10 @@ pub mod level_quality;
 /// Generate-and-measure evaluator: decode a level genome, run the pure `Dungeon::generate` / `furnish_all`
 /// / `habitat::build` pipeline, and score it with `level_quality`. GPU-free, deterministic.
 pub mod level_eval;
+/// Human-interest proxies (suspense / outcome surprise / effectance) computed from a per-checkpoint squad
+/// survival-belief series — the psychology-grounded companion to `surprise`'s information-theoretic `W·S·L`.
+/// Pure logic; the harness (`evaluate`) samples the belief series, this reduces it.
+pub mod interest;
 pub mod perception;
 pub mod persona;
 pub mod policy;
@@ -86,6 +94,23 @@ pub mod audio_eval;
 /// `coevolve::Population` + `audio_eval`; the genome it drives is ungated.
 #[cfg(feature = "test-harness")]
 pub mod audio_search;
+/// The policy genome (a learned `NeuralPolicy`'s MLP weights as a flat vector) — the sixth population, and
+/// the one that fills the RL gap. Pure logic like `world_genome`: it decodes to a `NeuralPolicy` that ships
+/// in the binary, while the neuroevolution SEARCH over it is harness-gated below.
+pub mod policy_genome;
+/// Rollout evaluator for the policy population: install a decoded `NeuralPolicy` at the squad seam, run two
+/// headless rollouts, and score them with the same witnessed-learnable-surprise fitness. Needs the harness.
+#[cfg(feature = "test-harness")]
+pub mod rl_eval;
+/// The standalone policy MAP-Elites (neuroevolution) search + readable `elites_policy.ron` handoff. Gated
+/// because it reuses `coevolve::Population` + `rl_eval`; the genome it drives is ungated.
+#[cfg(feature = "test-harness")]
+pub mod rl_search;
+/// POET — the open-ended outer loop that co-generates environments (world genome) and the agents that solve
+/// them (squad genome), with a learning-progress curriculum and cross-niche transfer. Generic core (unit-
+/// tested on a synthetic problem); the `train poet` driver instantiates it against a real rollout. Gated.
+#[cfg(feature = "test-harness")]
+pub mod poet;
 
 use cohesion::{SquadAnchor, SquadControlMode};
 use dialogue::{ActiveDialogueProvider, SquadLine, SquadUtterance};

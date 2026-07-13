@@ -33,8 +33,11 @@ use serde::{Deserialize, Serialize};
 use super::genome::{flat_mutate, flat_range_check};
 use crate::behavior_tuning::BehaviorTuning;
 
-/// Number of searched knobs. The curated first tranche across the seven behaviour clusters.
-pub const N: usize = 54;
+/// Number of searched knobs. The curated first tranche (54) plus a second tranche (35) of
+/// tactical/combat-feel knobs (ORCA cohesion, boss senses, laser ballistics, crab pounce/carry,
+/// parasite leap shape, mycelia coupling) appended as one block so the original 54 indices — and the
+/// committed `elites_behavior.ron` written against them — are untouched.
+pub const N: usize = 89;
 
 /// Hard `(min, max)` per knob, in the **same order** [`encode`]/[`decode`] walk the config. Each shipped
 /// value sits inside its range; the extremes are playable-but-different, never degenerate. Ordering
@@ -103,6 +106,49 @@ static BOUNDS: [(f32, f32); N] = [
     // Lower bound == the fixed `leash_in` (4.0), so the leash Schmitt band (`leash` outer >= `leash_in`
     // inner) can never invert under mutation — feasible by construction (see `validate_tuning`).
     (4.0, 15.0),  // perception.leash
+    // ── expanded subset (35): tactical / combat-feel knobs, all free of ordering constraints ──
+    // squad_move (9)
+    (0.05, 0.5),  // squad_move.min_encumber
+    (0.15, 0.6),  // squad_move.orca_radius
+    (0.3, 3.0),   // squad_move.orca_time_horizon
+    (2.0, 8.0),   // squad_move.orca_query_radius
+    (0.3, 1.5),   // squad_move.arrive_radius
+    (1.0, 8.0),   // squad_move.anchor_ease
+    (0.8, 4.0),   // squad_move.study_range
+    (0.8, 4.0),   // squad_move.heal_range
+    (5.0, 40.0),  // squad_move.heal_rate
+    // boss (5)
+    (0.0, 0.99),  // boss.turn_cos
+    (0.3, 0.99),  // boss.gaze_cos
+    (0.0, 1.0),   // boss.look_amount
+    (1.0, 8.0),   // boss.flee_speed
+    (0.4, 3.0),   // boss.sep_radius
+    // laser (4)
+    (8.0, 40.0),  // laser.laser_speed
+    (0.4, 3.0),   // laser.laser_life
+    (0.0, 1.0),   // laser.dist_spread
+    (4.0, 30.0),  // laser.dist_spread_range
+    // crab (8)
+    (0.3, 2.0),   // crab.jump_arc
+    (0.5, 6.0),   // crab.jitter_freq
+    (1.0, 2.5),   // crab.scout_speed_mul
+    (0.1, 1.0),   // crab.eat_range
+    (0.5, 6.0),   // crab.back_spread
+    (0.5, 4.0),   // crab.carry_speed
+    (0.5, 4.0),   // crab.deliver_range
+    (0.2, 2.0),   // crab.grab_range
+    // parasite_swarm (5)
+    (0.3, 2.0),   // parasite_swarm.leap_arc
+    (0.0, 0.95),  // parasite_swarm.blind_cos
+    (0.0, 3.0),   // parasite_swarm.harborage_bias
+    (2.0, 20.0),  // parasite_swarm.rouse_calm_seconds
+    (0.0, 3.0),   // parasite_swarm.huddle_sep_strength
+    // mycelia_coupling (3)
+    (0.1, 1.0),   // mycelia_coupling.graze_reach
+    (0.1, 1.0),   // mycelia_coupling.mat_dense_v
+    (0.005, 0.2), // mycelia_coupling.mat_meat_rate
+    // perception (1)
+    (0.1, 1.0),   // perception.squad_think_interval
 ];
 
 /// A behaviour config's evolvable subset, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin
@@ -175,6 +221,49 @@ pub fn encode(b: &BehaviorTuning) -> BehaviorGenome {
     v.push(b.mycelia_coupling.gaze_seen);
     // perception
     v.push(b.perception.leash);
+    // ── expanded subset (35), in BOUNDS order ──
+    // squad_move (9)
+    v.push(b.squad_move.min_encumber);
+    v.push(b.squad_move.orca_radius);
+    v.push(b.squad_move.orca_time_horizon);
+    v.push(b.squad_move.orca_query_radius);
+    v.push(b.squad_move.arrive_radius);
+    v.push(b.squad_move.anchor_ease);
+    v.push(b.squad_move.study_range);
+    v.push(b.squad_move.heal_range);
+    v.push(b.squad_move.heal_rate);
+    // boss (5)
+    v.push(b.boss.turn_cos);
+    v.push(b.boss.gaze_cos);
+    v.push(b.boss.look_amount);
+    v.push(b.boss.flee_speed);
+    v.push(b.boss.sep_radius);
+    // laser (4)
+    v.push(b.laser.laser_speed);
+    v.push(b.laser.laser_life);
+    v.push(b.laser.dist_spread);
+    v.push(b.laser.dist_spread_range);
+    // crab (8)
+    v.push(b.crab.jump_arc);
+    v.push(b.crab.jitter_freq);
+    v.push(b.crab.scout_speed_mul);
+    v.push(b.crab.eat_range);
+    v.push(b.crab.back_spread);
+    v.push(b.crab.carry_speed);
+    v.push(b.crab.deliver_range);
+    v.push(b.crab.grab_range);
+    // parasite_swarm (5)
+    v.push(b.parasite_swarm.leap_arc);
+    v.push(b.parasite_swarm.blind_cos);
+    v.push(b.parasite_swarm.harborage_bias);
+    v.push(b.parasite_swarm.rouse_calm_seconds);
+    v.push(b.parasite_swarm.huddle_sep_strength);
+    // mycelia_coupling (3)
+    v.push(b.mycelia_coupling.graze_reach);
+    v.push(b.mycelia_coupling.mat_dense_v);
+    v.push(b.mycelia_coupling.mat_meat_rate);
+    // perception (1)
+    v.push(b.perception.squad_think_interval);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     BehaviorGenome(v)
 }
@@ -257,6 +346,49 @@ pub fn decode(g: &BehaviorGenome, base: &BehaviorTuning) -> Result<BehaviorTunin
     b.mycelia_coupling.gaze_seen = f!();
     // perception
     b.perception.leash = f!();
+    // ── expanded subset (35), in BOUNDS order ──
+    // squad_move (9)
+    b.squad_move.min_encumber = f!();
+    b.squad_move.orca_radius = f!();
+    b.squad_move.orca_time_horizon = f!();
+    b.squad_move.orca_query_radius = f!();
+    b.squad_move.arrive_radius = f!();
+    b.squad_move.anchor_ease = f!();
+    b.squad_move.study_range = f!();
+    b.squad_move.heal_range = f!();
+    b.squad_move.heal_rate = f!();
+    // boss (5)
+    b.boss.turn_cos = f!();
+    b.boss.gaze_cos = f!();
+    b.boss.look_amount = f!();
+    b.boss.flee_speed = f!();
+    b.boss.sep_radius = f!();
+    // laser (4)
+    b.laser.laser_speed = f!();
+    b.laser.laser_life = f!();
+    b.laser.dist_spread = f!();
+    b.laser.dist_spread_range = f!();
+    // crab (8)
+    b.crab.jump_arc = f!();
+    b.crab.jitter_freq = f!();
+    b.crab.scout_speed_mul = f!();
+    b.crab.eat_range = f!();
+    b.crab.back_spread = f!();
+    b.crab.carry_speed = f!();
+    b.crab.deliver_range = f!();
+    b.crab.grab_range = f!();
+    // parasite_swarm (5)
+    b.parasite_swarm.leap_arc = f!();
+    b.parasite_swarm.blind_cos = f!();
+    b.parasite_swarm.harborage_bias = f!();
+    b.parasite_swarm.rouse_calm_seconds = f!();
+    b.parasite_swarm.huddle_sep_strength = f!();
+    // mycelia_coupling (3)
+    b.mycelia_coupling.graze_reach = f!();
+    b.mycelia_coupling.mat_dense_v = f!();
+    b.mycelia_coupling.mat_meat_rate = f!();
+    // perception (1)
+    b.perception.squad_think_interval = f!();
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
     Ok(b)
 }
