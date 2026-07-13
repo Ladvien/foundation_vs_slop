@@ -193,5 +193,16 @@ pub fn run() {
     #[cfg(debug_assertions)]
     app.add_plugins(devshot::DevShotPlugin);
 
+    // The watcher's "is the player looking at it?" gaze — WINDOWED-ONLY. It reads the live camera (which
+    // eases over wall-clock time), so registering it only here keeps it out of the headless deterministic
+    // harness: `enemy::smiley_reflex` there reads a stable `WatchedByPlayer(false)` and stays
+    // bit-reproducible. See `enemy::snapshot_player_gaze`.
+    app.add_systems(Update, enemy::snapshot_player_gaze);
+
+    // The gestation "twitching lump" tell — WINDOWED-ONLY cosmetic (spawns child meshes on infested hosts),
+    // so the headless deterministic core spawns nothing and its goldens are untouched. See
+    // `parasite::drive_infestation_tell`.
+    app.add_systems(Update, parasite::drive_infestation_tell);
+
     app.run();
 }

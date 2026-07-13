@@ -83,14 +83,18 @@ impl Default for AudioTuning {
                 unit_death_loudness: 0.9,
             },
             perception: AcousticPerceptionTuning {
-                // All din-response gains ship at 0: the acoustic channels are wired and audible, but nothing
-                // REACTS to them at the shipped config, so the sim (and the replay golden) is exactly the
-                // creature-only-fear game. The din contribution is ADDITIVE (see `DriveRule::TrackMaxPlusDin`)
-                // rather than max-shadowed, so raising these gains gives the offline audio search a real
-                // gradient — sound becomes a stimulus the moment the search (or a designer) turns it up.
-                crab_fear_of_din: 0.0,
-                unit_fear_of_din: 0.0,
-                crab_draw_to_din: 0.0,
+                // Sound-as-perception is ON (FIX 2). The whole read+write din pipeline (NOISE_SQUAD/
+                // NOISE_SWARM channels, the additive `DriveRule::TrackMaxPlusDin` FEAR rule, and the rank-2
+                // `Mode::Investigate` behaviour) was fully wired but shipped with every gain at 0 — written
+                // each frame, reacted to by nobody. These conservative positive defaults turn a firefight into
+                // a battlefield-shaping stimulus: `crab_draw_to_din` dominates `crab_fear_of_din`, so the
+                // swarm CONVERGES on gunfire — the design's own in-code question ("run from the guns or toward
+                // them?") answered *toward* — while `unit_fear_of_din` lets the swarm's death-roar unnerve the
+                // squad. Additive, so they give the offline audio search (`squad_ai::audio_genome` bounds) a
+                // real gradient to refine; these are the shipped starting point, not the search's last word.
+                crab_fear_of_din: 0.15,
+                unit_fear_of_din: 0.15,
+                crab_draw_to_din: 0.3,
                 investigate_threshold: 0.5,
             },
         }

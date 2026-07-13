@@ -58,19 +58,21 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // Re-pinned twice since the migration: first for diegetic lighting (crabs went photophobic), then for
     // the SCP-150 parasite — mancae now spawn into the core, hunt/embed hosts, and (over 1800 ticks)
     // manipulate infested units + trip the crab alarm on embed, all of which move actors. So the core
-    // moved from the lighting-era `0x3ecce611f2403172` to the value below. Legitimate: the same-seed
-    // reproducibility tests above (`deterministic_core_is_bit_identical`, `..._across_many_builds`) still
-    // pass, so the sim is still bit-reproducible — just different, because a real feature was added.
+    // moved from the lighting-era `0x3ecce611f2403172` to `0x4b6f6d7f454559c7`. Re-pinned AGAIN for the
+    // SCP-150 huddle/dormancy behaviour — mancae now spawn clustered at corner/furniture harborages, stay
+    // dormant (passive) until roused, and huddle via cohesion/separation, so real actor motion changed.
+    // Legitimate: the same-seed reproducibility tests above (`deterministic_core_is_bit_identical`,
+    // `..._across_many_builds`) still pass, so the sim is still bit-reproducible — just different, because a
+    // real feature was added.
     //
-    // Re-pinned again (was `0x4b6f6d7f454559c7`) for the ATTENTION channel: a new `FixedUpdate` producer
-    // (`ai::field::deposit_attention`) was added to the pinned schedule. NOTE: no core actor reads
-    // ATTENTION (its only consumer, the mould, is windowed-only and absent from the harness) — verified by
-    // temporarily skipping the deposit, which reproduced THIS exact hash. So the shift is purely the
-    // single-threaded executor re-solving its topological order once a system is inserted, not a data
-    // effect. The core is still bit-identical run-twice and arch-stable (ATTENTION is position/LOS-derived,
-    // never rotation). Flag for maintainers: that adding a pure producer shifts the trajectory means some
-    // core systems lack explicit relative ordering — a latent hygiene item, pre-existing, not introduced here.
-    const GOLDEN: u64 = 0xb8d5dc7d27ac37b1;
+    // MERGE with main (ATTENTION channel PR #48 + SCP color PR #47) into this WIP branch: this actor golden
+    // did NOT move — it still matches the pre-merge WIP value. ATTENTION adds `ai::field::deposit_attention`
+    // (a new `FixedUpdate` producer) and the 10th stigmergy channel, but no core actor reads ATTENTION (its
+    // consumer, the mould, is windowed-only and absent from the harness), and the added producer did not
+    // perturb any actor's trajectory here — so only the field-grid oracle below moved (it folds the new
+    // channel). The color PR is cosmetic (palette/HUD) and moves no actor either.
+    const GOLDEN: u64 = 0x6716f1718a9774d1;
+
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -96,7 +98,9 @@ fn field_passes_are_bit_identical() {
     // damages crabs and trips the ALARM channel, and manipulated units move — both perturb the stigmergy
     // grids `field_hash` folds. Previously re-pinned for the audio + lighting merge (`field_hash` folds the
     // `NOISE_SQUAD`/`NOISE_SWARM` channels and the `light::LightField` grid).
-    // Reverted to `0xa35b_eaeb_288a_fbca` after the flashlight re-pin (`0x3db0_1bf8_5c5d_d822`) proved
+    // [Later SUPERSEDED by the D1 re-pin at the bottom of this block — the cone forward is now arch-stable,
+    // so `fold_fingerprint` folds `cells` again.] Reverted to `0xa35b_eaeb_288a_fbca` after the flashlight
+    // re-pin (`0x3db0_1bf8_5c5d_d822`) proved
     // ARCH-DEPENDENT: `LightField::fold_fingerprint` now folds the static `base`, not `cells`. The dynamic
     // flashlight cone in `cells` derives its beam direction from unit `Transform.rotation`, computed with
     // glam quaternion/`slerp` transcendentals that are not bit-identical across ARM↔x86 — so an ARM-pinned
@@ -104,12 +108,37 @@ fn field_passes_are_bit_identical() {
     // translation, never rotation) passed. Folding the arch-stable scalar-`f32` base restores a value that
     // matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
     // within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
-    // Re-pinned (was `0xa35b_eaeb_288a_fbca`) for the ATTENTION channel: `Stig::fold_fingerprint` folds every
-    // channel, so the new 10th channel — deposited over the squad's line-of-sight set by
-    // `ai::field::deposit_attention` — enters this hash. It stays ARCH-STABLE (unlike the flashlight cone
-    // above): fog visibility is a pure function of unit cell positions + integer LOS, no rotation, so the
-    // deposit deliberately does NOT read the arch-sensitive flashlight beam direction.
-    const GOLDEN_FIELD: u64 = 0xd8deb83da6e1beb4;
+    //
+    // [MERGE re-pin] Combined with main's ATTENTION channel: `Stig::fold_fingerprint` now folds the 10th
+    // channel (attention, deposited over the squad LOS set by `ai::field::deposit_attention`) on top of the
+    // WIP field state below — arch-stable (fog visibility is position/integer-LOS, no rotation). Value below
+    // is the measured merged-tree hash.
+    //
+    // Re-measured at the restored clean-defaults baseline: `config.ron`'s `sim:` + `ai_tuning:` slices were
+    // reset to `SimTuning::default()` / `AiTuning::default()`, resolving the evolved drift + the three
+    // `TEMP — RESTORE` overrides (laser_damage ⅓, parasite initial_count/manca_count_max at 300). This value
+    // now also captures the SCP-150 readable-swarm change (alignment + collective roused motion + commitment
+    // ramp) that the prior `0xa35b_eaeb_288a_fbca` predated. The ACTOR golden above did NOT move: it was
+    // already pinned to the pure-defaults value — proven by `authored_world_config_override_is_a_noop`, which
+    // runs `decode(authored())` == (AiTuning::default(), SimTuning::default()) and still matches it — so the
+    // config restore only moved the field grids this oracle folds.
+    //
+    // Re-pinned again for FIX 1 (roused SCP-150 mancae now deposit `THREAT_ANOMALY` via
+    // `parasite::deposit_manca_dread`, so the whole brood is legible to the squad's anomaly-fear + psi-vision
+    // instead of being a silent parallel stack): the golden run rouses mancae, so new dread cells enter the
+    // field grids this oracle folds. The ACTOR golden was NOT affected — in this no-player seed the added
+    // dread moved no unit's final Transform/Health — so only this field value changed (was
+    // `0x5d60_2962_2213_5600`, the clean-defaults baseline).
+    //
+    // Re-pinned again for the D1 flashlight-determinism fix, which SUPERSEDES the `base`-only workaround
+    // described above: `apply_dynamic_lights` now derives the cone's beam direction from the Researcher's
+    // deterministic gameplay state (FacingOverride/AimTarget/velocity) with arch-stable ops instead of the
+    // slerped `Transform.rotation`, so `cells` (base + cones) is bit-identical across ARM↔x86 again. So
+    // `LightField::fold_fingerprint` folds `cells` once more (restoring the moving cone to this oracle's
+    // coverage), which moved this value (was `0xe1bb_9db0_7822_411f`). The ACTOR golden did NOT move: in
+    // this no-player seed no photophobe is warded into a cone cell, so the cone perturbs no unit's final
+    // Transform (the cone→actor coupling stays latent). See `light::apply_dynamic_lights`/`fold_fingerprint`.
+    const GOLDEN_FIELD: u64 = 0x03f9_6217_e5b5_fb62;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -137,7 +166,7 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        0xb8d5dc7d27ac37b1,
+        0x6716f1718a9774d1,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
@@ -210,6 +239,37 @@ fn a_mutated_audio_config_changes_the_sim() {
     assert_ne!(
         base.snapshot, mutant.snapshot,
         "a cranked audio config produced a byte-identical final state — the acoustic coupling is inert"
+    );
+}
+
+#[test]
+fn manca_dread_reaches_the_shared_anomaly_field() {
+    // FIX 1 regression guard. Roused SCP-150 mancae deposit `THREAT_ANOMALY` via `deposit_manca_dread`, so
+    // the brood is legible to the squad's anomaly-fear machinery + psi-vision instead of being a silent
+    // parallel AI stack. A/B on the new `manca_dread_rate` knob (mutate-tuning-at-the-seam, exactly as
+    // `photophobia_pulls_crabs_into_shadow` overrides `photophobic_gain`): at rate 0 the deposit lays
+    // `amount = 0·dt = 0` and the field matches the dread-off baseline; at the shipped rate the golden run's
+    // roused mancae fill THREAT_ANOMALY cells, so `field_hash` differs. This pins that the deposit is wired
+    // to the knob and gated on a positive rate. The READ side — units fear THREAT_ANOMALY — is pinned
+    // separately by `ai::tests::units_fear_every_hostile_creature_channel`; the two together cover the whole
+    // write→read coupling the fix restores.
+    use foundation_vs_slop::sim::SimTuning;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let field_at_rate = |rate: f32| -> u64 {
+        let mut app = build_headless_app_unfinished(&cfg);
+        app.world_mut().resource_mut::<SimTuning>().deposit.manca_dread_rate = rate;
+        app.finish();
+        app.cleanup();
+        step(&mut app, &cfg, 1800);
+        field_hash(&mut app)
+    };
+    assert_ne!(
+        field_at_rate(0.0),
+        field_at_rate(0.1),
+        "manca_dread_rate had no effect on the field grids — deposit_manca_dread is not reaching \
+         THREAT_ANOMALY (a roused brood would stay invisible to the squad's dread + psi-vision)"
     );
 }
 
@@ -459,4 +519,36 @@ fn photophobia_pulls_crabs_into_shadow() {
         mean_on < mean_off,
         "photophobic crabs (gain>0) should occupy darker cells than gain=0 crabs: on={mean_on} off={mean_off}"
     );
+}
+
+#[test]
+fn dramatic_burst_is_live_and_deterministic() {
+    // The SCP-150 host-burst (⅓-HP damage, chest wound, slow climb-out, blood + flesh chunks) fires only
+    // after a FULL gestation — 120 s shipped, far longer than any replay-test budget — so the exact-hash
+    // goldens above never see it. Force a fast gestation so the whole eruption (embed → gestate → convulse →
+    // erupt → bleed → emerge) actually runs, then prove it stays LIVE (no panic / NaN / out-of-range HP /
+    // runaway spawn) and DETERMINISTIC (two same-seed runs hash identically). The behavioural payoff — the
+    // host SURVIVES, wounded, instead of instakilling — is verified visually; this guards that the new
+    // phase machine can neither crash nor desync the pinned core.
+    use foundation_vs_slop::sim::SimTuning;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let run = || {
+        let mut app = build_headless_app_unfinished(&cfg);
+        // Shorten gestation so embed→erupt completes inside the step budget (mutate-tuning-at-the-seam trick,
+        // as `photophobia_pulls_crabs_into_shadow` does for the photophobic gain).
+        app.world_mut().resource_mut::<SimTuning>().parasite.gestation_seconds = 1.0;
+        app.finish();
+        app.cleanup();
+        for checkpoint in 1..=12 {
+            step(&mut app, &cfg, 50);
+            let v = liveness_violations(&mut app);
+            assert!(v.is_empty(), "burst liveness violated at tick {}: {v:?}", checkpoint * 50);
+        }
+        snapshot_hash(&mut app)
+    };
+    let a = run();
+    let b = run();
+    assert_eq!(a, b, "the dramatic host-burst must be bit-reproducible across same-seed runs");
 }

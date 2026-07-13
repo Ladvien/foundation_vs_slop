@@ -344,29 +344,80 @@ pub struct CandidateBrains {
 /// so do `Latch` and `SeekMeat`), which reads as swarm variety rather than as thrash. So
 /// `validate_rank_ladder` — a *role* invariant — is correctly not applied here.
 pub fn init_brains(mut commands: Commands, source: Res<BrainSource>) {
-    let brains = match &*source {
-        BrainSource::Authored => AiBrains {
-            smiley: smiley_brain(),
-            crab: crab_brain(),
-            scout: scout_brain(),
-        },
-        BrainSource::Candidate(candidate) => AiBrains {
+    let brains = load_creature_brains(&source).unwrap_or_else(|e| panic!("creatures.ron: {e}"));
+    commands.insert_resource(brains);
+}
+
+/// Which creature a `creatures.ron` entry overrides — the swarm analogue of `squad_ai::role::RoleId`.
+/// `Deserialize`/`Hash`/`Eq` so it keys the override map; a key that is not one of these is a loud RON
+/// parse error, never a silently skipped entry.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Deserialize)]
+pub enum CreatureId {
+    Smiley,
+    Crab,
+    Scout,
+}
+
+/// One creature's overridden repertoire (mirrors `squad_ai::role::RoleDef`). `Behavior` is already
+/// `Deserialize`, so an evolved elite round-trips into a readable RON diff a designer can inspect.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct CreatureDef {
+    pub behaviors: Vec<Behavior>,
+}
+
+/// Build the creature registry: the code-literal defaults (or a search candidate), overlaid by a validated
+/// `assets/config/creatures.ron` when present. This is the SWARM-side promotion path, symmetric with
+/// `squad_ai::load_role_brains` for the squad — so the offline search's evolved swarm repertoires
+/// (`elites_swarm.ron`) can reach the shipped game through a DELIBERATE, reviewed act (transcribe a chosen
+/// archive cell's crab/scout/smiley behaviours into `creatures.ron`), instead of the pipeline dead-ending
+/// with no runtime reader at all. Promoting one is a deliberate change with its own golden re-pin.
+///
+/// One path, no fallback (mirrors `load_role_brains`): a MISSING file is the normal shipped case (the
+/// code-literal defaults are a complete, playable swarm); a PRESENT-but-malformed/invalid file is a loud
+/// startup panic, never a silent discard of the author's override. A search `Candidate` replaces the
+/// repertoires wholesale and never overlays the file (an evaluation must run exactly the proposed brain).
+fn load_creature_brains(source: &BrainSource) -> Result<AiBrains, String> {
+    if let BrainSource::Candidate(candidate) = source {
+        return validated_creatures(AiBrains {
             smiley: Brain { behaviors: candidate.smiley.clone() },
             crab: Brain { behaviors: candidate.crab.clone() },
             scout: Brain { behaviors: candidate.scout.clone() },
-        },
-    };
-    // Checked once, loudly, at startup — see `utility::validate_unconditional_default`.
+        });
+    }
+
+    let mut brains = authored_brains();
+    match std::fs::read_to_string("assets/config/creatures.ron") {
+        Ok(src) => {
+            let defs: std::collections::HashMap<CreatureId, CreatureDef> =
+                ron::from_str(&src).map_err(|e| format!("malformed: {e}"))?;
+            for (id, def) in defs {
+                let slot = match id {
+                    CreatureId::Smiley => &mut brains.smiley,
+                    CreatureId::Crab => &mut brains.crab,
+                    CreatureId::Scout => &mut brains.scout,
+                };
+                *slot = Brain { behaviors: def.behaviors };
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("unreadable: {e}")),
+    }
+    validated_creatures(brains)
+}
+
+/// The one gate every creature brain passes through — a default, a `creatures.ron` override, or a search
+/// candidate alike. Creatures deliberately SHARE ranks (Chase/HuntBlood tie so the stronger pull wins), so
+/// the *role* rank-ladder invariant is correctly NOT applied here; only the unconditional-default check is
+/// (without it, `decide` would find no eligible behaviour and the creature would freeze).
+fn validated_creatures(brains: AiBrains) -> Result<AiBrains, String> {
     for (who, brain) in [
         ("smiley_brain", &brains.smiley),
         ("crab_brain", &brains.crab),
         ("scout_brain", &brains.scout),
     ] {
-        if let Err(e) = crate::ai::utility::validate_unconditional_default(&brain.behaviors, who) {
-            panic!("{e}");
-        }
+        crate::ai::utility::validate_unconditional_default(&brain.behaviors, who)?;
     }
-    commands.insert_resource(brains);
+    Ok(brains)
 }
 
 /// The smiley boss: hunt the nearest unit, but be **drawn to the biggest blood frenzy** (it reads the
@@ -636,13 +687,15 @@ fn crab_brain() -> Brain {
     }
 }
 
-/// The scout brain — the swarm's recon arm (~20% of crabs). A tiny data-literal repertoire that models
-/// ant scout-recruitment foraging by minimalist agents (Talamali, Bose, Haire, Xu, Marshall & Reina,
-/// "Sophisticated collective foraging with minimalist agents: a swarm robotics test", Swarm Intelligence
-/// 2019, DOI 10.1007/s11721-019-00176-9): **roam** far and fast hunting for prey; on a sighting, **mark** it —
-/// track its live position and lay the vectorial rally pheromone toward it (Tang et al. 2019, deposited by
-/// `crab::scout_mark_prey`) so the assault swarm converges; still **flee** gunfire. Scouts don't
-/// latch/forage/carry — the 80% assault swarm (see `crab_brain`) does the killing.
+/// The scout brain — the swarm's recon arm (~20% of crabs). A tiny data-literal repertoire whose
+/// roam→spot→recruit-via-stigmergy loop follows minimalist-agent foraging (Talamali, Bose, Haire, Xu,
+/// Marshall & Reina, "Sophisticated collective foraging with minimalist agents: a swarm robotics test",
+/// Swarm Intelligence 2019, DOI 10.1007/s11721-019-00176-9): **roam** far and fast hunting for prey; on a
+/// sighting, **mark** it — track its live position and lay the vectorial rally pheromone toward it (Tang et
+/// al. 2019, deposited by `crab::scout_mark_prey`) so the assault swarm converges; still **flee** gunfire.
+/// Scouts don't latch/forage/carry — the 80% assault swarm (see `crab_brain`) does the killing. The
+/// persistent scout/forager caste split is this game's design, NOT Talamali's model, which is homogeneous
+/// (every agent both explores and carries, recruiting by mass/trail — no caste).
 fn scout_brain() -> Brain {
     Brain {
         behaviors: vec![
@@ -704,6 +757,34 @@ mod tests {
     // Pure brain-shape checks — no App, no ECS (the seed-in/assert-out convention of `wfc.rs`).
     use super::*;
     use crate::ai::utility::validate_unconditional_default;
+
+    #[test]
+    fn creatures_ron_overlay_round_trips_and_replaces_by_name() {
+        // FIX 4 (swarm promotion path): a `creatures.ron` entry deserializes and replaces exactly the named
+        // creature, mirroring `roles.ron`. Serialize a REAL authored repertoire to RON, wrap it in the
+        // creatures.ron map syntax, and read it back through the loader's exact map type — proving both that
+        // `Behavior` round-trips and that `CreatureId` keys the override map (an evolved `elites_swarm.ron`
+        // cell is transcribed into precisely this shape to promote it).
+        let crab = authored_brains().crab.behaviors;
+        let behaviors_ron = ron::to_string(&crab).expect("authored behaviours serialize to RON");
+        let src = format!("{{ Crab: (behaviors: {behaviors_ron}) }}");
+        let defs: std::collections::HashMap<CreatureId, CreatureDef> =
+            ron::from_str(&src).expect("creatures.ron parses");
+        assert_eq!(defs.len(), 1, "only the named creature is present");
+        assert_eq!(
+            defs[&CreatureId::Crab].behaviors.len(),
+            crab.len(),
+            "the crab repertoire round-trips intact"
+        );
+        // An unknown creature key is a LOUD parse error, never a silent skip (one path, no fallback).
+        assert!(
+            ron::from_str::<std::collections::HashMap<CreatureId, CreatureDef>>(
+                "{ Nautilus: (behaviors: []) }"
+            )
+            .is_err(),
+            "an unknown creature key must fail to parse, not be silently ignored"
+        );
+    }
 
     #[test]
     fn every_shipped_creature_brain_has_an_unconditional_default() {

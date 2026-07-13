@@ -132,12 +132,13 @@ An elite's `ai` block has the same shape as the `ai_tuning:` slice of `assets/co
 
 ## What's evolvable (the config surface)
 
-The world genome is **61 knobs** — the whole data-driven world-dynamics surface, held in two config slices:
+The world genome is **75 knobs** — the whole data-driven world-dynamics surface, held in two config slices:
 
 - **`ai_tuning:`** (field propagation) — 7 stigmergy channels × {evaporate, diffuse, deposit_radius} + rally.
   Struct + shipped values: `src/ai/tuning.rs`; the slice in `assets/config/config.ron`.
-- **`sim:`** (simulation dynamics) — fear gains, deposit strengths, combat, breeding, and boss knobs.
-  Struct + shipped values: `src/sim.rs`; the slice in `config.ron`.
+- **`sim:`** (simulation dynamics) — fear gains, deposit strengths, combat, breeding, boss, and the SCP-150
+  parasite (population/gait/gestation/brood/host-manipulation). Struct + shipped values: `src/sim.rs`; the
+  slice in `config.ron`.
 
 The search only ever explores inside a hard per-knob bounds table (`world_genome::BOUNDS`) — evaporation
 floored so a field can't saturate, diffusion capped below 1, radii capped so a deposit can't flood the map.

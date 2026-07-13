@@ -119,6 +119,18 @@ pub struct Deposit {
 #[derive(Resource, Default)]
 pub struct StigDeposits(pub Vec<Deposit>);
 
+/// Stable ordering for a batch of deposits before they are queued. `drain_deposits` applies each with a
+/// non-associative `f32 +=`, so two deposits landing on overlapping cells in different iteration order
+/// (unstable across App instances — async GLB load + entity-id reuse) would smear the channel to a
+/// different sum. A site that emits deposits in raw ECS-query order sorts its batch through this first, so
+/// the drained field is a pure function of the deposits, not of query order. (Sites that already sort
+/// their source rows by a stable key before pushing — e.g. `crab_despawn_dead` by `Seed` — do not need it.)
+pub fn sort_deposits(batch: &mut [Deposit]) {
+    batch.sort_unstable_by_key(|d| {
+        (d.pos.x.to_bits(), d.pos.y.to_bits(), d.pos.z.to_bits(), d.amount.to_bits())
+    });
+}
+
 /// The shared field grids. One `Vec<f32>` per channel over the (fixed) dungeon cell grid, row-major
 /// `y*width + x` — the same indexing every other grid in the project uses.
 #[derive(Resource)]

@@ -99,9 +99,10 @@ Dropping the backend is sound, not a shortcut: `snapshot_hash` covers `(Transfor
 of which is on `FixedUpdate`, and rendering only *reads* sim state. It was verified by measurement — with a
 real Metal backend and with no backend, seed `0x5C09191` × 1800 ticks hash to the same value, with the whole
 suite passing. That deterministic-core golden is now pinned as an absolute value by
-`migrated_defaults_reproduce_the_shipped_golden_hash` (currently `0xec1add310772895c`; it tracks gameplay, so
-committing a deliberate balance change updates it — the earlier `716d0cfbb69b778e` predates the
-faction-relative-fear / psionic-field-sight work and is stale). It also made the harness ~2.9× faster (that episode:
+`migrated_defaults_reproduce_the_shipped_golden_hash` (currently `0x6716f1718a9774d1`; it tracks gameplay, so
+committing a deliberate balance change updates it — earlier values like `0xec1add310772895c` /
+`716d0cfbb69b778e` predate the faction-relative-fear / psionic-field-sight / SCP-150 work and are stale). The
+field-grid oracle `field_passes_are_bit_identical` is pinned separately (`0x5d60_2962_2213_5600`). It also made the harness ~2.9× faster (that episode:
 9.31 s → 3.18 s), because ~84% of a headless run was render-extract rather than simulation.
 
 ### 3. Visual regression (`src/visual_regression.rs`)

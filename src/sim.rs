@@ -48,6 +48,11 @@ pub struct DepositTuning {
     pub meat_rate: f32,
     /// `THREAT_ANOMALY` aura laid by the living watcher per second.
     pub anomaly_aura_rate: f32,
+    /// `THREAT_ANOMALY` dread laid per **roused** SCP-150 manca per second. Distinct from
+    /// `anomaly_aura_rate` (the single watcher's broad standing aura): a roused brood is many small
+    /// emitters clustered together, so the per-capita rate is deliberately lower — the swarm's felt dread
+    /// comes from overlap/clustering, not from each manca out-dreading the god. Dormant mancae emit nothing.
+    pub manca_dread_rate: f32,
     /// `ALARM` flooded around a freshly wounded crab.
     pub alarm_crab: f32,
     /// `ALARM` flooded around a wounded nest.
@@ -189,6 +194,7 @@ impl Default for SimTuning {
                 crab_menace_rate: 0.5,
                 meat_rate: 0.5,
                 anomaly_aura_rate: 0.4,
+                manca_dread_rate: 0.1,
                 alarm_crab: 2.0,
                 alarm_nest: 4.0,
                 rally_mark: 4.0,
@@ -283,6 +289,7 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     positive("deposit.crab_menace_rate", t.deposit.crab_menace_rate)?;
     positive("deposit.meat_rate", t.deposit.meat_rate)?;
     positive("deposit.anomaly_aura_rate", t.deposit.anomaly_aura_rate)?;
+    positive("deposit.manca_dread_rate", t.deposit.manca_dread_rate)?;
     positive("deposit.alarm_crab", t.deposit.alarm_crab)?;
     positive("deposit.alarm_nest", t.deposit.alarm_nest)?;
     positive("deposit.rally_mark", t.deposit.rally_mark)?;

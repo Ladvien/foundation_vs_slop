@@ -443,9 +443,16 @@ pub fn validate_unconditional_default(behaviors: &[Behavior], who: &str) -> Resu
     ))
 }
 
-/// Dual-utility selection (Dill): the highest rank bucket with any positive score, then weight-based
-/// random within it. Returns the index of the chosen behaviour. `behaviors` must be non-empty and
-/// should include an unconditional low-rank default (e.g. Wander) so a choice always exists.
+/// Dual-utility selection (Dill): the highest rank bucket with a score clearing [`MIN_SCORE`], then
+/// weight-based random within it. Returns the index of the chosen behaviour. `behaviors` must be non-empty
+/// and should include an unconditional low-rank default (e.g. Wander) so a choice always exists.
+///
+/// The `MIN_SCORE` gate at rank selection is a deliberate adaptation of Dill's *optional* step-3 low-weight
+/// screen, pulled forward to the rank step because considerations use continuous [`Curve`]s whose product
+/// is almost never exactly 0: Dill's literal "eliminate weight <= 0" would let every high-rank behaviour
+/// claim its rank via a near-zero curve tail (e.g. a Logistic at ~0.01) and dominate. Active high-rank
+/// behaviours author Step gates emitting ~1.0, so the threshold only screens out inactive tails, not real
+/// contenders — i.e. Dill's rank dominance still holds among behaviours that are meaningfully "on".
 pub fn decide(behaviors: &[Behavior], perc: &Perception, rng: &mut u32) -> usize {
     let scores: Vec<f32> = behaviors.iter().map(|b| b.score(perc)).collect();
     // Highest rank among behaviours whose score clears MIN_SCORE. The threshold (not just >0) is

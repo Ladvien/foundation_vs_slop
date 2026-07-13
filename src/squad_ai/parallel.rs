@@ -19,8 +19,9 @@
 //! accident). Raising `jobs` past `OPPONENTS` fills no more slots.
 //!
 //! Protocol: length-prefixed (`u32` LE) **bincode** frames over the worker's stdin (driver → worker) and
-//! stdout (worker → driver). The first frame the driver sends is the frozen [`ModePrior`] (handshake), so
-//! every worker scores against the exact reference the driver holds in memory. Workers are spawned with
+//! stdout (worker → driver). The driver's first two frames are the handshake — the frozen [`ModePrior`],
+//! then the [`Templates`] — so every worker scores against, and decodes genomes with, the exact reference
+//! the driver holds in memory (for ANY `t`, not just `authored()`). Workers are spawned with
 //! `RUST_LOG=off` so the sim's tracing output never contaminates the stdout data channel; their stderr is
 //! inherited so a genuine crash is still visible.
 //!
@@ -57,9 +58,10 @@ struct Worker {
 }
 
 impl WorkerPool {
-    /// Spawn `jobs` worker processes and hand each the frozen prior. Errors (spawn failure, a worker that
-    /// dies before the handshake) are fatal — there is no degraded single-process fallback, by design.
-    pub(crate) fn spawn(jobs: usize, prior: &ModePrior) -> Result<WorkerPool, String> {
+    /// Spawn `jobs` worker processes and hand each the frozen prior and the driver's templates. Errors
+    /// (spawn failure, a worker that dies before the handshake) are fatal — there is no degraded
+    /// single-process fallback, by design.
+    pub(crate) fn spawn(jobs: usize, prior: &ModePrior, t: &Templates) -> Result<WorkerPool, String> {
         let n = jobs.max(1);
         // The worker is this same binary re-invoked with `worker`. Tests override the path
         // (`TRAIN_WORKER_EXE`) because under `cargo test` `current_exe()` is the test harness, not `train`.
@@ -85,7 +87,8 @@ impl WorkerPool {
                 child.stdout.take().ok_or_else(|| format!("worker {i} has no stdout"))?,
             );
             let mut worker = Worker { child, stdin, stdout };
-            worker.send_prior(prior).map_err(|e| format!("worker {i} handshake: {e}"))?;
+            worker.send_prior(prior).map_err(|e| format!("worker {i} prior handshake: {e}"))?;
+            worker.send_templates(t).map_err(|e| format!("worker {i} templates handshake: {e}"))?;
             workers.push(Mutex::new(worker));
         }
         Ok(WorkerPool { workers })
@@ -145,11 +148,20 @@ impl WorkerPool {
 }
 
 impl Worker {
-    /// Send the frozen prior as the handshake frame.
+    /// Send the frozen prior as the first handshake frame.
     fn send_prior(&mut self, prior: &ModePrior) -> Result<(), String> {
         let payload = bincode::serialize(prior).map_err(|e| format!("encode prior: {e}"))?;
         write_frame(&mut self.stdin, &payload)?;
         self.stdin.flush().map_err(|e| format!("flush prior to worker: {e}"))
+    }
+
+    /// Send the driver's templates as the second handshake frame (after the prior), so the worker decodes
+    /// genomes against the driver's `t` rather than a locally-rebuilt `authored()`. This keeps the parallel
+    /// path a byte-identical evaluator of the inline path for ANY `t`, not only the authored repertoires.
+    fn send_templates(&mut self, t: &Templates) -> Result<(), String> {
+        let payload = bincode::serialize(t).map_err(|e| format!("encode templates: {e}"))?;
+        write_frame(&mut self.stdin, &payload)?;
+        self.stdin.flush().map_err(|e| format!("flush templates to worker: {e}"))
     }
 
     /// One request/response: send a job, block for its result.
@@ -172,14 +184,15 @@ impl Drop for Worker {
     }
 }
 
-/// The `train worker` entry point: handshake on the prior, then score every job frame until stdin closes.
+/// The `train worker` entry point: handshake on the prior then the templates, then score every job frame
+/// until stdin closes.
 ///
-/// Rebuilds `Templates::authored()` locally (the same code-literal reference the driver uses) rather than
-/// receiving it — cheap and guarantees no drift. Runs in the working directory it inherited from the
-/// driver, so it reads the identical `assets/config/config.ron`.
+/// The driver sends the templates as the second handshake frame, so the worker decodes genomes against the
+/// *driver's* `t` — the parallel path is then a byte-identical evaluator of the inline path for ANY `t`,
+/// not only `Templates::authored()`. (Previously the worker rebuilt `authored()` locally, which silently
+/// diverged from the inline path whenever the driver passed a non-authored `t`.) Runs in the working
+/// directory it inherited from the driver, so it reads the identical `assets/config/config.ron`.
 pub fn worker_main() -> Result<(), String> {
-    let t = Templates::authored();
-
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
@@ -189,6 +202,10 @@ pub fn worker_main() -> Result<(), String> {
         read_frame(&mut reader)?.ok_or_else(|| "worker received no prior handshake".to_string())?;
     let prior: ModePrior =
         bincode::deserialize(&prior_frame).map_err(|e| format!("decode prior: {e}"))?;
+    let templates_frame = read_frame(&mut reader)?
+        .ok_or_else(|| "worker received no templates handshake".to_string())?;
+    let t: Templates =
+        bincode::deserialize(&templates_frame).map_err(|e| format!("decode templates: {e}"))?;
 
     while let Some(frame) = read_frame(&mut reader)? {
         let job: TripleJob = bincode::deserialize(&frame).map_err(|e| format!("decode job: {e}"))?;
@@ -307,5 +324,27 @@ mod tests {
             all_bits(&job_back, &score_back),
             "an f32 changed bits crossing the worker IPC — the parallel search would diverge from inline"
         );
+    }
+
+    /// The templates handshake must carry a **non-authored** `t` losslessly, so the worker decodes genomes
+    /// against the driver's exact repertoires. Before the fix, the worker rebuilt `Templates::authored()`
+    /// locally and ignored the driver's `t` entirely — a search with any non-authored baseline silently
+    /// diverged from the inline reference (breaking the module's `parallel == inline` guarantee). Here we
+    /// perturb the authored repertoires and assert the perturbed `t` survives the exact bincode codec the
+    /// handshake uses, bit-for-bit. Pure + fast — no rollout, no GPU.
+    #[test]
+    fn templates_handshake_roundtrips_non_authored_bit_for_bit() {
+        let mut t = Templates::authored();
+        // A non-authored baseline: bump one behaviour's rank so `t != authored()` in a field the decoder
+        // reads. (The round-trip is codec-only, so feasibility of the resulting brains is irrelevant.)
+        let b = t.crab.first_mut().expect("authored crab repertoire is non-empty");
+        b.rank = b.rank.wrapping_add(1);
+
+        let bytes = bincode::serialize(&t).expect("encode templates");
+        let back: Templates = bincode::deserialize(&bytes).expect("decode templates");
+        // `Templates` has no `PartialEq`; re-encode the decoded value and compare the wire bytes, which is a
+        // strictly finer check than field equality (it also pins the encoding, not just the decoded value).
+        let reencoded = bincode::serialize(&back).expect("re-encode decoded templates");
+        assert_eq!(bytes, reencoded, "a non-authored Templates changed crossing the worker handshake");
     }
 }

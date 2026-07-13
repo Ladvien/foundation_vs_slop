@@ -4,7 +4,8 @@
 //! objective is **emergent agent behaviour**: does an acoustic-stimulus config make the swarm do something
 //! a player has not seen — converge on a firefight, panic-scatter at a wider radius, hesitate at a kill?
 //! So it reuses the same **witnessed-learnable-surprise** fitness (`super::surprise::fitness`, the `W·S·L`
-//! of the world/brain populations, Schmidhuber's compression-progress surprise, arXiv:0812.4360) over a
+//! of the world/brain populations — only the `L` (learnable) factor is Schmidhuber's compression-progress
+//! surprise, arXiv:0812.4360; per-factor attribution for W, S, L is exact in `super::surprise`) over a
 //! two-rollout learnability pair, scored against the frozen baseline prior. The only thing that changes
 //! between the baseline and a candidate is the installed [`AudioTuning`] — authored brains, authored world.
 //!

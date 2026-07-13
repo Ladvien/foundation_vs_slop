@@ -1,12 +1,23 @@
 //! `MetropolisSolver` — the Soft + Relational placement backend for `Freestanding` furniture.
 //!
-//! Direct port of the optimization-of-a-density-function-via-Metropolis–Hastings method of
+//! Adapts the optimize-a-density-function-via-Metropolis–Hastings method of
 //! Merrell, Schkufza, Li, Agrawala & Koltun, "Interactive Furniture Layout Using Interior Design
 //! Guidelines" (ACM TOG / SIGGRAPH 2011, DOI 10.1145/2010324.1964982). Each candidate is an oriented
 //! footprint; a cost (density) function scores a layout by summing interior-design terms — non-overlap,
 //! in-bounds, back-to-wall alignment, plus any explicit pairwise constraints — and Metropolis–Hastings
-//! samples low-cost layouts. Per-region, seeded, and reproducible; the paper needed a GPU only for
-//! interactive re-suggestion, not the one-shot offline layout we do here.
+//! samples low-cost layouts. Per-region, seeded, and reproducible.
+//!
+//! **Deliberate departures from the paper** (this makes a game layout, not an interactive design tool):
+//! - **Single-chain simulated annealing** (geometric cooling `temp_start`→`temp_end`), not the paper's
+//!   fixed-temperature **parallel tempering** — that technique exists to *parallelize* the sampler, which
+//!   the one-shot offline layout here does not need.
+//! - **Two proposal moves** (a discrete 90° yaw snap + a uniform translation), not the paper's three
+//!   (Gaussian translate, Gaussian rotate, and a two-item **swap**). The swap — the paper's engine for
+//!   global rearrangement — is omitted; with only a few sparse pieces per room, annealing plus local
+//!   moves explores adequately, and discrete 90° orientation suits axis-aligned Backrooms furniture.
+//! - The back-to-wall reward is a **custom 1-fold** term (see [`MetropolisWeights::w_wall_angle`]), not the
+//!   paper's 4-fold `m_wa`; and `w_wall` adds a **wall-proximity pull** (no analogue in the paper, which in
+//!   fact critiques wall-hugging for large items) — both are deliberate Backrooms choices, not Merrell terms.
 //!
 //! Weights live in the `placement.metropolis` slice of `assets/config/config.ron` so layout is re-tunable with no code change
 //! (Merrell 2011 reports robustness to ~2× weight perturbation).
@@ -45,8 +56,10 @@ pub struct MetropolisWeights {
     /// Multiplier applied to a **Hard** constraint's cost so the sampler drives it to satisfaction
     /// rather than treating it as one soft term among many (e.g. a fixture's back-to-wall rule).
     pub w_hard: f64,
-    /// Angular wall-snap strength (Merrell 2011 `m_wa`): rewards a wall-backed piece for orienting so
-    /// its back faces the nearest wall (front into the room). Applied to Hard `AgainstWall` fixtures.
+    /// Angular wall-snap strength for Hard `AgainstWall` fixtures: rewards a wall-backed piece for
+    /// orienting so its **back** faces the nearest wall (front into the room). This is a custom **1-fold**
+    /// back-to-wall term, NOT Merrell 2011's `m_wa` (which is `-cos(4Δθ)`, 4-fold — it rewards *any*
+    /// axis-aligned orientation equally, with no front/back preference). The game wants backs-to-wall.
     pub w_wall_angle: f64,
     /// Grouping strength for the `Near` band that draws same-group pieces together (toilet + sink).
     pub w_group: f64,
@@ -167,7 +180,9 @@ impl Solver for MetropolisSolver {
             self.weights.temp_end.max(1e-6),
         );
         for step in 0..iters {
-            // Geometric annealing from t0 → t1.
+            // Geometric simulated-annealing cooling t0 → t1 (single chain — see the module doc on why not
+            // the paper's parallel tempering). One local move per step below: a discrete 90° yaw snap or a
+            // uniform translate — the paper's Gaussian perturbations and two-item swap are adapted away.
             let frac = step as f64 / iters as f64;
             let temp = t0 * (t1 / t0).powf(frac);
 

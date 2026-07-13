@@ -24,6 +24,10 @@ pub mod dialogue;
 pub mod coevolve;
 #[cfg(feature = "test-harness")]
 pub mod evaluate;
+/// The shared single-population MAP-Elites loop that both `level_search` and `audio_search` drive.
+/// Gated because it reuses `coevolve::Population`.
+#[cfg(feature = "test-harness")]
+pub mod map_elites;
 /// The standalone level-generation MAP-Elites search + readable `elites_levels.ron` handoff. Gated
 /// because it reuses `coevolve::Population`; the genome/quality/eval it drives are all ungated.
 #[cfg(feature = "test-harness")]
