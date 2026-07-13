@@ -132,8 +132,8 @@ fn setup_laser_assets(
     // The project's first emissive material — a hot red-orange bolt. Values > 1 read as "glowing"
     // even without bloom; add an HDR camera + Bloom later for a halo.
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.1, 0.08),
-        emissive: LinearRgba::rgb(7.0, 0.25, 0.1), // red-dominant so it reads as a vivid bolt
+        base_color: crate::palette::LASER_BOLT_BASE,
+        emissive: crate::palette::LASER_BOLT_EMISSIVE, // red-dominant so it reads as a vivid bolt
         ..default()
     });
     commands.insert_resource(LaserAssets { mesh, material });
@@ -359,7 +359,7 @@ fn update_lasers(
                 gore.0.push(GoreEvent {
                     pos: hit_point,
                     kind: GoreKind::FleshHit,
-                    tint: Color::srgb(0.7, 0.05, 0.05),
+                    tint: crate::palette::LASER_SCORCH,
                     gib: None,
                     intensity: 0.0, // a flesh hit never shakes the camera (see gore feel layer)
                 });

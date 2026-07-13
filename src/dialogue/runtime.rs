@@ -307,7 +307,7 @@ fn present_current(
                     );
                     // Slightly dim until hovered, for a clickable affordance.
                     if let Some(mut m) = materials.get_mut(&rendered.material) {
-                        m.base_color = Color::srgb(0.8, 0.8, 0.8);
+                        m.base_color = crate::palette::PAPER_GRAY;
                     }
                     let mat = rendered.material.clone();
                     let mat_over = mat.clone();
@@ -343,7 +343,7 @@ fn present_current(
                             move |_ev: On<Pointer<Out>>,
                                   mut mats: ResMut<Assets<StandardMaterial>>| {
                                 if let Some(mut m) = mats.get_mut(&mat_out) {
-                                    m.base_color = Color::srgb(0.8, 0.8, 0.8);
+                                    m.base_color = crate::palette::PAPER_GRAY;
                                 }
                             },
                         );
