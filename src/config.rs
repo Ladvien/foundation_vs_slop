@@ -132,8 +132,14 @@ pub struct WorldConfig {
 pub fn load_game_config() -> Result<GameConfig, String> {
     let text = std::fs::read_to_string(GAME_CONFIG_PATH)
         .map_err(|e| format!("cannot read {GAME_CONFIG_PATH}: {e}"))?;
-    let cfg: GameConfig =
+    let mut cfg: GameConfig =
         ron::from_str(&text).map_err(|e| format!("{GAME_CONFIG_PATH} parse error: {e}"))?;
+    // Optional evolved-elite overlays (`FVS_*_ELITE` env vars): applied here, BEFORE the validators below,
+    // so an overlaid slice is validated on the same one path. Non-destructive — `config.ron` is untouched;
+    // unset env → shipped defaults. A bad archive/cell is a loud `Err` (surfaced by `ConfigPlugin::build`).
+    for line in crate::elite_overlay::overlay_config_elites(&mut cfg)? {
+        eprintln!("config: overlaid {line}");
+    }
     dungeon::validate_config(&cfg.dungeon)?;
     manifest::validate_manifest(&cfg.placement.furniture)?;
     validate_density(&cfg.placement.density)?;

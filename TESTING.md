@@ -148,6 +148,7 @@ The canonical map of what pins what. Update this table when you add or retire a 
 | `squad_ai/cmaes.rs` (`test-harness`) | Separable CMA-ES — **converges on a sphere & contracts sigma** (the correctness check), deterministic from its seed, a short generation is ignored. |
 | `squad_ai/map_elites.rs` (`test-harness`) | The CMA-ME improvement-emitter loop (`map_elites_cma_loop`) illuminates several archive cells on a synthetic QD problem. |
 | `squad_ai/poet.rs` (`test-harness`) | POET — **open-endedly grows harder niches & more skilled agents** on a synthetic difficulty/skill problem, rejects a hopeless seed pairing loudly, and `learning_progress` tracks recent improvement. |
+| `elite_overlay.rs` | Evolved-elite runtime overlay (`FVS_*_ELITE`) — `parse_cell`/`parse_spec`, the minimal `Archive` mirror **ignores unknown archive fields** (the load-bearing serde assumption), pick-by-cell vs best-fitness selection, absent-cell / empty-archive rejected loudly. |
 
 > **Offline training / search (`train` binary, `test-harness`).** The `train` subcommands drive these:
 > `bench`/`probe`/`prior` (measure + freeze the baseline), `evolve3` (squad×swarm×world co-evolution),

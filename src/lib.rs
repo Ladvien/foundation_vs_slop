@@ -33,6 +33,9 @@ pub mod crab;
 pub mod devshot;
 pub mod dialogue;
 pub mod dungeon;
+/// Evolved-elite runtime overlay: `FVS_*_ELITE` env vars install a search elite (behaviour / world / audio
+/// / levels config slices, or an RL `NeuralPolicy`) at startup without editing `config.ron`.
+pub mod elite_overlay;
 pub mod enemy;
 pub mod flowfield;
 pub mod fog;
@@ -87,6 +90,20 @@ const GIB_GRAVITY: f32 = 18.0;
 /// gameplay plugins can be driven deterministically off-screen.
 pub fn run() {
     let mut app = App::new();
+    // Optional RL-policy elite (`FVS_POLICY_ELITE`): install a learned `NeuralPolicy` as the squad
+    // `ActivePolicy` BEFORE `SquadAiPlugin`'s `init_resource::<ActivePolicy>()` (a no-op when present) —
+    // the same seam `sim_harness` uses. A bad archive fails loudly rather than silently using the default.
+    match elite_overlay::load_policy_elite() {
+        Ok(Some((policy, line))) => {
+            eprintln!("config: overlaid {line}");
+            app.insert_resource(squad_ai::policy::ActivePolicy(Box::new(policy)));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("FVS_POLICY_ELITE: {e}");
+            std::process::exit(1);
+        }
+    }
     app
         // Keep rendering at full rate even when the window is unfocused/occluded, so the game
         // stays live in the background (and the `devshot` in-process screenshots aren't black).
