@@ -100,6 +100,12 @@ impl Plugin for AiPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // Squad vision → the ATTENTION channel. Runs after the LOS grid is written this tick
+                    // (`fog::LosWritten`) and before the deposit queue is drained, so a cell's attention
+                    // reflects the current frame's line of sight.
+                    field::deposit_attention
+                        .after(crate::fog::LosWritten)
+                        .before(AiSet::Deposits),
                     field::drain_deposits.in_set(AiSet::Deposits),
                     field::drain_rally_deposits.in_set(AiSet::Deposits),
                     field::evaporate_diffuse.in_set(AiSet::FieldUpdate),

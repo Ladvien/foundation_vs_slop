@@ -310,6 +310,11 @@
             // Emitted by the living watcher, feared by the squad. Broad, slow, diffuse — it seeps down a
             // corridor, so the Psionic's through-wall sense reads as dread rather than a proximity ping.
             threat_anomaly: ( evaporate: 0.4,  diffuse: 0.2,  deposit_radius: 6.0 ),
+            // Observation field — where gaze rests right now. Fast evaporation (~1–2 s memory) makes
+            // attention a scarce, conserved budget; the mould recoils from it, a marked predator hunts it.
+            // Deposited per visible cell, so radius is ~per-cell (diffuse softens it; a big radius would
+            // bleed attention through walls into unseen cells).
+            attention:      ( evaporate: 0.7,  diffuse: 0.1,  deposit_radius: 1.0 ),
         ),
         // Vectorial rally pheromone (Tang et al. 2019): scouts deposit direction vectors toward live prey;
         // the swarm reads the local bearing and masses on it. decay = call-off rate, accumulate = deposit

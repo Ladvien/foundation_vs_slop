@@ -41,6 +41,8 @@ pub struct FieldsTuning {
     pub threat_crab: ChannelTuning,
     /// Danger emitted by the watcher (read by units).
     pub threat_anomaly: ChannelTuning,
+    /// Observation — where gaze currently rests (read by the mould and the marked predator).
+    pub attention: ChannelTuning,
 }
 
 impl FieldsTuning {
@@ -54,6 +56,7 @@ impl FieldsTuning {
         defs[FieldId::ALARM.0] = self.alarm.into();
         defs[FieldId::THREAT_CRAB.0] = self.threat_crab.into();
         defs[FieldId::THREAT_ANOMALY.0] = self.threat_anomaly.into();
+        defs[FieldId::ATTENTION.0] = self.attention.into();
         defs
     }
 }
@@ -133,6 +136,16 @@ impl Default for AiTuning {
                     diffuse: 0.2,
                     deposit_radius: 6.0,
                 },
+                // Attention decays fast (a cell "forgets" it was watched in ~1–2 s: the negative-feedback
+                // ingredient that makes gaze a *scarce, conserved* budget — look elsewhere and this fades).
+                // Deposited per *visible cell* (`deposit_attention`), so the radius is ~per-cell (a point);
+                // `diffuse` alone softens the gaze into peripheral cells. A larger radius here would bleed
+                // attention through walls into cells no unit can actually see.
+                attention: ChannelTuning {
+                    evaporate: 0.7,
+                    diffuse: 0.1,
+                    deposit_radius: 1.0,
+                },
             },
             // Rally vectors decay over a few seconds (call-off), accumulate scout deposits, and smear a
             // couple of cells so the massing swarm reads a smooth bearing toward the prey.
@@ -177,6 +190,7 @@ pub fn validate_tuning(t: &AiTuning) -> Result<(), String> {
     channel("alarm", &f.alarm)?;
     channel("threat_crab", &f.threat_crab)?;
     channel("threat_anomaly", &f.threat_anomaly)?;
+    channel("attention", &f.attention)?;
     let positive = |name: &str, v: f32| -> Result<(), String> {
         if v > 0.0 && v.is_finite() {
             Ok(())
