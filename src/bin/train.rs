@@ -211,11 +211,16 @@ struct EvolveArgs {
     cfg: SearchConfig,
     /// Use the CMA-ME adaptive emitter (valueless `--cma` flag; only honoured by the `rl` search today).
     cma: bool,
+    /// Override the output archive path (`--out <path>`). Lets many same-type searches (distinct `--seed`)
+    /// run concurrently without clobbering each other's `elites_*.ron`. Honoured by the single-output
+    /// searches (`levels`/`audio`/`behavior`/`rl`/`poet`); `evolve`/`evolve3` write three fixed files.
+    out: Option<String>,
 }
 
 fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
     let mut cfg = SearchConfig::default();
     let mut cma = false;
+    let mut out: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         // Valueless boolean flag — handled before the value-based flags so it doesn't consume the next arg.
@@ -235,6 +240,7 @@ fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
             // Worker processes for parallel rollout evaluation. `1` (default) runs inline. The archives are
             // byte-identical regardless — `--jobs` only trades CPU for wall-clock, capped at OPPONENTS (3).
             "--jobs" => cfg.jobs = parse_u32(value()?)? as usize,
+            "--out" => out = Some(value()?.clone()),
             other => return Err(format!("unknown flag {other:?}")),
         }
         i += 2;
@@ -249,7 +255,7 @@ fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
     if cfg.resolution == 0 {
         return Err("--res must be > 0".into());
     }
-    Ok(EvolveArgs { cfg, cma })
+    Ok(EvolveArgs { cfg, cma, out })
 }
 
 /// Run the three-way co-evolution (squad × swarm × world) and return the templates + filled archives.
@@ -366,9 +372,10 @@ fn levels(args: EvolveArgs) -> Result<(), String> {
         );
     })?;
 
-    write_ron(LEVELS_ARCHIVE_PATH, &level_search::level_archive_doc(&result.pop, &base)?)?;
+    let path = args.out.as_deref().unwrap_or(LEVELS_ARCHIVE_PATH);
+    write_ron(path, &level_search::level_archive_doc(&result.pop, &base)?)?;
     println!();
-    println!("wrote {LEVELS_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }
@@ -413,9 +420,10 @@ fn audio(args: EvolveArgs) -> Result<(), String> {
         );
     })?;
 
-    write_ron(AUDIO_ARCHIVE_PATH, &audio_search::audio_archive_doc(&result.pop)?)?;
+    let path = args.out.as_deref().unwrap_or(AUDIO_ARCHIVE_PATH);
+    write_ron(path, &audio_search::audio_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {AUDIO_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }
@@ -460,9 +468,10 @@ fn behavior(args: EvolveArgs) -> Result<(), String> {
         );
     })?;
 
-    write_ron(BEHAVIOR_ARCHIVE_PATH, &behavior_search::behavior_archive_doc(&result.pop)?)?;
+    let path = args.out.as_deref().unwrap_or(BEHAVIOR_ARCHIVE_PATH);
+    write_ron(path, &behavior_search::behavior_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {BEHAVIOR_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }
@@ -510,9 +519,10 @@ fn rl(args: EvolveArgs) -> Result<(), String> {
         );
     })?;
 
-    write_ron(RL_ARCHIVE_PATH, &rl_search::rl_archive_doc(&result.pop)?)?;
+    let path = args.out.as_deref().unwrap_or(RL_ARCHIVE_PATH);
+    write_ron(path, &rl_search::rl_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {RL_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }
@@ -596,10 +606,11 @@ fn poet(args: EvolveArgs) -> Result<(), String> {
             agent: n.agent.clone(),
         })
         .collect();
-    write_ron(POET_ARCHIVE_PATH, &doc)?;
+    let path = args.out.as_deref().unwrap_or(POET_ARCHIVE_PATH);
+    write_ron(path, &doc)?;
     println!();
     println!(
-        "wrote {POET_ARCHIVE_PATH} ({} niches, {} created, {} transfers over the run)",
+        "wrote {path} ({} niches, {} created, {} transfers over the run)",
         result.niches.len(),
         result.created,
         result.transfers
