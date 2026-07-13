@@ -153,7 +153,7 @@ fn draw_selection_rings(mut gizmos: Gizmos, selected: Query<&Transform, With<Sel
             tf.translation + Vec3::Y * 0.03,
             Quat::from_rotation_x(-FRAC_PI_2),
         );
-        gizmos.circle(iso, RING_RADIUS, Color::srgb(0.1, 1.0, 0.2));
+        gizmos.circle(iso, RING_RADIUS, crate::palette::SELECTION_RING);
     }
 }
 

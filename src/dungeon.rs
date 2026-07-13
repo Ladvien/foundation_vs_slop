@@ -1887,7 +1887,7 @@ fn spawn_tiles(
     // fog state. `base_color` tints the texture, so a dark cool grey remembers the terrain
     // without lighting it up. The fog swaps floor tiles between these two (see `fog`).
     let floor_mat_dim = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.28, 0.28, 0.36),
+        base_color: crate::palette::DUNGEON_STONE,
         base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
         perceptual_roughness: 0.95,
         metallic: 0.0,
