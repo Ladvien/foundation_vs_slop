@@ -29,6 +29,12 @@ pub fn serial_guard() -> MutexGuard<'static, ()> {
     HARNESS_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// A per-run factory for a learned squad controller. Boxed behind an `Arc` so a [`SimConfig`] — taken by
+/// `&`, and holding a `Box<dyn SquadPolicy>` that is **not** `Clone` — can mint a fresh policy for each
+/// rollout. Called once per [`build_headless_app`].
+pub type PolicyFactory =
+    std::sync::Arc<dyn Fn() -> Box<dyn crate::squad_ai::policy::SquadPolicy> + Send + Sync>;
+
 /// Knobs for a harness run.
 pub struct SimConfig {
     /// Simulation step in seconds. The whole pinned sim advances by exactly this each `step` tick.
@@ -74,6 +80,14 @@ pub struct SimConfig {
     /// behaviour-population analogue of [`Self::config`], applied at the same `GameConfig` seam before
     /// `AiPlugin` reads `gc.behavior` into its resources.
     pub behavior: Option<crate::behavior_tuning::BehaviorTuning>,
+    /// Install a learned squad decision policy (`ActivePolicy`) for one evaluation rollout — the
+    /// neuroevolution-population analogue of [`Self::brains`]. A **factory**, not a value, because
+    /// `Box<dyn SquadPolicy>` is not `Clone` and the harness API takes `&SimConfig`: it is called once per
+    /// [`build_headless_app`] to mint a fresh policy for that run. `None` runs the default hand-authored
+    /// `UtilityPolicy` (what every non-policy rollout uses); `Some(f)` overrides it before `SquadAiPlugin`'s
+    /// `init_resource::<ActivePolicy>()` — a no-op when the resource already exists, the same seam
+    /// [`Self::brains`] uses.
+    pub policy: Option<PolicyFactory>,
 }
 
 impl Default for SimConfig {
@@ -88,6 +102,7 @@ impl Default for SimConfig {
             config: None,
             audio: None,
             behavior: None,
+            policy: None,
         }
     }
 }
@@ -128,6 +143,13 @@ impl SimConfig {
     /// analogue of [`with_world_config`]. Applied at the same `GameConfig` seam (see `build_headless_app`).
     pub fn with_behavior_config(mut self, behavior: crate::behavior_tuning::BehaviorTuning) -> Self {
         self.behavior = Some(behavior);
+        self
+    }
+
+    /// Install a learned squad decision policy for one evaluation rollout — the neuroevolution-population
+    /// analogue of [`with_brains`]. Applied before `SquadAiPlugin` builds (see [`build_headless_app`]).
+    pub fn with_policy(mut self, policy: PolicyFactory) -> Self {
+        self.policy = Some(policy);
         self
     }
 }
@@ -264,6 +286,12 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // Insert BEFORE `AiPlugin`/`SquadAiPlugin`: their `init_resource::<BrainSource>()` is a no-op when the
     // resource already exists, so this is what selects authored-vs-candidate brains for the whole run.
     app.insert_resource(cfg.brains.clone());
+    // The learned-controller seam: mint a fresh policy and install it as `ActivePolicy` BEFORE
+    // `SquadAiPlugin::build` runs `init_resource::<ActivePolicy>()` (a no-op when present). `None` leaves the
+    // default `UtilityPolicy` in place — the same before-the-plugin mechanism as `brains`.
+    if let Some(make) = &cfg.policy {
+        app.insert_resource(crate::squad_ai::policy::ActivePolicy(make()));
+    }
 
     // The full game simulation, identical to production (see `lib::run`). Cosmetic plugins are included
     // too — they run harmlessly headless and keep the plugin graph identical, which matters because some
@@ -457,6 +485,23 @@ pub fn ordered_unit_count(app: &mut App) -> usize {
     let world = app.world_mut();
     let mut q = world.query_filtered::<(), (With<crate::squad::Unit>, With<crate::squad::MoveOrder>)>();
     q.iter(world).count()
+}
+
+/// The squad's aggregate health `(current_sum, max_sum)` over living units. The offline evaluation reduces
+/// this to a per-checkpoint **survival belief** for the human-interest proxies (`squad_ai::interest`): dead
+/// units have despawned and contribute nothing, so dividing a later `current_sum` by the episode's
+/// *starting* `max_sum` gives a belief in `[0,1]` that falls as units are bitten and rises as the medic
+/// heals. Read-only.
+pub fn squad_health(app: &mut App) -> (f32, f32) {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&crate::health::Health, With<crate::squad::Unit>>();
+    let mut cur = 0.0f32;
+    let mut max = 0.0f32;
+    for h in q.iter(world) {
+        cur += h.current;
+        max += h.max;
+    }
+    (cur, max)
 }
 
 /// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see

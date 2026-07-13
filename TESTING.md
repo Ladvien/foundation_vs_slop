@@ -141,6 +141,21 @@ The canonical map of what pins what. Update this table when you add or retire a 
 | `squad_ai/level_quality.rs` | The static level-quality objective — a disconnected level fails the minimal criterion (fitness `None`), one room is fully reachable, infestation & room/corridor split read correctly from the habitat mask, band/reward helpers behave. |
 | `squad_ai/level_eval.rs` | The generate-and-measure evaluator (GPU-free) — the shipped level scores in (0,1] and evaluates **reproducibly**; mutated genomes either score or cleanly reject (never panic). Runs the real `Dungeon::generate` / `furnish_all` / `habitat::build` pipeline. |
 | `squad_ai/level_search.rs` (`test-harness`) | The level MAP-Elites loop — a short search fills ≥1 archive niche and its archive doc serialises to readable RON. |
+| `squad_ai/behavior_genome.rs` | The 89-knob behaviour genome (`behavior:` config subset) — `authored` round-trips exactly, sits inside `BOUNDS` & is feasible, mutation stays feasible across 500 draws, a mutation moves something, wrong-length rejected. |
+| `squad_ai/policy.rs` | The policy seam — `Observation` tensor has a stable dim, `UtilityPolicy` matches engine `decide`, `ScriptedPolicy` clamps, and the learned `NeuralPolicy` has a weight count matching its layers + a **deterministic, in-range argmax** `choose` (RNG-independent — exact-hash safe). |
+| `squad_ai/policy_genome.rs` | The neuroevolution weight-vector genome — `authored` is deterministic, feasible, and decodes to an MLP; mutation stays in `[-W,W]` & feasible across 200 draws; wrong-length / out-of-range rejected. |
+| `squad_ai/interest.rs` | The human-interest proxies — a blowout has ~0 suspense, a back-and-forth fight out-suspenses it, a comeback registers outcome-surprise, an efficient recovery beats a flat walkover on effectance, all terms bounded `[0,1]`. |
+| `squad_ai/cmaes.rs` (`test-harness`) | Separable CMA-ES — **converges on a sphere & contracts sigma** (the correctness check), deterministic from its seed, a short generation is ignored. |
+| `squad_ai/map_elites.rs` (`test-harness`) | The CMA-ME improvement-emitter loop (`map_elites_cma_loop`) illuminates several archive cells on a synthetic QD problem. |
+| `squad_ai/poet.rs` (`test-harness`) | POET — **open-endedly grows harder niches & more skilled agents** on a synthetic difficulty/skill problem, rejects a hopeless seed pairing loudly, and `learning_progress` tracks recent improvement. |
+
+> **Offline training / search (`train` binary, `test-harness`).** The `train` subcommands drive these:
+> `bench`/`probe`/`prior` (measure + freeze the baseline), `evolve3` (squad×swarm×world co-evolution),
+> `levels`/`audio`/`behavior` (single-population MAP-Elites), **`rl`** (neuroevolution over `NeuralPolicy`
+> weights; `--cma` uses the CMA-ME emitter), and **`poet`** (open-ended world×squad co-generation). None ship
+> in the game binary — the runtime only reads the committed `elites_*.ron`. `rl`/`behavior`/`audio`/`poet`
+> need `train prior` first, and the prior must be regenerated (`train prior`) after any `Mode`/`MODE_COUNT`
+> change. `NeuralPolicy::choose` is argmax-deterministic so it stays on the exact-hash path.
 
 ### `tests/` integration files
 

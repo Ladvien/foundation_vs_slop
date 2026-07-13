@@ -28,11 +28,17 @@ use foundation_vs_slop::sim_harness::{
     build_headless_app, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
 };
 use foundation_vs_slop::squad_ai::coevolve::{
-    search, squad_archive_doc, swarm_archive_doc, sweep_prior, world_archive_doc, SearchConfig,
-    SearchResult, Templates,
+    brains_of, mutate_squad_feasible, search, squad_archive_doc, swarm_archive_doc, sweep_prior,
+    world_archive_doc, SearchConfig, SearchResult, SquadGenome, SwarmGenome, Templates,
 };
+use foundation_vs_slop::squad_ai::evaluate::rollout;
+use foundation_vs_slop::squad_ai::interest::Interest;
+use foundation_vs_slop::squad_ai::poet::{poet_search, PoetConfig};
+use foundation_vs_slop::squad_ai::surprise::{self, ModePrior};
+use foundation_vs_slop::squad_ai::world_genome::{self, WorldGenome};
 use foundation_vs_slop::squad_ai::audio_search::{self, AudioSearchConfig};
 use foundation_vs_slop::squad_ai::behavior_search::{self, BehaviorSearchConfig};
+use foundation_vs_slop::squad_ai::rl_search::{self, RlSearchConfig};
 use foundation_vs_slop::squad_ai::level_eval;
 use foundation_vs_slop::squad_ai::level_search::{self, LevelSearchConfig};
 
@@ -49,6 +55,11 @@ const AUDIO_ARCHIVE_PATH: &str = "assets/config/elites_audio.ron";
 /// The illuminated *behaviour* archive: evolved per-agent behaviour subset (locomotion/steering/senses/
 /// combat cadence/boids), overlaid onto the shipped `behavior:` base.
 const BEHAVIOR_ARCHIVE_PATH: &str = "assets/config/elites_behavior.ron";
+/// The illuminated *policy* archive: evolved `NeuralPolicy` weight vectors (the neuroevolution learner).
+const RL_ARCHIVE_PATH: &str = "assets/config/elites_policy.ron";
+/// The POET output: the surviving (environment, agent) niches — evolved worlds paired with the squad that
+/// solves them, plus each pairing's fitness + human-interest score.
+const POET_ARCHIVE_PATH: &str = "assets/config/elites_poet.ron";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -81,12 +92,18 @@ fn main() {
         // steering, senses, combat cadence, boids) under the SAME behavioural witnessed-surprise objective.
         // Needs the `prior` (`train prior` first) — regenerate it after any Mode change.
         "behavior" => parse_evolve(&args[1..]).and_then(behavior),
+        // Standalone policy (neuroevolution) search: evolve a `NeuralPolicy`'s weights under the SAME
+        // behavioural witnessed-surprise objective. Needs the `prior` (`train prior` first).
+        "rl" => parse_evolve(&args[1..]).and_then(rl),
+        // POET open-ended outer loop: co-evolve worlds + the squads that solve them, with a learning-progress
+        // curriculum and cross-niche transfer. Needs the `prior` (`train prior` first).
+        "poet" => parse_evolve(&args[1..]).and_then(poet),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior)"
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior | rl | poet)"
         )),
     };
     if let Err(e) = result {
@@ -135,6 +152,14 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
         println!("  coverage       : {} / {} cells = {:.2}%", o.cells_covered, o.reachable_cells, 100.0 * coverage);
         println!("  liveness       : {} violation(s)", o.liveness_violations);
         println!("  field          : peak {:.2}, flatness {:.1}% (field-sanity gate calibration)", o.peak_field, 100.0 * o.field_flatness);
+        // Human-interest proxies (suspense / outcome-surprise / effectance) reduced from the per-checkpoint
+        // survival-belief series — printed so their scale can be CALIBRATED from the shipped game (as the
+        // MIN_COVERAGE / FEAR bands were), not guessed. See `squad_ai::interest`.
+        let interest = foundation_vs_slop::squad_ai::interest::Interest::from_belief(&r.belief);
+        println!(
+            "  interest       : suspense {:.3}, outcome-surprise {:.3}, effectance {:.3}  (score {:.3}, {} checkpoints)",
+            interest.suspense, interest.outcome_surprise, interest.effectance, interest.score(), r.belief.len()
+        );
         println!("  squad descr    : aggression {:.3}, exploration {:.3}", squad_descriptor(&r.trace, o).aggression, squad_descriptor(&r.trace, o).exploration);
         println!("  swarm descr    : aggression {:.3}, persistence {:.3}", swarm_descriptor(&r.trace).aggression, swarm_descriptor(&r.trace).exploration);
         println!("  world descr    : deaths {:.3}, lives {:.3} (normalised deaths×lives axes)", world_descriptor(o).aggression, world_descriptor(o).exploration);
@@ -184,12 +209,21 @@ fn prior(ticks: u32, seeds: &[u64]) -> Result<(), String> {
 
 struct EvolveArgs {
     cfg: SearchConfig,
+    /// Use the CMA-ME adaptive emitter (valueless `--cma` flag; only honoured by the `rl` search today).
+    cma: bool,
 }
 
 fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
     let mut cfg = SearchConfig::default();
+    let mut cma = false;
     let mut i = 0;
     while i < args.len() {
+        // Valueless boolean flag — handled before the value-based flags so it doesn't consume the next arg.
+        if args[i] == "--cma" {
+            cma = true;
+            i += 1;
+            continue;
+        }
         let value = || args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i]));
         match args[i].as_str() {
             "--ticks" => cfg.episode_ticks = parse_u32(value()?)?,
@@ -215,7 +249,7 @@ fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
     if cfg.resolution == 0 {
         return Err("--res must be > 0".into());
     }
-    Ok(EvolveArgs { cfg })
+    Ok(EvolveArgs { cfg, cma })
 }
 
 /// Run the three-way co-evolution (squad × swarm × world) and return the templates + filled archives.
@@ -429,6 +463,147 @@ fn behavior(args: EvolveArgs) -> Result<(), String> {
     write_ron(BEHAVIOR_ARCHIVE_PATH, &behavior_search::behavior_archive_doc(&result.pop)?)?;
     println!();
     println!("wrote {BEHAVIOR_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// Standalone policy (neuroevolution) search: evolve a learned `NeuralPolicy`'s MLP weights under the
+/// witnessed-learnable-surprise objective, and commit the archive. Like `behavior`/`audio`, its fitness is a
+/// full-sim rollout, so it needs the frozen `prior` — run `train prior` first, and REGENERATE it after any
+/// `Mode` change. Reuses the `--generations / --batch / --res / --seed / --seeds / --ticks` flags; `--seeds`
+/// are the held-in worlds (the learnability pair uses the first two, which must differ). Unlike the config
+/// searches, an elite is an OPAQUE weight vector — the guard is the minimal criterion + watching it play,
+/// not a readable diff.
+fn rl(args: EvolveArgs) -> Result<(), String> {
+    let src = std::fs::read_to_string(PRIOR_PATH)
+        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
+    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
+
+    let use_cma = args.cma;
+    let c = args.cfg;
+    let cfg = RlSearchConfig {
+        seed: c.seed,
+        generations: c.generations,
+        batch: c.batch,
+        sigma: 0.3,
+        resolution: c.resolution,
+        dungeon_seeds: c.dungeon_seeds,
+        episode_ticks: c.episode_ticks,
+        use_cma,
+    };
+    println!(
+        "evolving policy ({}): {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
+        if use_cma { "CMA-ME emitter" } else { "neuroevolution, isotropic" },
+        cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.episode_ticks
+    );
+
+    let result = rl_search::search(&prior, &cfg, |generation, r| {
+        let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
+        println!(
+            "  gen {generation:>3}: policy {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
+            r.pop.archive.coverage(),
+            r.pop.archive.qd_score(),
+            best,
+            r.evaluations,
+            r.rejected_infeasible,
+            r.rejected_by_criterion
+        );
+    })?;
+
+    write_ron(RL_ARCHIVE_PATH, &rl_search::rl_archive_doc(&result.pop)?)?;
+    println!();
+    println!("wrote {RL_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// One POET niche, serialized: an evolved world paired with the squad that solves it, and the pairing's
+/// fitness + human-interest score. Both genomes are the same readable RON the config searches emit.
+#[derive(serde::Serialize)]
+struct PoetNicheDoc {
+    best_fitness: f32,
+    best_interest: f32,
+    env: WorldGenome,
+    agent: SquadGenome,
+}
+
+/// POET (Wang et al. 2019): the open-ended outer loop. It co-generates *worlds* (the world-dynamics genome)
+/// and the *squads* that solve them, admitting a new world only when it sits in the "neither too easy nor
+/// too hard" band for the current best squad (the minimal criterion), transferring squads between worlds,
+/// and steering optimisation budget by learning progress. Each pairing is scored by a real rollout, so it
+/// needs the frozen `prior` (`train prior` first). Reuses `--generations` (→ POET iterations) / `--seed` /
+/// `--seeds` (the held-in learnability pair) / `--ticks`.
+fn poet(args: EvolveArgs) -> Result<(), String> {
+    let src = std::fs::read_to_string(PRIOR_PATH)
+        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
+    let prior: ModePrior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
+
+    let c = args.cfg;
+    if c.dungeon_seeds.len() < 2 {
+        return Err("poet needs >= 2 dungeon seeds: the learnability pair must run on DIFFERENT worlds".into());
+    }
+    let t = Templates::authored();
+    // POET evolves worlds × squads against the shipped (authored) swarm — one moving opponent at a time.
+    let swarm = SwarmGenome::authored(&t);
+    let seeds = c.dungeon_seeds.clone();
+    let ticks = c.episode_ticks;
+    let poet_cfg = PoetConfig { seed: c.seed, iterations: c.generations, ..PoetConfig::default() };
+
+    println!(
+        "POET: {} iterations, up to {} niches, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
+        poet_cfg.iterations, poet_cfg.max_niches, seeds, poet_cfg.seed, ticks
+    );
+
+    // Score a (world, squad) pairing: two rollouts (the learnability pair) with the evolved world installed,
+    // gated by the behavioural minimal criterion, returning the witnessed-learnable-surprise fitness and the
+    // human-interest score. `None` is an MCC reject (POET reads it as "too hard / degenerate").
+    let evaluate = |world_g: &WorldGenome, squad_g: &SquadGenome| -> Option<(f32, f32)> {
+        let world_config = world_genome::decode(world_g).ok()?;
+        let brains = brains_of(&t, squad_g, &swarm).ok()?;
+        let a = rollout(brains.clone(), Some(world_config.clone()), None, None, seeds[0], ticks);
+        surprise::minimal_criterion(&a.outcome).ok()?;
+        let b = rollout(brains, Some(world_config), None, None, seeds[1], ticks);
+        surprise::minimal_criterion(&b.outcome).ok()?;
+        let fitness = surprise::fitness(&a.trace, &b.trace, &prior).score();
+        let interest = Interest::from_belief(&a.belief).score();
+        Some((fitness, interest))
+    };
+
+    let result = poet_search(
+        &poet_cfg,
+        world_genome::authored(),
+        SquadGenome::authored(&t),
+        |g: &WorldGenome, rng| world_genome::mutate(g, 0.3, rng),
+        |g: &SquadGenome, rng| mutate_squad_feasible(&t, g, rng),
+        evaluate,
+        |it, r| {
+            let peak_interest = r.niches.iter().map(|n| n.best_interest).fold(0.0f32, f32::max);
+            let best_fit = r.niches.iter().map(|n| n.best_fitness).fold(0.0f32, f32::max);
+            println!(
+                "  it {it:>3}: {} niches | {} created, {} rejected, {} transfers | {} evals | best fit {:.3}, peak interest {:.3}",
+                r.niches.len(), r.created, r.rejected, r.transfers, r.evaluations, best_fit, peak_interest
+            );
+        },
+    )?;
+
+    let doc: Vec<PoetNicheDoc> = result
+        .niches
+        .iter()
+        .map(|n| PoetNicheDoc {
+            best_fitness: n.best_fitness,
+            best_interest: n.best_interest,
+            env: n.env.clone(),
+            agent: n.agent.clone(),
+        })
+        .collect();
+    write_ron(POET_ARCHIVE_PATH, &doc)?;
+    println!();
+    println!(
+        "wrote {POET_ARCHIVE_PATH} ({} niches, {} created, {} transfers over the run)",
+        result.niches.len(),
+        result.created,
+        result.transfers
+    );
     print_read_warning();
     Ok(())
 }

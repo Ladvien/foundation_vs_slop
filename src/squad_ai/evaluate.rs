@@ -24,7 +24,7 @@ use crate::config::WorldConfig;
 use crate::sim_harness::{
     build_headless_app, clear_squad_orders, field_saturation, floor_cells, issue_squad_order,
     liveness_violations, nest_cells, ordered_unit_count, serial_guard, snapshot_hash, squad_centroid_cell,
-    step, SimConfig,
+    squad_health, step, PolicyFactory, SimConfig,
 };
 
 use super::surprise::{EpisodeOutcome, EpisodeTrace};
@@ -72,6 +72,10 @@ pub struct Rollout {
     /// the mode histogram. Used by `a_mutated_audio_config_changes_the_sim` to prove the acoustic coupling
     /// reaches gameplay.
     pub snapshot: u64,
+    /// Per-checkpoint squad **survival belief** `b_t ∈ [0,1]` (aggregate squad health / the episode's
+    /// starting health), sampled every liveness checkpoint. The input to `squad_ai::interest`, which reduces
+    /// this trajectory to the human-interest proxies (suspense / outcome-surprise / effectance).
+    pub belief: Vec<f32>,
 }
 
 /// **The synthetic player.**
@@ -129,9 +133,6 @@ pub fn rollout(
     dungeon_seed: u64,
     ticks: u32,
 ) -> Rollout {
-    // Held for the App's whole lifetime (harness invariant 4).
-    let _serial = serial_guard();
-
     let mut cfg = SimConfig::deterministic_core_seeded(dungeon_seed).with_brains(brains);
     // `None` runs the shipped world (the baseline prior sweep passes `None`); `Some(w)` installs an evolved
     // world for the third co-evolving population. One config reaches the sim either way.
@@ -150,10 +151,47 @@ pub fn rollout(
     if let Some(b) = behavior {
         cfg = cfg.with_behavior_config(b);
     }
-    let mut app = build_headless_app(&cfg);
+    run_episode(&cfg, ticks)
+}
+
+/// Like [`rollout`], but installs a **learned squad controller** (`ActivePolicy`) for the episode — the
+/// evaluation path for the neuroevolution population. The creatures keep their authored brains
+/// (`BrainSource::Authored`): we evolve the *squad's* decision policy against the shipped swarm. `policy`
+/// mints a fresh controller per rollout (a `Box<dyn SquadPolicy>` is not `Clone`). Everything else — the
+/// synthetic player, the recorder, the scoring inputs — is byte-identical to [`rollout`].
+pub fn rollout_with_policy(
+    policy: PolicyFactory,
+    config: Option<WorldConfig>,
+    audio: Option<AudioTuning>,
+    behavior: Option<crate::behavior_tuning::BehaviorTuning>,
+    dungeon_seed: u64,
+    ticks: u32,
+) -> Rollout {
+    let mut cfg = SimConfig::deterministic_core_seeded(dungeon_seed)
+        .with_brains(BrainSource::Authored)
+        .with_policy(policy);
+    if let Some(w) = config {
+        cfg = cfg.with_world_config(w);
+    }
+    if let Some(a) = audio {
+        cfg = cfg.with_audio_config(a);
+    }
+    if let Some(b) = behavior {
+        cfg = cfg.with_behavior_config(b);
+    }
+    run_episode(&cfg, ticks)
+}
+
+/// Run one headless episode of `ticks` fixed steps under `cfg`, driven by the synthetic player, and report
+/// the trace + outcome. The candidate (brains / world / audio / behaviour / policy) is already baked into
+/// `cfg`; this is the shared body of [`rollout`] and [`rollout_with_policy`].
+fn run_episode(cfg: &SimConfig, ticks: u32) -> Rollout {
+    // Held for the App's whole lifetime (harness invariant 4).
+    let _serial = serial_guard();
+    let mut app = build_headless_app(cfg);
 
     // One tick so the dungeon and squad exist before the tour is planned.
-    step(&mut app, &cfg, 1);
+    step(&mut app, cfg, 1);
     // The tour heads for the CRAB HUBS (nests), nearest-first from the spawn layout, and DWELLS on each so
     // the squad actually reaches firing range and a firefight happens (its NOISE_SQUAD din is then a
     // stimulus the swarm reacts to). Falls back to the floor spread only on a nest-less map. Ordering by
@@ -173,6 +211,11 @@ pub fn rollout(
     // frame's initial `ActiveBehavior` writes as decisions.
     start_recording(&mut app);
 
+    // Starting squad health total — the denominator for the survival-belief series (see `run`). Captured
+    // after the warm-up tick, before recording, so it is the full-strength squad the player started with.
+    let start_max_health = squad_health(&mut app).1;
+    // Per-checkpoint survival belief, filled by `run` — the input to the interest proxies.
+    let mut belief: Vec<f32> = Vec::new();
     let mut violations = 0u32;
     // Worst field-degeneracy seen across the episode (the saturation / whole-map-smear guard).
     let mut peak_field = 0.0f32;
@@ -196,7 +239,16 @@ pub fn rollout(
                 issue_squad_order(&mut app, hub);
             }
             let stepped = ADVANCE_TICKS.min(ticks - elapsed);
-            elapsed += run(&mut app, &cfg, stepped, &mut violations, &mut peak_field, &mut field_flatness);
+            elapsed += run(
+                &mut app,
+                cfg,
+                stepped,
+                &mut violations,
+                &mut peak_field,
+                &mut field_flatness,
+                &mut belief,
+                start_max_health,
+            );
             if ordered_unit_count(&mut app) > 0 {
                 ordered_ticks += stepped;
             }
@@ -209,21 +261,25 @@ pub fn rollout(
         clear_squad_orders(&mut app);
         elapsed += run(
             &mut app,
-            &cfg,
+            cfg,
             ENGAGE_TICKS.min(ticks - elapsed),
             &mut violations,
             &mut peak_field,
             &mut field_flatness,
+            &mut belief,
+            start_max_health,
         );
         hub_idx += 1;
     }
 
-    let mut rollout = finish_recording(&mut app, violations, peak_field, field_flatness);
+    let mut rollout = finish_recording(&mut app, violations, peak_field, field_flatness, belief);
     rollout.outcome.ordered_ticks = ordered_ticks.min(ticks);
     rollout
 }
 
-/// Step `ticks`, consulting the liveness oracle every [`LIVENESS_EVERY`]. Returns `ticks`.
+/// Step `ticks`, consulting the liveness oracle every [`LIVENESS_EVERY`] and sampling the survival belief at
+/// the same cadence. Returns `ticks`.
+#[allow(clippy::too_many_arguments)]
 fn run(
     app: &mut App,
     cfg: &SimConfig,
@@ -231,6 +287,8 @@ fn run(
     violations: &mut u32,
     peak_field: &mut f32,
     field_flatness: &mut f32,
+    belief: &mut Vec<f32>,
+    start_max_health: f32,
 ) -> u32 {
     let mut done = 0;
     while done < ticks {
@@ -242,6 +300,14 @@ fn run(
         let (peak, flatness) = field_saturation(app);
         *peak_field = peak_field.max(peak);
         *field_flatness = field_flatness.max(flatness);
+        // Survival-belief sample for the interest proxies: current squad health / the starting total.
+        // `start_max_health <= 0` (no squad at all) yields belief 0 — nothing left to survive.
+        let b = if start_max_health > 0.0 {
+            (squad_health(app).0 / start_max_health).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        belief.push(b);
     }
     ticks
 }
@@ -252,7 +318,13 @@ fn start_recording(app: &mut App) {
     app.world_mut().resource_mut::<Recording>().start();
 }
 
-fn finish_recording(app: &mut App, liveness_violations: u32, peak_field: f32, field_flatness: f32) -> Rollout {
+fn finish_recording(
+    app: &mut App,
+    liveness_violations: u32,
+    peak_field: f32,
+    field_flatness: f32,
+    belief: Vec<f32>,
+) -> Rollout {
     // Fold the final actor state BEFORE borrowing `Recording` (both need `&mut app`).
     let snapshot = snapshot_hash(app);
     let mut rec = app.world_mut().resource_mut::<Recording>();
@@ -261,5 +333,5 @@ fn finish_recording(app: &mut App, liveness_violations: u32, peak_field: f32, fi
     outcome.liveness_violations = liveness_violations;
     outcome.peak_field = peak_field;
     outcome.field_flatness = field_flatness;
-    Rollout { trace: std::mem::take(&mut rec.trace), outcome, snapshot }
+    Rollout { trace: std::mem::take(&mut rec.trace), outcome, snapshot, belief }
 }

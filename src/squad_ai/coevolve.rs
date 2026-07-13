@@ -209,6 +209,18 @@ fn propose_squad(
     ))
 }
 
+/// Public feasible squad mutation for the POET outer loop (`squad_ai::poet`) — redraw a child until it
+/// passes `squad_feasible`, exactly as the co-evolution's internal [`propose_squad`] does. The rejection
+/// count is discarded (POET keeps its own tallies).
+pub fn mutate_squad_feasible(
+    t: &Templates,
+    parent: &SquadGenome,
+    rng: &mut ChaCha8Rng,
+) -> Result<SquadGenome, String> {
+    let mut rejected = 0;
+    propose_squad(t, parent, rng, &mut rejected)
+}
+
 /// Redraw a swarm child until it is feasible.
 fn propose_swarm(
     t: &Templates,

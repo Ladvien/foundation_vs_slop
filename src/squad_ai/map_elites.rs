@@ -88,3 +88,141 @@ where
     }
     Ok(())
 }
+
+/// Rank separation added to a *non-improving* candidate's CMA fitness so an archive-improving candidate
+/// always sorts above it, regardless of the raw fitness scale (see [`map_elites_cma_loop`]). Chosen larger
+/// than any single-generation fitness spread the searches produce (witnessed-surprise ∈ `[0,1]`; the
+/// synthetic sphere test spans ~`[-50, 0]`), so the two improvement classes never interleave.
+const IMPROVE_SEP: f32 = 1.0e6;
+
+/// A **CMA-ME** improvement-emitter MAP-Elites loop (Fontaine et al. 2020, "Covariance Matrix Adaptation for
+/// the Rapid Illumination of Behavior Space"). Instead of sampling an archive parent and applying an
+/// isotropic kick ([`map_elites_loop`]), a [`super::cmaes::SepCmaEs`] emitter proposes each batch, is told an
+/// *improvement* ranking — a candidate that adds a new cell ranks above one that only improved a cell, above
+/// the rest — and adapts its distribution toward regions that illuminate the archive. On stagnation (a
+/// generation adds nothing new, or the step size collapses) the emitter restarts from a random elite, so the
+/// search keeps discovering rather than polishing one basin.
+///
+/// Operates on a flat `Vec<f32>` genome via `to_vec` / `from_vec` (the latter must clamp into the feasible
+/// box), so it reuses the same feasibility + evaluate closures as [`map_elites_loop`]. Every search leaves it
+/// **default-off**, so the committed archives (built with the isotropic path) stay bit-reproducible.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn map_elites_cma_loop<G, FF, FE, TV, FV, FR>(
+    rng: &mut ChaCha8Rng,
+    result: &mut MapElitesResult<G>,
+    authored_g: &G,
+    generations: u32,
+    batch: u32,
+    sigma: f32,
+    seed_criterion_err: &str,
+    to_vec: TV,
+    from_vec: FV,
+    is_feasible: FF,
+    mut evaluate: FE,
+    mut report: FR,
+) -> Result<(), String>
+where
+    G: Clone,
+    TV: Fn(&G) -> Vec<f32>,
+    FV: Fn(&[f32]) -> G,
+    FF: Fn(&G) -> bool,
+    FE: FnMut(&G) -> Option<(BehaviorDescriptor, f32)>,
+    FR: FnMut(u32, &MapElitesResult<G>),
+{
+    // Seed the archive with the authored genome (identical to the isotropic loop).
+    match evaluate(authored_g) {
+        Some((d, fitness)) => {
+            result.pop.insert(d, fitness, authored_g.clone());
+            result.evaluations += 1;
+        }
+        None => return Err(seed_criterion_err.to_string()),
+    }
+
+    let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
+
+    for generation in 0..generations {
+        let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
+        let mut added_new = false;
+        for _ in 0..emitter.lambda() {
+            let sample = emitter.ask(rng);
+            let child = from_vec(&sample.x);
+            // A rejected child is DROPPED, never told to the emitter — the same invariant the isotropic loop
+            // holds (a criterion/infeasibility reject must not steer future proposals with a sentinel).
+            if !is_feasible(&child) {
+                result.rejected_infeasible += 1;
+                continue;
+            }
+            // Re-derive the sample from the CLAMPED genome actually evaluated (`from_vec` box-clamps), so the
+            // CMA update is driven by the in-bounds point, not the raw proposal — this is what stops the mean
+            // marching past the box bound.
+            let repaired = emitter.repair(&to_vec(&child));
+            match evaluate(&child) {
+                Some((d, fitness)) => {
+                    let inserted = result.pop.insert(d, fitness, child);
+                    result.evaluations += 1;
+                    added_new |= inserted;
+                    // Improvement ranking: an archive-improving candidate ranks STRICTLY above one that did
+                    // not (the `IMPROVE_SEP` offset dominates any single-generation fitness spread), then by
+                    // fitness within each class — CMA-ME's improvement emitter.
+                    let rank = if inserted { fitness } else { fitness - IMPROVE_SEP };
+                    told.push((repaired, rank));
+                }
+                None => result.rejected_by_criterion += 1,
+            }
+        }
+        emitter.tell(told);
+
+        // Restart rule: if the generation illuminated nothing new, or the step size collapsed, re-centre on a
+        // random elite so the emitter explores a fresh region instead of polishing a filled basin.
+        if !added_new || emitter.sigma() < 1e-4 {
+            let restart_from =
+                result.pop.sample_parent(rng).cloned().unwrap_or_else(|| authored_g.clone());
+            emitter = super::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
+        }
+
+        report(generation, result);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::seeded;
+
+    /// Squash a real to `[0,1]` for a synthetic descriptor axis.
+    fn unit(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    #[test]
+    fn cma_loop_illuminates_the_archive() {
+        // A synthetic QD problem over a 4-D `Vec<f32>` genome: descriptor = (unit(x0), unit(x1)), fitness =
+        // -||x - target||². The CMA-ME loop must fill several archive cells (illumination), not collapse to
+        // one — the whole point of a QD emitter over a plain optimiser.
+        let target = [0.8f32, -0.6, 0.2, -0.3];
+        let mut result = MapElitesResult { pop: Population::new(8), evaluations: 0, rejected_infeasible: 0, rejected_by_criterion: 0 };
+        let authored = vec![0.0f32; 4];
+        let mut rng = seeded(0xC0A5_E11E);
+        map_elites_cma_loop(
+            &mut rng,
+            &mut result,
+            &authored,
+            30,
+            12,
+            0.6,
+            "seed failed",
+            |g: &Vec<f32>| g.clone(),
+            |v: &[f32]| v.to_vec(),
+            |_g| true,
+            |g: &Vec<f32>| {
+                let fitness = -g.iter().zip(target).map(|(a, b)| (a - b) * (a - b)).sum::<f32>();
+                Some((BehaviorDescriptor::new(unit(g[0]), unit(g[1])), fitness))
+            },
+            |_gen, _r| {},
+        )
+        .expect("cma loop");
+        assert!(result.pop.archive.coverage() >= 3, "CMA-ME must illuminate several cells, got {}", result.pop.archive.coverage());
+        assert!(result.evaluations > 30, "it must have evaluated a full run, got {}", result.evaluations);
+    }
+}

@@ -29,9 +29,10 @@ fx*.png
 # version stale, machine-generated data. A *blessed* archive, once one is adopted into the game, gets a
 # distinct committed name.
 assets/config/baseline_prior.ron
-assets/config/elites_squad.ron
-assets/config/elites_swarm.ron
-assets/config/elites_world.ron
+# Every `elites_*.ron` is a machine-generated search output (squad/swarm/world/levels/audio/behavior/policy
+# co-evolution + neuroevolution + POET). None are read by the shipped game; a *blessed* archive adopted into
+# the game gets a distinct committed name.
+assets/config/elites_*.ron
 
 # Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
 .claude/
