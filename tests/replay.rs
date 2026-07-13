@@ -71,7 +71,19 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // consumer, the mould, is windowed-only and absent from the harness), and the added producer did not
     // perturb any actor's trajectory here — so only the field-grid oracle below moved (it folds the new
     // channel). The color PR is cosmetic (palette/HUD) and moves no actor either.
-    const GOLDEN: u64 = 0x6716f1718a9774d1;
+    //
+    // Re-pinned for the COMBAT-FEEL pass: the SCP-150 parasite population defaults moved (initial_count 3→8,
+    // manca_count_max 12→20) and the mancae spawn geometry/arousal changed (HUDDLE_SIZE 40→4, MIN_SPAWN_DIST
+    // 8→5, ROUSE_THREAT 0.04→0.02, ROUSE_PROXIMITY 5→7 in src/parasite.rs) — more mancae, seeded into more
+    // huddles at different cells, rousing more readily, so real actor motion changed. The crab light-push is
+    // now gain-gated by AI mode (committed Muster/Rally/Latch/Carry crabs ignore the photophobic push); in
+    // this no-player seed few crabs commit, but the parasite change alone moves actors. Same-seed
+    // reproducibility (`deterministic_core_is_bit_identical`) still passes, so the sim stays bit-reproducible
+    // — just different, because real gameplay changed. Folds translation only, so arch-stable. Was
+    // `0x6716f1718a9774d1`. Re-measured once more within the same pass after the balance nerf that keeps the
+    // shipped brains survivable under the new pressure (crab_contact_dps 3.0→2.3, parasite initial_count
+    // 8→6); was the intermediate `0xd18a68ffc4e949b7`.
+    const GOLDEN: u64 = 0xc2fe3752a1fd1f66;
 
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
@@ -138,7 +150,13 @@ fn field_passes_are_bit_identical() {
     // coverage), which moved this value (was `0xe1bb_9db0_7822_411f`). The ACTOR golden did NOT move: in
     // this no-player seed no photophobe is warded into a cone cell, so the cone perturbs no unit's final
     // Transform (the cone→actor coupling stays latent). See `light::apply_dynamic_lights`/`fold_fingerprint`.
-    const GOLDEN_FIELD: u64 = 0x03f9_6217_e5b5_fb62;
+    // Re-pinned for the COMBAT-FEEL pass (was `0x03f9_6217_e5b5_fb62`): more mancae (initial_count 3→8) in
+    // more huddles rouse and deposit `THREAT_ANOMALY`, and changed crab motion re-writes the CRAB_DENSITY /
+    // SCENT / ALARM channels this oracle folds. No rotation-derived folding was touched (the light change is
+    // a read-only gradient sample gated by AI mode; the mancae dread is position/integer-cell), so the value
+    // stays arch-stable across ARM↔x86. Re-measured once more within the same pass after the balance nerf
+    // (crab_contact_dps 3.0→2.3, parasite initial_count 8→6); was the intermediate `0xf212_b7c1_4ef0_9a8c`.
+    const GOLDEN_FIELD: u64 = 0x4557_fa4d_8f4b_6262;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -166,7 +184,11 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        0x6716f1718a9774d1,
+        // Tracks the Phase-1 actor golden above (combat-feel re-pin). It stays byte-identical to it because
+        // `authored()` encodes the parasite counts straight from `SimTuning::default()` (world_genome.rs), and
+        // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
+        // (1–12, 4–40) so encode→decode is still lossless.
+        0xc2fe3752a1fd1f66,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }

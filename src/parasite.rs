@@ -46,17 +46,18 @@ const SCP150_GLB: &str = "scp150/scp-150.glb";
 
 /// Huddles seed at least this far (tiles) from the squad spawn. (Spawn geometry — count/hp/speeds are
 /// gameplay knobs and live in `sim::ParasiteTuning`; harborage/huddle spacing is in the huddle-const block.)
-const MANCA_MIN_SPAWN_DIST: f32 = 8.0;
+const MANCA_MIN_SPAWN_DIST: f32 = 5.0;
 
-/// Uniform render scale for the child model. The asset body is ≈3.6 long in Blender units; at 0.0275 the
-/// juvenile reads ≈0.1 m — a tiny scuttling louse, ¼ the earlier size (user request). Tuned by devshot.
-const MANCA_RENDER_SCALE: f32 = 0.0275;
-/// Root body-centre height above the surface, along the surface normal (also seats the collider). Scaled
-/// with the model (¼) so the tiny body rests on the floor instead of floating above it.
-const MANCA_BODY_CENTER: f32 = 0.025;
+/// Uniform render scale for the child model. The asset body is ≈3.6 long in Blender units; at 0.07 the
+/// juvenile reads ≈0.25 m — a clearly visible scuttler at RTS zoom (a felt second threat, not a speck).
+/// BODY_CENTER and MODEL_Y below are kept proportional to this so the body stays seated. Tuned by devshot.
+const MANCA_RENDER_SCALE: f32 = 0.07;
+/// Root body-centre height above the surface, along the surface normal (also seats the collider). Kept
+/// proportional to RENDER_SCALE so the body rests on the floor instead of floating above it / sinking in.
+const MANCA_BODY_CENTER: f32 = 0.064;
 /// Local Y offset of the scaled model under the root so its body rests on the surface. Kept proportional to
-/// RENDER_SCALE (¼) so the feet stay planted at the smaller size. Calibrated by eye.
-const MANCA_MODEL_Y: f32 = 0.045;
+/// RENDER_SCALE so the feet stay planted at the larger size. Calibrated by eye.
+const MANCA_MODEL_Y: f32 = 0.115;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
 /// unscaled. Kept deliberately GENEROUS relative to the ¼-size visual so the tiny mancae stay shootable —
 /// the hitbox is invisible, and they huddle densely, so a bolt into a clump reliably connects with one.
@@ -120,7 +121,7 @@ const BURROW_ANIM_SPEED: f32 = 0.8;
 // genome encoding (`world_genome`) and break saved elites mid-experiment.
 
 /// Target mancae per huddle; the initial swarm splits into `ceil(initial_count / HUDDLE_SIZE)` clusters.
-const HUDDLE_SIZE: usize = 40;
+const HUDDLE_SIZE: usize = 4;
 /// A huddle's mancae seed across floor cells within this radius (tiles) of the chosen harborage site.
 const HUDDLE_RADIUS: f32 = 2.0;
 /// Harborage sites are seeded at least this far apart (tiles) so distinct huddles occupy distinct corners.
@@ -148,11 +149,11 @@ const HARBORAGE_BIAS: f32 = 1.0;
 /// even distant/indirect gunfire (not just a direct hit, which deposits ~`threat_per_shot`≈0.5) wakes the
 /// clump — the huddles sit in far corners, so a tight threshold never fired in practice. (A direct hit ALSO
 /// trips the damage trigger in `manca_rouse`, independent of this field.)
-const ROUSE_THREAT: f32 = 0.04;
+const ROUSE_THREAT: f32 = 0.02;
 /// A dormant manca rouses when a fresh (un-infested) host steps within this planar distance. Generous (~a
 /// room), so an approaching squad member or crab visibly startles the clump from a distance rather than
 /// having to walk right into it.
-const ROUSE_PROXIMITY: f32 = 5.0;
+const ROUSE_PROXIMITY: f32 = 7.0;
 /// Arousal contagion radius: a Roused manca wakes Dormant siblings within this planar distance, so once one
 /// wakes the excitation sweeps the whole cluster in a few ticks — poke it and the patch erupts as a unit
 /// (Broly & Deneubourg 2015).
