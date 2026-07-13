@@ -935,10 +935,24 @@ fn crab_locomotion(
         // motion. `clamp_to_patch` keeps the nudge on the current surface patch (gate crossings stay with
         // the mode's flow-field).
         if !latching {
+            // Aggression overrides light. A *committed* crab — one the swarm has recruited via the ALARM
+            // (Muster) or rally (Rally) pheromone, one already climbing/feeding (Latch), or one hauling a
+            // gib home (Carry) — drives THROUGH the light instead of being repelled by it. So the moment the
+            // squad opens fire, the ALARM bloom flips nearby crabs to Muster and the swarm floods the lit
+            // room; an *idle* forager still shies from the light, so lit ground stays tactical cover ("dark =
+            // danger" holds). This is a per-mode gain scale on the existing photophobic taxis, NOT a second
+            // path — one light-push, its strength gated by the crab's current decision. `ActiveBehavior.mode`
+            // is written by `think` on the pinned FixedUpdate path, so this stays deterministic / replay-safe.
+            use crate::ai::utility::Mode;
+            let commit = matches!(
+                active.mode,
+                Mode::Muster | Mode::Rally | Mode::Latch | Mode::Carry
+            );
+            let light_scale = if commit { 0.0 } else { 1.0 };
             let signed_gain = if photophobic.is_some() {
-                -config.lighting.photophobic_gain
+                -config.lighting.photophobic_gain * light_scale
             } else if photophilic.is_some() {
-                config.lighting.photophilic_gain
+                config.lighting.photophilic_gain * light_scale
             } else {
                 0.0
             };

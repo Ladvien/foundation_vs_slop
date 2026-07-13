@@ -383,10 +383,10 @@
             embed_range: 0.2,
             leap_min: 1.0, leap_hunker: 0.3, leap_air: 0.35, leap_arc: 0.8, blind_cos: 0.5,
             stalk_band: 3.5, stalk_strength: 0.8,
-            huddle_size: 40, huddle_radius: 2.0, harborage_sep: 6.0, harborage_min_score: 2,
+            huddle_size: 4, huddle_radius: 2.0, harborage_sep: 6.0, harborage_min_score: 2,
             settle_speed: 0.5, settle_arrive: 0.6, cohesion_strength: 0.6,
             huddle_sep_radius: 0.35, huddle_sep_strength: 0.8, harborage_bias: 1.0,
-            rouse_threat: 0.04, rouse_proximity: 5.0, rouse_contagion_r: 3.0, rouse_calm_seconds: 9.0,
+            rouse_threat: 0.02, rouse_proximity: 7.0, rouse_contagion_r: 3.0, rouse_calm_seconds: 9.0,
             align_strength: 1.2, align_floor: 0.12, seek_strength: 0.5,
             mill_speed_factor: 0.5, charge_speed_factor: 1.35,
             commit_ramp: 0.5, commit_decay: 0.7, commit_spread: 2.0,
@@ -435,7 +435,7 @@
             laser_damage: 10.0,       // ~3 hits to down a 25 HP crab
             friendly_fire_chance: 0.2,
             friendly_fire_damage: 5.0,
-            crab_contact_dps: 3.0,
+            crab_contact_dps: 2.3,     // softened for the light-gated flood: a Mustering swarm now reaches units, so the super-linear pile-on must be a tense firefight, not an instant delete
             crab_damage_exponent: 1.5, // being swarmed is the real threat, not a single bite
             crab_jump_damage: 8.0,
             crab_hp: 25.0,
@@ -472,8 +472,8 @@
         // brood size, and host-manipulation strengths. manca_count_max is the load-bearing cap on the
         // burst→brood→infest loop. Geometry/render constants stay as code consts in src/parasite.rs.
         parasite: (
-            initial_count: 3,          // free mancae seeded at level start
-            manca_count_max: 12,       // hard cap on live mancae (bounds the reproduction loop)
+            initial_count: 6,          // free mancae seeded at level start (visible second threat; splits into ~2 huddles at HUDDLE_SIZE=4)
+            manca_count_max: 20,       // hard cap on live mancae (bounds the reproduction loop)
             manca_hp: 18.0,
             crawl_speed: 1.8,          // floor stalk speed (world units/s)
             climb_speed: 1.8,          // wall-climb speed
@@ -1344,7 +1344,7 @@
         fixture_color: (0.92, 1.0, 0.94),      // cool white, faint green cast (low-CRI halophosphate)
         fixture_emissive: 2.2,                 // mesh-glow strength (LDR); the visible "light is on" cue
         field_intensity: 1.0,                  // gameplay illuminance per fixture in the LightField (0..1-ish)
-        photophobic_gain: 14.0,                // crabs steer down the light gradient (toward dark) at this strength
+        photophobic_gain: 6.0,                 // idle crabs steer down the light gradient (toward dark) at this strength; committed/roused crabs (Muster/Rally/Latch/Carry) ignore it and flood the lit room — see crab_locomotion
         photophilic_gain: 14.0,                // light-seekers steer up the gradient (toolkit; no carrier yet)
         mushroom_light_size_bonus: 0.5,        // death caps grow up to +50% bigger under a lamp (photomorphogenesis)
         mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)

@@ -47,17 +47,18 @@ const SCP150_GLB: &str = "scp150/scp-150.glb";
 
 /// Huddles seed at least this far (tiles) from the squad spawn. (Spawn geometry — count/hp/speeds are
 /// gameplay knobs and live in `sim::ParasiteTuning`; harborage/huddle spacing is in the huddle-const block.)
-const MANCA_MIN_SPAWN_DIST: f32 = 8.0;
+const MANCA_MIN_SPAWN_DIST: f32 = 5.0;
 
-/// Uniform render scale for the child model. The asset body is ≈3.6 long in Blender units; at 0.0275 the
-/// juvenile reads ≈0.1 m — a tiny scuttling louse, ¼ the earlier size (user request). Tuned by devshot.
-const MANCA_RENDER_SCALE: f32 = 0.0275;
-/// Root body-centre height above the surface, along the surface normal (also seats the collider). Scaled
-/// with the model (¼) so the tiny body rests on the floor instead of floating above it.
-const MANCA_BODY_CENTER: f32 = 0.025;
+/// Uniform render scale for the child model. The asset body is ≈3.6 long in Blender units; at 0.07 the
+/// juvenile reads ≈0.25 m — a clearly visible scuttler at RTS zoom (a felt second threat, not a speck).
+/// BODY_CENTER and MODEL_Y below are kept proportional to this so the body stays seated. Tuned by devshot.
+const MANCA_RENDER_SCALE: f32 = 0.07;
+/// Root body-centre height above the surface, along the surface normal (also seats the collider). Kept
+/// proportional to RENDER_SCALE so the body rests on the floor instead of floating above it / sinking in.
+const MANCA_BODY_CENTER: f32 = 0.064;
 /// Local Y offset of the scaled model under the root so its body rests on the surface. Kept proportional to
-/// RENDER_SCALE (¼) so the feet stay planted at the smaller size. Calibrated by eye.
-const MANCA_MODEL_Y: f32 = 0.045;
+/// RENDER_SCALE so the feet stay planted at the larger size. Calibrated by eye.
+const MANCA_MODEL_Y: f32 = 0.115;
 /// Radius of the invisible collider sphere (the laser raycast target); world-size since the root is
 /// unscaled. Kept deliberately GENEROUS relative to the ¼-size visual so the tiny mancae stay shootable —
 /// the hitbox is invisible, and they huddle densely, so a bolt into a clump reliably connects with one.
@@ -111,6 +112,7 @@ const BURROW_ANIM_SPEED: f32 = 0.8;
 // Huddle sizing/spacing/quality (huddle_size, huddle_radius, harborage_sep, harborage_min_score) → the
 // `behavior.parasite_swarm` config slice. The initial swarm splits into `ceil(initial_count / huddle_size)`
 // clusters at harborage sites (a real corner ≥2 walls OR a furniture hide) spread `harborage_sep` apart.
+// (Combat-feel pass tightened huddle_size 40→4 in that slice, so the swarm seeds into more, smaller huddles.)
 /// Deterministic in-patch spawn jitter (world units, ± half of this) so huddle-mates seeded onto the same
 /// cell don't stack on one exact point — short-range separation needs a nonzero offset to push them apart.
 const MANCA_SPAWN_JITTER: f32 = 0.2;
@@ -122,6 +124,8 @@ const MANCA_SPAWN_JITTER: f32 = 0.2;
 // level that wakes a dormant manca), rouse_proximity (a fresh host this near startles the clump),
 // rouse_contagion_r (a roused manca wakes dormant siblings within this — the excitation sweeps the cluster,
 // Broly & Deneubourg 2015), rouse_calm_seconds (undisturbed this long → re-settle to Dormant).
+// (Combat-feel pass lowered rouse_threat 0.04→0.02 and widened rouse_proximity 5→7 in that slice, so the
+// clump rouses more readily.)
 
 // --- Roused swarm (readable collective motion) -----------------------------------------------------
 // A roused huddle does NOT scatter into lone stalkers — it moves as ONE legible swarm, because player
