@@ -63,6 +63,10 @@ const BLOOD_MIN_RADIUS_CELLS: f32 = 1.0;
 /// Chemoattractant splat radius (cells) around a meat chunk. Tight: a gib is a point source of food, and a
 /// wide splat would smear the bloom instead of erupting from the chunk itself.
 const MEAT_RADIUS_CELLS: f32 = 1.6;
+/// Attention above which a cell counts as "watched" for gaze-habituation — the mat only habituates to a
+/// gaze it actually registers, and the decaying tail of a just-left cell (attention below this) recovers
+/// rather than keeping the habituation pinned. Below the steady state (~1.0) of a continuously-seen cell.
+const GAZE_SEEN: f32 = 0.2;
 
 /// The control texture handles, extracted so the render world can bind them.
 #[derive(Resource, Clone, ExtractResource)]
@@ -292,6 +296,10 @@ pub(super) fn write_control(
     time: Res<Time<Virtual>>,
     dungeon: Option<Res<Dungeon>>,
     fog: Option<Res<FogGrid>>,
+    // The shared ATTENTION stigmergy channel (squad vision deposits it; it evaporates). Graded gaze —
+    // supersedes the binary `fog.visible_at` for the mat's recoil. `Option` for menu/loading frames before
+    // the AI fields exist.
+    stig: Option<Res<crate::ai::field::Stig>>,
     pools: Query<&Transform, With<BloodPool>>,
     gibs: Query<&Transform, With<GibChunk>>,
     nests: Query<&Nest>,
@@ -333,7 +341,20 @@ pub(super) fn write_control(
             let cell = IVec2::new(x, y);
             let i = (y * size + x) as usize;
 
-            let watched = fog.as_ref().is_some_and(|f| f.visible_at(cell));
+            // Graded observation from the shared ATTENTION stigmergy channel — squad vision deposits it
+            // (`ai::field::deposit_attention`) and it evaporates, so a cell reads hotter the longer / by
+            // more eyes it is watched and cools *smoothly* as the gaze moves on. This replaces the old
+            // binary `fog.visible_at`: the mat's recoil now ramps with how heavily a cell is watched and
+            // creeps back as attention fades, instead of flipping on a single LOS bit (observation as
+            // stigmergy — Grassé 1959; Heylighen, Cognitive Systems Research 2016).
+            let attention = stig
+                .as_ref()
+                .map(|s| {
+                    s.sample(crate::ai::field::FieldId::ATTENTION, &dungeon, dungeon.cell_center(cell))
+                })
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let watched = attention > GAZE_SEEN;
             let hab = &mut habituation[i];
             if watched {
                 *hab = (*hab + cfg.hab_rate * dt).min(1.0);
@@ -341,9 +362,10 @@ pub(super) fn write_control(
                 *hab = (*hab - cfg.hab_recover * dt).max(0.0);
             }
 
-            // Only a *currently seen* cell repels. Explored-but-dark and never-seen cells are equally safe
-            // — which is exactly the ambience we want: the mold blooms wherever nobody is looking.
-            let target = if watched { 1.0 - *hab * cfg.hab_strength } else { 0.0 };
+            // Repellent scales with how heavily the cell is watched, ceilinged by habituation (a
+            // repeatedly-watched cell stops fearing the harmless gaze — Simons, Franconeri & Reimer 2000).
+            // Unwatched cells (attention ≈ 0) do not repel: the mold blooms wherever nobody is looking.
+            let target = attention * (1.0 - *hab * cfg.hab_strength);
 
             // ...but the mat may not *reach* that target any faster than a human can notice a luminance
             // change. `G` drives `conceal` in the floor/wall/fruit shaders, a 2.75x swing on the vein glow;

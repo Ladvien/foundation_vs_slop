@@ -61,7 +61,16 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // moved from the lighting-era `0x3ecce611f2403172` to the value below. Legitimate: the same-seed
     // reproducibility tests above (`deterministic_core_is_bit_identical`, `..._across_many_builds`) still
     // pass, so the sim is still bit-reproducible — just different, because a real feature was added.
-    const GOLDEN: u64 = 0x4b6f6d7f454559c7;
+    //
+    // Re-pinned again (was `0x4b6f6d7f454559c7`) for the ATTENTION channel: a new `FixedUpdate` producer
+    // (`ai::field::deposit_attention`) was added to the pinned schedule. NOTE: no core actor reads
+    // ATTENTION (its only consumer, the mould, is windowed-only and absent from the harness) — verified by
+    // temporarily skipping the deposit, which reproduced THIS exact hash. So the shift is purely the
+    // single-threaded executor re-solving its topological order once a system is inserted, not a data
+    // effect. The core is still bit-identical run-twice and arch-stable (ATTENTION is position/LOS-derived,
+    // never rotation). Flag for maintainers: that adding a pure producer shifts the trajectory means some
+    // core systems lack explicit relative ordering — a latent hygiene item, pre-existing, not introduced here.
+    const GOLDEN: u64 = 0xb8d5dc7d27ac37b1;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -95,7 +104,12 @@ fn field_passes_are_bit_identical() {
     // translation, never rotation) passed. Folding the arch-stable scalar-`f32` base restores a value that
     // matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
     // within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
-    const GOLDEN_FIELD: u64 = 0xa35b_eaeb_288a_fbca;
+    // Re-pinned (was `0xa35b_eaeb_288a_fbca`) for the ATTENTION channel: `Stig::fold_fingerprint` folds every
+    // channel, so the new 10th channel — deposited over the squad's line-of-sight set by
+    // `ai::field::deposit_attention` — enters this hash. It stays ARCH-STABLE (unlike the flashlight cone
+    // above): fog visibility is a pure function of unit cell positions + integer LOS, no rotation, so the
+    // deposit deliberately does NOT read the arch-sensitive flashlight beam direction.
+    const GOLDEN_FIELD: u64 = 0xd8deb83da6e1beb4;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -123,7 +137,7 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        0x4b6f6d7f454559c7,
+        0xb8d5dc7d27ac37b1,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
