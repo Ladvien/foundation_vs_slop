@@ -880,7 +880,7 @@ fn despawn_dead(
             gore.0.push(GoreEvent {
                 pos: tf.translation,
                 kind: GoreKind::EnemySplat,
-                tint: Color::srgb(0.7, 0.05, 0.05),
+                tint: crate::palette::ENEMY_SCORCH,
                 gib: None,
                 // The boss is the heaviest thing in the level: full camera kick on its death.
                 intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
@@ -1133,8 +1133,8 @@ fn setup_lightning_assets(
     // Unit-length on Z so a beam is placed with `looking_at(to)` + `scale.z = length`.
     let mesh = meshes.add(Cuboid::new(0.14, 0.14, 1.0));
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.8, 0.9, 1.0),
-        emissive: LinearRgba::rgb(3.0, 6.0, 12.0), // electric blue-white, HDR-bright (reads as a bolt)
+        base_color: crate::palette::LIGHTNING_BASE,
+        emissive: crate::palette::LIGHTNING_EMISSIVE, // electric blue-white, HDR-bright (reads as a bolt)
         ..default()
     });
     commands.insert_resource(LightningAssets { mesh, material });

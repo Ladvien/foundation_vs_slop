@@ -1494,7 +1494,7 @@ fn crab_despawn_dead(
             gore.0.push(GoreEvent {
                 pos,
                 kind: GoreKind::EnemySplat,
-                tint: Color::srgb(0.2, 0.7, 0.15), // crab ichor green
+                tint: crate::palette::CRAB_ICHOR, // Type-Gray reanimated ichor (green)
                 gib: None,
                 intensity: 0.2,
             });
@@ -1502,7 +1502,7 @@ fn crab_despawn_dead(
             gore.0.push(GoreEvent {
                 pos,
                 kind: GoreKind::EnemySplat,
-                tint: Color::srgb(0.35, 0.6, 0.15), // sickly green crab ichor
+                tint: crate::palette::CRAB_ICHOR_DULL, // sickly green crab ichor
                 gib: None,
                 // Chaff: a crab death barely nudges the camera, so a whole swarm dying doesn't read as
                 // one giant explosion (the gib chunks still pop — only the feel layer is scaled down).

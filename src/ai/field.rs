@@ -64,12 +64,24 @@ impl FieldId {
     /// Audible din **emitted by crabs** — a crab's death squelch. Read by units, never by crabs (which
     /// would otherwise react to the sound of their own dying kin).
     pub const NOISE_SWARM: FieldId = FieldId(8);
+
+    /// **Observation** — how heavily a cell is being *watched* right now, deposited by every gaze
+    /// (squad vision cones, the Researcher's flashlight, and — windowed-only — the player's camera) and
+    /// evaporating fast so it is a live, decaying "where the eyes are" field, not a permanent memory.
+    /// Observation as stigmergy: the watcher writes attention into the environment and other systems
+    /// read it, so gaze coordinates behaviour *through the world* (Grassé 1959; Heylighen, "Stigmergy as
+    /// a universal coordination mechanism", Cognitive Systems Research 2016). Read by threats with
+    /// **opposite signs** — the mould recoils from it (grows in the inattention shadow, SCP-173's
+    /// freeze-when-watched pole) while a marked predator is *drawn* to it (aggros on being seen, SCP-096's
+    /// pole). Deliberately NOT in [`UNIT_THREAT_CHANNELS`]: attention is not faction-fear, and a unit that
+    /// feared the attention it emits would flee its own gaze.
+    pub const ATTENTION: FieldId = FieldId(9);
     // NOTE: the rally beacon is NOT a scalar channel — it's a *vectorial* pheromone (see [`RallyField`]
     // below), which stores a direction toward the moving prey rather than a scalar concentration.
 }
 
 /// Number of channels. Bump when adding a [`FieldId`].
-pub const CHANNEL_COUNT: usize = 9;
+pub const CHANNEL_COUNT: usize = 10;
 
 /// The danger channels a *unit* reads. One per hostile creature type, so nothing ever fears its own
 /// emissions. Ordered, but consumed by an order-independent `max` (see `DriveRule::TrackMaxFields`).
@@ -367,6 +379,44 @@ pub fn drain_deposits(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, mut deposit
 pub fn evaporate_diffuse(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, time: Res<Time>) {
     let dt = time.delta_secs();
     stig.evaporate_diffuse(&dungeon, dt);
+}
+
+/// Per-second attention a squad unit lays on every cell it can currently **see**. Deposited as `RATE·dt`
+/// each fixed tick, so a continuously-watched cell settles at the timestep-independent steady state
+/// `RATE / evaporate` (the `crab_density` rate idiom — a cell's value tracks how long/heavily it is
+/// watched) and a cell just out of sight decays from there. This is the negative-feedback + accumulation
+/// that turns the binary "in line of sight" bit into a graded, smoothly-fading gaze signal.
+pub const ATTENTION_RATE: f32 = 1.0;
+
+/// Deposit [`FieldId::ATTENTION`] over the squad's current line-of-sight set (`crate::fog::FogGrid`).
+///
+/// Observation as stigmergy: a watcher writes attention *into the environment*, and other systems (the
+/// mould's recoil, a marked predator's aggro) read it — gaze coordinates behaviour through the world
+/// rather than by messaging (Grassé 1959; Heylighen, "Stigmergy as a universal coordination mechanism",
+/// Cognitive Systems Research 2016).
+///
+/// **Determinism.** Fog visibility is a pure function of unit *cell positions* + integer line-of-sight
+/// (`fog::update_los` — no rotation, no transcendentals), so this channel folds into the cross-arch replay
+/// fingerprint like every other one. The Researcher's flashlight cone is deliberately NOT a source here:
+/// its `forward` comes from `Transform.rotation`, whose glam slerp is not bit-identical across
+/// architectures — folding a rotation-derived channel would re-open the #46 cross-arch hash hazard (the
+/// same reason `LightField::fold_fingerprint` folds `base`, not the moving cone). Deposits go through the
+/// [`StigDeposits`] queue (drained + globally sorted), so batch order can't perturb the field.
+pub fn deposit_attention(
+    dungeon: Res<Dungeon>,
+    fog: Res<crate::fog::FogGrid>,
+    time: Res<Time>,
+    mut deposits: ResMut<StigDeposits>,
+) {
+    let amount = ATTENTION_RATE * time.delta_secs();
+    if !(amount > 0.0) {
+        return;
+    }
+    for c in dungeon.floor_cells() {
+        if fog.visible_at(c) {
+            deposits.0.push(Deposit { pos: dungeon.cell_center(c), field: FieldId::ATTENTION, amount });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------

@@ -1720,7 +1720,7 @@ fn manca_despawn_dead(
         gore.0.push(GoreEvent {
             pos,
             kind: GoreKind::EnemySplat,
-            tint: Color::srgb(0.85, 0.80, 0.70), // pale chitin ichor
+            tint: crate::palette::CHITIN_ICHOR, // pale chitin ichor
             gib: None,
             intensity: 0.25,
         });

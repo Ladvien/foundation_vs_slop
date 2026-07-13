@@ -46,6 +46,7 @@ pub mod mycelia;
 pub mod nest;
 pub mod orca;
 pub mod parasite;
+pub mod palette;
 pub mod pathfind;
 pub mod psi_vision;
 pub mod placement;

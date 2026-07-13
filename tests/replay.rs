@@ -64,7 +64,15 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // Legitimate: the same-seed reproducibility tests above (`deterministic_core_is_bit_identical`,
     // `..._across_many_builds`) still pass, so the sim is still bit-reproducible — just different, because a
     // real feature was added.
+    //
+    // MERGE with main (ATTENTION channel PR #48 + SCP color PR #47) into this WIP branch: this actor golden
+    // did NOT move — it still matches the pre-merge WIP value. ATTENTION adds `ai::field::deposit_attention`
+    // (a new `FixedUpdate` producer) and the 10th stigmergy channel, but no core actor reads ATTENTION (its
+    // consumer, the mould, is windowed-only and absent from the harness), and the added producer did not
+    // perturb any actor's trajectory here — so only the field-grid oracle below moved (it folds the new
+    // channel). The color PR is cosmetic (palette/HUD) and moves no actor either.
     const GOLDEN: u64 = 0x6716f1718a9774d1;
+
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -101,6 +109,11 @@ fn field_passes_are_bit_identical() {
     // matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
     // within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
     //
+    // [MERGE re-pin] Combined with main's ATTENTION channel: `Stig::fold_fingerprint` now folds the 10th
+    // channel (attention, deposited over the squad LOS set by `ai::field::deposit_attention`) on top of the
+    // WIP field state below — arch-stable (fog visibility is position/integer-LOS, no rotation). Value below
+    // is the measured merged-tree hash.
+    //
     // Re-measured at the restored clean-defaults baseline: `config.ron`'s `sim:` + `ai_tuning:` slices were
     // reset to `SimTuning::default()` / `AiTuning::default()`, resolving the evolved drift + the three
     // `TEMP — RESTORE` overrides (laser_damage ⅓, parasite initial_count/manca_count_max at 300). This value
@@ -125,7 +138,7 @@ fn field_passes_are_bit_identical() {
     // coverage), which moved this value (was `0xe1bb_9db0_7822_411f`). The ACTOR golden did NOT move: in
     // this no-player seed no photophobe is warded into a cone cell, so the cone perturbs no unit's final
     // Transform (the cone→actor coupling stays latent). See `light::apply_dynamic_lights`/`fold_fingerprint`.
-    const GOLDEN_FIELD: u64 = 0xc06b_ac98_035d_fb3e;
+    const GOLDEN_FIELD: u64 = 0x03f9_6217_e5b5_fb62;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);

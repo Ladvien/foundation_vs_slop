@@ -219,13 +219,20 @@ fn update_speed_text(speed: Res<GameSpeed>, mut text_q: Query<&mut Text, With<Sp
 }
 
 /// Show the boss bar once the Smiley boss is engaged (has taken damage or turned angry) and the
-/// player hasn't hidden it; update its HP fill + calm/angry label. Read-only of `enemy.rs`.
+/// player hasn't hidden it; update its HP fill + hazard-tier label/color. Read-only of `enemy.rs`.
+///
+/// The bar fill and label follow the **SCP ACS Risk hazard ramp** (green → amber → red), driven by the
+/// watcher's mood: `Scared` (fleeing, playing harmless — de-escalated) reads green (Notice), `Watching`
+/// (the concealed calm, staring) reads amber (Caution), and `Unleashing` (mask off, instant-kill
+/// lightning) reads red (Critical). One glance at the bar's color says how close the mask is to coming
+/// off.
 fn update_boss_bar(
     hud: Res<HudSettings>,
+    theme: Res<UiTheme>,
     boss: Query<(&Health, &SmileyState), With<Enemy>>,
     mut root: Query<&mut Node, With<BossBarRoot>>,
-    mut fill: Query<&mut Node, (With<BossHpFill>, Without<BossBarRoot>)>,
-    mut label: Query<&mut Text, With<BossStateText>>,
+    mut fill: Query<(&mut Node, &mut BackgroundColor), (With<BossHpFill>, Without<BossBarRoot>)>,
+    mut label: Query<(&mut Text, &mut TextColor), With<BossStateText>>,
 ) {
     let Ok(mut root_node) = root.single_mut() else {
         return;
@@ -233,19 +240,34 @@ fn update_boss_bar(
 
     let engaged = boss.iter().find_map(|(health, state)| {
         let hit = health.current < health.max;
-        (hit || state.is_angry()).then_some((health.fraction(), state.is_angry()))
+        (hit || state.is_angry()).then(|| {
+            // ACS hazard ramp: mood → (Risk color, readout).
+            let (color, text): (Color, &str) = if state.is_angry() {
+                (theme.danger, "THE WATCHER — UNLEASHING") // red — Critical
+            } else if state.is_watching() {
+                (theme.warn, "THE WATCHER — WATCHING") // amber — Caution
+            } else {
+                (theme.health_fill, "THE WATCHER — RECOILING") // green — Notice (Scared/fleeing)
+            };
+            (health.fraction(), color, text)
+        })
     });
 
     match engaged {
-        Some((frac, angry)) if hud.show_boss_bar => {
+        Some((frac, color, text)) if hud.show_boss_bar => {
             root_node.display = Display::Flex;
-            if let Ok(mut f) = fill.single_mut() {
+            if let Ok((mut f, mut bg)) = fill.single_mut() {
                 f.width = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
+                if bg.0 != color {
+                    bg.0 = color;
+                }
             }
-            if let Ok(mut t) = label.single_mut() {
-                let s = if angry { "THE WATCHER — UNLEASHING" } else { "THE WATCHER — WATCHING" };
-                if t.0 != s {
-                    t.0 = s.to_string();
+            if let Ok((mut t, mut tc)) = label.single_mut() {
+                if t.0 != text {
+                    t.0 = text.to_string();
+                }
+                if tc.0 != color {
+                    tc.0 = color;
                 }
             }
         }

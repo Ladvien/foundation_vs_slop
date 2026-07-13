@@ -215,14 +215,9 @@ const FLASHLIGHT_SCALE: f32 = 0.12;
 /// Pitch that tips the model's local +Y (lens up) forward to the unit's −Z; tuned by screenshot.
 const FLASHLIGHT_PITCH: f32 = -std::f32::consts::FRAC_PI_2;
 
-/// Five distinct outfit colors, one per squad member (index-matched to spawn order).
-const OUTFITS: [Color; 5] = [
-    Color::srgb(0.85, 0.22, 0.20), // red
-    Color::srgb(0.22, 0.45, 0.90), // blue
-    Color::srgb(0.25, 0.75, 0.32), // green
-    Color::srgb(0.92, 0.76, 0.16), // gold
-    Color::srgb(0.66, 0.32, 0.82), // purple
-];
+/// Five distinct outfit colors, one per squad member (index-matched to spawn order = `RoleId::ALL`).
+/// See [`crate::palette`].
+const OUTFITS: [Color; 5] = crate::palette::OUTFITS;
 
 /// Spiral of cell offsets from the spawn point; the first five that are floor become unit spawns.
 const SPAWN_SPIRAL: [(i32, i32); 13] = [

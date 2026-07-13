@@ -558,8 +558,8 @@ fn setup_gore_assets(
     ];
     // Droplets: a glossy dark-red bit, faintly emissive so fresh blood catches the eye in flight.
     let droplet_mat = std_mats.add(StandardMaterial {
-        base_color: Color::srgb(0.45, 0.0, 0.0),
-        emissive: LinearRgba::rgb(0.12, 0.0, 0.0),
+        base_color: crate::palette::BLOOD_BASE,
+        emissive: crate::palette::BLOOD_EMISSIVE,
         perceptual_roughness: 0.35,
         ..default()
     });

@@ -32,11 +32,12 @@ use crate::sim::{
     BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, SimTuning,
 };
 
-/// Number of knobs: 24 field-propagation (`AiTuning`: 7 channels × {evaporate, diffuse, deposit_radius}
+/// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
 /// + rally × 3) + 52 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 9, boss 7,
-/// parasite 14). The SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials belong in
-/// the search that shapes the ecosystem's deaths and lives.
-pub const N: usize = 76;
+/// parasite 14). The 8th stigmergy channel is ATTENTION (observation), and the SCP-150 parasite is a
+/// host-killing species, so its lifecycle/lethality dials belong in the search that shapes the ecosystem's
+/// deaths and lives.
+pub const N: usize = 79;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -44,7 +45,7 @@ pub const N: usize = 76;
 /// capped at `0.6` (the blur lerp weight must stay `< 1`), `deposit_radius` capped so a deposit can't
 /// flood the whole map. Integer knobs (population cap, cull counts) carry float bounds; [`decode`] rounds.
 static BOUNDS: [(f32, f32); N] = [
-    // ── AiTuning: 7 stigmergy channels × (evaporate, diffuse, deposit_radius) ──
+    // ── AiTuning: 8 stigmergy channels × (evaporate, diffuse, deposit_radius) ──
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // scent
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // threat_gun
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // crab_density
@@ -52,6 +53,7 @@ static BOUNDS: [(f32, f32); N] = [
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // alarm
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // threat_crab
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // threat_anomaly
+    (0.05, 3.0), (0.0, 0.6), (0.5, 8.0), // attention
     // rally (decay, accumulate, deposit_radius)
     (0.05, 3.0), (0.05, 3.0), (0.5, 8.0),
     // ── SimTuning::fear (per_crab, of_anomaly, crab_of_gunfire) ──
@@ -127,6 +129,7 @@ pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
     push_channel(&mut v, &ai.fields.alarm);
     push_channel(&mut v, &ai.fields.threat_crab);
     push_channel(&mut v, &ai.fields.threat_anomaly);
+    push_channel(&mut v, &ai.fields.attention);
     v.push(ai.rally.decay);
     v.push(ai.rally.accumulate);
     v.push(ai.rally.deposit_radius);
@@ -219,6 +222,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             alarm: ChannelTuning { evaporate: f!(), diffuse: f!(), deposit_radius: f!() },
             threat_crab: ChannelTuning { evaporate: f!(), diffuse: f!(), deposit_radius: f!() },
             threat_anomaly: ChannelTuning { evaporate: f!(), diffuse: f!(), deposit_radius: f!() },
+            attention: ChannelTuning { evaporate: f!(), diffuse: f!(), deposit_radius: f!() },
         },
         rally: RallyTuning { decay: f!(), accumulate: f!(), deposit_radius: f!() },
     };
