@@ -22,6 +22,7 @@ pub mod audio;
 /// audio_genome`). Mirrors `ai::tuning` / `sim`.
 pub mod audio_tuning;
 pub mod autogib;
+pub mod behavior_tuning;
 pub mod blood_lens;
 pub mod ai;
 pub mod ai_overlay;

@@ -45,9 +45,9 @@ pub fn evaluate(
     let seed_a = *seeds.first()?;
     let seed_b = *seeds.get(1)?;
 
-    let a = rollout(BrainSource::Authored, None, Some(audio), seed_a, ticks);
+    let a = rollout(BrainSource::Authored, None, Some(audio), None, seed_a, ticks);
     minimal_criterion(&a.outcome).ok()?;
-    let b = rollout(BrainSource::Authored, None, Some(audio), seed_b, ticks);
+    let b = rollout(BrainSource::Authored, None, Some(audio), None, seed_b, ticks);
     minimal_criterion(&b.outcome).ok()?;
 
     let d = swarm_descriptor(&a.trace);

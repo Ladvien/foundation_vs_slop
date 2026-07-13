@@ -27,6 +27,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use crate::ai::field::{FieldId, Stig};
+use crate::behavior_tuning::BehaviorTuning;
 use crate::config::GameConfig;
 use crate::dungeon::Dungeon;
 use crate::enemy::Hostile;
@@ -72,27 +73,15 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 /// Patch-normal Y below this reads as a wall (drives the Climb clip vs Walk).
 const WALL_NORMAL_Y: f32 = 0.7;
 
-/// Leap gait tone (mirrors the crab pounce, `crab::JUMP_*`). The *reach* (`leap_len`) and *cadence*
-/// (`leap_cooldown`) are gameplay knobs in `sim::ParasiteTuning`; these shape constants stay in code. A
-/// manca won't lunge at a host already in its face (`LEAP_MIN`); it hunkers `LEAP_HUNKER`s then arcs
-/// `LEAP_AIR`s to `LEAP_ARC` peak height.
-const LEAP_MIN: f32 = 1.0;
-const LEAP_HUNKER: f32 = 0.3;
-const LEAP_AIR: f32 = 0.35;
-const LEAP_ARC: f32 = 0.8;
-/// Blind-side gate: a manca only commits its leap from outside the host's facing cone. `cos(60°)` ⇒ a
-/// ±60° front arc the host "sees"; the manca leaps from the rear 240° (README-style stalk-to-blind-side).
-const BLIND_COS: f32 = 0.5;
-/// Blind-side stalk band: while closing to within this of a host that is *facing* it, the manca arcs
-/// tangentially toward the host's rear instead of charging head-on, until it slips into the blind arc.
-const STALK_BAND: f32 = 3.5;
-const STALK_STRENGTH: f32 = 0.8;
+// Leap/stalk gait shape (mirrors the crab pounce, `crab::JUMP_*`) + the blind-side gate/band are now the
+// `behavior.parasite_swarm` config slice: leap_min/hunker/air/arc, blind_cos, stalk_band/strength. The
+// *reach* (`leap_len`) and *cadence* (`leap_cooldown`) remain gameplay knobs in `sim::ParasiteTuning`.
 
-/// Embed reach geometry: a manca within `HOST_BODY_RADIUS + MANCA_EMBED_RANGE` (planar) of a host burrows
+/// Embed reach geometry: a manca within `HOST_BODY_RADIUS + beh.parasite_swarm.embed_range` (planar) of a host burrows
 /// in. Sized so a landed leap (or a crawl right up to the host) connects. (The embed *damage* is a
 /// gameplay knob in `sim::ParasiteTuning`; these radii are geometry consts.)
 const HOST_BODY_RADIUS: f32 = 0.35;
-const MANCA_EMBED_RANGE: f32 = 0.2;
+// `beh.parasite_swarm.embed_range` → `behavior.parasite_swarm.embed_range` (the embed reach beyond HOST_BODY_RADIUS).
 
 /// Cross-fade between animation clips.
 const CROSSFADE: Duration = Duration::from_millis(150);
@@ -119,46 +108,20 @@ const BURROW_ANIM_SPEED: f32 = 0.8;
 // harness-evolved `sim::ParasiteTuning` — adding fields there would shift the offline search's positional
 // genome encoding (`world_genome`) and break saved elites mid-experiment.
 
-/// Target mancae per huddle; the initial swarm splits into `ceil(initial_count / HUDDLE_SIZE)` clusters.
-const HUDDLE_SIZE: usize = 40;
-/// A huddle's mancae seed across floor cells within this radius (tiles) of the chosen harborage site.
-const HUDDLE_RADIUS: f32 = 2.0;
-/// Harborage sites are seeded at least this far apart (tiles) so distinct huddles occupy distinct corners.
-const HARBORAGE_SEP: f32 = 6.0;
-/// A floor cell needs at least this harborage score (orthogonal wall count, +3 if on/next to furniture) to
-/// seed a huddle — i.e. a real corner (≥2 walls) OR a furniture hide. See `harborage_score`.
-const HARBORAGE_MIN_SCORE: i32 = 2;
+// Huddle sizing/spacing/quality (huddle_size, huddle_radius, harborage_sep, harborage_min_score) → the
+// `behavior.parasite_swarm` config slice. The initial swarm splits into `ceil(initial_count / huddle_size)`
+// clusters at harborage sites (a real corner ≥2 walls OR a furniture hide) spread `harborage_sep` apart.
 /// Deterministic in-patch spawn jitter (world units, ± half of this) so huddle-mates seeded onto the same
 /// cell don't stack on one exact point — short-range separation needs a nonzero offset to push them apart.
 const MANCA_SPAWN_JITTER: f32 = 0.2;
-/// Dormant settle/creep speed (world units/s) — a huddle only ever shuffles in place; it does not travel.
-const SETTLE_SPEED: f32 = 0.5;
-/// A dormant manca more than this (world units) from its harborage anchor reads as *traveling* (Walk/Climb
-/// anim); nearer than this it is *settled* (the snug idle) — small residual jitter doesn't flip the clip.
-const SETTLE_ARRIVE: f32 = 0.6;
-/// Cohesion pull toward the local dormant-neighbour centroid (flock-centering; social inter-attraction).
-const COHESION_STRENGTH: f32 = 0.6;
-/// Short-range separation so a huddle packs shoulder-to-shoulder without collapsing into a single point.
-const HUDDLE_SEP_RADIUS: f32 = 0.35;
-const HUDDLE_SEP_STRENGTH: f32 = 0.8;
-/// Pull toward the manca's harborage anchor (pins the clump to its corner/furniture, resists dispersal).
-const HARBORAGE_BIAS: f32 = 1.0;
+// Dormant settle/cohesion/separation/harborage-pull steer weights → the `behavior.parasite_swarm` config
+// slice: settle_speed, settle_arrive, cohesion_strength, huddle_sep_radius, huddle_sep_strength,
+// harborage_bias. (Cohesion + separation: Olfati-Saber, IEEE TAC 2006, DOI 10.1109/TAC.2005.864190.)
 
-/// A dormant manca rouses when the squad's gunfire field (`THREAT_GUN`) at its cell exceeds this. Low, so
-/// even distant/indirect gunfire (not just a direct hit, which deposits ~`threat_per_shot`≈0.5) wakes the
-/// clump — the huddles sit in far corners, so a tight threshold never fired in practice. (A direct hit ALSO
-/// trips the damage trigger in `manca_rouse`, independent of this field.)
-const ROUSE_THREAT: f32 = 0.04;
-/// A dormant manca rouses when a fresh (un-infested) host steps within this planar distance. Generous (~a
-/// room), so an approaching squad member or crab visibly startles the clump from a distance rather than
-/// having to walk right into it.
-const ROUSE_PROXIMITY: f32 = 5.0;
-/// Arousal contagion radius: a Roused manca wakes Dormant siblings within this planar distance, so once one
-/// wakes the excitation sweeps the whole cluster in a few ticks — poke it and the patch erupts as a unit
-/// (Broly & Deneubourg 2015).
-const ROUSE_CONTAGION_R: f32 = 3.0;
-/// A Roused manca with no disturbance for this long re-settles to Dormant and creeps back to its harborage.
-const ROUSE_CALM_SECONDS: f32 = 9.0;
+// Rouse/contagion thresholds → the `behavior.parasite_swarm` config slice: rouse_threat (THREAT_GUN field
+// level that wakes a dormant manca), rouse_proximity (a fresh host this near startles the clump),
+// rouse_contagion_r (a roused manca wakes dormant siblings within this — the excitation sweeps the cluster,
+// Broly & Deneubourg 2015), rouse_calm_seconds (undisturbed this long → re-settle to Dormant).
 
 // --- Roused swarm (readable collective motion) -----------------------------------------------------
 // A roused huddle does NOT scatter into lone stalkers — it moves as ONE legible swarm, because player
@@ -176,37 +139,14 @@ const ROUSE_CALM_SECONDS: f32 = 9.0;
 // positional `world_genome` encoding must not shift. The evolved crawl/climb speeds ARE reused as the
 // base, so the harness still tunes them; commitment only *modulates* that base.
 
-/// Alignment (heading matching) weight at full commitment — the readable polarization of a charge. Scaled
-/// by `commit` from `ALIGN_FLOOR` up to this, so a mill is loosely aligned and a charge is a tight arrow.
-const ALIGN_STRENGTH: f32 = 1.2;
-/// A faint alignment always present (the dormant huddle and a commit≈0 mill) so a resting/agitated patch
-/// reads as subtly coherent rather than random noise — the floor of the `commit` lerp to `ALIGN_STRENGTH`.
-const ALIGN_FLOOR: f32 = 0.12;
-/// Weak pull toward the nearest fresh host — grounds the alignment consensus on a real target WITHOUT
-/// letting any single manca break from the swarm to beeline. Kept below `ALIGN_STRENGTH` by design.
-const SEEK_STRENGTH: f32 = 0.5;
-/// Roused travel-speed multiplier on the evolved crawl/climb base at commit=0 (the mill — barely faster
-/// than the dormant creep) …
-const MILL_SPEED_FACTOR: f32 = 0.5;
-/// … and at commit=1 (the committed charge — faster than a lone stalker). `lerp` by `commit`.
-const CHARGE_SPEED_FACTOR: f32 = 1.35;
-/// Commitment ramps up by this per second while a roused manca has a fresh host to hunt …
-const COMMIT_RAMP: f32 = 0.5;
-/// … and decays by this per second when no fresh host remains — the swarm relaxes from charge back to mill.
-const COMMIT_DECAY: f32 = 0.7;
-/// Per-second rate at which a manca's commitment is nudged toward its roused-neighbour average, so
-/// commitment spreads through the cluster (the swarm commits together — a readable wave) rather than
-/// manca-by-manca. Applied as `(avg - commit) * (COMMIT_SPREAD * dt)`.
-const COMMIT_SPREAD: f32 = 2.0;
-
-/// Flash-expansion: the tick a manca rouses it briefly bursts OUTWARD from the cluster, then re-forms into
-/// the mill — the readable "it woke up" pop, riding the one-ring/tick rouse contagion so the burst sweeps
-/// the clump as an expanding ripple (Reynolds' "maneuver wave"; Gautrais et al. 2012 flash expansion).
-const FLASH_SECS: f32 = 0.3;
-/// Outward radial push (world units) at the peak of the flash pop, decaying to zero over `FLASH_SECS`.
-const FLASH_IMPULSE: f32 = 2.5;
-/// Separation multiplier added at the peak of the flash pop (the clump briefly over-spaces, then re-packs).
-const FLASH_SEP_BOOST: f32 = 2.0;
+// Roused-swarm steering (alignment/seek/commitment/flash) → the `behavior.parasite_swarm` config slice:
+// align_strength (charge polarization) + align_floor (a faint always-present alignment), seek_strength
+// (weak pull to the nearest fresh host), mill_speed_factor / charge_speed_factor (the commit=0 mill vs
+// commit=1 charge multipliers on the evolved crawl/climb base), commit_ramp / commit_decay / commit_spread
+// (how commitment rises with a host, decays without one, and spreads to roused neighbours), and the
+// flash-expansion pop flash_secs / flash_impulse / flash_sep_boost. Grounding: Reynolds 1987 alignment
+// (DOI 10.1145/37402.37406); Couzin et al. 2002 (DOI 10.1006/jtbi.2002.3065); the speed→polarization +
+// flash-expansion relationship of Gautrais et al. 2012 (DOI 10.1371/journal.pcbi.1002678).
 
 // --- Host-burst eruption (the Alien-chestburster sequence) -----------------------------------------
 // When gestation completes the host does NOT die instantly. It CONVULSES, then a manca tears out of its
@@ -220,21 +160,11 @@ const FLASH_SEP_BOOST: f32 = 2.0;
 
 /// The eruption costs `hp.max / this` — 3 ⇒ ⅓ of max HP; the host lives if it had more than a third left.
 const BURST_DAMAGE_DIVISOR: f32 = 3.0;
-/// Convulse wind-up: seconds the host shudders + blood wells before the manca tears out.
-const BURST_CONVULSE_SECS: f32 = 1.5;
-/// Bleed-out: seconds the wound streams after the eruption before the host is released from infestation.
-const BURST_BLEED_SECS: f32 = 2.0;
-/// Cadence (seconds) of the blood drips pushed at the wound during convulse + bleed.
-const BLEED_INTERVAL: f32 = 0.18;
-/// Seconds a manca spends slowly dragging itself OUT of the host chest (the BurrowOut climb) before it drops
-/// to the floor.
-const EMERGE_SECS: f32 = 1.2;
-/// How far (world units, along the host's forward) a manca crawls out of the chest across the climb before
-/// it drops to the floor.
-const EMERGE_DIST: f32 = 0.3;
-/// A freshly-erupted manca cannot embed for this long — stops the brood from instantly re-infesting the host
-/// it just burst from (the requested re-infestation cooldown). Initial level mancae get 0 (embed at once).
-const EMBED_COOLDOWN: f32 = 6.0;
+// Burst-eruption choreography timing → the `behavior.parasite_swarm` config slice: burst_convulse_secs
+// (host shudder wind-up), burst_bleed_secs (wound streams post-eruption before release), bleed_interval
+// (drip cadence), emerge_secs / emerge_dist (the BurrowOut climb-out duration/distance), embed_cooldown (a
+// fresh brood can't re-infest for this long; initial level mancae get 0). The eruption *damage divisor*
+// stays in code (BURST_DAMAGE_DIVISOR above) — parasite lethality is owned by `sim::ParasiteTuning`.
 /// Chest anchor (host-LOCAL, pre-root-scale) where the wound opens and the manca erupts — front of the torso
 /// (−Z is forward). The unit figurine (root scale 2.6) and the small crab need different offsets.
 const CHEST_LOCAL_UNIT: Vec3 = Vec3::new(0.0, 0.30, -0.25);
@@ -242,10 +172,8 @@ const CHEST_LOCAL_CRAB: Vec3 = Vec3::new(0.0, 0.20, -0.05);
 /// Radius of the wound disc mesh; parented to the host root, so it inherits the body scale (a big unit gets
 /// a proportionally bigger hole than a crab).
 const WOUND_R: f32 = 0.09;
-/// Screen-shake added per tick during the convulse wind-up (a rising dread rumble) and the big kick at the
-/// instant of eruption. Cosmetic (`juice::Trauma`) — never gates pinned state.
-const CONVULSE_TRAUMA_PER_TICK: f32 = 0.006;
-const ERUPT_TRAUMA: f32 = 0.55;
+// Screen-shake magnitudes (convulse_trauma_per_tick, erupt_trauma) → the `behavior.parasite_swarm` config
+// slice. Cosmetic (`juice::Trauma`) — never gates pinned state.
 
 // --- Host-side components (always present on every unit AND every crab) ----------------------------
 
@@ -377,7 +305,7 @@ enum MancaAnimState {
 /// DOI 10.1371/journal.pcbi.1004290). A manca spawns [`MoodState::Dormant`]: huddled at a harborage,
 /// passive — it does NOT hunt, leap, or embed. A disturbance (a host underfoot, the squad's gunfire field,
 /// or an already-roused sibling nearby — the contagion) flips it to [`MoodState::Roused`] and it runs the
-/// hunt→leap→embed drive. With no disturbance for `ROUSE_CALM_SECONDS` it re-settles to Dormant. Inserted
+/// hunt→leap→embed drive. With no disturbance for `beh.parasite_swarm.rouse_calm_seconds` it re-settles to Dormant. Inserted
 /// once at spawn and never removed, so the hashed manca archetype never splits (the module's determinism
 /// invariant; cf. [`Infestation`]).
 #[derive(Component)]
@@ -385,16 +313,16 @@ pub struct MancaMood {
     state: MoodState,
     /// Counts down while Roused and undisturbed; at ≤ 0 the manca re-settles to Dormant.
     calm_timer: f32,
-    /// Seconds until this manca may embed into a host. A fresh brood starts at `EMBED_COOLDOWN` so it can't
+    /// Seconds until this manca may embed into a host. A fresh brood starts at `beh.parasite_swarm.embed_cooldown` so it can't
     /// instantly re-infest the host it just erupted from; initial level mancae start at 0. Counted down in
     /// `manca_rouse`, gated in `manca_embed`.
     embed_cd: f32,
     /// Commitment ∈ [0,1] driving the readable mill→charge ramp of the roused swarm: 0 = a slow, loosely
-    /// aligned agitated mill; 1 = a fast, strongly polarized charge. Ramps up (`COMMIT_RAMP`) while roused
-    /// with a fresh host, decays (`COMMIT_DECAY`) without one, and is nudged toward the roused-neighbour
-    /// average (`COMMIT_SPREAD`) so the swarm commits together. Updated in `manca_hunt`; 0 while dormant.
+    /// aligned agitated mill; 1 = a fast, strongly polarized charge. Ramps up (`beh.parasite_swarm.commit_ramp`) while roused
+    /// with a fresh host, decays (`beh.parasite_swarm.commit_decay`) without one, and is nudged toward the roused-neighbour
+    /// average (`beh.parasite_swarm.commit_spread`) so the swarm commits together. Updated in `manca_hunt`; 0 while dormant.
     commit: f32,
-    /// Flash-expansion countdown (seconds): stamped to `FLASH_SECS` the tick this manca rouses, then decays
+    /// Flash-expansion countdown (seconds): stamped to `beh.parasite_swarm.flash_secs` the tick this manca rouses, then decays
     /// to 0. While positive the manca bursts outward from the cluster — the "it woke up" pop that rides the
     /// rouse contagion as an expanding ripple. Stamped in `manca_rouse`, decayed + applied in `manca_hunt`.
     flash: f32,
@@ -687,6 +615,7 @@ fn spawn_mancae(
     mut meshes: ResMut<Assets<Mesh>>,
     mut seq: ResMut<MancaSpawnSeq>,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     // Placed furniture (spawned in Startup) — its cells are prime harborages: mancae hide under/beside it.
     furniture: Query<&Transform, With<PlacedIn>>,
 ) {
@@ -736,7 +665,7 @@ fn spawn_mancae(
                 continue;
             }
             let score = harborage_score(cell);
-            if score >= HARBORAGE_MIN_SCORE {
+            if score >= beh.parasite_swarm.harborage_min_score {
                 candidates.push((score, cell));
             }
         }
@@ -749,11 +678,11 @@ fn spawn_mancae(
     // whole ranking is a pure function of the (fixed) dungeon + furniture layout.
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
-    // Greedily choose huddle sites spread ≥ HARBORAGE_SEP apart so distinct huddles occupy distinct corners.
-    let n_huddles = count.div_ceil(HUDDLE_SIZE).max(1);
+    // Greedily choose huddle sites spread ≥ beh.parasite_swarm.harborage_sep apart so distinct huddles occupy distinct corners.
+    let n_huddles = count.div_ceil(beh.parasite_swarm.huddle_size).max(1);
     let mut sites: Vec<IVec2> = Vec::new();
     for (_score, cell) in &candidates {
-        if sites.iter().any(|s| (*s - *cell).as_vec2().length() < HARBORAGE_SEP) {
+        if sites.iter().any(|s| (*s - *cell).as_vec2().length() < beh.parasite_swarm.harborage_sep) {
             continue;
         }
         sites.push(*cell);
@@ -763,7 +692,7 @@ fn spawn_mancae(
     }
 
     // Distribute the swarm across the chosen sites (as evenly as possible), seeding each huddle as a dense
-    // blob over the floor cells within HUDDLE_RADIUS of its site, all anchored (home) to the site centre.
+    // blob over the floor cells within beh.parasite_swarm.huddle_radius of its site, all anchored (home) to the site centre.
     let n_sites = sites.len();
     let mut spawned = 0usize;
     for (i, site) in sites.iter().enumerate() {
@@ -774,12 +703,12 @@ fn spawn_mancae(
         }
         // Nearby floor cells to spread this huddle over (deterministic scan; the site itself always in).
         let mut cells: Vec<IVec2> = Vec::new();
-        let r = HUDDLE_RADIUS.ceil() as i32;
+        let r = beh.parasite_swarm.huddle_radius.ceil() as i32;
         for dy in -r..=r {
             for dx in -r..=r {
                 let c = *site + IVec2::new(dx, dy);
                 if dungeon.is_floor(c)
-                    && (c - *site).as_vec2().length() <= HUDDLE_RADIUS
+                    && (c - *site).as_vec2().length() <= beh.parasite_swarm.huddle_radius
                     && (c - dungeon.spawn).as_vec2().length() >= MANCA_MIN_SPAWN_DIST
                 {
                     cells.push(c);
@@ -798,7 +727,7 @@ fn spawn_mancae(
             let Some(patch) = graph.floor_patch_cell(cell) else { continue };
             let s = seq.0 as u32;
             seq.0 += 1;
-            spawn_manca_on_patch(&mut commands, &graph, patch, &collider, &scene, s, &sim.parasite, home, 0.0, None);
+            spawn_manca_on_patch(&mut commands, &graph, patch, &collider, &scene, s, &sim.parasite, &beh, home, 0.0, None);
             spawned += 1;
         }
     }
@@ -815,6 +744,7 @@ pub fn spawn_manca_on_patch(
     scene: &Handle<WorldAsset>,
     rand_seed: u32,
     tuning: &crate::sim::ParasiteTuning,
+    beh: &BehaviorTuning,
     home: Vec3,
     embed_cd: f32,
     // `Some((host, chest_world_pos))` if this manca is erupting from a host chest — it spawns AT the chest in
@@ -836,7 +766,7 @@ pub fn spawn_manca_on_patch(
     // `manca_leap`'s Emerging arm, which follows the host, then drops it to the floor); a normal manca spawns
     // seated on the surface, Ready.
     let (init_pos, phase, phase_timer, host, anim) = match emerging {
-        Some((h, chest)) => (chest, LeapPhase::Emerging, EMERGE_SECS, Some(h), MancaAnimState::BurrowOut),
+        Some((h, chest)) => (chest, LeapPhase::Emerging, beh.parasite_swarm.emerge_secs, Some(h), MancaAnimState::BurrowOut),
         None => (seat, LeapPhase::Ready, 0.0, None, MancaAnimState::Snug),
     };
 
@@ -906,6 +836,7 @@ fn manca_hunt(
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     hosts: Query<(&Transform, &Infestation), (With<Parasitizable>, Without<Manca>)>,
     mut mancae: Query<
         (&mut MancaMotion, &mut MancaAnimState, &MancaLeap, &mut MancaMood, &mut Transform),
@@ -956,22 +887,22 @@ fn manca_hunt(
         // Nearest fresh host (shared deterministic ranking; forward vector carried as the payload).
         let nearest = nearest_planar(motion.pos, host_data.iter().map(|&(hp, fwd)| (fwd, hp)));
         let cell = dungeon.world_to_cell(motion.pos);
-        let acc = accumulate_boids(&hash, cell, motion.pos, HUDDLE_SEP_RADIUS);
+        let acc = accumulate_boids(&hash, cell, motion.pos, beh.parasite_swarm.huddle_sep_radius);
 
         // --- Commitment ramp (continuous mill→charge) ------------------------------------------------
         // Ramp up while a fresh host is in play, decay when none remain; then nudge toward the roused-
         // neighbour average so commitment spreads through the cluster (a readable wave), not manca-by-manca.
-        let ramp = if nearest.is_some() { COMMIT_RAMP } else { -COMMIT_DECAY };
+        let ramp = if nearest.is_some() { beh.parasite_swarm.commit_ramp } else { -beh.parasite_swarm.commit_decay };
         let mut commit = mood.commit + ramp * dt;
         if acc.n > 0.0 {
             let avg = acc.commit_sum / acc.n;
-            commit += (avg - commit) * (COMMIT_SPREAD * dt).min(1.0);
+            commit += (avg - commit) * (beh.parasite_swarm.commit_spread * dt).min(1.0);
         }
         commit = commit.clamp(0.0, 1.0);
         mood.commit = commit;
 
         // Flash-expansion pop: while it lasts, over-space and burst outward from the local centroid.
-        let flash_k = if mood.flash > 0.0 { (mood.flash / FLASH_SECS).clamp(0.0, 1.0) } else { 0.0 };
+        let flash_k = if mood.flash > 0.0 { (mood.flash / beh.parasite_swarm.flash_secs).clamp(0.0, 1.0) } else { 0.0 };
         mood.flash = (mood.flash - dt).max(0.0);
 
         // --- Swarm steering: weak seek + cohesion + commit-scaled alignment; separation on the push ----
@@ -980,37 +911,37 @@ fn manca_hunt(
             let planar_d = to_host.length();
             // Blind-side stalk: if the host is close and looking at this manca, arc tangentially toward its
             // rear rather than charging head-on, until the manca clears the facing cone.
-            let dir = if planar_d > LEAP_MIN
-                && planar_d < STALK_BAND
-                && unit_is_facing(hpos, hfwd, motion.pos, BLIND_COS)
+            let dir = if planar_d > beh.parasite_swarm.leap_min
+                && planar_d < beh.parasite_swarm.stalk_band
+                && unit_is_facing(hpos, hfwd, motion.pos, beh.parasite_swarm.blind_cos)
             {
                 let bearing = to_host.normalize_or_zero();
                 let tang = Vec3::new(-bearing.z, 0.0, bearing.x); // perpendicular, ground plane
                 let sign = if tang.dot(hfwd) >= 0.0 { 1.0 } else { -1.0 }; // toward the host's rear
-                (bearing + tang * sign * STALK_STRENGTH).normalize_or_zero()
+                (bearing + tang * sign * beh.parasite_swarm.stalk_strength).normalize_or_zero()
             } else {
                 to_host.normalize_or_zero()
             };
-            dir * SEEK_STRENGTH
+            dir * beh.parasite_swarm.seek_strength
         } else {
             Vec3::ZERO
         };
         let cohesion = if acc.n > 0.0 {
-            (acc.centroid / acc.n - motion.pos).with_y(0.0) * COHESION_STRENGTH
+            (acc.centroid / acc.n - motion.pos).with_y(0.0) * beh.parasite_swarm.cohesion_strength
         } else {
             Vec3::ZERO
         };
-        // Alignment scaled by commitment: a mill is loosely aligned (`ALIGN_FLOOR`), a charge is a tight
-        // polarized arrow (`ALIGN_STRENGTH`). This is the readable blob→arrow transition.
-        let align_gain = ALIGN_FLOOR + (ALIGN_STRENGTH - ALIGN_FLOOR) * commit;
+        // Alignment scaled by commitment: a mill is loosely aligned (`beh.parasite_swarm.align_floor`), a charge is a tight
+        // polarized arrow (`beh.parasite_swarm.align_strength`). This is the readable blob→arrow transition.
+        let align_gain = beh.parasite_swarm.align_floor + (beh.parasite_swarm.align_strength - beh.parasite_swarm.align_floor) * commit;
         let align = acc.heading_sum.with_y(0.0).normalize_or_zero() * align_gain;
         let desired = seek + cohesion + align;
 
         // Separation (un-clamped push), boosted during the flash pop, plus a brief radial burst outward.
-        let mut push = acc.sep * HUDDLE_SEP_STRENGTH * (1.0 + FLASH_SEP_BOOST * flash_k);
+        let mut push = acc.sep * beh.parasite_swarm.huddle_sep_strength * (1.0 + beh.parasite_swarm.flash_sep_boost * flash_k);
         if flash_k > 0.0 && acc.n > 0.0 {
             let outward = (motion.pos - acc.centroid / acc.n).with_y(0.0).normalize_or_zero();
-            push += outward * FLASH_IMPULSE * flash_k;
+            push += outward * beh.parasite_swarm.flash_impulse * flash_k;
         }
 
         // Climb speed on a wall patch, crawl speed on the floor (the evolved base) — modulated by commitment
@@ -1020,7 +951,7 @@ fn manca_hunt(
         } else {
             sim.parasite.crawl_speed
         };
-        let speed = base * (MILL_SPEED_FACTOR + (CHARGE_SPEED_FACTOR - MILL_SPEED_FACTOR) * commit);
+        let speed = base * (beh.parasite_swarm.mill_speed_factor + (beh.parasite_swarm.charge_speed_factor - beh.parasite_swarm.mill_speed_factor) * commit);
         let moving = steer_surface(&mut motion, &graph, &dungeon, desired, speed, push, dt);
 
         // Choose the animation state from motion + which surface we're on.
@@ -1142,9 +1073,9 @@ fn accumulate_boids(
 /// Rouse/settle: flip a manca between [`MoodState::Dormant`] (huddled, passive) and [`MoodState::Roused`]
 /// (hunting). A dormant manca wakes when the squad's gunfire field is hot at its cell (a bolt landed near
 /// the huddle — laser impacts deposit `THREAT_GUN` at the strike point, so a hit on ANY member floods its
-/// neighbours), when a fresh host steps within `ROUSE_PROXIMITY`, or when an already-roused sibling is
-/// within `ROUSE_CONTAGION_R` — the excitation spreads through the cluster (Broly & Deneubourg 2015,
-/// DOI 10.1371/journal.pcbi.1004290). A roused manca with no disturbance for `ROUSE_CALM_SECONDS`
+/// neighbours), when a fresh host steps within `beh.parasite_swarm.rouse_proximity`, or when an already-roused sibling is
+/// within `beh.parasite_swarm.rouse_contagion_r` — the excitation spreads through the cluster (Broly & Deneubourg 2015,
+/// DOI 10.1371/journal.pcbi.1004290). A roused manca with no disturbance for `beh.parasite_swarm.rouse_calm_seconds`
 /// re-settles to Dormant (then creeps back to its harborage in `manca_huddle`).
 ///
 /// **Determinism.** Fresh-host positions and the roused-manca set are SNAPSHOTTED before any mood flips, so
@@ -1154,6 +1085,7 @@ fn manca_rouse(
     time: Res<Time>,
     dungeon: Res<Dungeon>,
     stig: Res<Stig>,
+    beh: Res<BehaviorTuning>,
     hosts: Query<(&Transform, &Infestation), (With<Parasitizable>, Without<Manca>)>,
     mut mancae: Query<(&MancaMotion, Ref<Health>, &mut MancaMood), With<Manca>>,
 ) {
@@ -1166,8 +1098,8 @@ fn manca_rouse(
     let roused: Vec<Vec3> =
         mancae.iter().filter(|(_, _, m)| m.state == MoodState::Roused).map(|(mo, _, _)| mo.pos).collect();
 
-    let prox_sq = ROUSE_PROXIMITY * ROUSE_PROXIMITY;
-    let contagion_sq = ROUSE_CONTAGION_R * ROUSE_CONTAGION_R;
+    let prox_sq = beh.parasite_swarm.rouse_proximity * beh.parasite_swarm.rouse_proximity;
+    let contagion_sq = beh.parasite_swarm.rouse_contagion_r * beh.parasite_swarm.rouse_contagion_r;
 
     for (motion, health, mut mood) in &mut mancae {
         // Count down the post-eruption embed cooldown (a fresh brood can't immediately re-infest a host).
@@ -1178,7 +1110,7 @@ fn manca_rouse(
         // so `Changed` (minus the spawn-add tick) is a bulletproof "I was just shot" trigger — independent of
         // the gunfire field's magnitude or drain timing. This is the core fix for "won't react even when shot".
         let shot = health.is_changed() && !health.is_added();
-        let gunfire = stig.sample(FieldId::THREAT_GUN, &dungeon, motion.pos) > ROUSE_THREAT;
+        let gunfire = stig.sample(FieldId::THREAT_GUN, &dungeon, motion.pos) > beh.parasite_swarm.rouse_threat;
         let host_near =
             host_pos.iter().any(|h| (h.xz() - motion.pos.xz()).length_squared() < prox_sq);
         // A roused manca appears in `roused` at its own position (distance 0); the `> 1e-8` guard skips that
@@ -1194,15 +1126,15 @@ fn manca_rouse(
             MoodState::Dormant => {
                 if disturbed {
                     mood.state = MoodState::Roused;
-                    mood.calm_timer = ROUSE_CALM_SECONDS;
+                    mood.calm_timer = beh.parasite_swarm.rouse_calm_seconds;
                     // Stamp the flash-expansion pop. Because arousal contagion flips one ring per tick, the
                     // burst sweeps the clump as an expanding ripple — the readable "the patch just woke up".
-                    mood.flash = FLASH_SECS;
+                    mood.flash = beh.parasite_swarm.flash_secs;
                 }
             }
             MoodState::Roused => {
                 if disturbed {
-                    mood.calm_timer = ROUSE_CALM_SECONDS;
+                    mood.calm_timer = beh.parasite_swarm.rouse_calm_seconds;
                 } else {
                     mood.calm_timer -= dt;
                     if mood.calm_timer <= 0.0 {
@@ -1231,6 +1163,7 @@ fn manca_huddle(
     dungeon: Res<Dungeon>,
     light_field: Res<LightField>,
     config: Res<GameConfig>,
+    beh: Res<BehaviorTuning>,
     mut mancae: Query<
         (&mut MancaMotion, &mut MancaAnimState, &MancaLeap, &MancaMood, &mut Transform),
         With<Manca>,
@@ -1272,20 +1205,20 @@ fn manca_huddle(
 
         // Cohesion toward the local dormant centroid, short-range separation, and a FAINT alignment — the
         // same 3×3 per-cell scan the crab uses, now also summing neighbour headings (`accumulate_boids`).
-        // The alignment is deliberately faint here (`ALIGN_FLOOR`): a resting patch reads as subtly coherent,
+        // The alignment is deliberately faint here (`beh.parasite_swarm.align_floor`): a resting patch reads as subtly coherent,
         // not a directed march — that polarization is the roused swarm's job (`manca_hunt`).
         let cell = dungeon.world_to_cell(motion.pos);
-        let acc = accumulate_boids(&hash, cell, motion.pos, HUDDLE_SEP_RADIUS);
+        let acc = accumulate_boids(&hash, cell, motion.pos, beh.parasite_swarm.huddle_sep_radius);
         let cohesion = if acc.n > 0.0 {
-            (acc.centroid / acc.n - motion.pos).with_y(0.0) * COHESION_STRENGTH
+            (acc.centroid / acc.n - motion.pos).with_y(0.0) * beh.parasite_swarm.cohesion_strength
         } else {
             Vec3::ZERO
         };
-        let align = acc.heading_sum.with_y(0.0).normalize_or_zero() * ALIGN_FLOOR;
+        let align = acc.heading_sum.with_y(0.0).normalize_or_zero() * beh.parasite_swarm.align_floor;
 
         // Pull back toward the harborage anchor (pins the clump to its corner/furniture), capped to 1 unit.
         let to_home = (motion.home - motion.pos).with_y(0.0);
-        let home_pull = to_home.normalize_or_zero() * HARBORAGE_BIAS * to_home.length().min(1.0);
+        let home_pull = to_home.normalize_or_zero() * beh.parasite_swarm.harborage_bias * to_home.length().min(1.0);
 
         // Descend the illuminance gradient into shadow (the once-inert `Photophobic` marker, now live).
         let light = light_push(&light_field, &dungeon, motion.pos, signed_gain);
@@ -1296,14 +1229,14 @@ fn manca_huddle(
             &graph,
             &dungeon,
             desired,
-            SETTLE_SPEED,
-            acc.sep * HUDDLE_SEP_STRENGTH,
+            beh.parasite_swarm.settle_speed,
+            acc.sep * beh.parasite_swarm.huddle_sep_strength,
             dt,
         );
 
         // Anim: settled → the snug idle; only a manca still traveling back to its harborage walks/climbs.
         let on_wall = graph.patch(motion.patch).normal.y < WALL_NORMAL_Y;
-        *anim = if to_home.length() <= SETTLE_ARRIVE {
+        *anim = if to_home.length() <= beh.parasite_swarm.settle_arrive {
             MancaAnimState::Snug
         } else if on_wall {
             MancaAnimState::Climb
@@ -1324,6 +1257,7 @@ fn manca_leap(
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     // `Option<&Unit>` distinguishes the tall figurine host from a crab so an Emerging manca climbs out of the
     // right chest anchor (see `host_chest`).
     hosts: Query<
@@ -1363,10 +1297,10 @@ fn manca_leap(
                 }
                 if let Some((hfwd, hpos, d)) = nearest(motion.pos) {
                     // Blind-side gate: only commit the leap from outside the host's facing cone.
-                    let in_blind_spot = !unit_is_facing(hpos, hfwd, motion.pos, BLIND_COS);
-                    if d > LEAP_MIN && d < sim.parasite.leap_len && in_blind_spot {
+                    let in_blind_spot = !unit_is_facing(hpos, hfwd, motion.pos, beh.parasite_swarm.blind_cos);
+                    if d > beh.parasite_swarm.leap_min && d < sim.parasite.leap_len && in_blind_spot {
                         leap.phase = LeapPhase::Hunker;
-                        leap.timer = LEAP_HUNKER;
+                        leap.timer = beh.parasite_swarm.leap_hunker;
                         leap.from = motion.pos;
                         leap.to = hpos;
                     }
@@ -1383,14 +1317,14 @@ fn manca_leap(
                     }
                     leap.from = motion.pos;
                     leap.phase = LeapPhase::Air;
-                    leap.timer = LEAP_AIR;
+                    leap.timer = beh.parasite_swarm.leap_air;
                 }
             }
             LeapPhase::Air => {
                 leap.timer -= dt;
-                let s = (1.0 - (leap.timer / LEAP_AIR)).clamp(0.0, 1.0);
+                let s = (1.0 - (leap.timer / beh.parasite_swarm.leap_air)).clamp(0.0, 1.0);
                 let ground = leap.from.lerp(leap.to, s);
-                let height = LEAP_ARC * (std::f32::consts::PI * s).sin();
+                let height = beh.parasite_swarm.leap_arc * (std::f32::consts::PI * s).sin();
                 motion.pos = ground;
                 // Re-home onto the surface beneath the arc so it lands on a real patch.
                 if let Some(fp) = graph.floor_patch_cell(dungeon.world_to_cell(ground)) {
@@ -1413,7 +1347,7 @@ fn manca_leap(
             }
             LeapPhase::Emerging => {
                 // Drag slowly OUT of the host's chest along its forward (−Z), following the host if it moves,
-                // over EMERGE_SECS — then drop to the floor via a short Air arc. If the host has already died
+                // over beh.parasite_swarm.emerge_secs — then drop to the floor via a short Air arc. If the host has already died
                 // (query miss), bail straight to the drop so the brood is never stranded.
                 leap.timer -= dt;
                 *anim = MancaAnimState::BurrowOut;
@@ -1421,10 +1355,10 @@ fn manca_leap(
                 if let Some((htf, _inf, unit)) = host_tf {
                     let chest = host_chest(htf, unit.is_some());
                     let out = (htf.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
-                    let s = (1.0 - (leap.timer / EMERGE_SECS)).clamp(0.0, 1.0);
+                    let s = (1.0 - (leap.timer / beh.parasite_swarm.emerge_secs)).clamp(0.0, 1.0);
                     // Crawl outward + a small upward heave (peaks mid-climb) as it claws free of the wound.
                     let heave = Vec3::Y * (0.12 * (std::f32::consts::PI * s).sin());
-                    tf.translation = chest + out * (EMERGE_DIST * s) + heave;
+                    tf.translation = chest + out * (beh.parasite_swarm.emerge_dist * s) + heave;
                     let flat = out.with_y(0.0).normalize_or(motion.heading);
                     motion.heading = flat;
                     tf.rotation = surface_orientation(flat, Vec3::Y);
@@ -1434,7 +1368,7 @@ fn manca_leap(
                     leap.from = tf.translation;
                     leap.to = motion.pos;
                     leap.phase = LeapPhase::Air;
-                    leap.timer = LEAP_AIR;
+                    leap.timer = beh.parasite_swarm.leap_air;
                     leap.host = None;
                 }
             }
@@ -1454,6 +1388,7 @@ fn manca_leap(
 fn manca_embed(
     mut commands: Commands,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     mancae: Query<(Entity, &MancaMotion, &MancaLeap, &MancaMood, &MancaSeed, &Health), With<Manca>>,
     mut hosts: Query<
         (Entity, &Transform, &mut Health, &mut Infestation),
@@ -1483,7 +1418,7 @@ fn manca_embed(
         .filter(|(_, _, _, inf)| !inf.active)
         .map(|(e, t, _, _)| (e, t.translation))
         .collect();
-    let reach_sq = (HOST_BODY_RADIUS + MANCA_EMBED_RANGE).powi(2);
+    let reach_sq = (HOST_BODY_RADIUS + beh.parasite_swarm.embed_range).powi(2);
     let mut taken: HashSet<Entity> = HashSet::new();
 
     for (seed, manca_e, mpos) in ready {
@@ -1511,6 +1446,7 @@ fn manca_embed(
 fn gestation_tick(
     time: Res<Time>,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     mut hosts: Query<&mut Infestation, With<Parasitizable>>,
 ) {
     let dt = time.delta_secs();
@@ -1524,7 +1460,7 @@ fn gestation_tick(
             // Gestation complete — begin the slow eruption with the convulsing wind-up (driven by
             // `parasite_burst`), rather than bursting instantly.
             inf.burst = BurstPhase::Convulse;
-            inf.burst_timer = BURST_CONVULSE_SECS;
+            inf.burst_timer = beh.parasite_swarm.burst_convulse_secs;
         }
     }
 }
@@ -1555,6 +1491,7 @@ fn parasite_burst(
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
     sim: Res<SimTuning>,
+    beh: Res<BehaviorTuning>,
     manca_assets: Option<Res<MancaAssets>>,
     wound_assets: Option<Res<WoundAssets>>,
     mut seq: ResMut<MancaSpawnSeq>,
@@ -1598,10 +1535,10 @@ fn parasite_burst(
             BurstPhase::Convulse => {
                 let before = inf.burst_timer;
                 inf.burst_timer -= dt;
-                if drips(before, inf.burst_timer) {
+                if drips(before, inf.burst_timer, &beh) {
                     push_bleed(&mut gore, chest); // blood wells under the skin as pressure builds
                 }
-                trauma.add(CONVULSE_TRAUMA_PER_TICK); // a rising, dreadful rumble
+                trauma.add(beh.parasite_swarm.convulse_trauma_per_tick); // a rising, dreadful rumble
                 if inf.burst_timer <= 0.0 {
                     // --- ERUPT: the manca tears out ---
                     hp.current -= hp.max / BURST_DAMAGE_DIVISOR; // ⅓ damage — deliberately NOT an instakill
@@ -1631,7 +1568,7 @@ fn parasite_burst(
                             seq.0 += 1;
                             spawn_manca_on_patch(
                                 &mut commands, &graph, patch, &manca_assets.collider,
-                                &manca_assets.scene, s, p, brood_home, EMBED_COOLDOWN, Some((host_e, chest)),
+                                &manca_assets.scene, s, p, &beh, brood_home, beh.parasite_swarm.embed_cooldown, Some((host_e, chest)),
                             );
                             live += 1;
                         }
@@ -1646,15 +1583,15 @@ fn parasite_burst(
                         gib: None,
                         intensity: 0.0,
                     });
-                    trauma.add(ERUPT_TRAUMA); // the camera kick
+                    trauma.add(beh.parasite_swarm.erupt_trauma); // the camera kick
                     inf.burst = BurstPhase::Bleed;
-                    inf.burst_timer = BURST_BLEED_SECS;
+                    inf.burst_timer = beh.parasite_swarm.burst_bleed_secs;
                 }
             }
             BurstPhase::Bleed => {
                 let before = inf.burst_timer;
                 inf.burst_timer -= dt;
-                if drips(before, inf.burst_timer) {
+                if drips(before, inf.burst_timer, &beh) {
                     push_bleed(&mut gore, chest); // the wound keeps streaming
                 }
                 if inf.burst_timer <= 0.0 {
@@ -1668,10 +1605,10 @@ fn parasite_burst(
     }
 }
 
-/// True once per `BLEED_INTERVAL` as a burst timer counts down — a deterministic drip cadence so the wound
+/// True once per `beh.parasite_swarm.bleed_interval` as a burst timer counts down — a deterministic drip cadence so the wound
 /// bleed doesn't spray a fresh billboard every single tick.
-fn drips(before: f32, after: f32) -> bool {
-    (before / BLEED_INTERVAL).floor() != (after / BLEED_INTERVAL).floor()
+fn drips(before: f32, after: f32, beh: &BehaviorTuning) -> bool {
+    (before / beh.parasite_swarm.bleed_interval).floor() != (after / beh.parasite_swarm.bleed_interval).floor()
 }
 
 /// A single small blood spray at the wound (the sustained welling / dripping). `FleshHit` is never fog-gated,

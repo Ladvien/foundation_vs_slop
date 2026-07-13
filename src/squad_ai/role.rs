@@ -160,10 +160,10 @@ pub fn validate_rank_ladder(role: RoleId, behaviors: &[Behavior]) -> Result<(), 
 
 // --- Shared behaviour fragments (every role carries these tails) ---
 
-/// Distance (world units) past which a strayed unit is strongly pulled back to the anchor — the
-/// "leash" of the wander-but-cohere group model (Game AI Pro 2 Ch.20, "Hierarchical Architecture for
-/// Group Navigation Behaviors"; Moussaïd et al. 2010 field-of-view cohesion).
-pub const LEASH: f32 = 6.0;
+// The cohesion "leash" radius — distance past which a strayed unit is strongly pulled back to the anchor
+// (Game AI Pro 2 Ch.20, "Hierarchical Architecture for Group Navigation Behaviors"; Moussaïd et al. 2010
+// field-of-view cohesion) — now lives in the `behavior:` config slice (`BehaviorTuning::perception::
+// leash`), read as `Res<BehaviorTuning>` by the perception layer. See src/behavior_tuning.rs.
 
 /// Survival: retreat when fear spikes — the top bucket for every role.
 fn flee() -> Behavior {

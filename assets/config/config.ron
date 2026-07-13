@@ -323,6 +323,87 @@
     ),
 
     // =============================================================================================
+    // behavior — per-agent behavioural knobs lifted from the top of each system file (see
+    // src/behavior_tuning.rs): decision gates, sight ranges, locomotion speeds, steering weights,
+    // cooldowns, boids parameters. Structure is code; only these numbers are data. Structural consts
+    // (render geometry, grid sizes, spawn layout/counts, hash seeds, VFX durations) stay in Rust. This is
+    // a SEPARATE search surface (src/squad_ai/behavior_genome.rs) from `sim`/`world_genome`, so growing it
+    // never shifts that frozen encoding. Values pinned to BehaviorTuning::default() by the
+    // behavior_default_equals_shipped_config test.
+    // =============================================================================================
+    behavior: (
+        // Squad perception sight ranges + Schmitt hysteresis (squad_ai/perception.rs, role.rs). Each
+        // *_sight is the trigger radius; *_release the (larger) let-go radius.
+        perception: (
+            examine_sight: 8.0,  examine_sight_release: 9.0,
+            threat_sight: 12.0,  threat_sight_release: 13.5,
+            psi_sight: 16.0,     psi_sight_release: 17.5,
+            ward_sight: 10.0,    ward_sight_release: 11.5,
+            wounded_frac: 0.5,   wounded_frac_release: 0.55,
+            leash: 6.0, leash_in: 4.0,
+            squad_think_interval: 0.3,
+        ),
+        // Squad-unit locomotion, ORCA avoidance, pack cohesion, action ranges (squad.rs, cohesion.rs, actions.rs).
+        squad_move: (
+            unit_speed: 6.0, min_encumber: 0.15, turn_speed: 14.0,
+            orca_radius: 0.30, orca_time_horizon: 1.0, orca_query_radius: 4.0,
+            arrive_radius: 0.6, pack_radius: 2.5, blob_radius: 1.3, progress_eps: 0.05, pack_stuck_time: 0.5,
+            anchor_ease: 4.0, utter_cooldown: 4.0, study_range: 1.6, heal_range: 1.6, heal_rate: 20.0,
+        ),
+        // The watcher/boss locomotion + senses (enemy.rs). HP/zap/cull live in sim.boss.
+        boss: (
+            min_speed: 0.4, max_speed: 2.5, accel: 0.4, turn_cos: 0.87,
+            sight_near: 3.0, sight_far: 12.0, wander_interval: 2.5,
+            sep_radius: 1.2, sep_strength: 2.5, observe_dist: 3.0, look_amount: 0.35, gaze_cos: 0.927,
+            hit_memory: 0.6, flee_speed: 3.2,
+        ),
+        // Squad weapon ballistics + aim cone (laser.rs). Damage/friendly-fire live in sim.combat.
+        laser: (
+            fire_interval: 0.15, laser_speed: 22.0, laser_life: 1.2,
+            base_spread: 0.06, move_spread: 0.40, dist_spread: 0.30, dist_spread_range: 14.0, front_arc_cos: 0.26,
+        ),
+        // Crab-swarm locomotion, boids, pounce, scouts, caste, carry crew (crab.rs). HP/damage/breeding in sim.
+        crab: (
+            contact_radius: 0.2,
+            jump_len: 1.9, jump_min: 1.15, jump_hunker: 0.3, jump_air: 0.35, jump_arc: 0.9, jump_cooldown: 2.5,
+            pounce_blind_cos: 0.5, stalk_band: 3.5, stalk_strength: 0.8,
+            speed: 2.1, sep_radius: 0.45, sep_strength: 7.0, jitter_strength: 0.6, jitter_freq: 2.3,
+            muster_speed_mul: 1.4, climb_speed: 2.89, flee_speed_mul: 1.3,
+            scout_fraction: 0.20, scout_sight: 5.0, scout_speed_mul: 1.35, scout_wander_interval: 3.0,
+            rally_deposit_cooldown: 0.2,
+            eat_range: 0.3, back_spread: 2.6,
+            caste_cooldown: 4.0, caste_flips_per_tick: 2,
+            rally_live: 0.15, alarm_high: 0.5, promote_density: 3.0, scout_min_frac: 0.10, scout_max_frac: 0.30,
+            carry_capacity: 0.4, grab_range: 0.6, los_range: 2.0, carry_hold: 0.12, carry_speed: 1.6,
+            weight_drag: 2.5, deliver_range: 1.2, crew_timeout: 6.0, max_commit_dist: 2.5,
+        ),
+        // SCP-150 manca collective behaviour: huddle/harborage, rouse, boids, commit, flash, burst timing
+        // (parasite.rs). Count/hp/crawl/climb/leap-len/lethality live in sim.parasite.
+        parasite_swarm: (
+            embed_range: 0.2,
+            leap_min: 1.0, leap_hunker: 0.3, leap_air: 0.35, leap_arc: 0.8, blind_cos: 0.5,
+            stalk_band: 3.5, stalk_strength: 0.8,
+            huddle_size: 40, huddle_radius: 2.0, harborage_sep: 6.0, harborage_min_score: 2,
+            settle_speed: 0.5, settle_arrive: 0.6, cohesion_strength: 0.6,
+            huddle_sep_radius: 0.35, huddle_sep_strength: 0.8, harborage_bias: 1.0,
+            rouse_threat: 0.04, rouse_proximity: 5.0, rouse_contagion_r: 3.0, rouse_calm_seconds: 9.0,
+            align_strength: 1.2, align_floor: 0.12, seek_strength: 0.5,
+            mill_speed_factor: 0.5, charge_speed_factor: 1.35,
+            commit_ramp: 0.5, commit_decay: 0.7, commit_spread: 2.0,
+            flash_secs: 0.3, flash_impulse: 2.5, flash_sep_boost: 2.0,
+            burst_convulse_secs: 1.5, burst_bleed_secs: 2.0, bleed_interval: 0.18,
+            emerge_secs: 1.2, emerge_dist: 0.3, embed_cooldown: 6.0,
+            convulse_trauma_per_tick: 0.006, erupt_trauma: 0.55,
+        ),
+        // Crab<->mould ecosystem coupling: grazing/deposit rates + splat radii (mycelia/grazing.rs, control.rs).
+        mycelia_coupling: (
+            fruit_meat_rate: 0.1, graze_reach: 0.35, graze_bite_rate: 0.15, mat_dense_v: 0.6, mat_meat_rate: 0.03,
+            nest_radius_cells: 2.5, unit_radius_cells: 2.0, blood_min_radius_cells: 1.0, meat_radius_cells: 1.6,
+            gaze_seen: 0.2,
+        ),
+    ),
+
+    // =============================================================================================
     // sim — simulation-dynamics knobs (see src/sim.rs): combat, swarm economy, field-deposit strengths,
     // fear gains, and the boss. Structure is code; only these numbers are data. Each value is bit-identical
     // to the Rust const it replaced (pinned by the deterministic-core replay hash + sim_default_equals_

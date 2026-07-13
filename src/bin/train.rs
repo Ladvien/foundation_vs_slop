@@ -32,6 +32,7 @@ use foundation_vs_slop::squad_ai::coevolve::{
     SearchResult, Templates,
 };
 use foundation_vs_slop::squad_ai::audio_search::{self, AudioSearchConfig};
+use foundation_vs_slop::squad_ai::behavior_search::{self, BehaviorSearchConfig};
 use foundation_vs_slop::squad_ai::level_eval;
 use foundation_vs_slop::squad_ai::level_search::{self, LevelSearchConfig};
 
@@ -45,6 +46,9 @@ const WORLD_ARCHIVE_PATH: &str = "assets/config/elites_world.ron";
 const LEVELS_ARCHIVE_PATH: &str = "assets/config/elites_levels.ron";
 /// The illuminated *audio* archive: evolved acoustic-stimulus config (propagation + loudness + perception).
 const AUDIO_ARCHIVE_PATH: &str = "assets/config/elites_audio.ron";
+/// The illuminated *behaviour* archive: evolved per-agent behaviour subset (locomotion/steering/senses/
+/// combat cadence/boids), overlaid onto the shipped `behavior:` base.
+const BEHAVIOR_ARCHIVE_PATH: &str = "assets/config/elites_behavior.ron";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -73,12 +77,16 @@ fn main() {
         // witnessed-surprise objective as the world population (audio feeds agent perception). Needs the
         // `prior` (`train prior` first) — regenerate it after any Mode change (MODE_COUNT is now 25).
         "audio" => parse_evolve(&args[1..]).and_then(audio),
+        // Standalone behaviour search: evolve a curated subset of the `behavior:` config (locomotion,
+        // steering, senses, combat cadence, boids) under the SAME behavioural witnessed-surprise objective.
+        // Needs the `prior` (`train prior` first) — regenerate it after any Mode change.
+        "behavior" => parse_evolve(&args[1..]).and_then(behavior),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio)"
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior)"
         )),
     };
     if let Err(e) = result {
@@ -103,7 +111,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let swarm = SwarmGenome::authored(&t);
 
     for &seed in seeds {
-        let r = rollout(brains_of(&t, &squad, &swarm)?, None, None, seed, ticks);
+        let r = rollout(brains_of(&t, &squad, &swarm)?, None, None, None, seed, ticks);
         let o = &r.outcome;
         let coverage = if o.reachable_cells > 0 {
             o.cells_covered as f32 / o.reachable_cells as f32
@@ -374,6 +382,53 @@ fn audio(args: EvolveArgs) -> Result<(), String> {
     write_ron(AUDIO_ARCHIVE_PATH, &audio_search::audio_archive_doc(&result.pop)?)?;
     println!();
     println!("wrote {AUDIO_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
+    print_read_warning();
+    Ok(())
+}
+
+/// Standalone behaviour search: evolve a curated subset of the `behavior:` config (locomotion, steering,
+/// senses, combat cadence, boids) under the witnessed-learnable-surprise objective, and commit the
+/// illuminated archive. Like `audio`, its fitness is a full-sim rollout, so it needs the frozen `prior` —
+/// run `train prior` first, and REGENERATE it after any `Mode` change. Reuses the `--generations / --batch
+/// / --res / --seed / --seeds / --ticks` flags; `--seeds` are the held-in worlds (the learnability pair
+/// uses the first two, which must differ). Elites overlay onto the shipped base, so an archive cell is a
+/// readable diff of behaviour dials to transcribe into `config.ron`.
+fn behavior(args: EvolveArgs) -> Result<(), String> {
+    let src = std::fs::read_to_string(PRIOR_PATH)
+        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
+    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
+
+    let c = args.cfg;
+    let cfg = BehaviorSearchConfig {
+        seed: c.seed,
+        generations: c.generations,
+        batch: c.batch,
+        sigma: 0.3,
+        resolution: c.resolution,
+        dungeon_seeds: c.dungeon_seeds,
+        episode_ticks: c.episode_ticks,
+    };
+    println!(
+        "evolving behaviour: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
+        cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.episode_ticks
+    );
+
+    let result = behavior_search::search(&prior, &cfg, |generation, r| {
+        let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
+        println!(
+            "  gen {generation:>3}: behaviour {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
+            r.pop.archive.coverage(),
+            r.pop.archive.qd_score(),
+            best,
+            r.evaluations,
+            r.rejected_infeasible,
+            r.rejected_by_criterion
+        );
+    })?;
+
+    write_ron(BEHAVIOR_ARCHIVE_PATH, &behavior_search::behavior_archive_doc(&result.pop)?)?;
+    println!();
+    println!("wrote {BEHAVIOR_ARCHIVE_PATH} ({} elites)", result.pop.archive.coverage());
     print_read_warning();
     Ok(())
 }

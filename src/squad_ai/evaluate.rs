@@ -125,6 +125,7 @@ pub fn rollout(
     brains: BrainSource,
     config: Option<WorldConfig>,
     audio: Option<AudioTuning>,
+    behavior: Option<crate::behavior_tuning::BehaviorTuning>,
     dungeon_seed: u64,
     ticks: u32,
 ) -> Rollout {
@@ -142,6 +143,12 @@ pub fn rollout(
     // population's rollout. Same single `GameConfig` seam.
     if let Some(a) = audio {
         cfg = cfg.with_audio_config(a);
+    }
+    // The behaviour slice: `None` runs the shipped `behavior:` config (every non-behaviour population passes
+    // `None`); `Some(b)` installs an evolved `BehaviorTuning` for the behaviour population's rollout. Same
+    // single `GameConfig` seam.
+    if let Some(b) = behavior {
+        cfg = cfg.with_behavior_config(b);
     }
     let mut app = build_headless_app(&cfg);
 

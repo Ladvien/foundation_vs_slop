@@ -66,9 +66,15 @@ impl Plugin for AiPlugin {
         // here (same one-path config seam as `AiTuning`/`SimTuning`) and inserted so `init_fields` can
         // compose the acoustic channel defs and `init_drives` can read the per-faction din-fear gains.
         let audio = app.world().resource::<crate::config::GameConfig>().audio;
+        // The `behavior:` slice — per-agent behavioural knobs (decision gates, sight ranges, locomotion
+        // speeds, steering weights, cooldowns, boids params) lifted from the top of each system file. Read
+        // once here (same one-path seam as `AiTuning`/`SimTuning`) and inserted so every consumer
+        // (brain/perception/squad/enemy/laser/crab/parasite/mycelia) reads `Res<BehaviorTuning>`.
+        let behavior = app.world().resource::<crate::config::GameConfig>().behavior;
         app.insert_resource(tuning)
             .insert_resource(sim)
             .insert_resource(audio)
+            .insert_resource(behavior)
             .init_resource::<StigDeposits>()
             .init_resource::<RallyDeposits>()
             .init_resource::<FieldHotspots>()

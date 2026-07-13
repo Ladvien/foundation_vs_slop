@@ -54,19 +54,9 @@ use crate::squad::Unit;
 
 use super::{field, perceptual, MyceliaConfig, CONTROL_SIZE};
 
-/// Chemoattractant splat radius (cells) around a nest's floor position.
-const NEST_RADIUS_CELLS: f32 = 2.5;
-/// Disturbance splat radius (cells) around each squad unit.
-const UNIT_RADIUS_CELLS: f32 = 2.0;
-/// Floor on a blood pool's splat radius (cells), so even a small stain is smelled.
-const BLOOD_MIN_RADIUS_CELLS: f32 = 1.0;
-/// Chemoattractant splat radius (cells) around a meat chunk. Tight: a gib is a point source of food, and a
-/// wide splat would smear the bloom instead of erupting from the chunk itself.
-const MEAT_RADIUS_CELLS: f32 = 1.6;
-/// Attention above which a cell counts as "watched" for gaze-habituation — the mat only habituates to a
-/// gaze it actually registers, and the decaying tail of a just-left cell (attention below this) recovers
-/// rather than keeping the habituation pinned. Below the steady state (~1.0) of a continuously-seen cell.
-const GAZE_SEEN: f32 = 0.2;
+// Splat radii (cells) and the gaze-habituation threshold now live in the `behavior:` config slice
+// (`BehaviorTuning::mycelia_coupling`, read via `Res<BehaviorTuning>` in `write_control`):
+// nest_radius_cells / unit_radius_cells / blood_min_radius_cells / meat_radius_cells / gaze_seen.
 
 /// The control texture handles, extracted so the render world can bind them.
 #[derive(Resource, Clone, ExtractResource)]
@@ -291,6 +281,7 @@ fn compute_wall_proximity(dungeon: &Dungeon, field_size: u32, wall_reach: f32, c
 pub(super) fn write_control(
     mut control: ResMut<MoldControl>,
     cfg: Res<MyceliaConfig>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
     habitat: Res<super::MoldHabitat>,
     mut images: ResMut<Assets<Image>>,
     time: Res<Time<Virtual>>,
@@ -354,7 +345,7 @@ pub(super) fn write_control(
                 })
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
-            let watched = attention > GAZE_SEEN;
+            let watched = attention > beh.mycelia_coupling.gaze_seen;
             let hab = &mut habituation[i];
             if watched {
                 *hab = (*hab + cfg.hab_rate * dt).min(1.0);
@@ -406,20 +397,20 @@ pub(super) fn write_control(
     for t in &pools {
         // A pool's footprint lives only in its Transform scale (there is no radius field); the quad spans
         // [-1,1] in local space, so the half-extent in world units is `scale * 0.5`.
-        let radius = (t.scale.x * 0.5).max(BLOOD_MIN_RADIUS_CELLS);
+        let radius = (t.scale.x * 0.5).max(beh.mycelia_coupling.blood_min_radius_cells);
         splat(cpu, dungeon.world_to_cell(t.translation), radius, 0);
     }
     for nest in &nests {
-        splat(cpu, dungeon.world_to_cell(nest.pos), NEST_RADIUS_CELLS, 0);
+        splat(cpu, dungeon.world_to_cell(nest.pos), beh.mycelia_coupling.nest_radius_cells, 0);
     }
     // Meat chunks are the mold's food, not merely its scent. The `R` splat both steers agents here (via
     // `chemo_gain`) and nucleates biomass directly (via `carrion_bloom` in the `field` pass), so a fresh gib
     // erupts. Gibs tumble and settle in 3D; splat at their resting XZ.
     for t in &gibs {
-        splat(cpu, dungeon.world_to_cell(t.translation), MEAT_RADIUS_CELLS, 0);
+        splat(cpu, dungeon.world_to_cell(t.translation), beh.mycelia_coupling.meat_radius_cells, 0);
     }
     for t in &units {
-        splat(cpu, dungeon.world_to_cell(t.translation), UNIT_RADIUS_CELLS, 2);
+        splat(cpu, dungeon.world_to_cell(t.translation), beh.mycelia_coupling.unit_radius_cells, 2);
     }
 
     // ── Upload ────────────────────────────────────────────────────────────────────────────────────────

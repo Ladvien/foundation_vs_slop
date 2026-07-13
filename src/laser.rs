@@ -22,33 +22,18 @@ use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
+use crate::behavior_tuning::BehaviorTuning;
 use crate::sim::SimTuning;
-use crate::squad::{AimTarget, Unit, Velocity, UNIT_SPEED};
+use crate::squad::{AimTarget, Unit, Velocity};
 use crate::util::rand01;
 
-/// Seconds between shots while Space is held (fixed fire rate).
-const FIRE_INTERVAL: f32 = 0.15;
-/// Bolt travel speed, world units per second.
-const LASER_SPEED: f32 = 22.0;
-/// Bolt lifetime in seconds (a fallback despawn if it never meets a wall).
-const LASER_LIFE: f32 = 1.2;
+// Ballistics + aim cone (fire cadence, bolt speed/life, spread model, front arc) now live in the
+// `behavior:` config slice (`BehaviorTuning::laser`); read via `Res<BehaviorTuning>` in `fire_laser` and
+// (for the fire cadence) from `GameConfig` at plugin build. Damage/friendly-fire stay in `sim.combat`.
+
 /// Half-width of a bolt for wall sweeps (thin — it's a bolt). Only used by `resolve_move` so the bolt
-/// stops on the room-side wall face rather than passing through the slab.
+/// stops on the room-side wall face rather than passing through the slab. Pure bolt geometry — stays in code.
 const LASER_HALF: f32 = 0.02;
-/// Aim-cone half-angle (radians) for a *stationary* unit — nonzero so even a still squad must work
-/// for hits against the small enemy hitbox.
-const BASE_SPREAD: f32 = 0.06;
-/// Extra aim-cone half-angle added at full movement speed — dominates `BASE_SPREAD`, so a moving unit
-/// sprays. Scaled by (unit speed / `UNIT_SPEED`).
-const MOVE_SPREAD: f32 = 0.40;
-/// Extra aim-cone half-angle added at `DIST_SPREAD_RANGE` tiles of target range — distant crabs are
-/// harder to hit (accuracy falls off linearly with distance up to this cap). A near target stays crisp.
-const DIST_SPREAD: f32 = 0.30;
-const DIST_SPREAD_RANGE: f32 = 14.0;
-/// A unit only shoots things in its FRONT arc (it faces its travel direction). Targets whose bearing is
-/// more than this half-angle off the unit's forward are ignored — so a crab on a unit's back is safe
-/// from that unit's own gun (only a teammate facing it can shoot it off). cos(75°) ≈ 0.26.
-const FRONT_ARC_COS: f32 = 0.26;
 
 /// A live laser bolt: its constant velocity, remaining lifetime (seconds), and the unit that fired it
 /// (so a bolt that strikes the smiley watcher can attribute the hit to its real shooter — the watcher
@@ -67,7 +52,7 @@ struct LaserAssets {
     material: Handle<StandardMaterial>,
 }
 
-/// Fixed-rate fire gate. Repeating: it ticks every frame and wraps every [`FIRE_INTERVAL`];
+/// Fixed-rate fire gate. Repeating: it ticks every frame and wraps every `behavior.laser.fire_interval`;
 /// a shot is emitted on each wrap tick while Space is held.
 #[derive(Resource)]
 struct FireCooldown(Timer);
@@ -106,8 +91,16 @@ pub struct LaserPlugin;
 
 impl Plugin for LaserPlugin {
     fn build(&self, app: &mut App) {
+        // Fire cadence comes from the `behavior:` config slice (same one-path `GameConfig` seam as the AI
+        // tuning). Read once at build; `fire_laser` reads the rest of the ballistics per-tick.
+        let fire_interval = app
+            .world()
+            .resource::<crate::config::GameConfig>()
+            .behavior
+            .laser
+            .fire_interval;
         app.insert_resource(FireCooldown(Timer::from_seconds(
-            FIRE_INTERVAL,
+            fire_interval,
             TimerMode::Repeating,
         )))
         .init_resource::<LaserRng>()
@@ -159,6 +152,7 @@ fn fire_laser(
     enemies: Query<(&Transform, Option<&SmileyState>), (With<Hostile>, Without<Unit>)>,
     sim: Res<SimTuning>,
     audio: Res<AudioTuning>,
+    beh: Res<BehaviorTuning>,
 ) {
     // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. Target selection runs
     // EVERY tick (so each unit's `AimTarget` — hence its facing, `squad::unit_movement` — stays fresh and
@@ -200,7 +194,7 @@ fn fire_laser(
             // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
             // by itself; a teammate whose front arc covers it can still pick it off).
             let bearing = (enemy.translation - unit.translation).with_y(0.0);
-            if bearing.normalize_or(forward).dot(forward) < FRONT_ARC_COS {
+            if bearing.normalize_or(forward).dot(forward) < beh.laser.front_arc_cos {
                 continue;
             }
             let d = enemy.translation.distance_squared(muzzle);
@@ -235,14 +229,15 @@ fn fire_laser(
         };
         // Spread grows with (a) the unit's own speed and (b) the target's range — a still unit firing
         // point-blank is crisp; a moving unit shooting a far crab sprays.
-        let move_frac = (velocity.0.length() / UNIT_SPEED).clamp(0.0, 1.0);
-        let dist_frac = ((target - muzzle).length() / DIST_SPREAD_RANGE).clamp(0.0, 1.0);
-        let spread = BASE_SPREAD + MOVE_SPREAD * move_frac + DIST_SPREAD * dist_frac;
+        let move_frac = (velocity.0.length() / beh.squad_move.unit_speed).clamp(0.0, 1.0);
+        let dist_frac = ((target - muzzle).length() / beh.laser.dist_spread_range).clamp(0.0, 1.0);
+        let spread =
+            beh.laser.base_spread + beh.laser.move_spread * move_frac + beh.laser.dist_spread * dist_frac;
         let forward = scatter(*aim, spread, &mut lrng.aim);
         commands.spawn((
             Laser {
-                velocity: forward * LASER_SPEED,
-                life: LASER_LIFE,
+                velocity: forward * beh.laser.laser_speed,
+                life: beh.laser.laser_life,
                 shooter: unit_entity,
             },
             Mesh3d(assets.mesh.clone()),

@@ -39,17 +39,13 @@ use crate::util::{rand01, smoothstep};
 /// whole pack combined (see `START_HP` / `CONTACT_DPS`). There is no respawn, so this is one for the
 /// whole run.
 const ENEMY_COUNT: usize = 1;
-/// Momentum charge (steering with acceleration + heading persistence; Wang, Kearney, Cremer &
-/// Willemsen, "Steering Behaviors for Autonomous Vehicles in Virtual Environments", IEEE VR 2006,
-/// DOI 10.1109/vr.2005.69). An enemy crawls at `MIN_SPEED`, and while it holds a roughly-straight
-/// heading it accelerates by `ACCEL` toward `MAX_SPEED`; any heading change beyond `TURN_COS` drops
-/// it back to a crawl — so a committed straight-line pursuer becomes fast and dangerous, a wanderer
-/// stays slow.
-const MIN_SPEED: f32 = 0.4; // a slow crawl — the boss lumbers
-const MAX_SPEED: f32 = 2.5; // deliberately well under a unit's 6.0 cruise: a lumbering boss you can kite
-const ACCEL: f32 = 0.4; // world units / s² — a long, low ramp so it never lunges
-/// Heading is "unchanged" while the new desired direction is within ~30° of the current one.
-const TURN_COS: f32 = 0.87;
+// Momentum charge (steering with acceleration + heading persistence; Wang, Kearney, Cremer &
+// Willemsen, "Steering Behaviors for Autonomous Vehicles in Virtual Environments", IEEE VR 2006,
+// DOI 10.1109/vr.2005.69). An enemy crawls at `boss.min_speed`, and while it holds a roughly-straight
+// heading it accelerates by `boss.accel` toward `boss.max_speed`; any heading change beyond
+// `boss.turn_cos` (heading "unchanged" within ~30°) drops it back to a crawl — so a committed
+// straight-line pursuer becomes fast, a wanderer stays slow. Lifted to `behavior.boss`
+// (src/behavior_tuning.rs), read via `Res<BehaviorTuning>`.
 /// Centre distance at which the boss counts as "in contact" — NO LONGER a damage radius (the contact-gnaw
 /// was removed for the watcher rework), it now only tunes the separation/ring behaviour in `enemy_seek`
 /// (so arrivers ring the standoff instead of stacking to a point).
@@ -79,33 +75,22 @@ const FACE_LOCAL: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 /// and accepted enemies are kept at least `SPAWN_SEP` apart so they don't stack.
 const MIN_SPAWN_DIST: f32 = 4.0;
 const SPAWN_SEP: f32 = 3.0;
-/// Glance strength: how far the eyes/head lean toward the tracked unit (shader `look` range ≈ 0.4).
-const LOOK_AMOUNT: f32 = 0.35;
-/// Grin-on-sight: `smile` ramps to a big toothy grin (≈1) as the nearest unit closes inside
-/// `SIGHT_NEAR` tiles, and falls to a frown (0) beyond `SIGHT_FAR`. The face "lights up" on prey — but
-/// as uncanny *fixation*, not warmth: a smile that swells the closer it gets reads as a predator locking
-/// on, not a greeting (direct gaze as a threat cue: Trevisan et al., PLoS ONE 2017,
-/// DOI 10.1371/journal.pone.0188446; the uncanny valley: Mori).
-const SIGHT_NEAR: f32 = 3.0;
-const SIGHT_FAR: f32 = 12.0;
+// Glance strength (`boss.look_amount`) and grin-on-sight band (`boss.sight_near`/`boss.sight_far`):
+// `smile` ramps to a big toothy grin (≈1) as the nearest unit closes inside `sight_near` tiles and
+// falls to a frown (0) beyond `sight_far` — uncanny *fixation*, not warmth (direct gaze as a threat cue:
+// Trevisan et al., PLoS ONE 2017, DOI 10.1371/journal.pone.0188446; the uncanny valley: Mori). Lifted to
+// `behavior.boss` (src/behavior_tuning.rs).
 /// Clamp per-frame dt so a hitch can't tunnel an enemy through a wall (mirrors squad movement).
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
-/// Seconds a wandering enemy holds a random heading before re-rolling a new one.
-const WANDER_INTERVAL: f32 = 2.5;
-/// Enemies closer than this (centre distance) push apart, so a crowd chasing one unit never
-/// collapses onto a single point (a killed enemy then can't "reveal a full-health twin" behind it).
-/// Reynolds separation steering (Reynolds, "Steering Behaviors For Autonomous Characters", GDC 1999).
-const SEP_RADIUS: f32 = 1.2;
-/// Weight of the separation push relative to the (unit-length) pursuit/wander direction. Only the
-/// lateral part is applied while pursuing (see `enemy_seek`), so this can be strong enough to ring a
-/// target without stalling forward progress through corridors.
-const SEP_STRENGTH: f32 = 2.5;
+// Wander hold (`boss.wander_interval`), and Reynolds separation (`boss.sep_radius`/`boss.sep_strength`):
+// enemies closer than sep_radius push apart so a crowd chasing one unit never collapses to a point
+// (Reynolds, "Steering Behaviors For Autonomous Characters", GDC 1999). Only the lateral part is applied
+// while pursuing (see `enemy_seek`). Lifted to `behavior.boss` (src/behavior_tuning.rs).
 
-/// --- Uncanny-watcher reflex tuning (the README rework) ---
-/// It does NOT hunt the squad to kill (see the removed `enemy_contact_damage`): it wants to keep you
-/// around to watch. It drifts toward the nearest unit but stops at this standoff (tiles) to stare rather
-/// than pinning — a lonely observer, not a predator on contact.
-const OBSERVE_DIST: f32 = 3.0;
+// --- Uncanny-watcher reflex tuning (the README rework) ---
+// It does NOT hunt the squad to kill (see the removed `enemy_contact_damage`): it wants to keep you
+// around to watch. It drifts toward the nearest unit but stops at the `boss.observe_dist` standoff (tiles)
+// to stare rather than pinning — a lonely observer, not a predator on contact. Lifted to `behavior.boss`.
 /// Observation is the PLAYER's gaze, not an NPC's: the watcher performs its uncanny "friendly" visage for
 /// whoever is actually watching it — the human at the camera. [`WatchedByPlayer`] (set windowed-only by
 /// [`snapshot_player_gaze`] from the live camera; always `false` in the headless deterministic core) gates
@@ -125,9 +110,8 @@ const OBSERVE_DIST: f32 = 3.0;
 /// Range (cells) the watcher's retaliation reaches — the SAME radius the squad can see (single source of
 /// truth: `fog::VISION_RADIUS`), so it can only smite what is within the squad's vision.
 const LOOK_RANGE: f32 = crate::fog::VISION_RADIUS as f32;
-/// Seconds after a hit the watcher stays "attacked", so the reaction persists past the single damage
-/// tick. Short — this is a reflex, not a mood.
-const HIT_MEMORY: f32 = 0.6;
+// Seconds after a hit the watcher stays "attacked" (`boss.hit_memory`), so the reaction persists past the
+// single damage tick. Short — this is a reflex, not a mood. Lifted to `behavior.boss`.
 /// Range (world units) within which it can smite an attacker with lightning. Clamped to the gaze/vision
 /// range so it can never zap a unit beyond the distance at which that unit could ever see it (and thus
 /// de-escalate it into cowering) — no deaths to an enemy you can neither see nor stop.
@@ -136,8 +120,8 @@ const ZAP_RANGE: f32 = LOOK_RANGE;
 /// fractal sphere the player asked for. Shorter than `ZAP_CADENCE`, so between strikes the angry face
 /// shows and only the strike reveals what it is.
 const FLASH_TIME: f32 = 0.18;
-/// Flee speed while scared — faster than its lumber so it actually breaks away.
-const FLEE_SPEED: f32 = 3.2;
+// Flee speed while scared (`boss.flee_speed`) — faster than its lumber so it actually breaks away.
+// Lifted to `behavior.boss`.
 /// Seconds a lightning-beam VFX stays on screen.
 const LIGHTNING_LIFE: f32 = 0.12;
 // --- Bounded self-defence (a *coexisting god*, never a normal boss) ---
@@ -181,11 +165,11 @@ pub struct SmileyState {
 }
 
 impl SmileyState {
-    fn new(start_hp: f32) -> Self {
+    fn new(start_hp: f32, hit_memory: f32) -> Self {
         SmileyState {
             mood: SmileyMood::Watching,
             last_hp: start_hp,
-            since_hit: HIT_MEMORY, // start un-attacked
+            since_hit: hit_memory, // start un-attacked (>= the hit-memory window)
             zap_cooldown: 0.0,
             flee_timer: 0.0,
             flash_timer: 0.0,
@@ -425,6 +409,7 @@ fn spawn_enemies(
     mut materials: ResMut<Assets<SmileyMaterial>>,
     mut attack_materials: ResMut<Assets<AttackSphereMaterial>>,
     sim: Res<SimTuning>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let capsule = meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_LENGTH));
     let quad = meshes.add(Rectangle::new(FACE_SIZE, FACE_SIZE));
@@ -479,7 +464,7 @@ fn spawn_enemies(
                 Enemy,
                 Hostile,
                 crate::squad::Prey, // crabs swarm the boss too (nearest-prey targeting)
-                SmileyState::new(sim.boss.start_hp),
+                SmileyState::new(sim.boss.start_hp, beh.boss.hit_memory),
                 LastAttacker::default(), // who last hit it (written by the laser + crab damage sites)
                 Health::new(sim.boss.start_hp),
                 // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
@@ -495,7 +480,7 @@ fn spawn_enemies(
                 crate::ai::brain::ActiveBehavior::new(pos.x.to_bits() ^ pos.z.to_bits()),
                 crate::ai::brain::ThinkTimer::staggered(pos.x.to_bits() ^ pos.z.to_bits()),
                 EnemyMotion {
-                    speed: MIN_SPEED,
+                    speed: beh.boss.min_speed,
                     heading: Vec3::ZERO,
                     wander_dir: Vec3::ZERO,
                     wander_timer: 0.0,
@@ -610,8 +595,10 @@ fn enemy_seek(
         ),
         With<Enemy>,
     >,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
+    let boss = &beh.boss;
 
     // Snapshot enemy positions up front for the separation term (read-only); the mutable pass below
     // then moves each enemy. One frame of staleness is fine for a gentle push-apart.
@@ -629,7 +616,7 @@ fn enemy_seek(
         match state.mood {
             // Rooted while unleashing: it plants itself, sheds its face, and smites (see `smiley_zap`).
             SmileyMood::Unleashing => {
-                motion.speed = MIN_SPEED;
+                motion.speed = boss.min_speed;
                 continue;
             }
             // Scared (attacked while watched): it "runs away" — flee straight from the nearest unit.
@@ -641,8 +628,8 @@ fn enemy_seek(
                 if away != Vec2::ZERO {
                     let desired3 = Vec3::new(away.x, 0.0, away.y);
                     motion.heading = desired3;
-                    motion.speed = FLEE_SPEED;
-                    let resolved = dungeon.resolve_move(pos, desired3 * (FLEE_SPEED * dt), ENEMY_HALF);
+                    motion.speed = boss.flee_speed;
+                    let resolved = dungeon.resolve_move(pos, desired3 * (boss.flee_speed * dt), ENEMY_HALF);
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.z;
                 }
@@ -675,7 +662,7 @@ fn enemy_seek(
             _ => {
                 motion.wander_timer -= dt;
                 if motion.wander_timer <= 0.0 || motion.wander_dir == Vec3::ZERO {
-                    motion.wander_timer = WANDER_INTERVAL;
+                    motion.wander_timer = boss.wander_interval;
                     let angle = rand01(&mut motion.rng) * std::f32::consts::TAU;
                     motion.wander_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
                 }
@@ -688,7 +675,7 @@ fn enemy_seek(
         // to keep you around to watch, so it holds at a creepy distance rather than pinning you. Applies
         // whenever it is *approaching a unit* — both plain `Chase` AND blood-drawn `HuntBlood` (which also
         // homes on a nearby unit), so blood near a unit doesn't make it forget the standoff and pin them.
-        let (base, engaged) = if within_standoff(active.mode, nearest_dist) {
+        let (base, engaged) = if within_standoff(active.mode, nearest_dist, boss.observe_dist) {
             (Vec2::ZERO, false)
         } else {
             (base, engaged)
@@ -702,8 +689,8 @@ fn enemy_seek(
             }
             let off = pos.xz() - *opos;
             let d = off.length();
-            if d > 1e-4 && d < SEP_RADIUS {
-                sep += off / d * (1.0 - d / SEP_RADIUS);
+            if d > 1e-4 && d < boss.sep_radius {
+                sep += off / d * (1.0 - d / boss.sep_radius);
             }
         }
         // While *approaching*, strip the part of the push that opposes the pursuit heading so a
@@ -715,7 +702,7 @@ fn enemy_seek(
             sep -= fwd * sep.dot(fwd).min(0.0);
         }
 
-        let desired = (base + sep * SEP_STRENGTH).normalize_or_zero();
+        let desired = (base + sep * boss.sep_strength).normalize_or_zero();
         if desired == Vec2::ZERO {
             continue; // no pull and no push (e.g. pinning the target) — hold position
         }
@@ -725,15 +712,15 @@ fn enemy_seek(
         // while wandering, settle to a crawl — so arrivers hold the ring and gnaw instead of
         // rocketing around on the separation push.
         let target_speed = if engaged && !in_contact && base != Vec2::ZERO {
-            MAX_SPEED
+            boss.max_speed
         } else {
-            MIN_SPEED
+            boss.min_speed
         };
-        let holding = motion.heading != Vec3::ZERO && desired3.dot(motion.heading) >= TURN_COS;
+        let holding = motion.heading != Vec3::ZERO && desired3.dot(motion.heading) >= boss.turn_cos;
         motion.speed = if holding {
-            (motion.speed + ACCEL * dt).min(target_speed)
+            (motion.speed + boss.accel * dt).min(target_speed)
         } else {
-            MIN_SPEED
+            boss.min_speed
         };
         motion.heading = desired3;
 
@@ -796,6 +783,7 @@ fn update_smiley_faces(
         (With<AttackSphereFace>, Without<Enemy>, Without<Unit>, Without<SmileyFace>),
     >,
     mut face_mats: ResMut<Assets<SmileyMaterial>>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let cam_rot = camera.rotation();
     // Face-space axes: since the quad takes the camera rotation, its local right/up are the
@@ -818,9 +806,9 @@ fn update_smiley_faces(
         let (mut look, grin) = match nearest_unit(etf.translation, &units) {
             Some(target) => {
                 let mut to = target - etf.translation;
-                let glance = Vec2::new(to.dot(*right), to.dot(*up)).normalize_or_zero() * LOOK_AMOUNT;
+                let glance = Vec2::new(to.dot(*right), to.dot(*up)).normalize_or_zero() * beh.boss.look_amount;
                 to.y = 0.0;
-                (glance, smoothstep(SIGHT_FAR, SIGHT_NEAR, to.length()))
+                (glance, smoothstep(beh.boss.sight_far, beh.boss.sight_near, to.length()))
             }
             None => (Vec2::ZERO, 0.0),
         };
@@ -832,7 +820,7 @@ fn update_smiley_faces(
         let menace = if angry { 1.0 } else { 0.0 };
         let sad = if scared || angry { 0.0 } else { (1.0 - grin).clamp(0.0, 1.0) };
         if !scared && !angry && grin < 0.01 {
-            look.y = -LOOK_AMOUNT * 0.5;
+            look.y = -beh.boss.look_amount * 0.5;
         }
         let smile = if angry { 0.0 } else { grin * (1.0 - panic) };
 
@@ -907,9 +895,10 @@ fn orb_visible(angry: bool, flash_timer: f32) -> bool {
 
 /// Pure test: should the watcher hold its observation standoff this tick? True while *approaching a unit*
 /// — plain `Chase` OR blood-drawn `HuntBlood` (both home on a nearby unit) — and already within
-/// `OBSERVE_DIST`. Keeps it staring at a creepy distance instead of pinning the unit. Unit-tested.
-fn within_standoff(mode: Mode, nearest_dist: Option<f32>) -> bool {
-    matches!(mode, Mode::Chase | Mode::HuntBlood) && nearest_dist.is_some_and(|d| d <= OBSERVE_DIST)
+/// `observe_dist` (`behavior.boss.observe_dist`). Keeps it staring at a creepy distance instead of pinning
+/// the unit. Unit-tested.
+fn within_standoff(mode: Mode, nearest_dist: Option<f32>, observe_dist: f32) -> bool {
+    matches!(mode, Mode::Chase | Mode::HuntBlood) && nearest_dist.is_some_and(|d| d <= observe_dist)
 }
 
 /// Planar (XZ) distance — the game's actors all sit on the ground plane, so this is the right metric.
@@ -926,10 +915,9 @@ fn planar_dist(a: Vec3, b: Vec3) -> f32 {
 #[derive(Resource, Default)]
 pub struct WatchedByPlayer(pub bool);
 
-/// Cosine of the half-angle of the camera-view cone within which the watcher counts as "looked at": the
-/// player must roughly CENTRE it in view (deliberate attention), not merely have it at the screen edge.
-/// cos(22°) ≈ 0.927. Windowed-only tuning.
-const GAZE_COS: f32 = 0.927;
+// Cosine of the half-angle of the camera-view cone within which the watcher counts as "looked at": the
+// player must roughly CENTRE it in view (deliberate attention), not merely have it at the screen edge.
+// cos(22°) ≈ 0.927. Windowed-only tuning. Lifted to `behavior.boss.gaze_cos` (src/behavior_tuning.rs).
 
 /// Pure: is `watcher` within the camera's central view cone (a dot-product proxy for "near screen
 /// centre")? Split out so the gaze geometry is unit-testable without a live camera.
@@ -946,6 +934,7 @@ pub fn snapshot_player_gaze(
     mut watched: ResMut<WatchedByPlayer>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     smileys: Query<&Transform, With<Enemy>>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     // A single game camera in the windowed app; take the first (windowed-only, so iteration order is
     // irrelevant — nothing here is hashed).
@@ -957,7 +946,7 @@ pub fn snapshot_player_gaze(
     let cam_fwd = cam_tf.forward();
     watched.0 = smileys
         .iter()
-        .any(|stf| is_watcher_centered(cam_pos, *cam_fwd, stf.translation, GAZE_COS));
+        .any(|stf| is_watcher_centered(cam_pos, *cam_fwd, stf.translation, beh.boss.gaze_cos));
 }
 
 /// The watcher's reflex: detect being attacked, read whether the PLAYER is watching it, and set the mood
@@ -968,8 +957,10 @@ fn smiley_reflex(
     watched: Res<WatchedByPlayer>,
     mut smileys: Query<(&Health, &mut SmileyState, &mut LastAttacker), With<Enemy>>,
     sim: Res<SimTuning>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let dt = time.delta_secs();
+    let hit_memory = beh.boss.hit_memory;
     // "Looked at" is now the PLAYER's gaze — a single global fact this tick, set windowed-only by
     // `snapshot_player_gaze` and a stable `false` in the headless core (so the reflex stays
     // bit-reproducible). The watcher performs its friendly mask for the human at the camera, not for
@@ -981,7 +972,7 @@ fn smiley_reflex(
         // Age the last-attacker working-memory fact; forget it once stale so a long-gone attacker is never
         // retaliated against (Orkin 2005 — perceptions carry an update time and decay).
         attacker.age += dt;
-        if attacker.age > HIT_MEMORY {
+        if attacker.age > hit_memory {
             attacker.entity = None;
         }
         // Attacked = an HP drop since last tick (order-independent, unlike change-detection). The memory
@@ -994,7 +985,7 @@ fn smiley_reflex(
             state.since_hit = (state.since_hit + dt).min(1.0e6);
         }
         state.last_hp = hp.current;
-        let attacked = state.since_hit < HIT_MEMORY;
+        let attacked = state.since_hit < hit_memory;
 
         // Scared flight persists for a beat after the last hit-while-watched.
         if looked_at && attacked {
@@ -1204,18 +1195,21 @@ mod tests {
     #[test]
     fn gaze_watcher_dead_ahead_is_looked_at() {
         // Camera at origin looking down −Z; a watcher straight ahead is centred in view.
-        assert!(is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, -5.0), GAZE_COS));
+        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
+        assert!(is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, -5.0), gaze_cos));
     }
 
     #[test]
     fn gaze_watcher_off_axis_is_not_looked_at() {
         // 45° off the view axis (dot = 0.707) is outside the ~22° central cone (cos ≈ 0.927).
-        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(-5.0, 0.0, -5.0), GAZE_COS));
+        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
+        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(-5.0, 0.0, -5.0), gaze_cos));
     }
 
     #[test]
     fn gaze_watcher_behind_camera_is_not_looked_at() {
-        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, 5.0), GAZE_COS));
+        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
+        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, 5.0), gaze_cos));
     }
 
     #[test]
@@ -1258,11 +1252,12 @@ mod tests {
     // not in other modes / when still far.
     #[test]
     fn standoff_covers_chase_and_huntblood_when_close() {
-        assert!(within_standoff(Mode::Chase, Some(OBSERVE_DIST - 0.5)));
-        assert!(within_standoff(Mode::HuntBlood, Some(OBSERVE_DIST - 0.5))); // the fix: HuntBlood too
-        assert!(!within_standoff(Mode::HuntBlood, Some(OBSERVE_DIST + 5.0))); // still far → keep closing
-        assert!(!within_standoff(Mode::Wander, Some(0.5))); // not approaching a unit → no standoff
-        assert!(!within_standoff(Mode::Chase, None)); // no unit at all
+        let od = crate::behavior_tuning::BehaviorTuning::default().boss.observe_dist;
+        assert!(within_standoff(Mode::Chase, Some(od - 0.5), od));
+        assert!(within_standoff(Mode::HuntBlood, Some(od - 0.5), od)); // the fix: HuntBlood too
+        assert!(!within_standoff(Mode::HuntBlood, Some(od + 5.0), od)); // still far → keep closing
+        assert!(!within_standoff(Mode::Wander, Some(0.5), od)); // not approaching a unit → no standoff
+        assert!(!within_standoff(Mode::Chase, None, od)); // no unit at all
     }
 
     // The zap can never reach past the range at which a unit could see/de-escalate it (review #9).

@@ -69,6 +69,11 @@ pub struct SimConfig {
     /// audio-population analogue of [`Self::config`], applied at the same `GameConfig` seam before
     /// `AiPlugin` reads `gc.audio` into its resources.
     pub audio: Option<crate::audio_tuning::AudioTuning>,
+    /// Override the per-agent behaviour tuning (`behavior:` slice). `None` runs the shipped slice (what the
+    /// replay goldens pin); `Some(b)` installs an evolved `BehaviorTuning` for one rollout — the
+    /// behaviour-population analogue of [`Self::config`], applied at the same `GameConfig` seam before
+    /// `AiPlugin` reads `gc.behavior` into its resources.
+    pub behavior: Option<crate::behavior_tuning::BehaviorTuning>,
 }
 
 impl Default for SimConfig {
@@ -82,6 +87,7 @@ impl Default for SimConfig {
             dungeon_seed: None,
             config: None,
             audio: None,
+            behavior: None,
         }
     }
 }
@@ -115,6 +121,13 @@ impl SimConfig {
     /// analogue of [`with_world_config`]. Applied at the same `GameConfig` seam (see `build_headless_app`).
     pub fn with_audio_config(mut self, audio: crate::audio_tuning::AudioTuning) -> Self {
         self.audio = Some(audio);
+        self
+    }
+
+    /// Install an evolved per-agent behaviour config for one evaluation rollout — the behaviour-population
+    /// analogue of [`with_world_config`]. Applied at the same `GameConfig` seam (see `build_headless_app`).
+    pub fn with_behavior_config(mut self, behavior: crate::behavior_tuning::BehaviorTuning) -> Self {
+        self.behavior = Some(behavior);
         self
     }
 }
@@ -242,6 +255,11 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
         gc.ai_tuning = w.ai;
         gc.sim = w.sim;
+    }
+    if let Some(b) = cfg.behavior {
+        // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the
+        // `BehaviorTuning` resource every consumer system reads. `None` → the shipped slice the goldens pin.
+        app.world_mut().resource_mut::<crate::config::GameConfig>().behavior = b;
     }
     // Insert BEFORE `AiPlugin`/`SquadAiPlugin`: their `init_resource::<BrainSource>()` is a no-op when the
     // resource already exists, so this is what selects authored-vs-candidate brains for the whole run.

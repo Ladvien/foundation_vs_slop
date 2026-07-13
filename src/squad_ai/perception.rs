@@ -31,7 +31,7 @@ use crate::util::nearest_planar;
 
 use super::cohesion::{DesiredMove, SquadAnchor, SquadControlMode};
 use super::policy::ActivePolicy;
-use super::role::{RoleId, RoleBrains, LEASH};
+use super::role::{RoleId, RoleBrains};
 
 /// Marks an entity a squad member has already studied/secured, so perception stops offering it as a
 /// fresh examinable (one-way, like the fog reveal). Inserted by the Examine/SecureDoor actions.
@@ -95,37 +95,12 @@ fn latch_when_above(prev: bool, value: f32, enter: f32, exit: f32) -> bool {
     }
 }
 
-/// How far a unit perceives examinables (furniture / bodies) — the squad vision radius.
-const EXAMINE_SIGHT: f32 = 8.0;
-/// An examinable already being studied is kept until it drifts past this — the Researcher doesn't drop a
-/// subject that jitters across the sight radius.
-const EXAMINE_SIGHT_RELEASE: f32 = 9.0;
-/// How far a unit perceives a hostile creature as a threat (line-of-sight bounded in the reveal grid).
-const THREAT_SIGHT: f32 = 12.0;
-/// A tracked threat stays tracked until it retreats past this — a crab pacing the sight boundary must not
-/// make the Gunman drop and re-acquire Overwatch every think.
-const THREAT_SIGHT_RELEASE: f32 = 13.5;
-/// How far the Psionic senses the watcher's anomaly signature — through walls (psi, not LOS).
-const PSI_SIGHT: f32 = 16.0;
-/// The anomaly's residue lingers in the Psionic's sense a little past the range it was acquired at.
-const PSI_SIGHT_RELEASE: f32 = 17.5;
-/// An ally at or below this health fraction is "down" and draws the Medic.
-const WOUNDED_FRAC: f32 = 0.5;
-/// A patient stays the Medic's patient until healed a little clear of the trigger — otherwise the first
-/// tick of healing un-declares the emergency and the Medic walks away mid-treatment.
-const WOUNDED_FRAC_RELEASE: f32 = 0.55;
-/// How close a light-averse creature must come before the Researcher wards it with the flashlight. A
-/// touch shorter than `THREAT_SIGHT` — warding is close-range crowd-control, not a long-range alert.
-const WARD_SIGHT: f32 = 10.0;
-/// ...and it stays the ward target until it flees past this, so a crab pacing the beam edge doesn't make
-/// the Researcher drop and re-acquire the ward every think (the same anti-thrash band as the others).
-const WARD_SIGHT_RELEASE: f32 = 11.5;
-/// A unit is "strayed" once this far from the anchor (the cohesion leash — see `role::LEASH`).
-const LEASH_OUT: f32 = LEASH;
-/// ...and stops being strayed only once it has come back well inside, so a unit loitering at exactly the
-/// leash distance doesn't alternate Regroup / role-work every think. Sits above `FOLLOW_DEADZONE` so a
-/// regrouping unit hands off cleanly to `FollowAnchor` and settles.
-const LEASH_IN: f32 = 4.0;
+// The squad perception sight ranges + Schmitt hysteresis bands (EXAMINE_SIGHT/_RELEASE, THREAT_SIGHT/
+// _RELEASE, PSI_SIGHT/_RELEASE, WARD_SIGHT/_RELEASE, WOUNDED_FRAC/_RELEASE) and the cohesion leash band
+// (LEASH → `beh.perception.leash`, LEASH_IN) now live in the `behavior:` config slice
+// (`BehaviorTuning::perception`), read as `Res<BehaviorTuning>` by `squad_think`. See src/behavior_tuning.rs.
+// (`FOLLOW_DEADZONE` / `FLEE_DISTANCE` below stay in code: they are used only by the pure `resolve_goal`
+// helper, which is kept config-free so it stays unit-testable.)
 
 /// Build perception, decide (throttled), resolve the movement goal, and cache both — for every unit.
 #[allow(clippy::type_complexity)]
@@ -169,6 +144,7 @@ pub fn squad_think(
         ),
         With<Unit>,
     >,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     // World signals gathered once (planar positions), reused across all units.
     let threat_pos: Vec<Vec3> = threats.iter().map(|t| t.translation).collect();
@@ -220,8 +196,11 @@ pub fn squad_think(
         // patients up to `WOUNDED_FRAC_RELEASE`, so the first tick of healing doesn't un-declare the
         // emergency and walk them away mid-treatment. (Filtering by distance first and health second would
         // let a healthy ally standing closer mask a wounded one further off.)
-        let wounded_cut =
-            if latch.ally_down { WOUNDED_FRAC_RELEASE } else { WOUNDED_FRAC };
+        let wounded_cut = if latch.ally_down {
+            beh.perception.wounded_frac_release
+        } else {
+            beh.perception.wounded_frac
+        };
         let nearest_wounded = nearest_planar(
             pos,
             unit_snapshot
@@ -229,7 +208,7 @@ pub fn squad_think(
                 .filter(|(e, _, hf)| *e != entity && *hf <= wounded_cut)
                 .map(|&(_, p, _)| ((), p)),
         )
-        .filter(|(_, _, d)| *d <= THREAT_SIGHT);
+        .filter(|(_, _, d)| *d <= beh.perception.threat_sight);
 
         let anchor_dist = if anchor.valid {
             (anchor.pos - pos).length()
@@ -238,26 +217,35 @@ pub fn squad_think(
         };
 
         // --- Latch every boolean gate through its dead band (pure; see `latch_when_below`). ---
-        latch.threat =
-            latch_when_below(latch.threat, dist_of(nearest_threat), THREAT_SIGHT, THREAT_SIGHT_RELEASE);
+        latch.threat = latch_when_below(
+            latch.threat,
+            dist_of(nearest_threat),
+            beh.perception.threat_sight,
+            beh.perception.threat_sight_release,
+        );
         latch.examinable = latch_when_below(
             latch.examinable,
             dist_of(nearest_examinable),
-            EXAMINE_SIGHT,
-            EXAMINE_SIGHT_RELEASE,
+            beh.perception.examine_sight,
+            beh.perception.examine_sight_release,
         );
-        latch.anomaly =
-            latch_when_below(latch.anomaly, dist_of(nearest_boss), PSI_SIGHT, PSI_SIGHT_RELEASE);
+        latch.anomaly = latch_when_below(
+            latch.anomaly,
+            dist_of(nearest_boss),
+            beh.perception.psi_sight,
+            beh.perception.psi_sight_release,
+        );
         latch.photophobe = latch_when_below(
             latch.photophobe,
             dist_of(nearest_photophobe),
-            WARD_SIGHT,
-            WARD_SIGHT_RELEASE,
+            beh.perception.ward_sight,
+            beh.perception.ward_sight_release,
         );
         // The band is already applied via `wounded_cut` above, so the latch just records the outcome for
         // the next tick's threshold.
         latch.ally_down = nearest_wounded.is_some();
-        latch.past_leash = latch_when_above(latch.past_leash, anchor_dist, LEASH_OUT, LEASH_IN);
+        latch.past_leash =
+            latch_when_above(latch.past_leash, anchor_dist, beh.perception.leash, beh.perception.leash_in);
 
         // A cue is only *admitted* to perception once its latch is on, so `resolve_goal` can never aim at a
         // subject the brain was not allowed to see.
@@ -268,7 +256,7 @@ pub fn squad_think(
 
         // Feed perception-derived squad drives (curiosity near study targets, cohesion when strayed).
         drives.set(DriveId::CURIOSITY, if latch.examinable { 0.8 } else { 0.0 });
-        drives.set(DriveId::COHESION, (anchor_dist / LEASH).clamp(0.0, 1.0));
+        drives.set(DriveId::COHESION, (anchor_dist / beh.perception.leash).clamp(0.0, 1.0));
 
         // SCP-150 host manipulation (the extended phenotype, Heil 2016): an infested unit has its social
         // drives hijacked — COHESION forced low so it stops rejoining the squad, CURIOSITY forced high so it
@@ -321,7 +309,7 @@ pub fn squad_think(
         // Decide (throttled): re-run the policy only at decision points; keep the cached mode between.
         timer.0 -= dt;
         if timer.0 <= 0.0 {
-            timer.0 = THINK_INTERVAL;
+            timer.0 = beh.perception.squad_think_interval;
             let brain = brains.get(*role);
             let idx = policy.0.choose(&perc, &brain.behaviors, &mut active.rng);
             active.mode = brain.behaviors[idx].mode;
@@ -373,8 +361,8 @@ pub fn squad_think(
     }
 }
 
-/// Seconds between squad re-decisions (steering runs every tick). Matches the creature `THINK_INTERVAL`.
-const THINK_INTERVAL: f32 = 0.3;
+// Seconds between squad re-decisions (`squad_think_interval`) now lives in the `behavior:` config slice
+// (`BehaviorTuning::perception::squad_think_interval`), read as `Res<BehaviorTuning>`.
 
 /// FollowAnchor deadband: within this planar distance of the anchor a unit HOLDS (no goal) instead of
 /// steering onto the exact centroid. Keeps an idle squad in a loose blob (ORCA spaces the members)
@@ -479,6 +467,11 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
 mod tests {
     use super::*;
     use crate::ai::drives::DRIVE_COUNT;
+
+    /// The shipped perception knobs — the sight bands / leash the latch tests exercise now live in config.
+    fn bp() -> crate::behavior_tuning::PerceptionTuning {
+        crate::behavior_tuning::BehaviorTuning::default().perception
+    }
 
     fn perc_with(squad: SquadFields) -> Perception {
         Perception {
@@ -596,7 +589,7 @@ mod tests {
         for step in 0..40 {
             // Sweep 11.8 ↔ 13.2 — straddling the 12.0 trigger, entirely inside the 12.0–13.5 band.
             let d = if step % 2 == 0 { 11.8 } else { 13.2 };
-            let next = latch_when_below(on, d, THREAT_SIGHT, THREAT_SIGHT_RELEASE);
+            let next = latch_when_below(on, d, bp().threat_sight, bp().threat_sight_release);
             if step > 0 {
                 assert_eq!(next, on, "latch flipped at step {step} (d={d}) — that is the thrash");
             }
@@ -608,10 +601,10 @@ mod tests {
     #[test]
     fn latch_when_above_is_the_mirror_image() {
         // The leash: strayed once past LEASH_OUT, un-strayed only once well back inside LEASH_IN.
-        assert!(!latch_when_above(false, 5.9, LEASH_OUT, LEASH_IN), "not yet strayed");
-        assert!(latch_when_above(false, 6.0, LEASH_OUT, LEASH_IN), "strays at the leash");
-        assert!(latch_when_above(true, 4.0, LEASH_OUT, LEASH_IN), "still coming home at the band edge");
-        assert!(!latch_when_above(true, 3.9, LEASH_OUT, LEASH_IN), "home once well inside");
+        assert!(!latch_when_above(false, 5.9, bp().leash, bp().leash_in), "not yet strayed");
+        assert!(latch_when_above(false, 6.0, bp().leash, bp().leash_in), "strays at the leash");
+        assert!(latch_when_above(true, 4.0, bp().leash, bp().leash_in), "still coming home at the band edge");
+        assert!(!latch_when_above(true, 3.9, bp().leash, bp().leash_in), "home once well inside");
     }
 
     #[test]
@@ -620,7 +613,7 @@ mod tests {
         // rather than freezing the latch on its last value.
         let none: Option<((), Vec3, f32)> = None;
         assert_eq!(dist_of(none), NO_TARGET_DIST);
-        assert!(!latch_when_below(true, dist_of(none), THREAT_SIGHT, THREAT_SIGHT_RELEASE));
+        assert!(!latch_when_below(true, dist_of(none), bp().threat_sight, bp().threat_sight_release));
     }
 
     #[test]
@@ -628,8 +621,8 @@ mod tests {
         // A regrouping unit releases its leash latch at LEASH_IN and is then owned by FollowAnchor, which
         // holds inside FOLLOW_DEADZONE. If the release landed *inside* the deadzone the unit would arrive,
         // stop being strayed, hold, drift out, and re-stray — a slow oscillation instead of settling.
-        assert!(LEASH_IN > FOLLOW_DEADZONE, "leash release must hand off to FollowAnchor, not to itself");
-        assert!(LEASH_OUT > LEASH_IN, "the leash band must have width");
+        assert!(bp().leash_in > FOLLOW_DEADZONE, "leash release must hand off to FollowAnchor, not to itself");
+        assert!(bp().leash > bp().leash_in, "the leash band must have width");
     }
 
     #[test]

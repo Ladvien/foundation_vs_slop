@@ -55,7 +55,8 @@ pub struct DesiredMove {
 
 /// How fast the anchor eases toward the squad centroid (per second). A gentle lag (not a hard snap) so
 /// the group reference is smooth.
-const ANCHOR_EASE: f32 = 4.0;
+// ANCHOR_EASE (cohesion anchor-tracking ease rate) now lives in the `behavior:` config slice
+// (`BehaviorTuning::squad_move::anchor_ease`), read as `Res<BehaviorTuning>`. See src/behavior_tuning.rs.
 
 /// The mean of `positions`, summed in a CANONICAL (value-sorted) order rather than raw iteration order
 /// — `None` if empty. Float addition is non-associative, so summing in entity-iteration order would
@@ -85,6 +86,7 @@ pub fn update_anchor(
     time: Res<Time>,
     mut anchor: ResMut<SquadAnchor>,
     units: Query<&Transform, With<Unit>>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let positions: Vec<Vec3> = units.iter().map(|t| t.translation).collect();
     let Some(centroid) = deterministic_centroid(positions) else {
@@ -100,7 +102,7 @@ pub fn update_anchor(
     }
     let dt = time.delta_secs();
     let prev = anchor.pos;
-    let k = (ANCHOR_EASE * dt).min(1.0);
+    let k = (beh.squad_move.anchor_ease * dt).min(1.0);
     anchor.pos = prev + (centroid - prev) * k;
     // Smoothed drift (per-second) for alignment consumers.
     if dt > 0.0 {

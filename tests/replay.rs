@@ -224,7 +224,7 @@ fn a_mutated_audio_config_changes_the_sim() {
     let seed = 0x5C09191;
     let ticks = 1800;
 
-    let base = rollout(BrainSource::Authored, None, None, seed, ticks);
+    let base = rollout(BrainSource::Authored, None, None, None, seed, ticks);
 
     // Crank the din-fear gains off their dormant (0.0) default. `unit_fear_of_din` reacts to the crab-death
     // din (NOISE_SWARM), which the rollout actually produces; `crab_fear_of_din` is the swarm analogue,
@@ -232,7 +232,7 @@ fn a_mutated_audio_config_changes_the_sim() {
     let mut audio = AudioTuning::default();
     audio.perception.unit_fear_of_din = 0.5;
     audio.perception.crab_fear_of_din = 0.5;
-    let mutant = rollout(BrainSource::Authored, None, Some(audio), seed, ticks);
+    let mutant = rollout(BrainSource::Authored, None, Some(audio), None, seed, ticks);
 
     // DECISIVE: the final actor state (Transform+Health) must differ. Same world, brains and seed — the ONLY
     // difference is the audio slice, so a changed final state proves the acoustic din reaches gameplay.

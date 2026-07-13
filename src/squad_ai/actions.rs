@@ -27,16 +27,10 @@ use super::role::RoleId;
 #[derive(Component, Default)]
 pub struct UtterCooldown(pub f32);
 
-/// Seconds between repeated barks from one unit.
-const UTTER_COOLDOWN: f32 = 4.0;
-/// How close a unit must be to study / secure a subject.
-const STUDY_RANGE: f32 = 1.6;
-/// How close a medic must be to heal an ally.
-const HEAL_RANGE: f32 = 1.6;
-/// Medic heal rate (HP per second).
-const HEAL_RATE: f32 = 20.0;
-/// An ally at or below this fraction is a heal target (matches the perception threshold).
-const WOUNDED_FRAC: f32 = 0.5;
+// UTTER_COOLDOWN / STUDY_RANGE / HEAL_RANGE / HEAL_RATE now live in the `behavior:` config slice
+// (`BehaviorTuning::squad_move`); the medic wounded-threshold shares `BehaviorTuning::perception::
+// wounded_frac` (the same value the perception layer triggers on). Read as `Res<BehaviorTuning>`.
+// See src/behavior_tuning.rs.
 
 /// Execute self/subject effects for each unit's chosen mode, and emit throttled observations. Does not
 /// mutate *other* units (see [`medic_heal`] for cross-unit healing), so it needs only one `Unit` query.
@@ -54,6 +48,7 @@ pub fn unit_actions(
         (Entity, &Transform, &RoleId, &ActiveBehavior, &mut Drives, &mut UtterCooldown),
         (With<Unit>, Without<MoveOrder>),
     >,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let dt = time.delta_secs();
     for (entity, tf, role, active, mut drives, mut cd) in &mut units {
@@ -64,9 +59,9 @@ pub fn unit_actions(
         // narrate immediately, bypassing the utterance cooldown.
         if matches!(active.mode, Mode::Examine | Mode::SecureDoor) {
             let body = nearest_planar(pos, bodies.iter().map(|(e, t)| (e, t.translation)))
-                .filter(|(_, _, d)| *d <= STUDY_RANGE);
+                .filter(|(_, _, d)| *d <= beh.squad_move.study_range);
             let object = nearest_planar(pos, furniture.iter().map(|(e, t)| (e, t.translation)))
-                .filter(|(_, _, d)| *d <= STUDY_RANGE);
+                .filter(|(_, _, d)| *d <= beh.squad_move.study_range);
             // A researcher prefers a corpse; anyone else studies whichever is present (object first).
             let choice = if *role == RoleId::Researcher && body.is_some() {
                 body.map(|b| (b.0, ObsEvent::ExaminedBody))
@@ -110,7 +105,7 @@ pub fn unit_actions(
         if let Some(event) = event
             && cd.0 <= 0.0
         {
-            cd.0 = UTTER_COOLDOWN;
+            cd.0 = beh.squad_move.utter_cooldown;
             utter.write(SquadUtterance { speaker: entity, role: *role, event, subject: Some(pos) });
         }
     }
@@ -126,6 +121,7 @@ pub fn medic_heal(
     // player-commanded units are genuinely under full control (matches the `unit_actions` gate).
     medics: Query<(&Transform, &ActiveBehavior), (With<Unit>, Without<MoveOrder>)>,
     mut patients: Query<(&Transform, &mut Health), With<Unit>>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     // Positions of medics currently tending.
     let tending: Vec<Vec3> = medics
@@ -138,15 +134,15 @@ pub fn medic_heal(
     }
     let dt = time.delta_secs();
     for (tf, mut health) in &mut patients {
-        if health.max <= 0.0 || health.current > health.max * WOUNDED_FRAC {
+        if health.max <= 0.0 || health.current > health.max * beh.perception.wounded_frac {
             continue;
         }
         let pos = tf.translation;
         let near_medic = tending
             .iter()
-            .any(|m| (*m - pos).length() <= HEAL_RANGE && (*m - pos).length() > 0.01);
+            .any(|m| (*m - pos).length() <= beh.squad_move.heal_range && (*m - pos).length() > 0.01);
         if near_medic {
-            health.current = (health.current + HEAL_RATE * dt).min(health.max);
+            health.current = (health.current + beh.squad_move.heal_rate * dt).min(health.max);
         }
     }
 }

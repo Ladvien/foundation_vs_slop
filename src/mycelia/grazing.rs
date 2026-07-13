@@ -39,30 +39,15 @@ use crate::fog::FogGrid;
 use super::fruit::FruitBody;
 use super::perceptual::VEIL_RUPTURE_T;
 
-/// Scent a mature, unwatched cap sheds into [`FieldId::MEAT`] per second.
-///
-/// A fifth of the rate a gib chunk gives off (`crab::MEAT_RATE` is `0.5`). Carrion outranks fungus: a crab
-/// that can smell a corpse should go to the corpse. A mushroom is what it eats when there is nothing better,
-/// which is also when the player is least likely to be watching the room.
-const FRUIT_MEAT_RATE: f32 = 0.1;
-
-/// Planar reach, in world units, at which a crab is close enough to bite a body. The adult cap spans
-/// `perceptual::CAP_RADIUS_M * body_scale` — about 22 cm at the shipped scale — so a crab standing under the
-/// rim is feeding.
-const GRAZE_REACH: f32 = 0.35;
-
-/// `growth` consumed per crab per second. A single crab strips a mature body in about seven seconds; a pile
-/// does it in one. Deliberately fast — unlike growth, eating is not held under any perceptual threshold,
-/// because eating never happens where it can be seen.
-const GRAZE_BITE_RATE: f32 = 0.15;
-
-/// Biomass `V` above which a mold mat is thick enough to smell of food (the mold read-edge threshold).
-const MAT_DENSE_V: f32 = 0.6;
-
-/// Scent a thick mold MAT sheds into [`FieldId::MEAT`] per second per unit biomass — far lower than a real
-/// cap ([`FRUIT_MEAT_RATE`]), so a fruit body always out-draws bare mat, but a dense corridor of mold still
-/// dens the swarm onto it. This is what makes the biomass field COUPLED terrain rather than decoration.
-const MAT_MEAT_RATE: f32 = 0.03;
+// The grazing/deposit rates now live in the `behavior:` config slice
+// (`BehaviorTuning::mycelia_coupling`, read via `Res<BehaviorTuning>` in each system below):
+//   fruit_meat_rate — scent a mature cap sheds into MEAT (a fifth of a gib chunk's rate; carrion outranks
+//     fungus, and the cap only smells when unwatched).
+//   graze_reach     — planar world-unit reach at which a crab is close enough to bite a body.
+//   graze_bite_rate — `growth` consumed per crab per second (deliberately fast; eating is unheld).
+//   mat_dense_v     — biomass `V` above which a mold mat is thick enough to smell of food.
+//   mat_meat_rate   — scent a thick MAT sheds into MEAT per second per unit biomass (below fruit_meat_rate,
+//     so a fruit body always out-draws bare mat, yet a dense corridor still dens the swarm — coupled terrain).
 
 pub(super) fn build(app: &mut App) {
     app.add_systems(
@@ -89,6 +74,7 @@ pub(super) fn build(app: &mut App) {
 fn deposit_fruit_scent(
     time: Res<Time>,
     cfg: Res<super::MyceliaConfig>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
     fog: Res<FogGrid>,
     bodies: Query<(&Transform, &FruitBody)>,
     mut deposits: ResMut<StigDeposits>,
@@ -104,7 +90,7 @@ fn deposit_fruit_scent(
         .map(|(tf, b)| {
             let sc = &cfg.species[b.species.0 as usize];
             let appetite = (sc.nutrition * (1.0 - sc.toxicity * b.amatoxin())).max(0.0);
-            (tf.translation, FRUIT_MEAT_RATE * appetite * dt)
+            (tf.translation, beh.mycelia_coupling.fruit_meat_rate * appetite * dt)
         })
         .filter(|(_, a)| *a > 0.0)
         .collect();
@@ -117,7 +103,7 @@ fn deposit_fruit_scent(
 /// A thick, unwatched mold MAT smells faintly of food — the mold read-edge that turns the biomass field
 /// from a decorative one-way island into coupled forage terrain, so the swarm dens onto dense corridors.
 ///
-/// Same grammar as [`deposit_fruit_scent`]: only DENSE mat (biomass ≥ [`MAT_DENSE_V`]), only on the floor,
+/// Same grammar as [`deposit_fruit_scent`]: only DENSE mat (biomass ≥ `mycelia_coupling.mat_dense_v`), only on the floor,
 /// only where `!fog.visible_at` (the mold's concealment is its protection), and emitted in SORTED position
 /// order (overlapping MEAT discs accumulate with non-associative `f32 +=`, so an unstable order would make
 /// the summed gradient — and the swarm's steering — depend on storage layout). Bounded to the coarse
@@ -125,17 +111,18 @@ fn deposit_fruit_scent(
 fn mold_mat_scent(
     time: Res<Time>,
     coarse: Res<super::fruit::MoldCoarse>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
     fog: Res<FogGrid>,
     dungeon: Res<crate::dungeon::Dungeon>,
     mut deposits: ResMut<StigDeposits>,
 ) {
     let dt = time.delta_secs();
     let mut out: Vec<(Vec3, f32)> = coarse
-        .dense_cells(MAT_DENSE_V)
+        .dense_cells(beh.mycelia_coupling.mat_dense_v)
         .filter_map(|(xz, v)| {
             let pos = Vec3::new(xz.x, 0.0, xz.y);
             let cell = dungeon.world_to_cell(pos);
-            (dungeon.is_floor(cell) && !fog.visible_at(cell)).then_some((pos, MAT_MEAT_RATE * v * dt))
+            (dungeon.is_floor(cell) && !fog.visible_at(cell)).then_some((pos, beh.mycelia_coupling.mat_meat_rate * v * dt))
         })
         .filter(|(_, a)| *a > 0.0)
         .collect();
@@ -171,6 +158,7 @@ fn mold_mat_scent(
 fn crabs_graze_fruit_bodies(
     time: Res<Time>,
     cfg: Res<super::MyceliaConfig>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
     fog: Res<FogGrid>,
     mut bodies: Query<(&Transform, &mut FruitBody)>,
     mut crabs: Query<(Entity, &Transform, &mut Drives), With<Crab>>,
@@ -181,7 +169,7 @@ fn crabs_graze_fruit_bodies(
     }
     // `crab::HUNGER_SATE_RATE`, mirrored: a grazing crab is a feeding crab.
     const HUNGER_SATE_RATE: f32 = 0.3;
-    let reach_sq = GRAZE_REACH * GRAZE_REACH;
+    let reach_sq = beh.mycelia_coupling.graze_reach * beh.mycelia_coupling.graze_reach;
 
     let crab_positions: Vec<(Entity, Vec3)> =
         crabs.iter().map(|(entity, tf, _)| (entity, tf.translation)).collect();
@@ -213,7 +201,7 @@ fn crabs_graze_fruit_bodies(
             // Linear in the pile, unlike `crab_contact_damage`'s super-linear frenzy: a mushroom is a fixed
             // quantity of food, not a body whose defences collapse under a swarm. The body is still consumed
             // whatever its toxicity — the crab takes the bite; it just gains nothing from a poisonous one.
-            body.consume(GRAZE_BITE_RATE * biters as f32 * dt);
+            body.consume(beh.mycelia_coupling.graze_bite_rate * biters as f32 * dt);
         }
     }
 

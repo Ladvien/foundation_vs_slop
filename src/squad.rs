@@ -152,47 +152,13 @@ const FIGURINE_SCALE: f32 = 2.6;
 /// under the figurine's visual radius on purpose — reaching the goal reliably beats pixel-exact
 /// contact, and the visual is far wider anyway.
 const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.22);
-/// RTS walk speed (a touch slower than the old run pace — these are commanded, not twitch-driven).
-/// Public so the laser can scale fire spread by how fast a unit is moving (accuracy penalty).
-pub const UNIT_SPEED: f32 = 6.0;
-/// Encumbrance floor: each crab clinging to a unit (a `CrabAttached` whose host is that unit) drags its
-/// movement down to `UNIT_SPEED / (1 + crabs * sim.combat.crab_drag)`, floored here so a heavily-swarmed
-/// unit crawls (piranha weight) but is never frozen solid. At the shipped `crab_drag` (0.15): 3 crabs ≈
-/// 0.7×, 5 ≈ 0.6×, 10 ≈ 0.4×, 20 ≈ 0.25×. (`crab_drag` and unit HP now live in the `sim:` config slice.)
-const MIN_ENCUMBER: f32 = 0.15;
-/// How fast a unit turns to face its travel direction (per-second slerp rate, clamped per frame).
-const TURN_SPEED: f32 = 14.0;
 const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 
-/// ORCA personal-space disc radius. Slightly larger than the collision half-extent so units keep
-/// their AABBs from overlapping, while still small enough for two to pass abreast in a 2-wide
-/// corridor (2·0.30 = 0.60 centre spacing fits the 1.6 clear width).
-const ORCA_RADIUS: f32 = 0.30;
-/// Seconds ahead unit↔unit collisions are anticipated. Larger = earlier, gentler avoidance but more
-/// anticipatory braking (which gridlocks dense junctions); kept low so units squeeze through crowds.
-const ORCA_TIME_HORIZON: f32 = 1.0;
-/// Only units within this centre distance are fed to a unit's ORCA solve (the rest can't interact
-/// within the horizon). Bounds the per-frame neighbor work.
-const ORCA_QUERY_RADIUS: f32 = 4.0;
-
-/// Arrived once this close to the goal cell centre.
-const ARRIVE_RADIUS: f32 = 0.6;
-/// Within this distance of the goal, a unit that can no longer make progress is "packed in" and
-/// treated as arrived (others fill the exact goal cell), instead of jittering forever.
-const PACK_RADIUS: f32 = 2.5;
-/// A stuck unit also arrives if an already-settled unit sits within this distance *between it and
-/// the goal* — the settled blob then grows outward from the goal so a large crowd all packs in
-/// rather than piling up short of a single goal cell.
-const BLOB_RADIUS: f32 = 1.3;
-/// A unit counts as "progressing" when it gets at least this much closer to the goal; smaller
-/// improvements are treated as a stall (avoids float jitter resetting the stall timer forever).
-const PROGRESS_EPS: f32 = 0.05;
-/// No-progress duration that ends a packed-in order when the unit is near the goal or wedged behind
-/// the settled goal blob. There is deliberately no plain time-based give-up: initial spawn
-/// congestion always stalls the back of the crowd for seconds, so a timer alone would settle units
-/// at the spawn. Settling is gated on *what* blocks a unit — a settled neighbor between it and the
-/// goal (permanent) vs. moving neighbors (transient) — see `blocked_by_settled`.
-const PACK_STUCK_TIME: f32 = 0.5;
+// Unit locomotion / ORCA / pack-cohesion knobs — UNIT_SPEED, MIN_ENCUMBER, TURN_SPEED, ORCA_RADIUS,
+// ORCA_TIME_HORIZON, ORCA_QUERY_RADIUS, ARRIVE_RADIUS, PACK_RADIUS, BLOB_RADIUS, PROGRESS_EPS,
+// PACK_STUCK_TIME — now live in the `behavior:` config slice (`BehaviorTuning::squad_move`), read as
+// `Res<BehaviorTuning>`. See src/behavior_tuning.rs. (The laser scales fire spread by unit speed via the
+// same slice's `squad_move.unit_speed`.)
 
 const FIGURINE_GLB: &str = "kenney_prototype-kit/Models/GLB format/figurine.glb";
 
@@ -272,7 +238,13 @@ impl Plugin for SquadPlugin {
     }
 }
 
-fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetServer>, sim: Res<SimTuning>) {
+fn spawn_squad(
+    mut commands: Commands,
+    dungeon: Res<Dungeon>,
+    assets: Res<AssetServer>,
+    sim: Res<SimTuning>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
+) {
     // Pick five distinct floor cells clustered around the dungeon spawn.
     let base = dungeon.spawn;
     let cells: Vec<IVec2> = SPAWN_SPIRAL
@@ -304,7 +276,7 @@ fn spawn_squad(mut commands: Commands, dungeon: Res<Dungeon>, assets: Res<AssetS
                 Unit,
                 SquadMember(i),
                 Prey, // crabs may swarm/bite units (nearest-prey targeting)
-                MoveSpeed(UNIT_SPEED),
+                MoveSpeed(beh.squad_move.unit_speed),
                 Velocity(Vec2::ZERO),
                 AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
                 FacingOverride(None), // set by `squad_think` when the Researcher wards; wins over aim
@@ -543,6 +515,7 @@ fn unit_movement(
     // Crabs clinging to units, for the encumbrance slowdown (a piranha pile bogs a unit down).
     attached: Query<&CrabAttached>,
     sim: Res<SimTuning>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     if dt <= 0.0 {
@@ -574,7 +547,7 @@ fn unit_movement(
                 Agent {
                     pos: t.translation.xz(),
                     vel: v.0,
-                    radius: ORCA_RADIUS,
+                    radius: beh.squad_move.orca_radius,
                     avoids: moving,
                 },
             )
@@ -587,7 +560,8 @@ fn unit_movement(
 
         // Encumbrance: crabs clinging to this unit drag its top speed down (never to a dead stop).
         let crabs = crab_load.get(&entity).copied().unwrap_or(0);
-        let max_speed = speed.0 * (1.0 / (1.0 + crabs as f32 * sim.combat.crab_drag)).max(MIN_ENCUMBER);
+        let max_speed =
+            speed.0 * (1.0 / (1.0 + crabs as f32 * sim.combat.crab_drag)).max(beh.squad_move.min_encumber);
 
         // Preferred velocity + goal from the authoritative source. Player order first (unchanged flow-
         // field steer); else the AI goal (straight steer); else hold.
@@ -616,11 +590,11 @@ fn unit_movement(
                 continue;
             }
             let off = ag.pos - self_pos;
-            if off.length_squared() <= ORCA_QUERY_RADIUS * ORCA_QUERY_RADIUS {
+            if off.length_squared() <= beh.squad_move.orca_query_radius * beh.squad_move.orca_query_radius {
                 neighbors.push(*ag);
             }
             if !ag.avoids
-                && off.length_squared() <= BLOB_RADIUS * BLOB_RADIUS
+                && off.length_squared() <= beh.squad_move.blob_radius * beh.squad_move.blob_radius
                 && off.normalize_or_zero().dot(to_goal) > 0.2
             {
                 blocked_by_settled = true;
@@ -659,11 +633,11 @@ fn unit_movement(
         let me = Agent {
             pos: self_pos,
             vel: velocity.0,
-            radius: ORCA_RADIUS,
+            radius: beh.squad_move.orca_radius,
             avoids: true,
         };
         let new_vel =
-            orca::new_velocity(&me, pref, &neighbors, &walls, ORCA_TIME_HORIZON, dt, max_speed);
+            orca::new_velocity(&me, pref, &neighbors, &walls, beh.squad_move.orca_time_horizon, dt, max_speed);
         velocity.0 = new_vel;
 
         // Integrate the ORCA velocity against walls (unit↔wall is the resolver's job, not ORCA's).
@@ -675,7 +649,7 @@ fn unit_movement(
             // --- Player-order arrival (unchanged): progress-based stall + packed-in blob. ---
             // The timer only resets when the unit gets genuinely closer to the goal, so a unit shoved
             // in circles at non-zero speed still eventually counts as stalled.
-            if new_goal_dist < order.best_dist - PROGRESS_EPS {
+            if new_goal_dist < order.best_dist - beh.squad_move.progress_eps {
                 order.best_dist = new_goal_dist;
                 order.no_progress_time = 0.0;
             } else {
@@ -685,13 +659,13 @@ fn unit_movement(
             // wedged behind the settled blob. Because settled units exist only at the goal (no mid-
             // route give-up), `blocked_by_settled` can only become true once a unit reaches the back
             // of that blob, so the blob grows outward from the goal and never nucleates a stall mid-hall.
-            let packed = order.no_progress_time >= PACK_STUCK_TIME
-                && (goal_dist < PACK_RADIUS || blocked_by_settled);
-            if goal_dist < ARRIVE_RADIUS || packed {
+            let packed = order.no_progress_time >= beh.squad_move.pack_stuck_time
+                && (goal_dist < beh.squad_move.pack_radius || blocked_by_settled);
+            if goal_dist < beh.squad_move.arrive_radius || packed {
                 commands.entity(entity).remove::<MoveOrder>();
                 velocity.0 = Vec2::ZERO;
             }
-        } else if new_goal_dist < ARRIVE_RADIUS {
+        } else if new_goal_dist < beh.squad_move.arrive_radius {
             // --- AI-goal arrival: reached the cohesion/role goal → come to rest for this tick. ---
             //
             // We do NOT clear `desired.goal` here. `squad_think` re-resolves it from scratch every tick
@@ -715,6 +689,7 @@ fn unit_movement(
 /// facing) matches what the player sees: body facing == aim (Rabin, "Vision Zones", GameAIPro2 Ch.4).
 pub(crate) fn unit_facing(
     time: Res<Time>,
+    beh: Res<crate::behavior_tuning::BehaviorTuning>,
     mut units: Query<(&mut Transform, &Velocity, &AimTarget, &FacingOverride), With<Unit>>,
 ) {
     let dt = time.delta_secs().min(MAX_FRAME_DT);
@@ -739,7 +714,7 @@ pub(crate) fn unit_facing(
             let facing = Transform::from_translation(transform.translation)
                 .looking_at(target, Vec3::Y)
                 .rotation;
-            transform.rotation = transform.rotation.slerp(facing, (TURN_SPEED * dt).min(1.0));
+            transform.rotation = transform.rotation.slerp(facing, (beh.squad_move.turn_speed * dt).min(1.0));
         }
     }
 }

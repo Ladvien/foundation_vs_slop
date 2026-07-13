@@ -58,6 +58,20 @@ pub mod trace;
 /// The world-config genome (field-propagation + sim-dynamics tuning as a flat vector) the offline search
 /// evolves as a third population. Pure logic like `genome`; the harness installs a decoded `WorldConfig`.
 pub mod world_genome;
+/// The behaviour genome (a curated subset of the `behavior:` config — locomotion/steering/senses/combat
+/// cadence — as a flat vector), evolved as its own population and overlaid onto the shipped
+/// `BehaviorTuning` base. Separate surface from `world_genome`, so that frozen encoding is untouched; the
+/// harness installs a decoded `BehaviorTuning` via `SimConfig::with_behavior_config`.
+pub mod behavior_genome;
+/// Generate-and-measure evaluator for the behaviour population: install an evolved `BehaviorTuning`, run
+/// two full headless rollouts, and score them with the same witnessed-learnable-surprise fitness
+/// (`surprise`) as the world/audio populations — the objective is emergent AGENT behaviour. Needs the harness.
+#[cfg(feature = "test-harness")]
+pub mod behavior_eval;
+/// The standalone behaviour MAP-Elites search + readable `elites_behavior.ron` handoff. Gated because it
+/// reuses `coevolve::Population` + `behavior_eval`; the genome it drives is ungated.
+#[cfg(feature = "test-harness")]
+pub mod behavior_search;
 /// The audio-config genome (acoustic-stimulus propagation + per-event loudness + per-faction perception
 /// gains as a flat vector) the offline search evolves as a fifth population. Pure logic like
 /// `world_genome`; the harness installs a decoded `AudioTuning` via `SimConfig::with_audio_config`.

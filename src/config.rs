@@ -105,6 +105,7 @@ pub struct GameConfig {
     pub gore: GoreSettings,
     pub impact_fx: ImpactFxSettings,
     pub ai_tuning: AiTuning,
+    pub behavior: crate::behavior_tuning::BehaviorTuning,
     pub sim: SimTuning,
     pub vhs: VhsConfig,
     pub mycelia: MyceliaConfig,
@@ -145,6 +146,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     // The species table's geometry, colours and room affinity, checked once at startup.
     mycelia::validate_species(&cfg.mycelia, &cfg.dungeon.room_types)?;
     crate::ai::tuning::validate_tuning(&cfg.ai_tuning)?;
+    crate::behavior_tuning::validate_tuning(&cfg.behavior)?;
     sim::validate_tuning(&cfg.sim)?;
     crate::light::validate_config(&cfg.lighting)?;
     model::validate_script(&cfg.dialogue)?;
