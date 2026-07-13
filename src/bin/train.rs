@@ -31,7 +31,7 @@ use foundation_vs_slop::squad_ai::coevolve::{
     brains_of, mutate_squad_feasible, search, squad_archive_doc, swarm_archive_doc, sweep_prior,
     world_archive_doc, SearchConfig, SearchResult, SquadGenome, SwarmGenome, Templates,
 };
-use foundation_vs_slop::squad_ai::evaluate::rollout;
+use foundation_vs_slop::squad_ai::evaluate::{rollout, rollout_with_belief};
 use foundation_vs_slop::squad_ai::interest::Interest;
 use foundation_vs_slop::squad_ai::poet::{poet_search, PoetConfig};
 use foundation_vs_slop::squad_ai::surprise::{self, ModePrior};
@@ -120,7 +120,7 @@ fn main() {
 /// hundred at most.
 fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     use foundation_vs_slop::squad_ai::coevolve::{brains_of, squad_descriptor, swarm_descriptor, world_descriptor, SquadGenome, SwarmGenome};
-    use foundation_vs_slop::squad_ai::evaluate::rollout;
+    use foundation_vs_slop::squad_ai::evaluate::rollout_with_belief;
     use foundation_vs_slop::squad_ai::surprise::{minimal_criterion, witnessed_fraction};
 
     let t = Templates::authored();
@@ -128,7 +128,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let swarm = SwarmGenome::authored(&t);
 
     for &seed in seeds {
-        let r = rollout(brains_of(&t, &squad, &swarm)?, None, None, None, seed, ticks);
+        let r = rollout_with_belief(brains_of(&t, &squad, &swarm)?, None, None, None, seed, ticks);
         let o = &r.outcome;
         let coverage = if o.reachable_cells > 0 {
             o.cells_covered as f32 / o.reachable_cells as f32
@@ -560,7 +560,7 @@ fn poet(args: EvolveArgs) -> Result<(), String> {
     let evaluate = |world_g: &WorldGenome, squad_g: &SquadGenome| -> Option<(f32, f32)> {
         let world_config = world_genome::decode(world_g).ok()?;
         let brains = brains_of(&t, squad_g, &swarm).ok()?;
-        let a = rollout(brains.clone(), Some(world_config.clone()), None, None, seeds[0], ticks);
+        let a = rollout_with_belief(brains.clone(), Some(world_config.clone()), None, None, seeds[0], ticks);
         surprise::minimal_criterion(&a.outcome).ok()?;
         let b = rollout(brains, Some(world_config), None, None, seeds[1], ticks);
         surprise::minimal_criterion(&b.outcome).ok()?;
