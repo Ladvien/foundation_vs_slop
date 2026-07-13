@@ -7,9 +7,11 @@
 //!
 //! 1. **No new dependency.** ~100 `f32`s, mutated with the in-tree seeded ChaCha8 (`crate::rng`).
 //! 2. **Every trained artifact is readable.** A genome decodes to `Vec<Behavior>`, which serialises to
-//!    the same `roles.ron` a human authors — so an elite is a *diff*, not opaque weights. This is the
-//!    practical answer to reward hacking (Skalse et al., "Defining and Characterizing Reward Hacking",
-//!    arXiv:2209.13085): you can read what the optimiser found and reject it.
+//!    the same `roles.ron` a human authors — so an elite is a *diff*, not opaque weights. Readability is
+//!    this code's own defence; what it enables — reading what the optimiser found and *rejecting* it — is
+//!    the human veto restricting the admissible policy set, one of Skalse et al.'s reward-hacking remedies
+//!    (Skalse et al., "Defining and Characterizing Reward Hacking", arXiv:2209.13085). Skalse propose no
+//!    interpretability/readability remedy; that idea is ours.
 //! 3. **The engine's safety guards survive.** `validate_unconditional_default` and
 //!    `validate_rank_ladder` still gate every candidate — they become the *minimal criterion* of the
 //!    search (Wang et al., POET, arXiv:1901.01753 §2.2), so an infeasible brain is rejected at the door
@@ -27,6 +29,7 @@
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::ai::tuning::ChannelTuning;
 use crate::ai::utility::{validate_unconditional_default, Behavior, Curve};
 use crate::rng::DetRng;
 use crate::squad_ai::role::{validate_rank_ladder, RoleId};
@@ -192,6 +195,67 @@ pub(crate) fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
     let u2 = rng.unit();
     let r = (-2.0 * u1.ln()).sqrt();
     (r * (std::f64::consts::TAU * u2).cos()) as f32
+}
+
+// ── Shared scaffolding for the flat-vector *config* genomes (`world_genome`, `audio_genome`) ──
+//
+// Both flatten an authored config into a `Vec<f32>`, mutate it with the same scale-relative Gaussian
+// clamped to a per-knob BOUNDS table, and range-check against that table. Only the concrete newtype, the
+// static `BOUNDS`/`N`, and the decoded-config `validate` hook differ, so the numeric core lives here once.
+// The brain genome above is a *different* search (its own `SCALE_FLOOR` of 0.25 and a signed `BAND`), so it
+// does not share this path.
+
+/// Minimum mutation scale for the flat config genomes, so a knob authored at (or near) `0.0` — e.g.
+/// `diffuse`, or audio's `crab_draw_to_din` — can still move. Smaller than the brain genome's `SCALE_FLOOR`
+/// (0.25): config knobs span a wider range of magnitudes and a large floor would swamp the small ones.
+pub(crate) const FLAT_SCALE_FLOOR: f32 = 0.05;
+
+/// Push a stigmergy/acoustic channel's three knobs (evaporate, diffuse, deposit_radius) into a flat genome
+/// vector, in the fixed order the config genomes' `encode`/`decode`/`BOUNDS` agree on.
+pub(crate) fn push_channel(v: &mut Vec<f32>, c: &ChannelTuning) {
+    v.push(c.evaporate);
+    v.push(c.diffuse);
+    v.push(c.deposit_radius);
+}
+
+/// Scale-relative Gaussian mutation for a flat config genome. Each knob `i` is kicked by
+/// `N(0, sigma·(|authored[i]| + FLAT_SCALE_FLOOR))` and clamped to `bounds[i]`. Exactly one [`gaussian`]
+/// draw per knob, in index order — the RNG draw count and order are load-bearing for search
+/// reproducibility, so this is the single definition both config genomes call. The caller guarantees
+/// `parent`, `authored`, and `bounds` share a length (its own length check runs first for its error text).
+pub(crate) fn flat_mutate(
+    parent: &[f32],
+    authored: &[f32],
+    bounds: &[(f32, f32)],
+    sigma: f32,
+    rng: &mut ChaCha8Rng,
+) -> Vec<f32> {
+    let mut out = Vec::with_capacity(parent.len());
+    for i in 0..parent.len() {
+        let origin = authored[i];
+        let scale = origin.abs() + FLAT_SCALE_FLOOR;
+        let moved = parent[i] + gaussian(rng) * sigma * scale;
+        let (lo, hi) = bounds[i];
+        out.push(moved.clamp(lo, hi));
+    }
+    out
+}
+
+/// The shared range-check half of a flat config genome's feasibility gate: every knob finite and within its
+/// `bounds`. `label` names the genome for the error message ("world"/"audio"). The length check and the
+/// decoded-config `validate_tuning` are the caller's own (their error strings and validate hooks differ).
+pub(crate) fn flat_range_check(
+    params: &[f32],
+    bounds: &[(f32, f32)],
+    label: &str,
+) -> Result<(), String> {
+    for (i, &x) in params.iter().enumerate() {
+        let (lo, hi) = bounds[i];
+        if !(x.is_finite() && (lo..=hi).contains(&x)) {
+            return Err(format!("{label} genome knob {i} = {x} is out of bounds [{lo}, {hi}]"));
+        }
+    }
+    Ok(())
 }
 
 /// Perturb a genome: every parameter gets a scale-relative Gaussian kick, clamped to a band around its

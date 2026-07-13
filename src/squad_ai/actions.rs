@@ -99,6 +99,12 @@ pub fn unit_actions(
             Mode::Overwatch | Mode::Engage | Mode::Suppress => Some(ObsEvent::ThreatSpotted),
             Mode::TendWounded => Some(ObsEvent::HealedAlly),
             Mode::Regroup => Some(ObsEvent::Regrouped),
+            // The alarm beat: a unit that breaks and flees now shouts it, so an emergent fear-spike rout
+            // reads as the squad REACTING, not silently glitching. An autonomously fleeing unit carries no
+            // `MoveOrder`, so it already passes this system's `Without<MoveOrder>` filter. Cosmetic
+            // `SquadUtterance` + the un-hashed cooldown only — no pinned mutation — so this FixedUpdate arm
+            // stays determinism-safe.
+            Mode::Flee => Some(ObsEvent::Panicked),
             _ => None,
         };
         if let Some(event) = event

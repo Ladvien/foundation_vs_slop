@@ -142,9 +142,10 @@ impl FearBucket {
     /// `max`-reduced, eased tracker of the stigmergy threat fields (`ai::drives`), so under shipped play the
     /// squad is unthreatened ~85% of the time (drive ≈ 0) and the **maximum drive ever observed was 0.497**.
     /// The old naive 1/3, 2/3 bands therefore left `Panicked` *unreachable* and `Wary` firing on ~3% of
-    /// decisions, which collapsed the world archive's `mean_fear` descriptor into a single bin. These bands
-    /// put a genuinely crowded moment (the ~0.28–0.49 mode) into `Panicked` and a moderate threat (~p92 of
-    /// the distribution) into `Wary`, so scary worlds separate from calm ones on the descriptor axis. `NaN`
+    /// decisions, which collapsed the FEAR dimension of the surprise-prior context into a single bin. These
+    /// bands put a genuinely crowded moment (the ~0.28–0.49 mode) into `Panicked` and a moderate threat (~p92
+    /// of the distribution) into `Wary`, so scary contexts separate from calm ones in `P(mode | context)`.
+    /// `NaN`
     /// reads as `Calm`: a non-finite drive is a bug elsewhere, and this module must classify it rather than
     /// propagate it into a probability.
     pub fn of(fear: f32) -> Self {
@@ -214,7 +215,8 @@ impl EpisodeTrace {
     /// visited in first-appearance order so the result is a pure function of the trace.
     ///
     /// Indexed by hash, not by a linear scan: a rollout carries tens of thousands of decisions across
-    /// hundreds of crabs, and `fitness` walks this three times.
+    /// hundreds of crabs. A `fitness` call walks this twice — rollout `a` once inside [`MarkovModel::fit`],
+    /// and rollout `b` once in [`learnability`], shared between the null marginal and the fitted model.
     fn sequences(&self) -> Vec<Vec<Mode>> {
         let mut index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
         let mut runs: Vec<Vec<Mode>> = Vec::new();
@@ -325,12 +327,15 @@ impl ModePrior {
         Ok(())
     }
 
-    /// Laplace-smoothed `P(mode | context)`. A context the baseline never visited yields the uniform
-    /// distribution, which is the honest statement of "we have no expectation here".
-    fn prob(&self, context: usize, mode: usize) -> f64 {
+    /// The full Laplace-smoothed distribution `P(· | context)`, computing the row total **once**. A context
+    /// the baseline never visited yields the uniform distribution — the honest "we have no expectation
+    /// here". Callers that read several modes of one context use this instead of a per-mode `prob`, which
+    /// would re-sum the 25-entry row once per mode on the hot KL path.
+    fn prob_row(&self, context: usize) -> [f64; MODE_COUNT] {
         let row = &self.counts[context];
         let total: u32 = row.iter().sum();
-        (f64::from(row[mode]) + ALPHA) / (f64::from(total) + ALPHA * MODE_COUNT as f64)
+        let denom = f64::from(total) + ALPHA * MODE_COUNT as f64;
+        std::array::from_fn(|mode| (f64::from(row[mode]) + ALPHA) / denom)
     }
 
     pub fn total_observations(&self) -> u64 {
@@ -382,13 +387,13 @@ pub fn bayesian_surprise(trace: &EpisodeTrace, prior: &ModePrior) -> f64 {
         }
         let weight = f64::from(n) / admissible as f64;
         let mut kl = 0.0f64;
+        let q_row = prior.prob_row(ctx); // prior row total summed once per context, not once per mode
         for (mode, &c) in row.iter().enumerate() {
             if c == 0 {
                 continue; // 0*ln 0 = 0
             }
             let p = f64::from(c) / f64::from(n);
-            let q = prior.prob(ctx, mode);
-            kl += p * (p / q).ln();
+            kl += p * (p / q_row[mode]).ln();
         }
         surprise += weight * kl;
     }
@@ -413,6 +418,9 @@ pub fn surprise_score(surprise_nats: f64) -> f32 {
 pub struct MarkovModel {
     /// `counts[from][to]`.
     counts: Vec<[u32; MODE_COUNT]>,
+    /// Row totals `Σ_to counts[from][to]`, cached at fit time so `prob` does not re-sum the 25-entry row on
+    /// every transition of the log-likelihood inner loop. `counts` is never mutated after `fit`, so it stays valid.
+    totals: [u32; MODE_COUNT],
 }
 
 impl MarkovModel {
@@ -424,21 +432,23 @@ impl MarkovModel {
                 counts[pair[0].index()][pair[1].index()] += 1;
             }
         }
-        MarkovModel { counts }
+        let totals = std::array::from_fn(|from| counts[from].iter().sum());
+        MarkovModel { counts, totals }
     }
 
-    /// Laplace-smoothed `P(to | from)`.
+    /// Laplace-smoothed `P(to | from)`, using the row total cached at fit time.
     fn prob(&self, from: usize, to: usize) -> f64 {
-        let row = &self.counts[from];
-        let total: u32 = row.iter().sum();
-        (f64::from(row[to]) + ALPHA) / (f64::from(total) + ALPHA * MODE_COUNT as f64)
+        (f64::from(self.counts[from][to]) + ALPHA)
+            / (f64::from(self.totals[from]) + ALPHA * MODE_COUNT as f64)
     }
 
-    /// Total log-likelihood (nats) this model assigns to another trace's transitions.
-    fn log_likelihood(&self, trace: &EpisodeTrace) -> (f64, usize) {
+    /// Total log-likelihood (nats) this model assigns to another trace's transitions. Takes the trace's
+    /// pre-built mode sequences so a caller scoring the same trace under two models (see [`learnability`])
+    /// builds them once.
+    fn log_likelihood(&self, seqs: &[Vec<Mode>]) -> (f64, usize) {
         let mut ll = 0.0f64;
         let mut n = 0usize;
-        for seq in trace.sequences() {
+        for seq in seqs {
             for pair in seq.windows(2) {
                 ll += self.prob(pair[0].index(), pair[1].index()).ln();
                 n += 1;
@@ -450,10 +460,10 @@ impl MarkovModel {
 
 /// The **null model**: a trace's own 0th-order marginal over modes, fitted on the very trace it scores.
 /// Deliberately optimistic — the strongest "you learned nothing about the dynamics" baseline available.
-fn marginal_log_likelihood(trace: &EpisodeTrace) -> (f64, usize) {
+fn marginal_log_likelihood(seqs: &[Vec<Mode>]) -> (f64, usize) {
     let mut counts = [0u32; MODE_COUNT];
     let mut transitions: Vec<usize> = Vec::new();
-    for seq in trace.sequences() {
+    for seq in seqs {
         for pair in seq.windows(2) {
             counts[pair[1].index()] += 1;
             transitions.push(pair[1].index());
@@ -482,12 +492,16 @@ fn marginal_log_likelihood(trace: &EpisodeTrace) -> (f64, usize) {
 /// `a` and `b` must be two rollouts of the **same** candidate on different episode seeds. Returns `0.0`
 /// when `b` has no transitions to predict (fewer than two decisions by any actor).
 pub fn learnability(a: &EpisodeTrace, b: &EpisodeTrace) -> f32 {
-    let (ll_null, n) = marginal_log_likelihood(b);
+    // Build b's per-actor sequences ONCE and score it under both the null marginal and the model fitted on
+    // a. Previously each callee rebuilt b.sequences() (a fresh HashMap + Vec over tens of thousands of
+    // decisions), walking b twice per fitness call.
+    let b_seqs = b.sequences();
+    let (ll_null, n) = marginal_log_likelihood(&b_seqs);
     if n == 0 || ll_null >= 0.0 {
         // `ll_null` is a sum of logs of probabilities, hence < 0 whenever n > 0. `>= 0` means n == 0.
         return 0.0;
     }
-    let (ll_fitted, _) = MarkovModel::fit(a).log_likelihood(b);
+    let (ll_fitted, _) = MarkovModel::fit(a).log_likelihood(&b_seqs);
     // Both are negative; `ll_fitted > ll_null` means the fitted model predicts `b` better.
     let saved = ll_fitted - ll_null;
     (saved / ll_null.abs()).clamp(0.0, 1.0) as f32
@@ -554,6 +568,53 @@ pub struct EpisodeOutcome {
     /// smear** guard. A flooded field is uniform (no gradient to navigate); the shipped game is sparse, so
     /// this stays small. `1.0` would mean the whole floor is saturated. Sampled in `evaluate::rollout`.
     pub field_flatness: f32,
+
+    // ── Per-species vitality census — the world archive's deaths×lives descriptor axes ──────────────
+    // "deaths" = population *removals* over the episode; "alive" = end-of-episode headcount; "peak" =
+    // running max simultaneous population (the normaliser that decouples how-deadly from how-populous —
+    // raw deaths and lives both scale with population: Gras et al., Artificial Life 15(4) 2009; Yang,
+    // arXiv:1003.5288). Squad units reuse `squad_size`/`survivors`; crabs reuse `crabs_killed`/`crabs_alive`.
+    /// Peak simultaneous live crabs over the episode.
+    pub crab_peak: u32,
+    /// SCP-150 mancae removed over the episode. Like `crabs_killed`, this counts every manca despawn — a
+    /// kill (HP≤0) *or* a successful embed into a host — so it reads population turnover, not attribution.
+    pub manca_deaths: u32,
+    /// Live free mancae at episode end.
+    pub manca_alive: u32,
+    /// Peak simultaneous live free mancae over the episode.
+    pub manca_peak: u32,
+    /// Smiley-boss removals (0 or 1 — a single entity).
+    pub boss_deaths: u32,
+    /// Live boss at episode end (0 or 1).
+    pub boss_alive: u32,
+    /// Peak boss count (0 or 1).
+    pub boss_peak: u32,
+}
+
+impl EpisodeOutcome {
+    /// Total cross-species deaths (population removals) this episode — squad units + crabs + parasite
+    /// mancae + boss. The "deaths" half of the world archive's ecosystem-vitality axes; predator–prey
+    /// turnover and extinction are the canonical signals of a *living* ecosystem (Gras et al., Artificial
+    /// Life 15(4) 2009; Yang, arXiv:1003.5288).
+    pub fn total_deaths(&self) -> u32 {
+        let unit_deaths = self.squad_size.saturating_sub(self.survivors);
+        unit_deaths + self.crabs_killed + self.manca_deaths + self.boss_deaths
+    }
+
+    /// Total cross-species headcount still alive at episode end — squad + crabs + free mancae + boss. The
+    /// "lives" half of the axes. This is total *abundance* (a raw cross-species headcount sum), NOT Shannon
+    /// diversity — it has no species-proportion / evenness term and is nonzero for a monoculture.
+    pub fn total_lives(&self) -> u32 {
+        self.survivors + self.crabs_alive + self.manca_alive + self.boss_alive
+    }
+
+    /// Peak simultaneous cross-species population over the episode — the natural normaliser for both axes:
+    /// raw deaths and lives both scale with how many creatures the world holds, so dividing by the peak
+    /// decouples "how deadly / how alive" from "how crowded" (Gras et al. 2009 show individual- and
+    /// species-counts co-vary strongly).
+    pub fn peak_population(&self) -> u32 {
+        self.squad_size + self.crab_peak + self.manca_peak + self.boss_peak
+    }
 }
 
 /// Minimum fraction of the reachable map an episode must cover to count as "an encounter happened".
@@ -934,7 +995,7 @@ mod tests {
             vec![Mode::TendWounded, Mode::Regroup]
         ]);
         // Exactly two transitions, one per actor — never Overwatch→TendWounded.
-        let (_, n) = MarkovModel::fit(&trace).log_likelihood(&trace);
+        let (_, n) = MarkovModel::fit(&trace).log_likelihood(&seqs);
         assert_eq!(n, 2);
     }
 
@@ -961,6 +1022,8 @@ mod tests {
             // A sparse, non-degenerate field: a modest peak over a small fraction of the floor.
             peak_field: 8.0,
             field_flatness: 0.15,
+            // Per-species vitality census defaults to 0 — not consulted by `minimal_criterion`.
+            ..Default::default()
         }
     }
 

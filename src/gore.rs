@@ -54,6 +54,11 @@ pub enum GoreKind {
     UnitCrunch,
     /// A billboard enemy died: full spray + pool, but no gibs (it has no mesh to shatter).
     EnemySplat,
+    /// A cosmetic viscera burst — a few flesh chunks fly out, and NOTHING else (no blood-economy meat, no
+    /// spray/pool/shake of its own; the caller sprays blood separately). Used for the SCP-150 chestburster
+    /// eruption, where the host must NOT die/gib. Never `Carryable`, so it never enters the crab forage
+    /// economy or the deterministic-core hash.
+    Viscera,
 }
 
 /// For a [`GoreKind::UnitCrunch`]: which baked character to gib and how to place it. Kept separate
@@ -609,6 +614,14 @@ fn drain_gore(
         *seed = seed.wrapping_add(1);
         let fseed = *seed as f32 * 0.618;
 
+        // Cosmetic viscera burst (the SCP-150 chestburster eruption): a few non-economy flesh chunks fly out
+        // and NOTHING else — no meat/fragments, no blood spray/pool/shake here (the eruption sprays blood via
+        // separate `FleshHit`s). Never `Carryable`, so it stays out of the crab economy and the replay hash.
+        if let GoreKind::Viscera = ev.kind {
+            spawn_viscera_chunks(&mut commands, &assets, &settings, &mut gib_ring, ev.pos, VISCERA_CHUNKS);
+            continue;
+        }
+
         // --- SIM viscera (kills only): the unit's own mesh sliced into flying fragment gibs (raw-meat
         //     cut faces, blaster flung off intact — see `autogib`) plus permanent meat chunks. The crab
         //     forage→haul→breed economy consumes these, so they spawn for EVERY kill regardless of the
@@ -671,6 +684,8 @@ fn drain_gore(
                 settings.pool_size_death,
                 settings.droplet_count_death,
             ),
+            // Handled + `continue`d at the top of the loop, so this never runs.
+            GoreKind::Viscera => unreachable!("Viscera is spawned and continued above"),
         };
 
         // --- Airborne blood droplets: real ballistic drops that arc out and splat on contact (the
@@ -1025,6 +1040,65 @@ fn spawn_meat_chunks(
             },
             GibKey(key),
         ));
+        commands.entity(id).with_children(|parent| {
+            parent.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(assets.meat_mat.clone()),
+                Transform::from_scale(Vec3::splat(half * 2.0)),
+            ));
+        });
+    }
+}
+
+/// Number of cosmetic flesh chunks a [`GoreKind::Viscera`] burst flings out.
+const VISCERA_CHUNKS: u32 = 6;
+
+/// Spawn a few PURELY COSMETIC flesh chunks bursting from `origin` — the SCP-150 chestburster eruption. Same
+/// physics as a meat chunk but WITHOUT [`Carryable`]/[`GibKey`], so they never enter the crab forage economy,
+/// deposit no `MEAT` scent, and (being `Health`-less + physics-off inert) never touch the deterministic-core
+/// hash. Still registered in [`GibRing`] so `cap_gib_chunks` bounds them like any other chunk.
+fn spawn_viscera_chunks(
+    commands: &mut Commands,
+    assets: &GoreAssets,
+    settings: &GoreSettings,
+    gib_ring: &mut GibRing,
+    origin: Vec3,
+    count: u32,
+) {
+    // Deterministic per-chunk randomness from the (deterministic) eruption origin (mirrors `spawn_meat_chunks`).
+    let det = origin.x.to_bits() ^ origin.y.to_bits().rotate_left(11) ^ origin.z.to_bits().rotate_left(22);
+    for i in 0..count {
+        let base = det
+            .wrapping_mul(2_246_822_519)
+            .wrapping_add(i.wrapping_mul(2_654_435_761))
+            .wrapping_add(0x1234_5678);
+        let h1 = hash_f32(base.wrapping_add(1));
+        let h2 = hash_f32(base.wrapping_add(2));
+        let h3 = hash_f32(base.wrapping_add(3));
+        let h4 = hash_f32(base.wrapping_add(4));
+        let h5 = hash_f32(base.wrapping_add(5));
+        // Hemispherical up-and-out spray, a touch punchier than a meat chunk.
+        let angle = h1 * TAU;
+        let horiz = 0.5 + 0.8 * h2;
+        let up = 0.9 + 0.9 * h3;
+        let dir = Vec3::new(angle.cos() * horiz, up, angle.sin() * horiz).normalize_or_zero();
+        let velocity = dir * settings.gib_speed * (0.7 + 0.7 * h4);
+        let spin = Vec3::new(h1 - 0.5, h2 - 0.5, h5 - 0.5).normalize_or_zero() * (8.0 + 8.0 * h4);
+        let half = 0.5 * settings.meat_size * (0.35 + 0.4 * h5); // small gobbets
+        let mesh = if assets.meat_meshes.is_empty() {
+            assets.gib.clone()
+        } else {
+            assets.meat_meshes[(base as usize) % assets.meat_meshes.len()].clone()
+        };
+        let id = spawn_gib_body(
+            commands,
+            gib_ring,
+            settings,
+            origin + Vec3::Y * 0.05,
+            Vec3::splat(half),
+            velocity,
+            spin,
+        );
         commands.entity(id).with_children(|parent| {
             parent.spawn((
                 Mesh3d(mesh),

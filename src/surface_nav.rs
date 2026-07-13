@@ -129,6 +129,92 @@ pub(crate) fn surface_orientation(heading: Vec3, normal: Vec3) -> Quat {
     t.rotation
 }
 
+/// Distance to a gate (world units) at which a creature commits the patch transfer — the shared
+/// step at which surface-crawlers cross a graph edge. Shared by every surface-crawling creature so
+/// the crossing threshold is defined once.
+pub(crate) const TRANSFER_RADIUS: f32 = 0.22;
+
+/// Per-second rate the surface normal / heading eases toward the (possibly new) patch across a step:
+/// `t = (NORMAL_EASE * dt).min(1.0)`. Shared by every surface-crawling creature.
+pub(crate) const NORMAL_EASE: f32 = 12.0;
+
+/// The shared surface-manifold step every surface-crawling creature (crab, SCP-150 manca) runs: pick the
+/// graph neighbour whose gate best matches `desired`, slide toward it (folding in a pre-projected `push`),
+/// clamp to the patch, commit a transfer on reaching a gate, then ease the surface normal + heading. It
+/// mutates the four navigation fields (`pos`, `patch`, `normal`, `heading`) in place and returns whether
+/// the creature moved. The wall-respecting mechanic never clips through a wall and can climb onto a wall
+/// patch when that is the best-aligned direction.
+///
+/// `push` is already projected onto the current surface *and* pre-scaled by the caller (crab: Reynolds
+/// separation × `CRAB_SEP_STRENGTH`; manca: the huddle/swarm push). The core adds it directly — it does
+/// NOT re-project or re-scale — so each critter's `move_vec` arithmetic is bit-identical to the old
+/// per-module copies (projecting a pre-scaled vector would reorder the float ops and change the low bits).
+///
+/// `steer_to_override`, when `Some`, is a straight-to point on the current patch (the crab's on-patch
+/// homing/final-approach): it both skips the neighbour-gate scan and becomes the steer target. When `None`
+/// the neighbour scan runs exactly as before. `t = (NORMAL_EASE * dt).min(1.0)` is computed internally.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn steer_surface_core(
+    pos: &mut Vec3,
+    patch: &mut u32,
+    normal: &mut Vec3,
+    heading: &mut Vec3,
+    graph: &SurfaceGraph,
+    desired: Vec3,
+    push: Vec3,
+    speed: f32,
+    dt: f32,
+    steer_to_override: Option<Vec3>,
+) -> bool {
+    let p = graph.patch(*patch);
+
+    // Pick the graph neighbour whose gate best matches the desired travel direction (skipped when the
+    // caller supplies an on-patch steer target, e.g. the crab's final approach onto a gib).
+    let desired_t = project_tangent(desired, p.normal).normalize_or_zero();
+    let mut best: Option<(u32, Vec3)> = None;
+    let mut best_dot = 0.0f32;
+    if steer_to_override.is_none() && desired_t.length_squared() > 1.0e-6 {
+        for (to, gate) in graph.neighbors(*patch) {
+            let g_dir = project_tangent(gate - *pos, p.normal).normalize_or_zero();
+            let d = g_dir.dot(desired_t);
+            if d > best_dot {
+                best_dot = d;
+                best = Some((to, gate));
+            }
+        }
+    }
+
+    // Steer toward the override point, else the chosen gate, else drift in the desired direction (a
+    // dead-end with no aligned neighbour → slide along the wall, clamped to the patch). The pre-projected,
+    // pre-scaled `push` is folded on top (added directly — already in the surface plane).
+    let steer_to = steer_to_override
+        .or(best.map(|(_, g)| g))
+        .unwrap_or(*pos + desired_t);
+    let tangent = project_tangent(steer_to - *pos, p.normal).normalize_or_zero();
+    let move_vec = tangent * speed + push;
+    *pos += move_vec * dt;
+    *pos = clamp_to_patch(*pos, p);
+
+    // Commit a patch transfer only on physically reaching the chosen gate — never across a wall.
+    if let Some((to, gate)) = best {
+        if pos.distance(gate) < TRANSFER_RADIUS {
+            *patch = to;
+            *pos = clamp_to_patch(gate, graph.patch(to));
+        }
+    }
+
+    // Ease onto the (possibly new) surface and turn toward travel.
+    let t = (NORMAL_EASE * dt).min(1.0);
+    let np = graph.patch(*patch);
+    *normal = normal.lerp(np.normal, t).normalize_or(np.normal);
+    let moved = move_vec.length_squared() > 1.0e-6;
+    if moved {
+        let h = project_tangent(move_vec, *normal).normalize_or(*heading);
+        *heading = heading.lerp(h, t).normalize_or(*heading);
+    }
+    moved
+}
+
 /// A directed step in the surface graph: to a neighbor patch, its integer cost (≈10·world distance,
 /// octile-scaled like `flowfield`), and the world-space `gate` — the shared-boundary midpoint a crab
 /// steers toward to make the crossing.

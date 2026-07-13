@@ -231,7 +231,8 @@ mod tests {
             Faction::Foundation => &[FieldId::THREAT_GUN, FieldId::NOISE_SQUAD],
             // `crab::deposit_crab_fields`; NOISE_SWARM at the crab-death site.
             Faction::Crab => &[FieldId::THREAT_CRAB, FieldId::NOISE_SWARM],
-            // `enemy::deposit_anomaly_aura`.
+            // `enemy::deposit_anomaly_aura` (the watcher's standing aura) + `parasite::deposit_manca_dread`
+            // (a roused SCP-150 brood) — two emitters, one channel.
             Faction::Anomaly => &[FieldId::THREAT_ANOMALY],
         }
     }

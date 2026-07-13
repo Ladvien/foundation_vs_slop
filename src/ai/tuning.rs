@@ -189,3 +189,29 @@ pub fn validate_tuning(t: &AiTuning) -> Result<(), String> {
     positive("deposit_radius", t.rally.deposit_radius)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_ai_defaults_validate() {
+        assert!(validate_tuning(&AiTuning::default()).is_ok());
+    }
+
+    #[test]
+    fn ai_tuning_default_equals_shipped_config() {
+        // Byte-identity guard mirroring `sim::tests::sim_default_equals_shipped_config`: the `ai_tuning:`
+        // slice in the shipped `config.ron` must equal `AiTuning::default()` exactly. This guard was MISSING
+        // — while `sim:` had one, `ai_tuning:` did not — so an evolved-elite paste once diverged the
+        // field-propagation knobs from the defaults with nothing to catch it, and only the downstream
+        // `field_passes_are_bit_identical` replay golden noticed (indirectly, and only under the harness).
+        // One path, no fallback: a drift now reds here loudly, at the same altitude as the sim guard.
+        let cfg = crate::config::load_game_config().expect("shipped game config must load");
+        assert_eq!(
+            cfg.ai_tuning,
+            AiTuning::default(),
+            "assets/config/config.ron `ai_tuning:` slice drifted from the shipped AiTuning defaults"
+        );
+    }
+}

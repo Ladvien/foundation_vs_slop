@@ -243,6 +243,23 @@ impl MoldCoarse {
         let y = (uv.y * COARSE_SIZE as f32) as usize;
         self.cells.get(y * COARSE_SIZE as usize + x)
     }
+
+    /// Iterate the coarse cells whose biomass `V` is at least `threshold`, yielding each cell's world-XZ
+    /// centre and its biomass. The FORAGE-terrain seam (the mold read-edge): a thick mold MAT smells faintly
+    /// of food, so `grazing::mold_mat_scent` deposits `MEAT` on it and the swarm dens onto dense corridors —
+    /// turning the biomass field from a decorative one-way island into coupled terrain. Bounded to
+    /// `COARSE_SIZE²` cells (the coarse readback), so it is cheap regardless of map size, and yields nothing
+    /// before the first readback (`cells` empty). Inverse of [`Self::cell_at`]'s world→cell mapping.
+    pub(crate) fn dense_cells(&self, threshold: f32) -> impl Iterator<Item = (Vec2, f32)> + '_ {
+        let n = COARSE_SIZE as usize;
+        self.cells.iter().enumerate().filter_map(move |(i, c)| {
+            let v = c[0];
+            (v >= threshold).then(|| {
+                let uv = Vec2::new((i % n) as f32 + 0.5, (i / n) as f32 + 0.5) / n as f32;
+                (WORLD_ORIGIN + uv * WORLD_EXTENT, v)
+            })
+        })
+    }
 }
 
 /// How long each coarse cell has continuously held the pin condition. Keyed by coarse index, so iteration

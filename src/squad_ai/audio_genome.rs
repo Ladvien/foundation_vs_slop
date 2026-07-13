@@ -25,16 +25,13 @@
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use super::genome::{flat_mutate, flat_range_check, push_channel};
 use crate::ai::tuning::ChannelTuning;
 use crate::audio_tuning::{AcousticPerceptionTuning, AcousticStimulusTuning, AudioTuning};
 
 /// Number of knobs: 6 propagation (2 acoustic channels × {evaporate, diffuse, deposit_radius}) + 5
 /// per-event loudness (deposit amounts) + 4 perception (crab/unit din-fear, draw, investigate threshold).
 pub const N: usize = 15;
-
-/// Minimum mutation scale, so a knob authored at `0.0` — `crab_draw_to_din`, or a `diffuse` — can still
-/// move off its floor. Same value as [`super::world_genome`].
-const SCALE_FLOOR: f32 = 0.05;
 
 /// Hard `(min, max)` per knob, in the **same order** [`encode`] walks [`AudioTuning`]. Channel bounds match
 /// `world_genome` (evaporate never saturating, diffuse `< 1`, radius bounded); loudness is a deposit
@@ -62,12 +59,6 @@ static BOUNDS: [(f32, f32); N] = [
 /// An audio config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioGenome(pub Vec<f32>);
-
-fn push_channel(v: &mut Vec<f32>, c: &ChannelTuning) {
-    v.push(c.evaporate);
-    v.push(c.diffuse);
-    v.push(c.deposit_radius);
-}
 
 /// Flatten an [`AudioTuning`] into the fixed-order knob vector `BOUNDS` and `decode` agree on.
 pub fn encode(a: &AudioTuning) -> AudioGenome {
@@ -138,15 +129,7 @@ pub fn mutate(parent: &AudioGenome, sigma: f32, rng: &mut ChaCha8Rng) -> Result<
         return Err(format!("audio genome has {} knobs, expected {N}", parent.0.len()));
     }
     let authored = authored();
-    let mut out = Vec::with_capacity(N);
-    for i in 0..N {
-        let origin = authored.0[i];
-        let scale = origin.abs() + SCALE_FLOOR;
-        let moved = parent.0[i] + super::genome::gaussian(rng) * sigma * scale;
-        let (lo, hi) = BOUNDS[i];
-        out.push(moved.clamp(lo, hi));
-    }
-    Ok(AudioGenome(out))
+    Ok(AudioGenome(flat_mutate(&parent.0, &authored.0, &BOUNDS, sigma, rng)))
 }
 
 /// The genome-level feasibility gate: right length, every knob finite and within [`BOUNDS`], and the
@@ -156,12 +139,7 @@ pub fn is_feasible(g: &AudioGenome) -> Result<(), String> {
     if g.0.len() != N {
         return Err(format!("audio genome has {} knobs, expected {N}", g.0.len()));
     }
-    for (i, &x) in g.0.iter().enumerate() {
-        let (lo, hi) = BOUNDS[i];
-        if !(x.is_finite() && (lo..=hi).contains(&x)) {
-            return Err(format!("audio genome knob {i} = {x} is out of bounds [{lo}, {hi}]"));
-        }
-    }
+    flat_range_check(&g.0, &BOUNDS, "audio")?;
     let audio = decode(g)?;
     crate::audio_tuning::validate_tuning(&audio)
 }

@@ -40,12 +40,17 @@ pub enum ObsEvent {
     ThreatSpotted,
     /// A unit strayed and rejoined the squad.
     Regrouped,
+    /// A unit broke and fled — the alarm beat of a fear-spike rout. The single most alarming moment in a
+    /// fight previously produced NO dialogue, so an emergent cascade read as the squad silently "breaking".
+    Panicked,
 }
 
 impl ObsEvent {
     /// Salience `[0,1]` — how memorable/likely-to-be-spoken this is (Park et al. importance score).
     pub fn importance(self) -> f32 {
         match self {
+            // A rout is the loudest beat in a fight — outranks even the anomaly signature.
+            ObsEvent::Panicked => 0.95,
             ObsEvent::SensedAnomaly => 0.9,
             ObsEvent::ExaminedBody => 0.8,
             ObsEvent::ThreatSpotted => 0.7,
@@ -68,6 +73,7 @@ impl ObsEvent {
             ObsEvent::HealedAlly => 6,
             ObsEvent::ThreatSpotted => 7,
             ObsEvent::Regrouped => 8,
+            ObsEvent::Panicked => 9,
         }
     }
 }
@@ -192,7 +198,18 @@ impl MemoryStream {
     }
 }
 
-/// Retrieval score: importance + a recency term decaying over ~600 ticks (10 s at 60 Hz).
+/// Retrieval score for one memory — a game-adapted **subset** of Park et al.'s (Generative Agents)
+/// retrieval, not a faithful port. The paper sums three min-max-normalized, equally-weighted components
+/// (recency, importance, relevance); this keeps two and deliberately deviates, by design:
+///   - **No relevance term.** Park's relevance is cosine similarity to a query memory's embedding; the
+///     game ships no embedding model, so retrieval is unconditioned on the current situation.
+///   - **Recency is a linear ramp over *event age*** (~600 ticks ≈ 10 s at 60 Hz), not the paper's
+///     exponential decay since *last retrieval*: dialogue wants to reference how long ago the EVENT
+///     happened, and recency is deliberately not refreshed on access.
+///   - **Importance-weighted, not equal-weight min-max normalized**: importance (a fixed [0.2, 0.95]
+///     salience table) enters raw while recency is scaled to at most 0.5, so a memorable event outlives a
+///     merely-recent one — the intended dialogue feel.
+/// The Park et al. citation is for the recency+importance retrieval *idea*, not the exact scoring function.
 fn score(r: &MemoryRecord, now: u64) -> f32 {
     let age = now.saturating_sub(r.tick) as f32;
     r.importance + (1.0 - (age / 600.0)).max(0.0) * 0.5
@@ -276,6 +293,17 @@ impl DialogueProvider for TemplateProvider {
             (ObsEvent::Regrouped, _) => (
                 &["Forming up.", "Back on you."],
                 Emotion::Neutral,
+            ),
+            // Any role can break: the rout bark is role-agnostic and fearful — the alarm the silent-flee
+            // beat was missing.
+            (ObsEvent::Panicked, _) => (
+                &[
+                    "Falling back — I can't hold!",
+                    "Breaking off, too many!",
+                    "Get back, get back!",
+                    "I'm out — regrouping!",
+                ],
+                Emotion::Fear,
             ),
             // Any event a role has no special voice for → generic acknowledgement (still in-character
             // enough via tone). Keeps a line for every (event, role) without a giant table.

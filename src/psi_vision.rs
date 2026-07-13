@@ -18,7 +18,7 @@
 
 use bevy::prelude::*;
 
-use crate::ai::field::{Stig, UNIT_THREAT_CHANNELS};
+use crate::ai::field::{FieldId, Stig, UNIT_THREAT_CHANNELS};
 use crate::dungeon::Dungeon;
 use crate::squad::Unit;
 use crate::squad_ai::role::RoleId;
@@ -67,26 +67,51 @@ struct PsiVisionState {
 #[derive(Component)]
 struct PsiCell;
 
+/// The field GROUPS psi-vision renders, each with its own hot RGB hue so the Psionic reads the swarm's
+/// pheromonal STATE, not one undifferentiated heat: dread (what the squad fears), the muster ALARM bloom
+/// (why a pack is boiling toward a casualty — the beat that otherwise reads as scripted aggression), and
+/// the MEAT forage trails (where the swarm is drawn to feed). Order matches [`psi_group_channels`].
+const PSI_GROUP_HUES: [[f32; 3]; 3] = [
+    [0.9, 0.15, 0.9],  // dread — magenta
+    [1.0, 0.28, 0.06], // alarm — red
+    [0.15, 0.85, 0.5], // meat  — green
+];
+
+/// The stigmergy channels each render group folds (by `max`). Group 0 stays exactly the old dread set (the
+/// channels a *unit* fears — never the squad's own THREAT_GUN/NOISE din). `&[FieldId::_]` const-promotes to
+/// `'static`, and `&UNIT_THREAT_CHANNELS` coerces `&[_; 2] → &[_]`.
+fn psi_group_channels(group: usize) -> &'static [FieldId] {
+    match group {
+        0 => &UNIT_THREAT_CHANNELS,
+        1 => &[FieldId::ALARM],
+        2 => &[FieldId::MEAT],
+        _ => &[],
+    }
+}
+
 fn setup_psi_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let quad = meshes.add(Rectangle::new(crate::dungeon::TILE_SIZE, crate::dungeon::TILE_SIZE));
-    // Cold violet → hot magenta, alpha rising with intensity. Unlit so the wash reads at full strength in
-    // the dungeon's near-black corners, where the danger actually matters.
-    let bands = (0..BANDS)
-        .map(|i| {
+    // One palette per render group: each ramps a dim → hot version of the group's hue, alpha rising with
+    // intensity. Unlit so the wash reads at full strength in the dungeon's near-black corners, where the
+    // danger actually matters. Stored FLAT, indexed `group * BANDS + band`.
+    let mut bands = Vec::with_capacity(PSI_GROUP_HUES.len() * BANDS);
+    for hue in PSI_GROUP_HUES {
+        for i in 0..BANDS {
             let t = i as f32 / (BANDS - 1) as f32;
-            materials.add(StandardMaterial {
-                base_color: Color::srgba(0.35 + 0.55 * t, 0.10, 0.55 + 0.35 * t, 0.10 + 0.30 * t),
+            let k = 0.4 + 0.6 * t; // brightness ramps with intensity
+            bands.push(materials.add(StandardMaterial {
+                base_color: Color::srgba(hue[0] * k, hue[1] * k, hue[2] * k, 0.10 + 0.30 * t),
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 cull_mode: None,
                 ..default()
-            })
-        })
-        .collect();
+            }));
+        }
+    }
     commands.insert_resource(PsiVisionAssets { quad, bands });
 }
 
@@ -133,8 +158,11 @@ fn redraw_psi_vision(
         return;
     }
 
-    // Gather the lit cells: the strongest of the channels a *unit* fears, so the Psionic sees exactly the
-    // danger the squad is subject to — never the squad's own gunfire.
+    // Gather the lit cells. Each cell is coloured by its DOMINANT pheromone group (by raw magnitude): a
+    // fresh ALARM bloom (~2) out-shouts ambient dread (~1) exactly where a pack is mustering, which is the
+    // story to tell; forage MEAT (~0.5) surfaces only on real trails. Group 0 is still the danger a *unit*
+    // is subject to — never the squad's own gunfire. `band_of` maps the winner's intensity to a brightness
+    // band within its palette; the stored value is the FLAT material index (`group * BANDS + band`).
     let mut lit: Vec<(IVec2, usize)> = Vec::new();
     let mut overflowed = false;
     for y in 0..dungeon.height as i32 {
@@ -144,16 +172,26 @@ fn redraw_psi_vision(
                 continue;
             }
             let pos = dungeon.cell_center(cell);
-            let heat = UNIT_THREAT_CHANNELS
-                .iter()
-                .map(|&ch| stig.sample(ch, &dungeon, pos))
-                .fold(0.0f32, f32::max);
-            let Some(band) = band_of(heat) else { continue };
+            let mut best_mat: Option<usize> = None;
+            let mut best_heat = 0.0f32;
+            for group in 0..PSI_GROUP_HUES.len() {
+                let heat = psi_group_channels(group)
+                    .iter()
+                    .map(|&ch| stig.sample(ch, &dungeon, pos))
+                    .fold(0.0f32, f32::max);
+                if heat > best_heat
+                    && let Some(band) = band_of(heat)
+                {
+                    best_heat = heat;
+                    best_mat = Some(group * BANDS + band);
+                }
+            }
+            let Some(mat) = best_mat else { continue };
             if lit.len() == MAX_LIT_CELLS {
                 overflowed = true;
                 break;
             }
-            lit.push((cell, band));
+            lit.push((cell, mat));
         }
     }
     if overflowed && !state.warned_overflow {
@@ -165,13 +203,13 @@ fn redraw_psi_vision(
     let mut painted = 0usize;
     for (mut tf, mut material, mut vis) in &mut cells {
         match lit.get(painted) {
-            Some(&(cell, band)) => {
+            Some(&(cell, mat)) => {
                 let p = dungeon.cell_center(cell);
                 tf.translation = Vec3::new(p.x, HOVER, p.z);
                 // Lie flat: the quad is authored in XY, the floor is XZ.
                 tf.rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-                if material.0.id() != assets.bands[band].id() {
-                    material.0 = assets.bands[band].clone();
+                if material.0.id() != assets.bands[mat].id() {
+                    material.0 = assets.bands[mat].clone();
                 }
                 *vis = Visibility::Visible;
                 painted += 1;
@@ -179,12 +217,12 @@ fn redraw_psi_vision(
             None => *vis = Visibility::Hidden,
         }
     }
-    for &(cell, band) in &lit[painted..] {
+    for &(cell, mat) in &lit[painted..] {
         let p = dungeon.cell_center(cell);
         commands.spawn((
             PsiCell,
             Mesh3d(assets.quad.clone()),
-            MeshMaterial3d(assets.bands[band].clone()),
+            MeshMaterial3d(assets.bands[mat].clone()),
             Transform::from_xyz(p.x, HOVER, p.z)
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
             Visibility::Visible,

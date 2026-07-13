@@ -23,6 +23,7 @@ use crate::rng::seeded;
 use super::coevolve::{ArchiveDoc, Population};
 use super::level_eval;
 use super::level_genome::{self, authored, mutate, LevelBase, LevelGenome};
+use super::map_elites::{map_elites_loop, MapElitesResult};
 use super::qd::BehaviorDescriptor;
 
 /// Knobs for a level search. Held-in `dungeon_seeds` are the maps every genome is scored across (and must
@@ -51,13 +52,9 @@ impl Default for LevelSearchConfig {
     }
 }
 
-/// The outcome of a level search: the illuminated archive plus reject tallies.
-pub struct LevelSearchResult {
-    pub pop: Population<LevelGenome>,
-    pub evaluations: u32,
-    pub rejected_infeasible: u32,
-    pub rejected_by_criterion: u32,
-}
+/// The outcome of a level search: the illuminated archive plus reject tallies. Aliases the shared
+/// [`MapElitesResult`] at the level genome, so the level and audio searches share one result shape.
+pub type LevelSearchResult = MapElitesResult<LevelGenome>;
 
 /// Run the level search. `report(generation, &result)` is called after each generation; `search` itself
 /// writes nothing to disk (the driver in `train.rs` does). One path: an infeasible or criterion-failing
@@ -81,39 +78,24 @@ pub fn search(
         rejected_by_criterion: 0,
     };
 
-    // Seed the archive with the authored level so `sample_parent` has somewhere to start.
-    if let Some(ev) = level_eval::evaluate(&authored_g, base, manifest, &cfg.dungeon_seeds) {
-        let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
-        result.pop.insert(d, ev.fitness, authored_g.clone());
-        result.evaluations += 1;
-    } else {
-        return Err("the shipped level failed the minimal criterion on the held-in seeds".into());
-    }
-
-    for generation in 0..cfg.generations {
-        for _ in 0..cfg.batch {
-            let parent = result
-                .pop
-                .sample_parent(&mut rng)
-                .cloned()
-                .unwrap_or_else(|| authored_g.clone());
-            let child = mutate(&parent, cfg.sigma, &mut rng);
-            // Cheap feasibility gate before the (also cheap) generate-and-measure.
-            if level_genome::is_feasible(&child, base).is_err() {
-                result.rejected_infeasible += 1;
-                continue;
-            }
-            match level_eval::evaluate(&child, base, manifest, &cfg.dungeon_seeds) {
-                Some(ev) => {
-                    let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
-                    result.pop.insert(d, ev.fitness, child);
-                    result.evaluations += 1;
-                }
-                None => result.rejected_by_criterion += 1,
-            }
-        }
-        report(generation, &result);
-    }
+    // The propose → evaluate → archive loop is shared with the audio search; only mutate / feasibility /
+    // evaluate vary, supplied here as closures. Level mutation is infallible, so it is wrapped in `Ok`;
+    // the (also cheap) generate-and-measure evaluation is the criterion gate.
+    map_elites_loop(
+        &mut rng,
+        &mut result,
+        &authored_g,
+        cfg.generations,
+        cfg.batch,
+        "the shipped level failed the minimal criterion on the held-in seeds",
+        |parent, rng| Ok(mutate(parent, cfg.sigma, rng)),
+        |child| level_genome::is_feasible(child, base).is_ok(),
+        |g| {
+            level_eval::evaluate(g, base, manifest, &cfg.dungeon_seeds)
+                .map(|ev| (BehaviorDescriptor::new(ev.axes.0, ev.axes.1), ev.fitness))
+        },
+        &mut report,
+    )?;
     Ok(result)
 }
 

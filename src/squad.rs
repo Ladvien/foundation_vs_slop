@@ -431,6 +431,11 @@ fn despawn_dead_units(
     audio: Res<crate::audio_tuning::AudioTuning>,
     units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
 ) {
+    // Death-din (`NOISE_SQUAD`) deposits are collected here and sorted before queueing: the query order
+    // over dead units is not stable across App instances (async GLB load + entity-id reuse), so an
+    // unsorted batch would smear the din channel order-dependently (see `field::sort_deposits`). Every
+    // sibling deposit site already sorts (e.g. `crab_despawn_dead` by `Seed`); this one did not.
+    let mut noise: Vec<crate::ai::field::Deposit> = Vec::new();
     for (entity, hp, transform, outfit, figurine) in &units {
         if hp.current > 0.0 {
             continue;
@@ -453,13 +458,15 @@ fn despawn_dead_units(
         sfx.write(Sfx::UnitDeath(transform.translation));
         // A unit's death is the loudest squad acoustic event: its din (`NOISE_SQUAD`) marks where the
         // fight turned costly, so the swarm keeps reading the spot even after the guns fall silent.
-        deposits.0.push(crate::ai::field::Deposit {
+        noise.push(crate::ai::field::Deposit {
             pos: transform.translation,
             field: crate::ai::field::FieldId::NOISE_SQUAD,
             amount: audio.stimulus.unit_death_loudness,
         });
         commands.entity(entity).despawn();
     }
+    crate::ai::field::sort_deposits(&mut noise);
+    deposits.0.extend(noise);
 }
 
 /// Once a unit's figurine scene has spawned its mesh descendants, give it a flat outfit-colored
@@ -711,7 +718,7 @@ fn unit_movement(
 /// facing in `unit_movement`, which only turned commanded/moving units), so a stationary unit visibly
 /// pivots to aim. This is why the smiley watcher's "is a unit looking at it" gaze test (which reads body
 /// facing) matches what the player sees: body facing == aim (Rabin, "Vision Zones", GameAIPro2 Ch.4).
-fn unit_facing(
+pub(crate) fn unit_facing(
     time: Res<Time>,
     mut units: Query<(&mut Transform, &Velocity, &AimTarget, &FacingOverride), With<Unit>>,
 ) {

@@ -56,11 +56,22 @@ const GRAZE_REACH: f32 = 0.35;
 /// because eating never happens where it can be seen.
 const GRAZE_BITE_RATE: f32 = 0.15;
 
+/// Biomass `V` above which a mold mat is thick enough to smell of food (the mold read-edge threshold).
+const MAT_DENSE_V: f32 = 0.6;
+
+/// Scent a thick mold MAT sheds into [`FieldId::MEAT`] per second per unit biomass — far lower than a real
+/// cap ([`FRUIT_MEAT_RATE`]), so a fruit body always out-draws bare mat, but a dense corridor of mold still
+/// dens the swarm onto it. This is what makes the biomass field COUPLED terrain rather than decoration.
+const MAT_MEAT_RATE: f32 = 0.03;
+
 pub(super) fn build(app: &mut App) {
     app.add_systems(
         FixedUpdate,
         (
             deposit_fruit_scent.before(AiSet::Deposits),
+            // The mold read-edge: thick unwatched mats den the swarm (biomass → MEAT). Same plugin-boundary
+            // determinism firewall as `deposit_fruit_scent` — `MyceliaPlugin` is never in the harness.
+            mold_mat_scent.before(AiSet::Deposits),
             crabs_graze_fruit_bodies.after(AiSet::Think),
         ),
     );
@@ -103,6 +114,37 @@ fn deposit_fruit_scent(
     }
 }
 
+/// A thick, unwatched mold MAT smells faintly of food — the mold read-edge that turns the biomass field
+/// from a decorative one-way island into coupled forage terrain, so the swarm dens onto dense corridors.
+///
+/// Same grammar as [`deposit_fruit_scent`]: only DENSE mat (biomass ≥ [`MAT_DENSE_V`]), only on the floor,
+/// only where `!fog.visible_at` (the mold's concealment is its protection), and emitted in SORTED position
+/// order (overlapping MEAT discs accumulate with non-associative `f32 +=`, so an unstable order would make
+/// the summed gradient — and the swarm's steering — depend on storage layout). Bounded to the coarse
+/// readback grid, and inert before the first GPU readback (`dense_cells` yields nothing while empty).
+fn mold_mat_scent(
+    time: Res<Time>,
+    coarse: Res<super::fruit::MoldCoarse>,
+    fog: Res<FogGrid>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+    mut deposits: ResMut<StigDeposits>,
+) {
+    let dt = time.delta_secs();
+    let mut out: Vec<(Vec3, f32)> = coarse
+        .dense_cells(MAT_DENSE_V)
+        .filter_map(|(xz, v)| {
+            let pos = Vec3::new(xz.x, 0.0, xz.y);
+            let cell = dungeon.world_to_cell(pos);
+            (dungeon.is_floor(cell) && !fog.visible_at(cell)).then_some((pos, MAT_MEAT_RATE * v * dt))
+        })
+        .filter(|(_, a)| *a > 0.0)
+        .collect();
+    out.sort_unstable_by_key(|(p, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    for (pos, amount) in out {
+        deposits.0.push(Deposit { pos, field: FieldId::MEAT, amount });
+    }
+}
+
 /// A crab within reach of an unwatched body takes a bite, and is fed by it.
 ///
 /// [`FruitBody::consume`] runs the growth clock backwards along the same path primordium abortion uses.
@@ -119,11 +161,13 @@ fn deposit_fruit_scent(
 ///
 /// # Order independence
 ///
-/// Both loops are written so the result cannot depend on ECS iteration order, which is not stable across
-/// runs. A crab feeding at two bodies in one tick would otherwise drain `HUNGER` as `(h - a) - b`, and `f32`
-/// subtraction is not associative — the two bodies' order would perturb its next utility decision, and from
-/// there its `Transform`. So each crab's bites are **counted** (an integer, exactly order-independent) and
-/// its hunger drained once. Each body's `growth` is likewise decremented once, by a count.
+/// The result cannot depend on ECS iteration order, which is not stable across runs. Each body's `growth`
+/// is decremented once by an integer bite **count** (exactly order-independent). Each crab's hunger is
+/// drained once by the summed *food value* of its bites (`nutrition · (1 − toxicity·maturity)`); because
+/// `f32` addition is not associative, that per-crab sum is made reproducible by collecting the bites and
+/// summing them in a fixed (sorted) order — never in raw body-visit order — before the single `HUNGER`
+/// drain. A crab feeding at two bodies in one tick therefore drains the same amount whatever order the
+/// query walked the bodies, so its next utility decision (and from there its `Transform`) is stable.
 fn crabs_graze_fruit_bodies(
     time: Res<Time>,
     cfg: Res<super::MyceliaConfig>,
@@ -143,7 +187,9 @@ fn crabs_graze_fruit_bodies(
         crabs.iter().map(|(entity, tf, _)| (entity, tf.translation)).collect();
     // Accumulate *food value* per crab, not bite count: a mouthful of oyster sates; a mouthful of a
     // mature death cap is toxin, not food, and sates almost nothing (`nutrition · (1 − toxicity·maturity)`).
-    let mut sated: Vec<(Entity, f32)> = Vec::new();
+    // Each crab's bites are collected here and summed in a fixed order below, so the drained hunger does
+    // not depend on the unstable body-visit order (`f32 +` is not associative — see the doc above).
+    let mut sated: Vec<(Entity, Vec<f32>)> = Vec::new();
 
     for (body_tf, mut body) in &mut bodies {
         if body.growth <= 0.0 || fog.visible_at(body.cell) {
@@ -159,8 +205,8 @@ fn crabs_graze_fruit_bodies(
             }
             biters += 1;
             match sated.iter_mut().find(|(e, _)| e == entity) {
-                Some((_, f)) => *f += food,
-                None => sated.push((*entity, food)),
+                Some((_, foods)) => foods.push(food),
+                None => sated.push((*entity, vec![food])),
             }
         }
         if biters > 0 {
@@ -171,8 +217,12 @@ fn crabs_graze_fruit_bodies(
         }
     }
 
-    for (entity, food) in sated {
+    for (entity, mut foods) in sated {
         if let Ok((_, _, mut drives)) = crabs.get_mut(entity) {
+            // Sum each crab's bites in a fixed (ascending) order so the drained hunger is reproducible
+            // regardless of the ECS body-visit order that produced them (`f32 +` is not associative).
+            foods.sort_unstable_by(|a, b| a.total_cmp(b));
+            let food: f32 = foods.iter().sum();
             let h = drives.get(DriveId::HUNGER);
             drives.set(DriveId::HUNGER, h - HUNGER_SATE_RATE * food * dt);
         }

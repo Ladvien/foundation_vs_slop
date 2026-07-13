@@ -186,7 +186,9 @@ pub struct LightFieldWritten;
 /// Research: Greger et al., "The Irradiance Volume" (IEEE CG&A 1998) — a queryable spatial illumination
 /// field for dynamic agents in static geometry; leak-suppression here is a cheap `line_of_sight` (cf.
 /// DDGI's visibility moments, Majercik et al. JCGT 2019). A photophobic crab descending this field's
-/// gradient is Physarum minimum-risk routing over an illumination field (Nakagaki et al., PRL 2007).
+/// gradient does photophobic taxis (local descent of the illuminance gradient) — a light-avoidance
+/// direction consistent with Nakagaki et al.'s Physarum photoavoidance (PRL 2007), but not their
+/// minimum-risk routing (a global path integral between two fixed endpoints, not local gradient descent).
 #[derive(Resource)]
 pub struct LightField {
     width: usize,
@@ -335,22 +337,21 @@ impl LightField {
         self.dirty = true;
     }
 
-    /// FNV-1a-fold every **static base** cell's bit pattern into `hash` — the determinism oracle for the
-    /// furniture bake, mirroring `Stig::fold_fingerprint`. A broken bake/occlusion that shifts a crab would
-    /// change the replay hash; this pins the field itself too. Test-only.
+    /// FNV-1a-fold every **composed** cell's bit pattern into `hash` — the determinism oracle for the whole
+    /// field, mirroring `Stig::fold_fingerprint`. A broken bake/occlusion that shifts a crab would change
+    /// the replay hash; this pins the field itself too. Test-only.
     ///
-    /// **Folds `base`, not `cells`.** `cells` includes the Researcher's dynamic flashlight cone, whose beam
-    /// direction comes from the unit's `Transform.rotation` — and rotation is computed with glam
-    /// quaternion/`slerp` transcendentals that are NOT bit-identical across architectures (which is exactly
-    /// why `sim_harness::snapshot_hash` folds `translation` but never `rotation`). Folding the cone here
-    /// coupled this cross-arch golden to that arch-sensitive rotation, so an ARM-pinned value failed on x86
-    /// CI (issue #44 follow-up). The static `base` is pure scalar-`f32` (arch-stable), so the golden is a
-    /// meaningful cross-arch oracle again. The moving cone stays covered within-arch by
-    /// `deterministic_core_is_bit_identical` (run-twice) and by its own unit tests
-    /// (`flashlight_cone_lights_ahead_not_behind`, `flashlight_compose_is_deterministic`).
+    /// **Folds `cells` (base + cones), not just `base`.** `cells` includes the Researcher's dynamic
+    /// flashlight cone. This once folded `base` alone, because the cone's beam direction was derived from
+    /// the unit's slerped `Transform.rotation` — glam quaternion/`slerp` transcendentals that are NOT
+    /// bit-identical across architectures — so an ARM-pinned cone-inclusive golden failed on x86 CI (issue
+    /// #46). Now `apply_dynamic_lights` builds the cone `forward` from the unit's deterministic gameplay
+    /// state (FacingOverride/AimTarget/velocity) with arch-stable ops (subtract + `normalize_or`), never
+    /// from `rotation`, so `cells` is a cross-arch-stable oracle again — and folding it (not just `base`)
+    /// restores the moving cone to the field golden's coverage.
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
-        for &v in &self.base {
+        for &v in &self.cells {
             for &b in &v.to_bits().to_le_bytes() {
                 *hash ^= b as u64;
                 *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -400,26 +401,56 @@ fn bake_light_field(
 }
 
 /// Recompose the field every tick: `cells = base + Σ flashlight cones`. The Researcher (the "Scientist")
-/// carries the only moving light — its beam points along its facing (`transform.rotation * −Z`, the same
-/// forward `unit_facing` yaws to), so the AI's `Mode::Ward` aim (which turns the body via `FacingOverride`)
-/// is exactly what steers the beam. Photophobic crabs/mancas already flee this field's gradient, so the
-/// cone repels them with no per-creature code. Runs in [`LightFieldWritten`], chained AFTER
-/// [`bake_light_field`], in BOTH the windowed game and the headless harness (the field is hashed).
+/// carries the only moving light — its beam points at the same target `unit_facing` turns the body toward
+/// (the `Mode::Ward` aim via `FacingOverride`, else `AimTarget`, else its travel direction), so the AI's
+/// warding aim is exactly what steers the beam. Photophobic crabs/mancas already flee this field's
+/// gradient, so the cone repels them with no per-creature code. Runs in [`LightFieldWritten`], chained
+/// AFTER [`bake_light_field`] and ordered AFTER `squad::unit_facing`, in BOTH the windowed game and the
+/// headless harness (the field is hashed).
 /// **Determinism:** cones are sorted by source cell before compose (the `bake` float-sum discipline); the
-/// beam reads the unit's own deterministic `Transform`. Ref: Björk & Michelsen, FDG 2014.
+/// beam `forward` is built from the unit's deterministic gameplay state with arch-stable ops, never from
+/// the slerped `Transform.rotation` (see [`LightField::fold_fingerprint`]). Ref: Björk & Michelsen, FDG 2014.
 fn apply_dynamic_lights(
     mut field: ResMut<LightField>,
     dungeon: Res<Dungeon>,
     config: Res<GameConfig>,
-    researchers: Query<(&Transform, &crate::squad_ai::role::RoleId), With<crate::squad::Unit>>,
+    researchers: Query<
+        (
+            &Transform,
+            &crate::squad::Velocity,
+            &crate::squad::AimTarget,
+            &crate::squad::FacingOverride,
+            &crate::squad_ai::role::RoleId,
+        ),
+        With<crate::squad::Unit>,
+    >,
 ) {
     let c = &config.lighting;
     let mut cones: Vec<FlashlightCone> = researchers
         .iter()
-        .filter(|(_, role)| **role == crate::squad_ai::role::RoleId::Researcher)
-        .map(|(t, _)| {
-            let fwd = t.rotation * Vec3::NEG_Z;
-            let forward = Vec2::new(fwd.x, fwd.z).normalize_or(Vec2::new(0.0, -1.0));
+        .filter(|(.., role)| **role == crate::squad_ai::role::RoleId::Researcher)
+        .map(|(t, velocity, aim, facing_override, _)| {
+            // Beam direction = the SAME target `squad::unit_facing` turns the body toward, but built here
+            // with arch-stable ops (subtract + `normalize_or` = mul/add/sqrt/div) instead of reading the
+            // rendered `Transform.rotation`. That rotation is accumulated through `looking_at`/`slerp`
+            // (acos/sin), which are NOT bit-identical across architectures — reading it leaked that
+            // divergence into the hashed positions of the photophobic crabs/mancae this cone steers (the
+            // same hazard #46 fixed for the field oracle, still live for the actor hash). The visible
+            // `SpotLight` is a child of the unit and still follows the smooth slerped rotation, so only this
+            // CPU gameplay cone snaps to the target. Precedence mirrors `unit_facing`: FacingOverride (the
+            // warding aim) → AimTarget → travel direction → world -Z.
+            let target = facing_override
+                .0
+                .or(aim.0)
+                .map(|p| Vec3::new(p.x, t.translation.y, p.z))
+                .or_else(|| {
+                    let v = Vec3::new(velocity.0.x, 0.0, velocity.0.y);
+                    (v.length_squared() > 1.0e-6).then_some(t.translation + v)
+                });
+            let forward = target
+                .map(|tg| Vec2::new(tg.x - t.translation.x, tg.z - t.translation.z))
+                .unwrap_or(Vec2::new(0.0, -1.0))
+                .normalize_or(Vec2::new(0.0, -1.0));
             FlashlightCone {
                 source: dungeon.world_to_cell(t.translation),
                 forward,
@@ -450,7 +481,14 @@ impl Plugin for LightFieldPlugin {
         app.insert_resource(field).add_systems(
             FixedUpdate,
             // Static base first, then the moving cones layered on top — one field, one query interface.
-            (bake_light_field, apply_dynamic_lights).chain().in_set(LightFieldWritten),
+            // Ordered AFTER `squad::unit_facing` so the cone reads settled, current-tick unit facing/position:
+            // both `apply_dynamic_lights` (shared `&Transform`) and `unit_facing` (`&mut Transform`) touch the
+            // `Unit` archetype, and without this the mut-vs-shared conflict was resolved by an unspecified
+            // Bevy tie-break — leaving the actor golden implicitly pinned to schedule insertion order (D2).
+            (bake_light_field, apply_dynamic_lights)
+                .chain()
+                .in_set(LightFieldWritten)
+                .after(crate::squad::unit_facing),
         );
     }
 }
@@ -484,8 +522,10 @@ struct FixtureLight {
 // Light-response markers — the composable toolkit. Any creature can carry one to gain emergent behaviour
 // around light and its absence; the generic `light_push` (below) reads the shared LightField gradient.
 // The photophobic/-philic duality is the FleeGradient/FollowGradient pair from `ai::field`, for light.
-// Research: crustacean noxious-stimulus avoidance (Cano et al. 2011); Physarum photoavoidance as
-// minimum-risk routing over an illumination field (Nakagaki et al., PRL 2007).
+// Research: crustacean noxious-stimulus avoidance (Cano et al. 2011); the light-avoidance direction is
+// photophobic/photophilic taxis (down/up the illuminance gradient), consistent with Nakagaki et al.'s
+// Physarum photoavoidance (PRL 2007) — but NOT their minimum-risk routing (a global path integral over
+// two fixed endpoints, which this local gradient step is not).
 // ---------------------------------------------------------------------------------------------------
 
 /// Avoids light: the creature steers **down** the [`LightField`] gradient (toward the dark), strength

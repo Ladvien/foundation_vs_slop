@@ -3,9 +3,11 @@
 //! `(Observation, Action)` space as the hand-authored brain (Bergdahl et al. 2021). [`TrajectoryLog`]
 //! records `(obs, action, reward)` from deterministic-core rollouts (repeatable, so a trainer can
 //! replay them), and [`novelty_reward`] is the curiosity signal that rewards visiting fresh game state
-//! — the driver of exploratory, "interesting" behaviour (Pathak et al., "Curiosity-Driven Exploration
-//! by Self-Supervised Prediction", 2017; Gordillo et al., "Improving Playtesting Coverage via
-//! Curiosity Driven RL", 2021).
+//! — the driver of exploratory, "interesting" behaviour. It is a count-based state-visitation bonus
+//! (Bellemare et al., "Unifying Count-Based Exploration and Intrinsic Motivation", 2016; Gordillo et al.,
+//! "Improving Playtesting Coverage via Curiosity Driven RL", 2021), NOT the forward-model prediction
+//! error of Pathak et al. 2017 — that paper's curiosity is the contrasting approach, and it explicitly
+//! classifies tabular visitation counts as a different method it argues against.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -60,8 +62,8 @@ impl SquadPolicy for RemotePolicy {
 }
 
 /// Novelty (curiosity) reward for visiting a cell that has been seen `visits` times before: high for
-/// the first visit, decaying as the cell becomes familiar (Pathak et al. 2017; a count-based
-/// approximation à la Bellemare et al. 2016). `visits = 0` → reward 1.0.
+/// the first visit, decaying as the cell becomes familiar — a count-based state-visitation bonus
+/// (Bellemare et al. 2016; Gordillo et al. 2021). `visits = 0` → reward 1.0.
 pub fn novelty_reward(visits: u32) -> f32 {
     1.0 / ((visits as f32) + 1.0).sqrt()
 }

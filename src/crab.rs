@@ -990,8 +990,10 @@ fn crab_locomotion(
         };
 
         // Light response: a photophobic (or photophilic) crab drifts down (or up) the LightField gradient
-        // on top of whatever its mode is doing — light as a constant environmental force (Physarum
-        // minimum-risk routing over an illumination field, Nakagaki et al. 2007). Skipped while latching:
+        // on top of whatever its mode is doing — light as a constant environmental force. This is local
+        // photophobic/photophilic taxis (down/up the illuminance gradient); the avoidance direction is
+        // consistent with Nakagaki et al. 2007's Physarum result, not their minimum-risk routing (a global
+        // path integral between fixed endpoints, which this local step has none of). Skipped while latching:
         // a piranha crab rides a unit's body, off the floor light field. Deterministic (field + gradient +
         // config gain) on the pinned FixedUpdate path, so it folds into the replay hash like any crab
         // motion. `clamp_to_patch` keeps the nudge on the current surface patch (gate crossings stay with
@@ -1683,56 +1685,34 @@ fn steer_surface(
     speed: f32,
     sep: Vec3,
     dt: f32,
-    t: f32,
+    _t: f32,
 ) -> bool {
-    let p = graph.patch(motion.patch);
-
-    // Final approach: if the homing point sits on THIS patch's cell, walk straight to it (no gate).
+    // Final approach: if the homing point sits on THIS patch's cell, walk straight to it (no gate). Some
+    // ⇒ the shared core skips the neighbour-gate scan and steers straight at this point (the on-patch
+    // final approach onto / hold on a gib).
     let on_patch_home =
         home.filter(|h| graph.floor_patch_cell(dungeon.world_to_cell(*h)) == Some(motion.patch));
 
-    // Otherwise pick the graph neighbour whose gate best matches the desired travel direction.
-    let desired_t = project_tangent(desired, p.normal).normalize_or_zero();
-    let mut best: Option<(u32, Vec3)> = None;
-    let mut best_dot = 0.0f32;
-    if on_patch_home.is_none() && desired_t.length_squared() > 1.0e-6 {
-        for (to, gate) in graph.neighbors(motion.patch) {
-            let g_dir = project_tangent(gate - motion.pos, p.normal).normalize_or_zero();
-            let d = g_dir.dot(desired_t);
-            if d > best_dot {
-                best_dot = d;
-                best = Some((to, gate));
-            }
-        }
-    }
+    // Reynolds separation, projected onto the current surface and scaled here (the core adds it as-is, so
+    // the `project_tangent(sep, n) * CRAB_SEP_STRENGTH` arithmetic stays bit-identical to the old copy).
+    let n = graph.patch(motion.patch).normal;
+    let push = project_tangent(sep, n) * CRAB_SEP_STRENGTH;
 
-    // Steer toward the homing point, else the chosen gate, else drift in the desired direction (a
-    // dead-end with no aligned neighbour → the crab slides along the wall, clamped to its patch).
-    let steer_to = on_patch_home
-        .or(best.map(|(_, g)| g))
-        .unwrap_or(motion.pos + desired_t);
-    let tangent = project_tangent(steer_to - motion.pos, p.normal).normalize_or_zero();
-    let move_vec = tangent * speed + project_tangent(sep, p.normal) * CRAB_SEP_STRENGTH;
-    motion.pos += move_vec * dt;
-    motion.pos = clamp_to_patch(motion.pos, p);
-
-    // Commit a patch transfer only on physically reaching the chosen gate — never across a wall.
-    if let Some((to, gate)) = best {
-        if motion.pos.distance(gate) < TRANSFER_RADIUS {
-            motion.patch = to;
-            motion.pos = clamp_to_patch(gate, graph.patch(to));
-        }
-    }
-
-    // Ease onto the (possibly new) surface and turn toward travel.
-    let np = graph.patch(motion.patch);
-    motion.normal = motion.normal.lerp(np.normal, t).normalize_or(np.normal);
-    let moved = move_vec.length_squared() > 1.0e-6;
-    if moved {
-        let h = project_tangent(move_vec, motion.normal).normalize_or(motion.heading);
-        motion.heading = motion.heading.lerp(h, t).normalize_or(motion.heading);
-    }
-    moved
+    // `_t` is ignored: the shared core recomputes `(NORMAL_EASE * dt).min(1.0)` internally (same formula,
+    // same `dt`), so the eased normal/heading are bit-identical. Kept in the signature so the 6 call sites
+    // and the intermediate steer helpers (which also use `t` for their own lerps) stay untouched.
+    crate::surface_nav::steer_surface_core(
+        &mut motion.pos,
+        &mut motion.patch,
+        &mut motion.normal,
+        &mut motion.heading,
+        graph,
+        desired,
+        push,
+        speed,
+        dt,
+        on_patch_home,
+    )
 }
 
 /// Foraging locomotion: crawl toward meat along walkable floor. Long-range navigation follows the MEAT

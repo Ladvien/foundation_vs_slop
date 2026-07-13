@@ -94,7 +94,7 @@ fn main() {
 /// floor tiles (metres), of which a dungeon has thousands, while a squad on a 30 s tour walks a few
 /// hundred at most.
 fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
-    use foundation_vs_slop::squad_ai::coevolve::{brains_of, squad_descriptor, swarm_descriptor, SquadGenome, SwarmGenome};
+    use foundation_vs_slop::squad_ai::coevolve::{brains_of, squad_descriptor, swarm_descriptor, world_descriptor, SquadGenome, SwarmGenome};
     use foundation_vs_slop::squad_ai::evaluate::rollout;
     use foundation_vs_slop::squad_ai::surprise::{minimal_criterion, witnessed_fraction};
 
@@ -119,12 +119,17 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
         println!("  agency         : {} duty decisions | {} / {ticks} ticks under player order ({:.0}% AI-driven)",
             o.squad_duty_decisions, o.ordered_ticks,
             100.0 * (1.0 - o.ordered_ticks as f32 / ticks as f32));
-        println!("  swarm          : {} killed, {} alive", o.crabs_killed, o.crabs_alive);
+        println!("  swarm          : {} killed, {} alive (peak {})", o.crabs_killed, o.crabs_alive, o.crab_peak);
+        println!("  parasite       : {} removed, {} alive (peak {})", o.manca_deaths, o.manca_alive, o.manca_peak);
+        println!("  boss           : {} removed, {} alive", o.boss_deaths, o.boss_alive);
+        println!("  vitality       : {} total deaths, {} total lives, {} peak pop  <- calibrate DEATHS/LIVES_FULLSCALE from these",
+            o.total_deaths(), o.total_lives(), o.peak_population());
         println!("  coverage       : {} / {} cells = {:.2}%", o.cells_covered, o.reachable_cells, 100.0 * coverage);
         println!("  liveness       : {} violation(s)", o.liveness_violations);
         println!("  field          : peak {:.2}, flatness {:.1}% (field-sanity gate calibration)", o.peak_field, 100.0 * o.field_flatness);
         println!("  squad descr    : aggression {:.3}, exploration {:.3}", squad_descriptor(&r.trace, o).aggression, squad_descriptor(&r.trace, o).exploration);
         println!("  swarm descr    : aggression {:.3}, persistence {:.3}", swarm_descriptor(&r.trace).aggression, swarm_descriptor(&r.trace).exploration);
+        println!("  world descr    : deaths {:.3}, lives {:.3} (normalised deaths×lives axes)", world_descriptor(o).aggression, world_descriptor(o).exploration);
         // What did the brain actually choose? The agency clause must be defined from this, not guessed.
         {
             use foundation_vs_slop::squad_ai::surprise::ActorKind;
@@ -233,8 +238,23 @@ fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), Strin
             r.rejected_infeasible,
             r.rejected_by_criterion
         );
+        // Checkpoint every generation. `evolve3` otherwise commits the archives only at the very end, so
+        // any interruption of the multi-hour run (e.g. macOS jetsam under memory pressure) discards all of
+        // it. Writing each generation keeps the latest completed generation always on disk.
+        if let Err(e) = checkpoint_archives(&templates, r) {
+            eprintln!("  (checkpoint write failed: {e})");
+        }
     })?;
     Ok((templates, result))
+}
+
+/// Commit all three co-evolution archives to `assets/config/`. Called every generation from
+/// `run_coevolution` (so an interrupted run keeps its latest archives) and again at the end.
+fn checkpoint_archives(templates: &Templates, r: &SearchResult) -> Result<(), String> {
+    write_ron(SQUAD_ARCHIVE_PATH, &squad_archive_doc(templates, &r.squad)?)?;
+    write_ron(SWARM_ARCHIVE_PATH, &swarm_archive_doc(templates, &r.swarm)?)?;
+    write_ron(WORLD_ARCHIVE_PATH, &world_archive_doc(&r.world)?)?;
+    Ok(())
 }
 
 /// The reward-hacking guard is only a guard if someone reads the diff.

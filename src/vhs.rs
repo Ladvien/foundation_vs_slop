@@ -90,7 +90,15 @@ impl Plugin for VhsPlugin {
         let config = app.world().resource::<crate::config::GameConfig>().vhs.clone();
         app.add_plugins(FullscreenMaterialPlugin::<VhsSettings>::default())
             .insert_resource(config)
-            .add_systems(Update, (ensure_camera_settings, drive_fade));
+            .init_resource::<AnomalyGlitch>()
+            .add_systems(
+                Update,
+                (
+                    ensure_camera_settings,
+                    drive_anomaly_glitch,
+                    drive_fade.after(drive_anomaly_glitch),
+                ),
+            );
     }
 }
 
@@ -127,7 +135,12 @@ fn envelope(x: f32, config: &VhsConfig) -> f32 {
 
 /// Each frame: compute the current spike envelope (periodic cycle) and push it — plus the constant
 /// `base_level` texture floor and the effect strengths — into every camera's `VhsSettings`.
-fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, mut cameras: Query<&mut VhsSettings>) {
+fn drive_fade(
+    time: Res<Time>,
+    config: Res<VhsConfig>,
+    glitch: Res<AnomalyGlitch>,
+    mut cameras: Query<&mut VhsSettings>,
+) {
     let t = time.elapsed_secs();
     let span = config.fade_in + config.hold + config.fade_out;
 
@@ -137,7 +150,11 @@ fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, mut cameras: Query<&mut V
 
     for mut s in &mut cameras {
         s.base = config.base_level;
-        s.spike = spike;
+        // The picture corrupts on a REAL anomaly manifesting (the watcher unleashing, a chestburster
+        // erupting), folded on top of the ambient periodic metronome — a found-footage tell for anomalous
+        // PRESENCE rather than a clock. `.max` so the stronger of {periodic, anomaly} wins; never a second
+        // code path.
+        s.spike = spike.max(glitch.0);
         s.time = t;
         s.chroma = config.chroma;
         s.wave = config.wave;
@@ -145,5 +162,36 @@ fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, mut cameras: Query<&mut V
         s.noise_amt = config.noise_amt;
         s.bloom = config.bloom;
     }
+}
+
+/// The anomaly-driven glitch intensity: rises to [`ANOMALY_GLITCH_PEAK`] while a real anomaly is
+/// manifesting (the watcher unleashing, or a chestburster erupting) and decays after. Folded into the VHS
+/// `spike` by [`drive_fade`] so anomalous PRESENCE corrupts the picture — the found-footage grammar
+/// SCP-9191's slop trades on — instead of the old fixed 45 s metronome that correlated with nothing.
+#[derive(Resource, Default)]
+pub struct AnomalyGlitch(pub f32);
+
+/// Corruption target while an anomaly manifests (below 1.0 so the shader peak still reads as a deliberate
+/// spike, not a permanent wash).
+const ANOMALY_GLITCH_PEAK: f32 = 0.9;
+/// Per-second decay once the anomaly settles (~0.6 s fade-out).
+const ANOMALY_GLITCH_DECAY: f32 = 1.5;
+
+/// Drive [`AnomalyGlitch`] from live anomaly state — windowed-only, like the rest of VHS (never runs in the
+/// deterministic core). Instant rise on manifestation, smooth decay after, so the corruption tracks the
+/// anomaly and tails off rather than snapping on/off.
+fn drive_anomaly_glitch(
+    time: Res<Time>,
+    mut glitch: ResMut<AnomalyGlitch>,
+    watchers: Query<&crate::enemy::SmileyState>,
+    infested: Query<&crate::parasite::Infestation>,
+) {
+    let manifesting =
+        watchers.iter().any(|s| s.is_angry()) || infested.iter().any(|i| i.is_erupting());
+    glitch.0 = if manifesting {
+        ANOMALY_GLITCH_PEAK
+    } else {
+        (glitch.0 - ANOMALY_GLITCH_DECAY * time.delta_secs()).max(0.0)
+    };
 }
 

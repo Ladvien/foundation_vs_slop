@@ -25,18 +25,18 @@
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use super::genome::{flat_mutate, flat_range_check, push_channel};
 use crate::ai::tuning::{AiTuning, ChannelTuning, FieldsTuning, RallyTuning};
 use crate::config::WorldConfig;
-use crate::sim::{BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, SimTuning};
+use crate::sim::{
+    BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, SimTuning,
+};
 
 /// Number of knobs: 24 field-propagation (`AiTuning`: 7 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 37 simulation-dynamics (`SimTuning`: fear 3, deposit 9, combat 9, breeding 9, boss 7).
-pub const N: usize = 61;
-
-/// Minimum mutation scale, so a knob authored at (or near) `0.0` — e.g. `diffuse` — can still move.
-/// Smaller than the brain genome's `0.25`: world knobs span a wider range of magnitudes and a large floor
-/// would swamp the small ones (fear gains ~0.08, exponents ~1.5).
-const SCALE_FLOOR: f32 = 0.05;
+/// + rally × 3) + 52 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 9, boss 7,
+/// parasite 14). The SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials belong in
+/// the search that shapes the ecosystem's deaths and lives.
+pub const N: usize = 76;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -63,6 +63,7 @@ static BOUNDS: [(f32, f32); N] = [
     (0.05, 3.0),  // crab_menace_rate
     (0.05, 3.0),  // meat_rate
     (0.05, 3.0),  // anomaly_aura_rate
+    (0.05, 3.0),  // manca_dread_rate
     (0.2, 8.0),   // alarm_crab
     (0.2, 12.0),  // alarm_nest
     (0.2, 12.0),  // rally_mark
@@ -94,17 +95,26 @@ static BOUNDS: [(f32, f32); N] = [
     (0.5, 5.0),      // cull_radius
     (1.0, 30.0),     // cull_max (usize)
     (0.5, 10.0),     // cull_cooldown
+    // ── SimTuning::parasite (SCP-150 tongue-eating louse) ──
+    (1.0, 12.0),   // initial_count (usize) — free mancae seeded at level start
+    (4.0, 40.0),   // manca_count_max (usize) — firm cap so burst→brood→infest can't explode
+    (5.0, 60.0),   // manca_hp
+    (0.5, 6.0),    // crawl_speed
+    (0.5, 6.0),    // climb_speed
+    (0.5, 5.0),    // leap_len
+    (0.5, 8.0),    // leap_cooldown
+    (2.0, 40.0),   // embed_damage
+    (5.0, 180.0),  // gestation_seconds — floored well below the 120 s episode so a burst can complete
+    (1.0, 6.0),    // brood_min (u32)
+    (1.0, 8.0),    // brood_max (u32) — decode clamps >= brood_min (validate_tuning requires it)
+    (0.0, 1.0),    // manip_cohesion_drop (probability)
+    (0.0, 1.0),    // manip_curiosity_gain (probability)
+    (0.1, 10.0),   // manip_dark_gain (validate_tuning requires > 0)
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldGenome(pub Vec<f32>);
-
-fn push_channel(v: &mut Vec<f32>, c: &ChannelTuning) {
-    v.push(c.evaporate);
-    v.push(c.diffuse);
-    v.push(c.deposit_radius);
-}
 
 /// Flatten a `(AiTuning, SimTuning)` into the fixed-order knob vector `BOUNDS` and `decode` agree on.
 pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
@@ -130,6 +140,7 @@ pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
     v.push(sim.deposit.crab_menace_rate);
     v.push(sim.deposit.meat_rate);
     v.push(sim.deposit.anomaly_aura_rate);
+    v.push(sim.deposit.manca_dread_rate);
     v.push(sim.deposit.alarm_crab);
     v.push(sim.deposit.alarm_nest);
     v.push(sim.deposit.rally_mark);
@@ -158,6 +169,20 @@ pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
     v.push(sim.boss.cull_radius);
     v.push(sim.boss.cull_max as f32);
     v.push(sim.boss.cull_cooldown);
+    v.push(sim.parasite.initial_count as f32);
+    v.push(sim.parasite.manca_count_max as f32);
+    v.push(sim.parasite.manca_hp);
+    v.push(sim.parasite.crawl_speed);
+    v.push(sim.parasite.climb_speed);
+    v.push(sim.parasite.leap_len);
+    v.push(sim.parasite.leap_cooldown);
+    v.push(sim.parasite.embed_damage);
+    v.push(sim.parasite.gestation_seconds);
+    v.push(sim.parasite.brood_min as f32);
+    v.push(sim.parasite.brood_max as f32);
+    v.push(sim.parasite.manip_cohesion_drop);
+    v.push(sim.parasite.manip_curiosity_gain);
+    v.push(sim.parasite.manip_dark_gain);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     WorldGenome(v)
 }
@@ -206,6 +231,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             crab_menace_rate: f!(),
             meat_rate: f!(),
             anomaly_aura_rate: f!(),
+            manca_dread_rate: f!(),
             alarm_crab: f!(),
             alarm_nest: f!(),
             rally_mark: f!(),
@@ -241,9 +267,43 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             cull_max: to_usize(f!()),
             cull_cooldown: f!(),
         },
-        // The SCP-150 parasite knobs are not part of the evolved genome yet — the world search leaves them
-        // at their shipped defaults (so encode/decode round-trips at the same genome length `N`).
-        parasite: SimTuning::default().parasite,
+        // SCP-150 parasite. Read into locals first so `brood_max` can be clamped to `>= brood_min`:
+        // the two knobs mutate independently within their bounds, but `sim::validate_tuning` (which
+        // `is_feasible` calls) requires `brood_min <= brood_max`, so the clamp is what keeps every mutated
+        // child feasible *by construction* — the same no-rejection-loop guarantee the rest of the genome
+        // relies on. The macro's left-to-right `f!()` reads still bind in `encode` order.
+        parasite: {
+            let initial_count = to_usize(f!());
+            let manca_count_max = to_usize(f!());
+            let manca_hp = f!();
+            let crawl_speed = f!();
+            let climb_speed = f!();
+            let leap_len = f!();
+            let leap_cooldown = f!();
+            let embed_damage = f!();
+            let gestation_seconds = f!();
+            let brood_min = to_usize(f!()) as u32;
+            let brood_max = (to_usize(f!()) as u32).max(brood_min);
+            let manip_cohesion_drop = f!();
+            let manip_curiosity_gain = f!();
+            let manip_dark_gain = f!();
+            ParasiteTuning {
+                initial_count,
+                manca_count_max,
+                manca_hp,
+                crawl_speed,
+                climb_speed,
+                leap_len,
+                leap_cooldown,
+                embed_damage,
+                gestation_seconds,
+                brood_min,
+                brood_max,
+                manip_cohesion_drop,
+                manip_curiosity_gain,
+                manip_dark_gain,
+            }
+        },
     };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
     Ok(WorldConfig { ai, sim })
@@ -263,15 +323,7 @@ pub fn mutate(parent: &WorldGenome, sigma: f32, rng: &mut ChaCha8Rng) -> Result<
         return Err(format!("world genome has {} knobs, expected {N}", parent.0.len()));
     }
     let authored = authored();
-    let mut out = Vec::with_capacity(N);
-    for i in 0..N {
-        let origin = authored.0[i];
-        let scale = origin.abs() + SCALE_FLOOR;
-        let moved = parent.0[i] + super::genome::gaussian(rng) * sigma * scale;
-        let (lo, hi) = BOUNDS[i];
-        out.push(moved.clamp(lo, hi));
-    }
-    Ok(WorldGenome(out))
+    Ok(WorldGenome(flat_mutate(&parent.0, &authored.0, &BOUNDS, sigma, rng)))
 }
 
 /// The genome-level feasibility gate: right length, every knob finite and within [`BOUNDS`], and the
@@ -281,12 +333,7 @@ pub fn is_feasible(g: &WorldGenome) -> Result<(), String> {
     if g.0.len() != N {
         return Err(format!("world genome has {} knobs, expected {N}", g.0.len()));
     }
-    for (i, &x) in g.0.iter().enumerate() {
-        let (lo, hi) = BOUNDS[i];
-        if !(x.is_finite() && (lo..=hi).contains(&x)) {
-            return Err(format!("world genome knob {i} = {x} is out of bounds [{lo}, {hi}]"));
-        }
-    }
+    flat_range_check(&g.0, &BOUNDS, "world")?;
     let wc = decode(g)?;
     crate::sim::validate_tuning(&wc.sim)
 }

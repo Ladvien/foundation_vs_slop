@@ -201,6 +201,18 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             .disable::<bevy::winit::WinitPlugin>(),
     );
 
+    // `RenderPlugin { backends: None }` registers every render type and its per-component
+    // `SyncComponentPlugin<C>` `on_remove` hooks, but the render sub-app that would add `SyncWorldPlugin`
+    // (and its `PendingSyncEntity` resource) is device-gated — skipped with no backend. Despawning a
+    // render-synced entity then fires that hook against a missing resource and panics
+    // (`PendingSyncEntity does not exist`). It surfaced under the offline search, where a dead unit's
+    // despawn (`squad::despawn_dead_units`) drops the unit's figurine/flashlight-model mesh child; the
+    // pinned replay seed never kills a unit, so it stayed latent since the flashlight/figurine work.
+    // Add the main-world sync bookkeeping ourselves — it needs no device (just `PendingSyncEntity` + the
+    // Add/Remove observers), so headless despawn is safe. The queue is never drained (no render world) but
+    // a rollout is bounded, so it stays small and nothing reads it.
+    app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+
     // Physics (gib chunks only) — same scoping as `lib::run`. Gated: the Avian solver is the one part of
     // the sim that is not bit-reproducible, so exact same-seed replay runs with it OFF.
     if cfg.physics {

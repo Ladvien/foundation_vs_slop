@@ -338,7 +338,6 @@
             crab_menace_rate: 0.5,    // THREAT_CRAB (dread) per crab/s
             meat_rate: 0.5,           // MEAT per carrion source/s
             anomaly_aura_rate: 0.4,   // THREAT_ANOMALY aura per second (living watcher)
-            manca_dread_rate: 0.1,    // THREAT_ANOMALY per ROUSED SCP-150 manca/s (dormant mancae emit nothing)
             alarm_crab: 2.0,          // ALARM flooded around a wounded crab
             alarm_nest: 4.0,          // ALARM flooded around a wounded nest
             rally_mark: 4.0,          // rally-vector strength a scout lays toward live prey
@@ -1264,15 +1263,6 @@
         mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)
         flicker_hum_depth: 0.06,               // cosmetic fluorescent shimmer depth (fraction)
         flicker_fail_ratio: 0.12,              // ~1 in 8 tubes is a failing/strobing Backrooms fluorescent
-        // The Researcher's flashlight — a moving directional emitter in the LightField (repels photophobes)
-        flashlight_intensity: 3.0,             // gameplay peak illuminance at the beam origin (>fixtures, so it drives crabs off)
-        flashlight_range: 8.0,                 // beam reach in dungeon cells (wall-occluded like a fixture)
-        flashlight_cone_cos: 0.82,             // cos(~35deg) half-angle — a tight torch wedge
-        flashlight_edge_softness: 0.15,        // soft rim: cone fades 0->1 over this cosine width
-        flashlight_spot_intensity: 200000.0,   // cosmetic real SpotLight lumens (windowed-only glow)
-        flashlight_spot_range: 12.0,           // cosmetic beam reach (metres)
-        flashlight_spot_color: (1.0, 0.95, 0.8), // warm torch beam
-        flashlight_spot_outer_angle: 0.6,      // cosmetic beam half-angle (radians, ~34deg)
     ),
     // Acoustic-stimulus + audio tuning (src/audio_tuning.rs). Makes sound a perception stimulus:
     // gameplay sounds deposit into the acoustic stigmergy channels (ai::field::NOISE_*) and agents
@@ -1290,12 +1280,9 @@
             unit_death_loudness: 0.9,
         ),
         perception: (
-            // Sound-as-perception ON (FIX 2): din-response gains ship positive so a firefight shapes the
-            // battlefield. crab_draw_to_din > crab_fear_of_din ⇒ the swarm converges on gunfire. Must stay
-            // byte-identical to AudioTuning::default() (audio_default_equals_shipped_config guards it).
-            crab_fear_of_din: 0.15,
-            unit_fear_of_din: 0.15,
-            crab_draw_to_din: 0.3,
+            crab_fear_of_din: 0.0,
+            unit_fear_of_din: 0.0,
+            crab_draw_to_din: 0.0,
             investigate_threshold: 0.5,
         ),
     ),

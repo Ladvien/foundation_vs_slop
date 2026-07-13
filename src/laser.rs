@@ -12,7 +12,7 @@
 
 use bevy::prelude::*;
 
-use crate::ai::field::{Deposit, FieldId, StigDeposits};
+use crate::ai::field::{sort_deposits, Deposit, FieldId, StigDeposits};
 use crate::audio_tuning::AudioTuning;
 use crate::audio::Sfx;
 use crate::crab::CrabAttached;
@@ -169,6 +169,10 @@ fn fire_laser(
     // Auto-aim: each unit locks the nearest enemy it can currently SEE (fog-hidden enemies aren't
     // targeted — RTS partial observability) and fires from its muzzle toward it, scattered by a cone
     // that widens with the unit's speed. A unit with no visible enemy holds fire — one path.
+    // Fire-din (`NOISE_SQUAD`) deposits are collected and sorted before queueing — the shooter query
+    // order is not stable across App instances, and `drain_deposits` sums the din channel with a
+    // non-associative `f32 +=` (see `field::sort_deposits`).
+    let mut noise: Vec<Deposit> = Vec::new();
     for (unit_entity, unit, velocity, mut aim_target, role) in &mut shooters {
         // The Researcher (the "Scientist") carries a flashlight, not a blaster — it never fires. Its beam
         // repels light-averse creatures through the `LightField` instead of dealing damage (one path: no
@@ -258,12 +262,14 @@ fn fire_laser(
         // …and its audible din (`NOISE_SQUAD`) at the same spot — the *sound* of the shot, which the
         // swarm reads as a stimulus (fear and/or investigate). Distinct channel from THREAT_GUN: it
         // propagates on the `audio:` slice's tuning and carries an evolvable perception sign.
-        deposits.0.push(Deposit {
+        noise.push(Deposit {
             pos: unit.translation,
             field: FieldId::NOISE_SQUAD,
             amount: audio.stimulus.fire_loudness,
         });
     }
+    sort_deposits(&mut noise);
+    deposits.0.extend(noise);
 }
 
 fn update_lasers(
@@ -275,11 +281,12 @@ fn update_lasers(
     mut sfx: MessageWriter<Sfx>,
     // Every hostile's hit volume (enemy capsule / crab & nest sphere) for the CPU bolt cast.
     // `With<Hostile>` keeps this provably disjoint from the `Without<Hostile>` `lasers` query below
-    // (both touch `Transform`), which Bevy's borrow checker requires. `Option<&SmileyState>` marks the
-    // boss: a NON-angry watcher is intangible to bolts (they pass through the neutral entity) so a stray
-    // shot aimed at a crab can't provoke it — the "leave it alone" rule is enforced at the DAMAGE layer,
-    // not just target selection (stimulus gating; GameAIPro2 Ch.27).
-    targets: Query<(Entity, &Transform, &LaserTarget, Option<&SmileyState>), With<Hostile>>,
+    // (both touch `Transform`), which Bevy's borrow checker requires. The Watching watcher is NO LONGER
+    // intangible: a stray/missed squad bolt that strikes it hits + PROVOKES it (recording the shooter as
+    // its `LastAttacker` below), so an errant shot landed while the player isn't watching it wakes it and
+    // the instakill takes the shooter. `fire_laser` still never AIMS at a Watching watcher, so any hit on
+    // it is an accident the player pays for (watch it, or a missed shot gets someone killed).
+    targets: Query<(Entity, &Transform, &LaserTarget), With<Hostile>>,
     // The boss's `LastAttacker` working-memory fact — a bolt that hits it records its real shooter here so
     // `enemy::smiley_zap` retaliates against the actual attacker, never a bystander (Orkin 2005).
     mut attackers: Query<&mut LastAttacker>,
@@ -298,6 +305,10 @@ fn update_lasers(
 ) {
     let dt = time.delta_secs();
 
+    // Impact-din (`NOISE_SQUAD`) deposits — flesh and wall strikes — collected and sorted before queueing:
+    // the bolt query order is not stable across App instances, and the din channel accumulates with a
+    // non-associative `f32 +=` (see `field::sort_deposits`).
+    let mut noise: Vec<Deposit> = Vec::new();
     for (entity, mut transform, mut laser) in &mut lasers {
         let prev = transform.translation;
         transform.translation += laser.velocity * dt;
@@ -307,11 +318,7 @@ fn update_lasers(
         // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
         // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
         let mut best: Option<(Entity, f32, Vec3)> = None;
-        for (te, tt, tv, smiley) in &targets {
-            // A neutral (non-angry) watcher is intangible — bolts pass through it (no damage, no provoke).
-            if smiley.is_some_and(|s| !s.is_angry()) {
-                continue;
-            }
+        for (te, tt, tv) in &targets {
             if let Some((s, point)) =
                 segment_capsule_hit(prev, transform.translation, tt.translation, tv.half_height, tv.radius)
             {
@@ -371,7 +378,7 @@ fn update_lasers(
                     amount: sim.deposit.threat_per_shot,
                 });
                 // …and the wet impact's audible din (`NOISE_SQUAD`) at the strike point.
-                deposits.0.push(Deposit {
+                noise.push(Deposit {
                     pos: hit_point,
                     field: FieldId::NOISE_SQUAD,
                     amount: audio.stimulus.impact_flesh_loudness,
@@ -404,7 +411,7 @@ fn update_lasers(
                 sfx.write(Sfx::ImpactWall(transform.translation));
                 // The crack of a bolt on stone carries as din (`NOISE_SQUAD`) — quieter than a discharge
                 // or a wet hit, but it still marks "a fight is happening here" for the swarm to read.
-                deposits.0.push(Deposit {
+                noise.push(Deposit {
                     pos: transform.translation,
                     field: FieldId::NOISE_SQUAD,
                     amount: audio.stimulus.impact_wall_loudness,
@@ -413,6 +420,8 @@ fn update_lasers(
             commands.entity(entity).despawn();
         }
     }
+    sort_deposits(&mut noise);
+    deposits.0.extend(noise);
 }
 
 /// Perturb an aim direction inside a cone of half-angle ≈ `spread` (radians): sample a uniform point

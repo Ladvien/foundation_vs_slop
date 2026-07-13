@@ -54,6 +54,7 @@ use crate::dungeon::Dungeon;
 use crate::enemy::Enemy;
 use crate::fog::FogGrid;
 use crate::health::Health;
+use crate::parasite::Manca;
 use crate::squad::Unit;
 
 use super::perception::PerceptionLatch;
@@ -200,17 +201,26 @@ pub fn record_outcome(
     mut rec: ResMut<Recording>,
     mut visits: ResMut<Visitation>,
     mut dead_crabs: RemovedComponents<Crab>,
+    mut dead_mancae: RemovedComponents<Manca>,
+    mut dead_boss: RemovedComponents<Enemy>,
     dungeon: Res<Dungeon>,
     units: Query<(Entity, &Transform, &Health), With<Unit>>,
     crabs: Query<(), With<Crab>>,
+    mancae: Query<(), With<Manca>>,
+    boss: Query<(), With<Enemy>>,
 ) {
     // `RemovedComponents` is a per-system event cursor: if we return early without draining it, the
-    // events pile up and the *next* enabled episode counts deaths from before it began. Drain first.
+    // events pile up and the *next* enabled episode counts deaths from before it began. Drain first —
+    // every cursor, or a disabled episode leaks its removals into the next enabled one.
     let crabs_died = dead_crabs.read().count() as u32;
+    let mancae_died = dead_mancae.read().count() as u32;
+    let boss_died = dead_boss.read().count() as u32;
     if !rec.enabled {
         return;
     }
     rec.outcome.crabs_killed += crabs_died;
+    rec.outcome.manca_deaths += mancae_died;
+    rec.outcome.boss_deaths += boss_died;
 
     if rec.outcome.reachable_cells == 0 {
         rec.outcome.reachable_cells = (0..dungeon.height as i32)
@@ -236,7 +246,19 @@ pub fn record_outcome(
 
     rec.outcome.squad_size = rec.outcome.squad_size.max(squad_size);
     rec.outcome.survivors = squad_size;
-    rec.outcome.crabs_alive = crabs.iter().count() as u32;
+
+    // Per-species census: end-of-episode alive count + running peak, for the world archive's deaths×lives
+    // axes. The peak is what lets the descriptor read turnover independent of raw population size.
+    let crabs_now = crabs.iter().count() as u32;
+    rec.outcome.crabs_alive = crabs_now;
+    rec.outcome.crab_peak = rec.outcome.crab_peak.max(crabs_now);
+    let mancae_now = mancae.iter().count() as u32;
+    rec.outcome.manca_alive = mancae_now;
+    rec.outcome.manca_peak = rec.outcome.manca_peak.max(mancae_now);
+    let boss_now = boss.iter().count() as u32;
+    rec.outcome.boss_alive = boss_now;
+    rec.outcome.boss_peak = rec.outcome.boss_peak.max(boss_now);
+
     rec.outcome.cells_covered = visits.coverage() as u32;
 }
 

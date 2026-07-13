@@ -20,6 +20,7 @@ use crate::rng::seeded;
 use super::audio_eval;
 use super::audio_genome::{self, authored, mutate, AudioGenome};
 use super::coevolve::{ArchiveDoc, Population};
+use super::map_elites::{map_elites_loop, MapElitesResult};
 use super::qd::BehaviorDescriptor;
 use super::surprise::ModePrior;
 
@@ -51,13 +52,9 @@ impl Default for AudioSearchConfig {
     }
 }
 
-/// The outcome of an audio search: the illuminated archive plus reject tallies.
-pub struct AudioSearchResult {
-    pub pop: Population<AudioGenome>,
-    pub evaluations: u32,
-    pub rejected_infeasible: u32,
-    pub rejected_by_criterion: u32,
-}
+/// The outcome of an audio search: the illuminated archive plus reject tallies. Aliases the shared
+/// [`MapElitesResult`] at the audio genome, so the audio and level searches share one result shape.
+pub type AudioSearchResult = MapElitesResult<AudioGenome>;
 
 /// Run the audio search. `report(generation, &result)` is called after each generation; `search` itself
 /// writes nothing to disk (the `train.rs` driver does). One path: an infeasible or criterion-failing child
@@ -87,42 +84,24 @@ pub fn search(
         rejected_by_criterion: 0,
     };
 
-    // Seed the archive with the authored audio config so `sample_parent` has somewhere to start.
-    match audio_eval::evaluate(&authored_g, prior, &cfg.dungeon_seeds, cfg.episode_ticks) {
-        Some(ev) => {
-            let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
-            result.pop.insert(d, ev.fitness, authored_g.clone());
-            result.evaluations += 1;
-        }
-        None => {
-            return Err("the shipped audio config failed the minimal criterion on the held-in seeds".into())
-        }
-    }
-
-    for generation in 0..cfg.generations {
-        for _ in 0..cfg.batch {
-            let parent = result
-                .pop
-                .sample_parent(&mut rng)
-                .cloned()
-                .unwrap_or_else(|| authored_g.clone());
-            let child = mutate(&parent, cfg.sigma, &mut rng)?;
-            // Cheap feasibility gate before the (expensive) full-sim evaluation.
-            if audio_genome::is_feasible(&child).is_err() {
-                result.rejected_infeasible += 1;
-                continue;
-            }
-            match audio_eval::evaluate(&child, prior, &cfg.dungeon_seeds, cfg.episode_ticks) {
-                Some(ev) => {
-                    let d = BehaviorDescriptor::new(ev.axes.0, ev.axes.1);
-                    result.pop.insert(d, ev.fitness, child);
-                    result.evaluations += 1;
-                }
-                None => result.rejected_by_criterion += 1,
-            }
-        }
-        report(generation, &result);
-    }
+    // The propose → evaluate → archive loop is shared with the level search; only mutate / feasibility /
+    // evaluate vary, supplied here as closures. Audio mutation is fallible, so its `Result` flows straight
+    // through; the criterion gate is the (expensive) full-sim behavioural rollout.
+    map_elites_loop(
+        &mut rng,
+        &mut result,
+        &authored_g,
+        cfg.generations,
+        cfg.batch,
+        "the shipped audio config failed the minimal criterion on the held-in seeds",
+        |parent, rng| mutate(parent, cfg.sigma, rng),
+        |child| audio_genome::is_feasible(child).is_ok(),
+        |g| {
+            audio_eval::evaluate(g, prior, &cfg.dungeon_seeds, cfg.episode_ticks)
+                .map(|ev| (BehaviorDescriptor::new(ev.axes.0, ev.axes.1), ev.fitness))
+        },
+        &mut report,
+    )?;
     Ok(result)
 }
 
