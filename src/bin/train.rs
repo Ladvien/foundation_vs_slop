@@ -103,11 +103,15 @@ fn main() {
         // Rust `Default` impl + the replay goldens together, so `cargo test` stays green.
         "apply" => apply(&args[1..]),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
+        // Determinism stability guard: recompute the deterministic-core goldens `--reps` times (fresh App
+        // each) and require agreement. Run across several fresh processes (under load) to catch the rare
+        // cross-process flake before re-baking. See `recompute_goldens_stable`.
+        "verify" => parse_verify(&args[1..]).and_then(verify),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior | rl | poet | apply)"
+            "unknown subcommand {other:?} (expected bench | probe | verify | prior | evolve | evolve3 | levels | audio | behavior | rl | poet | apply)"
         )),
     };
     if let Err(e) = result {
@@ -130,6 +134,13 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let t = Templates::authored();
     let squad = SquadGenome::authored(&t);
     let swarm = SwarmGenome::authored(&t);
+
+    // Accumulate one run signature per seed (interest × tone axes) + whether every seed was admitted, so the
+    // cross-seed REPLAYABILITY (expressive-range spread) can be reported after the per-seed detail. This is
+    // the replayability objective's diagnostic surface, calibrated the same way the other proxies are.
+    use foundation_vs_slop::squad_ai::replayability::{replayability_gated, spread, RunSignature};
+    let mut signatures: Vec<RunSignature> = Vec::new();
+    let mut all_admitted = true;
 
     for &seed in seeds {
         let r = rollout_with_belief(brains_of(&t, &squad, &swarm)?, None, None, None, seed, ticks);
@@ -164,6 +175,14 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
             "  interest       : suspense {:.3}, outcome-surprise {:.3}, effectance {:.3}  (score {:.3}, {} checkpoints)",
             interest.suspense, interest.outcome_surprise, interest.effectance, interest.score(), r.belief.len()
         );
+        // Tone / experience-shape proxies (dread / loneliness-liminality / pacing-arc) reduced from the same
+        // belief series — printed for the same reason: their weighting into the objective is CALIBRATED by
+        // the Phase-5 audition gate against rated runs, not guessed. See `squad_ai::experience`.
+        let experience = foundation_vs_slop::squad_ai::experience::Experience::from_belief(&r.belief);
+        println!(
+            "  tone           : dread {:.3}, loneliness {:.3}, pacing {:.3}  (score {:.3})",
+            experience.dread, experience.loneliness, experience.pacing, experience.score()
+        );
         println!("  squad descr    : aggression {:.3}, exploration {:.3}", squad_descriptor(&r.trace, o).aggression, squad_descriptor(&r.trace, o).exploration);
         println!("  swarm descr    : aggression {:.3}, persistence {:.3}", swarm_descriptor(&r.trace).aggression, swarm_descriptor(&r.trace).exploration);
         println!("  world descr    : deaths {:.3}, lives {:.3} (normalised deaths×lives axes)", world_descriptor(o).aggression, world_descriptor(o).exploration);
@@ -184,12 +203,39 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
             };
             println!("  unit modes     : {}", fmt(&unit_modes));
             println!("  creature modes : {}", fmt(&creature_modes));
+            // Fairness / exploitability of the AUTHORED brain on this world — a reference point. The Phase-4
+            // neuroevolution playtester (`rl_eval::evaluate_playtester`) searches for the strongest play, and
+            // its exploitable max is what the fairness objective actually consumes; this is the shipped-brain
+            // baseline, printed for calibration. See `squad_ai::fairness`.
+            use foundation_vs_slop::squad_ai::fairness;
+            let unit_counts: Vec<u32> = unit_modes.values().copied().collect();
+            let comp = fairness::survival_competence(o.survivors, o.squad_size);
+            let conc = fairness::mode_concentration(&unit_counts);
+            println!(
+                "  fairness (auth): competence {:.3}, concentration {:.3}, exploitability {:.3}, fairness {:.3}",
+                comp, conc, fairness::exploitability(comp, conc), fairness::fairness(comp, conc)
+            );
         }
+        signatures.push(RunSignature::from_belief(&r.belief));
+        let admitted = minimal_criterion(o).is_ok();
+        all_admitted &= admitted;
         match minimal_criterion(o) {
             Ok(()) => println!("  criterion      : PASS"),
             Err(why) => println!("  criterion      : FAIL — {why}"),
         }
         println!();
+    }
+
+    // Cross-seed replayability: how much of the interest × tone space this candidate's runs cover. Gated —
+    // a broken seed zeroes it (see `squad_ai::replayability`).
+    if signatures.len() >= 2 {
+        println!(
+            "replayability across {} seeds : spread {:.3}, gated {:.3} ({})",
+            signatures.len(),
+            spread(&signatures),
+            replayability_gated(&signatures, all_admitted),
+            if all_admitted { "all seeds admitted" } else { "some seed inadmissible → gated to 0" }
+        );
     }
     Ok(())
 }
@@ -706,8 +752,10 @@ fn apply(args: &[String]) -> Result<(), String> {
     std::fs::write(CONFIG_PATH, &cfg_text).map_err(|e| format!("{CONFIG_PATH}: write: {e}"))?;
 
     // 4. Recompute the goldens from the freshly-baked config and re-pin them. (Env overlays are guaranteed
-    //    unset above, so `deterministic_core` reproduces exactly what the replay test will assert.)
-    let (snap, field) = recompute_goldens();
+    //    unset above, so `deterministic_core` reproduces exactly what the replay test will assert.) Go through
+    //    the stability guard — a golden is only stamped if repeated builds agree, so a non-deterministic core
+    //    reds here instead of silently pinning a one-off value.
+    let (snap, field) = recompute_goldens_stable(GOLDEN_STABILITY_REPS)?;
     repin_replay(snap, field)?;
     touched.push(REPLAY_PATH.to_string());
 
@@ -797,13 +845,70 @@ fn regen_default(path: &str, ty: &str, literal: &str) -> Result<(), String> {
 }
 
 /// Recompute the deterministic-core goldens from the (freshly-baked) config.ron — the exact run the replay
-/// test asserts: `deterministic_core` (seed from config.ron) + 1800 ticks.
+/// test asserts: `deterministic_core` (seed from config.ron) + 1800 ticks. One measurement.
 fn recompute_goldens() -> (u64, u64) {
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
     step(&mut app, &cfg, 1800);
     (snapshot_hash(&mut app), field_hash(&mut app))
+}
+
+/// **Determinism stability guard for golden re-baking.** Recompute the deterministic-core goldens `reps`
+/// times (a fresh `App` each) and require every measurement to agree before returning the value. A re-bake
+/// must never stamp a hash that isn't at least *intra-process* stable — a golden pinned from a single
+/// measurement of a non-deterministic core would bake in whichever value that one run happened to produce.
+///
+/// This catches any nondeterminism observable across repeated builds in ONE process. The known-rare,
+/// load-correlated CROSS-process flake (a wrong hash only under heavy CPU contention) is not fully
+/// observable intra-process, so the re-bake procedure additionally runs `train verify --reps K` in several
+/// *fresh* processes on an idle box and requires them to agree — this function is the first line, that is
+/// the second. `Err` lists the disagreement rather than silently picking one.
+fn recompute_goldens_stable(reps: u32) -> Result<(u64, u64), String> {
+    let reps = reps.max(1);
+    let first = recompute_goldens();
+    for r in 1..reps {
+        let again = recompute_goldens();
+        if again != first {
+            return Err(format!(
+                "deterministic-core goldens are NOT stable across repeated builds — measurement 0 = \
+                 (snapshot 0x{:016x}, field 0x{:016x}) but measurement {r} = (snapshot 0x{:016x}, \
+                 field 0x{:016x}). Refusing to re-pin a non-deterministic golden. The core must be \
+                 bit-reproducible before a golden can be committed.",
+                first.0, first.1, again.0, again.1
+            ));
+        }
+    }
+    Ok(first)
+}
+
+/// How many times `train apply` remeasures the deterministic-core goldens (a fresh `App` each) and requires
+/// agreement before pinning them. Cheap relative to the search that produced the elite; catches intra-process
+/// nondeterminism at the door.
+const GOLDEN_STABILITY_REPS: u32 = 3;
+
+/// `train verify [--reps K]` — the scriptable determinism guard. Recompute the deterministic-core goldens
+/// with the stability check and print them. Run it in several FRESH processes (a shell loop, ideally under
+/// CPU load) and diff the output to catch the rare cross-process flake before trusting a re-baked golden.
+fn verify(reps: u32) -> Result<(), String> {
+    let (snap, field) = recompute_goldens_stable(reps)?;
+    println!("deterministic-core stable over {reps} build(s): snapshot 0x{snap:016x}, field 0x{field:016x}");
+    Ok(())
+}
+
+/// Parse `train verify` args: only `--reps N` (default [`GOLDEN_STABILITY_REPS`]).
+fn parse_verify(args: &[String]) -> Result<u32, String> {
+    let mut reps = GOLDEN_STABILITY_REPS;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--reps" {
+            let v = it.next().ok_or("--reps needs a value")?;
+            reps = v.parse().map_err(|_| format!("bad --reps {v:?}"))?;
+        } else {
+            return Err(format!("unknown verify arg {a:?}"));
+        }
+    }
+    Ok(reps)
 }
 
 /// Re-pin the replay goldens in `tests/replay.rs`: replace the old `GOLDEN` (snapshot) hex — which appears

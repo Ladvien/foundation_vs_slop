@@ -55,6 +55,19 @@ pub mod level_eval;
 /// survival-belief series — the psychology-grounded companion to `surprise`'s information-theoretic `W·S·L`.
 /// Pure logic; the harness (`evaluate`) samples the belief series, this reduces it.
 pub mod interest;
+/// Tone / experience-shape proxies (dread / loneliness-liminality / pacing-arc) computed from the same
+/// per-checkpoint survival-belief series as `interest` — the SCP × Backrooms companion to `surprise`'s
+/// `W·S·L` and `interest`'s outcome swings. Pure logic; the harness (`evaluate`) samples the belief, this
+/// reduces it. Weighting into the objective is fit by the Phase-5 audition gate, not baked in here.
+pub mod experience;
+/// Replayability / expressive-range: the *spread* of a candidate's run signatures across dungeon seeds — a
+/// property of a SET of episodes, unlike the single-episode `surprise`/`interest`/`experience` proxies. Pure
+/// logic; the caller runs the seeds and gates on the minimal criterion, this measures the variety.
+pub mod replayability;
+/// Fairness / exploitability: is the config beatable by a single dominant tactic (`competence ×
+/// strategy-concentration`), or does surviving it demand varied play? Computed from a Phase-4 *playtester*'s
+/// achieved play, not a belief series. Pure logic; `rl_eval::evaluate_playtester` supplies the inputs.
+pub mod fairness;
 pub mod perception;
 pub mod persona;
 pub mod policy;
