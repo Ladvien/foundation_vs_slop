@@ -102,7 +102,17 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // forage on/heal from is therefore different (discrete 2–5 tile pools, not a sheet), moving the foraging
     // trajectory + heal outcomes this actor golden folds. Same-seed reproducibility still passes (just a
     // different, correct sim). Was `0xfd576e421bb17cf6`.
-    const GOLDEN: u64 = 0xc044a98e9f910d9d;
+    //
+    // Re-pinned for the CRAB DETERMINISM fix: the deterministic core was ~1–3% non-reproducible ACROSS
+    // PROCESSES (only caught by `train verify` run in fresh processes; `deterministic_core_is_bit_identical`
+    // compares two Apps in ONE process and shares the seed, so it stayed green). Two non-associative float
+    // sums over the NON-reproducible crab query order: (1) the crab separation spatial-hash buckets
+    // (`crab::crab_movement`) and (2) the wounded-crab ALARM deposit batch (`crab::crab_alarm_on_damage`).
+    // Both now sort into canonical order before summing (the same fix the parasite swarm + `sort_deposits`
+    // already use), making the core bit-reproducible across processes (verified 65/65 fresh processes). The
+    // old value was never a single correct golden — just the most common outcome of the flaky sum. Was
+    // `0xc044a98e9f910d9d` (snapshot) / `0xbcb2b8c38e3219a9` (field, below).
+    const GOLDEN: u64 = 0x45b960069537d712;
 
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
@@ -190,7 +200,11 @@ fn field_passes_are_bit_identical() {
     // grids this oracle folds are now the sparse-spring field (only spaced springs seep; no weak baseline),
     // and the changed water changes the crab motion the Stig channels fold. Arch-stable (scalar-f32 field
     // ops). Was `0x6f0e_14d6_3ad5_206c`.
-    const GOLDEN_FIELD: u64 = 0xbcb2_b8c3_8e32_19a9;
+    //
+    // Re-pinned for the CRAB DETERMINISM fix (see the `GOLDEN` note above): sorting the wounded-crab ALARM
+    // deposit batch (`crab::crab_alarm_on_damage`) canonicalised the ALARM channel's non-associative sum,
+    // which this field oracle folds. Was `0xbcb2_b8c3_8e32_19a9`.
+    const GOLDEN_FIELD: u64 = 0xee06_882d_2f14_21d9;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -222,8 +236,8 @@ fn authored_world_config_override_is_a_noop() {
         // `authored()` encodes the parasite counts straight from `SimTuning::default()` (world_genome.rs), and
         // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
         // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pins above (incl. the
-        // sparse-spring seep-model re-pin).
-        0xc044a98e9f910d9d,
+        // sparse-spring seep-model re-pin) and the crab-determinism re-pin.
+        0x45b960069537d712,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
