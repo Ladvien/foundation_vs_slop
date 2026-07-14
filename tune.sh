@@ -64,6 +64,9 @@ run_islands() {
     *) echo "ISLANDS supports behavior|audio|levels|rl|poet (evolve3 writes fixed paths — run it alone)" >&2; exit 2 ;;
   esac
   mkdir -p "$ODIR"
+  # Clear THIS dim's prior island outputs first — otherwise a run where every island dies would "pick a
+  # winner" from a previous run's leftover archives (a false result that could then get baked).
+  rm -f "$ODIR"/elites_"${DIM}"_*.ron "$ODIR"/"${DIM}"_*.log
   local extra=(); [[ "$DIM" == rl && "$CMA" == 1 ]] && extra=(--cma)
   echo ">> launching $ISLANDS parallel '$DIM' islands → $ODIR/  (12 physical cores; >12 oversubscribes)"
   local pids=() i seed out
@@ -78,6 +81,13 @@ run_islands() {
   echo "     tail -f $ODIR/${DIM}_1.log | grep -E 'gen '"
   local fail=0 p
   for p in "${pids[@]}"; do wait "$p" || fail=$((fail + 1)); done
+  if [[ "$fail" -ge "$ISLANDS" ]]; then
+    echo ">> ALL $ISLANDS islands failed — nothing to pick from. first error(s):" >&2
+    grep -hiE 'error|panic|unknown flag|parse error' "$ODIR"/"${DIM}"_*.log 2>/dev/null \
+      | grep -vE "$NOISE" | head -3 | sed 's/^/     /' >&2
+    echo "   full logs: $ODIR/${DIM}_*.log" >&2
+    exit 1
+  fi
   echo ">> all islands finished ($fail failed). scanning for the best elite across archives…"
   local best_file="" best_fit="-1e30" m
   for out in "$ODIR"/elites_"${DIM}"_*.ron; do
