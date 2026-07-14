@@ -1360,6 +1360,29 @@
         flashlight_spot_color: (1.0, 0.95, 0.8), // warm torch beam
         flashlight_spot_outer_angle: 0.6,      // cosmetic beam half-angle (radians, ~34deg)
     ),
+    // Almond Water (src/almond_water/) — a finite, self-regenerating heal resource that seeps from the
+    // concrete and pools on the floor. Gameplay knobs drive the CPU field + consuming heal (harness-visible,
+    // pinned); the trailing visual knobs are read only by the windowed iridescent-puddle plugin. Tuned
+    // high-volume so pools rarely run dry under normal play, leaving a wounded-swarm drain as the exception.
+    almond_water: (
+        strong_seep: 8.0,          // seep/sec on a wall-adjacent floor cell ("bubbles up from the walls")
+        weak_seep: 2.0,            // seep/sec baseline on every floor cell ("bubbles up from the floor")
+        capacity: 100.0,           // per-cell volume ceiling — a rich seep pools but never runs away
+        evaporate: 0.05,           // fraction dried per sec; steady state ≈ seep/evaporate (weak≈40, wall→cap)
+        diffuse: 0.1,              // blend toward 4-neighbour avg per tick — pools spread instead of point-sourcing
+        heal_rate: 5.0,            // HP/sec restored to a biological standing in water (rate-limited like the medic)
+        heal_per_unit_water: 1.5,  // water drunk per HP healed — the consumable coupling (drains the cell)
+        mold_seep_mult: 1.5,       // seep multiplier on mold-colonised concrete (>1: hyphae crack it; <1 flips it)
+        forage_gain: 10.0,         // steering gain a WOUNDED creature feels climbing the water gradient
+        forage_wounded_frac: 0.6,  // forage only at/below 60% health; a healthy creature ignores the water
+        // --- Visual (windowed-only; ignored by the gameplay field) ---
+        almond_tint: (0.92, 0.85, 0.70),  // pale almond/cream base (linear RGB)
+        min_visible_level: 1.0,    // below this volume a cell reads as bare concrete (no puddle drawn)
+        film_thickness_nm: 320.0,  // thin-film thickness — sets the iridescence hue via optical path difference
+        film_ior: 1.33,            // index of refraction of the water film (must be >= 1)
+        iridescence_strength: 0.25,// subtle oil-slick sheen; more water = more sheen
+        moisture_feed_gain: 0.3,   // how strongly water level boosts the mold's Gray-Scott bloom where they overlap
+    ),
     // Acoustic-stimulus + audio tuning (src/audio_tuning.rs). Makes sound a perception stimulus:
     // gameplay sounds deposit into the acoustic stigmergy channels (ai::field::NOISE_*) and agents
     // react to them. `stimulus` = channel propagation (evaporate/diffuse/deposit_radius, same model as

@@ -83,7 +83,19 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // `0x6716f1718a9774d1`. Re-measured once more within the same pass after the balance nerf that keeps the
     // shipped brains survivable under the new pressure (crab_contact_dps 3.0→2.3, parasite initial_count
     // 8→6); was the intermediate `0xd18a68ffc4e949b7`.
-    const GOLDEN: u64 = 0xc2fe3752a1fd1f66;
+    //
+    // Re-pinned for ALMOND WATER (the `almond_water` resource field + consuming heal): squad units and crabs
+    // now carry the `Biological` marker and heal while standing in seeps (the heal writes `Health` on
+    // FixedUpdate, so it enters `snapshot_hash`), and a wounded crab forages up the water gradient (moving
+    // actors). Adding the marker also shifted the unit/crab archetypes and thus deterministic iteration
+    // order. All legitimate: `deterministic_core_is_bit_identical` still passes (same seed → same hash), so
+    // the sim is still bit-reproducible — just a different, richer sim. Folds translation only, arch-stable.
+    // Was `0xc2fe3752a1fd1f66`. Re-measured once more within the same pass: pinning `almond_water_heal` to
+    // run AFTER every `Health` writer (the `HealthDamage` set + the medic) — required so the consuming heal
+    // composes deterministically with same-tick combat once foraging brings wounded crabs into weapon range
+    // — changed the net HP of those overlaps (the water now gets the last word), so the actor golden moved
+    // from the intermediate `0x2c9da14a81d01faa`.
+    const GOLDEN: u64 = 0xfd576e421bb17cf6;
 
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
@@ -156,7 +168,17 @@ fn field_passes_are_bit_identical() {
     // a read-only gradient sample gated by AI mode; the mancae dread is position/integer-cell), so the value
     // stays arch-stable across ARM↔x86. Re-measured once more within the same pass after the balance nerf
     // (crab_contact_dps 3.0→2.3, parasite initial_count 8→6); was the intermediate `0xf212_b7c1_4ef0_9a8c`.
-    const GOLDEN_FIELD: u64 = 0x4557_fa4d_8f4b_6262;
+    //
+    // Re-pinned for ALMOND WATER: `field_hash` now folds the `AlmondWater` field (`level` + `sources`, full
+    // grid, via `AlmondWater::fold_fingerprint`, added to `sim_harness::field_hash`) on top of the Stig /
+    // Rally / Light grids. The seeps also accumulate/evaporate/diffuse each tick and the heal drinks them
+    // down, so the folded water grid is live state. And the `Biological`-marker archetype shift moved the
+    // crab/unit trajectory the stigmergy channels fold. Arch-stable (pure scalar-f32 field ops, no rotation).
+    // Was `0x4557_fa4d_8f4b_6262`. Re-measured once more within the same pass for the `almond_water_heal`
+    // ordering pin (`.after(HealthDamage)`): the heal now drinks the water field AFTER same-tick combat
+    // resolves, shifting which cells drain and the actor motion the stigmergy grids fold. Was the
+    // intermediate `0x280d_34a4_87f1_1a3c`.
+    const GOLDEN_FIELD: u64 = 0x6f0e_14d6_3ad5_206c;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -187,8 +209,8 @@ fn authored_world_config_override_is_a_noop() {
         // Tracks the Phase-1 actor golden above (combat-feel re-pin). It stays byte-identical to it because
         // `authored()` encodes the parasite counts straight from `SimTuning::default()` (world_genome.rs), and
         // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
-        // (1–12, 4–40) so encode→decode is still lossless.
-        0xc2fe3752a1fd1f66,
+        // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pin above.
+        0xfd576e421bb17cf6,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
@@ -276,15 +298,24 @@ fn manca_dread_reaches_the_shared_anomaly_field() {
     // separately by `ai::tests::units_fear_every_hostile_creature_channel`; the two together cover the whole
     // write→read coupling the fix restores.
     use foundation_vs_slop::sim::SimTuning;
-    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let field_at_rate = |rate: f32| -> u64 {
-        let mut app = build_headless_app_unfinished(&cfg);
+        let mut app = build_headless_app(&cfg);
         app.world_mut().resource_mut::<SimTuning>().deposit.manca_dread_rate = rate;
-        app.finish();
-        app.cleanup();
-        step(&mut app, &cfg, 1800);
+        // Rouse the freshly-spawned brood directly, then sample a few ticks later, so the dread A/B is
+        // independent of the emergent rouse. Adding the `Biological` marker to units/crabs (for Almond Water
+        // healing) shifted their archetypes and thus the deterministic iteration order, so the shipped mancae
+        // no longer happen to be roused-and-depositing at tick 1800 for this seed — collapsing the A/B (in
+        // fact they now embed within ~2 ticks in this trajectory). Rousing them the instant they spawn and
+        // sampling 3 ticks on — while they still hold the huddle and deposit dread — keeps `manca_dread_rate`
+        // the ONLY variable between the two arms. (`rouse_all_mancae` parks the calm timer so they can't
+        // re-settle to Dormant mid-window; cranking `rouse_proximity` instead over-rouses them into a mass
+        // embed→despawn, so the `THREAT_ANOMALY` deposit has already evaporated by the sample — timing-fragile.)
+        step(&mut app, &cfg, 1); // one update spawns the mancae (PostStartup); grab them before any embed
+        let roused = foundation_vs_slop::parasite::rouse_all_mancae(&mut app);
+        assert!(roused > 0, "the sim must have mancae to rouse");
+        step(&mut app, &cfg, 3); // deposit dread while roused, before they embed and despawn
         field_hash(&mut app)
     };
     assert_ne!(
@@ -511,6 +542,15 @@ fn photophobia_pulls_crabs_into_shadow() {
         // harness already uses for `dungeon_seed`.
         if let Some(g) = gain_override {
             app.world_mut().resource_mut::<GameConfig>().lighting.photophobic_gain = g;
+        }
+        // Isolate photophobia from Almond Water too: crabs are `Biological`, so they heal in seeps (which
+        // reshapes which crabs survive to be measured) and a wounded crab forages toward water (which
+        // competes with the light gradient). Zero both so this measures the light response alone — the same
+        // "mutate tuning at the seam" isolation the parasite zeroing below uses.
+        {
+            let mut gc = app.world_mut().resource_mut::<GameConfig>();
+            gc.almond_water.heal_rate = 0.0;
+            gc.almond_water.forage_gain = 0.0;
         }
         // Isolate the variable under study (photophobia) from the SCP-150 parasite: zero the initial mancae
         // so their embed-damage can't trip the crab alarm → muster, which pulls crabs OUT of shadow and

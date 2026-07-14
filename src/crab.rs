@@ -31,7 +31,7 @@ use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
 use crate::enemy::Hostile;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
-use crate::health::{Health, NoHealthBar};
+use crate::health::{Biological, Health, NoHealthBar};
 use crate::behavior_tuning::{BehaviorTuning, CrabTuning};
 use crate::sim::SimTuning;
 use crate::squad::{Prey, Unit};
@@ -276,14 +276,17 @@ impl Plugin for CrabPlugin {
                         .after(rebuild_crab_field)
                         .after(crate::ai::AiSet::Think)
                         // Read the light field the tick it was baked (mirrors the `fog::LosWritten` gate).
-                        .after(crate::light::LightFieldWritten),
+                        .after(crate::light::LightFieldWritten)
+                        // Likewise read the Almond Water field the tick it was updated + drunk down, so the
+                        // forage nudge steers on the current level (post-heal), not last tick's.
+                        .after(crate::almond_water::AlmondWaterWritten),
                     // Pounce owns the transform of mid-jump crabs; runs after locomotion set the rest.
-                    crab_jump.after(crab_locomotion),
+                    crab_jump.after(crab_locomotion).in_set(crate::health::HealthDamage),
                     // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
                     carry_gibs
                         .after(crab_locomotion)
                         .after(assign_meat_targets),
-                    crab_contact_damage,
+                    crab_contact_damage.in_set(crate::health::HealthDamage),
                     // Flood the local ALARM channel when a crab is wounded, before the deposits drain so
                     // the muster bloom is live this tick (mirrors `scout_mark_prey`'s ordering).
                     crab_alarm_on_damage.before(crate::ai::AiSet::Deposits),
@@ -530,8 +533,11 @@ fn spawn_crab_on_patch(
             brain_id,
             crate::ai::brain::ActiveBehavior::new(rand_seed),
             crate::ai::brain::ThinkTimer::staggered(rand_seed),
-            // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
+            // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit. `Biological` rides
+            // here (not as a 16th top-level element) — living flesh Almond Water can heal; tagged at spawn
+            // so runtime-bred crabs (`nest_reproduce`) inherit it and no runtime archetype migration occurs.
             (
+                Biological,
                 CrabAttached { host: None },
                 CrabCarry {
                     capacity: bc.carry_capacity * (0.8 + 0.4 * draw(2)),
@@ -647,6 +653,9 @@ fn crab_locomotion(
     // The gameplay light field (baked in `light::LightFieldWritten`, ordered before this system) and the
     // config gains — for the photophobic/-philic light nudge below.
     light_field: Res<crate::light::LightField>,
+    // The Almond Water field (written in `AlmondWaterWritten`, ordered before this system) — for the
+    // wounded-forage nudge below (a wounded crab climbs the water gradient toward a seep).
+    almond_water: Res<crate::almond_water::AlmondWater>,
     config: Res<crate::config::GameConfig>,
     units: Query<(Entity, &Transform), (With<Prey>, Without<Crab>)>,
     // Gib transforms, for a `SeekMeat`/`Carry` crab to steer to the specific chunk it's committed to.
@@ -664,6 +673,8 @@ fn crab_locomotion(
             // Light response (`light::Photophobic`/`Photophilic`) — added at spawn; drives the light nudge.
             Option<&crate::light::Photophobic>,
             Option<&crate::light::Photophilic>,
+            // Health gates the Almond Water forage nudge — only a wounded crab seeks the water.
+            &Health,
         ),
         With<Crab>,
     >,
@@ -694,7 +705,7 @@ fn crab_locomotion(
     for v in hash.values_mut() {
         v.clear();
     }
-    for (motion, _, _, _, _, _, _, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
@@ -711,6 +722,7 @@ fn crab_locomotion(
         mut scout,
         photophobic,
         photophilic,
+        health,
     ) in &mut crabs
     {
         // Mid-pounce crabs are owned by `crab_jump` (it drives their arc + transform) — skip them here.
@@ -957,6 +969,28 @@ fn crab_locomotion(
                 0.0
             };
             let push = crate::light::light_push(&light_field, &dungeon, motion.pos, signed_gain);
+            if push.length_squared() > 1.0e-9 {
+                let p = graph.patch(motion.patch);
+                motion.pos += project_tangent(push, p.normal) * dt;
+                motion.pos = clamp_to_patch(motion.pos, p);
+            }
+        }
+
+        // Almond Water foraging: a WOUNDED crab climbs the water gradient toward a richer seep, on top of
+        // whatever its mode is doing — stigmergic foraging over a regenerating resource (Heylighen,
+        // *Cognitive Systems Research* 2015). A healthy crab (`fraction` above the wounded threshold) ignores
+        // the field — no cost when full — and the push is zero on flat water, so a crab nowhere near a
+        // gradient is unbiased. Skipped while latching (a crab riding a unit's body is off the floor water).
+        // Deterministic (field + gradient + config gain) on the pinned FixedUpdate path, folding into the
+        // replay hash like the light nudge above. This is what makes the seeps contested territory: the same
+        // pools heal the squad, so a wounded crab and a wounded unit are drawn to the same water.
+        if !latching && health.fraction() <= config.almond_water.forage_wounded_frac {
+            // The water gradient is on the scale of `capacity` (~100), not light's ~1, so normalise by
+            // capacity to keep `forage_gain` on the same footing as the light gains — otherwise the push is
+            // ~capacity× too strong and a wounded crab lurches across the map toward the nearest seep.
+            let forage_gain =
+                config.almond_water.forage_gain / config.almond_water.capacity.max(1.0e-6);
+            let push = crate::almond_water::almond_push(&almond_water, &dungeon, motion.pos, forage_gain);
             if push.length_squared() > 1.0e-9 {
                 let p = graph.patch(motion.patch);
                 motion.pos += project_tangent(push, p.normal) * dt;

@@ -110,7 +110,10 @@ impl Plugin for LaserPlugin {
         // LOS grid, so it must run after `update_los` writes it this tick (see `fog::LosWritten`).
         .add_systems(
             FixedUpdate,
-            (fire_laser.after(crate::fog::LosWritten), update_lasers),
+            (
+                fire_laser.after(crate::fog::LosWritten).in_set(crate::health::HealthDamage),
+                update_lasers,
+            ),
         );
     }
 }
