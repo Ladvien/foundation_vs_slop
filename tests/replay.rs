@@ -95,7 +95,14 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // composes deterministically with same-tick combat once foraging brings wounded crabs into weapon range
     // — changed the net HP of those overlaps (the water now gets the last word), so the actor golden moved
     // from the intermediate `0x2c9da14a81d01faa`.
-    const GOLDEN: u64 = 0xfd576e421bb17cf6;
+    //
+    // Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): `bake_almond_sources` now seeps
+    // from a sparse, spaced-out set of springs (greedy `pool_spacing` scatter) instead of every wall-adjacent
+    // cell + a weak everywhere-baseline, and drops the weak baseline entirely. The water field the crabs
+    // forage on/heal from is therefore different (discrete 2–5 tile pools, not a sheet), moving the foraging
+    // trajectory + heal outcomes this actor golden folds. Same-seed reproducibility still passes (just a
+    // different, correct sim). Was `0xfd576e421bb17cf6`.
+    const GOLDEN: u64 = 0xc044a98e9f910d9d;
 
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
@@ -178,7 +185,12 @@ fn field_passes_are_bit_identical() {
     // ordering pin (`.after(HealthDamage)`): the heal now drinks the water field AFTER same-tick combat
     // resolves, shifting which cells drain and the actor motion the stigmergy grids fold. Was the
     // intermediate `0x280d_34a4_87f1_1a3c`.
-    const GOLDEN_FIELD: u64 = 0x6f0e_14d6_3ad5_206c;
+    //
+    // Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): the `AlmondWater` `sources`/`level`
+    // grids this oracle folds are now the sparse-spring field (only spaced springs seep; no weak baseline),
+    // and the changed water changes the crab motion the Stig channels fold. Arch-stable (scalar-f32 field
+    // ops). Was `0x6f0e_14d6_3ad5_206c`.
+    const GOLDEN_FIELD: u64 = 0xbcb2_b8c3_8e32_19a9;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -209,8 +221,9 @@ fn authored_world_config_override_is_a_noop() {
         // Tracks the Phase-1 actor golden above (combat-feel re-pin). It stays byte-identical to it because
         // `authored()` encodes the parasite counts straight from `SimTuning::default()` (world_genome.rs), and
         // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
-        // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pin above.
-        0xfd576e421bb17cf6,
+        // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pins above (incl. the
+        // sparse-spring seep-model re-pin).
+        0xc044a98e9f910d9d,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }

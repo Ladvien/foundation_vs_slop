@@ -495,7 +495,7 @@
     // =============================================================================================
     vhs: (
         base_level: 0.15,       // always-on texture floor (0 = off)
-        cycle_period: 45.0,     // seconds between glitches (start-to-start of the spike envelope)
+        cycle_period: 60.0,     // seconds between glitches (also the refractory: ≤ one glitch per period)
         fade_in: 0.5,           // spike envelope: ramp up, hold at full, ramp down (seconds)
         hold: 1.5,
         fade_out: 0.5,
@@ -1365,11 +1365,12 @@
     // pinned); the trailing visual knobs are read only by the windowed iridescent-puddle plugin. Tuned
     // high-volume so pools rarely run dry under normal play, leaving a wounded-swarm drain as the exception.
     almond_water: (
-        strong_seep: 8.0,          // seep/sec on a wall-adjacent floor cell ("bubbles up from the walls")
-        weak_seep: 2.0,            // seep/sec baseline on every floor cell ("bubbles up from the floor")
+        strong_seep: 8.0,          // seep/sec at a spring (sparse wall-adjacent/mold cell) — only springs seep
+        pool_spacing: 8.0,         // min tiles between springs — caps each pool to a small, isolated puddle
         capacity: 100.0,           // per-cell volume ceiling — a rich seep pools but never runs away
         evaporate: 0.05,           // fraction dried per sec; steady state ≈ seep/evaporate (weak≈40, wall→cap)
-        diffuse: 0.1,              // blend toward 4-neighbour avg per tick — pools spread instead of point-sourcing
+        diffuse: 0.02,             // blend toward 4-neighbour avg per tick — kept low so a pool stays a tight
+                                   // puddle (decay length √(15·diffuse/evaporate) cells) instead of a wide sheet
         heal_rate: 5.0,            // HP/sec restored to a biological standing in water (rate-limited like the medic)
         heal_per_unit_water: 1.5,  // water drunk per HP healed — the consumable coupling (drains the cell)
         mold_seep_mult: 1.5,       // seep multiplier on mold-colonised concrete (>1: hyphae crack it; <1 flips it)
@@ -1377,7 +1378,9 @@
         forage_wounded_frac: 0.6,  // forage only at/below 60% health; a healthy creature ignores the water
         // --- Visual (windowed-only; ignored by the gameplay field) ---
         almond_tint: (0.92, 0.85, 0.70),  // pale almond/cream base (linear RGB)
-        min_visible_level: 1.0,    // below this volume a cell reads as bare concrete (no puddle drawn)
+        min_visible_level: 11.0,   // draw a puddle only above this volume (visual-only). Sets how far out from
+                                   // each spring reads as wet; with pool_spacing=8 + diffuse=0.02 this yields
+                                   // discrete 2–5 tile puddles (see the `almond_pools_stay_small` harness test).
         film_thickness_nm: 320.0,  // thin-film thickness — sets the iridescence hue via optical path difference
         film_ior: 1.33,            // index of refraction of the water film (must be >= 1)
         iridescence_strength: 0.25,// subtle oil-slick sheen; more water = more sheen

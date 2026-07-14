@@ -178,6 +178,42 @@ fn almond_water_seeps_and_pools_on_the_floor() {
 }
 
 #[test]
+fn almond_pools_stay_small_and_isolated() {
+    // The sparse-spring seep model must produce discrete puddles, not one continuous sheet: warm the field
+    // to near steady state, then assert every connected pool (cells above `min_visible_level`) is at most
+    // `POOL_TILE_CAP` tiles. Guards `bake_almond_sources`'s spring spacing + the diffuse/evaporate balance
+    // against a regression back to the whole-floor blanket that defeated fog of war. Deterministic core
+    // (physics off); the field is CPU state, harness-visible.
+    use foundation_vs_slop::almond_water::AlmondWater;
+    use foundation_vs_slop::config::GameConfig;
+
+    const POOL_TILE_CAP: usize = 10;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 3000); // ~50 s: several evaporation time-constants, so pools are near steady state
+
+    let threshold = app.world().resource::<GameConfig>().almond_water.min_visible_level;
+    let peak = app.world().resource::<AlmondWater>().peak();
+    let sizes = app.world().resource::<AlmondWater>().pool_sizes(threshold);
+    let largest = sizes.first().copied().unwrap_or(0);
+    println!(
+        "almond pools: {} pools, {} wet tiles, peak {:.1}, thresh {:.1}, largest {:?}",
+        sizes.len(),
+        sizes.iter().sum::<usize>(),
+        peak,
+        threshold,
+        &sizes[..sizes.len().min(12)]
+    );
+    assert!(!sizes.is_empty(), "sparse springs must still pool somewhere");
+    assert!(
+        largest <= POOL_TILE_CAP,
+        "an almond pool grew to {largest} tiles (> {POOL_TILE_CAP}) — pools are merging into a sheet"
+    );
+}
+
+#[test]
 fn almond_water_heals_a_wounded_biological() {
     // The heal direction, isolated from combat noise: flood the field, wound every biological to half
     // health, run ONE tick, and assert at least one recovered. Only a handful of biologicals are in melee on
