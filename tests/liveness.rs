@@ -160,3 +160,62 @@ fn a_units_fear_ignores_gunfire_and_answers_to_creatures() {
          danger, not merely brave",
     );
 }
+
+#[test]
+fn almond_water_seeps_and_pools_on_the_floor() {
+    // End-to-end proof that the Almond Water field actually accumulates in the real harness: bake the seep
+    // sources (Startup), then run the accumulate/evaporate/diffuse tick for ~10 s and assert the field has
+    // pooled somewhere (`peak > 0`). Covers the bake + tick path the GPU-free unit tests can only exercise
+    // in isolation. Deterministic core (physics off); the field is CPU state, harness-visible.
+    use foundation_vs_slop::almond_water::AlmondWater;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 600);
+    let peak = app.world().resource::<AlmondWater>().peak();
+    assert!(peak > 0.0, "Almond Water never pooled — the seeps aren't accumulating (peak={peak})");
+}
+
+#[test]
+fn almond_water_heals_a_wounded_biological() {
+    // The heal direction, isolated from combat noise: flood the field, wound every biological to half
+    // health, run ONE tick, and assert at least one recovered. Only a handful of biologicals are in melee on
+    // any given tick, so with the whole floor flooded the vast majority heal — `>= 1` is bulletproof against
+    // the few that take contact damage this tick. Together with the `drink` unit test (exact drain) this
+    // pins the write→heal coupling end-to-end.
+    use bevy::prelude::With;
+    use foundation_vs_slop::almond_water::AlmondWater;
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::health::{Biological, Health};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 120); // let spawns settle
+
+    // Wound every biological to exactly half its max.
+    let mut wounded = 0usize;
+    {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&mut Health, With<Biological>>();
+        for mut h in q.iter_mut(world) {
+            h.current = h.max * 0.5;
+            wounded += 1;
+        }
+    }
+    assert!(wounded > 0, "the sim must have biologicals (units + crabs) to heal");
+
+    // Put water under all of them, then run a single heal tick.
+    let capacity = app.world().resource::<GameConfig>().almond_water.capacity;
+    app.world_mut().resource_mut::<AlmondWater>().test_flood(capacity);
+    step(&mut app, &cfg, 1);
+
+    // At least one biological standing in water recovered above the half-health mark.
+    let healed = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&Health, With<Biological>>();
+        q.iter(world).filter(|h| h.current > h.max * 0.5 + 1.0e-4).count()
+    };
+    assert!(healed > 0, "no wounded biological healed while flooded with Almond Water");
+}

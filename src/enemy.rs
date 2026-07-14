@@ -380,11 +380,11 @@ impl Plugin for EnemyPlugin {
                     // Reflex first so movement + the zap see this tick's mood.
                     smiley_reflex.after(crate::ai::AiSet::Think),
                     // Smite attackers while unleashing (instakill = pinned state → FixedUpdate).
-                    smiley_zap.after(smiley_reflex),
+                    smiley_zap.after(smiley_reflex).in_set(crate::health::HealthDamage),
                     // Bounded no-heal crab cull so the swarm can't free-farm the coexisting god. It TAGS
                     // its victims (`crab::Culled`) rather than despawning them, so it must run before the
                     // one despawn owner — an `insert` command applied after that despawn panics.
-                    smiley_defense.before(crate::crab::CrabDespawn),
+                    smiley_defense.before(crate::crab::CrabDespawn).in_set(crate::health::HealthDamage),
                     // Move after the brain chose this tick's mode and the reflex set the mood.
                     enemy_seek
                         .after(rebuild_enemy_field)

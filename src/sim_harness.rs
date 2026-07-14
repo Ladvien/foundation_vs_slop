@@ -300,7 +300,15 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // `LightFieldPlugin` grouped with dungeon+placement (it needs both) and kept harness-visible so
         // the exact-hash gate covers its bake once Phase-2 creature light-response reads it. The windowed
         // `LightingPlugin` (real lights/FX) is deliberately NOT here.
-        (crate::dungeon::DungeonPlugin, crate::placement::PlacementPlugin, crate::light::LightFieldPlugin),
+        // `AlmondWaterPlugin` (the CPU water field + consuming heal) grouped here too and kept
+        // harness-visible — its field feeds crab foraging and its heal writes `Health`, both pinned. The
+        // cosmetic puddle `AlmondWaterVisualPlugin` is deliberately NOT here (windowed/GPU only).
+        (
+            crate::dungeon::DungeonPlugin,
+            crate::placement::PlacementPlugin,
+            crate::light::LightFieldPlugin,
+            crate::almond_water::AlmondWaterPlugin,
+        ),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
         // Squad movement AND squad AI — registered together, exactly as production `lib::run` does, so
@@ -434,6 +442,12 @@ pub fn field_hash(app: &mut App) -> u64 {
     // invisible to `snapshot_hash`. Fold the field itself too, exactly as Stig/Rally above.
     if let Some(light) = world.get_resource::<crate::light::LightField>() {
         light.fold_fingerprint(&mut hash);
+    }
+    // The Almond Water field feeds wounded-crab foraging AND is drunk down by the heal, so a broken
+    // seep bake / diffusion / drink that shifts a crab moves the replay hash — but a field bug that
+    // doesn't happen to relocate an agent would be invisible to `snapshot_hash`. Fold it too.
+    if let Some(water) = world.get_resource::<crate::almond_water::AlmondWater>() {
+        water.fold_fingerprint(&mut hash);
     }
     hash
 }

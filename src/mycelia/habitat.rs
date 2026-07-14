@@ -475,6 +475,31 @@ pub fn build(dungeon: &Dungeon, cfg: &MyceliaConfig) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
+/// A per-**dungeon-cell** "mold lives here" mask, row-major over the 192² grid. Samples the
+/// field-resolution [`build`] mask at each floor cell's centre using the exact texel map + [`COVERED`]
+/// threshold `build`'s own coverage measurement uses (the coverage loop above), so the two can never
+/// disagree. `true` only on infested floor; rock and clean floor are `false`.
+///
+/// This is the single source of truth for "mold-colonised concrete" outside the mold itself — used by
+/// [`crate::almond_water`] to boost seep where the colony has cracked the concrete. Pure and deterministic
+/// (it only reads the seeded, geometry-derived mask), so a caller may bake it into static state.
+pub fn infested_cells(dungeon: &Dungeon, cfg: &MyceliaConfig) -> Result<Vec<bool>, String> {
+    let bytes = build(dungeon, cfg)?;
+    let cells = CONTROL_SIZE as usize;
+    let field = cfg.field_size as usize;
+    let cells_per_texel = cells as f32 / field as f32;
+    let covered_byte = (COVERED * 255.0).round() as u8;
+    let mut out = vec![false; cells * cells];
+    for c in dungeon.floor_cells() {
+        let tx = ((c.x as f32 + 0.5) / cells_per_texel) as usize;
+        let ty = ((c.y as f32 + 0.5) / cells_per_texel) as usize;
+        if tx < field && ty < field && bytes[ty * field + tx] >= covered_byte {
+            out[crate::util::row_major(c, cells)] = true;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

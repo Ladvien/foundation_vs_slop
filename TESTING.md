@@ -130,6 +130,7 @@ The canonical map of what pins what. Update this table when you add or retire a 
 | `geom.rs` | Poisson-disk sampling (determinism, spacing, bounds), Delaunay triangulation (small cases, every-point-a-vertex, determinism), degree-prune. |
 | `autogib.rs` | Fracture **topology** — slice/cap geometry, reaches target & deterministic, missing UV/normals synthesized, open-boundary dropped, degenerate plane leaves piece whole. (Counts/structure, never float vertex positions.) |
 | `crab.rs` | Crab floor-patch clamp geometry — a crab is never inset into a wall slab (the reported wall-clip bug); walled edges inset, open edges keep full extent. |
+| `almond_water/mod.rs` | The Almond Water field math — `drink` drains exactly & clamps at 0, `tick` accumulates toward the seep/evaporate fixed point & clamps to capacity, diffusion spreads to a neighbour & conserves between two cells, and `validate_config` accepts a valid slice & rejects out-of-range (diffuse/ior/capacity/wounded-frac/negative-seep). |
 | `visual_regression.rs` | The SSIM oracle itself — identical→1.0, tiny perturbation stays > 0.98, structural change scores low, symmetric & deterministic. |
 | `placement/manifest.rs` | RON manifest parsing — roles & affordances parse, too-many-tiled is rejected. |
 | `placement/solver.rs` | Role→solver routing — routes by candidate role, registration-order-independent, unhandled role → no route, empty candidates → empty success, post-route constraint guard, mixed hard/soft requirements. |
@@ -165,7 +166,7 @@ The canonical map of what pins what. Update this table when you add or retire a 
 | `tests/rng_guard.rs` | GPU-free (no feature) | Freezes the exact bit output of every generator — `util` (`next_u32`, `rand01`, `hash01_u32`), `autogib::hash_f32`, and `rng::seeded` ChaCha8 (`raw_u64`, `unit`, `below`). A silent constant change trips here first. |
 | `tests/wfc_pin.rs` | GPU-free (no feature) | Golden FNV-1a hash of `wfc::generate` over a 5-seed corpus + in-process reproducibility + the "a floor link only ever joins two floors" invariant. |
 | `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. |
-| `tests/liveness.rs` | `test-harness` (GPU-free) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. |
+| `tests/liveness.rs` | `test-harness` (GPU-free) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. Also: **Almond Water** seeps and pools on the floor (`peak > 0` after 600 ticks) and a wounded biological flooded with water regains HP in one tick. |
 
 ---
 

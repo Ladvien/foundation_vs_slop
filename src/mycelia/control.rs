@@ -291,6 +291,12 @@ pub(super) fn write_control(
     // supersedes the binary `fog.visible_at` for the mat's recoil. `Option` for menu/loading frames before
     // the AI fields exist.
     stig: Option<Res<crate::ai::field::Stig>>,
+    // Almond Water moisture feed: wet concrete seeds the mold's chemoattractant (`R`) so the colony blooms
+    // richer where water pools — the cosmetic half of the two-way mold↔water coupling (the deterministic
+    // half is the seep boost on mold-colonised concrete, baked in `almond_water`). One-way and windowed-only:
+    // both `Option` so menu/loading frames before the field/config exist are a clean no-op.
+    almond: Option<Res<crate::almond_water::AlmondWater>>,
+    game: Option<Res<crate::config::GameConfig>>,
     pools: Query<&Transform, With<BloodPool>>,
     gibs: Query<&Transform, With<GibChunk>>,
     nests: Query<&Nest>,
@@ -325,6 +331,13 @@ pub(super) fn write_control(
             *static_written = true;
         }
     }
+
+    // Almond Water moisture parameters, resolved once. `gain == 0` (no config, or the knob turned off)
+    // makes the moisture term vanish — the pool then reads bare of any mold coupling.
+    let (moist_cap, moist_gain) = match &game {
+        Some(g) => (g.almond_water.capacity.max(1.0e-6), g.almond_water.moisture_feed_gain),
+        None => (1.0, 0.0),
+    };
 
     // ── Pass 1: per-cell fog (light + habituation) and the walkable mask ──────────────────────────────
     for y in 0..size {
@@ -384,8 +397,18 @@ pub(super) fn write_control(
                 85
             };
 
+            // R: chemo — seeded by Almond Water wetness (mold blooms on wet concrete), then the point
+            // sources splat on top in pass 2. Sampling the field by cell centre keeps it a pure read.
+            let moisture = almond
+                .as_ref()
+                .map(|w| {
+                    (w.sample(&dungeon, dungeon.cell_center(cell)) / moist_cap * moist_gain)
+                        .clamp(0.0, 1.0)
+                })
+                .unwrap_or(0.0);
+
             let base = i * field::CONTROL_BYTES_PER_TEXEL;
-            cpu[base] = 0; // R: chemo — accumulated in pass 2
+            cpu[base] = to_u8(moisture); // R: chemo — moisture seed; pass 2 adds carrion/nest scent
             cpu[base + 1] = to_u8(light[i]); // G: light/gaze, rate-limited above
             cpu[base + 2] = 0; // B: disturbance — accumulated in pass 2
             cpu[base + 3] = substrate; // A: 0 void / 85 unseen / 170 remembered / 255 visible

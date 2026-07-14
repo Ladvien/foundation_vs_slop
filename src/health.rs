@@ -59,6 +59,24 @@ struct HasHealthBar;
 #[derive(Component)]
 pub struct NoHealthBar;
 
+/// System set for every `FixedUpdate` system that **damages** `Health` (laser, crab contact/jump, boss
+/// zap/defense, parasite embed/burst). These writers overlap in component access but rarely touch the same
+/// entity the same tick, so their mutual order was never pinned. [`crate::almond_water::almond_water_heal`]
+/// orders itself `.after(HealthDamage)` so the consuming heal always composes on top of the tick's damage
+/// deterministically — otherwise, once foraging clusters wounded crabs into weapon range, heal-vs-damage
+/// clamping races and `snapshot_hash` flips per process. Each damage system opts in with `.in_set(...)` at
+/// its own registration; the set carries no ordering of its own, only a name to sequence the heal behind.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HealthDamage;
+
+/// Living flesh that [`crate::almond_water`] can heal — a **positive** tag, inserted at spawn only on the
+/// flesh factions (squad units, crabs), so `Health`-bearing non-flesh is excluded *by construction*: the
+/// stone Nest has `Health` but no `Biological`, and the anomaly factions (Manca, Smiley) are deliberately
+/// left out too. `Health` alone is not a valid "heal target" predicate; this marker is. Inserted at spawn,
+/// never mid-sim, to avoid a runtime archetype migration.
+#[derive(Component)]
+pub struct Biological;
+
 /// GPU uniform — mirrors `HealthBarSettings` in `health_bar.wgsl` (field order + types).
 #[derive(Clone, ShaderType)]
 struct HealthBarUniform {

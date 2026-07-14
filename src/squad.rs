@@ -18,7 +18,7 @@ use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
 use crate::gore::{GibSource, GoreEvent, GoreKind, GoreQueue};
-use crate::health::Health;
+use crate::health::{Biological, Health};
 use crate::orca::{self, Agent};
 use crate::sim::SimTuning;
 use crate::ai::brain::{ActiveBehavior, ThinkTimer};
@@ -282,6 +282,7 @@ fn spawn_squad(
                 FacingOverride(None), // set by `squad_think` when the Researcher wards; wins over aim
 
                 Health::new(sim.combat.unit_hp),
+                Biological, // living flesh Almond Water can heal (Foundation is a flesh faction)
                 Outfit(outfit),
                 // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
                 // decision + think throttle, and the autonomous movement goal (see `squad_ai`).

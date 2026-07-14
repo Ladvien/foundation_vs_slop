@@ -418,12 +418,15 @@ impl Plugin for ParasitePlugin {
                         .after(crate::light::LightFieldWritten),
                     manca_hunt.after(manca_huddle),
                     manca_leap.after(manca_hunt),
-                    manca_embed.after(manca_leap),
+                    manca_embed.after(manca_leap).in_set(crate::health::HealthDamage),
                     gestation_tick.after(manca_embed),
                     // The eruption driver: convulse → erupt (⅓-HP damage + wound + chest-spawned brood + gush)
                     // → bleed. Still ordered before the crab despawn owner (harmless now the burst no longer
                     // zeroes HP) and after the gestation clock that arms it.
-                    parasite_burst.after(gestation_tick).before(crate::crab::CrabDespawn),
+                    parasite_burst
+                        .after(gestation_tick)
+                        .before(crate::crab::CrabDespawn)
+                        .in_set(crate::health::HealthDamage),
                     // Sole HP≤0 owner for mancae (a shot manca) — mirrors `crab_despawn_dead`.
                     manca_despawn_dead,
                     // A ROUSED brood radiates THREAT_ANOMALY into the shared fear field, so the squad's
@@ -473,6 +476,26 @@ fn deposit_manca_dread(
             amount,
         });
     }
+}
+
+/// Force every manca into [`MoodState::Roused`] — a harness helper so a test can exercise the
+/// roused-only dread deposit (`deposit_manca_dread`) directly, without depending on the emergent rouse
+/// timing (which shifts whenever an unrelated change perturbs the deterministic trajectory). Returns how
+/// many mancae were roused. Test-only.
+#[cfg(feature = "test-harness")]
+pub fn rouse_all_mancae(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query::<&mut MancaMood>();
+    let mut n = 0;
+    for mut mood in q.iter_mut(world) {
+        mood.state = MoodState::Roused;
+        // Park the calm timer far in the future so `manca_rouse` cannot re-settle the brood to Dormant
+        // during the test's sample window (a freshly-forced rouse otherwise reverts next tick, since a
+        // dormant manca's `calm_timer` is 0). One durable, self-contained rouse.
+        mood.calm_timer = 1.0e9;
+        n += 1;
+    }
+    n
 }
 
 /// Build the shared animation graph over the manca clips we drive in Phase 1.

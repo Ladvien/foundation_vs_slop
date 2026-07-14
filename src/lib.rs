@@ -26,6 +26,7 @@ pub mod behavior_tuning;
 pub mod blood_lens;
 pub mod ai;
 pub mod ai_overlay;
+pub mod almond_water;
 pub mod camera;
 pub mod config;
 pub mod crab;
@@ -149,7 +150,15 @@ pub fn run() {
             // it depends on, and kept harness-visible — unlike the windowed `LightingPlugin` below — so the
             // determinism gate covers its bake. Nested here (not a 16th top-level element) to stay under
             // Bevy's 15-plugin tuple cap.
-            (dungeon::DungeonPlugin, placement::PlacementPlugin, light::LightFieldPlugin),
+            // `AlmondWaterPlugin` (the CPU water field creatures forage on + the consuming heal) is grouped
+            // here too and kept harness-visible, like `LightFieldPlugin` — its field + heal are pinned. The
+            // cosmetic puddle `AlmondWaterVisualPlugin` sits with the windowed FX below, never in the harness.
+            (
+                dungeon::DungeonPlugin,
+                placement::PlacementPlugin,
+                light::LightFieldPlugin,
+                almond_water::AlmondWaterPlugin,
+            ),
             world::WorldPlugin,
             camera::CameraPlugin,
             (squad::SquadPlugin, squad_ai::SquadAiPlugin),
@@ -181,7 +190,15 @@ pub fn run() {
             // cosmetic/GPU and windowed-only — deliberately NOT in `sim_harness`, so the deterministic
             // core never depends on a GPU (the harness keeps the plain `world` ambient+directional). The
             // gameplay `LightField` it will own is registered separately so the harness CAN see it.
-            (vhs::VhsPlugin, blood_lens::BloodLensPlugin, mycelia::MyceliaPlugin, light::LightingPlugin),
+            (
+                vhs::VhsPlugin,
+                blood_lens::BloodLensPlugin,
+                mycelia::MyceliaPlugin,
+                light::LightingPlugin,
+                // The iridescent Almond Water puddle + the mold moisture-feed. Cosmetic/GPU, windowed-only —
+                // never in `sim_harness`, so the deterministic core never depends on it.
+                almond_water::visual::AlmondWaterVisualPlugin,
+            ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
             // deterministic core (see `ui` docs). Dialogue needs `MenuState` (from `UiPlugin`) for the
