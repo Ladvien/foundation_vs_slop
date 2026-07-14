@@ -119,7 +119,14 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     // ambiguous `FixedUpdate` order (the documented schedule-insertion effect), shifting the actor golden;
     // and `MoldField` is now folded into `field_hash` (below). Deterministic across processes (verified
     // 40/40 via `train verify`). Was `0x45b960069537d712` (snapshot) / `0xee06882d2f1421d9` (field).
-    const GOLDEN: u64 = 0x5b5a84cf56eadcbe;
+    //
+    // Re-pinned for the MOLD COUPLINGS (load-bearing ecosystem): the mold now (1) dims the LightField
+    // (`mold_dim_light`) so photophobic crabs react to mold-made dark zones, (2) occludes LOS (`fog::
+    // update_los`) so a crab denned in thick mold is unseen/un-targetable, and (3) boosts almond-water seep
+    // live (`AlmondWater::tick`) so moldy zones weep more healing water. All three move real actors, and the
+    // field golden folds the couplings' effect on the light/water/Stig grids. Deterministic across processes
+    // (44/44). Was `0x5b5a84cf56eadcbe` (snapshot) / `0x5ff6dc475cad0375` (field).
+    const GOLDEN: u64 = 0xcdca49900d7da832;
 
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
@@ -211,7 +218,7 @@ fn field_passes_are_bit_identical() {
     // Re-pinned for the CRAB DETERMINISM fix (see the `GOLDEN` note above): sorting the wounded-crab ALARM
     // deposit batch (`crab::crab_alarm_on_damage`) canonicalised the ALARM channel's non-associative sum,
     // which this field oracle folds. Was `0xbcb2_b8c3_8e32_19a9`.
-    const GOLDEN_FIELD: u64 = 0x5ff6_dc47_5cad_0375;
+    const GOLDEN_FIELD: u64 = 0xd705_e971_d048_0409;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -244,7 +251,7 @@ fn authored_world_config_override_is_a_noop() {
         // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
         // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pins above (incl. the
         // sparse-spring seep-model re-pin) and the crab-determinism re-pin.
-        0x5b5a84cf56eadcbe,
+        0xcdca49900d7da832,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }

@@ -233,12 +233,29 @@ impl AlmondWater {
     /// One accumulate → evaporate → diffuse step, floor cells only, in `Stig::evaporate_diffuse`'s order and
     /// with its determinism discipline (fixed E/W/S/N neighbour order — float add is non-associative — and a
     /// double-buffered diffuse so rock cells stay invariantly 0). `dt` in seconds.
-    fn tick(&mut self, dt: f32, evaporate: f32, diffuse: f32, capacity: f32) {
-        // 1+2. Accumulate the seep, then evaporate, in one in-place pass (an evaporation of the just-added
-        //      seep is exactly a steady-state cap; the two commute up to O(dt²), same as `Stig`).
+    #[allow(clippy::too_many_arguments)]
+    fn tick(
+        &mut self,
+        dt: f32,
+        evaporate: f32,
+        diffuse: f32,
+        capacity: f32,
+        // Mold→seep coupling: the LIVE mold biomass grid + its knobs. A spring's seep is scaled by the mold
+        // over it — `boost = 1 + (seep_boost − 1)·min(1, biomass/dense_v)` — so a spring in thick mold weeps
+        // more and one where the mold has receded (pushed back by the squad's light) dries toward its base
+        // rate. Deterministic: read-only over `mold`, applied in the same fixed floor-cell order.
+        mold: &[f32],
+        seep_boost: f32,
+        dense_v: f32,
+    ) {
+        // 1+2. Accumulate the (mold-boosted) seep, then evaporate, in one in-place pass (an evaporation of
+        //      the just-added seep is exactly a steady-state cap; the two commute up to O(dt²), same as `Stig`).
         let retain = (1.0 - evaporate * dt).clamp(0.0, 1.0);
+        let inv_dense = 1.0 / dense_v.max(0.01);
         for &(idx, _) in &self.floor_cells {
-            let filled = (self.level[idx] + self.sources[idx] * dt).min(capacity);
+            let m01 = (mold.get(idx).copied().unwrap_or(0.0) * inv_dense).clamp(0.0, 1.0);
+            let boost = 1.0 + (seep_boost - 1.0) * m01;
+            let filled = (self.level[idx] + self.sources[idx] * boost * dt).min(capacity);
             self.level[idx] = filled * retain;
         }
 
@@ -408,11 +425,11 @@ fn bake_almond_sources(
         }
 
         springs.push(c);
-        let mut seep = cfg.strong_seep;
-        if mold {
-            seep *= cfg.mold_seep_mult;
-        }
-        sources[idx] = seep;
+        // Base seep at the spring. The mold-cracked boost is now applied LIVE in `tick` (scaled by the
+        // current `MoldField` biomass over the cell), not baked once — so a spring weeps more as mold thickens
+        // and dries back as the squad's light pushes it away. A mold-habitat cell is still eligible above, so
+        // the moldy regions have springs to boost. (`cfg.mold_seep_mult` is superseded by `mold.seep_boost`.)
+        sources[idx] = cfg.strong_seep;
     }
 
     field.sources = sources;
@@ -427,10 +444,21 @@ fn accumulate_evaporate_diffuse(
     mut field: ResMut<AlmondWater>,
     config: Res<GameConfig>,
     time: Res<Time>,
+    // The live mold field boosts seep where it is dense (mold-cracked concrete weeps more). Reads last-tick
+    // biomass — `mold_update` is ordered `.after(AlmondWaterWritten)` so the read/write pair is acyclic.
+    mold: Res<crate::mold::MoldField>,
 ) {
     let cfg = &config.almond_water;
     let (evaporate, diffuse, capacity) = (cfg.evaporate, cfg.diffuse, cfg.capacity);
-    field.tick(time.delta_secs(), evaporate, diffuse, capacity);
+    field.tick(
+        time.delta_secs(),
+        evaporate,
+        diffuse,
+        capacity,
+        mold.biomass_grid(),
+        config.mold.seep_boost,
+        config.mold.dense_v,
+    );
 }
 
 /// Heal every biological creature standing in water, draining the cell as it heals. `FixedUpdate`, after the
@@ -595,7 +623,7 @@ mod tests {
         // ~20k ticks: the per-tick convergence factor is (1 − e·dt) ≈ 0.99917, so it takes several
         // thousand ticks to settle to the fixed point within tolerance.
         for _ in 0..20_000 {
-            f.tick(dt, e, 0.0, cap); // diffuse 0: isolated cell
+            f.tick(dt, e, 0.0, cap, &[], 1.0, 0.5); // diffuse 0: isolated cell; no mold
             // Monotone non-decreasing from empty toward the fixed point; never over capacity.
             assert!(f.level[0] >= prev - 1.0e-6);
             assert!(f.level[0] <= cap + 1.0e-4);
@@ -610,7 +638,7 @@ mod tests {
     fn tick_clamps_a_huge_seep_to_capacity() {
         let mut f = grid(1, 1, &[(0, 0)]);
         f.sources[0] = 1.0e9;
-        f.tick(1.0 / 60.0, 0.0, 0.0, 42.0);
+        f.tick(1.0 / 60.0, 0.0, 0.0, 42.0, &[], 1.0, 0.5);
         assert_eq!(f.level[0], 42.0);
         assert_eq!(f.peak(), 42.0);
     }
@@ -620,7 +648,7 @@ mod tests {
         // Two adjacent floor cells, one full, one dry; no seep, no drying → diffusion only.
         let mut f = grid(2, 1, &[(0, 0), (1, 0)]);
         f.level[0] = 100.0;
-        f.tick(1.0 / 60.0, 0.0, 0.5, 1000.0);
+        f.tick(1.0 / 60.0, 0.0, 0.5, 1000.0, &[], 1.0, 0.5);
         // Each blends halfway toward the other; the pair's total is conserved.
         assert!((f.level[0] - 50.0).abs() < 1.0e-4);
         assert!((f.level[1] - 50.0).abs() < 1.0e-4);

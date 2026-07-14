@@ -337,6 +337,26 @@ impl LightField {
         self.dirty = true;
     }
 
+    /// Attenuate the composed illuminance by the gameplay mold: a moldy cell (`biomass` toward 1) darkens
+    /// toward `1 - dim_light`. Called each tick AFTER `compose` (so it never accumulates — `compose`
+    /// recopies the un-dimmed base+cones first), inside the `LightFieldWritten` set so every light reader
+    /// (crab photophobia, the mold's own recoil) sees the darkened field. `biomass` is the row-major
+    /// `MoldField` grid, same layout as `cells`. This is the mold→light half of the mold↔light feedback
+    /// loop: mold self-shades (persisting in its own dark), and the squad's flashlight — strong enough to
+    /// overpower the dimming — pushes it back (the recoil half lives in `mold::mold_update`).
+    pub fn apply_mold_dim(&mut self, biomass: &[f32], dim_light: f32) {
+        if dim_light <= 0.0 {
+            return;
+        }
+        let mut peak = 0.0f32;
+        for (i, cell) in self.cells.iter_mut().enumerate() {
+            let b = biomass.get(i).copied().unwrap_or(0.0);
+            *cell *= (1.0 - dim_light * b).clamp(0.0, 1.0);
+            peak = peak.max(*cell);
+        }
+        self.peak = peak;
+    }
+
     /// FNV-1a-fold every **composed** cell's bit pattern into `hash` — the determinism oracle for the whole
     /// field, mirroring `Stig::fold_fingerprint`. A broken bake/occlusion that shifts a crab would change
     /// the replay hash; this pins the field itself too. Test-only.
@@ -410,7 +430,7 @@ fn bake_light_field(
 /// **Determinism:** cones are sorted by source cell before compose (the `bake` float-sum discipline); the
 /// beam `forward` is built from the unit's deterministic gameplay state with arch-stable ops, never from
 /// the slerped `Transform.rotation` (see [`LightField::fold_fingerprint`]). Ref: Björk & Michelsen, FDG 2014.
-fn apply_dynamic_lights(
+pub(crate) fn apply_dynamic_lights(
     mut field: ResMut<LightField>,
     dungeon: Res<Dungeon>,
     config: Res<GameConfig>,

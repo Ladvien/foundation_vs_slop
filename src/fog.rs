@@ -121,6 +121,10 @@ fn update_los(
     units: Query<&Transform, With<Unit>>,
     tiles: Query<(Entity, &Tile)>,
     mut visibility: Query<&mut Visibility>,
+    // Mold→LOS coupling: dense mold occludes sight (soft cover). Reads last-tick biomass — `mold_update` is
+    // ordered `.after(LosWritten)`, so the resource read/write pair is acyclic and deterministic.
+    mold: Res<crate::mold::MoldField>,
+    config: Res<crate::config::GameConfig>,
 ) {
     let fog = &mut *fog;
 
@@ -161,7 +165,13 @@ fn update_los(
                     continue;
                 }
                 let c = uc + IVec2::new(dx, dy);
-                if !dungeon.is_floor(c) || !dungeon.line_of_sight(uc, c) {
+                // Dense mold obscures the cell (soft cover): `biomass · occlude_los ≥ dense_v` leaves it
+                // un-Visible, so the squad can't see — or auto-fire at — a crab denned in thick mold, and
+                // the ATTENTION channel (deposited over the LOS set) doesn't reach it either.
+                if !dungeon.is_floor(c)
+                    || !dungeon.line_of_sight(uc, c)
+                    || mold.biomass_at(c) * config.mold.occlude_los >= config.mold.dense_v
+                {
                     continue;
                 }
                 let i = fog.index(c);

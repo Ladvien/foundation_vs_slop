@@ -204,6 +204,12 @@ impl MoldField {
         self.v.iter().sum()
     }
 
+    /// The row-major biomass grid (same layout as `LightField`/`Stig`/`AlmondWater`) — for the couplings
+    /// that scale another field by mold (`light::LightField::apply_mold_dim`).
+    pub fn biomass_grid(&self) -> &[f32] {
+        &self.v
+    }
+
     /// The determinism fingerprint (test-harness only) — folded into `sim_harness::field_hash`.
     #[cfg(feature = "test-harness")]
     pub fn fold_fingerprint(&self, hash: &mut u64) {
@@ -263,6 +269,14 @@ fn mold_update(
     field.diffuse_react(&config.mold);
 }
 
+/// **Mold → light dimming** — the mold's write-edge onto the [`LightField`]. Runs inside the
+/// [`LightFieldWritten`] set, AFTER the cones are composed and BEFORE any light reader, so crab photophobia
+/// and the mold's own recoil both see the darkened field the same tick. Reads last-tick biomass (the
+/// standard one-tick lag), so the mold↔light feedback stays acyclic and deterministic.
+fn mold_dim_light(mut light: ResMut<LightField>, mold: Res<MoldField>, config: Res<GameConfig>) {
+    light.apply_mold_dim(mold.biomass_grid(), config.mold.dim_light);
+}
+
 /// Owns the gameplay [`MoldField`]. Registered in BOTH the windowed game and the headless harness (like
 /// [`crate::light::LightFieldPlugin`]) because the field is CPU gameplay state the replay gate must cover.
 /// Requires `Dungeon` at build (DungeonPlugin precedes it).
@@ -277,10 +291,25 @@ impl Plugin for MoldPlugin {
         let field = MoldField::new(dungeon.width, dungeon.height);
         app.insert_resource(field)
             .add_systems(Startup, bake_mold)
-            // `.after(LightFieldWritten)`: recoil reads the current tick's composed illuminance, exactly as
-            // crab locomotion reads light after the same set. The mold's writes (dim/occlude/seep) are read
-            // by the next tick's bakes — the codebase's standard one-tick lag that breaks the feedback cycle.
-            .add_systems(FixedUpdate, mold_update.after(LightFieldWritten));
+            .add_systems(
+                FixedUpdate,
+                (
+                    // Dim the light INSIDE `LightFieldWritten`, after the cones (`apply_dynamic_lights`), so
+                    // every `.after(LightFieldWritten)` reader — crab photophobia and `mold_update` below —
+                    // deterministically sees the darkened field.
+                    mold_dim_light
+                        .in_set(LightFieldWritten)
+                        .after(crate::light::apply_dynamic_lights),
+                    // Then advance the reaction-diffusion, recoiling from the (now mold-dimmed) illuminance.
+                    // Ordered AFTER every mold READER — `update_los` (LOS occlusion) and
+                    // `accumulate_evaporate_diffuse` (seep boost) — so each reads last-tick biomass and the
+                    // MoldField read/write pairs stay acyclic and deterministic.
+                    mold_update
+                        .after(LightFieldWritten)
+                        .after(crate::fog::LosWritten)
+                        .after(crate::almond_water::AlmondWaterWritten),
+                ),
+            );
     }
 }
 
