@@ -128,12 +128,17 @@ fn setup_puddle(
     commands.insert_resource(AlmondLevelImage(level));
 }
 
-/// Copy the gameplay `level` grid into the puddle texture each frame, normalised to `capacity` → 0..255.
-/// `super::AlmondWater`'s fields are private but visible here (a child module sees its parent's privates),
-/// so this reads `level` directly rather than sampling cell-by-cell. Cosmetic: it only mutates a GPU image.
+/// Copy the gameplay `level` grid into the puddle texture each frame, normalised to `capacity` → 0..255,
+/// **gated by fog of war**: a cell outside every unit's live line of sight is written as 0 (dry) so the
+/// shader's dry-cell `discard` hides the puddle there — the puddle can never paint over unexplored/
+/// unwatched black fog and reveal the map. `super::AlmondWater`'s fields are private but visible here (a
+/// child module sees its parent's privates), so this reads `level`/`width` directly rather than sampling
+/// cell-by-cell. Cosmetic: it only mutates a GPU image (reads the last-written [`FogGrid`], no ordering
+/// needed).
 fn upload_level(
     field: Res<AlmondWater>,
     config: Res<GameConfig>,
+    fog: Res<crate::fog::FogGrid>,
     image: Res<AlmondLevelImage>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -148,7 +153,11 @@ fn upload_level(
     if data.len() != field.level.len() {
         return;
     }
-    for (byte, &lvl) in data.iter_mut().zip(field.level.iter()) {
-        *byte = ((lvl / cap).clamp(0.0, 1.0) * 255.0) as u8;
+    let w = field.width as i32;
+    for (i, (byte, &lvl)) in data.iter_mut().zip(field.level.iter()).enumerate() {
+        // Recover the cell from the row-major texel index (same `y*width + x` layout the level grid uses).
+        let cell = IVec2::new(i as i32 % w, i as i32 / w);
+        let shown = if fog.visible_at(cell) { lvl } else { 0.0 };
+        *byte = ((shown / cap).clamp(0.0, 1.0) * 255.0) as u8;
     }
 }

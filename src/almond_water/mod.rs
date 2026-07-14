@@ -35,11 +35,15 @@ pub mod visual;
 /// panic via [`validate_config`].
 #[derive(Deserialize, Clone, Debug)]
 pub struct AlmondWaterConfig {
-    /// Seep rate (volume/sec) baked into a floor cell that borders a wall — "bubbles up from the walls of
-    /// concrete." The strong source.
+    /// Seep rate (volume/sec) baked into a **spring** — a sparse, spaced-out floor cell that borders a wall
+    /// (or is mold-colonised), where the water "bubbles up from the concrete." Only springs seep; every
+    /// other cell stays dry, so the field reads as discrete pools rather than one continuous sheet.
     pub strong_seep: f32,
-    /// Baseline seep rate for every floor cell — "bubbles up from the floor." Weak but everywhere.
-    pub weak_seep: f32,
+    /// Minimum spacing (in tiles) between springs — the greedy scatter in [`bake_almond_sources`] rejects a
+    /// candidate spring within this Chebyshev distance of one already placed. Larger ⇒ fewer, more isolated
+    /// pools; this is what caps a pool's footprint (a spring's puddle spreads only a tile or two before the
+    /// next spring is too far to merge with it), keeping each pool to ~1–10 tiles.
+    pub pool_spacing: f32,
     /// Per-cell volume ceiling. Accumulation clamps here so a rich seep pools but never runs away.
     pub capacity: f32,
     /// Fraction of a cell's volume lost per second (drying) — the same evaporation term `Stig` uses.
@@ -82,7 +86,6 @@ pub struct AlmondWaterConfig {
 pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
     for (name, v) in [
         ("strong_seep", c.strong_seep),
-        ("weak_seep", c.weak_seep),
         ("evaporate", c.evaporate),
         ("heal_rate", c.heal_rate),
         ("mold_seep_mult", c.mold_seep_mult),
@@ -98,6 +101,12 @@ pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
     }
     if !(c.capacity.is_finite() && c.capacity > 0.0) {
         return Err(format!("almond_water.capacity must be finite and > 0 (got {})", c.capacity));
+    }
+    if !(c.pool_spacing.is_finite() && c.pool_spacing >= 1.0) {
+        return Err(format!(
+            "almond_water.pool_spacing must be finite and >= 1 tile (got {})",
+            c.pool_spacing
+        ));
     }
     if !(c.heal_per_unit_water.is_finite() && c.heal_per_unit_water > 0.0) {
         return Err(format!(
@@ -282,6 +291,44 @@ impl AlmondWater {
         fold(self.peak, hash);
     }
 
+    /// Connected-component (4-neighbour) tile counts of every **pool** — a maximal run of floor cells whose
+    /// `level` exceeds `threshold`. Sorted descending. Lets a harness test assert the sparse springs stay
+    /// small, isolated puddles (the "1–10 tiles per pool" contract) rather than merging into a sheet.
+    /// Test-only.
+    #[cfg(feature = "test-harness")]
+    pub fn pool_sizes(&self, threshold: f32) -> Vec<usize> {
+        let (w, h) = (self.width, self.height);
+        let wet = |c: IVec2| -> bool {
+            in_grid(c, w, h) && self.level[row_major(c, w)] > threshold
+        };
+        let mut seen = vec![false; w * h];
+        let mut sizes: Vec<usize> = Vec::new();
+        for &(idx, c) in &self.floor_cells {
+            if seen[idx] || !wet(c) {
+                continue;
+            }
+            let mut stack = vec![c];
+            seen[idx] = true;
+            let mut size = 0usize;
+            while let Some(p) = stack.pop() {
+                size += 1;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let n = p + IVec2::new(dx, dy);
+                    if wet(n) {
+                        let ni = row_major(n, w);
+                        if !seen[ni] {
+                            seen[ni] = true;
+                            stack.push(n);
+                        }
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        sizes
+    }
+
     /// Flood every floor cell to `level` — a harness helper so a heal test can put water under every
     /// biological without waiting for the seeps to pool. Test-only.
     #[cfg(feature = "test-harness")]
@@ -305,12 +352,16 @@ pub fn almond_push(field: &AlmondWater, dungeon: &Dungeon, pos: Vec3, gain: f32)
     Vec3::new(g.x, 0.0, g.y) * gain
 }
 
-/// Bake the per-cell seep `sources` once, at `Startup`, from pure geometry plus the static mold habitat:
-/// a floor cell bordering a wall (any 4-neighbour non-floor) is a **strong seep**; every floor cell gets
-/// the **weak baseline**; and a cell the mold colonises is multiplied by `mold_seep_mult`. Fallible because
-/// it reads the mold habitat (`mycelia::habitat::infested_cells`) — a dungeon/damp-table contract violation
-/// is a loud startup `Err`, never a degraded default. Deterministic (pure geometry + the seeded habitat
-/// mask), so it stays out of `snapshot_hash`.
+/// Bake the per-cell seep `sources` once, at `Startup`, from pure geometry plus the static mold habitat.
+/// Water bubbles up from **sparse springs**, not every wall: a floor cell is a spring only if it is eligible
+/// (borders a wall — "bubbles up from the walls" — or is mold-colonised) AND no spring is already placed
+/// within `pool_spacing` tiles. A greedy min-spacing scatter (deterministic row-major order) keeps springs
+/// far enough apart that their puddles never merge, so the field reads as discrete 1–10 tile pools instead
+/// of one continuous sheet. A mold spring seeps `mold_seep_mult`× more. Every non-spring cell stays dry.
+///
+/// Fallible because it reads the mold habitat (`mycelia::habitat::infested_cells`) — a dungeon/damp-table
+/// contract violation is a loud startup `Err`, never a degraded default. Deterministic (pure geometry + the
+/// seeded habitat mask + a fixed iteration order), so it stays out of `snapshot_hash`.
 fn bake_almond_sources(
     mut field: ResMut<AlmondWater>,
     dungeon: Res<Dungeon>,
@@ -326,17 +377,39 @@ fn bake_almond_sources(
     let floor_cells: Vec<(usize, IVec2)> =
         dungeon.floor_cells().map(|c| (row_major(c, w), c)).collect();
 
+    // Chebyshev min-spacing between springs (≥ 1). Rounded from the config tile distance.
+    let spacing = cfg.pool_spacing.max(1.0).round() as i32;
+
     let mut sources = vec![0.0f32; w * h];
     let mut floor_mask = vec![false; w * h];
+    // Placed spring cells, for the greedy spacing rejection. Deterministic: `floor_cells` is row-major, so
+    // the accepted set is a pure function of geometry + the seeded mold mask.
+    let mut springs: Vec<IVec2> = Vec::new();
     for &(idx, c) in &floor_cells {
         floor_mask[idx] = true;
-        // Wall-adjacent ⇒ strong seep ("bubbles up from the walls"); else the weak floor baseline.
+
+        // Eligible = bubbles up from a wall edge, or from mold-cracked concrete.
         let wall_adjacent = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
             let nb = c + IVec2::new(dx, dy);
             !dungeon.is_floor(nb) // off-grid or rock both count as "a wall borders that edge"
         });
-        let mut seep = if wall_adjacent { cfg.strong_seep } else { cfg.weak_seep };
-        if infested.get(idx).copied().unwrap_or(false) {
+        let mold = infested.get(idx).copied().unwrap_or(false);
+        if !(wall_adjacent || mold) {
+            continue;
+        }
+
+        // Greedy min-spacing: reject if any placed spring is within `spacing` tiles (Chebyshev), so pools
+        // stay isolated and small.
+        let too_close = springs
+            .iter()
+            .any(|s| (s.x - c.x).abs() <= spacing && (s.y - c.y).abs() <= spacing);
+        if too_close {
+            continue;
+        }
+
+        springs.push(c);
+        let mut seep = cfg.strong_seep;
+        if mold {
             seep *= cfg.mold_seep_mult;
         }
         sources[idx] = seep;
@@ -477,7 +550,7 @@ mod tests {
     fn valid_cfg() -> AlmondWaterConfig {
         AlmondWaterConfig {
             strong_seep: 8.0,
-            weak_seep: 2.0,
+            pool_spacing: 6.0,
             capacity: 100.0,
             evaporate: 0.05,
             diffuse: 0.1,
@@ -575,6 +648,10 @@ mod tests {
 
         let mut c = valid_cfg();
         c.strong_seep = -1.0; // seep can't be negative
+        assert!(validate_config(&c).is_err());
+
+        let mut c = valid_cfg();
+        c.pool_spacing = 0.0; // springs must be at least 1 tile apart
         assert!(validate_config(&c).is_err());
     }
 }

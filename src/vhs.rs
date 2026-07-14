@@ -1,6 +1,7 @@
 //! Full-screen **VHS** post-process pass. Most of the time the screen is clean; every
-//! ~45 s the effect fades in for a brief "tracking-error" glitch (chromatic split, tape-wave
-//! warp, a switching-noise band, scanlines, grain, a chroma-bloom smear) and fades back out.
+//! ~60 s (or the instant a real anomaly manifests, whichever comes first) the effect fades in for a brief
+//! "tracking-error" glitch (chromatic split, tape-wave warp, a switching-noise band, scanlines, grain, a
+//! chroma-bloom smear) and fades back out. A refractory window caps it at one glitch per `cycle_period`.
 //!
 //! Implementation uses Bevy 0.19's built-in [`FullscreenMaterial`] abstraction
 //! (`bevy_core_pipeline::fullscreen_material`): the engine handles the render-graph wiring
@@ -68,7 +69,7 @@ impl Default for VhsConfig {
     fn default() -> Self {
         Self {
             base_level: 0.15,
-            cycle_period: 45.0,
+            cycle_period: 60.0,
             fade_in: 0.5,
             hold: 1.5,
             fade_out: 0.5,
@@ -90,14 +91,10 @@ impl Plugin for VhsPlugin {
         let config = app.world().resource::<crate::config::GameConfig>().vhs.clone();
         app.add_plugins(FullscreenMaterialPlugin::<VhsSettings>::default())
             .insert_resource(config)
-            .init_resource::<AnomalyGlitch>()
+            .init_resource::<VhsGlitch>()
             .add_systems(
                 Update,
-                (
-                    ensure_camera_settings,
-                    drive_anomaly_glitch,
-                    drive_fade.after(drive_anomaly_glitch),
-                ),
+                (ensure_camera_settings, drive_glitch, drive_fade.after(drive_glitch)),
             );
     }
 }
@@ -133,28 +130,18 @@ fn envelope(x: f32, config: &VhsConfig) -> f32 {
     raw * raw * (3.0 - 2.0 * raw)
 }
 
-/// Each frame: compute the current spike envelope (periodic cycle) and push it — plus the constant
-/// `base_level` texture floor and the effect strengths — into every camera's `VhsSettings`.
-fn drive_fade(
-    time: Res<Time>,
-    config: Res<VhsConfig>,
-    glitch: Res<AnomalyGlitch>,
-    mut cameras: Query<&mut VhsSettings>,
-) {
+/// Each frame: read the current glitch envelope (a single, refractory-gated pulse — see [`drive_glitch`])
+/// and push it — plus the constant `base_level` texture floor and the effect strengths — into every
+/// camera's `VhsSettings`.
+fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, glitch: Res<VhsGlitch>, mut cameras: Query<&mut VhsSettings>) {
     let t = time.elapsed_secs();
-    let span = config.fade_in + config.hold + config.fade_out;
-
-    // Periodic glitch: fire the envelope once per `cycle_period`, at the start of each cycle.
-    let period = config.cycle_period.max(span.max(0.1));
-    let spike = envelope(t % period, &config);
+    // One driver for the spike: the trapezoidal envelope over the current glitch's `phase`. Idle between
+    // glitches (`phase` runs past the envelope span → 0), so there is no always-on wash.
+    let spike = envelope(glitch.phase, &config);
 
     for mut s in &mut cameras {
         s.base = config.base_level;
-        // The picture corrupts on a REAL anomaly manifesting (the watcher unleashing, a chestburster
-        // erupting), folded on top of the ambient periodic metronome — a found-footage tell for anomalous
-        // PRESENCE rather than a clock. `.max` so the stronger of {periodic, anomaly} wins; never a second
-        // code path.
-        s.spike = spike.max(glitch.0);
+        s.spike = spike;
         s.time = t;
         s.chroma = config.chroma;
         s.wave = config.wave;
@@ -164,34 +151,60 @@ fn drive_fade(
     }
 }
 
-/// The anomaly-driven glitch intensity: rises to [`ANOMALY_GLITCH_PEAK`] while a real anomaly is
-/// manifesting (the watcher unleashing, or a chestburster erupting) and decays after. Folded into the VHS
-/// `spike` by [`drive_fade`] so anomalous PRESENCE corrupts the picture — the found-footage grammar
-/// SCP-9191's slop trades on — instead of the old fixed 45 s metronome that correlated with nothing.
-#[derive(Resource, Default)]
-pub struct AnomalyGlitch(pub f32);
+/// The VHS glitch clock: a single tracking-error pulse that fires at most once per `cycle_period` and is
+/// triggered by a REAL anomaly manifesting (the watcher unleashing, a chestburster erupting) OR the ambient
+/// periodic metronome — whichever comes first. Windowed-only, like the rest of VHS (never perturbs the
+/// deterministic core: it writes only this cosmetic resource + the camera's `VhsSettings`).
+///
+/// A refractory window (`cooldown`) is what caps the cadence: SCP-9191's biology now keeps a host swarm
+/// perpetually erupting (almond water heals the crabs that host the parasite), so the old "corrupt while
+/// ANY anomaly manifests" test pinned the effect ON forever. The cooldown lets a genuine anomaly still fire
+/// the glitch — the found-footage tell — but never more than once per `cycle_period`.
+#[derive(Resource)]
+pub struct VhsGlitch {
+    /// Seconds since the current glitch started; drives [`envelope`]. Idles past the envelope span between
+    /// glitches, so the picture is clean until the next trigger.
+    phase: f32,
+    /// Refractory seconds remaining before a new glitch may start — caps the cadence at one per
+    /// `cycle_period`.
+    cooldown: f32,
+}
 
-/// Corruption target while an anomaly manifests (below 1.0 so the shader peak still reads as a deliberate
-/// spike, not a permanent wash).
-const ANOMALY_GLITCH_PEAK: f32 = 0.9;
-/// Per-second decay once the anomaly settles (~0.6 s fade-out).
-const ANOMALY_GLITCH_DECAY: f32 = 1.5;
+impl Default for VhsGlitch {
+    fn default() -> Self {
+        // Start idle (`phase` past any envelope span) but with the refractory already clear, so the ambient
+        // metronome can fire the first glitch shortly after boot rather than only after a full period.
+        Self { phase: f32::MAX, cooldown: 0.0 }
+    }
+}
 
-/// Drive [`AnomalyGlitch`] from live anomaly state — windowed-only, like the rest of VHS (never runs in the
-/// deterministic core). Instant rise on manifestation, smooth decay after, so the corruption tracks the
-/// anomaly and tails off rather than snapping on/off.
-fn drive_anomaly_glitch(
+/// Advance the glitch clock and (re)trigger the pulse. Each frame: age `phase`, drain the `cooldown`, and
+/// when the refractory has cleared start a fresh glitch if either a real anomaly is manifesting or a full
+/// `cycle_period` has elapsed since the last one. `manifesting` stays a first-class trigger — a real
+/// anomaly fires the glitch the instant the refractory clears — while the periodic term keeps the picture
+/// glitching ambiently when the world is calm.
+fn drive_glitch(
     time: Res<Time>,
-    mut glitch: ResMut<AnomalyGlitch>,
+    config: Res<VhsConfig>,
+    mut glitch: ResMut<VhsGlitch>,
     watchers: Query<&crate::enemy::SmileyState>,
     infested: Query<&crate::parasite::Infestation>,
 ) {
+    let dt = time.delta_secs();
+    // Saturating age so `phase` cannot overflow across a long calm session while it idles at f32::MAX.
+    glitch.phase = (glitch.phase + dt).min(f32::MAX);
+    glitch.cooldown = (glitch.cooldown - dt).max(0.0);
+
     let manifesting =
         watchers.iter().any(|s| s.is_angry()) || infested.iter().any(|i| i.is_erupting());
-    glitch.0 = if manifesting {
-        ANOMALY_GLITCH_PEAK
-    } else {
-        (glitch.0 - ANOMALY_GLITCH_DECAY * time.delta_secs()).max(0.0)
-    };
+    let span = config.fade_in + config.hold + config.fade_out;
+    let period = config.cycle_period.max(span.max(0.1));
+
+    // Trigger a new glitch only once the refractory has cleared — either on a live anomaly or the ambient
+    // metronome. `cooldown == period`, so the observable cadence is one glitch per `cycle_period`.
+    if glitch.cooldown <= 0.0 && (manifesting || glitch.phase >= period) {
+        glitch.phase = 0.0;
+        glitch.cooldown = period;
+    }
 }
 
