@@ -41,7 +41,7 @@ use crate::util::row_major;
 
 /// The evolvable mold parameters (the `mold:` config slice). Per-substep coefficients (the fixed 60 Hz
 /// `FixedUpdate` × `substeps` sets the wall-clock rate), so nothing here depends on `dt`.
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
 pub struct MoldConfig {
     /// Logistic growth coefficient per substep — how fast biomass climbs toward the habitat capacity.
     pub growth: f32,

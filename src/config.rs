@@ -125,6 +125,7 @@ pub struct GameConfig {
 pub struct WorldConfig {
     pub ai: AiTuning,
     pub sim: SimTuning,
+    pub mold: crate::mold::MoldConfig,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation

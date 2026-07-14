@@ -289,6 +289,7 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
         gc.ai_tuning = w.ai;
         gc.sim = w.sim;
+        gc.mold = w.mold;
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the

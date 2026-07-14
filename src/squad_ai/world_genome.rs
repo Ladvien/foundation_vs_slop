@@ -37,7 +37,7 @@ use crate::sim::{
 /// parasite 14). The 8th stigmergy channel is ATTENTION (observation), and the SCP-150 parasite is a
 /// host-killing species, so its lifecycle/lethality dials belong in the search that shapes the ecosystem's
 /// deaths and lives.
-pub const N: usize = 79;
+pub const N: usize = 86;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -112,14 +112,24 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 1.0),    // manip_cohesion_drop (probability)
     (0.0, 1.0),    // manip_curiosity_gain (probability)
     (0.1, 10.0),   // manip_dark_gain (validate_tuning requires > 0)
+    // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
+    //    co-evolves with combat, since mold shapes light/LOS/healing). substeps/seed_v/light_ref stay fixed
+    //    (structural/calibration), so only the 7 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
+    (0.0, 0.2),    // growth (logistic coeff/substep)
+    (0.0, 0.24),   // diffuse (lerp weight/substep, must stay < 0.25)
+    (0.0, 0.2),    // light_recoil (photophobia sink/substep)
+    (0.0, 1.0),    // dim_light (mold → LightField attenuation)
+    (0.0, 1.5),    // occlude_los (mold → LOS occlusion strength)
+    (0.5, 6.0),    // seep_boost (mold → almond-water seep multiplier)
+    (0.2, 1.0),    // dense_v (biomass threshold for "dense" mold)
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldGenome(pub Vec<f32>);
 
-/// Flatten a `(AiTuning, SimTuning)` into the fixed-order knob vector `BOUNDS` and `decode` agree on.
-pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
+/// Flatten a `(AiTuning, SimTuning, MoldConfig)` into the fixed-order knob vector `BOUNDS`/`decode` agree on.
+pub fn encode(ai: &AiTuning, sim: &SimTuning, mold: &crate::mold::MoldConfig) -> WorldGenome {
     let mut v = Vec::with_capacity(N);
     // AiTuning: channels in FieldId slot order, then rally.
     push_channel(&mut v, &ai.fields.scent);
@@ -186,6 +196,14 @@ pub fn encode(ai: &AiTuning, sim: &SimTuning) -> WorldGenome {
     v.push(sim.parasite.manip_cohesion_drop);
     v.push(sim.parasite.manip_curiosity_gain);
     v.push(sim.parasite.manip_dark_gain);
+    // MoldConfig — the 7 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
+    v.push(mold.growth);
+    v.push(mold.diffuse);
+    v.push(mold.light_recoil);
+    v.push(mold.dim_light);
+    v.push(mold.occlude_los);
+    v.push(mold.seep_boost);
+    v.push(mold.dense_v);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     WorldGenome(v)
 }
@@ -309,13 +327,24 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             }
         },
     };
+    // MoldConfig — the 7 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
+    let mold = crate::mold::MoldConfig {
+        growth: f!(),
+        diffuse: f!(),
+        light_recoil: f!(),
+        dim_light: f!(),
+        occlude_los: f!(),
+        seep_boost: f!(),
+        dense_v: f!(),
+        ..crate::mold::MoldConfig::default()
+    };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
-    Ok(WorldConfig { ai, sim })
+    Ok(WorldConfig { ai, sim, mold })
 }
 
 /// The shipped world as a genome — the band origin for [`mutate`] and the co-evolution's baseline.
 pub fn authored() -> WorldGenome {
-    encode(&AiTuning::default(), &SimTuning::default())
+    encode(&AiTuning::default(), &SimTuning::default(), &crate::mold::MoldConfig::default())
 }
 
 /// Perturb a world genome: every knob gets a scale-relative Gaussian kick (scale from the **authored**
@@ -339,7 +368,8 @@ pub fn is_feasible(g: &WorldGenome) -> Result<(), String> {
     }
     flat_range_check(&g.0, &BOUNDS, "world")?;
     let wc = decode(g)?;
-    crate::sim::validate_tuning(&wc.sim)
+    crate::sim::validate_tuning(&wc.sim)?;
+    crate::mold::validate_config(&wc.mold)
 }
 
 #[cfg(test)]
@@ -354,6 +384,7 @@ mod tests {
         let wc = decode(&authored()).expect("authored decodes");
         assert_eq!(wc.ai, AiTuning::default());
         assert_eq!(wc.sim, SimTuning::default());
+        assert_eq!(wc.mold, crate::mold::MoldConfig::default());
     }
 
     #[test]
