@@ -320,6 +320,9 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             crate::placement::PlacementPlugin,
             crate::light::LightFieldPlugin,
             crate::almond_water::AlmondWaterPlugin,
+            // The CPU reaction-diffusion gameplay mold: pinned CPU state (reads LightField, drives the
+            // light/LOS/water couplings), so the exact-hash gate covers it. GPU `MyceliaPlugin` stays out.
+            crate::mold::MoldPlugin,
         ),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
@@ -460,6 +463,11 @@ pub fn field_hash(app: &mut App) -> u64 {
     // doesn't happen to relocate an agent would be invisible to `snapshot_hash`. Fold it too.
     if let Some(water) = world.get_resource::<crate::almond_water::AlmondWater>() {
         water.fold_fingerprint(&mut hash);
+    }
+    // The CPU gameplay mold field feeds crab/light/LOS/water couplings, so a bake/diffusion/recoil bug that
+    // shifts the mold moves the replay hash even when no actor has moved yet. Fold it too, like the others.
+    if let Some(mold) = world.get_resource::<crate::mold::MoldField>() {
+        mold.fold_fingerprint(&mut hash);
     }
     hash
 }

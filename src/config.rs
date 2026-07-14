@@ -111,6 +111,7 @@ pub struct GameConfig {
     pub mycelia: MyceliaConfig,
     pub lighting: crate::light::LightingConfig,
     pub almond_water: crate::almond_water::AlmondWaterConfig,
+    pub mold: crate::mold::MoldConfig,
     pub dialogue: DialogueScript,
     pub audio: AudioTuning,
 }
@@ -157,6 +158,7 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     sim::validate_tuning(&cfg.sim)?;
     crate::light::validate_config(&cfg.lighting)?;
     crate::almond_water::validate_config(&cfg.almond_water)?;
+    crate::mold::validate_config(&cfg.mold)?;
     model::validate_script(&cfg.dialogue)?;
     audio_tuning::validate_tuning(&cfg.audio)?;
     Ok(cfg)
