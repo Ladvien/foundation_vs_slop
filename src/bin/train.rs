@@ -24,8 +24,9 @@
 
 use std::time::Instant;
 
+use foundation_vs_slop::elite_overlay::{apply_dim, Dim};
 use foundation_vs_slop::sim_harness::{
-    build_headless_app, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
+    build_headless_app, field_hash, liveness_violations, serial_guard, snapshot_hash, step, SimConfig,
 };
 use foundation_vs_slop::squad_ai::coevolve::{
     brains_of, mutate_squad_feasible, search, squad_archive_doc, swarm_archive_doc, sweep_prior,
@@ -98,12 +99,15 @@ fn main() {
         // POET open-ended outer loop: co-evolve worlds + the squads that solve them, with a learning-progress
         // curriculum and cross-niche transfer. Needs the `prior` (`train prior` first).
         "poet" => parse_evolve(&args[1..]).and_then(poet),
+        // Permanently bake an evolved elite into the shipped defaults: rewrites config.ron + the matching
+        // Rust `Default` impl + the replay goldens together, so `cargo test` stays green.
+        "apply" => apply(&args[1..]),
         "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
         // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
         // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
         "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
         other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior | rl | poet)"
+            "unknown subcommand {other:?} (expected bench | probe | prior | evolve | evolve3 | levels | audio | behavior | rl | poet | apply)"
         )),
     };
     if let Err(e) = result {
@@ -617,6 +621,209 @@ fn poet(args: EvolveArgs) -> Result<(), String> {
     );
     print_read_warning();
     Ok(())
+}
+
+// ── `train apply`: permanently bake an evolved elite into the shipped defaults ──────────────────────
+
+const CONFIG_PATH: &str = "assets/config/config.ron";
+const REPLAY_PATH: &str = "tests/replay.rs";
+
+/// Permanently ship an evolved elite: rewrite the `config.ron` slice(s), the matching Rust `Default`
+/// impl(s), and the deterministic-replay goldens together, so `cargo test` stays green. Full-auto, one
+/// command. `policy` is intentionally unsupported (a `NeuralPolicy` has no config slice — use
+/// `FVS_POLICY_ELITE` to run one).
+fn apply(args: &[String]) -> Result<(), String> {
+    // Env overlays would double-apply and perturb the golden recompute — refuse to bake while any is set.
+    for v in [
+        foundation_vs_slop::elite_overlay::BEHAVIOR_ENV,
+        foundation_vs_slop::elite_overlay::WORLD_ENV,
+        foundation_vs_slop::elite_overlay::AUDIO_ENV,
+        foundation_vs_slop::elite_overlay::LEVELS_ENV,
+        foundation_vs_slop::elite_overlay::POLICY_ENV,
+    ] {
+        if std::env::var(v).map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            return Err(format!("unset {v} before `apply` (an env overlay conflicts with a permanent bake)"));
+        }
+    }
+
+    let dim_s = args
+        .first()
+        .ok_or("usage: train apply <behavior|world|audio|levels> <archive.ron> [--cell r,c]")?;
+    let dim = Dim::parse(dim_s)?;
+    let archive = args.get(1).ok_or("apply needs an archive path")?.clone();
+    let mut cell: Option<String> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cell" => {
+                cell = Some(args.get(i + 1).ok_or("--cell needs a `row,col` value")?.clone());
+                i += 2;
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let spec = match &cell {
+        Some(c) => format!("{archive}#{c}"),
+        None => archive.clone(),
+    };
+
+    // 1. Load the clean shipped config, then overlay the elite — validated on the same one path the runtime
+    //    overlay uses (a cross-slice-invalid level elite fails here, before anything is written).
+    let mut gc = foundation_vs_slop::config::load_game_config()?;
+    let desc = apply_dim(&mut gc, dim, &spec)?;
+    println!("apply: {desc}");
+
+    // 2 + 3. Splice the config.ron slice(s) and regenerate the guarded `Default` impl(s).
+    let mut cfg_text = std::fs::read_to_string(CONFIG_PATH).map_err(|e| format!("{CONFIG_PATH}: {e}"))?;
+    let mut touched: Vec<String> = vec![CONFIG_PATH.to_string()];
+    match dim {
+        Dim::Behavior => {
+            cfg_text = splice_block(&cfg_text, "behavior", &ron_slice(&gc.behavior)?)?;
+            regen_default("src/behavior_tuning.rs", "BehaviorTuning", &format!("{:#?}", gc.behavior))?;
+            touched.push("src/behavior_tuning.rs".into());
+        }
+        Dim::World => {
+            cfg_text = splice_block(&cfg_text, "sim", &ron_slice(&gc.sim)?)?;
+            cfg_text = splice_block(&cfg_text, "ai_tuning", &ron_slice(&gc.ai_tuning)?)?;
+            regen_default("src/sim.rs", "SimTuning", &format!("{:#?}", gc.sim))?;
+            regen_default("src/ai/tuning.rs", "AiTuning", &format!("{:#?}", gc.ai_tuning))?;
+            touched.push("src/sim.rs".into());
+            touched.push("src/ai/tuning.rs".into());
+        }
+        Dim::Audio => {
+            cfg_text = splice_block(&cfg_text, "audio", &ron_slice(&gc.audio)?)?;
+            regen_default("src/audio_tuning.rs", "AudioTuning", &format!("{:#?}", gc.audio))?;
+            touched.push("src/audio_tuning.rs".into());
+        }
+        Dim::Levels => {
+            // These config types have no `Default` impl, so only config.ron is rewritten.
+            cfg_text = splice_block(&cfg_text, "dungeon", &ron_slice(&gc.dungeon)?)?;
+            cfg_text = splice_block(&cfg_text, "mycelia", &ron_slice(&gc.mycelia)?)?;
+            cfg_text = splice_block(&cfg_text, "metropolis", &ron_slice(&gc.placement.metropolis)?)?;
+            cfg_text = splice_block(&cfg_text, "density", &ron_slice(&gc.placement.density)?)?;
+        }
+    }
+    std::fs::write(CONFIG_PATH, &cfg_text).map_err(|e| format!("{CONFIG_PATH}: write: {e}"))?;
+
+    // 4. Recompute the goldens from the freshly-baked config and re-pin them. (Env overlays are guaranteed
+    //    unset above, so `deterministic_core` reproduces exactly what the replay test will assert.)
+    let (snap, field) = recompute_goldens();
+    repin_replay(snap, field)?;
+    touched.push(REPLAY_PATH.to_string());
+
+    // 5 + 6. Report + next steps.
+    println!();
+    println!("baked. re-pinned goldens: snapshot 0x{snap:016x}, field 0x{field:016x}");
+    println!("files changed:");
+    for f in &touched {
+        println!("  {f}");
+    }
+    println!();
+    println!("NEXT: regenerate the baseline prior for the new shipped tuning:  train prior");
+    println!("      review:  git diff        verify:  cargo test --features test-harness");
+    println!("      revert:  git checkout -- {}", touched.join(" "));
+    Ok(())
+}
+
+/// Serialize a config slice to RON in config.ron's anonymous-tuple style (`struct_names: false`).
+fn ron_slice<T: serde::Serialize>(v: &T) -> Result<String, String> {
+    ron::ser::to_string_pretty(v, ron::ser::PrettyConfig::default()).map_err(|e| format!("serialize slice: {e}"))
+}
+
+/// Replace the `<name>: ( … )` block in `config.ron` text with `<indent><name>: <value_ron>,`. The block is
+/// found by a line whose trim equals `<name>: (` and paren-balanced to its close (works for top-level 4-space
+/// slices and 8-space placement sub-slices alike; every target name is unique in the file).
+fn splice_block(text: &str, name: &str, value_ron: &str) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let header = format!("{name}: (");
+    let start = lines
+        .iter()
+        .position(|l| l.trim() == header)
+        .ok_or_else(|| format!("config.ron: no `{name}:` block header"))?;
+    let indent: String = lines[start].chars().take_while(|c| *c == ' ').collect();
+    let mut depth = 0i32;
+    let mut end = None;
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        for c in line.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            end = Some(idx);
+            break;
+        }
+    }
+    let end = end.ok_or_else(|| format!("config.ron: unbalanced `{name}:` block"))?;
+    let mut out: Vec<String> = lines[..start].iter().map(|s| s.to_string()).collect();
+    out.push(format!("{indent}{name}: {value_ron},"));
+    out.extend(lines[end + 1..].iter().map(|s| s.to_string()));
+    Ok(out.join("\n") + "\n")
+}
+
+/// Replace the body of `fn default() -> Self { … }` inside `impl Default for <ty>` in a Rust source file with
+/// `literal` (a `{:#?}` struct-literal expression). Brace-balanced from the fn's opening `{`.
+fn regen_default(path: &str, ty: &str, literal: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let impl_at = text
+        .find(&format!("impl Default for {ty} {{"))
+        .ok_or_else(|| format!("{path}: no `impl Default for {ty}`"))?;
+    let fn_marker = "fn default() -> Self {";
+    let fn_rel = text[impl_at..].find(fn_marker).ok_or_else(|| format!("{path}: no default fn for {ty}"))?;
+    let body_open = impl_at + fn_rel + fn_marker.len(); // just past the `{`
+    let bytes = text.as_bytes();
+    let mut depth = 1i32;
+    let mut j = body_open;
+    while j < bytes.len() && depth > 0 {
+        match bytes[j] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    if depth != 0 {
+        return Err(format!("{path}: unbalanced default fn for {ty}"));
+    }
+    let body_close = j - 1; // the matching `}`
+    let indented = literal.replace('\n', "\n        ");
+    let mut out = String::with_capacity(text.len() + literal.len());
+    out.push_str(&text[..body_open]);
+    out.push_str(&format!("\n        {indented}\n    "));
+    out.push_str(&text[body_close..]);
+    std::fs::write(path, out).map_err(|e| format!("{path}: write: {e}"))
+}
+
+/// Recompute the deterministic-core goldens from the (freshly-baked) config.ron — the exact run the replay
+/// test asserts: `deterministic_core` (seed from config.ron) + 1800 ticks.
+fn recompute_goldens() -> (u64, u64) {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1800);
+    (snapshot_hash(&mut app), field_hash(&mut app))
+}
+
+/// Re-pin the replay goldens in `tests/replay.rs`: replace the old `GOLDEN` (snapshot) hex — which appears
+/// twice (the const and the world-config no-op assertion) — and the `GOLDEN_FIELD` hex, everywhere they
+/// occur, with the freshly recomputed values.
+fn repin_replay(snap: u64, field: u64) -> Result<(), String> {
+    let text = std::fs::read_to_string(REPLAY_PATH).map_err(|e| format!("{REPLAY_PATH}: {e}"))?;
+    let old_snap = extract_hex(&text, "const GOLDEN: u64 = ")?;
+    let old_field = extract_hex(&text, "const GOLDEN_FIELD: u64 = ")?;
+    let text = text.replace(&old_snap, &format!("0x{snap:016x}"));
+    let text = text.replace(&old_field, &format!("0x{field:016x}"));
+    std::fs::write(REPLAY_PATH, text).map_err(|e| format!("{REPLAY_PATH}: write: {e}"))
+}
+
+/// Extract the hex literal after a `const X: u64 = ` marker, up to the `;`.
+fn extract_hex(text: &str, marker: &str) -> Result<String, String> {
+    let at = text.find(marker).ok_or_else(|| format!("{REPLAY_PATH}: no `{marker}`"))?;
+    let rest = &text[at + marker.len()..];
+    let end = rest.find(';').ok_or_else(|| format!("{REPLAY_PATH}: unterminated `{marker}`"))?;
+    Ok(rest[..end].trim().to_string())
 }
 
 /// Pretty RON so an elite is a reviewable diff, not one long line.

@@ -157,41 +157,77 @@ fn read_elite<E: Elite + serde::de::DeserializeOwned>(spec: &str, dim: &str) -> 
     Ok(arch.elites.swap_remove(idx))
 }
 
+/// A config-slice evolved dimension (the ones `train apply` can permanently bake and `FVS_*_ELITE` can
+/// overlay). Policy is deliberately absent — a `NeuralPolicy` is not a config slice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dim {
+    Behavior,
+    World,
+    Audio,
+    Levels,
+}
+
+impl Dim {
+    /// Parse a CLI dimension name.
+    pub fn parse(s: &str) -> Result<Dim, String> {
+        match s {
+            "behavior" | "behaviour" => Ok(Dim::Behavior),
+            "world" => Ok(Dim::World),
+            "audio" => Ok(Dim::Audio),
+            "levels" | "level" => Ok(Dim::Levels),
+            other => Err(format!("unknown dim {other:?} (expected behavior|world|audio|levels)")),
+        }
+    }
+}
+
+/// Overlay one dimension's elite (`spec` = `<path>[#row,col]`) onto `gc`, in place. Returns a human-readable
+/// description of what was applied. Shared by the `FVS_*_ELITE` overlay and the `train apply` bake, so both
+/// decode + map elites identically (and inherit the same per-slice validation downstream).
+pub fn apply_dim(gc: &mut GameConfig, dim: Dim, spec: &str) -> Result<String, String> {
+    Ok(match dim {
+        Dim::Behavior => {
+            let e: BehaviorEntry = read_elite(spec, "behaviour")?;
+            let (cell, fit) = (e.cell, e.fitness);
+            gc.behavior = e.behavior;
+            format!("behaviour <- {spec} (cell {cell:?}, fitness {fit:.3})")
+        }
+        Dim::World => {
+            let e: WorldEntry = read_elite(spec, "world")?;
+            let (cell, fit) = (e.cell, e.fitness);
+            gc.ai_tuning = e.ai; // NB: WorldConfig.ai maps to GameConfig.ai_tuning
+            gc.sim = e.sim;
+            format!("world (ai_tuning+sim) <- {spec} (cell {cell:?}, fitness {fit:.3})")
+        }
+        Dim::Audio => {
+            let e: AudioEntry = read_elite(spec, "audio")?;
+            let (cell, fit) = (e.cell, e.fitness);
+            gc.audio = e.audio;
+            format!("audio <- {spec} (cell {cell:?}, fitness {fit:.3})")
+        }
+        Dim::Levels => {
+            let e: LevelEntry = read_elite(spec, "levels")?;
+            let (cell, fit) = (e.cell, e.fitness);
+            gc.dungeon = e.dungeon;
+            gc.mycelia = e.mycelia;
+            gc.placement.metropolis = e.metropolis;
+            gc.placement.density = e.density;
+            format!("levels (dungeon+placement+mycelia) <- {spec} (cell {cell:?}, fitness {fit:.3})")
+        }
+    })
+}
+
 /// Overlay any set config-dimension elites (behaviour / world / audio / levels) onto `gc`, in place.
 /// Returns a human-readable line per applied dimension (for logging). Called by `config::load_game_config`
 /// **before** the per-slice validators, so an overlaid slice is validated on the same one path.
 pub fn overlay_config_elites(gc: &mut GameConfig) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
-
-    if let Some(spec) = env(BEHAVIOR_ENV) {
-        let e: BehaviorEntry = read_elite(&spec, "behaviour")?;
-        let (cell, fit) = (e.cell, e.fitness);
-        gc.behavior = e.behavior;
-        applied.push(format!("behaviour <- {spec} (cell {cell:?}, fitness {fit:.3})"));
+    for (envname, dim) in
+        [(BEHAVIOR_ENV, Dim::Behavior), (WORLD_ENV, Dim::World), (AUDIO_ENV, Dim::Audio), (LEVELS_ENV, Dim::Levels)]
+    {
+        if let Some(spec) = env(envname) {
+            applied.push(apply_dim(gc, dim, &spec)?);
+        }
     }
-    if let Some(spec) = env(WORLD_ENV) {
-        let e: WorldEntry = read_elite(&spec, "world")?;
-        let (cell, fit) = (e.cell, e.fitness);
-        gc.ai_tuning = e.ai; // NB: WorldConfig.ai maps to GameConfig.ai_tuning
-        gc.sim = e.sim;
-        applied.push(format!("world (ai_tuning+sim) <- {spec} (cell {cell:?}, fitness {fit:.3})"));
-    }
-    if let Some(spec) = env(AUDIO_ENV) {
-        let e: AudioEntry = read_elite(&spec, "audio")?;
-        let (cell, fit) = (e.cell, e.fitness);
-        gc.audio = e.audio;
-        applied.push(format!("audio <- {spec} (cell {cell:?}, fitness {fit:.3})"));
-    }
-    if let Some(spec) = env(LEVELS_ENV) {
-        let e: LevelEntry = read_elite(&spec, "levels")?;
-        let (cell, fit) = (e.cell, e.fitness);
-        gc.dungeon = e.dungeon;
-        gc.mycelia = e.mycelia;
-        gc.placement.metropolis = e.metropolis;
-        gc.placement.density = e.density;
-        applied.push(format!("levels (dungeon+placement+mycelia) <- {spec} (cell {cell:?}, fitness {fit:.3})"));
-    }
-
     Ok(applied)
 }
 
