@@ -179,12 +179,24 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         pool.thread_num()
     );
     // Avian's solver and the placement MCMC use the global rayon pool, whose work-stealing float
-    // reductions are timing-dependent (hence the flakiness). Pin rayon to one thread as well. Must be set
-    // before rayon's global pool first initializes — this runs before any Startup system, so it wins.
+    // reductions are timing-dependent (hence the flakiness). Pin rayon to one thread as well — the SAME way
+    // we pin the ComputeTaskPool above (explicit build + loud assert), NOT by trusting an env var to be read
+    // in time. `RAYON_NUM_THREADS` only takes effect if it is set before rayon's global pool lazily inits on
+    // first use; across a multi-test process that init race is sometimes lost, and a work-stealing float
+    // reduction then goes non-deterministic — the exact intermittent replay-golden flake this replaces.
+    // `build_global` inits the global pool at 1 thread on the first call and errors (ignored) once built.
     // SAFETY: single-threaded at this point (no other thread reads the environment concurrently).
     unsafe {
         std::env::set_var("RAYON_NUM_THREADS", "1");
     }
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(1).build_global();
+    assert_eq!(
+        rayon::current_num_threads(),
+        1,
+        "headless harness requires a 1-thread rayon pool for determinism, but the global pool was already \
+         initialized with {} thread(s) — something used rayon before build_headless_app",
+        rayon::current_num_threads()
+    );
 
     let mut app = App::new();
 
