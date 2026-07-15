@@ -76,6 +76,55 @@ pub fn evaluate(
     })
 }
 
+/// A level's **playtest** score (feature `test-harness`): how *engaging* it is to play, not just how well
+/// structured it is. This is the PCGRL move — a level scored by simulated play rather than static metrics
+/// (Khalifa et al. 2020, DOI 10.1609/aiide.v16i1.7416; the experience-driven objective, Yannakakis &
+/// Togelius 2011, DOI 10.1109/t-affc.2011.6).
+#[cfg(feature = "test-harness")]
+pub struct LevelPlaytestEvaluation {
+    /// Mean engagement (experience + interest proxies) over the admitted seeds.
+    pub fitness: f32,
+    /// The static expressive-range descriptor axes (openness × infestation) — the MAP-Elites niche.
+    pub axes: (f32, f32),
+}
+
+/// Score a level by **how it plays**: a cheap static pre-filter (reject structurally broken levels before
+/// paying for a rollout — Khalifa's feasible/infeasible split), then a real headless rollout per held-in
+/// seed scored by the Phase-1 experience + interest proxies, gated by the behavioural minimal criterion on
+/// every seed. `None` (a rejection, not a fallback) if the genome is infeasible, fails static structure, or
+/// produces no real encounter on any seed. Fitness is the mean engagement; the descriptor axes are the
+/// static openness × infestation.
+#[cfg(feature = "test-harness")]
+pub fn evaluate_playtest(
+    genome: &LevelGenome,
+    base: &LevelBase,
+    manifest: &FurnitureManifest,
+    seeds: &[u64],
+    ticks: u32,
+) -> Option<LevelPlaytestEvaluation> {
+    use super::evaluate::rollout_level;
+    use super::experience::Experience;
+    use super::interest::Interest;
+    use super::surprise::minimal_criterion;
+
+    // 1. Cheap static pre-filter (+ the expressive-range descriptor axes): a level that isn't connected /
+    //    playable is rejected here without a rollout.
+    let static_eval = evaluate(genome, base, manifest, seeds)?;
+    let pheno = level_genome::decode(genome, base).ok()?;
+
+    // 2. Playtest: run the real sim on the evolved level, on each held-in seed, and measure how engaging the
+    //    play is (experience + interest from the survival-belief series), gated by the behavioural criterion.
+    let mut sum_fit = 0.0f32;
+    for &seed in seeds {
+        let r = rollout_level(pheno.clone(), seed, ticks);
+        minimal_criterion(&r.outcome).ok()?;
+        let engagement =
+            0.5 * (Experience::from_belief(&r.belief).score() + Interest::from_belief(&r.belief).score());
+        sum_fit += engagement;
+    }
+    Some(LevelPlaytestEvaluation { fitness: sum_fit / seeds.len() as f32, axes: static_eval.axes })
+}
+
 /// Load the shipped config slices as a [`LevelBase`] — the mutation origin and decode base — plus the
 /// furniture manifest the evaluator furnishes with. One path: a missing/malformed config is a loud `Err`.
 pub fn load_base() -> Result<(LevelBase, FurnitureManifest), String> {
@@ -111,6 +160,23 @@ mod tests {
         assert!(a.axes.0 > 0.0, "shipped level must read as having furniture, got clutter {}", a.axes.0);
         let b = evaluate(&g, &base, &manifest, &seeds).expect("again");
         assert_eq!(a.fitness, b.fitness, "evaluation must be deterministic");
+        assert_eq!(a.axes, b.axes);
+    }
+
+    /// The playtest path (feature `test-harness`): the shipped level, run through the real sim, scores in
+    /// `[0,1]` and is deterministic. Guards the `SimConfig::with_level` seam + `evaluate_playtest`.
+    #[cfg(feature = "test-harness")]
+    #[test]
+    fn shipped_level_playtests_and_is_deterministic() {
+        use super::evaluate_playtest;
+        let _serial = crate::sim_harness::serial_guard();
+        let (base, manifest) = load_base().expect("shipped config");
+        let g = authored(&base);
+        let seeds = [0x5C09191u64];
+        let a = evaluate_playtest(&g, &base, &manifest, &seeds, 1800).expect("shipped level plays");
+        assert!((0.0..=1.0).contains(&a.fitness), "engagement fitness in [0,1], got {}", a.fitness);
+        let b = evaluate_playtest(&g, &base, &manifest, &seeds, 1800).expect("again");
+        assert_eq!(a.fitness, b.fitness, "playtest scoring must be deterministic");
         assert_eq!(a.axes, b.axes);
     }
 

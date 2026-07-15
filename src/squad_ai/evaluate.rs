@@ -203,6 +203,22 @@ pub fn rollout_with_policy(
     run_episode(&cfg, ticks, false)
 }
 
+/// Run one rollout on an **evolved level** (dungeon architecture + furniture + mould-habitat), with the
+/// shipped brains, sampling the belief series so the level can be scored by the experience proxies. The
+/// level-population analogue of [`rollout`] — the PCGRL "score a level by how it plays" path (Khalifa et al.
+/// 2020). `dungeon_seed` overrides the level's own seed so one evolved level is evaluated across the held-in
+/// seed set.
+pub fn rollout_level(
+    level: crate::squad_ai::level_genome::LevelPhenotype,
+    dungeon_seed: u64,
+    ticks: u32,
+) -> Rollout {
+    let cfg = SimConfig::deterministic_core_seeded(dungeon_seed)
+        .with_brains(BrainSource::Authored)
+        .with_level(level);
+    run_episode(&cfg, ticks, true)
+}
+
 /// Run one headless episode of `ticks` fixed steps under `cfg`, driven by the synthetic player, and report
 /// the trace + outcome. The candidate (brains / world / audio / behaviour / policy) is already baked into
 /// `cfg`; this is the shared body of [`rollout`], [`rollout_with_belief`], and [`rollout_with_policy`].

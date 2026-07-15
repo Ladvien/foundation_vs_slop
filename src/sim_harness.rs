@@ -88,6 +88,14 @@ pub struct SimConfig {
     /// `init_resource::<ActivePolicy>()` — a no-op when the resource already exists, the same seam
     /// [`Self::brains`] uses.
     pub policy: Option<PolicyFactory>,
+    /// Override the generated **level** for one rollout: the evolved dungeon architecture + furniture
+    /// (`metropolis`/`density`) + mould-habitat (`mycelia`) slices a [`crate::squad_ai::level_genome`]
+    /// decodes to. `None` runs the shipped level (what the replay goldens pin); `Some(l)` installs an
+    /// evolved level BEFORE `DungeonPlugin`/`PlacementPlugin` generate it — the level-population analogue of
+    /// [`Self::config`], so a level can be scored by how it *plays* (a rollout), not only its static
+    /// structure (PCGRL; Khalifa et al. 2020, DOI 10.1609/aiide.v16i1.7416). `dungeon_seed` still wins over
+    /// the level's own seed, so an evolved level is evaluated across the held-in seed set like every genome.
+    pub level: Option<crate::squad_ai::level_genome::LevelPhenotype>,
 }
 
 impl Default for SimConfig {
@@ -103,6 +111,7 @@ impl Default for SimConfig {
             audio: None,
             behavior: None,
             policy: None,
+            level: None,
         }
     }
 }
@@ -150,6 +159,15 @@ impl SimConfig {
     /// analogue of [`with_brains`]. Applied before `SquadAiPlugin` builds (see [`build_headless_app`]).
     pub fn with_policy(mut self, policy: PolicyFactory) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Install an evolved level (dungeon + furniture + mould-habitat slices) for one rollout — the
+    /// level-population analogue of [`with_world_config`]. Applied at the `GameConfig` seam BEFORE
+    /// `DungeonPlugin`/`PlacementPlugin` generate, so the level is scored by play. Combine with
+    /// `deterministic_core_seeded` to evaluate the same level across the held-in seed set.
+    pub fn with_level(mut self, level: crate::squad_ai::level_genome::LevelPhenotype) -> Self {
+        self.level = Some(level);
         self
     }
 }
@@ -273,6 +291,17 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // it — that plugin generates the world eagerly at build time, so this is the only seam. Splitting
     // the tuple does not change plugin build order.
     app.add_plugins(crate::config::ConfigPlugin);
+    // Install an evolved LEVEL (dungeon architecture + furniture + mould-habitat) BEFORE the seed override
+    // and before `DungeonPlugin`/`PlacementPlugin` generate it — so a level can be scored by how it plays.
+    // The seed override below overwrites this level's own seed, so the same evolved level is generated across
+    // the held-in seed set (robustness across maps), exactly like the world/behaviour populations.
+    if let Some(level) = &cfg.level {
+        let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
+        gc.dungeon = level.dungeon.clone();
+        gc.placement.metropolis = level.metropolis.clone();
+        gc.placement.density = level.density.clone();
+        gc.mycelia = level.mycelia.clone();
+    }
     if let Some(seed) = cfg.dungeon_seed {
         app.world_mut().resource_mut::<crate::config::GameConfig>().dungeon.seed = seed;
     }
