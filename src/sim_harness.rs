@@ -559,13 +559,23 @@ pub fn ordered_unit_count(app: &mut App) -> usize {
 pub fn squad_health(app: &mut App) -> (f32, f32) {
     let world = app.world_mut();
     let mut q = world.query_filtered::<&crate::health::Health, With<crate::squad::Unit>>();
-    let mut cur = 0.0f32;
-    let mut max = 0.0f32;
+    // Canonical-order summation. The query yields units in archetype/allocation order, which is NOT
+    // guaranteed identical across two same-seed `App` instances, and f32 addition is non-associative — so a
+    // raw running sum drifts by ~1e-4 between otherwise bit-identical runs. `snapshot_hash` folds `Health`
+    // in a canonical order and stays stable, but this sum did not, which made the survival-belief series
+    // (and the level-playtest fitness it feeds via `interest`/`experience`) non-deterministic — only
+    // exposed once the mould couplings perturbed the trajectory into a different iteration order. Collect
+    // then sort-by-value so the totals are order-independent given the (hash-identical) multiset of healths.
+    // Same fix class as the crab-separation / ALARM-deposit canonicalisation (commit 00193f8).
+    let mut curs: Vec<f32> = Vec::new();
+    let mut maxs: Vec<f32> = Vec::new();
     for h in q.iter(world) {
-        cur += h.current;
-        max += h.max;
+        curs.push(h.current);
+        maxs.push(h.max);
     }
-    (cur, max)
+    curs.sort_by(f32::total_cmp);
+    maxs.sort_by(f32::total_cmp);
+    (curs.iter().sum(), maxs.iter().sum())
 }
 
 /// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see

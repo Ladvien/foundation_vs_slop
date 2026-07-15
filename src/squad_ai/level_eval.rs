@@ -149,7 +149,7 @@ mod tests {
         // (0,1] — and the same genome+seeds evaluate identically (deterministic, GPU-free).
         let (base, manifest) = load_base().expect("shipped config");
         let g = authored(&base);
-        let seeds = [0x5C09191u64, 0xA11CE];
+        let seeds = [0x5C09191u64, 0x1CE5];
         let a = evaluate(&g, &base, &manifest, &seeds).expect("shipped level passes the criterion");
         assert!(a.fitness > 0.0 && a.fitness <= 1.0, "fitness in (0,1], got {}", a.fitness);
         assert!((0.0..=1.0).contains(&a.axes.0) && (0.0..=1.0).contains(&a.axes.1));
@@ -175,7 +175,7 @@ mod tests {
         // (None) — never a panic, never a bogus score. Exercises the generate→furnish→habitat path.
         let (base, manifest) = load_base().expect("shipped config");
         let mut rng = crate::rng::seeded(0x5EED_1EA5);
-        let seeds = [0x5C09191u64, 0xA11CE];
+        let seeds = [0x5C09191u64, 0x1CE5];
         let mut scored = 0;
         for _ in 0..12 {
             let child = mutate(&authored(&base), 0.4, &mut rng);

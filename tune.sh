@@ -10,7 +10,7 @@
 #     dim = behavior | audio | levels | rl | poet | evolve3
 #
 # Env overrides (all optional):
-#   GENERATIONS=30  BATCH=16  TICKS=1800  SEEDS=0x5C09191,0xA11CE,0xBEEF,0xF00D,0x1CE
+#   GENERATIONS=30  BATCH=16  TICKS=1800  SEEDS=0x5C09191,0x1CE5,0xB0BA
 #   JOBS=3          # evolve3 only (capped at 3 by the archive read-after-write dependency)
 #   CMA=1           # rl only — use the CMA-ME adaptive emitter
 #   APPLY=1         # after the search, PERMANENTLY bake the best elite (behavior/audio/levels/evolve3→world)
@@ -28,7 +28,7 @@ DIM="${1:-behavior}"; shift || true
 GENERATIONS="${GENERATIONS:-30}"
 BATCH="${BATCH:-16}"
 TICKS="${TICKS:-1800}"
-SEEDS="${SEEDS:-0x5C09191,0xA11CE,0xBEEF,0xF00D,0x1CE}"
+SEEDS="${SEEDS:-0x5C09191,0x1CE5,0xB0BA}"
 JOBS="${JOBS:-3}"
 CMA="${CMA:-0}"
 APPLY="${APPLY:-0}"

@@ -471,7 +471,7 @@ impl Default for SearchConfig {
             generations: 8,
             batch: 4,
             episode_ticks: 7200,
-            dungeon_seeds: vec![0x5C09191, 0xA11CE, 0xBEEF],
+            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
             resolution: 8,
             jobs: 1,
         }

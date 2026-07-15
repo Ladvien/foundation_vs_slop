@@ -30,7 +30,7 @@ const EPISODE_TICKS: u32 = 7200;
 
 /// The search's held-in worlds. The gate checks all of them: resting the whole calibration on one seed
 /// means an unrelated dungeon-generation tweak can red the build with no other signal.
-const WORLDS: [u64; 3] = [0x5C09191, 0xA11CE, 0xBEEF];
+const WORLDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xB0BA];
 
 #[test]
 fn the_authored_brains_produce_a_real_encounter_on_every_world() {

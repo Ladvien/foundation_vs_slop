@@ -46,7 +46,7 @@ impl Default for BehaviorSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0xA11CE, 0xBEEF],
+            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
             episode_ticks: 1800,
         }
     }

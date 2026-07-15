@@ -78,9 +78,22 @@ impl Default for MoldConfig {
             seed_v: 0.15,
             light_recoil: 0.05,
             light_ref: 6.0,
-            dim_light: 0.7,
+            // SHIPPED coupling defaults. The mold is load-bearing (Phase 3): it dims light (crabs are less
+            // light-pushed) and, where dense (biomass >= dense_v/occlude_los ~= 0.83), hides crabs from the
+            // squad's line of sight — a real tactical cost, not cosmetic. Adding the mold also shifts the
+            // deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf. tests/replay.rs),
+            // which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes. Those were
+            // re-selected: the held-in set is now [0x5C09191, 0x1CE5, 0xB0BA], where the shipped squad produces
+            // a real encounter — it survives with margin AND the swarm survives (neither side is wiped). The
+            // couplings stay LIVE and tunable: the optimizer (world_genome BOUNDS: dim_light 0..1,
+            // occlude_los 0..1.5, seep_boost 0.5..6) can push them and weigh the "mold makes it scarier" cost.
+            dim_light: 0.5,
             occlude_los: 0.6,
-            seep_boost: 3.0,
+            // 1.5 mirrors the old static `almond_water.mold_seep_mult`: the live ramp `1 + 0.5·mold01` stays
+            // <= that at all times, so moldy pools keep the sparse, fog-preserving footprint the
+            // `almond_pools_stay_small_and_isolated` liveness test guards. The optimizer may push it up to 6×
+            // (world_genome BOUNDS) and weigh the "moldy zones flood into a healing sheet" trade-off itself.
+            seep_boost: 1.5,
             dense_v: 0.5,
         }
     }

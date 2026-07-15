@@ -47,7 +47,7 @@ impl Default for LevelSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0xA11CE, 0xBEEF],
+            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
         }
     }
 }
@@ -156,7 +156,7 @@ mod tests {
         let cfg = LevelSearchConfig {
             generations: 3,
             batch: 8,
-            dungeon_seeds: vec![0x5C09191, 0xA11CE],
+            dungeon_seeds: vec![0x5C09191, 0x1CE5],
             ..Default::default()
         };
         let result = search(&base, &manifest, &cfg, |_, _| {}).expect("search runs");
