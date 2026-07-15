@@ -7,7 +7,7 @@ edition = "2024"
 # Opt-in test/replay scaffolding: gates the headless `sim_harness`, the deterministic snapshot/hash
 # accessors, and any test-only visual-decoupling hooks. Off by default so the shipped binary carries
 # none of it. Enable with `cargo test --features test-harness`.
-test-harness = ["bevy/debug"]
+test-harness = ["bevy/debug", "dep:clap", "dep:indicatif"]
 
 # Both binaries are declared explicitly. `src/bin/train.rs` would otherwise be auto-discovered and
 # compiled on a plain `cargo check`, where `sim_harness` does not exist — `required-features` is the
@@ -44,6 +44,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 rand = "0.10"
 rand_chacha = "0.10"
 rayon = "1"
+# CLI + progress for the offline `train` tuning driver ONLY — optional, pulled in by `test-harness` so the
+# shipped game binary carries neither. `clap` derives the subcommand parser; `indicatif` renders the live
+# per-generation progress bar (ETA + stats) and the multi-bar island display.
+clap = { version = "4", features = ["derive"], optional = true }
+indicatif = { version = "0.17", optional = true }
 
 # Bevy's recommended dev compile-speed profile: keep our own crate light so
 # iteration is fast, but optimize dependencies so the engine runs at speed.

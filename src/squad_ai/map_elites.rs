@@ -197,6 +197,10 @@ where
 /// The output archive (`result.pop`) still keeps the best genome per cell for the readable elite handoff;
 /// the thresholds are a *separate* side-structure driving only the emitter's ranking. Additive and
 /// default-off, so the committed archives (isotropic / CMA-ME) stay bit-reproducible.
+// Staged CMA-MAE (Fontaine & Nikolaidis 2023) emitter — implemented and unit-tested, but not yet wired
+// into `rl_search`'s emitter selection (that still picks isotropic vs CMA-ME on `--cma`). Kept ready for
+// the next increment; allow dead_code until it's selected.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn map_elites_cma_mae_loop<G, FF, FE, TV, FV, FR>(
     rng: &mut ChaCha8Rng,
