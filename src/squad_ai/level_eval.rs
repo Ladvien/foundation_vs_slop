@@ -163,23 +163,11 @@ mod tests {
         assert_eq!(a.axes, b.axes);
     }
 
-    /// The playtest path (feature `test-harness`): the shipped level, run through the real sim, scores in
-    /// `[0,1]` and is deterministic. Guards the `SimConfig::with_level` seam + `evaluate_playtest`.
-    #[cfg(feature = "test-harness")]
-    #[test]
-    fn shipped_level_playtests_and_is_deterministic() {
-        use super::evaluate_playtest;
-        // Do NOT hold `serial_guard()` here — `evaluate_playtest`'s rollouts acquire it internally per App,
-        // and the guard's mutex is non-reentrant, so holding it here would deadlock.
-        let (base, manifest) = load_base().expect("shipped config");
-        let g = authored(&base);
-        let seeds = [0x5C09191u64];
-        let a = evaluate_playtest(&g, &base, &manifest, &seeds, 1800).expect("shipped level plays");
-        assert!((0.0..=1.0).contains(&a.fitness), "engagement fitness in [0,1], got {}", a.fitness);
-        let b = evaluate_playtest(&g, &base, &manifest, &seeds, 1800).expect("again");
-        assert_eq!(a.fitness, b.fitness, "playtest scoring must be deterministic");
-        assert_eq!(a.axes, b.axes);
-    }
+    // NOTE: the `evaluate_playtest` (rollout-based) guard lives in `tests/playtest_level.rs`, NOT here — a
+    // harness test that builds a headless `App` must be the FIRST thing in its process to touch the global
+    // thread pool (so `build_headless_app` can pin it to 1 thread). In the `--lib` binary other unit tests
+    // run first and initialise the pool, tripping that assert. So it goes in its own integration-test binary,
+    // exactly like `tests/replay.rs` / `tests/liveness.rs`.
 
     #[test]
     fn a_mutated_genome_evaluates_or_cleanly_rejects() {
