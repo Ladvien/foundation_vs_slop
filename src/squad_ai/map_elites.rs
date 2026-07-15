@@ -185,6 +185,106 @@ where
     Ok(())
 }
 
+/// A **CMA-MAE** loop (Fontaine & Nikolaidis 2023, "Covariance Matrix Adaptation MAP-Annealing",
+/// DOI 10.1145/3583131.3590389) — the SOTA upgrade to [`map_elites_cma_loop`]. CMA-ME ranks a proposal by a
+/// *binary* improved/not-improved flag, which fails on flat or deceptive objectives (nothing "improves", so
+/// the emitter gets no gradient) and abandons the objective too readily. CMA-MAE gives every cell a **soft
+/// annealing threshold** `t_e` (init `min_f`): a proposal's rank is the *continuous* improvement `f − t_e`,
+/// and on acceptance the threshold anneals `t_e ← t_e + α·(f − t_e)`. `α = 0` recovers a pure optimiser
+/// (thresholds never rise), `α = 1` recovers CMA-ME-like hard elitism; intermediate `α` smoothly trades
+/// optimisation for exploration and is robust to the failure modes above.
+///
+/// The output archive (`result.pop`) still keeps the best genome per cell for the readable elite handoff;
+/// the thresholds are a *separate* side-structure driving only the emitter's ranking. Additive and
+/// default-off, so the committed archives (isotropic / CMA-ME) stay bit-reproducible.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn map_elites_cma_mae_loop<G, FF, FE, TV, FV, FR>(
+    rng: &mut ChaCha8Rng,
+    result: &mut MapElitesResult<G>,
+    authored_g: &G,
+    generations: u32,
+    batch: u32,
+    sigma: f32,
+    alpha: f32,
+    min_f: f32,
+    seed_criterion_err: &str,
+    to_vec: TV,
+    from_vec: FV,
+    is_feasible: FF,
+    mut evaluate: FE,
+    mut report: FR,
+) -> Result<(), String>
+where
+    G: Clone,
+    TV: Fn(&G) -> Vec<f32>,
+    FV: Fn(&[f32]) -> G,
+    FF: Fn(&G) -> bool,
+    FE: FnMut(&G) -> Option<(BehaviorDescriptor, f32)>,
+    FR: FnMut(u32, &MapElitesResult<G>),
+{
+    use std::collections::BTreeMap;
+
+    let res = result.pop.archive.resolution();
+    // Per-cell annealing thresholds (BTreeMap for deterministic iteration, matching the archive).
+    let mut thresholds: BTreeMap<(usize, usize), f32> = BTreeMap::new();
+
+    // Seed the archive + the seeded cell's threshold with the authored genome.
+    match evaluate(authored_g) {
+        Some((d, fitness)) => {
+            result.pop.insert(d, fitness, authored_g.clone());
+            thresholds.insert(d.cell(res), min_f + alpha * (fitness - min_f));
+            result.evaluations += 1;
+        }
+        None => return Err(seed_criterion_err.to_string()),
+    }
+
+    let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
+
+    for generation in 0..generations {
+        let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
+        let mut any_improved = false;
+        for _ in 0..emitter.lambda() {
+            let sample = emitter.ask(rng);
+            let child = from_vec(&sample.x);
+            if !is_feasible(&child) {
+                result.rejected_infeasible += 1;
+                continue;
+            }
+            let repaired = emitter.repair(&to_vec(&child));
+            match evaluate(&child) {
+                Some((d, fitness)) => {
+                    let cell = d.cell(res);
+                    let t = thresholds.get(&cell).copied().unwrap_or(min_f);
+                    let improvement = fitness - t;
+                    // The output archive keeps best-per-cell regardless (the readable elite).
+                    result.pop.insert(d, fitness, child);
+                    // Soft acceptance: beat the annealing threshold → anneal it up and count it as illumination.
+                    if improvement > 0.0 {
+                        thresholds.insert(cell, t + alpha * improvement);
+                        any_improved = true;
+                    }
+                    // CMA-MAE ranks EVERY proposal by its continuous improvement (even negative), so the
+                    // emitter gets a gradient on flat/deceptive objectives where CMA-ME's binary flag is stuck.
+                    result.evaluations += 1;
+                    told.push((repaired, improvement));
+                }
+                None => result.rejected_by_criterion += 1,
+            }
+        }
+        emitter.tell(told);
+
+        // Restart when a generation cleared no threshold (nothing new illuminated) or the step size collapsed.
+        if !any_improved || emitter.sigma() < 1e-4 {
+            let restart_from =
+                result.pop.sample_parent(rng).cloned().unwrap_or_else(|| authored_g.clone());
+            emitter = super::cmaes::SepCmaEs::new(to_vec(&restart_from), sigma, batch as usize);
+        }
+
+        report(generation, result);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +324,52 @@ mod tests {
         .expect("cma loop");
         assert!(result.pop.archive.coverage() >= 3, "CMA-ME must illuminate several cells, got {}", result.pop.archive.coverage());
         assert!(result.evaluations > 30, "it must have evaluated a full run, got {}", result.evaluations);
+    }
+
+    #[test]
+    fn cma_mae_illuminates_the_archive() {
+        // The same synthetic QD problem the CMA-ME test uses: CMA-MAE must also fill several cells.
+        let target = [0.8f32, -0.6, 0.2, -0.3];
+        let mut result = MapElitesResult { pop: Population::new(8), evaluations: 0, rejected_infeasible: 0, rejected_by_criterion: 0 };
+        let authored = vec![0.0f32; 4];
+        let mut rng = seeded(0xC0A5_E11E);
+        map_elites_cma_mae_loop(
+            &mut rng, &mut result, &authored, 30, 12, 0.6, 0.5, -100.0, "seed failed",
+            |g: &Vec<f32>| g.clone(),
+            |v: &[f32]| v.to_vec(),
+            |_g| true,
+            |g: &Vec<f32>| {
+                let fitness = -g.iter().zip(target).map(|(a, b)| (a - b) * (a - b)).sum::<f32>();
+                Some((BehaviorDescriptor::new(unit(g[0]), unit(g[1])), fitness))
+            },
+            |_gen, _r| {},
+        )
+        .expect("cma-mae loop");
+        assert!(result.pop.archive.coverage() >= 3, "CMA-MAE must illuminate several cells, got {}", result.pop.archive.coverage());
+        assert!(result.evaluations > 30);
+    }
+
+    #[test]
+    fn cma_mae_still_illuminates_a_flat_objective() {
+        // The failure mode CMA-MAE exists for: a FLAT objective (constant fitness). CMA-ME's binary
+        // improved/not flag gives the emitter almost no gradient once cells are filled; CMA-MAE's annealing
+        // threshold keeps `f - t` informative, so it must still spread across the descriptor space.
+        let authored = vec![0.0f32; 4];
+        let mut result = MapElitesResult { pop: Population::new(8), evaluations: 0, rejected_infeasible: 0, rejected_by_criterion: 0 };
+        let mut rng = seeded(0xF1A7_C0DE);
+        map_elites_cma_mae_loop(
+            &mut rng, &mut result, &authored, 40, 12, 0.8, 0.5, 0.0, "seed",
+            |g: &Vec<f32>| g.clone(),
+            |v: &[f32]| v.to_vec(),
+            |_g| true,
+            |g: &Vec<f32>| Some((BehaviorDescriptor::new(unit(g[0]), unit(g[1])), 1.0f32)),
+            |_gen, _r| {},
+        )
+        .expect("cma-mae flat");
+        assert!(
+            result.pop.archive.coverage() >= 3,
+            "CMA-MAE must keep illuminating on a flat objective, got {}",
+            result.pop.archive.coverage()
+        );
     }
 }

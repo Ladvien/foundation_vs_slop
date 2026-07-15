@@ -32,8 +32,9 @@ impl BehaviorDescriptor {
         }
     }
 
-    /// Bin to a grid cell at the given resolution (cells per axis).
-    fn cell(&self, res: usize) -> (usize, usize) {
+    /// Bin to a grid cell at the given resolution (cells per axis). `pub(crate)` so the CMA-MAE loop can key
+    /// its per-cell annealing thresholds by the same cell the archive uses.
+    pub(crate) fn cell(&self, res: usize) -> (usize, usize) {
         let bin = |x: f32| ((x * res as f32) as usize).min(res.saturating_sub(1));
         (bin(self.aggression), bin(self.exploration))
     }
