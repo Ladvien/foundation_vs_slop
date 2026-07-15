@@ -88,6 +88,14 @@ pub struct SimConfig {
     /// `init_resource::<ActivePolicy>()` — a no-op when the resource already exists, the same seam
     /// [`Self::brains`] uses.
     pub policy: Option<PolicyFactory>,
+    /// Override the generated **level** for one rollout: the evolved dungeon architecture + furniture
+    /// (`metropolis`/`density`) + mould-habitat (`mycelia`) slices a [`crate::squad_ai::level_genome`]
+    /// decodes to. `None` runs the shipped level (what the replay goldens pin); `Some(l)` installs an
+    /// evolved level BEFORE `DungeonPlugin`/`PlacementPlugin` generate it — the level-population analogue of
+    /// [`Self::config`], so a level can be scored by how it *plays* (a rollout), not only its static
+    /// structure (PCGRL; Khalifa et al. 2020, DOI 10.1609/aiide.v16i1.7416). `dungeon_seed` still wins over
+    /// the level's own seed, so an evolved level is evaluated across the held-in seed set like every genome.
+    pub level: Option<crate::squad_ai::level_genome::LevelPhenotype>,
 }
 
 impl Default for SimConfig {
@@ -103,6 +111,7 @@ impl Default for SimConfig {
             audio: None,
             behavior: None,
             policy: None,
+            level: None,
         }
     }
 }
@@ -150,6 +159,15 @@ impl SimConfig {
     /// analogue of [`with_brains`]. Applied before `SquadAiPlugin` builds (see [`build_headless_app`]).
     pub fn with_policy(mut self, policy: PolicyFactory) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Install an evolved level (dungeon + furniture + mould-habitat slices) for one rollout — the
+    /// level-population analogue of [`with_world_config`]. Applied at the `GameConfig` seam BEFORE
+    /// `DungeonPlugin`/`PlacementPlugin` generate, so the level is scored by play. Combine with
+    /// `deterministic_core_seeded` to evaluate the same level across the held-in seed set.
+    pub fn with_level(mut self, level: crate::squad_ai::level_genome::LevelPhenotype) -> Self {
+        self.level = Some(level);
         self
     }
 }
@@ -273,6 +291,17 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // it — that plugin generates the world eagerly at build time, so this is the only seam. Splitting
     // the tuple does not change plugin build order.
     app.add_plugins(crate::config::ConfigPlugin);
+    // Install an evolved LEVEL (dungeon architecture + furniture + mould-habitat) BEFORE the seed override
+    // and before `DungeonPlugin`/`PlacementPlugin` generate it — so a level can be scored by how it plays.
+    // The seed override below overwrites this level's own seed, so the same evolved level is generated across
+    // the held-in seed set (robustness across maps), exactly like the world/behaviour populations.
+    if let Some(level) = &cfg.level {
+        let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
+        gc.dungeon = level.dungeon.clone();
+        gc.placement.metropolis = level.metropolis.clone();
+        gc.placement.density = level.density.clone();
+        gc.mycelia = level.mycelia.clone();
+    }
     if let Some(seed) = cfg.dungeon_seed {
         app.world_mut().resource_mut::<crate::config::GameConfig>().dungeon.seed = seed;
     }
@@ -289,6 +318,7 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         let mut gc = app.world_mut().resource_mut::<crate::config::GameConfig>();
         gc.ai_tuning = w.ai;
         gc.sim = w.sim;
+        gc.mold = w.mold;
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the
@@ -320,6 +350,9 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             crate::placement::PlacementPlugin,
             crate::light::LightFieldPlugin,
             crate::almond_water::AlmondWaterPlugin,
+            // The CPU reaction-diffusion gameplay mold: pinned CPU state (reads LightField, drives the
+            // light/LOS/water couplings), so the exact-hash gate covers it. GPU `MyceliaPlugin` stays out.
+            crate::mold::MoldPlugin,
         ),
         crate::world::WorldPlugin,
         crate::camera::CameraPlugin,
@@ -461,6 +494,11 @@ pub fn field_hash(app: &mut App) -> u64 {
     if let Some(water) = world.get_resource::<crate::almond_water::AlmondWater>() {
         water.fold_fingerprint(&mut hash);
     }
+    // The CPU gameplay mold field feeds crab/light/LOS/water couplings, so a bake/diffusion/recoil bug that
+    // shifts the mold moves the replay hash even when no actor has moved yet. Fold it too, like the others.
+    if let Some(mold) = world.get_resource::<crate::mold::MoldField>() {
+        mold.fold_fingerprint(&mut hash);
+    }
     hash
 }
 
@@ -521,13 +559,23 @@ pub fn ordered_unit_count(app: &mut App) -> usize {
 pub fn squad_health(app: &mut App) -> (f32, f32) {
     let world = app.world_mut();
     let mut q = world.query_filtered::<&crate::health::Health, With<crate::squad::Unit>>();
-    let mut cur = 0.0f32;
-    let mut max = 0.0f32;
+    // Canonical-order summation. The query yields units in archetype/allocation order, which is NOT
+    // guaranteed identical across two same-seed `App` instances, and f32 addition is non-associative — so a
+    // raw running sum drifts by ~1e-4 between otherwise bit-identical runs. `snapshot_hash` folds `Health`
+    // in a canonical order and stays stable, but this sum did not, which made the survival-belief series
+    // (and the level-playtest fitness it feeds via `interest`/`experience`) non-deterministic — only
+    // exposed once the mould couplings perturbed the trajectory into a different iteration order. Collect
+    // then sort-by-value so the totals are order-independent given the (hash-identical) multiset of healths.
+    // Same fix class as the crab-separation / ALARM-deposit canonicalisation (commit 00193f8).
+    let mut curs: Vec<f32> = Vec::new();
+    let mut maxs: Vec<f32> = Vec::new();
     for h in q.iter(world) {
-        cur += h.current;
-        max += h.max;
+        curs.push(h.current);
+        maxs.push(h.max);
     }
-    (cur, max)
+    curs.sort_by(f32::total_cmp);
+    maxs.sort_by(f32::total_cmp);
+    (curs.iter().sum(), maxs.iter().sum())
 }
 
 /// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see

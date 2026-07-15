@@ -710,6 +710,15 @@ fn crab_locomotion(
             .or_default()
             .push(motion.pos);
     }
+    // Sort each bucket by position bits so the separation SUM below (`sep += …`) is canonical. Float
+    // addition is non-associative and the bucket is filled in crab QUERY order, which is NOT reproducible
+    // across same-seed runs (documented at the carry logistics below, and see `util::nearest_planar`): an
+    // unsorted bucket lets a query-order difference flip a rounding bit in `sep`, diverging a crab's
+    // position and cascading into the physics-off replay hash (~1–3% of runs, pinned tick 549). Mirrors the
+    // identical fix on the parasite swarm hash (`parasite.rs`, `manca_swarm`).
+    for v in hash.values_mut() {
+        v.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    }
 
     for (
         mut motion,
@@ -1350,17 +1359,28 @@ fn crab_alarm_on_damage(
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     sim: Res<SimTuning>,
 ) {
+    // Collect this tick's wounded-crab alarm deposits into a local batch, then sort it into the canonical
+    // deposit order before appending to the shared queue. `drain_deposits` applies each with a
+    // non-associative `f32 +=` in queue order, and the crab query order is NOT reproducible across runs
+    // (async GLB load + entity-id reuse — see the carry logistics), so two wounded crabs whose ALARM
+    // blooms overlap would otherwise sum to a query-order-dependent value, diverging the ALARM channel and
+    // the physics-off replay hash (~1-3% of runs). Sorting the batch makes the drained field a pure
+    // function of the deposits, exactly as `ai::field::sort_deposits` documents (the same class of fix as
+    // the crab-separation bucket sort above).
+    let mut batch: Vec<crate::ai::field::Deposit> = Vec::new();
     for (hp, tf) in &crabs {
         // `is_changed()` also fires on spawn; `is_added()` screens that out. `current < max` restricts to
         // an actual wound (a fresh full-health crab that was merely touched by the ECS won't deposit).
         if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
-            deposits.0.push(crate::ai::field::Deposit {
+            batch.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::ALARM,
                 amount: sim.deposit.alarm_crab,
             });
         }
     }
+    crate::ai::field::sort_deposits(&mut batch);
+    deposits.0.extend(batch);
 }
 
 /// Feeding sates hunger: an actively-biting crab (`CrabState::Attack`) drains its HUNGER drive, so a fed

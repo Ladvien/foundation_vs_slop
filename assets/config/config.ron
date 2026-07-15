@@ -1386,6 +1386,22 @@
         iridescence_strength: 0.25,// subtle oil-slick sheen; more water = more sheen
         moisture_feed_gain: 0.3,   // how strongly water level boosts the mold's Gray-Scott bloom where they overlap
     ),
+    // The DETERMINISTIC CPU gameplay mold (src/mold.rs) — Fisher-KPP reaction-diffusion over the dungeon
+    // grid, in the harness (optimizer-tunable), distinct from the GPU cosmetic `mycelia` above. Grows in the
+    // same `mycelia.habitat` mask, spreads, and recedes from the squad's light. Couplings dim light / occlude
+    // LOS / boost almond-water seep.
+    mold: (
+        growth: 0.08,          // logistic growth coeff per substep, toward habitat capacity
+        diffuse: 0.12,         // diffusion lerp weight per substep (must be < 0.25 for a stable step)
+        substeps: 4,           // reaction-diffusion substeps per FixedUpdate tick
+        seed_v: 0.15,          // initial biomass seeded into each habitat cell at bake
+        light_recoil: 0.05,    // recoil sink per substep per unit illuminance — the photophobia strength
+        light_ref: 6.0,        // illuminance that reads as fully lit (light01 = min(1, light / light_ref))
+        dim_light: 0.5,        // biomass -> LightField attenuation (mold darkens rooms; crabs less light-pushed)
+        occlude_los: 0.6,      // dense mold (biomass >= ~0.83) hides crabs from squad LOS (tactical cost; tunable 0..1.5)
+        seep_boost: 1.5,       // dense biomass -> almond-water seep multiplier (live; mirrors old mold_seep_mult)
+        dense_v: 0.5,          // biomass at/above which a cell counts as "dense" mold (LOS + seep)
+    ),
     // Acoustic-stimulus + audio tuning (src/audio_tuning.rs). Makes sound a perception stimulus:
     // gameplay sounds deposit into the acoustic stigmergy channels (ai::field::NOISE_*) and agents
     // react to them. `stimulus` = channel propagation (evaporate/diffuse/deposit_radius, same model as

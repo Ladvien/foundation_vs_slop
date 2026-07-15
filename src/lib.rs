@@ -47,6 +47,7 @@ pub mod juice;
 pub mod impact_fx;
 pub mod laser;
 pub mod light;
+pub mod mold;
 pub mod mycelia;
 pub mod nest;
 pub mod orca;
@@ -153,11 +154,16 @@ pub fn run() {
             // `AlmondWaterPlugin` (the CPU water field creatures forage on + the consuming heal) is grouped
             // here too and kept harness-visible, like `LightFieldPlugin` — its field + heal are pinned. The
             // cosmetic puddle `AlmondWaterVisualPlugin` sits with the windowed FX below, never in the harness.
+            // `MoldPlugin` (the CPU reaction-diffusion gameplay mold) is grouped here too and kept
+            // harness-visible, like `LightFieldPlugin`/`AlmondWaterPlugin` — it is pinned CPU gameplay state
+            // (it reads the LightField to recoil and, via its couplings, dims light / occludes LOS / boosts
+            // seep). The GPU `MyceliaPlugin` below is the cosmetic mirror and stays windowed-only.
             (
                 dungeon::DungeonPlugin,
                 placement::PlacementPlugin,
                 light::LightFieldPlugin,
                 almond_water::AlmondWaterPlugin,
+                mold::MoldPlugin,
             ),
             world::WorldPlugin,
             camera::CameraPlugin,
