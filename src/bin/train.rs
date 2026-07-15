@@ -1,28 +1,25 @@
-//! Offline behaviour-search driver (feature `test-harness`).
+//! Offline QD/RL tuning driver (feature `test-harness`).
 //!
 //! The offline half of the experience system: it runs the real simulation headlessly, many times, to
-//! search the space of squad/swarm brains. Nothing here ships in the game binary — the runtime only
-//! ever *reads* the archive this produces.
+//! search the space of squad/swarm brains, worlds, levels, audio, and neural policies. Nothing here ships
+//! in the game binary — the runtime only ever *reads* the archives this produces.
 //!
-//! Right now it implements one subcommand, `bench`, which answers the question every later phase
-//! depends on: **how many simulated ticks per second can one process actually deliver?** MAP-Elites
-//! (Mouret & Clune, "Illuminating search spaces by mapping elites", arXiv:1504.04909) needs thousands
-//! of evaluations, and `sim_harness` admits exactly one `App` per process (it holds a process-wide lock
-//! and pins the global compute pool + rayon to one thread for determinism). So throughput is
-//! `processes × ticks_per_second`, and the evaluation budget has to be derived from a measurement
-//! rather than a guess.
+//! MAP-Elites (Mouret & Clune, "Illuminating search spaces by mapping elites", arXiv:1504.04909) needs
+//! thousands of evaluations, and `sim_harness` admits exactly one `App` per process (it holds a
+//! process-wide lock and pins the global compute pool + rayon to one thread for determinism). So throughput
+//! is `processes × ticks_per_second`, which `--islands N` (N independent processes) and `--jobs N` (a
+//! worker pool for the co-evolution rollouts) both exploit.
 //!
-//! Subcommands:
-//! ```text
-//! train bench  [--ticks N] [--seeds A,B,C] [--speed S]   # throughput + determinism probe
-//! train probe  [--ticks N] [--seeds A,B,C]               # one authored episode: outcome + criterion
-//! train prior  [--ticks N] [--seeds A,B,C]               # sweep the shipped brain -> baseline_prior.ron
-//! train evolve [--ticks N] [--seeds A,B,C] [--generations G] [--batch B] [--seed S] [--res R]
-//! ```
-//! `prior` must run before `evolve`: surprise is measured against the shipped brain's realised mode
-//! distribution — what the player expects — and that reference is frozen for the whole search.
+//! This is a `clap` CLI — run `train --help` (and `train <subcommand> --help`) for the full flag list.
+//! A search prints a live progress bar with ETA + per-generation stats on a terminal, and falls back to
+//! plain per-generation lines when piped. `--apply` bakes the result into the shipped defaults, and (for
+//! prior-backed searches) the baseline prior is auto-refreshed when `config.ron` is newer than it.
 
-use std::time::Instant;
+use std::io::{BufRead, IsTerminal};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use clap::{Args, Parser, Subcommand};
 
 use foundation_vs_slop::elite_overlay::{apply_dim, Dim};
 use foundation_vs_slop::sim_harness::{
@@ -61,6 +58,8 @@ const RL_ARCHIVE_PATH: &str = "assets/config/elites_policy.ron";
 /// The POET output: the surviving (environment, agent) niches — evolved worlds paired with the squad that
 /// solves them, plus each pairing's fitness + human-interest score.
 const POET_ARCHIVE_PATH: &str = "assets/config/elites_poet.ron";
+/// Where `--islands N` writes each island's archive + log.
+const ISLANDS_DIR: &str = "islands_out";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -70,55 +69,587 @@ const POET_ARCHIVE_PATH: &str = "assets/config/elites_poet.ron";
 /// dungeon seeds.
 const ROLLOUTS_PER_GENOME: u32 = 2 * 3 * 3;
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first() else {
-        eprintln!("usage: train bench [--ticks N] [--seeds A,B,C] [--speed S]");
-        std::process::exit(2);
-    };
+const CONFIG_PATH: &str = "assets/config/config.ron";
+const REPLAY_PATH: &str = "tests/replay.rs";
 
-    let result = match cmd.as_str() {
-        "bench" => parse_bench(&args[1..]).map(|(ticks, seeds, speed)| bench(ticks, &seeds, speed)),
-        "prior" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| prior(ticks, &seeds)),
-        "evolve" => parse_evolve(&args[1..]).and_then(evolve),
-        "evolve3" => parse_evolve(&args[1..]).and_then(evolve3),
-        // Standalone level search: evolve dungeon/furniture/mushroom config under the static
-        // level-quality objective. GPU-free, no `prior` needed (the objective isn't behavioural).
-        "levels" => parse_evolve(&args[1..]).and_then(levels),
-        // Standalone audio search: evolve the acoustic-stimulus config under the SAME behavioural
-        // witnessed-surprise objective as the world population (audio feeds agent perception). Needs the
-        // `prior` (`train prior` first) — regenerate it after any Mode change (MODE_COUNT is now 25).
-        "audio" => parse_evolve(&args[1..]).and_then(audio),
-        // Standalone behaviour search: evolve a curated subset of the `behavior:` config (locomotion,
-        // steering, senses, combat cadence, boids) under the SAME behavioural witnessed-surprise objective.
-        // Needs the `prior` (`train prior` first) — regenerate it after any Mode change.
-        "behavior" => parse_evolve(&args[1..]).and_then(behavior),
-        // Standalone policy (neuroevolution) search: evolve a `NeuralPolicy`'s weights under the SAME
-        // behavioural witnessed-surprise objective. Needs the `prior` (`train prior` first).
-        "rl" => parse_evolve(&args[1..]).and_then(rl),
-        // POET open-ended outer loop: co-evolve worlds + the squads that solve them, with a learning-progress
-        // curriculum and cross-niche transfer. Needs the `prior` (`train prior` first).
-        "poet" => parse_evolve(&args[1..]).and_then(poet),
-        // Permanently bake an evolved elite into the shipped defaults: rewrites config.ron + the matching
-        // Rust `Default` impl + the replay goldens together, so `cargo test` stays green.
-        "apply" => apply(&args[1..]),
-        "probe" => parse_bench(&args[1..]).and_then(|(ticks, seeds, _)| probe(ticks, &seeds)),
-        // Determinism stability guard: recompute the deterministic-core goldens `--reps` times (fresh App
-        // each) and require agreement. Run across several fresh processes (under load) to catch the rare
-        // cross-process flake before re-baking. See `recompute_goldens_stable`.
-        "verify" => parse_verify(&args[1..]).and_then(verify),
-        // Internal: a rollout-evaluation worker for `--jobs N`. Spawned by the search's `WorkerPool`, never
-        // run by hand — it speaks a length-prefixed RON protocol on stdin/stdout, not a human CLI.
-        "worker" => foundation_vs_slop::squad_ai::parallel::worker_main(),
-        other => Err(format!(
-            "unknown subcommand {other:?} (expected bench | probe | verify | prior | evolve | evolve3 | levels | audio | behavior | rl | poet | apply)"
-        )),
+// ── CLI definition (clap derive) ────────────────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    name = "train",
+    about = "Offline QD/RL tuning driver for Foundation vs. Slop (test-harness build only).",
+    long_about = "Runs the real simulation headlessly to search squad/swarm brains, worlds, levels, audio, \
+                  and neural policies. Searches print a live progress bar + ETA; `--apply` bakes the winner \
+                  into the shipped config; `--islands N` fans N independent search processes across cores."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Throughput + determinism probe: time one headless episode per seed.
+    Bench(BenchArgs),
+    /// One authored episode per seed: raw outcome + criterion (calibration diagnostic).
+    Probe(ProbeArgs),
+    /// Sweep the shipped brain -> baseline_prior.ron (run before the behavioural searches).
+    Prior(ProbeArgs),
+    /// Co-evolve squad × swarm × world; commit the squad + swarm archives.
+    Evolve(SearchArgs),
+    /// Co-evolve squad × swarm × world; commit all three (incl. the evolved worlds + mould).
+    Evolve3(SearchArgs),
+    /// Evolve dungeon architecture + furniture + mushrooms (static objective, GPU-free, no prior).
+    Levels(SearchArgs),
+    /// Evolve the acoustic-stimulus config (behavioural witnessed-surprise objective).
+    Audio(SearchArgs),
+    /// Evolve a curated behaviour subset (behavioural witnessed-surprise objective).
+    Behavior(SearchArgs),
+    /// Neuroevolve a NeuralPolicy's weights (behavioural witnessed-surprise objective).
+    Rl(SearchArgs),
+    /// POET open-ended world × squad co-evolution.
+    Poet(SearchArgs),
+    /// Permanently bake an evolved elite into the shipped defaults (config.ron + Default impls + goldens).
+    Apply(ApplyArgs),
+    /// Determinism stability guard: recompute the deterministic-core goldens and require agreement.
+    Verify {
+        #[arg(long, default_value_t = GOLDEN_STABILITY_REPS, value_parser = parse_pos_u32)]
+        reps: u32,
+    },
+    /// Internal rollout-evaluation worker for `--jobs N` (length-prefixed RON IPC — not a human CLI).
+    #[command(hide = true)]
+    Worker,
+}
+
+#[derive(Args)]
+struct BenchArgs {
+    /// Ticks per episode (1800 = 30 s @ 60 Hz).
+    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    ticks: u32,
+    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: 0x5C09191.
+    #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
+    seeds: Vec<u64>,
+    /// Throughput lever: FixedUpdate sub-steps per render pass (does not change physics).
+    #[arg(long, default_value_t = 1.0)]
+    speed: f32,
+}
+
+#[derive(Args)]
+struct ProbeArgs {
+    /// Ticks per episode (1800 = 30 s @ 60 Hz).
+    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    ticks: u32,
+    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: 0x5C09191.
+    #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
+    seeds: Vec<u64>,
+}
+
+/// Shared flags for every search subcommand. Defaults are the PRACTICAL search settings the old `tune.sh`
+/// applied (30 gens × 16 children, 1800 ticks) — NOT `SearchConfig::default()`'s tiny 8/4/7200 — so a bare
+/// `train evolve3` / `./tune.sh evolve3` runs a useful search out of the box.
+#[derive(Args, Clone)]
+struct SearchArgs {
+    /// Generations (POET: outer iterations).
+    #[arg(long, default_value_t = 30, value_parser = parse_pos_u32)]
+    generations: u32,
+    /// Children proposed per generation (per side, for co-evolution).
+    #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
+    batch: u32,
+    /// Ticks per rollout episode.
+    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    ticks: u32,
+    /// MAP-Elites archive resolution (bins per descriptor axis).
+    #[arg(long, default_value_t = 8, value_parser = parse_pos_usize)]
+    res: usize,
+    /// Search RNG seed (distinct search trajectories; `--islands` derives its own per island).
+    #[arg(long, default_value_t = 0xC0FFEE, value_parser = parse_seed)]
+    seed: u64,
+    /// Held-in dungeon seeds the objective is evaluated on (comma-separated; decimal or 0x-hex). Needs >= 2.
+    /// Default: 0x5C09191,0x1CE5,0xB0BA.
+    #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
+    seeds: Vec<u64>,
+    /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); capped useful at OPPONENTS (3).
+    #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
+    jobs: usize,
+    /// Use the CMA-ME adaptive emitter (only honoured by `rl`).
+    #[arg(long)]
+    cma: bool,
+    /// Override the output archive path (single-output searches only).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// After the search, permanently bake the winner into the shipped config + regenerate the prior.
+    #[arg(long)]
+    apply: bool,
+    /// Fan N independent search processes across cores, then pick the best-fitness elite (single-output
+    /// searches only; `evolve`/`evolve3` write fixed multi-archive paths and must run alone).
+    #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
+    islands: usize,
+    /// Force plain per-generation lines instead of the live progress bar (for logs / CI).
+    #[arg(long)]
+    no_progress: bool,
+    /// Internal: run as an island child — emit machine-readable PROGRESS/RESULT on stdout for the parent.
+    #[arg(long, hide = true)]
+    island_child: bool,
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    /// Which config slice to bake: behavior | world | audio | levels.
+    dim: String,
+    /// The evolved elite archive to bake from.
+    archive: PathBuf,
+    /// Pick a specific archive cell `row,col` (default: the archive's best elite).
+    #[arg(long)]
+    cell: Option<String>,
+}
+
+fn main() {
+    // Silence the headless Bevy asset-not-found spam at the source (absorbs the old `tune.sh` RUST_LOG
+    // export) unless the caller set their own filter.
+    if std::env::var_os("RUST_LOG").is_none() {
+        // SAFETY: single-threaded here — this runs at the very top of `main`, before any thread (the island
+        // readers, the compute pool) is spawned, so there is no concurrent env access to race with.
+        unsafe {
+            std::env::set_var(
+                "RUST_LOG",
+                "warn,bevy_asset=off,bevy_render=off,bevy_gltf=off,bevy_gizmos=off,wgpu=off,naga=off",
+            );
+        }
+    }
+
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Bench(a) => {
+            bench(a.ticks, &seeds_or(&a.seeds, &[0x5C09191]), a.speed);
+            Ok(())
+        }
+        Command::Probe(a) => probe(a.ticks, &seeds_or(&a.seeds, &[0x5C09191])),
+        Command::Prior(a) => prior(a.ticks, &seeds_or(&a.seeds, &[0x5C09191])),
+        Command::Evolve(a) => run_search(SearchKind::Evolve, a),
+        Command::Evolve3(a) => run_search(SearchKind::Evolve3, a),
+        Command::Levels(a) => run_search(SearchKind::Levels, a),
+        Command::Audio(a) => run_search(SearchKind::Audio, a),
+        Command::Behavior(a) => run_search(SearchKind::Behavior, a),
+        Command::Rl(a) => run_search(SearchKind::Rl, a),
+        Command::Poet(a) => run_search(SearchKind::Poet, a),
+        Command::Apply(a) => {
+            Dim::parse(&a.dim).and_then(|dim| apply_archive(dim, &a.archive, a.cell.as_deref()))
+        }
+        Command::Verify { reps } => verify(reps),
+        Command::Worker => foundation_vs_slop::squad_ai::parallel::worker_main(),
     };
     if let Err(e) = result {
-        eprintln!("train {cmd}: {e}");
+        eprintln!("train: {e}");
         std::process::exit(1);
     }
 }
+
+/// The seeds the caller gave, or `fallback` if none.
+fn seeds_or(seeds: &[u64], fallback: &[u64]) -> Vec<u64> {
+    if seeds.is_empty() { fallback.to_vec() } else { seeds.to_vec() }
+}
+
+// ── Search kinds + orchestration ─────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchKind {
+    Evolve,
+    Evolve3,
+    Levels,
+    Audio,
+    Behavior,
+    Rl,
+    Poet,
+}
+
+impl SearchKind {
+    /// The clap subcommand name (also the island archive/log prefix).
+    fn cli_name(self) -> &'static str {
+        match self {
+            SearchKind::Evolve => "evolve",
+            SearchKind::Evolve3 => "evolve3",
+            SearchKind::Levels => "levels",
+            SearchKind::Audio => "audio",
+            SearchKind::Behavior => "behavior",
+            SearchKind::Rl => "rl",
+            SearchKind::Poet => "poet",
+        }
+    }
+    /// Progress-bar label.
+    fn label(self) -> &'static str {
+        match self {
+            SearchKind::Rl => "policy",
+            SearchKind::Behavior => "behaviour",
+            other => other.cli_name(),
+        }
+    }
+    /// Behavioural searches need the frozen prior; the static `levels` objective does not.
+    fn needs_prior(self) -> bool {
+        !matches!(self, SearchKind::Levels)
+    }
+    /// Only single-output searches can be fanned into islands; co-evolution writes fixed multi-archive paths.
+    fn supports_islands(self) -> bool {
+        !matches!(self, SearchKind::Evolve | SearchKind::Evolve3)
+    }
+    /// Which config slice a `--apply` bakes, or an error explaining why this kind can't be baked.
+    fn apply_dim(self) -> Result<Dim, String> {
+        match self {
+            SearchKind::Evolve3 => Ok(Dim::World),
+            SearchKind::Levels => Ok(Dim::Levels),
+            SearchKind::Audio => Ok(Dim::Audio),
+            SearchKind::Behavior => Ok(Dim::Behavior),
+            SearchKind::Evolve => {
+                Err("evolve does not commit a world archive to bake — use `evolve3 --apply`".into())
+            }
+            SearchKind::Rl => Err(
+                "rl/policy has no config slice to bake (a NeuralPolicy is opaque weights) — run it with \
+                 FVS_POLICY_ELITE=<archive> instead of --apply"
+                    .into(),
+            ),
+            SearchKind::Poet => {
+                Err("poet has no single config slice to bake — inspect the niches archive by hand".into())
+            }
+        }
+    }
+}
+
+/// What a completed single search produced: the best fitness (for island ranking) + its archive path.
+struct SearchOutcome {
+    best: f32,
+    out: PathBuf,
+}
+
+/// Entry point for every search subcommand: validate, fan into islands or run one search, then optionally
+/// bake the winner.
+fn run_search(kind: SearchKind, mut a: SearchArgs) -> Result<(), String> {
+    if a.seeds.is_empty() {
+        a.seeds = vec![0x5C09191, 0x1CE5, 0xB0BA];
+    }
+    if a.seeds.len() < 2 {
+        return Err(
+            "a search needs >= 2 dungeon seeds: the two rollouts of a candidate must run on DIFFERENT \
+             worlds, or learnability measures a memorised map rather than a behaviour"
+                .into(),
+        );
+    }
+    // Fail fast: if `--apply` was asked for a kind that can't be baked, say so before a multi-hour search.
+    if a.apply {
+        kind.apply_dim()?;
+    }
+
+    if a.islands > 1 {
+        if !kind.supports_islands() {
+            return Err(format!(
+                "`{}` does not support --islands (it writes fixed multi-archive paths) — run it alone \
+                 (use --jobs N for its worker pool instead)",
+                kind.cli_name()
+            ));
+        }
+        return run_islands(kind, a);
+    }
+
+    // Single search. Island children never refresh the prior (the parent did it once; N children racing to
+    // rewrite baseline_prior.ron would corrupt it).
+    if kind.needs_prior() && !a.island_child {
+        ensure_prior_fresh(a.ticks, &a.seeds)?;
+    }
+
+    let progress = Progress::new(a.generations, a.no_progress, a.island_child, kind.label());
+    let outcome = run_single(kind, &a, &progress)?;
+
+    if a.island_child {
+        // The parent parses this line to rank islands.
+        println!("RESULT best={} out={}", outcome.best, outcome.out.display());
+    }
+
+    if a.apply {
+        let dim = kind.apply_dim()?;
+        println!();
+        println!(">> --apply: baking the {} elite {} into the shipped config…", kind.cli_name(), outcome.out.display());
+        apply_archive(dim, &outcome.out, None)?;
+        println!(">> regenerating the baseline prior for the new tuning…");
+        prior(a.ticks, &a.seeds)?;
+    }
+    Ok(())
+}
+
+fn run_single(kind: SearchKind, a: &SearchArgs, p: &Progress) -> Result<SearchOutcome, String> {
+    match kind {
+        SearchKind::Evolve => evolve_run(a, p),
+        SearchKind::Evolve3 => evolve3_run(a, p),
+        SearchKind::Levels => levels_run(a, p),
+        SearchKind::Audio => audio_run(a, p),
+        SearchKind::Behavior => behavior_run(a, p),
+        SearchKind::Rl => rl_run(a, p),
+        SearchKind::Poet => poet_run(a, p),
+    }
+}
+
+/// Regenerate the baseline prior when it is missing or older than `config.ron` (the shipped game it models
+/// has since changed, so a stale prior would measure "surprise" against a game that no longer exists).
+fn ensure_prior_fresh(ticks: u32, seeds: &[u64]) -> Result<(), String> {
+    let stale = match std::fs::metadata(PRIOR_PATH) {
+        Err(_) => true, // missing
+        Ok(pm) => match (pm.modified(), std::fs::metadata(CONFIG_PATH).and_then(|m| m.modified())) {
+            (Ok(prior_t), Ok(cfg_t)) => cfg_t > prior_t,
+            _ => false, // can't compare mtimes — leave the existing prior alone rather than churn
+        },
+    };
+    if stale {
+        eprintln!(">> baseline_prior.ron is missing or older than config.ron — regenerating…");
+        prior(ticks, seeds)?;
+    }
+    Ok(())
+}
+
+// ── Live progress ────────────────────────────────────────────────────────────────────────────────────
+
+/// Per-generation progress reporting. `Bar` on a terminal, `Plain` per-generation lines when piped or
+/// `--no-progress`, and `Child` machine-readable lines an island parent parses. Updated ONLY from the
+/// search's side-effect-only `report` closure, so it never perturbs search determinism.
+enum Progress {
+    Bar(indicatif::ProgressBar),
+    Plain,
+    Child { generations: u32 },
+}
+
+impl Progress {
+    fn new(generations: u32, no_progress: bool, island_child: bool, label: &str) -> Progress {
+        if island_child {
+            return Progress::Child { generations };
+        }
+        if no_progress || !std::io::stderr().is_terminal() {
+            return Progress::Plain;
+        }
+        let bar = indicatif::ProgressBar::new(generations as u64);
+        let style = indicatif::ProgressStyle::with_template(
+            "{prefix:>9} {bar:28.cyan/blue} gen {pos}/{len} [{elapsed_precise}<{eta_precise}] {msg}",
+        )
+        .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar());
+        bar.set_style(style);
+        bar.set_prefix(label.to_string());
+        bar.enable_steady_tick(Duration::from_millis(120));
+        Progress::Bar(bar)
+    }
+
+    fn tick(&self, generation: u32, best: f32, msg: &str) {
+        match self {
+            Progress::Bar(b) => {
+                b.set_position(generation as u64);
+                b.set_message(msg.to_string());
+            }
+            Progress::Plain => eprintln!("  gen {generation:>3}: {msg}"),
+            Progress::Child { generations } => {
+                println!("PROGRESS gen={generation}/{generations} best={best}")
+            }
+        }
+    }
+
+    fn finish(&self, msg: &str) {
+        match self {
+            Progress::Bar(b) => b.finish_with_message(msg.to_string()),
+            Progress::Plain => eprintln!("  {msg}"),
+            Progress::Child { .. } => {}
+        }
+    }
+}
+
+// ── Island model: N independent search processes, best elite wins ──────────────────────────────────────
+
+/// Fan `a.islands` independent search processes across cores (each its own process → its own pinned
+/// single-thread pool, so determinism holds), drive one progress bar per island, then pick the
+/// highest-best-fitness elite across their archives.
+fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
+    use std::process::{Command as PCommand, Stdio};
+
+    let n = a.islands;
+    // The parent refreshes the prior ONCE, before spawning; the children skip it.
+    if kind.needs_prior() {
+        ensure_prior_fresh(a.ticks, &a.seeds)?;
+    }
+    std::fs::create_dir_all(ISLANDS_DIR).map_err(|e| format!("{ISLANDS_DIR}: create: {e}"))?;
+
+    // Clear this dim's stale island outputs, or an all-dead run could "pick a winner" from leftovers.
+    let name = kind.cli_name();
+    if let Ok(rd) = std::fs::read_dir(ISLANDS_DIR) {
+        for entry in rd.flatten() {
+            let f = entry.file_name().to_string_lossy().into_owned();
+            let is_arch = f.starts_with(&format!("elites_{name}_")) && f.ends_with(".ron");
+            let is_log = f.starts_with(&format!("{name}_")) && f.ends_with(".log");
+            if is_arch || is_log {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let seeds_csv = a.seeds.iter().map(|s| format!("0x{s:X}")).collect::<Vec<_>>().join(",");
+    let mp = indicatif::MultiProgress::new();
+    let show_bars = !a.no_progress && std::io::stderr().is_terminal();
+    eprintln!(">> launching {n} '{name}' islands → {ISLANDS_DIR}/ (each a separate process)");
+
+    struct Island {
+        idx: usize,
+        child: std::process::Child,
+        out_reader: std::thread::JoinHandle<Option<f32>>,
+        err_reader: std::thread::JoinHandle<String>,
+        out_path: String,
+    }
+    let mut islands: Vec<Island> = Vec::with_capacity(n);
+
+    for i in 1..=n {
+        // Distinct per-island search seed (Knuth multiplicative hash), kept in u32 range.
+        let seed = (i as u64).wrapping_mul(2654435761) & 0x7FFF_FFFF;
+        let out_path = format!("{ISLANDS_DIR}/elites_{name}_{i}.ron");
+        let log_path = format!("{ISLANDS_DIR}/{name}_{i}.log");
+
+        let mut cmd = PCommand::new(&exe);
+        cmd.arg(name)
+            .args(["--generations", &a.generations.to_string()])
+            .args(["--batch", &a.batch.to_string()])
+            .args(["--ticks", &a.ticks.to_string()])
+            .args(["--res", &a.res.to_string()])
+            .args(["--seeds", &seeds_csv])
+            .args(["--jobs", &a.jobs.to_string()])
+            .args(["--seed", &format!("0x{seed:X}")])
+            .args(["--out", &out_path])
+            .args(["--islands", "1", "--island-child"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if a.cma {
+            cmd.arg("--cma");
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn island {i}: {e}"))?;
+        let stdout = child.stdout.take().ok_or("island child stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("island child stderr unavailable")?;
+
+        // One bar per island, updated from the child's PROGRESS lines.
+        let bar = mp.add(indicatif::ProgressBar::new(a.generations as u64));
+        if show_bars {
+            let style = indicatif::ProgressStyle::with_template(
+                "{prefix:>10} {bar:24.cyan/blue} gen {pos}/{len} [{elapsed_precise}] {msg}",
+            )
+            .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar());
+            bar.set_style(style);
+            bar.set_prefix(format!("island {i}"));
+            bar.enable_steady_tick(Duration::from_millis(120));
+        } else {
+            bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+
+        // stdout reader: drive the bar, capture the RESULT best, tee everything to the island log.
+        let out_reader = std::thread::spawn(move || {
+            let mut best: Option<f32> = None;
+            let reader = std::io::BufReader::new(stdout);
+            let mut log = std::fs::File::create(&log_path).ok();
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(rest) = line.strip_prefix("PROGRESS ") {
+                    let mut g = 0u64;
+                    let mut b = 0.0f32;
+                    for tok in rest.split_whitespace() {
+                        if let Some(v) = tok.strip_prefix("gen=") {
+                            if let Some((cur, _)) = v.split_once('/') {
+                                g = cur.parse().unwrap_or(0);
+                            }
+                        } else if let Some(v) = tok.strip_prefix("best=") {
+                            b = v.parse().unwrap_or(0.0);
+                        }
+                    }
+                    bar.set_position(g);
+                    bar.set_message(format!("best {b:.3}"));
+                } else if let Some(rest) = line.strip_prefix("RESULT ") {
+                    for tok in rest.split_whitespace() {
+                        if let Some(v) = tok.strip_prefix("best=") {
+                            best = v.parse().ok();
+                        }
+                    }
+                }
+                if let Some(f) = log.as_mut() {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+            bar.finish();
+            best
+        });
+        // stderr reader: fully drain (avoid pipe-fill deadlock) and keep it for error reporting.
+        let err_reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut s = String::new();
+            let _ = std::io::BufReader::new(stderr).read_to_string(&mut s);
+            s
+        });
+
+        islands.push(Island { idx: i, child, out_reader, err_reader, out_path });
+    }
+
+    // Wait for all, collect (best, ok, stderr).
+    struct Done {
+        best: Option<f32>,
+        ok: bool,
+        out_path: String,
+        stderr: String,
+    }
+    let mut done: Vec<Done> = Vec::with_capacity(n);
+    for mut isl in islands {
+        let status = isl.child.wait().map_err(|e| format!("island {} wait: {e}", isl.idx))?;
+        let best = isl.out_reader.join().unwrap_or(None);
+        let stderr = isl.err_reader.join().unwrap_or_default();
+        done.push(Done { best, ok: status.success(), out_path: isl.out_path, stderr });
+    }
+
+    let alive: Vec<&Done> = done.iter().filter(|d| d.ok && d.best.is_some()).collect();
+    if alive.is_empty() {
+        let first_err = done
+            .iter()
+            .find(|d| !d.stderr.trim().is_empty())
+            .map(|d| d.stderr.trim())
+            .unwrap_or("(no stderr captured — see the island logs)");
+        return Err(format!(
+            "all {n} islands failed — nothing to pick from. first error:\n{}\n(full logs: {ISLANDS_DIR}/{name}_*.log)",
+            first_err.lines().take(6).collect::<Vec<_>>().join("\n")
+        ));
+    }
+
+    let Some(winner) = alive
+        .iter()
+        .max_by(|x, y| x.best.unwrap_or(f32::MIN).total_cmp(&y.best.unwrap_or(f32::MIN)))
+    else {
+        return Err("no island winner".into());
+    };
+    let win_out = winner.out_path.clone();
+    let win_best = winner.best.unwrap_or(0.0);
+    let failed = n - alive.len();
+    println!();
+    println!(
+        ">> WINNER: {win_out}  (best fitness {win_best:.4}; {} of {n} islands produced elites{})",
+        alive.len(),
+        if failed > 0 { format!(", {failed} failed") } else { String::new() }
+    );
+
+    if a.apply {
+        let dim = kind.apply_dim()?;
+        println!(">> --apply: baking {win_out} into the shipped config…");
+        apply_archive(dim, Path::new(&win_out), None)?;
+        println!(">> regenerating the baseline prior for the new tuning…");
+        prior(a.ticks, &a.seeds)?;
+    } else if let Ok(dim) = kind.apply_dim() {
+        println!("   ship it:  train apply {} {win_out}    (or re-run with --apply)", dim_cli_name(dim));
+    }
+    Ok(())
+}
+
+/// The `train apply` dim name for a `Dim`.
+fn dim_cli_name(dim: Dim) -> &'static str {
+    match dim {
+        Dim::Behavior => "behavior",
+        Dim::World => "world",
+        Dim::Audio => "audio",
+        Dim::Levels => "levels",
+    }
+}
+
+// ── Diagnostics: probe + prior ─────────────────────────────────────────────────────────────────────────
 
 /// Run the authored brains once per seed and print the raw episode outcome + the fitness factors.
 ///
@@ -240,7 +771,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     Ok(())
 }
 
-/// Sweep the shipped brain and commit the baseline prior. Every later `evolve` reads it.
+/// Sweep the shipped brain and commit the baseline prior. Every later behavioural `evolve` reads it.
 fn prior(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     let templates = Templates::authored();
     println!("sweeping the authored brain over {} world(s), {ticks} ticks each...", seeds.len());
@@ -257,61 +788,25 @@ fn prior(ticks: u32, seeds: &[u64]) -> Result<(), String> {
     Ok(())
 }
 
-struct EvolveArgs {
-    cfg: SearchConfig,
-    /// Use the CMA-ME adaptive emitter (valueless `--cma` flag; only honoured by the `rl` search today).
-    cma: bool,
-    /// Override the output archive path (`--out <path>`). Lets many same-type searches (distinct `--seed`)
-    /// run concurrently without clobbering each other's `elites_*.ron`. Honoured by the single-output
-    /// searches (`levels`/`audio`/`behavior`/`rl`/`poet`); `evolve`/`evolve3` write three fixed files.
-    out: Option<String>,
+// ── Co-evolution (evolve / evolve3) ──────────────────────────────────────────────────────────────────
+
+/// Build a co-evolution `SearchConfig` from the shared search flags.
+fn coevo_config(a: &SearchArgs) -> SearchConfig {
+    SearchConfig {
+        seed: a.seed,
+        generations: a.generations,
+        batch: a.batch,
+        episode_ticks: a.ticks,
+        dungeon_seeds: a.seeds.clone(),
+        resolution: a.res,
+        jobs: a.jobs,
+    }
 }
 
-fn parse_evolve(args: &[String]) -> Result<EvolveArgs, String> {
-    let mut cfg = SearchConfig::default();
-    let mut cma = false;
-    let mut out: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        // Valueless boolean flag — handled before the value-based flags so it doesn't consume the next arg.
-        if args[i] == "--cma" {
-            cma = true;
-            i += 1;
-            continue;
-        }
-        let value = || args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i]));
-        match args[i].as_str() {
-            "--ticks" => cfg.episode_ticks = parse_u32(value()?)?,
-            "--generations" => cfg.generations = parse_u32(value()?)?,
-            "--batch" => cfg.batch = parse_u32(value()?)?,
-            "--res" => cfg.resolution = parse_u32(value()?)? as usize,
-            "--seed" => cfg.seed = parse_u64(value()?)?,
-            "--seeds" => cfg.dungeon_seeds = parse_seeds(value()?)?,
-            // Worker processes for parallel rollout evaluation. `1` (default) runs inline. The archives are
-            // byte-identical regardless — `--jobs` only trades CPU for wall-clock, capped at OPPONENTS (3).
-            "--jobs" => cfg.jobs = parse_u32(value()?)? as usize,
-            "--out" => out = Some(value()?.clone()),
-            other => return Err(format!("unknown flag {other:?}")),
-        }
-        i += 2;
-    }
-    if cfg.dungeon_seeds.len() < 2 {
-        return Err(
-            "evolve needs >= 2 dungeon seeds: the two rollouts of a candidate must run on DIFFERENT \
-             worlds, or learnability measures a memorised map rather than a behaviour"
-                .into(),
-        );
-    }
-    if cfg.resolution == 0 {
-        return Err("--res must be > 0".into());
-    }
-    Ok(EvolveArgs { cfg, cma, out })
-}
-
-/// Run the three-way co-evolution (squad × swarm × world) and return the templates + filled archives.
-/// Both `evolve` and `evolve3` delegate here; they differ only in which archives they commit — the world
-/// population co-evolves either way (it is what makes the squad/swarm do things a player has not seen).
-fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), String> {
+/// Run the three-way co-evolution (squad × swarm × world), driving `progress`, and return the templates +
+/// filled archives. Both `evolve` and `evolve3` delegate here; they differ only in which archives they
+/// commit — the world population co-evolves either way.
+fn run_coevolution(cfg: SearchConfig, progress: &Progress) -> Result<(Templates, SearchResult), String> {
     let templates = Templates::authored();
     let src = std::fs::read_to_string(PRIOR_PATH)
         .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
@@ -323,9 +818,8 @@ fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), Strin
     );
 
     let result = search(&templates, &prior, &cfg, |generation, r| {
-        println!(
-            "  gen {generation:>3}: squad {:>3} (qd {:.3}) | swarm {:>3} (qd {:.3}) | world {:>3} (qd {:.3}) \
-             | {} evals, {} infeasible, {} failed the criterion",
+        let msg = format!(
+            "squad {:>3} (qd {:.3}) | swarm {:>3} (qd {:.3}) | world {:>3} (qd {:.3}) | {} evals, {} inf, {} fail",
             r.squad.archive.coverage(),
             r.squad.archive.qd_score(),
             r.swarm.archive.coverage(),
@@ -336,13 +830,15 @@ fn run_coevolution(cfg: SearchConfig) -> Result<(Templates, SearchResult), Strin
             r.rejected_infeasible,
             r.rejected_by_criterion
         );
+        progress.tick(generation, 0.0, &msg);
         // Checkpoint every generation. `evolve3` otherwise commits the archives only at the very end, so
-        // any interruption of the multi-hour run (e.g. macOS jetsam under memory pressure) discards all of
-        // it. Writing each generation keeps the latest completed generation always on disk.
+        // any interruption of the multi-hour run discards all of it. Writing each generation keeps the
+        // latest completed generation always on disk.
         if let Err(e) = checkpoint_archives(&templates, r) {
             eprintln!("  (checkpoint write failed: {e})");
         }
     })?;
+    progress.finish("co-evolution complete");
     Ok((templates, result))
 }
 
@@ -363,20 +859,20 @@ fn print_read_warning() {
 }
 
 /// Two-population view: co-evolve and commit the squad + swarm archives (world is illuminated but not saved).
-fn evolve(args: EvolveArgs) -> Result<(), String> {
-    let (templates, result) = run_coevolution(args.cfg)?;
+fn evolve_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let (templates, result) = run_coevolution(coevo_config(a), progress)?;
     write_ron(SQUAD_ARCHIVE_PATH, &squad_archive_doc(&templates, &result.squad)?)?;
     write_ron(SWARM_ARCHIVE_PATH, &swarm_archive_doc(&templates, &result.swarm)?)?;
     println!();
     println!("wrote {SQUAD_ARCHIVE_PATH} ({} elites)", result.squad.archive.coverage());
     println!("wrote {SWARM_ARCHIVE_PATH} ({} elites)", result.swarm.archive.coverage());
     print_read_warning();
-    Ok(())
+    Ok(SearchOutcome { best: 0.0, out: PathBuf::from(SQUAD_ARCHIVE_PATH) })
 }
 
 /// Three-population run: co-evolve and commit all three archives, including the evolved worlds.
-fn evolve3(args: EvolveArgs) -> Result<(), String> {
-    let (templates, result) = run_coevolution(args.cfg)?;
+fn evolve3_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let (templates, result) = run_coevolution(coevo_config(a), progress)?;
     write_ron(SQUAD_ARCHIVE_PATH, &squad_archive_doc(&templates, &result.squad)?)?;
     write_ron(SWARM_ARCHIVE_PATH, &swarm_archive_doc(&templates, &result.swarm)?)?;
     write_ron(WORLD_ARCHIVE_PATH, &world_archive_doc(&result.world)?)?;
@@ -385,24 +881,41 @@ fn evolve3(args: EvolveArgs) -> Result<(), String> {
     println!("wrote {SWARM_ARCHIVE_PATH} ({} elites)", result.swarm.archive.coverage());
     println!("wrote {WORLD_ARCHIVE_PATH} ({} elites)", result.world.archive.coverage());
     print_read_warning();
-    Ok(())
+    // `--apply` for evolve3 bakes the evolved WORLD.
+    Ok(SearchOutcome { best: 0.0, out: PathBuf::from(WORLD_ARCHIVE_PATH) })
+}
+
+// ── Single-output searches (levels / audio / behavior / rl / poet) ──────────────────────────────────────
+
+/// Load the frozen mode-prior. The behavioural searches all need it (`train prior` writes it).
+fn load_prior() -> Result<ModePrior, String> {
+    let src = std::fs::read_to_string(PRIOR_PATH)
+        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
+    ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))
+}
+
+/// Resolve the archive output path for a single-output search.
+fn out_path(a: &SearchArgs, default: &str) -> PathBuf {
+    a.out.clone().unwrap_or_else(|| PathBuf::from(default))
+}
+
+/// `PathBuf` → `&str` (the RON writer takes `&str`); non-UTF-8 paths are a loud error, not a silent lossy.
+fn path_str(p: &Path) -> Result<&str, String> {
+    p.to_str().ok_or_else(|| format!("non-UTF-8 output path: {}", p.display()))
 }
 
 /// Standalone level search: evolve dungeon architecture + furniture amount + mushroom amount under the
-/// static level-quality objective, and commit the illuminated archive. GPU-free and fast (each genome is
-/// generate-and-measure, not a rollout), so it needs no `prior` and no `--jobs`. Reuses the `--generations
-/// / --batch / --res / --seed / --seeds` flags; `--seeds` are the held-in dungeon seeds each level is
-/// scored across (and must clear the criterion on all of them).
-fn levels(args: EvolveArgs) -> Result<(), String> {
+/// static level-quality objective. GPU-free and fast (each genome is generate-and-measure, not a rollout),
+/// so it needs no `prior`.
+fn levels_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
     let (base, manifest) = level_eval::load_base()?;
-    let c = args.cfg;
     let cfg = LevelSearchConfig {
-        seed: c.seed,
-        generations: c.generations,
-        batch: c.batch,
+        seed: a.seed,
+        generations: a.generations,
+        batch: a.batch,
         sigma: 0.3,
-        resolution: c.resolution,
-        dungeon_seeds: c.dungeon_seeds,
+        resolution: a.res,
+        dungeon_seeds: a.seeds.clone(),
     };
     println!(
         "evolving levels: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, sigma {}",
@@ -411,46 +924,36 @@ fn levels(args: EvolveArgs) -> Result<(), String> {
 
     let result = level_search::search(&base, &manifest, &cfg, |generation, r| {
         let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
-        println!(
-            "  gen {generation:>3}: levels {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
-            r.pop.archive.coverage(),
-            r.pop.archive.qd_score(),
-            best,
-            r.evaluations,
-            r.rejected_infeasible,
-            r.rejected_by_criterion
+        let msg = format!(
+            "levels {:>3} (qd {:.3}, best {:.3}) | {} evals, {} inf, {} fail",
+            r.pop.archive.coverage(), r.pop.archive.qd_score(), best,
+            r.evaluations, r.rejected_infeasible, r.rejected_by_criterion
         );
+        progress.tick(generation, best, &msg);
     })?;
+    progress.finish("done");
 
-    let path = args.out.as_deref().unwrap_or(LEVELS_ARCHIVE_PATH);
-    write_ron(path, &level_search::level_archive_doc(&result.pop, &base)?)?;
+    let path = out_path(a, LEVELS_ARCHIVE_PATH);
+    write_ron(path_str(&path)?, &level_search::level_archive_doc(&result.pop, &base)?)?;
     println!();
-    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {} ({} elites)", path.display(), result.pop.archive.coverage());
     print_read_warning();
-    Ok(())
+    Ok(SearchOutcome { best: result.pop.archive.best().map_or(0.0, |e| e.fitness), out: path })
 }
 
-/// Standalone audio search: evolve the acoustic-stimulus config (channel propagation + per-event loudness
-/// + per-faction perception gains) under the witnessed-learnable-surprise objective, and commit the
-/// illuminated archive. Unlike `levels`, its fitness is a full-sim rollout (sound feeds agent perception),
-/// so it needs the frozen `prior` — run `train prior` first, and REGENERATE it after any `Mode` change
-/// (this branch added `Mode::Investigate`, so `MODE_COUNT` is 25). Reuses the `--generations / --batch /
-/// --res / --seed / --seeds / --ticks` flags; `--seeds` are the held-in worlds (the learnability pair uses
-/// the first two, which must differ).
-fn audio(args: EvolveArgs) -> Result<(), String> {
-    let src = std::fs::read_to_string(PRIOR_PATH)
-        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
-    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
-
-    let c = args.cfg;
+/// Standalone audio search: evolve the acoustic-stimulus config under the witnessed-learnable-surprise
+/// objective. Its fitness is a full-sim rollout (sound feeds agent perception), so it needs the frozen
+/// `prior`.
+fn audio_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let prior = load_prior()?;
     let cfg = AudioSearchConfig {
-        seed: c.seed,
-        generations: c.generations,
-        batch: c.batch,
+        seed: a.seed,
+        generations: a.generations,
+        batch: a.batch,
         sigma: 0.3,
-        resolution: c.resolution,
-        dungeon_seeds: c.dungeon_seeds,
-        episode_ticks: c.episode_ticks,
+        resolution: a.res,
+        dungeon_seeds: a.seeds.clone(),
+        episode_ticks: a.ticks,
     };
     println!(
         "evolving audio: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
@@ -459,46 +962,36 @@ fn audio(args: EvolveArgs) -> Result<(), String> {
 
     let result = audio_search::search(&prior, &cfg, |generation, r| {
         let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
-        println!(
-            "  gen {generation:>3}: audio {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
-            r.pop.archive.coverage(),
-            r.pop.archive.qd_score(),
-            best,
-            r.evaluations,
-            r.rejected_infeasible,
-            r.rejected_by_criterion
+        let msg = format!(
+            "audio {:>3} (qd {:.3}, best {:.3}) | {} evals, {} inf, {} fail",
+            r.pop.archive.coverage(), r.pop.archive.qd_score(), best,
+            r.evaluations, r.rejected_infeasible, r.rejected_by_criterion
         );
+        progress.tick(generation, best, &msg);
     })?;
+    progress.finish("done");
 
-    let path = args.out.as_deref().unwrap_or(AUDIO_ARCHIVE_PATH);
-    write_ron(path, &audio_search::audio_archive_doc(&result.pop)?)?;
+    let path = out_path(a, AUDIO_ARCHIVE_PATH);
+    write_ron(path_str(&path)?, &audio_search::audio_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {} ({} elites)", path.display(), result.pop.archive.coverage());
     print_read_warning();
-    Ok(())
+    Ok(SearchOutcome { best: result.pop.archive.best().map_or(0.0, |e| e.fitness), out: path })
 }
 
-/// Standalone behaviour search: evolve a curated subset of the `behavior:` config (locomotion, steering,
-/// senses, combat cadence, boids) under the witnessed-learnable-surprise objective, and commit the
-/// illuminated archive. Like `audio`, its fitness is a full-sim rollout, so it needs the frozen `prior` —
-/// run `train prior` first, and REGENERATE it after any `Mode` change. Reuses the `--generations / --batch
-/// / --res / --seed / --seeds / --ticks` flags; `--seeds` are the held-in worlds (the learnability pair
-/// uses the first two, which must differ). Elites overlay onto the shipped base, so an archive cell is a
-/// readable diff of behaviour dials to transcribe into `config.ron`.
-fn behavior(args: EvolveArgs) -> Result<(), String> {
-    let src = std::fs::read_to_string(PRIOR_PATH)
-        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
-    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
-
-    let c = args.cfg;
+/// Standalone behaviour search: evolve a curated subset of the `behavior:` config under the
+/// witnessed-learnable-surprise objective. Full-sim rollout fitness → needs the frozen `prior`. Elites
+/// overlay onto the shipped base, so an archive cell is a readable diff to transcribe.
+fn behavior_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let prior = load_prior()?;
     let cfg = BehaviorSearchConfig {
-        seed: c.seed,
-        generations: c.generations,
-        batch: c.batch,
+        seed: a.seed,
+        generations: a.generations,
+        batch: a.batch,
         sigma: 0.3,
-        resolution: c.resolution,
-        dungeon_seeds: c.dungeon_seeds,
-        episode_ticks: c.episode_ticks,
+        resolution: a.res,
+        dungeon_seeds: a.seeds.clone(),
+        episode_ticks: a.ticks,
     };
     println!(
         "evolving behaviour: {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
@@ -507,74 +1000,61 @@ fn behavior(args: EvolveArgs) -> Result<(), String> {
 
     let result = behavior_search::search(&prior, &cfg, |generation, r| {
         let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
-        println!(
-            "  gen {generation:>3}: behaviour {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
-            r.pop.archive.coverage(),
-            r.pop.archive.qd_score(),
-            best,
-            r.evaluations,
-            r.rejected_infeasible,
-            r.rejected_by_criterion
+        let msg = format!(
+            "behaviour {:>3} (qd {:.3}, best {:.3}) | {} evals, {} inf, {} fail",
+            r.pop.archive.coverage(), r.pop.archive.qd_score(), best,
+            r.evaluations, r.rejected_infeasible, r.rejected_by_criterion
         );
+        progress.tick(generation, best, &msg);
     })?;
+    progress.finish("done");
 
-    let path = args.out.as_deref().unwrap_or(BEHAVIOR_ARCHIVE_PATH);
-    write_ron(path, &behavior_search::behavior_archive_doc(&result.pop)?)?;
+    let path = out_path(a, BEHAVIOR_ARCHIVE_PATH);
+    write_ron(path_str(&path)?, &behavior_search::behavior_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {} ({} elites)", path.display(), result.pop.archive.coverage());
     print_read_warning();
-    Ok(())
+    Ok(SearchOutcome { best: result.pop.archive.best().map_or(0.0, |e| e.fitness), out: path })
 }
 
-/// Standalone policy (neuroevolution) search: evolve a learned `NeuralPolicy`'s MLP weights under the
-/// witnessed-learnable-surprise objective, and commit the archive. Like `behavior`/`audio`, its fitness is a
-/// full-sim rollout, so it needs the frozen `prior` — run `train prior` first, and REGENERATE it after any
-/// `Mode` change. Reuses the `--generations / --batch / --res / --seed / --seeds / --ticks` flags; `--seeds`
-/// are the held-in worlds (the learnability pair uses the first two, which must differ). Unlike the config
-/// searches, an elite is an OPAQUE weight vector — the guard is the minimal criterion + watching it play,
-/// not a readable diff.
-fn rl(args: EvolveArgs) -> Result<(), String> {
-    let src = std::fs::read_to_string(PRIOR_PATH)
-        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
-    let prior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
-
-    let use_cma = args.cma;
-    let c = args.cfg;
+/// Standalone policy (neuroevolution) search: evolve a `NeuralPolicy`'s MLP weights under the
+/// witnessed-learnable-surprise objective. Full-sim rollout fitness → needs the frozen `prior`. An elite is
+/// an OPAQUE weight vector; the guard is the minimal criterion + watching it play, not a readable diff.
+fn rl_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let prior = load_prior()?;
     let cfg = RlSearchConfig {
-        seed: c.seed,
-        generations: c.generations,
-        batch: c.batch,
+        seed: a.seed,
+        generations: a.generations,
+        batch: a.batch,
         sigma: 0.3,
-        resolution: c.resolution,
-        dungeon_seeds: c.dungeon_seeds,
-        episode_ticks: c.episode_ticks,
-        use_cma,
+        resolution: a.res,
+        dungeon_seeds: a.seeds.clone(),
+        episode_ticks: a.ticks,
+        use_cma: a.cma,
     };
     println!(
         "evolving policy ({}): {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
-        if use_cma { "CMA-ME emitter" } else { "neuroevolution, isotropic" },
+        if a.cma { "CMA-ME emitter" } else { "neuroevolution, isotropic" },
         cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.episode_ticks
     );
 
     let result = rl_search::search(&prior, &cfg, |generation, r| {
         let best = r.pop.archive.best().map_or(0.0, |e| e.fitness);
-        println!(
-            "  gen {generation:>3}: policy {:>3} (qd {:.3}, best {:.3}) | {} evals, {} infeasible, {} failed the criterion",
-            r.pop.archive.coverage(),
-            r.pop.archive.qd_score(),
-            best,
-            r.evaluations,
-            r.rejected_infeasible,
-            r.rejected_by_criterion
+        let msg = format!(
+            "policy {:>3} (qd {:.3}, best {:.3}) | {} evals, {} inf, {} fail",
+            r.pop.archive.coverage(), r.pop.archive.qd_score(), best,
+            r.evaluations, r.rejected_infeasible, r.rejected_by_criterion
         );
+        progress.tick(generation, best, &msg);
     })?;
+    progress.finish("done");
 
-    let path = args.out.as_deref().unwrap_or(RL_ARCHIVE_PATH);
-    write_ron(path, &rl_search::rl_archive_doc(&result.pop)?)?;
+    let path = out_path(a, RL_ARCHIVE_PATH);
+    write_ron(path_str(&path)?, &rl_search::rl_archive_doc(&result.pop)?)?;
     println!();
-    println!("wrote {path} ({} elites)", result.pop.archive.coverage());
+    println!("wrote {} ({} elites)", path.display(), result.pop.archive.coverage());
     print_read_warning();
-    Ok(())
+    Ok(SearchOutcome { best: result.pop.archive.best().map_or(0.0, |e| e.fitness), out: path })
 }
 
 /// One POET niche, serialized: an evolved world paired with the squad that solves it, and the pairing's
@@ -587,27 +1067,19 @@ struct PoetNicheDoc {
     agent: SquadGenome,
 }
 
-/// POET (Wang et al. 2019): the open-ended outer loop. It co-generates *worlds* (the world-dynamics genome)
-/// and the *squads* that solve them, admitting a new world only when it sits in the "neither too easy nor
-/// too hard" band for the current best squad (the minimal criterion), transferring squads between worlds,
-/// and steering optimisation budget by learning progress. Each pairing is scored by a real rollout, so it
-/// needs the frozen `prior` (`train prior` first). Reuses `--generations` (→ POET iterations) / `--seed` /
-/// `--seeds` (the held-in learnability pair) / `--ticks`.
-fn poet(args: EvolveArgs) -> Result<(), String> {
-    let src = std::fs::read_to_string(PRIOR_PATH)
-        .map_err(|e| format!("{PRIOR_PATH}: {e} — run `train prior` first"))?;
-    let prior: ModePrior = ron::from_str(&src).map_err(|e| format!("{PRIOR_PATH}: malformed: {e}"))?;
+/// POET (Wang et al. 2019): the open-ended outer loop. It co-generates *worlds* and the *squads* that solve
+/// them, admitting a new world only when it sits in the "neither too easy nor too hard" band for the current
+/// best squad, transferring squads between worlds, and steering budget by learning progress. Each pairing is
+/// scored by a real rollout, so it needs the frozen `prior`.
+fn poet_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> {
+    let prior: ModePrior = load_prior()?;
 
-    let c = args.cfg;
-    if c.dungeon_seeds.len() < 2 {
-        return Err("poet needs >= 2 dungeon seeds: the learnability pair must run on DIFFERENT worlds".into());
-    }
     let t = Templates::authored();
     // POET evolves worlds × squads against the shipped (authored) swarm — one moving opponent at a time.
     let swarm = SwarmGenome::authored(&t);
-    let seeds = c.dungeon_seeds.clone();
-    let ticks = c.episode_ticks;
-    let poet_cfg = PoetConfig { seed: c.seed, iterations: c.generations, ..PoetConfig::default() };
+    let seeds = a.seeds.clone();
+    let ticks = a.ticks;
+    let poet_cfg = PoetConfig { seed: a.seed, iterations: a.generations, ..PoetConfig::default() };
 
     println!(
         "POET: {} iterations, up to {} niches, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
@@ -639,12 +1111,14 @@ fn poet(args: EvolveArgs) -> Result<(), String> {
         |it, r| {
             let peak_interest = r.niches.iter().map(|n| n.best_interest).fold(0.0f32, f32::max);
             let best_fit = r.niches.iter().map(|n| n.best_fitness).fold(0.0f32, f32::max);
-            println!(
-                "  it {it:>3}: {} niches | {} created, {} rejected, {} transfers | {} evals | best fit {:.3}, peak interest {:.3}",
+            let msg = format!(
+                "{} niches | {} created, {} rejected, {} transfers | {} evals | best fit {:.3}, peak interest {:.3}",
                 r.niches.len(), r.created, r.rejected, r.transfers, r.evaluations, best_fit, peak_interest
             );
+            progress.tick(it, best_fit, &msg);
         },
     )?;
+    progress.finish("done");
 
     let doc: Vec<PoetNicheDoc> = result
         .niches
@@ -656,29 +1130,25 @@ fn poet(args: EvolveArgs) -> Result<(), String> {
             agent: n.agent.clone(),
         })
         .collect();
-    let path = args.out.as_deref().unwrap_or(POET_ARCHIVE_PATH);
-    write_ron(path, &doc)?;
+    let path = out_path(a, POET_ARCHIVE_PATH);
+    write_ron(path_str(&path)?, &doc)?;
     println!();
     println!(
-        "wrote {path} ({} niches, {} created, {} transfers over the run)",
-        result.niches.len(),
-        result.created,
-        result.transfers
+        "wrote {} ({} niches, {} created, {} transfers over the run)",
+        path.display(), result.niches.len(), result.created, result.transfers
     );
     print_read_warning();
-    Ok(())
+    let best_fit = result.niches.iter().map(|n| n.best_fitness).fold(0.0f32, f32::max);
+    Ok(SearchOutcome { best: best_fit, out: path })
 }
 
 // ── `train apply`: permanently bake an evolved elite into the shipped defaults ──────────────────────
 
-const CONFIG_PATH: &str = "assets/config/config.ron";
-const REPLAY_PATH: &str = "tests/replay.rs";
-
 /// Permanently ship an evolved elite: rewrite the `config.ron` slice(s), the matching Rust `Default`
 /// impl(s), and the deterministic-replay goldens together, so `cargo test` stays green. Full-auto, one
-/// command. `policy` is intentionally unsupported (a `NeuralPolicy` has no config slice — use
+/// call. `policy` is intentionally unsupported (a `NeuralPolicy` has no config slice — use
 /// `FVS_POLICY_ELITE` to run one).
-fn apply(args: &[String]) -> Result<(), String> {
+fn apply_archive(dim: Dim, archive: &Path, cell: Option<&str>) -> Result<(), String> {
     // Env overlays would double-apply and perturb the golden recompute — refuse to bake while any is set.
     for v in [
         foundation_vs_slop::elite_overlay::BEHAVIOR_ENV,
@@ -692,25 +1162,10 @@ fn apply(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let dim_s = args
-        .first()
-        .ok_or("usage: train apply <behavior|world|audio|levels> <archive.ron> [--cell r,c]")?;
-    let dim = Dim::parse(dim_s)?;
-    let archive = args.get(1).ok_or("apply needs an archive path")?.clone();
-    let mut cell: Option<String> = None;
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--cell" => {
-                cell = Some(args.get(i + 1).ok_or("--cell needs a `row,col` value")?.clone());
-                i += 2;
-            }
-            other => return Err(format!("unknown flag {other:?}")),
-        }
-    }
-    let spec = match &cell {
+    let archive = path_str(archive)?;
+    let spec = match cell {
         Some(c) => format!("{archive}#{c}"),
-        None => archive.clone(),
+        None => archive.to_string(),
     };
 
     // 1. Load the clean shipped config, then overlay the elite — validated on the same one path the runtime
@@ -896,21 +1351,6 @@ fn verify(reps: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse `train verify` args: only `--reps N` (default [`GOLDEN_STABILITY_REPS`]).
-fn parse_verify(args: &[String]) -> Result<u32, String> {
-    let mut reps = GOLDEN_STABILITY_REPS;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--reps" {
-            let v = it.next().ok_or("--reps needs a value")?;
-            reps = v.parse().map_err(|_| format!("bad --reps {v:?}"))?;
-        } else {
-            return Err(format!("unknown verify arg {a:?}"));
-        }
-    }
-    Ok(reps)
-}
-
 /// Re-pin the replay goldens in `tests/replay.rs`: replace the old `GOLDEN` (snapshot) hex — which appears
 /// twice (the const and the world-config no-op assertion) — and the `GOLDEN_FIELD` hex, everywhere they
 /// occur, with the freshly recomputed values.
@@ -938,15 +1378,12 @@ fn write_ron<T: serde::Serialize>(path: &str, value: &T) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{path}: write: {e}"))
 }
 
-fn parse_u32(v: &str) -> Result<u32, String> {
-    let n = v.parse::<u32>().map_err(|e| format!("{v:?}: {e}"))?;
-    if n == 0 {
-        return Err(format!("{v:?} must be > 0"));
-    }
-    Ok(n)
-}
+// ── clap value parsers ─────────────────────────────────────────────────────────────────────────────────
 
-fn parse_u64(v: &str) -> Result<u64, String> {
+/// A seed literal: decimal, or `0x`-prefixed hex. Absent flags take documented defaults; a *malformed*
+/// value is a loud error (the project's one-path rule).
+fn parse_seed(v: &str) -> Result<u64, String> {
+    let v = v.trim();
     match v.strip_prefix("0x") {
         Some(h) => u64::from_str_radix(h, 16),
         None => v.parse::<u64>(),
@@ -954,65 +1391,20 @@ fn parse_u64(v: &str) -> Result<u64, String> {
     .map_err(|e| format!("{v:?}: {e}"))
 }
 
-fn parse_seeds(v: &str) -> Result<Vec<u64>, String> {
-    let seeds = v.split(',').map(|s| parse_u64(s.trim())).collect::<Result<Vec<u64>, String>>()?;
-    if seeds.is_empty() {
-        return Err("at least one seed".into());
+fn parse_pos_u32(v: &str) -> Result<u32, String> {
+    let n = v.parse::<u32>().map_err(|e| format!("{v:?}: {e}"))?;
+    if n == 0 {
+        return Err(format!("{v:?} must be > 0"));
     }
-    Ok(seeds)
+    Ok(n)
 }
 
-/// Parse `--ticks N`, `--seeds A,B,C`, and `--speed S`. Every failure is an `Err` the caller reports
-/// and exits on — no silent defaulting of a malformed value (the project's one-path rule); an *absent*
-/// flag takes the documented default, which is a different thing from a malformed one.
-fn parse_bench(args: &[String]) -> Result<(u32, Vec<u64>, f32), String> {
-    // 1800 ticks = 30 s of simulated time at the pinned 60 Hz `FixedUpdate`.
-    let mut ticks: u32 = 1800;
-    let mut seeds: Vec<u64> = vec![0x5C09191];
-    let mut speed: f32 = 1.0;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--speed" => {
-                let v = args.get(i + 1).ok_or("--speed needs a value")?;
-                speed = v.parse::<f32>().map_err(|e| format!("--speed {v:?}: {e}"))?;
-                if !(speed.is_finite() && speed > 0.0) {
-                    return Err("--speed must be finite and > 0".into());
-                }
-                i += 2;
-            }
-            "--ticks" => {
-                let v = args.get(i + 1).ok_or("--ticks needs a value")?;
-                ticks = v.parse::<u32>().map_err(|e| format!("--ticks {v:?}: {e}"))?;
-                if ticks == 0 {
-                    return Err("--ticks must be > 0".into());
-                }
-                i += 2;
-            }
-            "--seeds" => {
-                let v = args.get(i + 1).ok_or("--seeds needs a comma-separated list")?;
-                seeds = v
-                    .split(',')
-                    .map(|s| {
-                        let s = s.trim();
-                        let hex = s.strip_prefix("0x");
-                        match hex {
-                            Some(h) => u64::from_str_radix(h, 16),
-                            None => s.parse::<u64>(),
-                        }
-                        .map_err(|e| format!("--seeds {s:?}: {e}"))
-                    })
-                    .collect::<Result<Vec<u64>, String>>()?;
-                if seeds.is_empty() {
-                    return Err("--seeds must name at least one seed".into());
-                }
-                i += 2;
-            }
-            other => return Err(format!("unknown flag {other:?}")),
-        }
+fn parse_pos_usize(v: &str) -> Result<usize, String> {
+    let n = v.parse::<usize>().map_err(|e| format!("{v:?}: {e}"))?;
+    if n == 0 {
+        return Err(format!("{v:?} must be > 0"));
     }
-    Ok((ticks, seeds, speed))
+    Ok(n)
 }
 
 /// Time one headless episode per seed on the deterministic core, reporting build vs. step cost
