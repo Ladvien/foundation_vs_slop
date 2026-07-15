@@ -169,7 +169,8 @@ mod tests {
     #[test]
     fn shipped_level_playtests_and_is_deterministic() {
         use super::evaluate_playtest;
-        let _serial = crate::sim_harness::serial_guard();
+        // Do NOT hold `serial_guard()` here — `evaluate_playtest`'s rollouts acquire it internally per App,
+        // and the guard's mutex is non-reentrant, so holding it here would deadlock.
         let (base, manifest) = load_base().expect("shipped config");
         let g = authored(&base);
         let seeds = [0x5C09191u64];
