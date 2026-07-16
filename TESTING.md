@@ -45,6 +45,12 @@ If you try to exact-hash a physics-on run, it passes ~20% of the time and wastes
   threshold, coverage %.
 - Golden values are committed. Changing one is a **deliberate, human-reviewed** act — never auto-approve a
   diff. Prefer a human-readable golden (a hash *and* the source values) so the diff is reviewable.
+  **`train apply` enforces this**: it recomputes the goldens, and if they MOVED it aborts and reports
+  `old -> new` rather than re-pinning. `--repin-goldens` accepts the move; the unattended callers inside
+  `cargo train all` never pass it, so a bake that changes the shipped sim stops for a human. This is not
+  belt-and-braces — `apply` used to re-pin silently, and on 2026-07-16 that turned five correctly-failing
+  tests green against a machine-baked level (see the incident log at the top of `tests/replay.rs`). **A tool
+  that both changes the sim and moves the ruler in one step cannot be reviewed.**
 
 ---
 
@@ -80,6 +86,22 @@ These are the hard-won constraints. Violating any one either flakes the suite or
 7. **Test only compiled code.** The crate is a **lib + bin split** — domain modules are declared in
    `src/lib.rs`. `src/combat.rs` and `src/enemies.rs` are shelved (not declared) — do not write tests
    against them. The live enemy path is `enemy.rs` + `crab.rs`.
+8. **A determinism probe on an IDLE box proves nothing.** Order-dependence bugs are races: with G0 *live*,
+   an idle machine produced 12/12 identical rollouts in one process and 5/5 across fresh processes, and
+   only split under CPU load. Any test asserting same-seed reproducibility of a *long, combat-carrying*
+   run must generate background load — see `search_rollouts_are_reproducible_under_load`. Without it the
+   test is decoration. (The short physics-off goldens don't need this: they're a fixed 180/1800-tick
+   trajectory that never enters the racy paths.)
+9. **Exercise the code you mean to pin.** G0 lived in `laser::fire_laser` and survived for months *behind*
+   a 24-build determinism gate, because that gate runs 180 ticks with no synthetic player — the squad idles
+   at spawn and never fires. Coverage of a *system* is not coverage of its *contended* path. When a guard
+   is meant to pin ordering, check that the scenario actually produces >1 concurrent actor in that code.
+10. **An exoneration is only as strong as the condition it was measured under.** Corollary of 8, and the
+    rule that keeps a ruled-out list honest. "I removed the suspect and it still diverged" does **not** clear
+    the suspect — with several order-dependencies live, removing one leaves divergence (the aim-scatter A/B
+    was read as REFUTED this way, and it was the actual root cause). "It didn't reproduce over N runs" does
+    **not** clear a hypothesis unless the box was loaded. Any row in a ruled-out table must record *how* it
+    was measured, or it is not evidence — two rows in the G0 doc had to be struck for exactly this.
 
 ---
 
@@ -165,8 +187,27 @@ The canonical map of what pins what. Update this table when you add or retire a 
 |---|---|---|
 | `tests/rng_guard.rs` | GPU-free (no feature) | Freezes the exact bit output of every generator — `util` (`next_u32`, `rand01`, `hash01_u32`), `autogib::hash_f32`, and `rng::seeded` ChaCha8 (`raw_u64`, `unit`, `below`). A silent constant change trips here first. |
 | `tests/wfc_pin.rs` | GPU-free (no feature) | Golden FNV-1a hash of `wfc::generate` over a 5-seed corpus + in-process reproducibility + the "a floor link only ever joins two floors" invariant. |
-| `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. |
+| `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. Also **`search_rollouts_are_reproducible_under_load`** — the G0 guard: 12 `rollout()`s at the search's real 7200-tick episode **with the synthetic player**, on **both held-in seeds**, must agree bit-for-bit. ~6 min. **Currently RED on `0xA11CE` — that is correct, see G0c below.** |
 | `tests/liveness.rs` | `test-harness` (GPU-free) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. Also: **Almond Water** seeps and pools on the floor (`peak > 0` after 600 ticks) and a wounded biological flooded with water regains HP in one tick. |
+
+### Known-red: `search_rollouts_are_reproducible_under_load` on seed `0xA11CE` (G0c)
+
+**This test is red on purpose. Do not `#[ignore]` it, do not narrow it back to one seed, do not "fix" it by
+deleting the seed.** It is reporting a real, pre-existing bug (G0c): the search's rollouts are still not
+reproducible on the held-in world `0xA11CE` — 3 distinct outcomes over 8 reps, **on an idle box**.
+
+It was green until 2026-07-16 only because it tested a single seed (`0x5C09191`) that happens to be
+reproducible. That is the failure mode invariants 8-10 exist to prevent, and it is worth internalising:
+*the guard was not wrong about its seed — it was wrong about what one seed proves.*
+
+Consequences while this is red:
+- **Archives are not trustworthy for `train apply`.** The objective wobbles, so a MAP-Elites cell can be won
+  by evaluation luck rather than by the genome.
+- `tests/search_parallel.rs` is red too. It is a **symptom** — the parallel reduction is exonerated by
+  measurement *and* by reading. Don't debug `parallel.rs`.
+
+Diagnosis, the ruled-out table, and the next step (a per-tick bisect inside the 600–1800 window using the
+~25 s reproducer): `docs/rl/2026-07-16-search-rollout-nondeterminism.md` §G0c.
 
 ---
 

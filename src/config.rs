@@ -126,6 +126,9 @@ pub struct WorldConfig {
     pub ai: AiTuning,
     pub sim: SimTuning,
     pub mold: crate::mold::MoldConfig,
+    /// The evolvable Almond Water dynamics (seep/heal/poison/belief) — so the world search can co-evolve the
+    /// belief/inversion water alongside combat. Applied over `GameConfig::almond_water`'s gameplay knobs.
+    pub almond: crate::almond_water::AlmondWaterDynamics,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation

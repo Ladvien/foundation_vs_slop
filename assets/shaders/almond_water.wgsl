@@ -24,6 +24,7 @@ struct AlmondParams {
     bounds: vec4<f32>,   // (world_origin.xy, world_extent.xy)
     params0: vec4<f32>,  // (field_res, min_visible_norm, film_thickness_nm, film_ior)
     params1: vec4<f32>,  // (iridescence_strength, almond_tint.rgb)
+    params2: vec4<f32>,  // (iridescence_mute, poison_tint.rgb)
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> mat: AlmondParams;
@@ -72,8 +73,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Normalised water level (0..1). `textureSampleLevel` (LOD 0) is derivative-safe after the `discard`.
-    let level = textureSampleLevel(level_tex, level_smp, uv, 0.0).r;
+    // Field texture: R = normalised water level (0..1), G = belief (0 = cyanide, 1 = heal). `textureSampleLevel`
+    // (LOD 0) is derivative-safe after the `discard`.
+    let field = textureSampleLevel(level_tex, level_smp, uv, 0.0).rg;
+    let level = field.r;
+    let belief = field.g;
     let min_vis = mat.params0.y;
     if (level <= min_vis) {
         discard; // dry concrete
@@ -97,14 +101,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         0.5 + 0.5 * cos(two_pi * opd / 400.0),
     );
     // Mute it: real oil/water films are a wavelength MIXTURE (golds/teals/magentas), not a clean rainbow.
-    // Pull each channel toward the mean so the sheen stays tasteful and almond-appropriate.
+    // Pull each channel toward the mean so the sheen stays tasteful and almond-appropriate (mute now tunable).
     let mean = (irid.r + irid.g + irid.b) / 3.0;
-    irid = mix(vec3<f32>(mean), irid, 0.6);
+    irid = mix(vec3<f32>(mean), irid, mat.params2.x);
 
-    // --- Layer C: almond base, tinted by the (muted) film -----------------------------------------------
+    // --- Layer C: base tint, driven by BELIEF (the inversion mechanic) then tinted by the (muted) film ----
+    // A pool the population reads as cyanide (belief→0) shows `poison_tint`; one it trusts (belief→1) shows the
+    // almond base. This is the diegetic "this pool is wrong" tell — which an anosmic creature still can't smell.
     let almond = mat.params1.yzw;
+    let poison = mat.params2.yzw;
+    let base = mix(poison, almond, clamp(belief, 0.0, 1.0));
     let strength = mat.params1.x * wet;
-    var color = mix(almond, almond * (0.5 + irid), strength);
+    var color = mix(base, base * (0.5 + irid), strength);
 
     // --- Layer A: bubble-up blooms, welling from the concrete where water pools --------------------------
     let bloom = blooms(uv, globals.time) * wet;

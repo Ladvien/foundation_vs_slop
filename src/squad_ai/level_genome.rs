@@ -414,6 +414,18 @@ pub fn decode(g: &LevelGenome, base: &LevelBase) -> Result<LevelPhenotype, Strin
     mycelia
         .damp_weights
         .retain(|row| present_tags.contains(&row.tag.as_str()));
+    // A dropped room type must ALSO drop from every species' `room_affinity` — the same reason the damp
+    // table is pruned above, and the half that was missed: `mycelia::validate_species` rejects an affinity
+    // naming a type the dungeon never emits, and `config::load_game_config` runs it. So a genome that
+    // dropped, say, "living" while a species still named it decoded to a config the REAL loader rejects —
+    // `train apply` baked exactly that and left `config.ron` unloadable.
+    //
+    // Pruning is the right move rather than forbidding the drop: it is semantically neutral. Per
+    // `fruit::species_weight`, an unlisted room is neutral (weight 1.0), so a species that loses its
+    // preferred tag simply stops preferring a room that no longer exists — it never becomes ineligible.
+    for s in &mut mycelia.species {
+        s.room_affinity.retain(|a| present_tags.contains(&a.tag.as_str()));
+    }
 
     Ok(LevelPhenotype { dungeon, metropolis, density, mycelia })
 }
@@ -427,6 +439,12 @@ pub fn is_feasible(g: &LevelGenome, base: &LevelBase) -> Result<(), String> {
     crate::config::validate_density(&p.density)?;
     crate::mycelia::validate_config(&p.mycelia)?;
     crate::mycelia::validate_damp_coverage(&p.mycelia, &p.dungeon.room_types)?;
+    // Mirror the REAL config load path exactly: `config::load_game_config` runs BOTH cross-slice mycelia
+    // validators (damp coverage AND species). Running only the first is how an elite that dropped a room
+    // type still named by a species' `room_affinity` passed this gate, got baked by `train apply`, and made
+    // `config.ron` unloadable at the next startup. A feasibility gate that validates less than the loader
+    // does is not a gate — every validator the loader runs on these slices belongs here.
+    crate::mycelia::validate_species(&p.mycelia, &p.dungeon.room_types)?;
     Ok(())
 }
 
@@ -472,6 +490,58 @@ mod tests {
         assert!((p.mycelia.patch_radius_max - base.mycelia.patch_radius_max).abs() < 1e-4);
         // The authored genome must pass every real validator.
         is_feasible(&authored(&base), &base).expect("shipped level is feasible");
+    }
+
+    #[test]
+    fn dropping_a_room_type_prunes_every_reference_to_it() {
+        // REGRESSION. A levels elite dropped a room type ("living") that `mycelia.species[1].room_affinity`
+        // still named. `decode` pruned the damp table but NOT the species affinity, and `is_feasible` ran
+        // `validate_damp_coverage` but NOT `validate_species` — so the genome passed the gate, `train apply`
+        // baked it, and the next startup died in `config::load_game_config`:
+        //   "mycelia.species[1] ...: room_affinity names room type "living", which dungeon.room_types never
+        //    emits"
+        // leaving `config.ron` unloadable. Pin BOTH halves: decode prunes every cross-slice reference, and
+        // the gate runs exactly the validators the real loader runs.
+        let base = base();
+        // Pick a type some species actually names — the case that used to break.
+        let referenced = base
+            .mycelia
+            .species
+            .iter()
+            .flat_map(|s| s.room_affinity.iter())
+            .map(|a| a.tag.clone())
+            .find(|tag| base.dungeon.room_types.iter().any(|rt| &rt.tag == tag))
+            .expect("some species names a room type the shipped dungeon emits");
+        let idx = base
+            .dungeon
+            .room_types
+            .iter()
+            .position(|rt| rt.tag == referenced)
+            .expect("the named type is emitted");
+
+        let mut g = authored(&base);
+        g.room_present[idx] = false; // the others stay present, so this one really is dropped
+
+        let p = decode(&g, &base).expect("decodes");
+        assert!(
+            !p.dungeon.room_types.iter().any(|rt| rt.tag == referenced),
+            "the room type must actually be dropped, or this proves nothing"
+        );
+        assert!(
+            !p.mycelia.species.iter().any(|s| s.room_affinity.iter().any(|a| a.tag == referenced)),
+            "no species may still name a dropped room type"
+        );
+        assert!(
+            !p.mycelia.damp_weights.iter().any(|r| r.tag == referenced),
+            "the damp table must drop it too"
+        );
+
+        // The gate, and the exact cross-slice validators `config::load_game_config` runs on these slices.
+        is_feasible(&g, &base).expect("dropping a referenced room type must stay feasible");
+        crate::mycelia::validate_species(&p.mycelia, &p.dungeon.room_types)
+            .expect("the loader's species check must pass on a decoded elite");
+        crate::mycelia::validate_damp_coverage(&p.mycelia, &p.dungeon.room_types)
+            .expect("the loader's damp check must pass on a decoded elite");
     }
 
     #[test]

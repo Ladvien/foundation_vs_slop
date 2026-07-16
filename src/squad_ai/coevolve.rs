@@ -454,13 +454,14 @@ pub struct SearchConfig {
     pub resolution: usize,
     /// How many worker **processes** evaluate rollouts in parallel. `1` (the default) runs every rollout
     /// inline in this process — the reference path. `N > 1` spawns `N` `train worker` subprocesses and
-    /// fans the `OPPONENTS` independent triples of each candidate across them. Parallelism must be across
-    /// *processes*, never threads: `sim_harness` holds a process-wide lock and pins the compute pool to one
-    /// thread for determinism (see `evaluate` module doc). Because `score_triple_compact` draws no search RNG and a
-    /// rollout is a pure function of its `(brains, world, seed, ticks)`, the fan-out reduces in the exact
-    /// input order and the archives are **byte-identical** to `jobs = 1` (proved by
-    /// `tests/search_parallel.rs`). The ceiling is `OPPONENTS`: children are sequential (each reads the
-    /// archive the previous one just mutated), so raising `jobs` past `OPPONENTS` adds no speedup.
+    /// fans a whole generation's `batch × OPPONENTS` independent triples (per population) across them — the
+    /// batch MAP-Elites emitter (`batch_population`). Parallelism must be across *processes*, never threads:
+    /// `sim_harness` holds a process-wide lock and pins the compute pool to one thread for determinism (see
+    /// `evaluate` module doc). Because `score_triple_compact` draws no search RNG and a rollout is a pure
+    /// function of its `(brains, world, seed, ticks)`, the fan-out reduces in the exact input order and the
+    /// archives are **byte-identical** to `jobs = 1` (proved by `tests/search_parallel.rs`). The useful
+    /// ceiling is now `batch × OPPONENTS` (per population per generation) — a whole batch is scored at once —
+    /// so `jobs` scales to the box; raise `batch` for more width.
     pub jobs: usize,
 }
 
@@ -630,97 +631,102 @@ pub fn search(
     // agent autocurricula, Baker et al. arXiv:1909.07528): a squad child fights (swarm, world) pairs, a
     // swarm child fights (squad, world), and a world child is judged by the (squad, swarm) it induces.
     for generation in 0..cfg.generations {
-        for _ in 0..cfg.batch {
-            // ── squad child vs (swarm, world) opponents ──
-            let parent = result.squad.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_squad.clone());
-            let child = propose_squad(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
-            let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
-            let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
-            score_and_insert(
-                cfg,
-                &mut rng,
-                &evaluator,
-                &mut result.squad,
-                &mut result.evaluations,
-                &mut result.rejected_by_criterion,
-                &child,
-                &swarm_opps,
-                &world_opps,
-                || Ok(()),
-                |swarm, world| {
-                    feasible(t, &child, swarm)?;
-                    world_genome::is_feasible(world)
-                },
-                |c, swarm, world, sa, sb| TripleJob {
-                    squad: c.clone(),
-                    swarm: swarm.clone(),
-                    world: world.clone(),
-                    seed_a: sa,
-                    seed_b: sb,
-                    ticks: cfg.episode_ticks,
-                },
-                |s| s.squad,
-            )?;
+        // Each population's whole generation is proposed and scored as ONE batch (see `batch_population`):
+        // `cfg.batch` children against a frozen archive snapshot, every child's `OPPONENTS` triples flattened
+        // into a single `eval` call so `--jobs` scales to `batch × OPPONENTS` workers, inserted in a pinned
+        // order. Sub-phases stay ordered squad→swarm→world within a generation (a swarm child still fights
+        // this generation's freshly-inserted squad elites), which keeps the three-way autocurriculum tight.
 
-            // ── swarm child vs (squad, world) opponents ──
-            let parent = result.swarm.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_swarm.clone());
-            let child = propose_swarm(t, &parent, &mut rng, &mut result.rejected_infeasible)?;
-            let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
-            let world_opps = sample_or_authored(&result.world, &authored_world, &mut rng);
-            score_and_insert(
-                cfg,
-                &mut rng,
-                &evaluator,
-                &mut result.swarm,
-                &mut result.evaluations,
-                &mut result.rejected_by_criterion,
-                &child,
-                &squad_opps,
-                &world_opps,
-                || Ok(()),
-                |squad, world| {
-                    feasible(t, squad, &child)?;
-                    world_genome::is_feasible(world)
-                },
-                |c, squad, world, sa, sb| TripleJob {
-                    squad: squad.clone(),
-                    swarm: c.clone(),
-                    world: world.clone(),
-                    seed_a: sa,
-                    seed_b: sb,
-                    ticks: cfg.episode_ticks,
-                },
-                |s| s.swarm,
-            )?;
+        // ── squad children vs (swarm, world) opponents ──
+        batch_population(
+            cfg,
+            &mut rng,
+            &evaluator,
+            &mut result.squad,
+            &result.swarm,
+            &result.world,
+            &authored_squad,
+            &authored_swarm,
+            &authored_world,
+            &mut result.evaluations,
+            &mut result.rejected_infeasible,
+            &mut result.rejected_by_criterion,
+            |parent, rng, rejected| propose_squad(t, parent, rng, rejected),
+            |_child| Ok(()),
+            |child, swarm, world| {
+                feasible(t, child, swarm)?;
+                world_genome::is_feasible(world)
+            },
+            |c, swarm, world, sa, sb| TripleJob {
+                squad: c.clone(),
+                swarm: swarm.clone(),
+                world: world.clone(),
+                seed_a: sa,
+                seed_b: sb,
+                ticks: cfg.episode_ticks,
+            },
+            |s| s.squad,
+        )?;
 
-            // ── world child vs (squad, swarm) opponents ──
-            let parent = result.world.sample_parent(&mut rng).cloned().unwrap_or_else(|| authored_world.clone());
-            let child = propose_world(&parent, &mut rng)?;
-            let squad_opps = sample_or_authored(&result.squad, &authored_squad, &mut rng);
-            let swarm_opps = sample_or_authored(&result.swarm, &authored_swarm, &mut rng);
-            score_and_insert(
-                cfg,
-                &mut rng,
-                &evaluator,
-                &mut result.world,
-                &mut result.evaluations,
-                &mut result.rejected_by_criterion,
-                &child,
-                &squad_opps,
-                &swarm_opps,
-                || world_genome::is_feasible(&child),
-                |squad, swarm| feasible(t, squad, swarm),
-                |c, squad, swarm, sa, sb| TripleJob {
-                    squad: squad.clone(),
-                    swarm: swarm.clone(),
-                    world: c.clone(),
-                    seed_a: sa,
-                    seed_b: sb,
-                    ticks: cfg.episode_ticks,
-                },
-                |s| s.world,
-            )?;
-        }
+        // ── swarm children vs (squad, world) opponents ──
+        batch_population(
+            cfg,
+            &mut rng,
+            &evaluator,
+            &mut result.swarm,
+            &result.squad,
+            &result.world,
+            &authored_swarm,
+            &authored_squad,
+            &authored_world,
+            &mut result.evaluations,
+            &mut result.rejected_infeasible,
+            &mut result.rejected_by_criterion,
+            |parent, rng, rejected| propose_swarm(t, parent, rng, rejected),
+            |_child| Ok(()),
+            |child, squad, world| {
+                feasible(t, squad, child)?;
+                world_genome::is_feasible(world)
+            },
+            |c, squad, world, sa, sb| TripleJob {
+                squad: squad.clone(),
+                swarm: c.clone(),
+                world: world.clone(),
+                seed_a: sa,
+                seed_b: sb,
+                ticks: cfg.episode_ticks,
+            },
+            |s| s.swarm,
+        )?;
+
+        // ── world children vs (squad, swarm) opponents ──
+        batch_population(
+            cfg,
+            &mut rng,
+            &evaluator,
+            &mut result.world,
+            &result.squad,
+            &result.swarm,
+            &authored_world,
+            &authored_squad,
+            &authored_swarm,
+            &mut result.evaluations,
+            &mut result.rejected_infeasible,
+            &mut result.rejected_by_criterion,
+            |parent, rng, _rejected| propose_world(parent, rng),
+            |child| world_genome::is_feasible(child),
+            |_child, squad, swarm| feasible(t, squad, swarm),
+            |c, squad, swarm, sa, sb| TripleJob {
+                squad: squad.clone(),
+                swarm: swarm.clone(),
+                world: c.clone(),
+                seed_a: sa,
+                seed_b: sb,
+                ticks: cfg.episode_ticks,
+            },
+            |s| s.world,
+        )?;
+
         report(generation, &result);
     }
     Ok(result)
@@ -739,82 +745,114 @@ fn sample_or_authored<G: Clone>(pop: &Population<G>, authored: &G, rng: &mut Cha
     }
 }
 
-/// Score one child against its `OPPONENTS` opponent pairs and try to insert it — the single
-/// generic body behind the squad, swarm, and world children. The three co-evolving populations
-/// share this exact Phase 1/2/3 structure and differ only in where the child sits in a triple, so it
-/// is parameterized rather than copied three ways:
+/// Propose and score ONE population's whole generation as a batch, then insert — the **batch variant of
+/// MAP-Elites** (Mouret & Clune 2015, *Illuminating search spaces by mapping elites*, arXiv:1504.04909,
+/// §"batch": "a batch of `b` individuals is generated and evaluated in parallel before the map is updated";
+/// parallel-scaling rationale: Colas, Madhavan, Huizinga & Clune 2020, *Scaling MAP-Elites to Deep
+/// Neuroevolution*, doi:10.1145/3377930.3390217). The three co-evolving populations share this exact
+/// Predraw/Eval/Insert structure and differ only in where the child sits in a triple, so it is parameterized:
 ///
-/// - `pre_check` runs once up front (the world child asserts its own feasibility here; the brain
-///   children have nothing to check and pass `|| Ok(())`);
+/// - `propose` mutates a sampled parent into a feasible child (the brains rejection-sample; the world child
+///   is feasible by construction);
+/// - `pre_check` gates the child itself (the world child screens its own knobs; the brains pass `|_| Ok(())`);
 /// - `check` screens one opponent pair (the two feasibility calls, which draw no RNG);
-/// - `make_job` places a child-role genome into the correct triple slot beside its two opponents —
-///   used both to build the forward jobs (with `child`) and, inside `try_insert_with_reeval`, to
-///   re-score a surviving incumbent on the challenger's exact recorded conditions (with `incumbent`);
+/// - `make_job` places a child-role genome into the correct triple slot beside its two opponents — used both
+///   for the forward jobs (with `child`) and, inside `try_insert_with_reeval`, to re-score a surviving
+///   incumbent on the challenger's exact recorded conditions (with `incumbent`);
 /// - `select` picks this population's descriptor axis off a [`TripleScore`].
 ///
-/// `draw_two_seeds` is the only RNG here and is called exactly once per opponent pair, in order — so
-/// the stream stays byte-identical to scoring the triples one at a time (a rollout draws none). The
-/// job push order is preserved because the parallel evaluator reduces in input order.
+/// **Determinism + parallelism-invariance.** All RNG (parent pick, the variable-length `propose` redraws, the
+/// two opponent samples, and each triple's `draw_two_seeds`) is consumed serially in child-then-opponent
+/// order during PREDRAW, before any rollout — and a rollout draws none. So the whole generation's `batch ×
+/// OPPONENTS` triples can be flattened into ONE `evaluator.eval` call: it reduces in input order, and inserts
+/// are applied in the pinned predraw order (so the `>=` elitism tie-break in `try_insert_with_reeval` and the
+/// contested-cell re-evals are reproducible). `jobs=1` (inline) and `jobs=N` (pool) therefore produce
+/// bit-identical archives — the `--jobs` ceiling rises from `OPPONENTS` (3) to `batch × OPPONENTS`. Children
+/// are proposed against the archive as it stands at the start of this sub-phase (inserts deferred) — the
+/// standard online→batch trade.
 #[allow(clippy::too_many_arguments)]
-fn score_and_insert<C: Clone, O1: Clone, O2: Clone>(
+fn batch_population<C: Clone, O1: Clone, O2: Clone>(
     cfg: &SearchConfig,
     rng: &mut ChaCha8Rng,
     evaluator: &Evaluator,
     population: &mut Population<C>,
+    opp_pop1: &Population<O1>,
+    opp_pop2: &Population<O2>,
+    authored_child: &C,
+    authored_opp1: &O1,
+    authored_opp2: &O2,
     evaluations: &mut u32,
+    rejected_infeasible: &mut u32,
     rejected_by_criterion: &mut u32,
-    child: &C,
-    opps1: &[O1],
-    opps2: &[O2],
-    pre_check: impl Fn() -> Result<(), String>,
-    check: impl Fn(&O1, &O2) -> Result<(), String>,
+    propose: impl Fn(&C, &mut ChaCha8Rng, &mut u32) -> Result<C, String>,
+    pre_check: impl Fn(&C) -> Result<(), String>,
+    check: impl Fn(&C, &O1, &O2) -> Result<(), String>,
     make_job: impl Fn(&C, &O1, &O2, u64, u64) -> TripleJob,
     select: impl Fn(&TripleScore) -> BehaviorDescriptor,
 ) -> Result<(), String> {
-    // A one-time gate on the child itself (the world child screens its own knobs here). A failure is a
-    // bug, not a candidate to skip.
-    pre_check()?;
-
-    // Phase 1 — sequential: screen each pairing and draw its seed pair, in opponent order.
-    let mut jobs = Vec::with_capacity(opps1.len());
-    // Each triple's exact (opponents, seeds), so a surviving incumbent can be re-scored on identical
-    // conditions in the common-opponent comparison.
-    let mut recorded: Vec<(O1, O2, u64, u64)> = Vec::with_capacity(opps1.len());
-    for (o1, o2) in opps1.iter().zip(opps2) {
-        // Feasible by construction (`propose_*` screens children; archive members were screened on entry).
-        // A failure here is a bug, not a candidate to skip.
-        check(o1, o2)?;
-        *evaluations += 1;
-        let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
-        jobs.push(make_job(child, o1, o2, sa, sb));
-        recorded.push((o1.clone(), o2.clone(), sa, sb));
+    // One child's forward conditions, carried from predraw to the deferred insert.
+    struct Pending<C, O1, O2> {
+        child: C,
+        recorded: Vec<(O1, O2, u64, u64)>,
     }
 
-    // Phase 2 — parallel or inline: evaluate every triple, order preserved.
-    let outcomes = evaluator.eval(&jobs)?;
-
-    // Phase 3 — sequential: reduce in opponent order, keeping only PASSING triples' descriptors + records.
-    let mut scores = Vec::new();
-    let mut descriptors = Vec::new();
-    let mut kept: Vec<(O1, O2, u64, u64)> = Vec::new();
-    for (outcome, rec) in outcomes.into_iter().zip(recorded) {
-        match outcome {
-            Some(s) => {
-                scores.push(s.score);
-                descriptors.push(select(&s));
-                kept.push(rec);
-            }
-            None => *rejected_by_criterion += 1,
+    // Phase 1 — PREDRAW: propose every child against the frozen (start-of-sub-phase) archives and build all
+    // their triples. This is the only place RNG is consumed, in a fixed serial order.
+    let mut pending: Vec<Pending<C, O1, O2>> = Vec::with_capacity(cfg.batch as usize);
+    let mut all_jobs: Vec<TripleJob> = Vec::with_capacity(cfg.batch as usize * OPPONENTS);
+    for _ in 0..cfg.batch {
+        let parent = population.sample_parent(rng).cloned().unwrap_or_else(|| authored_child.clone());
+        let child = propose(&parent, rng, rejected_infeasible)?;
+        let opps1 = sample_or_authored(opp_pop1, authored_opp1, rng);
+        let opps2 = sample_or_authored(opp_pop2, authored_opp2, rng);
+        // A one-time gate on the child itself (the world child screens its own knobs). A failure is a bug.
+        pre_check(&child)?;
+        let mut recorded: Vec<(O1, O2, u64, u64)> = Vec::with_capacity(opps1.len());
+        for (o1, o2) in opps1.iter().zip(&opps2) {
+            // Feasible by construction; a failure here is a bug, not a candidate to skip.
+            check(&child, o1, o2)?;
+            *evaluations += 1;
+            let (sa, sb) = draw_two_seeds(&cfg.dungeon_seeds, rng);
+            all_jobs.push(make_job(&child, o1, o2, sa, sb));
+            recorded.push((o1.clone(), o2.clone(), sa, sb));
         }
+        pending.push(Pending { child, recorded });
     }
-    if scores.is_empty() {
-        return Ok(());
+
+    // Phase 2 — EVAL the whole generation's triples in one flattened call (up to `batch × OPPONENTS`,
+    // order preserved). This is where `--jobs` now scales past `OPPONENTS`.
+    let outcomes = evaluator.eval(&all_jobs)?;
+
+    // Phase 3 — INSERT in the pinned predraw order. Splitting `outcomes` by each child's job count keeps the
+    // reduce identical to the per-child path; the fixed order makes the elitism tie-break reproducible.
+    let mut cursor = 0usize;
+    for p in pending {
+        let n = p.recorded.len();
+        let slice = &outcomes[cursor..cursor + n];
+        cursor += n;
+
+        let mut scores = Vec::new();
+        let mut descriptors = Vec::new();
+        let mut kept: Vec<(O1, O2, u64, u64)> = Vec::new();
+        for (outcome, rec) in slice.iter().zip(p.recorded) {
+            match outcome {
+                Some(s) => {
+                    scores.push(s.score);
+                    descriptors.push(select(s));
+                    kept.push(rec);
+                }
+                None => *rejected_by_criterion += 1,
+            }
+        }
+        if scores.is_empty() {
+            continue;
+        }
+        let descriptor = mean_descriptor(&descriptors);
+        let challenger_fitness = mean(&scores);
+        population.try_insert_with_reeval(descriptor, challenger_fitness, p.child.clone(), |incumbent| {
+            reeval_on_recorded(evaluator, &kept, |rec| make_job(incumbent, &rec.0, &rec.1, rec.2, rec.3))
+        })?;
     }
-    let descriptor = mean_descriptor(&descriptors);
-    let challenger_fitness = mean(&scores);
-    population.try_insert_with_reeval(descriptor, challenger_fitness, child.clone(), |incumbent| {
-        reeval_on_recorded(evaluator, &kept, |rec| make_job(incumbent, &rec.0, &rec.1, rec.2, rec.3))
-    })?;
     Ok(())
 }
 

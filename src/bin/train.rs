@@ -109,6 +109,10 @@ enum Command {
     Rl(SearchArgs),
     /// POET open-ended world × squad co-evolution.
     Poet(SearchArgs),
+    /// Train the WHOLE system end-to-end: prior → levels → audio → evolve3 → rl. The single command for
+    /// "retrain everything" — defaults to MAX parallelism (auto-detect cores) and auto-applies + verifies at
+    /// the end (pass `--no-apply` to skip baking).
+    All(AllArgs),
     /// Permanently bake an evolved elite into the shipped defaults (config.ron + Default impls + goldens).
     Apply(ApplyArgs),
     /// Determinism stability guard: recompute the deterministic-core goldens and require agreement.
@@ -144,9 +148,9 @@ struct ProbeArgs {
     seeds: Vec<u64>,
 }
 
-/// Shared flags for every search subcommand. Defaults are the PRACTICAL search settings the old `tune.sh`
-/// applied (30 gens × 16 children, 1800 ticks) — NOT `SearchConfig::default()`'s tiny 8/4/7200 — so a bare
-/// `train evolve3` / `./tune.sh evolve3` runs a useful search out of the box.
+/// Shared flags for every search subcommand. Defaults are PRACTICAL search settings (30 gens × 16 children,
+/// 1800 ticks) — NOT `SearchConfig::default()`'s tiny 8/4/7200 — so a bare `cargo train evolve3` runs a
+/// useful search out of the box.
 #[derive(Args, Clone)]
 struct SearchArgs {
     /// Generations (POET: outer iterations).
@@ -192,6 +196,45 @@ struct SearchArgs {
     island_child: bool,
 }
 
+/// Flags for the whole-system `all` pipeline. One shared set, threaded sensibly into each phase (`--jobs`
+/// drives the co-evolution worker fan-out; `--islands` drives the single-output searches; `rl` gets CMA-ME).
+#[derive(Args)]
+struct AllArgs {
+    /// Generations per phase.
+    #[arg(long, default_value_t = 30, value_parser = parse_pos_u32)]
+    generations: u32,
+    /// Children proposed per generation (per side, for co-evolution).
+    #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
+    batch: u32,
+    /// Ticks per rollout episode.
+    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    ticks: u32,
+    /// MAP-Elites archive resolution (bins per descriptor axis).
+    #[arg(long, default_value_t = 8, value_parser = parse_pos_usize)]
+    res: usize,
+    /// Search RNG seed (each phase derives its own trajectory from it).
+    #[arg(long, default_value_t = 0xC0FFEE, value_parser = parse_seed)]
+    seed: u64,
+    /// Held-in dungeon seeds the objective is evaluated on (comma-separated; decimal or 0x-hex). Needs >= 2.
+    #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
+    seeds: Vec<u64>,
+    /// Rollout worker processes for the `evolve3` co-evolution phase (the batch emitter scales to
+    /// `batch × OPPONENTS`). `0` (the default) = auto: use every logical core.
+    #[arg(long, default_value_t = 0)]
+    jobs: usize,
+    /// Island fan-out for the single-output phases (`levels`/`audio`/`rl`), picking the best-fitness elite.
+    /// `0` (the default) = auto: use every logical core.
+    #[arg(long, default_value_t = 0)]
+    islands: usize,
+    /// Do NOT bake at the end. By default `all` bakes each config-backed phase's winner into the shipped
+    /// config as it finishes and runs the determinism verify — pass this to leave `config.ron`/goldens alone.
+    #[arg(long)]
+    no_apply: bool,
+    /// Force plain per-generation lines instead of the live progress bar (for logs / CI).
+    #[arg(long)]
+    no_progress: bool,
+}
+
 #[derive(Args)]
 struct ApplyArgs {
     /// Which config slice to bake: behavior | world | audio | levels.
@@ -201,21 +244,40 @@ struct ApplyArgs {
     /// Pick a specific archive cell `row,col` (default: the archive's best elite).
     #[arg(long)]
     cell: Option<String>,
+    /// Accept a golden that MOVED and re-pin `tests/replay.rs` to the new value.
+    ///
+    /// Without this, a bake whose recomputed goldens differ from the committed ones ABORTS and reports the
+    /// drift. That is deliberate: a moved golden means the bake changed the shipped sim, which is exactly the
+    /// thing a human is supposed to look at before it lands. TESTING.md: "Changing one is a deliberate,
+    /// human-reviewed act — never auto-approve a diff." Pass this only when you have read the diff and the
+    /// movement is the intended effect of the elite you are baking.
+    #[arg(long)]
+    repin_goldens: bool,
+}
+
+/// The default log filter: silence the headless Bevy asset-not-found spam at the source (so `cargo train …`
+/// needs no `RUST_LOG` export), keeping warnings from the sim itself.
+const DEFAULT_LOG_FILTER: &str =
+    "warn,bevy_asset=off,bevy_render=off,bevy_gltf=off,bevy_gizmos=off,wgpu=off,naga=off";
+
+/// Install the process-global tracing subscriber ONCE, honouring `RUST_LOG` when the caller set one.
+///
+/// The harness disables Bevy's `LogPlugin` (see `sim_harness::build_headless_app_unfinished`): the subscriber
+/// is process-global, but a search builds one `App` per rollout — thousands of them — and each would fight to
+/// install it, so every rollout after the first logged
+/// `ERROR bevy_log: Could not set global logger …`. The process owns the logger; the `App`s don't. Installing
+/// here keeps the sim's warnings visible exactly once, with none of the per-rollout spam.
+fn init_logging() {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILTER.to_string());
+    // A failure here means something already installed a subscriber — nothing to do, and not worth aborting
+    // a multi-hour search over.
+    let _ = bevy::log::tracing_subscriber::fmt()
+        .with_env_filter(bevy::log::tracing_subscriber::EnvFilter::new(filter))
+        .try_init();
 }
 
 fn main() {
-    // Silence the headless Bevy asset-not-found spam at the source (absorbs the old `tune.sh` RUST_LOG
-    // export) unless the caller set their own filter.
-    if std::env::var_os("RUST_LOG").is_none() {
-        // SAFETY: single-threaded here — this runs at the very top of `main`, before any thread (the island
-        // readers, the compute pool) is spawned, so there is no concurrent env access to race with.
-        unsafe {
-            std::env::set_var(
-                "RUST_LOG",
-                "warn,bevy_asset=off,bevy_render=off,bevy_gltf=off,bevy_gizmos=off,wgpu=off,naga=off",
-            );
-        }
-    }
+    init_logging();
 
     let cli = Cli::parse();
     let result = match cli.command {
@@ -232,9 +294,9 @@ fn main() {
         Command::Behavior(a) => run_search(SearchKind::Behavior, a),
         Command::Rl(a) => run_search(SearchKind::Rl, a),
         Command::Poet(a) => run_search(SearchKind::Poet, a),
-        Command::Apply(a) => {
-            Dim::parse(&a.dim).and_then(|dim| apply_archive(dim, &a.archive, a.cell.as_deref()))
-        }
+        Command::All(a) => run_all(a),
+        Command::Apply(a) => Dim::parse(&a.dim)
+            .and_then(|dim| apply_archive(dim, &a.archive, a.cell.as_deref(), a.repin_goldens)),
         Command::Verify { reps } => verify(reps),
         Command::Worker => foundation_vs_slop::squad_ai::parallel::worker_main(),
     };
@@ -321,6 +383,70 @@ struct SearchOutcome {
 
 /// Entry point for every search subcommand: validate, fan into islands or run one search, then optionally
 /// bake the winner.
+/// Train the whole system end-to-end, in one command: prior → levels → audio → evolve3 → rl. The single entry
+/// point for "retrain everything" after a mechanic change (e.g. the Almond Water belief/inversion redesign,
+/// which widened the policy observation and grew the world genome). One shared flag set threads into each
+/// phase: `--jobs` fans out the `evolve3` co-evolution workers (it runs alone, islands=1); the single-output
+/// phases (`levels`/`audio`/`rl`) use `--islands`; `rl` gets the CMA-ME emitter. **Defaults to max: `--jobs`
+/// and `--islands` auto-resolve to every logical core, and it auto-applies** — each config-backed phase bakes
+/// its winner into the shipped config as it finishes and the pipeline verifies determinism at the end (pass
+/// `--no-apply` to skip baking). The `rl` neural policy has no config slice, so it is never baked — its elite
+/// lands in its archive, loaded via the `FVS_POLICY_ELITE` overlay.
+fn run_all(a: AllArgs) -> Result<(), String> {
+    let seeds = seeds_or(&a.seeds, &[0x5C09191, 0x1CE5, 0xB0BA]);
+    // Auto (0) → every logical core. Phases run sequentially, so each saturates the box in turn: `evolve3`
+    // fans `jobs` batch-emitter workers, the single-output phases fan `islands` independent searches.
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let jobs = if a.jobs == 0 { cores } else { a.jobs };
+    let islands = if a.islands == 0 { cores } else { a.islands };
+    let apply = !a.no_apply;
+
+    println!(
+        "train all — cores={cores}, jobs={jobs}, islands={islands}, batch={}, generations={}, apply={apply}",
+        a.batch, a.generations
+    );
+
+    // A per-phase SearchArgs from the shared flags.
+    let phase = |jobs: usize, islands: usize, cma: bool, apply: bool| SearchArgs {
+        generations: a.generations,
+        batch: a.batch,
+        ticks: a.ticks,
+        res: a.res,
+        seed: a.seed,
+        seeds: seeds.clone(),
+        jobs,
+        cma,
+        out: None,
+        apply,
+        islands,
+        no_progress: a.no_progress,
+        island_child: false,
+    };
+    let banner = |i: u32, name: &str| println!("\n═══ train all — phase {i}/5: {name} ═══");
+
+    banner(1, "prior (baseline the shipped brain)");
+    prior(a.ticks, &seeds)?;
+    banner(2, "levels (dungeon architecture + furniture + mushrooms)");
+    run_search(SearchKind::Levels, phase(1, islands, false, apply))?;
+    banner(3, "audio (acoustic stimulus)");
+    run_search(SearchKind::Audio, phase(1, islands, false, apply))?;
+    banner(4, "evolve3 (squad × swarm × world, incl. the evolvable Almond Water dynamics)");
+    run_search(SearchKind::Evolve3, phase(jobs, 1, false, apply))?;
+    banner(5, "rl (neuroevolve the squad policy — now perceives water / belief / anosmia)");
+    run_search(SearchKind::Rl, phase(1, islands, true, false))?; // policy has no config slice → never baked
+    println!(
+        "  → trained policy is at {}. Use it in-game with FVS_POLICY_ELITE={}",
+        RL_ARCHIVE_PATH, RL_ARCHIVE_PATH
+    );
+
+    if apply {
+        println!("\n═══ train all — verify determinism after auto-apply ═══");
+        verify(GOLDEN_STABILITY_REPS)?;
+    }
+    println!("\n✓ train all: full pipeline complete");
+    Ok(())
+}
+
 fn run_search(kind: SearchKind, mut a: SearchArgs) -> Result<(), String> {
     if a.seeds.is_empty() {
         a.seeds = vec![0x5C09191, 0x1CE5, 0xB0BA];
@@ -366,7 +492,10 @@ fn run_search(kind: SearchKind, mut a: SearchArgs) -> Result<(), String> {
         let dim = kind.apply_dim()?;
         println!();
         println!(">> --apply: baking the {} elite {} into the shipped config…", kind.cli_name(), outcome.out.display());
-        apply_archive(dim, &outcome.out, None)?;
+        // `repin_goldens: false` — an unattended bake must never move a golden. If this elite changes the
+        // shipped sim, the run ABORTS with the drift and a human decides. That is the whole lesson of the
+        // 2026-07-16 incident (see `apply_archive` step 4).
+        apply_archive(dim, &outcome.out, None, false)?;
         println!(">> regenerating the baseline prior for the new tuning…");
         prior(a.ticks, &a.seeds)?;
     }
@@ -630,7 +759,8 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
     if a.apply {
         let dim = kind.apply_dim()?;
         println!(">> --apply: baking {win_out} into the shipped config…");
-        apply_archive(dim, Path::new(&win_out), None)?;
+        // `repin_goldens: false` — see the sibling call in `run_search`: unattended bakes never move a ruler.
+        apply_archive(dim, Path::new(&win_out), None, false)?;
         println!(">> regenerating the baseline prior for the new tuning…");
         prior(a.ticks, &a.seeds)?;
     } else if let Ok(dim) = kind.apply_dim() {
@@ -1148,7 +1278,12 @@ fn poet_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String
 /// impl(s), and the deterministic-replay goldens together, so `cargo test` stays green. Full-auto, one
 /// call. `policy` is intentionally unsupported (a `NeuralPolicy` has no config slice — use
 /// `FVS_POLICY_ELITE` to run one).
-fn apply_archive(dim: Dim, archive: &Path, cell: Option<&str>) -> Result<(), String> {
+fn apply_archive(
+    dim: Dim,
+    archive: &Path,
+    cell: Option<&str>,
+    repin_goldens: bool,
+) -> Result<(), String> {
     // Env overlays would double-apply and perturb the golden recompute — refuse to bake while any is set.
     for v in [
         foundation_vs_slop::elite_overlay::BEHAVIOR_ENV,
@@ -1170,6 +1305,11 @@ fn apply_archive(dim: Dim, archive: &Path, cell: Option<&str>) -> Result<(), Str
 
     // 1. Load the clean shipped config, then overlay the elite — validated on the same one path the runtime
     //    overlay uses (a cross-slice-invalid level elite fails here, before anything is written).
+    //
+    //    `base` is the SAME config without the elite. `splice_block` diffs `base` against `gc` to find what
+    //    the elite actually moved: both are the same Rust type through the same serializer, so a path that
+    //    differs is a real change and not an artefact of the authored file omitting a defaulted field.
+    let base = foundation_vs_slop::config::load_game_config()?;
     let mut gc = foundation_vs_slop::config::load_game_config()?;
     let desc = apply_dim(&mut gc, dim, &spec)?;
     println!("apply: {desc}");
@@ -1179,44 +1319,101 @@ fn apply_archive(dim: Dim, archive: &Path, cell: Option<&str>) -> Result<(), Str
     let mut touched: Vec<String> = vec![CONFIG_PATH.to_string()];
     match dim {
         Dim::Behavior => {
-            cfg_text = splice_block(&cfg_text, "behavior", &ron_slice(&gc.behavior)?)?;
+            cfg_text = splice_block(
+                &cfg_text,
+                "behavior",
+                &ron_slice(&base.behavior)?,
+                &ron_slice(&gc.behavior)?,
+            )?;
             regen_default("src/behavior_tuning.rs", "BehaviorTuning", &format!("{:#?}", gc.behavior))?;
             touched.push("src/behavior_tuning.rs".into());
         }
         Dim::World => {
-            cfg_text = splice_block(&cfg_text, "sim", &ron_slice(&gc.sim)?)?;
-            cfg_text = splice_block(&cfg_text, "ai_tuning", &ron_slice(&gc.ai_tuning)?)?;
+            cfg_text = splice_block(&cfg_text, "sim", &ron_slice(&base.sim)?, &ron_slice(&gc.sim)?)?;
+            cfg_text = splice_block(
+                &cfg_text,
+                "ai_tuning",
+                &ron_slice(&base.ai_tuning)?,
+                &ron_slice(&gc.ai_tuning)?,
+            )?;
             regen_default("src/sim.rs", "SimTuning", &format!("{:#?}", gc.sim))?;
             regen_default("src/ai/tuning.rs", "AiTuning", &format!("{:#?}", gc.ai_tuning))?;
             touched.push("src/sim.rs".into());
             touched.push("src/ai/tuning.rs".into());
         }
         Dim::Audio => {
-            cfg_text = splice_block(&cfg_text, "audio", &ron_slice(&gc.audio)?)?;
+            cfg_text =
+                splice_block(&cfg_text, "audio", &ron_slice(&base.audio)?, &ron_slice(&gc.audio)?)?;
             regen_default("src/audio_tuning.rs", "AudioTuning", &format!("{:#?}", gc.audio))?;
             touched.push("src/audio_tuning.rs".into());
         }
         Dim::Levels => {
             // These config types have no `Default` impl, so only config.ron is rewritten.
-            cfg_text = splice_block(&cfg_text, "dungeon", &ron_slice(&gc.dungeon)?)?;
-            cfg_text = splice_block(&cfg_text, "mycelia", &ron_slice(&gc.mycelia)?)?;
-            cfg_text = splice_block(&cfg_text, "metropolis", &ron_slice(&gc.placement.metropolis)?)?;
-            cfg_text = splice_block(&cfg_text, "density", &ron_slice(&gc.placement.density)?)?;
+            cfg_text =
+                splice_block(&cfg_text, "dungeon", &ron_slice(&base.dungeon)?, &ron_slice(&gc.dungeon)?)?;
+            cfg_text =
+                splice_block(&cfg_text, "mycelia", &ron_slice(&base.mycelia)?, &ron_slice(&gc.mycelia)?)?;
+            cfg_text = splice_block(
+                &cfg_text,
+                "metropolis",
+                &ron_slice(&base.placement.metropolis)?,
+                &ron_slice(&gc.placement.metropolis)?,
+            )?;
+            cfg_text = splice_block(
+                &cfg_text,
+                "density",
+                &ron_slice(&base.placement.density)?,
+                &ron_slice(&gc.placement.density)?,
+            )?;
         }
     }
     std::fs::write(CONFIG_PATH, &cfg_text).map_err(|e| format!("{CONFIG_PATH}: write: {e}"))?;
 
-    // 4. Recompute the goldens from the freshly-baked config and re-pin them. (Env overlays are guaranteed
-    //    unset above, so `deterministic_core` reproduces exactly what the replay test will assert.) Go through
-    //    the stability guard — a golden is only stamped if repeated builds agree, so a non-deterministic core
-    //    reds here instead of silently pinning a one-off value.
+    // 4. Recompute the goldens from the freshly-baked config and compare them against the committed ones.
+    //    (Env overlays are guaranteed unset above, so `deterministic_core` reproduces exactly what the replay
+    //    test will assert.) Go through the stability guard — a golden is only trusted if repeated builds
+    //    agree, so a non-deterministic core reds here instead of pinning a one-off value.
+    //
+    //    A MOVED golden aborts unless `--repin-goldens` says otherwise. This used to re-pin unconditionally,
+    //    and on 2026-07-16 that turned a real regression invisible: `cargo train all` spliced a machine-baked
+    //    levels elite over the authored level AND re-pinned the goldens to match it, so the five tests that
+    //    correctly detected the swap went green against the new value. A bake that both changes the sim and
+    //    moves the ruler cannot be reviewed. TESTING.md: a golden is "a deliberate, human-reviewed act —
+    //    never auto-approve a diff."
     let (snap, field) = recompute_goldens_stable(GOLDEN_STABILITY_REPS)?;
-    repin_replay(snap, field)?;
-    touched.push(REPLAY_PATH.to_string());
+    let committed = read_committed_goldens()?;
+    let drifted = (snap, field) != committed;
+    if drifted && !repin_goldens {
+        // `config.ron` is already written at this point, so say so — the operator needs to know the tree is
+        // dirty and exactly how to undo it.
+        return Err(format!(
+            "GOLDEN DRIFT — refusing to re-pin.\n\
+             \n  snapshot: 0x{:016x} (committed)  ->  0x{snap:016x} (this bake)\n  \
+               field:    0x{:016x} (committed)  ->  0x{field:016x} (this bake)\n\
+             \nThe baked elite changes the shipped sim. That may be exactly what you want — but a golden is a\n\
+             deliberate, human-reviewed act (TESTING.md), and re-pinning it here would move the ruler that\n\
+             measures the change, in the same step that makes it.\n\
+             \n{CONFIG_PATH} HAS been written; {REPLAY_PATH} has NOT.\n\
+             \n  review:  git diff {CONFIG_PATH}\n  \
+               accept:  re-run with --repin-goldens\n  \
+               revert:  git checkout -- {}",
+            committed.0,
+            committed.1,
+            touched.join(" "),
+        ));
+    }
+    if drifted {
+        repin_replay(snap, field)?;
+        touched.push(REPLAY_PATH.to_string());
+    }
 
     // 5 + 6. Report + next steps.
     println!();
-    println!("baked. re-pinned goldens: snapshot 0x{snap:016x}, field 0x{field:016x}");
+    if drifted {
+        println!("baked. goldens MOVED and were re-pinned (--repin-goldens): snapshot 0x{snap:016x}, field 0x{field:016x}");
+    } else {
+        println!("baked. goldens unchanged: snapshot 0x{snap:016x}, field 0x{field:016x}");
+    }
     println!("files changed:");
     for f in &touched {
         println!("  {f}");
@@ -1233,37 +1430,381 @@ fn ron_slice<T: serde::Serialize>(v: &T) -> Result<String, String> {
     ron::ser::to_string_pretty(v, ron::ser::PrettyConfig::default()).map_err(|e| format!("serialize slice: {e}"))
 }
 
-/// Replace the `<name>: ( … )` block in `config.ron` text with `<indent><name>: <value_ron>,`. The block is
-/// found by a line whose trim equals `<name>: (` and paren-balanced to its close (works for top-level 4-space
-/// slices and 8-space placement sub-slices alike; every target name is unique in the file).
-fn splice_block(text: &str, name: &str, value_ron: &str) -> Result<String, String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let header = format!("{name}: (");
-    let start = lines
-        .iter()
-        .position(|l| l.trim() == header)
-        .ok_or_else(|| format!("config.ron: no `{name}:` block header"))?;
-    let indent: String = lines[start].chars().take_while(|c| *c == ' ').collect();
-    let mut depth = 0i32;
-    let mut end = None;
-    for (idx, line) in lines.iter().enumerate().skip(start) {
-        for c in line.chars() {
-            match c {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                _ => {}
+/// A scalar leaf found in RON source text: where it lives in the tree, and the exact byte span of its value
+/// token so it can be substituted without disturbing anything around it.
+struct Leaf {
+    /// Dotted field path from the block root, with `[i]` for sequence elements (`room_types[2].weight`).
+    path: String,
+    /// Byte range of the scalar token within the scanned text.
+    span: std::ops::Range<usize>,
+    /// The scalar token's source text (`0x5C09191`, `2`, `1.0`, `"bathroom"`, `true`, `None`).
+    text: String,
+}
+
+/// Scan RON source into its scalar leaves, tracking the path to each and the byte span of its value token.
+///
+/// This is deliberately a *source* scanner, not a deserializer: it must know where each scalar sits in the
+/// original bytes so `splice_block` can substitute one number and leave every comment, alignment, and
+/// literal spelling around it untouched. It skips `//`, `/* */`, and string contents — which is also why the
+/// old paren-counting block scan was wrong (it counted `(` inside comments and strings).
+fn scan_ron_leaves(text: &str) -> Result<Vec<Leaf>, String> {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+
+    // Advance past whitespace and comments.
+    fn skip(b: &[u8], mut i: usize) -> usize {
+        loop {
+            while i < b.len() && (b[i] as char).is_whitespace() {
+                i += 1;
             }
-        }
-        if depth == 0 {
-            end = Some(idx);
-            break;
+            if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'/' {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+                continue;
+            }
+            return i;
         }
     }
-    let end = end.ok_or_else(|| format!("config.ron: unbalanced `{name}:` block"))?;
-    let mut out: Vec<String> = lines[..start].iter().map(|s| s.to_string()).collect();
-    out.push(format!("{indent}{name}: {value_ron},"));
-    out.extend(lines[end + 1..].iter().map(|s| s.to_string()));
-    Ok(out.join("\n") + "\n")
+
+    // An identifier (field name, enum variant, `Some`, `None`, `true`).
+    fn ident(b: &[u8], mut i: usize) -> (usize, String) {
+        let s = i;
+        while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
+            i += 1;
+        }
+        (i, String::from_utf8_lossy(&b[s..i]).into_owned())
+    }
+
+    // Recursive-descent over one value. `path` is the path to THIS value.
+    #[allow(clippy::too_many_arguments)]
+    fn value(
+        b: &[u8],
+        text: &str,
+        mut i: usize,
+        path: &str,
+        out: &mut Vec<Leaf>,
+        depth: usize,
+    ) -> Result<usize, String> {
+        if depth > 32 {
+            return Err("config.ron: value nested deeper than 32 — refusing".to_string());
+        }
+        i = skip(b, i);
+        if i >= b.len() {
+            return Err(format!("config.ron: unexpected end of input at `{path}`"));
+        }
+
+        // `Some(...)` / `None` — an Option wrapper is transparent to the path.
+        if (b[i] as char).is_alphabetic() {
+            let (after, id) = ident(b, i);
+            let j = skip(b, after);
+            if id == "Some" && j < b.len() && b[j] == b'(' {
+                i = value(b, text, j + 1, path, out, depth + 1)?;
+                i = skip(b, i);
+                if i >= b.len() || b[i] != b')' {
+                    return Err(format!("config.ron: unclosed `Some(` at `{path}`"));
+                }
+                return Ok(i + 1);
+            }
+            // A named struct/enum like `Grid` or `Foo(...)`: if a `(` follows, descend; else it's a scalar.
+            if j < b.len() && b[j] == b'(' {
+                return strukt(b, text, j + 1, path, out, depth + 1);
+            }
+            out.push(Leaf { path: path.to_string(), span: i..after, text: id });
+            return Ok(after);
+        }
+
+        match b[i] {
+            b'(' => strukt(b, text, i + 1, path, out, depth + 1),
+            b'[' => {
+                let mut n = 0usize;
+                i += 1;
+                loop {
+                    i = skip(b, i);
+                    if i >= b.len() {
+                        return Err(format!("config.ron: unclosed `[` at `{path}`"));
+                    }
+                    if b[i] == b']' {
+                        return Ok(i + 1);
+                    }
+                    i = value(b, text, i, &format!("{path}[{n}]"), out, depth + 1)?;
+                    n += 1;
+                    i = skip(b, i);
+                    if i < b.len() && b[i] == b',' {
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => {
+                let s = i;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(b.len());
+                out.push(Leaf {
+                    path: path.to_string(),
+                    span: s..i,
+                    text: text[s..i].to_string(),
+                });
+                Ok(i)
+            }
+            _ => {
+                // A bare scalar: run to the next delimiter. Comments never start mid-token in RON.
+                let s = i;
+                while i < b.len() && !matches!(b[i], b',' | b')' | b']' | b'\n') {
+                    i += 1;
+                }
+                let raw = text[s..i].trim_end();
+                out.push(Leaf {
+                    path: path.to_string(),
+                    span: s..s + raw.len(),
+                    text: raw.to_string(),
+                });
+                Ok(s + raw.len())
+            }
+        }
+    }
+
+    // A struct body, positioned just after its `(`. Fields are `key: value`; bare values are tuple elements.
+    fn strukt(
+        b: &[u8],
+        text: &str,
+        mut i: usize,
+        path: &str,
+        out: &mut Vec<Leaf>,
+        depth: usize,
+    ) -> Result<usize, String> {
+        let mut tuple_idx = 0usize;
+        loop {
+            i = skip(b, i);
+            if i >= b.len() {
+                return Err(format!("config.ron: unclosed `(` at `{path}`"));
+            }
+            if b[i] == b')' {
+                return Ok(i + 1);
+            }
+            // Field or tuple element? A `key:` has an identifier then a colon.
+            let mut child = format!("{path}[{tuple_idx}]");
+            if (b[i] as char).is_alphabetic() || b[i] == b'_' {
+                let (after, id) = ident(b, i);
+                let j = skip(b, after);
+                if j < b.len() && b[j] == b':' {
+                    child = if path.is_empty() { id } else { format!("{path}.{id}") };
+                    i = j + 1;
+                } else {
+                    tuple_idx += 1;
+                }
+            } else {
+                tuple_idx += 1;
+            }
+            i = value(b, text, i, &child, out, depth + 1)?;
+            i = skip(b, i);
+            if i < b.len() && b[i] == b',' {
+                i += 1;
+            }
+        }
+    }
+
+    i = skip(b, i);
+    if i >= b.len() || b[i] != b'(' {
+        return Err("config.ron: block value does not start with `(`".to_string());
+    }
+    let end = strukt(b, text, i + 1, "", &mut out, 0)?;
+    let tail = skip(b, end);
+    if tail < b.len() {
+        return Err(format!("config.ron: trailing input after block value: {:?}", &text[tail..]));
+    }
+    Ok(out)
+}
+
+/// Do two RON scalar tokens denote the same value? Compares by PARSED value, not by spelling — so the
+/// authored `seed: 0x5C09191` and the serializer's `96506257` are equal, and the authored line is left
+/// alone (hex spelling, alignment, and its `// nods to SCP-9191` comment all preserved).
+fn scalar_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (ron::from_str::<ron::Value>(a), ron::from_str::<ron::Value>(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        // Unparseable on either side: fall back to exact text. Never treat "can't tell" as "equal".
+        _ => false,
+    }
+}
+
+/// Locate the `<name>: ( … )` block in `config.ron`, returning the byte span of its VALUE (the `( … )`).
+/// The scan is comment- and string-aware, unlike the old raw `(`/`)` char count.
+fn find_block_value(text: &str, name: &str) -> Result<std::ops::Range<usize>, String> {
+    let header = format!("{name}: (");
+    let mut search = 0usize;
+    let at = loop {
+        let rel = text[search..]
+            .find(&header)
+            .ok_or_else(|| format!("config.ron: no `{name}:` block header"))?;
+        let abs = search + rel;
+        // Must be a real field, not a substring of a longer name (`density` inside `foo_density`) and not
+        // inside a comment.
+        let line_start = text[..abs].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let prefix = &text[line_start..abs];
+        let in_comment = prefix.contains("//");
+        let boundary = prefix.chars().last().is_none_or(|c| c.is_whitespace());
+        if !in_comment && boundary {
+            break abs;
+        }
+        search = abs + header.len();
+    };
+    let open = at + name.len() + 2; // past `name:`, onto the ` (`
+    let open = text[open..].find('(').map(|o| open + o).ok_or("config.ron: malformed header")?;
+    // Reuse the scanner to find the matching close: scan the tail and take the end it reports.
+    let tail = &text[open..];
+    let mut depth = 0usize;
+    let b = tail.as_bytes();
+    let (mut i, mut in_str, mut in_line_comment, mut in_block_comment) = (0usize, false, false, false);
+    while i < b.len() {
+        let c = b[i];
+        if in_line_comment {
+            if c == b'\n' {
+                in_line_comment = false;
+            }
+        } else if in_block_comment {
+            if c == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 1;
+            }
+        } else if in_str {
+            if c == b'\\' {
+                i += 1;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 1;
+        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            in_block_comment = true;
+            i += 1;
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'(' {
+            depth += 1;
+        } else if c == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(open..open + i + 1);
+            }
+        }
+        i += 1;
+    }
+    Err(format!("config.ron: unbalanced `{name}:` block"))
+}
+
+/// Rewrite the `<name>: ( … )` block in `config.ron` to hold `value_ron`, **substituting only the scalars
+/// that actually changed** and leaving every other byte — comments, alignment, literal spelling — exactly
+/// as authored.
+///
+/// This replaced a `to_string_pretty` splice that overwrote the whole block with one generated line. That
+/// destroyed every comment inside it: on 2026-07-16 a `--dim levels` bake stripped ~279 lines of
+/// hand-written rationale from `config.ron` (which carries ~563 comment lines — the reasoning IS the file).
+///
+/// **It refuses rather than guessing.** If the bake changes the block's *shape* — a dropped/added field, a
+/// different sequence length, an `Option` appearing or vanishing — there is no honest edit: the prose around
+/// the old shape describes a design the elite no longer has, so preserving it would leave the file
+/// confidently lying. `--dim levels` can do exactly this (`level_genome::decode` drops unselected
+/// `room_types`), and that bake now errors with the path instead of quietly rewriting the block.
+///
+/// `before_ron` and `after_ron` are the SAME slice serialized before and after the elite was applied. The
+/// diff is taken between those two — never between the authored *text* and the baked value — because the
+/// authored text legitimately omits `#[serde(default)]` fields (`room_types[…].expands` is written only on
+/// the types that set it). Diffing text against a serializer that always spells every field out would read
+/// those omissions as a shape change. Two serializations of one type cannot disagree that way, so what is
+/// left is real: a value moved, a sequence grew or shrank, an `Option` flipped.
+fn splice_block(text: &str, name: &str, before_ron: &str, after_ron: &str) -> Result<String, String> {
+    let span = find_block_value(text, name)?;
+    let authored = scan_ron_leaves(&text[span.clone()])
+        .map_err(|e| format!("{name}: reading the authored block: {e}"))?;
+    let before = scan_ron_leaves(before_ron).map_err(|e| format!("{name}: reading the pre-bake value: {e}"))?;
+    let after = scan_ron_leaves(after_ron).map_err(|e| format!("{name}: reading the baked value: {e}"))?;
+
+    // Shape check: before vs after. Same Rust type through the same serializer, so any path difference is a
+    // genuine structural change (sequence length, `Option` variant), not a defaulted-field omission.
+    let (bp, ap): (Vec<&str>, Vec<&str>) = (
+        before.iter().map(|l| l.path.as_str()).collect(),
+        after.iter().map(|l| l.path.as_str()).collect(),
+    );
+    if bp != ap {
+        let dropped: Vec<&&str> = bp.iter().filter(|p| !ap.contains(p)).take(4).collect();
+        let added: Vec<&&str> = ap.iter().filter(|p| !bp.contains(p)).take(4).collect();
+        return Err(format!(
+            "cannot splice `{name}`: the elite changes the block's SHAPE, not just its values \
+             ({} leaves before, {} after).\n  \
+               dropped: {dropped:?}\n  \
+               added:   {added:?}\n\
+             \nRewriting it would mean deleting or inventing lines, and the hand-written rationale around \
+             them describes the AUTHORED design — preserving those comments would leave them describing a \
+             structure that no longer exists, which is worse than deleting them, because a stale comment \
+             reads as authoritative.\n\
+             \nThis is expected for `--dim levels` when an elite drops a room type (`level_genome::decode` \
+             skips unselected `room_types`). Ship that elite through the runtime overlay \
+             (`FVS_LEVELS_ELITE`, see src/elite_overlay.rs), or hand-edit the block and its prose together.",
+            bp.len(),
+            ap.len(),
+        ));
+    }
+
+    // Where the authored text actually spells each field out.
+    let placed: std::collections::HashMap<&str, &Leaf> =
+        authored.iter().map(|l| (l.path.as_str(), l)).collect();
+
+    // The changed leaves, and where each one lives in the authored text.
+    let mut edits: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+    let mut unplaceable: Vec<String> = Vec::new();
+    for (b, a) in before.iter().zip(&after) {
+        if scalar_eq(&b.text, &a.text) {
+            continue;
+        }
+        match placed.get(a.path.as_str()) {
+            Some(l) => edits.push((l.span.clone(), a.text.as_str())),
+            // The value moved, but the authored file never writes this field — it rides on a serde default.
+            // Adding the line means choosing where to put it and what to say about it. Refuse.
+            None => unplaceable.push(format!("{} ({} -> {})", a.path, b.text, a.text)),
+        }
+    }
+    if !unplaceable.is_empty() {
+        return Err(format!(
+            "cannot splice `{name}`: the elite changes {} field(s) the authored block does not spell out \
+             (they sit at their `#[serde(default)]` value):\n  {}\n\
+             \nWriting them would mean inserting lines into hand-authored prose and deciding, on your \
+             behalf, where they go and what they mean. Hand-edit the block, or ship the elite through the \
+             runtime overlay (see src/elite_overlay.rs).",
+            unplaceable.len(),
+            unplaceable.join("\n  "),
+        ));
+    }
+
+    // Apply right-to-left so earlier spans stay valid.
+    edits.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
+    let mut out = text.to_string();
+    for (s, new_text) in &edits {
+        out.replace_range(span.start + s.start..span.start + s.end, new_text);
+    }
+    println!(
+        "  {name}: {} value(s) changed, {} unchanged (comments preserved)",
+        edits.len(),
+        before.len() - edits.len()
+    );
+    Ok(out)
 }
 
 /// Replace the body of `fn default() -> Self { … }` inside `impl Default for <ty>` in a Rust source file with
@@ -1351,16 +1892,49 @@ fn verify(reps: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-pin the replay goldens in `tests/replay.rs`: replace the old `GOLDEN` (snapshot) hex — which appears
-/// twice (the const and the world-config no-op assertion) — and the `GOLDEN_FIELD` hex, everywhere they
-/// occur, with the freshly recomputed values.
+const SNAP_MARKER: &str = "const GOLDEN: u64 = ";
+const FIELD_MARKER: &str = "const GOLDEN_FIELD: u64 = ";
+
+/// The goldens currently committed in `tests/replay.rs`, as `(snapshot, field)`.
+fn read_committed_goldens() -> Result<(u64, u64), String> {
+    let text = std::fs::read_to_string(REPLAY_PATH).map_err(|e| format!("{REPLAY_PATH}: {e}"))?;
+    Ok((parse_hex(&extract_hex(&text, SNAP_MARKER)?)?, parse_hex(&extract_hex(&text, FIELD_MARKER)?)?))
+}
+
+/// Parse a `0x…` u64 literal, tolerating RON/Rust `_` digit separators (`0xe1ec_dc58_3c8d_bfca`).
+fn parse_hex(lit: &str) -> Result<u64, String> {
+    let cleaned: String = lit.trim().trim_start_matches("0x").chars().filter(|c| *c != '_').collect();
+    u64::from_str_radix(&cleaned, 16).map_err(|e| format!("{REPLAY_PATH}: bad golden literal `{lit}`: {e}"))
+}
+
+/// Re-pin the replay goldens in `tests/replay.rs`.
+///
+/// **Scoped to the two `const` declarations, deliberately.** This used to `str::replace` the old hex across
+/// the WHOLE file, which had two failure modes: (1) `replay.rs`'s header is an archaeology log that quotes
+/// prior hashes in prose on purpose, and any that matched the current value were silently rewritten — the
+/// tool ate its own audit trail; (2) it existed only to keep a duplicated literal in
+/// `authored_world_config_override_is_a_noop` in step, and that duplicate is now a reference to `GOLDEN`,
+/// so there is exactly one declaration site per golden. Rewriting anything beyond these two statements is
+/// out of scope by construction.
 fn repin_replay(snap: u64, field: u64) -> Result<(), String> {
     let text = std::fs::read_to_string(REPLAY_PATH).map_err(|e| format!("{REPLAY_PATH}: {e}"))?;
-    let old_snap = extract_hex(&text, "const GOLDEN: u64 = ")?;
-    let old_field = extract_hex(&text, "const GOLDEN_FIELD: u64 = ")?;
-    let text = text.replace(&old_snap, &format!("0x{snap:016x}"));
-    let text = text.replace(&old_field, &format!("0x{field:016x}"));
+    let text = repin_one(&text, SNAP_MARKER, snap)?;
+    let text = repin_one(&text, FIELD_MARKER, field)?;
     std::fs::write(REPLAY_PATH, text).map_err(|e| format!("{REPLAY_PATH}: write: {e}"))
+}
+
+/// Replace the literal in the single `<marker><hex>;` declaration, leaving every other byte untouched.
+fn repin_one(text: &str, marker: &str, value: u64) -> Result<String, String> {
+    let at = text.find(marker).ok_or_else(|| format!("{REPLAY_PATH}: no `{marker}`"))?;
+    if text[at + marker.len()..].contains(marker) {
+        // Two declarations of one golden is the duplication this function was built to stop needing.
+        return Err(format!("{REPLAY_PATH}: `{marker}` declared more than once — a golden has one home"));
+    }
+    let val_start = at + marker.len();
+    let end = text[val_start..]
+        .find(';')
+        .ok_or_else(|| format!("{REPLAY_PATH}: unterminated `{marker}`"))?;
+    Ok(format!("{}0x{value:016x}{}", &text[..val_start], &text[val_start + end..]))
 }
 
 /// Extract the hex literal after a `const X: u64 = ` marker, up to the `;`.
@@ -1485,5 +2059,168 @@ fn bench(ticks: u32, seeds: &[u64], speed: f32) {
     for genomes in [1_000u32, 5_000, 20_000] {
         let wall_h = (f64::from(genomes) * per_genome) / processes as f64 / 3600.0;
         println!("  {genomes:>6} genomes → {wall_h:6.2} h wall");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A miniature of `config.ron`'s real shape: prose above a field, an inline trailing comment, a hex
+    /// literal, a nested one-line struct, an `Option`, and a sequence of tuple structs.
+    const BLOCK: &str = r#"config: (
+    other: (
+        keep: 1,
+    ),
+    dungeon: (
+        coarse_w: 6,
+        corridor_width: 2,          // minimum corridor width (block-centre lane + 1 more)
+        seed: 0x5C09191,            // nods to SCP-9191, the slop generator
+
+        // Liminality dial: 1.0 = sparse Backrooms boxes adrift in the void.
+        liminality: 1.0,
+        notch: Some((
+            chance: 0.8,
+        )),
+        wfc_weights: (
+            rock: 3.0, dead_end: 1.2,
+        ),
+        room_types: [
+            ( tag: "bathroom", weight: 0.8 ),
+            ( tag: "hall",     weight: 1.0 ),
+        ],
+    ),
+)
+"#;
+
+    /// The `before` arm: `BLOCK`'s dungeon values as the serializer spells them — every field present,
+    /// including the ones the authored text leaves at their serde default.
+    const BEFORE: &str = r#"(coarse_w: 6, corridor_width: 2, seed: 96506257, liminality: 1.0,
+        notch: Some((chance: 0.8)), wfc_weights: (rock: 3.0, dead_end: 1.2),
+        room_types: [(tag: "bathroom", weight: 0.8), (tag: "hall", weight: 1.0)])"#;
+
+    #[test]
+    fn splice_preserves_comments_and_touches_only_changed_scalars() {
+        // corridor_width 2 -> 3 and rock 3.0 -> 4.5; everything else identical.
+        let baked = r#"(coarse_w: 6, corridor_width: 3, seed: 96506257, liminality: 1.0,
+            notch: Some((chance: 0.8)), wfc_weights: (rock: 4.5, dead_end: 1.2),
+            room_types: [(tag: "bathroom", weight: 0.8), (tag: "hall", weight: 1.0)])"#;
+        let out = splice_block(BLOCK, "dungeon", BEFORE, baked).expect("splice");
+
+        // The rationale survives, verbatim.
+        assert!(out.contains("// minimum corridor width (block-centre lane + 1 more)"));
+        assert!(out.contains("// nods to SCP-9191, the slop generator"));
+        assert!(out.contains("// Liminality dial: 1.0 = sparse Backrooms boxes adrift in the void."));
+        // The changed scalars moved.
+        assert!(out.contains("corridor_width: 3,"), "corridor_width not updated:\n{out}");
+        assert!(out.contains("rock: 4.5,"), "nested one-line struct not updated:\n{out}");
+        // `seed` is semantically unchanged (0x5C09191 == 96506257), so its line is byte-identical — the hex
+        // spelling and its alignment survive. This is the whole point of comparing values, not text.
+        assert!(out.contains("seed: 0x5C09191,            // nods to SCP-9191"), "seed line was disturbed:\n{out}");
+        // Untouched neighbours stay put.
+        assert!(out.contains("coarse_w: 6,"));
+        assert!(out.contains("keep: 1,"));
+        assert!(out.contains("liminality: 1.0,"));
+    }
+
+    #[test]
+    fn splice_refuses_a_dropped_sequence_entry() {
+        // `--dim levels` dropping a room type: 2 room_types -> 1.
+        let baked = r#"(coarse_w: 6, corridor_width: 2, seed: 96506257, liminality: 1.0,
+            notch: Some((chance: 0.8)), wfc_weights: (rock: 3.0, dead_end: 1.2),
+            room_types: [(tag: "hall", weight: 1.0)])"#;
+        let err = splice_block(BLOCK, "dungeon", BEFORE, baked).expect_err("must refuse a shape change");
+        assert!(err.contains("SHAPE"), "{err}");
+        assert!(err.contains("FVS_LEVELS_ELITE"), "the error must name the one-path alternative: {err}");
+    }
+
+    #[test]
+    fn splice_refuses_a_vanished_option() {
+        // `notch: Some(( … ))` -> `None` removes the `notch.chance` leaf: a shape change, not a value change.
+        let baked = r#"(coarse_w: 6, corridor_width: 2, seed: 96506257, liminality: 1.0,
+            notch: None, wfc_weights: (rock: 3.0, dead_end: 1.2),
+            room_types: [(tag: "bathroom", weight: 0.8), (tag: "hall", weight: 1.0)])"#;
+        let err = splice_block(BLOCK, "dungeon", BEFORE, baked).expect_err("must refuse a vanished Option");
+        assert!(err.contains("SHAPE"), "{err}");
+    }
+
+    /// The old paren scan counted raw `(`/`)` anywhere, including inside comments and strings — so a lone
+    /// paren in prose mis-located the block's end and mangled the file.
+    #[test]
+    fn block_scan_ignores_parens_in_comments_and_strings() {
+        let text = r#"root: (
+    dungeon: (
+        // a smiley :) and an unbalanced ( paren in prose
+        tag: "a ) string with ( parens",
+        n: 1,
+    ),
+    after: (
+        untouched: 7,
+    ),
+)
+"#;
+        let before = r#"(tag: "a ) string with ( parens", n: 1)"#;
+        let baked = r#"(tag: "a ) string with ( parens", n: 2)"#;
+        let out = splice_block(text, "dungeon", before, baked).expect("splice past the decoy parens");
+        assert!(out.contains("n: 2,"), "{out}");
+        assert!(out.contains("// a smiley :) and an unbalanced ( paren in prose"));
+        // The block ended where it should: the sibling below is intact.
+        assert!(out.contains("untouched: 7,"), "block end mis-located:\n{out}");
+    }
+
+    #[test]
+    fn scalar_eq_compares_values_not_spelling() {
+        assert!(scalar_eq("0x5C09191", "96506257"), "hex and decimal are the same number");
+        assert!(scalar_eq("1.0", "1.0"));
+        assert!(!scalar_eq("1.0", "1.5"));
+        assert!(!scalar_eq("2", "3"));
+    }
+
+    /// `repin_replay` must touch ONLY the const declaration — `replay.rs`'s header quotes prior hashes in
+    /// prose deliberately, and the old unbounded `str::replace` rewrote those too.
+    #[test]
+    fn repin_one_leaves_prose_hashes_alone() {
+        let src = "// Was `0xdeadbeefdeadbeef`. See the log.\nconst GOLDEN: u64 = 0xdeadbeefdeadbeef;\n";
+        let out = repin_one(src, SNAP_MARKER, 0x1234_5678_9abc_def0).expect("repin");
+        assert!(out.contains("// Was `0xdeadbeefdeadbeef`. See the log."), "prose was rewritten:\n{out}");
+        assert!(out.contains("const GOLDEN: u64 = 0x123456789abcdef0;"), "{out}");
+    }
+
+    #[test]
+    fn repin_one_rejects_a_duplicated_golden() {
+        let src = "const GOLDEN: u64 = 0x1;\nconst GOLDEN: u64 = 0x2;\n";
+        let err = repin_one(src, SNAP_MARKER, 9).expect_err("two homes for one golden must be an error");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn parse_hex_accepts_ron_digit_separators() {
+        assert_eq!(parse_hex("0xe1ec_dc58_3c8d_bfca").expect("sep"), 0xe1ec_dc58_3c8d_bfca);
+        assert_eq!(parse_hex("0x38d3c9107d4eed33").expect("plain"), 0x38d3c9107d4eed33);
+        assert!(parse_hex("0xnope").is_err());
+    }
+
+    /// The real-file guard, and the strongest one: splice each shipped slice with a value decoded FROM the
+    /// shipped config. Nothing changed, so `config.ron` must come back BYTE-IDENTICAL — every comment, every
+    /// hex literal, every column of alignment. If the scanner mis-parses any real construct in the authored
+    /// file, this reds. (The synthetic fixtures above pin the behaviour; this pins it against reality.)
+    #[test]
+    fn splicing_the_shipped_config_with_its_own_values_is_a_byte_identical_no_op() {
+        let gc = foundation_vs_slop::config::load_game_config().expect("load the shipped config");
+        let text = std::fs::read_to_string(CONFIG_PATH).expect("read config.ron");
+        for (name, value) in [
+            ("behavior", ron_slice(&gc.behavior).expect("ser behavior")),
+            ("sim", ron_slice(&gc.sim).expect("ser sim")),
+            ("ai_tuning", ron_slice(&gc.ai_tuning).expect("ser ai_tuning")),
+            ("audio", ron_slice(&gc.audio).expect("ser audio")),
+            ("dungeon", ron_slice(&gc.dungeon).expect("ser dungeon")),
+            ("mycelia", ron_slice(&gc.mycelia).expect("ser mycelia")),
+            ("metropolis", ron_slice(&gc.placement.metropolis).expect("ser metropolis")),
+            ("density", ron_slice(&gc.placement.density).expect("ser density")),
+        ] {
+            let out = splice_block(&text, name, &value, &value)
+                .unwrap_or_else(|e| panic!("splicing `{name}` with its own value must succeed: {e}"));
+            assert_eq!(out, text, "splicing `{name}` with its own decoded value changed config.ron");
+        }
     }
 }

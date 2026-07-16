@@ -293,8 +293,9 @@ pub(super) fn write_control(
     stig: Option<Res<crate::ai::field::Stig>>,
     // Almond Water moisture feed: wet concrete seeds the mold's chemoattractant (`R`) so the colony blooms
     // richer where water pools — the cosmetic half of the two-way mold↔water coupling (the deterministic
-    // half is the seep boost on mold-colonised concrete, baked in `almond_water`). One-way and windowed-only:
-    // both `Option` so menu/loading frames before the field/config exist are a clean no-op.
+    // half is the seep boost on mold-colonised concrete, applied live in `almond_water::tick` scaled by the
+    // current mold biomass). One-way and windowed-only: both `Option` so menu/loading frames before the
+    // field/config exist are a clean no-op.
     almond: Option<Res<crate::almond_water::AlmondWater>>,
     game: Option<Res<crate::config::GameConfig>>,
     pools: Query<&Transform, With<BloodPool>>,

@@ -162,7 +162,9 @@ impl Plugin for SquadAiPlugin {
                     cohesion::update_anchor.before(crate::ai::AiSet::Think),
                     perception::squad_think
                         .in_set(crate::ai::AiSet::Think)
-                        .after(crate::fog::LosWritten),
+                        .after(crate::fog::LosWritten)
+                        // Reads this tick's Almond Water level + belief into the policy observation.
+                        .after(crate::almond_water::AlmondWaterWritten),
                     actions::unit_actions.after(crate::ai::AiSet::Think),
                     actions::medic_heal.after(crate::ai::AiSet::Think),
                     // Episode recording for the offline behaviour search. Disabled by default (one

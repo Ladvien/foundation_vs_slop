@@ -208,15 +208,22 @@ fn nest_alarm(
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     sim: Res<crate::sim::SimTuning>,
 ) {
+    // Collected + sorted before queueing, like every other deposit producer: nest query order is not stable
+    // across `App` instances, overlapping ALARM discs accumulate into shared cells, and `Stig::deposit` is a
+    // non-associative `f32 +=` that `drain_deposits` applies in raw batch order — so an unsorted push order
+    // makes the summed field depend on enumeration order (see `field::sort_deposits`).
+    let mut batch: Vec<crate::ai::field::Deposit> = Vec::new();
     for (hp, tf) in &nests {
         if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
-            deposits.0.push(crate::ai::field::Deposit {
+            batch.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::ALARM,
                 amount: sim.deposit.alarm_nest,
             });
         }
     }
+    crate::ai::field::sort_deposits(&mut batch);
+    deposits.0.extend(batch);
 }
 
 /// Push each nest's live hoard into its material uniform so the portal brightens as it fills.

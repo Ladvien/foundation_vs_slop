@@ -47,6 +47,15 @@ pub struct Observation {
     pub threat_bearing_known: f32,
     pub anomaly_residue: f32,
     pub seen_by_squad: f32,
+    // --- Almond Water (belief/inversion mechanic): what the unit perceives about the water at its cell. ---
+    /// Water volume at the unit's cell, [0,1].
+    pub water_here: f32,
+    /// The **smelled** belief at the cell, [0,1] (0 = cyanide, 1 = heal). Anosmic units read the neutral prior.
+    pub water_belief: f32,
+    /// 1.0 while standing in water the unit reads as safe (wet AND belief ≥ heal threshold).
+    pub water_safe: f32,
+    /// 1.0 if the unit is anosmic — it cannot perceive a poison flip, so it must learn it can't trust `water_belief`.
+    pub own_anosmia: f32,
 }
 
 impl Observation {
@@ -64,6 +73,10 @@ impl Observation {
             threat_bearing_known: perc.squad.threat_bearing_known,
             anomaly_residue: perc.squad.anomaly_residue,
             seen_by_squad: perc.seen_by_squad,
+            water_here: perc.water.here,
+            water_belief: perc.water.belief,
+            water_safe: perc.water.safe,
+            own_anosmia: perc.water.anosmic,
         }
     }
 
@@ -85,12 +98,17 @@ impl Observation {
         v.push(self.threat_bearing_known);
         v.push(self.anomaly_residue);
         v.push(self.seen_by_squad);
+        // Almond Water (belief/inversion): already in [0,1], pushed raw.
+        v.push(self.water_here);
+        v.push(self.water_belief);
+        v.push(self.water_safe);
+        v.push(self.own_anosmia);
         v
     }
 
     /// The length of [`Observation::to_vec`] output — the RL observation dimensionality.
     pub const fn dim() -> usize {
-        RoleId::ALL.len() + DRIVE_COUNT + 10
+        RoleId::ALL.len() + DRIVE_COUNT + 14
     }
 }
 
@@ -263,6 +281,7 @@ mod tests {
             seen_by_squad: 0.0,
             noise_draw: 0.0,
             squad: SquadFields { anchor_dist: 0.0, ..SquadFields::neutral() },
+            water: crate::ai::utility::WaterObs::default(),
         }
     }
 

@@ -16,13 +16,67 @@ in the reference list (§8).
 
 ## 2. What already exists (the baseline to improve on)
 
-`src/squad_ai/` implements MAP-Elites, CMA-ME, POET, neuroevolution, an island-model search
-(`tune.sh`), 6 genome populations decoded onto `assets/config/config.ron`, and a headless deterministic
+`src/squad_ai/` implements MAP-Elites (batch emitter), CMA-ME, POET, neuroevolution, an island-model search
+(`cargo train`), 6 genome populations decoded onto `assets/config/config.ron`, and a headless deterministic
 harness (`src/sim_harness.rs`). Its fitness stack is **witnessed learnable-surprise** `W·S·L`
 (`surprise.rs`) + **human-interest** proxies (`interest.rs`: suspense / outcome-surprise / effectance),
 gated by a `minimal_criterion`.
 
 **Identified gaps** (the roadmap closes these):
+- **G0 — the named instance is FIXED (2026-07-16), but the GAP IS STILL OPEN as G0c.** *Search rollouts are
+  not reproducible* — identical evaluations scored ~6% apart, so every search below optimizes partly-noisy
+  fitness. Root cause of the G0 instance: `laser::fire_laser` drew the aim-scatter RNG from a **shared stream
+  in raw ECS query order**, so two units firing on the same tick could swap scatter cones and send a bolt at
+  a different hostile. Now processed in `SquadMember` order; pinned by
+  `replay::search_rollouts_are_reproducible_under_load` (12 rollouts @ 7200 with the synthetic player, under
+  load — it fails with 4 distinct outcomes if the fix is reverted). Three more sites of the same class are
+  also fixed: `update_lasers` (incl. a `LastAttacker` last-writer-wins pick feeding the boss's instakill
+  retaliation), the ORCA neighbour sort's missing tiebreak, and the nest/enemy death deposits.
+  **However** — that guard was passing on a **lucky seed**. The search's other held-in world (`0xA11CE`)
+  still splits 3 ways *on an idle box*. The guard now covers both seeds and is correctly RED. **Until G0c
+  closes, the objective still wobbles and archives are not trustworthy for `train apply`.** Full diagnosis:
+  `2026-07-16-search-rollout-nondeterminism.md`.
+- **G0b — FIXED (2026-07-16):** the search illuminated **zero niches**, so both `tests/search_parallel.rs`
+  tests failed at `assert!(filled > 0)` *before* any determinism comparison — i.e. never for the G0 reason
+  their header claimed. Cause: **`config.ron` held a machine-baked levels elite, not the authored level.**
+  `cargo train all` → `train apply --dim levels` (08:54) spliced an evolved `dungeon`/`mycelia`/`placement`
+  over the authored slices (corridors 2→6, topology → `Graph`, new seed), stripping ~279 lines of hand-written
+  rationale and **auto-re-pinning both replay goldens** to the baked level. The squad fought a different map
+  and was wiped, so the minimal criterion rejected every candidate. That elite also came from a search run
+  **while G0 was live** — scored against a wobbling objective, so partly selected by evaluation luck. The
+  authored level is restored (keeping the hand-authored `almond_water` belief/inversion work); both held-in
+  seeds now pass the criterion with the poison **untouched**, and the five `cargo test` failures + the
+  `a_mutated_audio_config_changes_the_sim` failure all clear. An earlier diagnosis blaming the cyanide was
+  **wrong** — it swept a knob on the contaminated baseline; see the correction in
+  `2026-07-16-search-rollout-nondeterminism.md`.
+- **G0c — OPEN, the real `tests/search_parallel.rs` failure:** with G0 and G0b fixed, the archive fills and
+  both tests **reach the fingerprint comparison for the first time** — and `jobs = 1` vs `jobs = N` disagree.
+  The parallel plumbing has since been read end-to-end and is **clean**: the reduction is index-addressed
+  (`parallel.rs:101-148`), seeds are pre-drawn before any fan-out, the bincode wire is bit-exact, and
+  `coevolve::mean` is bit-canonical. Two real asymmetries remain, neither in the reduction: (1) **work
+  assignment is a race** — long-lived workers steal jobs off a shared `AtomicUsize::fetch_add`, so which
+  process runs a triple, and at what ordinal in that process's `App` sequence, is decided by the scheduler;
+  `jobs=1 ≡ jobs=N` therefore quietly demands a rollout be pure **regardless of process history**, an
+  invariant nothing states; (2) **`jobs=3` IS the load** — the parallel arm self-loads and the inline arm
+  does not, so the two arms differ in the one variable that gates this bug class's visibility. The
+  `update_lasers` and ORCA ordering fixes did **not** close it (measured). Diagnostic and the three-way
+  split: `2026-07-16-search-rollout-nondeterminism.md` §G0c. Note the naive "run inline twice" is invalid on
+  a quiet box — the inline arm must run under load.
+- **Process footgun — FIXED (2026-07-16):** `apply_archive` re-pinned the replay goldens automatically, at
+  odds with TESTING.md (*"a deliberate, human-reviewed act — never auto-approve a diff"*), and `splice_block`
+  wrote bare serialized RON, destroying every comment in the slices it rewrote. A bake could silently replace
+  the authored level **and** move the ruler that would have caught it. Now: (1) `apply` **aborts** on golden
+  drift reporting `old -> new` unless `--repin-goldens` is passed, and the unattended `cargo train all`
+  callers never pass it; (2) `repin_replay` rewrites only the `const` declaration — it used to `str::replace`
+  the hash across the whole file, rewriting the prose hashes in `replay.rs`'s incident log, i.e. eating its
+  own audit trail; (3) `splice_block` now substitutes only the scalars that **changed**, comparing by parsed
+  value so `seed: 0x5C09191` vs the serializer's `96506257` reads as equal and the line is never touched —
+  every comment, hex literal and column of alignment survives (pinned by a byte-identical no-op round-trip
+  over all 8 shipped slices, 1356 leaves). It **refuses** rather than guessing when an elite changes the
+  block's *shape* (a dropped `room_types` entry, a vanished `Option`) or moves a field the authored file
+  leaves at its serde default: there is no honest edit, because the prose around the old shape describes a
+  design the elite no longer has, and a preserved-but-false comment is worse than a deleted one. `--dim
+  levels` elites that drop a room type must ship through the runtime overlay (`FVS_LEVELS_ELITE`) instead.
 - **G1** proxies are never calibrated to a human;
 - **G2** replayability is not an objective;
 - **G3** levels are scored statically, not by play;

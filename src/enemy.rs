@@ -473,6 +473,10 @@ fn spawn_enemies(
                     // The watcher fears nothing — but it must still be tagged, because every `Drives`
                     // carrier needs a faction (`ai::faction::validate_factions`).
                     crate::ai::faction::Faction::Anomaly,
+                    // Flesh: the belief-water heals or poisons the boss too. Seed from its position bits (the
+                    // same deterministic per-spawn seed the boss's brain uses).
+                    crate::health::Biological,
+                    crate::health::CyanideSmell::from_seed((pos.x.to_bits() ^ pos.z.to_bits()) as u64),
                 ),
                 crate::ai::brain::BrainId::Smiley,
                 // Single boss → a stable per-spawn seed from its position bits (the seed just needs to be
@@ -862,27 +866,41 @@ fn despawn_dead(
     enemies: Query<(Entity, &Health, &Transform), With<Enemy>>,
     sim: Res<SimTuning>,
 ) {
-    for (entity, hp, tf) in &enemies {
-        if hp.current <= 0.0 {
-            // Billboard smiley — no mesh to shatter, so a red blood burst + floor pool, no gibs.
-            gore.0.push(GoreEvent {
-                pos: tf.translation,
-                kind: GoreKind::EnemySplat,
-                tint: crate::palette::ENEMY_SCORCH,
-                gib: None,
-                // The boss is the heaviest thing in the level: full camera kick on its death.
-                intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
-            });
-            // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
-            deposits.0.push(crate::ai::field::Deposit {
-                pos: tf.translation,
-                field: crate::ai::field::FieldId::SCENT,
-                amount: sim.deposit.blood_scent,
-            });
-            sfx.write(Sfx::EnemyDeath(tf.translation));
-            commands.entity(entity).despawn();
-        }
+    // Deaths handled in a CANONICAL order (by world position bits), not raw query order — which is not
+    // stable across `App` instances. Both side effects here are order-dependent: the SCENT `Deposit`
+    // accumulates with a non-associative `f32 +=` (`Stig::deposit`) that `drain_deposits` applies in raw
+    // batch order, and the `GoreEvent` push advances `drain_gore`'s shared per-event seed counter and fixes
+    // `GibRing` insertion order. Position is the stable geometric key the sibling producers use
+    // (`deposit_meat_scent`, `deposit_crab_fields`); the SCENT batch still goes through `sort_deposits`.
+    let mut dead: Vec<(Entity, Vec3)> = enemies
+        .iter()
+        .filter(|(_, hp, _)| hp.current <= 0.0)
+        .map(|(entity, _, tf)| (entity, tf.translation))
+        .collect();
+    dead.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+
+    let mut scent: Vec<crate::ai::field::Deposit> = Vec::new();
+    for (entity, pos) in dead {
+        // Billboard smiley — no mesh to shatter, so a red blood burst + floor pool, no gibs.
+        gore.0.push(GoreEvent {
+            pos,
+            kind: GoreKind::EnemySplat,
+            tint: crate::palette::ENEMY_SCORCH,
+            gib: None,
+            // The boss is the heaviest thing in the level: full camera kick on its death.
+            intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
+        });
+        // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
+        scent.push(crate::ai::field::Deposit {
+            pos,
+            field: crate::ai::field::FieldId::SCENT,
+            amount: sim.deposit.blood_scent,
+        });
+        sfx.write(Sfx::EnemyDeath(pos));
+        commands.entity(entity).despawn();
     }
+    crate::ai::field::sort_deposits(&mut scent);
+    deposits.0.extend(scent);
 }
 
 /// Pure gate for the "true form" flash: the fractal orb is visible ONLY while the watcher is actually

@@ -34,8 +34,8 @@ assets/config/baseline_prior.ron
 # the game gets a distinct committed name.
 assets/config/elites_*.ron
 
-# `tune.sh` island-model output: per-island archives + logs from a parallel search fan-out. Same rationale
-# as elites_*.ron — machine-generated; the winner is applied via `train apply`, never committed from here.
+# `cargo train` island-model output: per-island archives + logs from a parallel search fan-out. Same
+# rationale as elites_*.ron — machine-generated; the winner is applied via `train apply`, never committed here.
 islands_out/
 
 # Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit

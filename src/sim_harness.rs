@@ -263,7 +263,28 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
                 )),
                 ..default()
             })
-            .disable::<bevy::winit::WinitPlugin>(),
+            .disable::<bevy::winit::WinitPlugin>()
+            // The tracing subscriber is PROCESS-global, but this harness builds one `App` per rollout —
+            // thousands of them in a `train` run. `LogPlugin` tries to install the subscriber on every
+            // build, so the first wins and every subsequent one logs
+            // `ERROR bevy_log: Could not set global logger ... Consider disabling LogPlugin` — one error
+            // line per rollout, drowning the search's own output. An `App` in a multi-`App` process must not
+            // own process-global state (the same reason `ComputeTaskPool` / rayon are forced once above), so
+            // the harness never installs a logger: the *process* owns it. `train::main` installs one
+            // subscriber at startup; the windowed game is unaffected (it builds its own `DefaultPlugins`
+            // in `lib::run`, with `LogPlugin` intact).
+            .disable::<bevy::log::LogPlugin>()
+            // No sound device. `AudioPlugin` opens a real rodio output stream and spawns its mixer thread —
+            // per `App`, i.e. per rollout. A headless search steps 1800+ ticks as fast as the CPU allows, so
+            // the stream is never fed in real time and rodio logs
+            // `ERROR rodio::stream: audio stream error: Buffer underrun/overrun` on every rollout, drowning
+            // the search output; it also opens thousands of audio devices for sound nobody hears. GAMEPLAY
+            // audio is unaffected: the acoustic model the `audio` search evolves is the `NOISE_SQUAD` /
+            // `NOISE_SWARM` stigmergy channels (`audio_tuning`, `ai::field`), not playback — `src/audio.rs`
+            // is cosmetic one-shot SFX. Its `AudioPlayer` components still insert exactly as before (so the
+            // entity churn, and therefore the replay goldens, are unchanged); nothing renders them to a
+            // device. The windowed game keeps its audio (`lib::run` builds its own `DefaultPlugins`).
+            .disable::<bevy::audio::AudioPlugin>(),
     );
 
     // `RenderPlugin { backends: None }` registers every render type and its per-component
@@ -276,6 +297,14 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
     // Add the main-world sync bookkeeping ourselves — it needs no device (just `PendingSyncEntity` + the
     // Add/Remove observers), so headless despawn is safe. The queue is never drained (no render world) but
     // a rollout is bounded, so it stays small and nothing reads it.
+    // `AudioPlugin` is disabled above (no sound device), but it is also what registers the `AudioSource`
+    // ASSET TYPE — and `audio::GameAudioPlugin` (cosmetic SFX, every system on `Update`) is still built here,
+    // so its `Startup` `load_audio` allocates `Handle<AudioSource>`s and would panic on an unregistered asset
+    // type. Register the type alone: handles resolve, `play_sfx` still spawns its `AudioPlayer` entities
+    // exactly as before (entity churn — and therefore the replay goldens — unchanged), and nothing is ever
+    // rendered to a device. This is the same "keep the graph, omit the device" shape as `RenderPlugin` above.
+    app.init_asset::<bevy::audio::AudioSource>();
+
     app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
 
     // Physics (gib chunks only) — same scoping as `lib::run`. Gated: the Avian solver is the one part of
@@ -319,6 +348,8 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         gc.ai_tuning = w.ai;
         gc.sim = w.sim;
         gc.mold = w.mold;
+        // Overwrite only the evolvable Almond Water gameplay knobs; visual/structural knobs keep config.ron.
+        w.almond.apply_to(&mut gc.almond_water);
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the
@@ -516,9 +547,17 @@ pub fn issue_squad_order(app: &mut App, goal: IVec2) -> bool {
         return false;
     };
     let field = std::sync::Arc::new(field);
-    let mut q = world.query_filtered::<Entity, With<crate::squad::Unit>>();
-    let units: Vec<Entity> = q.iter(world).collect();
-    for e in units {
+    let mut q = world
+        .query_filtered::<(Entity, &crate::squad::SquadMember), With<crate::squad::Unit>>();
+    let mut units: Vec<(usize, Entity)> = q.iter(world).map(|(e, m)| (m.0, e)).collect();
+    // CANONICAL ORDER — load-bearing. `insert` MOVES the entity to another archetype, and the order of those
+    // moves fixes each entity's slot in the destination table — i.e. the enumeration order every LATER query
+    // sees. Iterating in raw query order would therefore launder the initial order (which is NOT stable
+    // across `App` instances — see `replay::deterministic_core_is_bit_identical_across_many_builds`) into a
+    // persistent, run-dependent unit order, and two identical rollouts diverge. `SquadMember` is the stable
+    // spawn index, so ordering by it makes this churn a pure function of the squad.
+    units.sort_unstable_by_key(|(member, _)| *member);
+    for (_, e) in units {
         world.entity_mut(e).insert(crate::squad::MoveOrder::new(field.clone()));
     }
     true
@@ -535,9 +574,12 @@ pub fn issue_squad_order(app: &mut App, goal: IVec2) -> bool {
 /// all. Returns the number of units released.
 pub fn clear_squad_orders(app: &mut App) -> usize {
     let world = app.world_mut();
-    let mut q = world.query_filtered::<Entity, (With<crate::squad::Unit>, With<crate::squad::MoveOrder>)>();
-    let ordered: Vec<Entity> = q.iter(world).collect();
-    for e in &ordered {
+    let mut q = world.query_filtered::<(Entity, &crate::squad::SquadMember), (With<crate::squad::Unit>, With<crate::squad::MoveOrder>)>();
+    let mut ordered: Vec<(usize, Entity)> = q.iter(world).map(|(e, m)| (m.0, e)).collect();
+    // CANONICAL ORDER, for the same reason as `issue_squad_order`: `remove` is also an archetype move, so
+    // the removal order fixes the units' slots in the destination table. Order by the stable spawn index.
+    ordered.sort_unstable_by_key(|(member, _)| *member);
+    for (_, e) in &ordered {
         world.entity_mut(*e).remove::<crate::squad::MoveOrder>();
     }
     ordered.len()
@@ -612,7 +654,16 @@ pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
         q.iter(world).map(|t| t.translation).collect()
     };
     let dungeon = world.resource::<crate::dungeon::Dungeon>();
-    positions.iter().map(|p| dungeon.world_to_cell(*p)).collect()
+    let mut cells: Vec<IVec2> = positions.iter().map(|p| dungeon.world_to_cell(*p)).collect();
+    // CANONICAL ORDER — load-bearing. The ECS yields entities in an enumeration order that is NOT stable
+    // across `App` instances (GLB scene-child instantiation + entity-id reuse permute it; see
+    // `replay::deterministic_core_is_bit_identical_across_many_builds`). Returning query order would leak
+    // that instability into every consumer's tie-break — notably `evaluate::run_episode`'s nearest-first
+    // hub tour, whose `sort_by_key` is a *stable* sort, so tied nests keep their input order — and two
+    // identical rollouts would then tour the map in different orders and diverge. Sorting by cell makes
+    // this a pure function of the map.
+    cells.sort_unstable_by_key(|c| (c.y, c.x));
+    cells
 }
 
 /// The squad's centroid cell. The offline tour uses this ONCE at plan time to order the crab hubs
@@ -621,7 +672,7 @@ pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
 /// the tour schedule stays independent of the brain under test.
 pub fn squad_centroid_cell(app: &mut App) -> IVec2 {
     let world = app.world_mut();
-    let positions: Vec<Vec3> = {
+    let mut positions: Vec<Vec3> = {
         let mut q = world.query_filtered::<&Transform, With<crate::squad::Unit>>();
         q.iter(world).map(|t| t.translation).collect()
     };
@@ -629,6 +680,13 @@ pub fn squad_centroid_cell(app: &mut App) -> IVec2 {
     if positions.is_empty() {
         return dungeon.spawn;
     }
+    // ORDER-INDEPENDENT SUM — load-bearing. `f32` addition is not associative and the ECS enumeration order
+    // is not stable across `App` instances, so summing in query order makes the centroid differ in its last
+    // bits between identical runs. That is enough to move `world_to_cell` across a cell boundary, which
+    // flips the distance keys of `run_episode`'s hub tour and diverges the whole episode. Canonicalise the
+    // summation order first — the same discipline as `squad_ai::coevolve::mean` and `snapshot_hash`'s
+    // sorted rows.
+    positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     let mean = positions.iter().copied().sum::<Vec3>() / positions.len() as f32;
     dungeon.world_to_cell(mean)
 }

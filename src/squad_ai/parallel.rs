@@ -14,9 +14,10 @@
 //! order, so the reduction, the archive inserts, and therefore the final archives are **byte-identical** to
 //! `jobs = 1`. `tests/search_parallel.rs` pins that equality.
 //!
-//! The ceiling is `OPPONENTS` (3): a batch is one candidate's opponent set, and children are sequential
-//! (each samples the archive the previous one just mutated — load-bearing coevolutionary structure, not an
-//! accident). Raising `jobs` past `OPPONENTS` fills no more slots.
+//! The useful ceiling is `batch × OPPONENTS` (per population per generation): `batch_population` proposes a
+//! whole generation's children against a frozen archive snapshot and flattens every triple into ONE
+//! [`WorkerPool::eval`] call (the batch MAP-Elites emitter — Mouret & Clune 2015, arXiv:1504.04909 §batch).
+//! Raise `--batch` for more parallel width; `jobs` past `batch × OPPONENTS` fills no more slots.
 //!
 //! Protocol: length-prefixed (`u32` LE) **bincode** frames over the worker's stdin (driver → worker) and
 //! stdout (worker → driver). The driver's first two frames are the handshake — the frozen [`ModePrior`],

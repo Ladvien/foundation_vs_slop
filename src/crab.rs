@@ -538,6 +538,8 @@ fn spawn_crab_on_patch(
             // so runtime-bred crabs (`nest_reproduce`) inherit it and no runtime archetype migration occurs.
             (
                 Biological,
+                // ~1 in 4 crabs can't smell the cyanide warning → walk into poison pools. On every crab.
+                crate::health::CyanideSmell::from_seed(rand_seed as u64),
                 CrabAttached { host: None },
                 CrabCarry {
                     capacity: bc.carry_capacity * (0.8 + 0.4 * draw(2)),
@@ -675,6 +677,9 @@ fn crab_locomotion(
             Option<&crate::light::Photophilic>,
             // Health gates the Almond Water forage nudge — only a wounded crab seeks the water.
             &Health,
+            // Whether this crab can smell the cyanide warning — an anosmic crab can't tell a poison pool from
+            // a heal pool, so it forages toward any water (and walks into cyanide).
+            &crate::health::CyanideSmell,
         ),
         With<Crab>,
     >,
@@ -705,7 +710,7 @@ fn crab_locomotion(
     for v in hash.values_mut() {
         v.clear();
     }
-    for (motion, _, _, _, _, _, _, _, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
@@ -732,6 +737,7 @@ fn crab_locomotion(
         photophobic,
         photophilic,
         health,
+        smell,
     ) in &mut crabs
     {
         // Mid-pounce crabs are owned by `crab_jump` (it drives their arc + transform) — skip them here.
@@ -990,20 +996,36 @@ fn crab_locomotion(
         // *Cognitive Systems Research* 2015). A healthy crab (`fraction` above the wounded threshold) ignores
         // the field — no cost when full — and the push is zero on flat water, so a crab nowhere near a
         // gradient is unbiased. Skipped while latching (a crab riding a unit's body is off the floor water).
-        // Deterministic (field + gradient + config gain) on the pinned FixedUpdate path, folding into the
-        // replay hash like the light nudge above. This is what makes the seeps contested territory: the same
-        // pools heal the squad, so a wounded crab and a wounded unit are drawn to the same water.
+        // Deterministic (field + gradient + belief + config gain) on the pinned FixedUpdate path, folding into
+        // the replay hash like the light nudge above. This is what makes the seeps contested territory: the
+        // same pools heal the squad, so a wounded crab and a wounded unit are drawn to the same water.
+        //
+        // Belief-modulated (the inversion mechanic): a crab that can smell seeks water it reads as heal and
+        // FLEES water it reads as cyanide; an anosmic crab can't tell, so it seeks any water — and forages
+        // straight into poison (emergent selection pressure against anosmia). The reading is gated by the
+        // deadband so an unsettled pool draws no forage either way.
         if !latching && health.fraction() <= config.almond_water.forage_wounded_frac {
-            // The water gradient is on the scale of `capacity` (~100), not light's ~1, so normalise by
-            // capacity to keep `forage_gain` on the same footing as the light gains — otherwise the push is
-            // ~capacity× too strong and a wounded crab lurches across the map toward the nearest seep.
-            let forage_gain =
-                config.almond_water.forage_gain / config.almond_water.capacity.max(1.0e-6);
-            let push = crate::almond_water::almond_push(&almond_water, &dungeon, motion.pos, forage_gain);
-            if push.length_squared() > 1.0e-9 {
-                let p = graph.patch(motion.patch);
-                motion.pos += project_tangent(push, p.normal) * dt;
-                motion.pos = clamp_to_patch(motion.pos, p);
+            let aw = &config.almond_water;
+            let belief = almond_water.belief_at(dungeon.world_to_cell(motion.pos));
+            let seek = if smell.anosmic || belief >= aw.belief_flip_hi {
+                1.0 // seek water (heal pool, or can't smell the danger)
+            } else if belief <= aw.belief_flip_lo {
+                -1.0 // flee (a smelling crab avoids cyanide water)
+            } else {
+                0.0 // unsettled deadband — no forage
+            };
+            if seek != 0.0 {
+                // The water gradient is on the scale of `capacity` (~100), not light's ~1, so normalise by
+                // capacity to keep `forage_gain` on the same footing as the light gains — otherwise the push
+                // is ~capacity× too strong and a wounded crab lurches across the map toward the nearest seep.
+                let forage_gain = seek * aw.forage_gain / aw.capacity.max(1.0e-6);
+                let push =
+                    crate::almond_water::almond_push(&almond_water, &dungeon, motion.pos, forage_gain);
+                if push.length_squared() > 1.0e-9 {
+                    let p = graph.patch(motion.patch);
+                    motion.pos += project_tangent(push, p.normal) * dt;
+                    motion.pos = clamp_to_patch(motion.pos, p);
+                }
             }
         }
 

@@ -161,6 +161,7 @@ mod tests {
             seen_by_squad: 0.0,
             noise_draw: 0.0,
             squad: SquadFields::neutral(),
+            water: crate::ai::utility::WaterObs::default(),
         }
     }
 

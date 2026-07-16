@@ -43,7 +43,19 @@ struct Laser {
     velocity: Vec3,
     life: f32,
     shooter: Entity,
+    /// Stable, monotonic fire order — the key `update_lasers` sorts bolts by. `shooter` cannot serve:
+    /// a raw `Entity` id is recycled, and it is exactly that recycling which permutes query order in the
+    /// first place. `SquadMember` alone cannot serve either — one unit can have several bolts in flight,
+    /// so it is not a TOTAL order. Stamped from `BoltSeq` in `fire_laser`'s canonical loop.
+    seq: u64,
 }
+
+/// Monotonic bolt counter, stamped into each `Laser` at spawn. A resource rather than a `Local<u32>` for
+/// the same reason as [`LaserRng`]: it is simulation state that must reset per run, and a `Local` lives
+/// outside every component, so replay could never capture it. Deterministic by construction — the only
+/// site that increments it (`fire_laser`) does so in `SquadMember` order.
+#[derive(Resource, Default)]
+struct BoltSeq(u64);
 
 /// Shared bolt mesh + emissive material, built once so every bolt is a cheap handle clone.
 #[derive(Resource)]
@@ -104,6 +116,7 @@ impl Plugin for LaserPlugin {
             TimerMode::Repeating,
         )))
         .init_resource::<LaserRng>()
+        .init_resource::<BoltSeq>()
         .add_systems(Startup, setup_laser_assets)
         // Pinned sim: firing + bolt motion/hits advance on the fixed timestep (deterministic, frame-rate
         // independent — the CPU raycast and `LaserRng` make this reproducible). `fire_laser` gates on the
@@ -143,11 +156,19 @@ fn fire_laser(
     fog: Res<FogGrid>,
     mut cooldown: ResMut<FireCooldown>,
     mut lrng: ResMut<LaserRng>,
+    mut bolt_seq: ResMut<BoltSeq>,
     assets: Res<LaserAssets>,
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<StigDeposits>,
     mut shooters: Query<
-        (Entity, &Transform, &Velocity, &mut AimTarget, &crate::squad_ai::role::RoleId),
+        (
+            Entity,
+            &Transform,
+            &Velocity,
+            &mut AimTarget,
+            &crate::squad_ai::role::RoleId,
+            &crate::squad::SquadMember,
+        ),
         (With<Unit>, Without<Hostile>),
     >,
     // `Option<&SmileyState>` marks the smiley boss among hostiles: the squad leaves the neutral watcher
@@ -170,7 +191,11 @@ fn fire_laser(
     // order is not stable across App instances, and `drain_deposits` sums the din channel with a
     // non-associative `f32 +=` (see `field::sort_deposits`).
     let mut noise: Vec<Deposit> = Vec::new();
-    for (unit_entity, unit, velocity, mut aim_target, role) in &mut shooters {
+    // Every unit that will fire this tick, collected here and processed BELOW in `SquadMember` order.
+    // Aiming stays in this loop (each unit writes only its own `AimTarget`, so it is order-independent);
+    // everything with a cross-unit side effect is deferred. `(member, entity, muzzle, aim, spread, pos)`.
+    let mut shots: Vec<(usize, Entity, Vec3, Dir3, f32, Vec3)> = Vec::new();
+    for (unit_entity, unit, velocity, mut aim_target, role, member) in &mut shooters {
         // The Researcher (the "Scientist") carries a flashlight, not a blaster — it never fires. Its beam
         // repels light-averse creatures through the `LightField` instead of dealing damage (one path: no
         // "flashlight can also shoot" branch). Gate on the role *value*, which every unit carries, so the
@@ -236,12 +261,37 @@ fn fire_laser(
         let dist_frac = ((target - muzzle).length() / beh.laser.dist_spread_range).clamp(0.0, 1.0);
         let spread =
             beh.laser.base_spread + beh.laser.move_spread * move_frac + beh.laser.dist_spread * dist_frac;
+        shots.push((member.0, unit_entity, muzzle, aim, spread, unit.translation));
+    }
+
+    // CANONICAL ORDER — load-bearing. Everything below has a cross-unit side effect whose result depends on
+    // the order the shooters are processed in, and the query order is NOT stable across `App` instances
+    // (see `replay::deterministic_core_is_bit_identical_across_many_builds`), so raw query order laundered
+    // that instability into the sim:
+    //   * `lrng.aim` is a SHARED stream — the draw order decides WHICH unit gets which scatter, so two
+    //     units firing on the same tick could swap cones and send a bolt at a different hostile. This is
+    //     the same class the `LaserRng` doc already guards BETWEEN systems ("never interleave regardless of
+    //     system order"); within this system the draw order was unguarded.
+    //   * `commands.spawn` allocates bolt entity ids in this order.
+    //   * `BoltSeq` is stamped in this order, which is what makes it a stable key for `update_lasers`.
+    //   * the `THREAT_GUN` deposit accumulates with a non-associative `f32 +=` (`Stig::deposit`), and
+    //     `drain_deposits` applies the batch UNSORTED, so producer push order is load-bearing.
+    // `SquadMember` is the stable spawn index — the same key `sim_harness::issue_squad_order` sorts by, and
+    // for the same reason. `noise` keeps its own position sort below (its pushes are now canonical too, but
+    // the sort is the established idiom and costs nothing).
+    shots.sort_unstable_by_key(|&(member, ..)| member);
+
+    for (_, unit_entity, muzzle, aim, spread, unit_pos) in shots {
         let forward = scatter(*aim, spread, &mut lrng.aim);
+        // Stamped here, inside the canonical loop, so a bolt's `seq` is a pure function of the sim state —
+        // never of the order the ECS happened to yield shooters.
+        bolt_seq.0 += 1;
         commands.spawn((
             Laser {
                 velocity: forward * beh.laser.laser_speed,
                 life: beh.laser.laser_life,
                 shooter: unit_entity,
+                seq: bolt_seq.0,
             },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
@@ -253,7 +303,7 @@ fn fire_laser(
         sfx.write(Sfx::Fire(muzzle));
         // Gunfire raises the THREAT field at the shooter — creatures read this as danger (stigmergy).
         deposits.0.push(Deposit {
-            pos: unit.translation,
+            pos: unit_pos,
             field: FieldId::THREAT_GUN,
             amount: sim.deposit.threat_per_shot,
         });
@@ -261,7 +311,7 @@ fn fire_laser(
         // swarm reads as a stimulus (fear and/or investigate). Distinct channel from THREAT_GUN: it
         // propagates on the `audio:` slice's tuning and carries an evolvable perception sign.
         noise.push(Deposit {
-            pos: unit.translation,
+            pos: unit_pos,
             field: FieldId::NOISE_SQUAD,
             amount: audio.stimulus.fire_loudness,
         });
@@ -307,18 +357,41 @@ fn update_lasers(
     // the bolt query order is not stable across App instances, and the din channel accumulates with a
     // non-associative `f32 +=` (see `field::sort_deposits`).
     let mut noise: Vec<Deposit> = Vec::new();
+
+    // PASS 1 — motion. Order-independent by construction: each bolt advances only its OWN `Transform` and
+    // `life`, reading nothing another bolt writes. Collected here so PASS 2 can run the side effects in a
+    // canonical order. `(seq, entity, prev, now, life, shooter)`.
+    let mut bolts: Vec<(u64, Entity, Vec3, Vec3, f32, Entity)> = Vec::new();
     for (entity, mut transform, mut laser) in &mut lasers {
         let prev = transform.translation;
         transform.translation += laser.velocity * dt;
         laser.life -= dt;
+        bolts.push((laser.seq, entity, prev, transform.translation, laser.life, laser.shooter));
+    }
 
+    // CANONICAL ORDER — load-bearing, exactly as in `fire_laser` above. The bolt query order is NOT stable
+    // across `App` instances, and every side effect in PASS 2 is cross-bolt:
+    //   * `lrng.friendly` is a SHARED stream and the draw is CONDITIONAL, so bolt order decides which bolt
+    //     consumes which roll — i.e. which unit eats a friendly-fire round.
+    //   * `LastAttacker` (below) is a LAST-WRITER-WINS pick feeding `enemy::smiley_zap`'s instant-kill
+    //     retaliation. Two bolts from different shooters hitting the watcher on one tick chose the target
+    //     by query order. This one needs no crab latched to a unit to arm — only two units shooting the
+    //     boss at once, which is the ordinary case.
+    //   * the `THREAT_GUN` deposit accumulates with a non-associative `f32 +=` (`Stig::deposit`) and
+    //     `drain_deposits` applies the batch UNSORTED, so producer push order is load-bearing.
+    //   * `commands.despawn` order feeds Bevy's entity-id reuse — the root entropy itself.
+    // `seq` (stamped by `fire_laser` in `SquadMember` order) is the stable TOTAL order; see `Laser::seq`.
+    bolts.sort_unstable_by_key(|&(seq, ..)| seq);
+
+    // PASS 2 — effects, in fire order.
+    for (_, entity, prev, now, life, shooter) in bolts {
         // Enemy hit: sweep this frame's motion segment against every hostile hit-volume on the CPU and
         // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
         // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
         let mut best: Option<(Entity, f32, Vec3)> = None;
         for (te, tt, tv) in &targets {
             if let Some((s, point)) =
-                segment_capsule_hit(prev, transform.translation, tt.translation, tv.half_height, tv.radius)
+                segment_capsule_hit(prev, now, tt.translation, tv.half_height, tv.radius)
             {
                 // Deterministic tie-break: equal parametric `s` on two overlapping hostiles resolves by
                 // the strike point, not query order (unstable across same-seed runs — see
@@ -342,7 +415,7 @@ fn update_lasers(
             // If we hit the watcher, record WHO fired this bolt so it retaliates against the real shooter
             // (only the boss carries `LastAttacker`, so this no-ops for crabs/nests).
             if let Ok(mut la) = attackers.get_mut(hit_entity) {
-                la.entity = Some(laser.shooter);
+                la.entity = Some(shooter);
                 la.age = 0.0;
             }
             // A nest is a stone structure, not flesh: it takes the damage above but must NOT emit the
@@ -390,27 +463,31 @@ fn update_lasers(
         // at the **room-side (inner) wall face** (±0.3 from cell centre) — not the coarse tile boundary,
         // and not the wall centre. If the bolt would have crossed into a wall, it's stopped on that
         // surface and the spark bursts there, in the room, instead of behind/inside the slab.
-        let moved = Vec3::new(
-            transform.translation.x - prev.x,
-            0.0,
-            transform.translation.z - prev.z,
-        );
+        let moved = Vec3::new(now.x - prev.x, 0.0, now.z - prev.z);
         let resolved = dungeon.resolve_move(prev, moved, Vec2::splat(LASER_HALF));
-        let hit_wall = (resolved.x - transform.translation.x).abs() > 1.0e-4
-            || (resolved.z - transform.translation.z).abs() > 1.0e-4;
+        let hit_wall =
+            (resolved.x - now.x).abs() > 1.0e-4 || (resolved.z - now.z).abs() > 1.0e-4;
+        // The clamped resting place: where the bolt actually stopped, and so where its burst/din land.
+        let mut rest = now;
         if hit_wall {
-            transform.translation.x = resolved.x;
-            transform.translation.z = resolved.z;
+            rest.x = resolved.x;
+            rest.z = resolved.z;
+            // Write the clamp back through the query — PASS 1 has finished iterating it, so this is the
+            // one place the stopped position becomes visible to the rest of the sim.
+            if let Ok((_, mut transform, _)) = lasers.get_mut(entity) {
+                transform.translation.x = resolved.x;
+                transform.translation.z = resolved.z;
+            }
         }
-        if laser.life <= 0.0 || hit_wall {
+        if life <= 0.0 || hit_wall {
             // Only a real collision (not a mid-air timeout) spawns an impact burst (see `impact_fx`).
             if hit_wall {
-                impacts.0.push(transform.translation);
-                sfx.write(Sfx::ImpactWall(transform.translation));
+                impacts.0.push(rest);
+                sfx.write(Sfx::ImpactWall(rest));
                 // The crack of a bolt on stone carries as din (`NOISE_SQUAD`) — quieter than a discharge
                 // or a wet hit, but it still marks "a fight is happening here" for the swarm to read.
                 noise.push(Deposit {
-                    pos: transform.translation,
+                    pos: rest,
                     field: FieldId::NOISE_SQUAD,
                     amount: audio.stimulus.impact_wall_loudness,
                 });

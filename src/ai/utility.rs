@@ -305,6 +305,26 @@ pub struct Perception {
     /// Squad-unit perception (built by `squad_ai::perception`). Crab/boss `think` splats one neutral
     /// value: `squad: SquadFields::neutral()`.
     pub squad: SquadFields,
+
+    /// Almond Water at the agent's own cell (the belief/inversion mechanic), for the learned squad policy.
+    /// Filled by `squad_ai::perception`; `WaterObs::default()` (all 0) for crabs/boss — their water response is
+    /// the hand-coded forage in `crab_locomotion`, not the policy.
+    pub water: WaterObs,
+}
+
+/// The Almond Water an agent perceives at its own cell — the learned-policy view of the belief/inversion
+/// mechanic. `Default` is the dry/neutral read (used by every non-unit `Perception` and every test builder).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WaterObs {
+    /// Water volume at the cell, normalised to [0,1] by capacity.
+    pub here: f32,
+    /// The **smelled** belief at the cell in [0,1] (0 = cyanide, 1 = heal). An anosmic unit reads the neutral
+    /// prior — it cannot perceive a poison flip (partial observability, Gidlow 2017).
+    pub belief: f32,
+    /// 1.0 while standing in water the unit reads as safe to drink (wet AND belief ≥ the heal threshold).
+    pub safe: f32,
+    /// 1.0 if this agent is anosmic (cannot smell the cyanide warning).
+    pub anosmic: f32,
 }
 
 /// The "nothing of this kind is in range" distance. Deliberately **far but finite**: these values are fed
@@ -523,6 +543,7 @@ mod tests {
             seen_by_squad: 0.0,
             noise_draw: 0.0,
             squad: SquadFields::neutral(),
+            water: WaterObs::default(),
         }
     }
 

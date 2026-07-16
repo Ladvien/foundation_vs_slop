@@ -4,9 +4,9 @@
 - Rember compilation cost time; try to bunch changes and use `cargo check` to spot issues
 - Add under a ## Testing section (create one if absent).
 - This is a Rust game project (ECS-based). Always run the full test suite (including determinism and headless behavioral tests) after modifying gameplay/simulation code, and verify determinism before shipping.
-Add under a ## Working Style / Collaboration section.
 - Do NOT assume design decisions on my behalf. When a design or scope choice is ambiguous (colors, coverage %, approach), stop and ask before implementing. Prefer focused/concrete changes over global post-process filters or over-engineered solutions.
 - When investigating whether an issue is fixed, actually inspect the underlying data/code first before offering explanations; do not assume a file is broken or blame viewport/version.
+- Ensure every feature added is correctly included in the RL/QD systems for evolving.
 
 ## Testing
 
