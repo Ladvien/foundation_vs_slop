@@ -464,16 +464,84 @@ of the sim, not of one dungeon.
 | `crab_despawn_dead`'s gore push | Already sorted by `CrabSeed` (`crab.rs:1517`) |
 | `update_lasers` / ORCA neighbour ties | Both were real bugs of this class and are now **fixed** — and `0xA11CE` still diverges, so neither was G0c |
 
+### BISECTED (session 3) — first divergent tick = **1582**
+
+Done with `evaluate::TickProbe`, a per-tick observer threaded **through the real `run_episode` schedule**
+(not re-derived beside it — see `TickProbe`'s doc for why that distinction is load-bearing).
+
+| | tick |
+|---|---|
+| first `snapshot_hash` (actors) divergence | **1582** |
+| first `field_hash` (grids) divergence | **1584** |
+
+**Actors diverge BEFORE the fields**, so the root is an actor-position computation, not a field update. Note
+this only became answerable by tracing *both* hashes: `snapshot_hash` folds only `(Transform, Health)`, so a
+field can drift silently for hundreds of ticks and surface later through a quantised read. Bisecting on the
+actor hash alone would have named the wrong tick and the wrong system.
+
+**Row diff at the split** (`snapshot_rows`, multiset — a set-difference lies here because tied actors share a
+row):
+
+| actor | delta between two runs |
+|---|---|
+| healthy crab (25/25) | `dz = +0.000434` — float-scale |
+| **wounded crab (15.17/25)** | `dpos = (−0.161, −0.130)` — **~0.2 units in ONE tick** |
+
+0.2 in one tick is not float noise; it is a **reversed steering decision**. The mechanism is amplification:
+`crab.rs`'s wounded-forage push reads `belief_at(world_to_cell(pos))` and turns it into a **±1 sign flip**
+(`seek` = +1 seek water / −1 flee cyanide / 0 deadband). `world_to_cell` is quantised, so a sub-millimetre
+positional difference can read a *different cell's* belief, reverse the push, and lurch the crab. **Any
+sub-ULP wobble in this sim has a 0.2-unit lever attached to it.**
+
+### The key measurement: exact positional ties are COMMON in this world
+
+```text
+tick 1560: 41 rows | 6 pair(s) share x+z | 6 FULL key tie(s)
+tick 1580: 40 rows | 7 pair(s) share x+z | 6 FULL key tie(s)
+  FULL TIE — pos=(77.9400,12.9400) hp=25.000/25.0
+```
+
+Bit-identical coordinates sound impossible until you notice crabs are `clamp_to_patch`-ed against patch
+bounds: **crabs pressed to the same wall land on the same clamped float.** `(77.9400, 12.9400)` is exactly the
+position in the row diff above. So **every sort keyed on position bits without a stable tiebreak is a
+partial order in practice, not just in theory.**
+
+### Two real bugs found and FIXED by that measurement — neither closed G0c
+
+1. **`almond_water::almond_water_effect` drink contention.** Keyed `(cell, health, pos.x, pos.z)` and
+   *documented as* a total order. It is not — `Entity` was collected but left out of the key. Both `drink`
+   (clamps at 0) and `nudge_belief` (clamps to [0,1]) are order-dependent under contention *because of the
+   clamp*, even at equal magnitudes. Tied drinkers are **not** interchangeable (different `anosmic`, mode,
+   carry phase), so the swap is observable. *Fixed:* `CyanideSmell` now keeps its mixed spawn seed as a
+   stable `id` (it already computed and discarded it) and that is the tiebreak. It is the only spawn-time
+   identity every `Biological` carries — `Biological` is heterogeneous, so `SquadMember`/`CrabSeed` can't
+   serve, and a raw `Entity` is the recycled id being guarded against.
+2. **`enemy::smiley_defense`'s boss cull — a LETHAL keep-the-first-on-a-tie pick.** Keyed on position only,
+   with the comment *"WHICH crabs die … must not depend on unstable entity ordering"*. It fires exactly when
+   crabs pile onto the boss (`cull_threshold` 4 inside `cull_radius` 1.4) — i.e. exactly when they are
+   pressed together at tied coordinates — and `take(cull_max)` then killed a **different crab** run to run.
+   *Fixed:* `CrabSeed` (now `pub`) is the tiebreak.
+
+**Both are genuine, both are measured, and NEITHER closed G0c.** Read the rep counts honestly — 3 distinct/8
+before any fix, 2 after the first, 4 after the second — those are **sampling noise on a ~25-40% event over 8
+reps**, not a trend. (Treating 3→2 as progress was itself the error this document warns about.) The first
+divergent tick stayed at 1582 across both fixes.
+
 ### Next step
 
-Bisect to the first divergent tick on `0xA11CE` inside **600–1800**. The cheap idle-box reproducer makes this
-tractable: run N apps **sequentially** (never concurrently — harness invariant 4), each recording a per-tick
-`snapshot_hash` trace, then diff two traces that disagree.
+The divergence at **1582** has a further cause, upstream of the crab positions in that tick. Re-run the row
+diff at 1582 *with* these fixes in place and identify what still moves. Note what is now known:
 
-It needs `run_episode`'s real schedule (the synthetic player's hub tour), so add a temporary `trace_every`
-hook *beside* it rather than re-deriving the schedule. A probe that drifts from the real schedule reports a
-window boundary, not the true first divergence — that mistake already cost a session: an `elapsed = 1` offset
-made "tick 3840" look like the answer when the truth was 1858.
+- It is an **actor-position** system (fields are downstream by 2 ticks).
+- Given identical actor AND field state at 1581, one tick's computation still differs — so it reads
+  iteration order directly, or reads state that neither hash covers.
+- **The remaining blind spot: gibs are invisible to BOTH hashes.** `snapshot_hash` excludes them (no
+  `Health`) and `field_hash` folds only grids. A gib divergence — spawn order, `GibRing` insertion, which
+  chunk `cap_gib_chunks` evicts at `max_gibs: 200` — leaves no trace in either until it moves a crab through
+  `assign_meat_targets`. `0xA11CE` kills **74** crabs vs `0x5C09191`'s **47**, so it is far likelier to reach
+  that 200 cap. `spawn_meat_chunks` already derives its params from the death origin (not the shared drain
+  counter), so the suspect is the ring/eviction order, not the chunk params. **A third hash over gib state
+  would make this measurable instead of inferable.**
 
 ## Related
 

@@ -1124,8 +1124,15 @@ struct Caste {
 
 /// The crab's immortal spawn seed, kept so a promotion re-seeds [`Scout::new`] deterministically and so
 /// re-role's per-tick flip budget selects the SAME crabs regardless of ECS iteration order (sort key).
+///
+/// `pub` because it is the swarm's only stable identity, and the boss's cull
+/// ([`crate::enemy::smiley_defense`]) needs it too: that swat picks WHICH crabs die by sorted order, and a
+/// position-only key is not a total order — crabs piled on the boss sit at bit-identical coordinates
+/// (measured: 6 fully-tied pairs on held-in world `0xA11CE`), so the tie decided a LETHAL pick by ECS query
+/// order. A raw `Entity` cannot serve: ids are recycled and their order is not reproducible across
+/// same-seed runs — that is the instability being guarded against, not a guard.
 #[derive(Component, Clone, Copy)]
-struct CrabSeed(u32);
+pub struct CrabSeed(pub u32);
 
 // Dynamic-caste policy + bounds (README "let crabs re-role between scout and assault as swarm needs
 // shift") moved to `behavior.crab` (caste_cooldown, caste_flips_per_tick, rally_live, alarm_high,

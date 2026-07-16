@@ -1098,7 +1098,10 @@ fn smiley_defense(
     mut commands: Commands,
     mut sfx: MessageWriter<Sfx>,
     mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
-    mut crabs: Query<(Entity, &Transform, &mut Health), With<crate::crab::Crab>>,
+    mut crabs: Query<
+        (Entity, &Transform, &mut Health, &crate::crab::CrabSeed),
+        With<crate::crab::Crab>,
+    >,
     sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
@@ -1110,20 +1113,33 @@ fn smiley_defense(
         let spos = stf.translation;
         // Only LIVE crabs are cull candidates — a crab already at 0 HP (a laser or `smiley_zap` kill this
         // tick) is left to `crab_despawn_dead`'s normal death path, so the two never both claim one crab.
-        let mut biters: Vec<(Entity, Vec3)> = crabs
+        let mut biters: Vec<(Entity, Vec3, u32)> = crabs
             .iter()
-            .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= sim.boss.cull_radius)
-            .map(|(e, ctf, _)| (e, ctf.translation))
+            .filter(|(_, ctf, hp, _)| {
+                hp.current > 0.0 && planar_dist(ctf.translation, spos) <= sim.boss.cull_radius
+            })
+            .map(|(e, ctf, _, seed)| (e, ctf.translation, seed.0))
             .collect();
         if biters.len() < sim.boss.cull_threshold {
             continue;
         }
-        // Deterministic: cull the first `CULL_MAX` in a STABLE order (by world position), not query
-        // order — WHICH crabs die feeds Health/despawn and must not depend on unstable entity ordering
-        // (query order is not reproducible across same-seed runs; see `util::nearest_planar`).
-        biters.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
-        for (ce, _) in biters.into_iter().take(sim.boss.cull_max) {
-            if let Ok((_, _, mut hp)) = crabs.get_mut(ce) {
+        // Deterministic: cull the first `cull_max` in a STABLE order, not query order — WHICH crabs die
+        // feeds Health/despawn and must not depend on unstable entity ordering (query order is not
+        // reproducible across same-seed runs; see `util::nearest_planar`).
+        //
+        // `CrabSeed` is the tiebreak, and it is LOAD-BEARING: world position alone is **not a total order**
+        // here. This cull fires exactly when crabs pile onto the boss (`cull_threshold` of them inside
+        // `cull_radius` 1.4), which is precisely when they are pressed together and `clamp_to_patch` lands
+        // several of them on BIT-IDENTICAL coordinates — measured on held-in world `0xA11CE`: 6 fully-tied
+        // pairs at `pos=(77.94, 12.94)`. `sort_unstable` gives ties no guarantee, so it fell through to the
+        // ECS order this sort exists to erase, and `take(cull_max)` then killed a DIFFERENT crab run to run.
+        // A "keep-the-first-on-a-tie pick", verbatim the trap
+        // `replay::deterministic_core_is_bit_identical_across_many_builds`'s comment names.
+        biters.sort_unstable_by_key(|(_, p, seed)| {
+            (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed)
+        });
+        for (ce, _, _) in biters.into_iter().take(sim.boss.cull_max) {
+            if let Ok((_, _, mut hp, _)) = crabs.get_mut(ce) {
                 hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
             }
             commands.entity(ce).insert(crate::crab::Culled);

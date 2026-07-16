@@ -87,18 +87,37 @@ pub struct Biological;
 pub struct CyanideSmell {
     /// True ⇒ cannot smell the warning (blind to a pool's cyanide reading).
     pub anosmic: bool,
+    /// **Stable per-spawn identity** — the mixed spawn seed, kept rather than discarded.
+    ///
+    /// It exists because `Biological` is heterogeneous (units, crabs, mancae, the boss), so there is no one
+    /// stable key across it: `SquadMember` is units-only, `CrabSeed` is crabs-only, and a raw `Entity` id is
+    /// recycled and NOT reproducible across same-seed runs — it is the very instability being guarded
+    /// against. This is the only spawn-time identity every `Biological` already carries.
+    ///
+    /// [`crate::almond_water`]'s drink contention sorts on it. That sort's key was
+    /// `(cell, health, pos.x, pos.z)`, which its own comment called a total order — it is not: two crabs
+    /// `clamp_to_patch`-ed against the same wall land on BIT-IDENTICAL coordinates, and at equal health they
+    /// tie, at which point `sort_unstable` resolves them by the ECS query order the sort exists to erase.
+    /// Measured on held-in world `0xA11CE`: **6 fully-tied pairs at tick 1580**, all at
+    /// `pos=(77.94, 12.94) hp=25/25`. Tied drinkers are NOT interchangeable — they differ in `anosmic`,
+    /// mode, and carry phase — so who drinks first (both `drink` and `nudge_belief` clamp, and a clamp makes
+    /// even equal magnitudes order-dependent) decides who heals and who reads the pool as cyanide.
+    pub id: u64,
 }
 
 impl CyanideSmell {
     /// Deterministic per-spawn assignment: ~1 in 4 biologicals are anosmic. A pure function of the entity's
     /// already-hashed spawn seed (a splitmix64 finalizer), so no RNG enters the determinism hash and no
     /// archetype churns at runtime.
+    ///
+    /// The finalizer is a **bijection**, so distinct spawn seeds give distinct [`id`](Self::id)s — which is
+    /// what makes it usable as a sort tiebreak, not merely a well-mixed one.
     pub fn from_seed(seed: u64) -> Self {
         let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
-        Self { anosmic: z % 4 == 0 }
+        Self { anosmic: z % 4 == 0, id: z }
     }
 }
 

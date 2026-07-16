@@ -460,6 +460,30 @@ pub fn step(app: &mut App, _cfg: &SimConfig, ticks: u32) {
 /// non-reproducible physics debris (whose float transforms must never be hashed). Rows are keyed and
 /// sorted by the stable spawn-order entity index so the hash is order-independent, and floats are hashed
 /// by exact bit pattern. This is the replay oracle: same seed ⇒ same hash.
+/// The rows [`snapshot_hash`] folds: `[x, y, z, hp_current, hp_max]` bits per actor, in the same sorted
+/// order. Exposed so a determinism probe can diff two diverging runs at the tick they split and read WHAT
+/// moved — a hash says "different", a row diff says "10.0 HP came off the boss and landed on a max=60
+/// actor", which names the system. That row diff is what identified G0.
+#[cfg(feature = "test-harness")]
+pub fn snapshot_rows(app: &mut App) -> Vec<[u32; 5]> {
+    let world = app.world_mut();
+    let mut query = world.query::<(&Transform, &crate::health::Health)>();
+    let mut rows: Vec<[u32; 5]> = query
+        .iter(world)
+        .map(|(t, h)| {
+            [
+                t.translation.x.to_bits(),
+                t.translation.y.to_bits(),
+                t.translation.z.to_bits(),
+                h.current.to_bits(),
+                h.max.to_bits(),
+            ]
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
 pub fn snapshot_hash(app: &mut App) -> u64 {
     let world = app.world_mut();
     let mut query = world.query::<(&Transform, &crate::health::Health)>();

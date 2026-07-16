@@ -728,16 +728,27 @@ fn accumulate_evaporate_diffuse(
 /// order is pinned for deterministic composition when two `Health` writers land on one unit in one tick).
 /// Mirrors `squad_ai::actions::medic_heal`'s rate-based idiom, minus the medic gate — the water *is* the source.
 ///
-/// **Drink contention determinism:** several drinkers can share a cell, and both `drink` and the rumor
-/// `nudge_belief` mutate the cell with a non-associative `f32 ±`, so the candidates are sorted by
-/// `(cell, current, pos)` before any mutation — the same sorted-application discipline `snapshot_hash`'s rows
-/// and `Stig`'s deposits use.
+/// **Drink contention determinism:** several drinkers can share a cell, and both `drink` (clamped at 0) and
+/// the rumor `nudge_belief` (clamped to [0,1]) mutate the cell with a non-associative, *clamped* `f32 ±`, so
+/// the candidates are sorted before any mutation — the same sorted-application discipline `snapshot_hash`'s
+/// rows and `Stig`'s deposits use. A clamp is what makes this bite even when the magnitudes are equal: on a
+/// nearly-dry cell the first drinker takes what is left and the second gets nothing.
+///
+/// The key ends with [`CyanideSmell::id`], and that tiebreak is load-bearing, not decoration. This sort was
+/// keyed `(cell, current, pos.x, pos.z)` and *documented as* a total order. It was not — two crabs
+/// `clamp_to_patch`-ed against the same wall hold BIT-IDENTICAL coordinates, and at equal health every
+/// component of the key matches, so `sort_unstable` fell through to the ECS query order the sort exists to
+/// erase. Measured on held-in world `0xA11CE`: **6 fully-tied pairs at tick 1580**, all at
+/// `pos=(77.94, 12.94) hp=25/25`, and the episode diverged ~15 ticks later. Tied drinkers are *not*
+/// interchangeable (different `anosmic`, mode, carry phase), so the swap is observable: a wounded crab's
+/// forage push is a ±1 sign flip on `belief` crossing a threshold, which turns a lost drink into a
+/// 0.2-unit-per-tick lurch the other way.
 fn almond_water_effect(
     mut field: ResMut<AlmondWater>,
     dungeon: Res<Dungeon>,
     config: Res<GameConfig>,
     time: Res<Time>,
-    mut drinkers: Query<(Entity, &Transform, &mut Health), With<Biological>>,
+    mut drinkers: Query<(Entity, &Transform, &mut Health, &crate::health::CyanideSmell), With<Biological>>,
 ) {
     let cfg = &config.almond_water;
     let dt = time.delta_secs();
@@ -745,19 +756,29 @@ fn almond_water_effect(
     // Immutable pass: collect every living biological with its stable sort key. Not just the wounded — a pool
     // the population reads as cyanide poisons a full-health drinker too. `to_bits` on a deterministic-core
     // float is a total, reproducible order; the position tie-break decorrelates two co-located drinkers.
-    let mut cands: Vec<(u32, u32, u32, u32, u32, Entity, IVec2)> = drinkers
+    let mut cands: Vec<(u32, u32, u32, u32, u32, u64, Entity, IVec2)> = drinkers
         .iter()
-        .filter(|(_, _, h)| h.max > 0.0)
-        .map(|(e, t, h)| {
+        .filter(|(_, _, h, _)| h.max > 0.0)
+        .map(|(e, t, h, smell)| {
             let p = t.translation;
             let cell = dungeon.world_to_cell(p);
-            (cell.y as u32, cell.x as u32, h.current.to_bits(), p.x.to_bits(), p.z.to_bits(), e, cell)
+            (
+                cell.y as u32,
+                cell.x as u32,
+                h.current.to_bits(),
+                p.x.to_bits(),
+                p.z.to_bits(),
+                smell.id,
+                e,
+                cell,
+            )
         })
         .collect();
     if cands.is_empty() {
         return;
     }
-    cands.sort_unstable_by_key(|k| (k.0, k.1, k.2, k.3, k.4));
+    // TOTAL order: `smell.id` is the tiebreak, and without it this is not one — see the note above.
+    cands.sort_unstable_by_key(|k| (k.0, k.1, k.2, k.3, k.4, k.5));
 
     // Mutable pass, in the sorted order. ONE signed path: belief at the cell selects heal (+), poison (−), or
     // inert (the deadband). Both heal and poison DRINK the cell down — you drink the water either way, so a dry
@@ -765,7 +786,7 @@ fn almond_water_effect(
     // and the same-tick damage set. Rumor deposits (a safe drink reinforces the heal reading, a poisoning the
     // cyanide reading) land in the same sorted order — the non-associative belief `+=` stays reproducible.
     for (.., e, cell) in cands {
-        let Ok((_, _, mut health)) = drinkers.get_mut(e) else {
+        let Ok((_, _, mut health, _)) = drinkers.get_mut(e) else {
             continue;
         };
         let belief = field.belief_at(cell);
