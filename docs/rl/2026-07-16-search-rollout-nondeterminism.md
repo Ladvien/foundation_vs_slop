@@ -8,39 +8,99 @@
 | **G0** — `fire_laser`'s shared aim-scatter draw in query order | **FIXED** (session 2), pinned |
 | **G0b** — empty archive from a machine-baked level in `config.ron` | **FIXED** (session 2) |
 | **G0c** — the `0xA11CE` authored-genome divergence | **FIXED** (session 3), pinned |
-| **G0d** — `search_parallel` STILL red: `jobs=1 ≠ jobs=N` on MUTATED genomes | **OPEN** — see §G0d |
+| **G0d** — `jobs=1 ≠ jobs=N` on MUTATED genomes | **FIXED** (session 3), pinned |
 
-> ## PARTLY resolved. Do not read the green guard as a closed gap.
+> # RESOLVED. The search is reproducible.
 >
-> `search_rollouts_are_reproducible_under_load` is green on **both** held-in seeds — 12 rollouts × 7200 ticks
-> × 2 worlds under load, bit-identical. `GibKey` was a real root cause and is fixed.
+> ```text
+> search_rollouts_are_reproducible_under_load .......... ok
+> search_rollouts_of_mutants_are_reproducible_under_load ... ok
+> batch_emitter_scales_past_opponents_deterministically ... ok
+> parallel_search_reproduces_the_inline_archives_bit_for_bit ... ok
+> ```
 >
-> **But `tests/search_parallel.rs` is still RED**, so the *search* is not yet proven reproducible. The guard
-> runs the **authored** genome; the search evaluates **mutated** ones, which reach code the authored genome
-> never arms. This document itself flagged that trap about `update_lasers` ("inert for the authored genome
-> … armed by any mutant") — and then the session's conclusion ignored it. **A guard passing means the thing
-> it tests passes. Nothing more.** That is now the third time this investigation has been burned by reading
-> a green light as a general claim (see the quiet-box caveat, §2, and the A/B method note).
+> `search_parallel` — red for months — passes: `jobs=1 ≡ jobs=3` and `jobs=1 ≡ jobs=4` at batch 2, archives
+> byte-identical through the batch emitter, the worker pool and the common-opponent re-eval, measured under
+> CPU contention. **Archives are trustworthy for `train apply`.**
 >
-> **Until `search_parallel` is green, archives remain unproven for `train apply`.**
+> **Both** conditions were required, and stating them in advance was the point: a green *authored* guard was
+> read as "the gap is closed" TWICE in this investigation. The guard proves what it tests.
 >
-> **G0c's root cause: `GibKey` — the tiebreak that could not break its own tie.**
+> ## Sixteen bugs, four species
 >
-> `assign_meat_targets` sorts candidate meat chunks by `(position, GibKey)`, and `GibKey` was derived from
-> **the death origin position**. So the key that exists to disambiguate two chunks at a bit-identical spot
-> was *itself a function of that spot*: two different creatures dying on the same coordinate minted
-> byte-identical keys, the sort tied, and the greedy commit fell through to ECS query order — sending crabs
-> to different chunks run to run. `GibKey`'s own doc had anticipated coincident chunks exactly, and then
-> broke the tie with the colliding value.
+> | shape | n | examples |
+> |---|---|---|
+> | key is a **PREFIX of the value** | 8 | ORCA (`pos` w/ payload), `almond_water_effect` (Entity left out), `smiley_defense` (lethal), `light` cones, manca swarm, grazing, `crab_contact_damage` (lethal) |
+> | shared **stream/counter drawn in query order** | 4 | `fire_laser` (**G0**), `update_lasers`, `nest_reproduce`, `parasite_burst` |
+> | tiebreak **derived from the tied quantity** | 1 | **`GibKey`** hashed the death position it existed to disambiguate (**G0c**) |
+> | **latch-once cache** racing an async asset | 1 | `bake_autogib` waited for the body, never the gun |
+> | tiebreak that is a **mathematical no-op** | 1 | the laser's `(s, point)` — `point` is `f(s)` |
+> | **no sort at all**, no helper to call | 1 | `scout_mark_prey` — `sort_rally_deposits` did not exist |
 >
-> Crabs die on bit-identical coordinates constantly: `clamp_to_patch` pins a crab pressed to a wall onto the
-> same float. That is why `0xA11CE` (74 kills) diverged and `0x5C09191` (47 kills) did not.
+> ## Why enforcement, not more fixes
 >
-> **It was found by the lint, in one second — not by the bisect.** Seven sessions-worth of hand-bisecting
-> narrowed it to a tick and never named it. `util::sort_total_by_key_at` panicked on the first tied key and
-> printed the file, the line, and the duplicate. See "The lesson" at the end of this document.
+> **Six of the sixteen shipped with a comment asserting the exact property they lacked.** Not carelessness —
+> this class is genuinely invisible to reading:
+>
+> | site | the comment claimed | the truth |
+> |---|---|---|
+> | ORCA sort | "a pure function of the neighbour SET" | position-only; coincident agents permute the LP |
+> | `almond_water_effect` | "sorted by `(cell, current, pos)` … the same discipline `snapshot_hash` uses" | `Entity` collected, left OUT of the key |
+> | `smiley_defense` | "WHICH crabs die … must not depend on unstable entity ordering" | position-only, on a **lethal** pick |
+> | `GibKey` | "two chunks at a bit-identical spot would otherwise be ordered by unstable entity order" | the tiebreak was a function of that spot |
+> | `parasite_burst` | "a stable geometric order … so the brood seq draw + population cap are reproducible" | position-only; coincident hosts tie |
+> | `crab_contact_damage` | "lowest world position among the biters, **a stable geometric key**" | crabs pile onto the boss; they sit at identical floats |
+>
+> I added a seventh myself: I annotated `parasite_burst`'s sort `// SORT-OK: per-manca spawn seed, unique`
+> during the bulk pass. The key was position bits. My annotation silenced the check that would have caught
+> a real bug — three hours after I wrote "don't trust a comment claiming a total order". **A bulk-annotation
+> pass is a bulk-assertion pass.**
+>
+> Now mechanical: `sort_total!` panics naming the site and the duplicated key (reintroduce the
+> `smiley_defense` bug → red in 1.6 s); `util::sort_value_canonical` states the interchangeable-ties claim;
+> `tests/determinism_lint.rs` fails the hard gate on any unannotated sort (all 42 declare a contract).
+>
+> ## What actually found them
+>
+> **Not the bisect.** A full session of bisecting narrowed G0c to one tick and a pair of crabs and never
+> named it; the lint named it in **one second**. A bisect shows where a divergence SURFACED, not which of a
+> dozen sorts fell through to query order.
+>
+> **Five oracles, because each blind spot hid a bug.** `snapshot_hash` folds only `(Transform, Health)`:
+> - `field_hash` — the grids.
+> - `gib_hash` — gibs have no `Health`. It led the actors by **316 ticks** on the gun-bake race; bisecting
+>   the actor hash alone lands on the wrong system with total confidence.
+> - `bolt_hash` — bolts have a `Transform`, no `Health`. It earned its keep by **excluding** a suspect: I
+>   expected bolts to lead, they didn't, and that proved the laser tie-break was the only explanation left.
+> - `crab_rows` — identity-keyed. `snapshot_rows` is anonymous BY DESIGN (right for a hash; ids are
+>   recycled) and that is **actively harmful in a diff**: it reported "one crab, dhp = 0.868240", a precise,
+>   coherent, entirely fictional event. 0.868240 was just `3.5922 − 2.7240` — the gap between two DIFFERENT
+>   crabs, from pairing unrelated rows. I spent an hour matching it against every damage knob and found a
+>   0.03%-off near-match to the pile bonus. Only the type signature (`With<Prey>, Without<Crab>`) stopped
+>   me. **A diff without identity does not lose information; it fabricates plausible stories.**
+>
+> **The mutant guard is the coverage that was missing.** The authored guard ran green for months on ONE
+> lucky seed while `0xA11CE` split three ways, and green on the authored genome while the search — which
+> evaluates MUTANTS — scored noise. It turned "search_parallel is red" (which names nothing) into
+> "mutant #4, world 0x5c09191, 2 distinct" — a reproducer.
+>
+> ## Method notes that cost real time
+>
+> - **A quiet box hides this class completely.** 12/12 identical with G0 live. Every probe needs load.
+> - **The probe's own overhead is part of the experiment.** Hashing four oracles per tick suppressed the
+>   bug: 10/10 identical at `every=1`, reproducible at `every=30`. Narrow by shortening the EPISODE, not by
+>   thickening the sampling.
+> - **Bisect and row-diff must use the SAME sample set.** The divergent tick varies per run; a fresh set
+>   for the diff compares unrelated pairs (this produced a bogus 8-row diff once).
+> - **Rep counts are sampling noise.** 3/8 → 2/8 → 4/8 across fixes is not a trend on a ~25% event.
+> - **Removing one suspect proves nothing when several coexist.** The aim-scatter A/B was read "REFUTED";
+>   it was the root cause.
 
-## RESOLVED — root cause and fix
+---
+
+## The original filing (session 1) — kept for the method
+
+### G0 — root cause and fix
 
 **Root cause: `laser::fire_laser` drew the aim-scatter RNG in raw ECS query order.**
 

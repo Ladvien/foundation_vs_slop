@@ -23,34 +23,31 @@ harness (`src/sim_harness.rs`). Its fitness stack is **witnessed learnable-surpr
 gated by a `minimal_criterion`.
 
 **Identified gaps** (the roadmap closes these):
-- **G0 / G0b / G0c — FIXED. G0d — STILL OPEN. The gap is NOT yet closed.** *Search rollouts were not
-  reproducible* — identical evaluations scored ~6% apart, so every search below was optimizing partly-noisy
-  fitness. `replay::search_rollouts_are_reproducible_under_load` is now green on **both** held-in seeds (12
-  rollouts × 7200 ticks × 2 worlds, under CPU load, bit-identical) — but that guard runs the **authored**
-  genome, and **`tests/search_parallel.rs` is still red**, so the *search* (which evaluates **mutated**
-  genomes) is not yet proven reproducible. **Archives remain unproven for `train apply` until it is green.**
-  Read the green guard as covering exactly what it tests and no more — this investigation has now been burned
-  three times by generalising a green light. Root causes found so far:
-  - **G0** — `laser::fire_laser` drew aim-scatter from a **shared stream in raw ECS query order**, so two
-    units firing on one tick could swap cones and send a bolt at a different hostile.
-  - **G0b** — `config.ron` held a machine-baked levels elite instead of the authored level, so the archive
-    came back empty and `search_parallel` never reached its real assertion.
-  - **G0c** — **`GibKey` was derived from the death origin position**, so it could not break the position tie
-    it existed to break: two creatures dying on one coordinate minted identical keys,
-    `crab::assign_meat_targets`' sort tied, and crabs committed to different meat chunks per run. Crabs die
-    on bit-identical coordinates routinely (`clamp_to_patch` pins them to the same float), which is why
-    `0xA11CE` (74 kills) diverged and `0x5C09191` (47) did not. Fixed with a monotonic `GibSeq` mixed into
-    the key, made deterministic by sorting the `GoreQueue` canonically at its single consumer.
-  Ten order-dependence bugs of this class were fixed in total (`fire_laser`, `update_lasers` incl. a
-  `LastAttacker` last-writer-wins into instakill targeting, the ORCA tiebreak, `almond_water_effect`,
-  `smiley_defense`'s lethal cull pick, `nest_reproduce`'s shared spawn seq, `crab_jump`'s landing bite,
-  `light`'s cone compose, the manca swarm hash, and `GibKey`).
-  **The durable outcome is the enforcement, not the fixes.** This class rested on ~dozens of query-iterating
-  sites each remembering a stable total order, enforced only by comments — and four sites *documented the
-  exact trap they fell into*. It is now mechanical: `sort_total!` panics on a tied key naming the site,
-  `util::sort_value_canonical` states the interchangeable-ties claim, and `tests/determinism_lint.rs` fails
-  the hard gate on any unannotated sort. The lint found G0c in **one second** after a whole session of
-  bisecting failed to name it. Full diagnosis: `2026-07-16-search-rollout-nondeterminism.md`.
+- **G0 — CLOSED (2026-07-16). The search is reproducible.** *Search rollouts were not reproducible* —
+  identical evaluations scored ~6% apart, so every search below was optimizing noise. All four sub-gaps are
+  fixed and pinned by tests that were written to fail: `search_rollouts_are_reproducible_under_load`
+  (authored genome, **both** held-in seeds, under CPU load),
+  `search_rollouts_of_mutants_are_reproducible_under_load` (8 mutants × 3 reps × both seeds × 7200 ticks —
+  the genomes the search ACTUALLY evaluates), and `tests/search_parallel.rs` (`jobs=1 ≡ jobs=N`,
+  byte-identical archives through the batch emitter, worker pool and common-opponent re-eval).
+  **Archives are trustworthy for `train apply`.**
+  - **G0** — `laser::fire_laser` drew aim-scatter from a shared stream in raw ECS query order.
+  - **G0b** — `config.ron` held a machine-baked levels elite, so the archive came back empty.
+  - **G0c** — **`GibKey` was derived from the death position**, so it could not break the position tie it
+    existed to break.
+  - **G0d** — three more, all invisible to the authored genome: the **autogib bake raced the gun's async
+    scene** (a latch-once cache that waited for the body and never the held item — the documented GLB
+    root entropy reaching gameplay through the gib ring); the **laser's hit tie-break was a mathematical
+    no-op** (`point` is `f(s)`, so `(s, point)` ranks by `s` alone); and **`crab_contact_damage` picked the
+    boss's retaliation victim by position only** — crabs pile onto the boss, so the biters sit at identical
+    floats and it executed a different crab per run.
+  **Sixteen bugs, four species. The durable output is the enforcement, not the fixes** — six shipped with a
+  comment asserting the exact property they lacked (and I added a seventh wrong annotation myself). Now
+  mechanical: `sort_total!` panics naming the tied site; `tests/determinism_lint.rs` fails the hard gate on
+  any unannotated sort; five oracles (snapshot/field/gib/bolt/crab-identity), because every blind spot hid a
+  bug; and a guard that runs **mutants**, since the authored genome is the one configuration the search never
+  evaluates. Full diagnosis, the ruled-out table and the method notes:
+  `2026-07-16-search-rollout-nondeterminism.md`.
 - **Process footgun — FIXED (2026-07-16):** `apply_archive` re-pinned the replay goldens automatically, at
   odds with TESTING.md (*"a deliberate, human-reviewed act — never auto-approve a diff"*), and `splice_block`
   wrote bare serialized RON, destroying every comment in the slices it rewrote. A bake could silently replace
