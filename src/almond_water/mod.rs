@@ -139,9 +139,13 @@ pub struct AlmondWaterDynamics {
     pub forage_wounded_frac: f32,
 }
 
+/// MUST match the `almond_water:` gameplay knobs in `assets/config/config.ron`.
+///
+/// **Never put comments inside `fn default()`.** `train apply --dim world` rewrites that body verbatim from
+/// the baked elite (`regen_default` in `src/bin/train.rs` brace-matches and replaces the whole body), so
+/// anything in there is deleted by the first bake. Document above this impl instead.
 impl Default for AlmondWaterDynamics {
     fn default() -> Self {
-        // MUST match the `almond_water:` gameplay knobs in `assets/config/config.ron`.
         Self {
             strong_seep: 8.0,
             evaporate: 0.05,

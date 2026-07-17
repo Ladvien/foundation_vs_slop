@@ -46,7 +46,7 @@ impl Default for AudioSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
+            dungeon_seeds: crate::squad_ai::coevolve::HELD_IN_SEEDS.to_vec(),
             episode_ticks: 1800,
         }
     }

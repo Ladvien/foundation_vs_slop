@@ -27,7 +27,7 @@ use foundation_vs_slop::sim_harness::{
 };
 use foundation_vs_slop::squad_ai::coevolve::{
     brains_of, mutate_squad_feasible, search, squad_archive_doc, swarm_archive_doc, sweep_prior,
-    world_archive_doc, SearchConfig, SearchResult, SquadGenome, SwarmGenome, Templates,
+    world_archive_doc, SearchConfig, SearchResult, SquadGenome, SwarmGenome, Templates, HELD_IN_SEEDS,
 };
 use foundation_vs_slop::squad_ai::evaluate::{rollout, rollout_with_belief};
 use foundation_vs_slop::squad_ai::interest::Interest;
@@ -60,6 +60,27 @@ const RL_ARCHIVE_PATH: &str = "assets/config/elites_policy.ron";
 const POET_ARCHIVE_PATH: &str = "assets/config/elites_poet.ron";
 /// Where `--islands N` writes each island's archive + log.
 const ISLANDS_DIR: &str = "islands_out";
+
+/// **The bake ledger** — append-only, tracked, one record per `train apply` / `train all --apply` phase.
+///
+/// Git already records *what* a bake changed: `config.ron` and `tests/replay.rs` are both tracked, so
+/// `git log -p assets/config/config.ron` is the history of every baked value and `git log -p tests/replay.rs`
+/// is the history of every golden. Two things git cannot tell you, which this file exists to record:
+///
+/// 1. **Which elite caused it.** The archives are gitignored (reproducible outputs, not source) and the next
+///    run overwrites them, so the elite behind a golden move is gone by morning. [`BAKE_HISTORY_DIR`] keeps
+///    the exact archive; this ledger names it.
+/// 2. **Attribution inside one run.** `train all --repin-goldens` bakes several phases before you ever see a
+///    diff, so git collapses them into one. One record per phase says which phase moved the golden, and how
+///    far.
+///
+/// That is what makes `--repin-goldens` reviewable rather than "trust me": re-pinning surrenders *change
+/// detection*, and this is the trail you review instead.
+const BAKE_LEDGER: &str = "BAKES.md";
+/// Snapshots of every archive that was ever baked, keyed by stamp + dim — so an old elite stays reviewable
+/// (and re-bakeable) after the next run overwrites `elites_*.ron`. Gitignored: machine artifacts, sometimes
+/// large; the ledger carries the reviewable summary.
+const BAKE_HISTORY_DIR: &str = "assets/config/bake_history";
 
 /// Rollouts consumed by one genome evaluation in the planned search, used to project the budget:
 /// 2 rollouts (the learnability pair — a mode-transition model fitted on rollout A must predict
@@ -127,10 +148,11 @@ enum Command {
 
 #[derive(Args)]
 struct BenchArgs {
-    /// Ticks per episode (1800 = 30 s @ 60 Hz).
-    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    /// Ticks per episode (7200 = 120 s @ 60 Hz — the measured episode floor; see `SearchConfig`). Budget
+    /// projections are only honest at the length the search will actually run.
+    #[arg(long, default_value_t = 7200, value_parser = parse_pos_u32)]
     ticks: u32,
-    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: 0x5C09191.
+    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: the held-in set.
     #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
     seeds: Vec<u64>,
     /// Throughput lever: FixedUpdate sub-steps per render pass (does not change physics).
@@ -140,17 +162,22 @@ struct BenchArgs {
 
 #[derive(Args)]
 struct ProbeArgs {
-    /// Ticks per episode (1800 = 30 s @ 60 Hz).
-    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    /// Ticks per episode (7200 = 120 s @ 60 Hz — the measured episode floor; see `SearchConfig`).
+    #[arg(long, default_value_t = 7200, value_parser = parse_pos_u32)]
     ticks: u32,
-    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: 0x5C09191.
+    /// Dungeon seeds (comma-separated; decimal or 0x-hex). Default: the **whole held-in set**, because a
+    /// calibration read from a subset is how a retired seed once got mistaken for a held-in one.
     #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
     seeds: Vec<u64>,
 }
 
-/// Shared flags for every search subcommand. Defaults are PRACTICAL search settings (30 gens × 16 children,
-/// 1800 ticks) — NOT `SearchConfig::default()`'s tiny 8/4/7200 — so a bare `cargo train evolve3` runs a
-/// useful search out of the box.
+/// Shared flags for every search subcommand. The search-EFFORT defaults are practical settings (30 gens ×
+/// 16 children) rather than `SearchConfig::default()`'s 8 × 4, so a bare `cargo train evolve3` runs a useful
+/// search out of the box.
+///
+/// `ticks` is NOT an effort knob and is not traded off against them: it is the measured episode floor, and
+/// it matches `SearchConfig::default()`. Below it the criterion is balanced on a knife's edge and the
+/// archives thin out (see `SearchConfig`'s doc for the measurement).
 #[derive(Args, Clone)]
 struct SearchArgs {
     /// Generations (POET: outer iterations).
@@ -159,8 +186,8 @@ struct SearchArgs {
     /// Children proposed per generation (per side, for co-evolution).
     #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
     batch: u32,
-    /// Ticks per rollout episode.
-    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    /// Ticks per rollout episode (7200 = 120 s @ 60 Hz — the measured floor; see `SearchConfig`).
+    #[arg(long, default_value_t = 7200, value_parser = parse_pos_u32)]
     ticks: u32,
     /// MAP-Elites archive resolution (bins per descriptor axis).
     #[arg(long, default_value_t = 8, value_parser = parse_pos_usize)]
@@ -188,6 +215,20 @@ struct SearchArgs {
     /// searches only; `evolve`/`evolve3` write fixed multi-archive paths and must run alone).
     #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
     islands: usize,
+    /// With `--apply`: accept that the bake MOVES the deterministic goldens, and re-pin `tests/replay.rs`.
+    ///
+    /// Without this, a bake whose elite changes the shipped sim aborts and reports the drift — see
+    /// `apply_archive`. That default is right for a bake you did not ask for; it is wrong for a search you
+    /// deliberately ran to change the game, which is why `--apply` without this is refused UP FRONT rather
+    /// than hours later.
+    ///
+    /// What you give up by passing it is **change detection**, not determinism: `recompute_goldens_stable`
+    /// still requires every repeated measurement to agree, so a nondeterministic core reds here regardless.
+    /// What you must NOT conclude afterwards is that a green `cargo test --features test-harness` validates
+    /// the training — it passes by construction once the goldens are re-pinned. Review `git diff` and the
+    /// elite archives; the test suite only tells you the sim is reproducible.
+    #[arg(long)]
+    repin_goldens: bool,
     /// Force plain per-generation lines instead of the live progress bar (for logs / CI).
     #[arg(long)]
     no_progress: bool,
@@ -206,8 +247,8 @@ struct AllArgs {
     /// Children proposed per generation (per side, for co-evolution).
     #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
     batch: u32,
-    /// Ticks per rollout episode.
-    #[arg(long, default_value_t = 1800, value_parser = parse_pos_u32)]
+    /// Ticks per rollout episode (7200 = 120 s @ 60 Hz — the measured floor; see `SearchConfig`).
+    #[arg(long, default_value_t = 7200, value_parser = parse_pos_u32)]
     ticks: u32,
     /// MAP-Elites archive resolution (bins per descriptor axis).
     #[arg(long, default_value_t = 8, value_parser = parse_pos_usize)]
@@ -230,6 +271,15 @@ struct AllArgs {
     /// config as it finishes and runs the determinism verify — pass this to leave `config.ron`/goldens alone.
     #[arg(long)]
     no_apply: bool,
+    /// Required to bake: accept that the run MOVES the deterministic goldens, and re-pin them per phase.
+    ///
+    /// A search you ran on purpose is a change to the shipped sim, so its bake **will** move the goldens; the
+    /// per-bake default is to abort on that drift and let a human decide (`apply_archive` step 4). For an
+    /// unattended pipeline that would mean burning hours and then dying at the first phase, so `all` refuses
+    /// AT STARTUP unless you either accept the movement here or pass `--no-apply`. See `SearchArgs`'s field
+    /// for what accepting actually costs you (change detection — not determinism).
+    #[arg(long)]
+    repin_goldens: bool,
     /// Force plain per-generation lines instead of the live progress bar (for logs / CI).
     #[arg(long)]
     no_progress: bool,
@@ -282,11 +332,11 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Bench(a) => {
-            bench(a.ticks, &seeds_or(&a.seeds, &[0x5C09191]), a.speed);
+            bench(a.ticks, &seeds_or(&a.seeds, &HELD_IN_SEEDS), a.speed);
             Ok(())
         }
-        Command::Probe(a) => probe(a.ticks, &seeds_or(&a.seeds, &[0x5C09191])),
-        Command::Prior(a) => prior(a.ticks, &seeds_or(&a.seeds, &[0x5C09191])),
+        Command::Probe(a) => probe(a.ticks, &seeds_or(&a.seeds, &HELD_IN_SEEDS)),
+        Command::Prior(a) => prior(a.ticks, &seeds_or(&a.seeds, &HELD_IN_SEEDS)),
         Command::Evolve(a) => run_search(SearchKind::Evolve, a),
         Command::Evolve3(a) => run_search(SearchKind::Evolve3, a),
         Command::Levels(a) => run_search(SearchKind::Levels, a),
@@ -393,7 +443,7 @@ struct SearchOutcome {
 /// `--no-apply` to skip baking). The `rl` neural policy has no config slice, so it is never baked — its elite
 /// lands in its archive, loaded via the `FVS_POLICY_ELITE` overlay.
 fn run_all(a: AllArgs) -> Result<(), String> {
-    let seeds = seeds_or(&a.seeds, &[0x5C09191, 0x1CE5, 0xB0BA]);
+    let seeds = seeds_or(&a.seeds, &HELD_IN_SEEDS);
     // Auto (0) → every logical core. Phases run sequentially, so each saturates the box in turn: `evolve3`
     // fans `jobs` batch-emitter workers, the single-output phases fan `islands` independent searches.
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -401,9 +451,34 @@ fn run_all(a: AllArgs) -> Result<(), String> {
     let islands = if a.islands == 0 { cores } else { a.islands };
     let apply = !a.no_apply;
 
+    // FAIL FAST. A phase's bake aborts if its elite moved the goldens, and a real elite from a real search
+    // moves them — that is what a successful search MEANS. Discovering it after the first multi-hour phase,
+    // with three phases left unrun, is the worst possible time. Decide it here, in the first second.
+    if apply && !a.repin_goldens {
+        return Err(format!(
+            "`train all` bakes each phase, and a bake whose elite changes the shipped sim MOVES the \
+             deterministic goldens — which a real search's elite will, because that is what a successful \
+             search MEANS. Baking with the goldens pinned aborts mid-pipeline, hours in, with the remaining \
+             phases unrun. Choose now rather than then:\n\
+             \n\
+             --repin-goldens : bake each phase and re-pin as you go, accepting that the goldens move.\n\
+             Determinism is still proven — `recompute_goldens_stable` requires every repeated measurement to \
+             agree, so a nondeterministic core still reds. What you give up is CHANGE DETECTION, and note \
+             that a green `cargo test --features test-harness` afterwards then proves NOTHING about the \
+             training: the goldens were just set to whatever the code emits, so the suite passes by \
+             construction. Review `git diff {CONFIG_PATH}` and {BAKE_LEDGER} instead — that ledger exists \
+             precisely because this flag surrenders the automatic check.\n\
+             \n\
+             --no-apply : search every phase and bake nothing. The archives are written for you to read and \
+             bake by hand. NOTE: phases then stop composing — each search runs against the same base config, \
+             so baking all of them afterwards ships a combination no search ever evaluated together.\n"
+        ));
+    }
+
     println!(
-        "train all — cores={cores}, jobs={jobs}, islands={islands}, batch={}, generations={}, apply={apply}",
-        a.batch, a.generations
+        "train all — cores={cores}, jobs={jobs}, islands={islands}, batch={}, generations={}, apply={apply}, \
+         repin_goldens={}",
+        a.batch, a.generations, a.repin_goldens
     );
 
     // A per-phase SearchArgs from the shared flags.
@@ -419,10 +494,11 @@ fn run_all(a: AllArgs) -> Result<(), String> {
         out: None,
         apply,
         islands,
+        repin_goldens: a.repin_goldens,
         no_progress: a.no_progress,
         island_child: false,
     };
-    let banner = |i: u32, name: &str| println!("\n═══ train all — phase {i}/5: {name} ═══");
+    let banner = |i: u32, name: &str| println!("\n═══ train all — phase {i}/6: {name} ═══");
 
     banner(1, "prior (baseline the shipped brain)");
     prior(a.ticks, &seeds)?;
@@ -430,9 +506,17 @@ fn run_all(a: AllArgs) -> Result<(), String> {
     run_search(SearchKind::Levels, phase(1, islands, false, apply))?;
     banner(3, "audio (acoustic stimulus)");
     run_search(SearchKind::Audio, phase(1, islands, false, apply))?;
-    banner(4, "evolve3 (squad × swarm × world, incl. the evolvable Almond Water dynamics)");
+    // `behavior` (89 knobs of `BehaviorTuning`) was absent from this pipeline entirely, so "retrain
+    // everything" covered 3 of the 4 bakeable dims (`elite_overlay::Dim`) and the fourth could only be
+    // reached by running `train behavior` by hand. It sits BEFORE `evolve3` deliberately: it tunes the base
+    // the squad brains run on, and the co-evolution should radiate from the tuned base rather than have it
+    // move underneath the archives afterwards. Baking it re-baselines the prior (see `bake_winner`), which is
+    // what makes ordering safe here at all.
+    banner(4, "behavior (squad brain tuning — speeds, bands, thresholds)");
+    run_search(SearchKind::Behavior, phase(1, islands, false, apply))?;
+    banner(5, "evolve3 (squad × swarm × world, incl. the evolvable Almond Water dynamics)");
     run_search(SearchKind::Evolve3, phase(jobs, 1, false, apply))?;
-    banner(5, "rl (neuroevolve the squad policy — now perceives water / belief / anosmia)");
+    banner(6, "rl (neuroevolve the squad policy — now perceives water / belief / anosmia)");
     run_search(SearchKind::Rl, phase(1, islands, true, false))?; // policy has no config slice → never baked
     println!(
         "  → trained policy is at {}. Use it in-game with FVS_POLICY_ELITE={}",
@@ -449,7 +533,7 @@ fn run_all(a: AllArgs) -> Result<(), String> {
 
 fn run_search(kind: SearchKind, mut a: SearchArgs) -> Result<(), String> {
     if a.seeds.is_empty() {
-        a.seeds = vec![0x5C09191, 0x1CE5, 0xB0BA];
+        a.seeds = HELD_IN_SEEDS.to_vec();
     }
     if a.seeds.len() < 2 {
         return Err(
@@ -489,16 +573,27 @@ fn run_search(kind: SearchKind, mut a: SearchArgs) -> Result<(), String> {
     }
 
     if a.apply {
-        let dim = kind.apply_dim()?;
-        println!();
-        println!(">> --apply: baking the {} elite {} into the shipped config…", kind.cli_name(), outcome.out.display());
-        // `repin_goldens: false` — an unattended bake must never move a golden. If this elite changes the
-        // shipped sim, the run ABORTS with the drift and a human decides. That is the whole lesson of the
-        // 2026-07-16 incident (see `apply_archive` step 4).
-        apply_archive(dim, &outcome.out, None, false)?;
-        println!(">> regenerating the baseline prior for the new tuning…");
-        prior(a.ticks, &a.seeds)?;
+        bake_winner(kind, &a, &outcome.out)?;
     }
+    Ok(())
+}
+
+/// Bake a finished search's winner, then re-baseline the prior against the tuning that just landed.
+///
+/// **The one bake path for every search.** `run_search`'s single-process arm and `run_islands`' fan-out arm
+/// both call it, so `--apply` cannot come to mean two different things depending on `--islands` — these were
+/// two copies of the same block, each hardcoding `repin_goldens: false`, and a fix applied to one would have
+/// silently missed the other.
+///
+/// The prior re-sweep is not optional: it models the game *as shipped*, and the bake just changed what ships.
+/// (`ensure_prior_fresh` also catches this on the next search, by mtime.)
+fn bake_winner(kind: SearchKind, a: &SearchArgs, out: &Path) -> Result<(), String> {
+    let dim = kind.apply_dim()?;
+    println!();
+    println!(">> --apply: baking the {} elite {} into the shipped config…", kind.cli_name(), out.display());
+    apply_archive(dim, out, None, a.repin_goldens)?;
+    println!(">> regenerating the baseline prior for the new tuning…");
+    prior(a.ticks, &a.seeds)?;
     Ok(())
 }
 
@@ -757,16 +852,103 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
     );
 
     if a.apply {
-        let dim = kind.apply_dim()?;
-        println!(">> --apply: baking {win_out} into the shipped config…");
-        // `repin_goldens: false` — see the sibling call in `run_search`: unattended bakes never move a ruler.
-        apply_archive(dim, Path::new(&win_out), None, false)?;
-        println!(">> regenerating the baseline prior for the new tuning…");
-        prior(a.ticks, &a.seeds)?;
+        bake_winner(kind, &a, Path::new(&win_out))?;
     } else if let Ok(dim) = kind.apply_dim() {
         println!("   ship it:  train apply {} {win_out}    (or re-run with --apply)", dim_cli_name(dim));
     }
     Ok(())
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` from the system clock. Dependency-free — there is no date crate in this tree, and
+/// one stamp is not worth one. Civil-from-days is Howard Hinnant's algorithm ("chrono-Compatible Low-Level
+/// Date Algorithms"). A clock before 1970 is an `Err`, not a fudged zero: the ledger's whole value is that
+/// its record is trustworthy.
+fn utc_stamp() -> Result<String, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock is before the unix epoch — cannot stamp the bake ledger: {e}"))?
+        .as_secs() as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    Ok(format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z"))
+}
+
+/// Snapshot the baked archive and append one record to [`BAKE_LEDGER`]. Returns the snapshot's path.
+///
+/// Called only on a bake that actually landed — a run that aborted on golden drift changed nothing worth
+/// recording, and a ledger that logs non-events is one nobody reads.
+fn record_bake(
+    dim: Dim,
+    archive: &Path,
+    desc: &str,
+    before: (u64, u64),
+    after: (u64, u64),
+    repinned: bool,
+    touched: &[String],
+) -> Result<String, String> {
+    use std::fmt::Write as _;
+
+    let stamp = utc_stamp()?;
+    std::fs::create_dir_all(BAKE_HISTORY_DIR)
+        .map_err(|e| format!("{BAKE_HISTORY_DIR}: create: {e}"))?;
+    let kept = format!("{BAKE_HISTORY_DIR}/{}-{}.ron", stamp.replace(':', "-"), dim_cli_name(dim));
+    std::fs::copy(archive, &kept)
+        .map_err(|e| format!("{kept}: snapshot the baked archive: {e}"))?;
+
+    let mut rec = String::new();
+    if !Path::new(BAKE_LEDGER).exists() {
+        rec.push_str(
+            "# Bake history\n\n\
+             Append-only. One record per `train apply` / `train all --apply` phase, written by\n\
+             `train`'s `record_bake`. **Do not hand-edit** — and do not delete a record to make a diff look\n\
+             tidy; a bake you would rather not have recorded is exactly the one worth reading later.\n\n\
+             Git already holds the *values* a bake changed (`git log -p assets/config/config.ron`) and the\n\
+             goldens (`git log -p tests/replay.rs`). This file adds the two things git cannot: WHICH elite\n\
+             caused a change (the archives are gitignored and the next run overwrites them — the snapshot\n\
+             under `assets/config/bake_history/` is the only surviving copy), and per-phase attribution\n\
+             inside a single `train all` run, which git otherwise collapses into one diff.\n\n\
+             A moved golden is only reviewable because of this trail. Read it before you trust a run.\n",
+        );
+    }
+    let _ = write!(
+        rec,
+        "\n## {stamp} — {dim_name}\n\n\
+         - elite:    {desc}\n\
+         - archive:  {archive_disp}\n\
+         - snapshot: {kept}\n\
+         - goldens:  {verdict}\n",
+        dim_name = dim_cli_name(dim),
+        archive_disp = archive.display(),
+        verdict = if repinned {
+            format!(
+                "MOVED and re-pinned\n  \
+                 - snapshot: 0x{:016x} -> 0x{:016x}\n  \
+                 - field:    0x{:016x} -> 0x{:016x}",
+                before.0, after.0, before.1, after.1
+            )
+        } else {
+            format!("unchanged (snapshot 0x{:016x}, field 0x{:016x})", after.0, after.1)
+        },
+    );
+    let _ = write!(rec, "- files:    {}\n", touched.join(", "));
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(BAKE_LEDGER)
+        .map_err(|e| format!("{BAKE_LEDGER}: open for append: {e}"))?;
+    std::io::Write::write_all(&mut f, rec.as_bytes())
+        .map_err(|e| format!("{BAKE_LEDGER}: append: {e}"))?;
+    Ok(kept)
 }
 
 /// The `train apply` dim name for a `Dim`.
@@ -1330,6 +1512,11 @@ fn apply_archive(
             touched.push("src/behavior_tuning.rs".into());
         }
         Dim::World => {
+            // All four slices `world_genome` encodes, matching `apply_dim(Dim::World)`. If the permanent
+            // bake spliced fewer slices than the runtime overlay applies, one elite would mean two different
+            // games — and its archived fitness would match neither.
+            use foundation_vs_slop::almond_water::AlmondWaterDynamics;
+            use foundation_vs_slop::light::LightingDynamics;
             cfg_text = splice_block(&cfg_text, "sim", &ron_slice(&base.sim)?, &ron_slice(&gc.sim)?)?;
             cfg_text = splice_block(
                 &cfg_text,
@@ -1337,10 +1524,42 @@ fn apply_archive(
                 &ron_slice(&base.ai_tuning)?,
                 &ron_slice(&gc.ai_tuning)?,
             )?;
+            cfg_text = splice_block(&cfg_text, "mold", &ron_slice(&base.mold)?, &ron_slice(&gc.mold)?)?;
+            // The `almond_water:` block also holds structural + visual knobs the search never touches, so
+            // splice only the evolvable subset — its field names are a flat subset of the authored block,
+            // and both sides are the same type, so `splice_block`'s shape check passes by construction.
+            cfg_text = splice_block(
+                &cfg_text,
+                "almond_water",
+                &ron_slice(&AlmondWaterDynamics::from_config(&base.almond_water))?,
+                &ron_slice(&AlmondWaterDynamics::from_config(&gc.almond_water))?,
+            )?;
+            // Same subset trick for `lighting:` — only the two gameplay dials evolve; the visual knobs are
+            // authored and must survive the bake untouched.
+            cfg_text = splice_block(
+                &cfg_text,
+                "lighting",
+                &ron_slice(&LightingDynamics::from_config(&base.lighting))?,
+                &ron_slice(&LightingDynamics::from_config(&gc.lighting))?,
+            )?;
             regen_default("src/sim.rs", "SimTuning", &format!("{:#?}", gc.sim))?;
             regen_default("src/ai/tuning.rs", "AiTuning", &format!("{:#?}", gc.ai_tuning))?;
+            regen_default("src/mold.rs", "MoldConfig", &format!("{:#?}", gc.mold))?;
+            regen_default(
+                "src/almond_water/mod.rs",
+                "AlmondWaterDynamics",
+                &format!("{:#?}", AlmondWaterDynamics::from_config(&gc.almond_water)),
+            )?;
+            regen_default(
+                "src/light.rs",
+                "LightingDynamics",
+                &format!("{:#?}", LightingDynamics::from_config(&gc.lighting)),
+            )?;
             touched.push("src/sim.rs".into());
             touched.push("src/ai/tuning.rs".into());
+            touched.push("src/mold.rs".into());
+            touched.push("src/almond_water/mod.rs".into());
+            touched.push("src/light.rs".into());
         }
         Dim::Audio => {
             cfg_text =
@@ -1408,20 +1627,36 @@ fn apply_archive(
         touched.push(REPLAY_PATH.to_string());
     }
 
-    // 5 + 6. Report + next steps.
+    // 5. Record it. Before the report, not after: the trail must survive an operator who never reads stdout
+    //    (every unattended `train all` phase). Re-pinning surrenders change detection, so this ledger is the
+    //    thing a reviewer reads instead — it is not optional bookkeeping, it is the review surface.
+    let kept = record_bake(dim, Path::new(&archive), &desc, committed, (snap, field), drifted, &touched)?;
+    touched.push(BAKE_LEDGER.to_string());
+
+    // 6 + 7. Report + next steps.
     println!();
     if drifted {
         println!("baked. goldens MOVED and were re-pinned (--repin-goldens): snapshot 0x{snap:016x}, field 0x{field:016x}");
+        println!("  was: snapshot 0x{:016x}, field 0x{:016x}", committed.0, committed.1);
     } else {
         println!("baked. goldens unchanged: snapshot 0x{snap:016x}, field 0x{field:016x}");
     }
+    println!("recorded in {BAKE_LEDGER}; archive kept at {kept}");
     println!("files changed:");
     for f in &touched {
         println!("  {f}");
     }
     println!();
     println!("NEXT: regenerate the baseline prior for the new shipped tuning:  train prior");
-    println!("      review:  git diff        verify:  cargo test --features test-harness");
+    if drifted {
+        // A re-pinned golden makes the suite pass by construction — say so where it will actually be read,
+        // so nobody mistakes a green run for evidence the training was good.
+        println!("      REVIEW THIS: the goldens moved, so `cargo test --features test-harness` now passes by");
+        println!("      construction and proves only that the sim is reproducible — NOT that the bake was good.");
+        println!("      The reviewable artefacts are:  git diff {CONFIG_PATH}   and   {BAKE_LEDGER}");
+    } else {
+        println!("      review:  git diff        verify:  cargo test --features test-harness");
+    }
     println!("      revert:  git checkout -- {}", touched.join(" "));
     Ok(())
 }
@@ -2219,6 +2454,21 @@ mod tests {
             ("mycelia", ron_slice(&gc.mycelia).expect("ser mycelia")),
             ("metropolis", ron_slice(&gc.placement.metropolis).expect("ser metropolis")),
             ("density", ron_slice(&gc.placement.density).expect("ser density")),
+            ("mold", ron_slice(&gc.mold).expect("ser mold")),
+            // These two splice a SUBSET type (the evolvable dials only), so this also pins that a subset
+            // whose field names are a flat subset of the authored block round-trips byte-identically.
+            (
+                "almond_water",
+                ron_slice(&foundation_vs_slop::almond_water::AlmondWaterDynamics::from_config(
+                    &gc.almond_water,
+                ))
+                .expect("ser almond dynamics"),
+            ),
+            (
+                "lighting",
+                ron_slice(&foundation_vs_slop::light::LightingDynamics::from_config(&gc.lighting))
+                    .expect("ser lighting dynamics"),
+            ),
         ] {
             let out = splice_block(&text, name, &value, &value)
                 .unwrap_or_else(|e| panic!("splicing `{name}` with its own value must succeed: {e}"));

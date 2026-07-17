@@ -21,10 +21,13 @@
 use serde::Deserialize;
 
 use crate::ai::tuning::AiTuning;
+use crate::almond_water::AlmondWaterDynamics;
 use crate::audio_tuning::AudioTuning;
 use crate::behavior_tuning::BehaviorTuning;
 use crate::config::{GameConfig, PlacementDensity};
 use crate::dungeon::DungeonConfig;
+use crate::light::LightingDynamics;
+use crate::mold::MoldConfig;
 use crate::mycelia::MyceliaConfig;
 use crate::placement::solvers::metropolis::MetropolisWeights;
 use crate::sim::SimTuning;
@@ -32,7 +35,8 @@ use crate::squad_ai::policy::NeuralPolicy;
 
 /// Env var naming a `behavior` archive to overlay onto `gc.behavior`.
 pub const BEHAVIOR_ENV: &str = "FVS_BEHAVIOR_ELITE";
-/// Env var naming a `world` archive to overlay onto `gc.ai_tuning` + `gc.sim`.
+/// Env var naming a `world` archive to overlay onto `gc.ai_tuning` + `gc.sim` + `gc.mold` +
+/// `gc.almond_water` (the evolvable subset) — all four slices `world_genome` encodes.
 pub const WORLD_ENV: &str = "FVS_WORLD_ELITE";
 /// Env var naming an `audio` archive to overlay onto `gc.audio`.
 pub const AUDIO_ENV: &str = "FVS_AUDIO_ELITE";
@@ -54,12 +58,18 @@ struct BehaviorEntry {
     fitness: f32,
     behavior: BehaviorTuning,
 }
+/// All four slices `world_genome` encodes. Every field is **required**: a `serde(default)` here would let a
+/// pre-`mold`/`almond` archive load and silently ship only part of what the search evolved — the exact bug
+/// this mirror existed with for 23 knobs. A stale archive must fail loudly and be regenerated.
 #[derive(Deserialize)]
 struct WorldEntry {
     cell: (usize, usize),
     fitness: f32,
     ai: AiTuning,
     sim: SimTuning,
+    mold: MoldConfig,
+    almond: AlmondWaterDynamics,
+    lighting: LightingDynamics,
 }
 #[derive(Deserialize)]
 struct AudioEntry {
@@ -194,9 +204,16 @@ pub fn apply_dim(gc: &mut GameConfig, dim: Dim, spec: &str) -> Result<String, St
         Dim::World => {
             let e: WorldEntry = read_elite(spec, "world")?;
             let (cell, fit) = (e.cell, e.fitness);
+            // Mirrors `sim_harness`'s install of a `WorldConfig` — the search scored the elite through that
+            // exact mapping, so anything omitted here makes the baked config disagree with the fitness.
             gc.ai_tuning = e.ai; // NB: WorldConfig.ai maps to GameConfig.ai_tuning
             gc.sim = e.sim;
-            format!("world (ai_tuning+sim) <- {spec} (cell {cell:?}, fitness {fit:.3})")
+            gc.mold = e.mold;
+            e.almond.apply_to(&mut gc.almond_water); // evolvable gameplay knobs only
+            e.lighting.apply_to(&mut gc.lighting); // ditto — visual light knobs stay authored
+            format!(
+                "world (ai_tuning+sim+mold+almond_water+lighting) <- {spec} (cell {cell:?}, fitness {fit:.3})"
+            )
         }
         Dim::Audio => {
             let e: AudioEntry = read_elite(spec, "audio")?;
@@ -253,6 +270,87 @@ fn env(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every slice the world genome encodes must survive `apply_dim`.**
+    ///
+    /// This module shipped with `WorldEntry` naming only `ai` + `sim`, so `mold` and `almond` were silently
+    /// dropped: 23 of the world genome's 102 knobs were scored by the search and could never reach the game,
+    /// and an elite's archived fitness was unreproducible from the config `train apply` baked. Nothing failed
+    /// loudly, because serde deliberately ignores archive fields a mirror does not name (see the module doc)
+    /// — so the omission is invisible unless a test asserts each slice individually. `apply_dim` had no test
+    /// at all, which is why it went unnoticed.
+    ///
+    /// Assert every slice, one at a time. A blanket "it parsed" check would not have caught the original bug.
+    #[test]
+    fn world_apply_dim_lands_every_evolvable_slice() {
+        let mut gc = match crate::config::load_game_config() {
+            Ok(gc) => gc,
+            // The overlay env vars would double-apply; `apply_archive` refuses for the same reason.
+            Err(e) => panic!("load the shipped config: {e}"),
+        };
+
+        // Move every evolvable slice OFF its shipped value, so a dropped slice can't pass by coincidence.
+        let mut ai = gc.ai_tuning;
+        ai.rally.decay = 1.25;
+        let mut sim = gc.sim;
+        sim.fear.per_crab = 0.375;
+        let mut mold = gc.mold;
+        mold.dim_light = 0.125;
+        mold.seep_boost = 4.25;
+        let mut almond = AlmondWaterDynamics::from_config(&gc.almond_water);
+        almond.strong_seep = 12.5;
+        almond.heal_rate = 7.25;
+        let lighting = LightingDynamics { field_intensity: 2.5, photophobic_gain: 11.0 };
+
+        let doc = format!(
+            "(resolution: 8, coverage: 1, qd_score: 1.0, elites: [(cell: (0, 0), total_deaths: 0.0, \
+             total_lives: 0.0, fitness: 0.5, ai: {}, sim: {}, mold: {}, almond: {}, lighting: {})])",
+            ron::to_string(&ai).expect("ser ai"),
+            ron::to_string(&sim).expect("ser sim"),
+            ron::to_string(&mold).expect("ser mold"),
+            ron::to_string(&almond).expect("ser almond"),
+            ron::to_string(&lighting).expect("ser lighting"),
+        );
+        let path = std::env::temp_dir().join("fvs_apply_dim_world_roundtrip.ron");
+        std::fs::write(&path, &doc).expect("write the test archive");
+        let spec = path.to_str().expect("utf-8 temp path").to_string();
+
+        let desc = apply_dim(&mut gc, Dim::World, &spec).expect("apply the world elite");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(gc.ai_tuning, ai, "ai_tuning did not land");
+        assert_eq!(gc.sim, sim, "sim did not land");
+        assert_eq!(gc.mold, mold, "mold did not land — the original 7-knob drop");
+        assert_eq!(
+            AlmondWaterDynamics::from_config(&gc.almond_water),
+            almond,
+            "almond dynamics did not land — the original 16-knob drop"
+        );
+        assert_eq!(LightingDynamics::from_config(&gc.lighting), lighting, "lighting did not land");
+        assert!(desc.contains("cell (0, 0)"), "the description should name the cell: {desc}");
+    }
+
+    /// A stale archive (one written before a slice was added) must fail LOUDLY, not load and ship a partial
+    /// world. This is why `WorldEntry`'s fields carry no `#[serde(default)]`: a default would silently
+    /// resurrect the dropped-knob bug on every pre-existing archive.
+    #[test]
+    fn world_archive_missing_a_slice_is_a_loud_error() {
+        let mut gc = crate::config::load_game_config().expect("load the shipped config");
+        let doc = format!(
+            "(resolution: 8, coverage: 1, qd_score: 1.0, elites: [(cell: (0, 0), fitness: 0.5, ai: {}, \
+             sim: {})])",
+            ron::to_string(&gc.ai_tuning).expect("ser ai"),
+            ron::to_string(&gc.sim).expect("ser sim"),
+        );
+        let path = std::env::temp_dir().join("fvs_apply_dim_world_stale.ron");
+        std::fs::write(&path, &doc).expect("write the stale archive");
+        let spec = path.to_str().expect("utf-8 temp path").to_string();
+
+        let err = apply_dim(&mut gc, Dim::World, &spec)
+            .expect_err("an archive without mold/almond/lighting must be rejected");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("world"), "the error should name the dimension: {err}");
+    }
 
     #[test]
     fn parse_cell_and_spec() {

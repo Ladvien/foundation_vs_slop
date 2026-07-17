@@ -38,6 +38,12 @@ assets/config/elites_*.ron
 # rationale as elites_*.ron — machine-generated; the winner is applied via `train apply`, never committed here.
 islands_out/
 
+# Snapshots of every archive that was ever baked (`train apply` keeps one per bake so an old elite stays
+# reviewable after the next run overwrites `elites_*.ron`). Machine-generated and potentially large, same as
+# the archives they copy — but note the *ledger* that indexes them, BAKES.md, IS tracked: it is the review
+# trail for a moved golden, and a review trail nobody else can see is not one.
+assets/config/bake_history/
+
 # Claude Code per-project state (worktrees from other sessions, settings, transcripts) — never commit
 .claude/
 

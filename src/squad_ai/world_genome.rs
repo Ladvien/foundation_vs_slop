@@ -35,10 +35,10 @@ use crate::sim::{
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
 /// + rally × 3) + 52 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 9, boss 7,
-/// parasite 14). The 8th stigmergy channel is ATTENTION (observation), and the SCP-150 parasite is a
-/// host-killing species, so its lifecycle/lethality dials belong in the search that shapes the ecosystem's
-/// deaths and lives.
-pub const N: usize = 102;
+/// parasite 14) + 7 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is ATTENTION
+/// (observation), and the SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials
+/// belong in the search that shapes the ecosystem's deaths and lives.
+pub const N: usize = 104;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -143,18 +143,26 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 5.0),    // death_rumor_gain (poisoning → cyanide-reading nudge)
     (0.0, 30.0),   // forage_gain (wounded-crab water taxis strength)
     (0.0, 1.0),    // forage_wounded_frac (forage only at/below this health)
+    // ── LightingDynamics (the gameplay light the ecosystem steers on — see `light::LightingDynamics` for why
+    //    only these two of the `lighting:` slice evolve). Both floored at 0: `validate_config` requires
+    //    finite and >= 0, and 0 is a real world, not a degenerate one — the squad's flashlight still lights
+    //    the field, so fixtures simply stop contributing / idle crabs simply stop avoiding light.
+    (0.0, 4.0),    // field_intensity (gameplay illuminance per fixture in the LightField; shipped 1.0)
+    (0.0, 20.0),   // photophobic_gain (idle-crab push down the light gradient; shipped 6.0)
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldGenome(pub Vec<f32>);
 
-/// Flatten a `(AiTuning, SimTuning, MoldConfig)` into the fixed-order knob vector `BOUNDS`/`decode` agree on.
+/// Flatten a `(AiTuning, SimTuning, MoldConfig, AlmondWaterDynamics, LightingDynamics)` into the fixed-order
+/// knob vector `BOUNDS`/`decode` agree on.
 pub fn encode(
     ai: &AiTuning,
     sim: &SimTuning,
     mold: &crate::mold::MoldConfig,
     almond: &AlmondWaterDynamics,
+    lighting: &crate::light::LightingDynamics,
 ) -> WorldGenome {
     let mut v = Vec::with_capacity(N);
     // AiTuning: channels in FieldId slot order, then rally.
@@ -247,6 +255,9 @@ pub fn encode(
     v.push(almond.death_rumor_gain);
     v.push(almond.forage_gain);
     v.push(almond.forage_wounded_frac);
+    // LightingDynamics — the 2 evolvable gameplay light dials (in BOUNDS order); the visual knobs stay fixed.
+    v.push(lighting.field_intensity);
+    v.push(lighting.photophobic_gain);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     WorldGenome(v)
 }
@@ -400,8 +411,10 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
         forage_gain: f!(),
         forage_wounded_frac: f!(),
     };
+    // LightingDynamics — the 2 evolved gameplay light dials (encode order).
+    let lighting = crate::light::LightingDynamics { field_intensity: f!(), photophobic_gain: f!() };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
-    Ok(WorldConfig { ai, sim, mold, almond })
+    Ok(WorldConfig { ai, sim, mold, almond, lighting })
 }
 
 /// The shipped world as a genome — the band origin for [`mutate`] and the co-evolution's baseline.
@@ -411,6 +424,7 @@ pub fn authored() -> WorldGenome {
         &SimTuning::default(),
         &crate::mold::MoldConfig::default(),
         &AlmondWaterDynamics::default(),
+        &crate::light::LightingDynamics::default(),
     )
 }
 
@@ -448,10 +462,18 @@ mod tests {
     fn authored_round_trips_exactly() {
         // encode ∘ decode is the identity on the shipped config — pins that the encode/decode field walks
         // agree, and that the usize knobs survive the f32 round trip.
+        //
+        // EVERY slice must be asserted. Nothing else checks that BOUNDS/encode/decode agree on ORDER: the
+        // contract is a comment (struct-literal fields evaluate left-to-right), a misplaced knob still
+        // compiles, and both `debug_assert_eq!`s on the count still pass. This test is the only thing that
+        // catches a permuted genome — and it can only catch it for slices it names. `almond` went unasserted
+        // from the day it was added, leaving its 16 knobs unguarded.
         let wc = decode(&authored()).expect("authored decodes");
         assert_eq!(wc.ai, AiTuning::default());
         assert_eq!(wc.sim, SimTuning::default());
         assert_eq!(wc.mold, crate::mold::MoldConfig::default());
+        assert_eq!(wc.almond, AlmondWaterDynamics::default());
+        assert_eq!(wc.lighting, crate::light::LightingDynamics::default());
     }
 
     #[test]

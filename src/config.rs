@@ -116,11 +116,17 @@ pub struct GameConfig {
     pub audio: AudioTuning,
 }
 
-/// The evolvable **world-dynamics** surface, as one value: the field-propagation tuning (`ai_tuning`)
-/// plus the simulation-dynamics tuning (`sim`). This is the slice-pair the offline search evolves (see
-/// `squad_ai::world_genome`) and the harness installs for one rollout (`sim_harness::SimConfig::config`).
-/// Both members are `Copy` + `Serialize`, so an evolved world decodes to a readable RON diff — the
+/// The evolvable **world-dynamics** surface, as one value: field propagation (`ai`), simulation dynamics
+/// (`sim`), the reaction-diffusion mold (`mold`), the belief/inversion water (`almond`), and the gameplay
+/// lighting (`lighting`). This is the slice-set the offline search evolves (see `squad_ai::world_genome`)
+/// and the harness installs for one rollout (`sim_harness::SimConfig::config`).
+///
+/// Every member is `Copy` + `Serialize`, so an evolved world decodes to a readable RON diff — the
 /// reward-hacking guard (Skalse et al., "Defining and Characterizing Reward Hacking", arXiv:2209.13085).
+/// That guard only holds if **every** member also reaches the archive and the bake: a slice the rollout
+/// scores but `WorldEliteDoc`/`apply_dim` omit is a knob the search tunes and the game can never ship, and
+/// its elite's fitness is then unreproducible from the config it bakes. `mold` + `almond` were exactly that
+/// for 23 of 102 knobs. Adding a member here means adding it to all four.
 #[derive(Clone, Copy)]
 pub struct WorldConfig {
     pub ai: AiTuning,
@@ -129,6 +135,10 @@ pub struct WorldConfig {
     /// The evolvable Almond Water dynamics (seep/heal/poison/belief) — so the world search can co-evolve the
     /// belief/inversion water alongside combat. Applied over `GameConfig::almond_water`'s gameplay knobs.
     pub almond: crate::almond_water::AlmondWaterDynamics,
+    /// The evolvable **gameplay** lighting (field illuminance + photophobic steering) — so the search can
+    /// co-evolve the light the ecosystem steers on, rather than freezing it while evolving the mold's
+    /// response to it. Visual knobs stay authored. Applied over `GameConfig::lighting`'s gameplay knobs.
+    pub lighting: crate::light::LightingDynamics,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation

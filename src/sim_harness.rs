@@ -350,6 +350,10 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         gc.mold = w.mold;
         // Overwrite only the evolvable Almond Water gameplay knobs; visual/structural knobs keep config.ron.
         w.almond.apply_to(&mut gc.almond_water);
+        // Same: only the gameplay light (field illuminance + photophobic steering). `LightFieldPlugin` bakes
+        // the field on FixedUpdate and is in this harness, so these move the trajectory; the cosmetic
+        // `LightingPlugin` is not, so the visual knobs would be inert here anyway.
+        w.lighting.apply_to(&mut gc.lighting);
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the

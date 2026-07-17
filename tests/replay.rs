@@ -499,12 +499,18 @@ fn deterministic_core_is_bit_identical_across_many_builds() {
 /// the sim (which stays pinned to one compute thread, asserted in `build_headless_app`); they only contend
 /// for cores so the scheduler actually varies. Without them this test is decoration.
 ///
-/// **Why BOTH held-in seeds, not just one.** This test shipped covering only `0x5C09191` and passed 12/12
-/// — while `0xA11CE`, the search's *other* held-in world, split **3 ways on an idle box**. The guard was
-/// green on a lucky seed. A reproducibility guarantee is a property of the SIM, not of one dungeon: a
-/// single seed only exercises the layouts, spawn positions, and fights that seed happens to produce, and
-/// order-dependence needs the contended path to actually occur (invariant 9). These are the exact seeds
-/// `search_parallel::SEEDS` and `train prior` sweep, so what is pinned here is what the search runs.
+/// **Why TWO seeds, not one.** This test shipped covering only `0x5C09191` and passed 12/12 — while
+/// `0xA11CE` split **3 ways on an idle box**. The guard was green on a lucky seed. A reproducibility
+/// guarantee is a property of the SIM, not of one dungeon: a single seed only exercises the layouts, spawn
+/// positions, and fights that seed happens to produce, and order-dependence needs the contended path to
+/// actually occur (invariant 9).
+///
+/// **`0xA11CE` is kept as a determinism STRESSOR, not as a search world.** It is no longer held-in — the
+/// mold retired it and `0xBEEF` into squad wipes, and `coevolve::HELD_IN_SEEDS` is the live set. Its value
+/// to *this* test never depended on the search running it; it earned its place by splitting. An earlier
+/// version of this note called it "the search's *other* held-in world" and claimed these were "the exact
+/// seeds `train prior` sweeps": both went stale at the re-selection, and the stale claim survived long
+/// enough to send a later reader re-tuning the episode floor against a world the search never runs.
 ///
 /// Do NOT add `serial_guard()`: `evaluate::run_episode` takes it internally and `HARNESS_LOCK` is not
 /// reentrant, so holding it here deadlocks (same trap as `a_mutated_audio_config_changes_the_sim`).
@@ -519,7 +525,8 @@ fn search_rollouts_are_reproducible_under_load() {
     /// with probability ~0.7^11 < 2%. Cheap enough for the harness lane (~3 min per seed).
     const REPS: usize = 12;
     const TICKS: u32 = 7200;
-    /// Both held-in worlds — mirrors `search_parallel::SEEDS`. See the note above on why one is not enough.
+    /// One held-in world + one retired-but-splitty stressor. NOT the search's held-in set (that is
+    /// `coevolve::HELD_IN_SEEDS`) — see the note above on why this test wants a splitter, not a search world.
     const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -866,6 +873,8 @@ fn search_rollouts_of_mutants_are_reproducible_under_load() {
     /// are `MUTANTS × SEEDS` = 16 cells, so the test as a whole is far more sensitive than any one cell.
     const REPS: usize = 3;
     const TICKS: u32 = 7200;
+    /// Same pairing as `search_rollouts_are_reproducible_under_load`: one held-in world plus `0xA11CE`, a
+    /// retired-but-splitty stressor. NOT the search's held-in set — see that test's note.
     const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
     /// Fixed, so the mutant set is identical run to run — a red here must be reproducible by re-running.
     const MUTANT_RNG_SEED: u64 = 0x6D07A17;

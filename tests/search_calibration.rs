@@ -182,7 +182,7 @@ fn a_candidate_genome_actually_changes_the_simulation() {
     // entire search would be optimising a brain that never reaches `decide()`.
     use foundation_vs_slop::rng::seeded;
     use foundation_vs_slop::sim_harness::{build_headless_app, snapshot_hash, step, SimConfig};
-    use foundation_vs_slop::squad_ai::coevolve::mutate_squad_for_test;
+    use foundation_vs_slop::squad_ai::coevolve::mutate_squad_feasible;
 
     const TICKS: u32 = 600;
     let _serial = serial_guard();
@@ -198,8 +198,18 @@ fn a_candidate_genome_actually_changes_the_simulation() {
     };
 
     let authored = SquadGenome::authored(&t);
-    // A large sigma so the mutant is unmistakably a different brain.
-    let mutant = mutate_squad_for_test(&t, &authored, 1.0, seeded(0xD1FF));
+    // Draw the child the SEARCH would propose — `mutate_squad_feasible` IS the co-evolution's
+    // `propose_squad`: mutate at `SIGMA`, redraw until `squad_feasible` passes.
+    //
+    // This used to call a `mutate_squad_for_test` helper at `sigma = 1.0` with **no feasibility check**,
+    // which is a second squad-mutation path the search does not have. It could hand `decide()` a brain the
+    // search would never propose, and eventually did: the draw produced an Engineer whose every behaviour is
+    // gated off, `validate_unconditional_default` correctly refused it, and this test panicked inside
+    // `init_role_brains` rather than testing anything. The helper is gone; `squad_feasible` → `is_feasible`
+    // → `validate_unconditional_default` is the very invariant that was firing, so the search's own path
+    // cannot reproduce it. Testing what the search evaluates is also the point (cf. `mutate_swarm_feasible`).
+    let mut rng = seeded(0xD1FF);
+    let mutant = mutate_squad_feasible(&t, &authored, &mut rng).expect("a feasible squad child");
     assert_ne!(authored, mutant, "the mutation did nothing");
 
     assert_ne!(
