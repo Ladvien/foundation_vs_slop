@@ -828,3 +828,115 @@ fn dramatic_burst_is_live_and_deterministic() {
     let b = run();
     assert_eq!(a, b, "the dramatic host-burst must be bit-reproducible across same-seed runs");
 }
+
+/// **The mutant guard** — same-seed reproducibility of the rollouts the SEARCH actually evaluates.
+///
+/// Its sibling `search_rollouts_are_reproducible_under_load` runs the **authored** genome, and that is the
+/// hole this fills. The search evaluates **mutants**, and a mutant reaches code the authored config never
+/// arms: a behaviour gated on a knob that *ships* clear of its threshold but whose genome bound sits on the
+/// field's noise floor, or a mode the shipped brains never enter. So the authored guard went green while the
+/// search was still scoring noise, and that green was read — twice, by me — as "the search is reproducible".
+/// **A guard proves what it tests. Nothing more.** (Worked example: `bc.rally_live` ships at 0.15 but the
+/// genome bound is 0.02, where one ULP of an unsorted rally accumulate flips a crab's caste.)
+///
+/// **Breadth over depth, deliberately.** K distinct mutants × few reps beats 1 mutant × many reps: different
+/// mutants arm *different code*, and a rep only re-rolls the same dice. Squad AND swarm AND world are
+/// mutated — the world genome is the important one, because it is what moves the config knobs.
+///
+/// Runs at the search's REAL episode length on BOTH held-in worlds, so nothing hides in the tail or on the
+/// lucky seed. It is slow (~40 min) and that is a known cost: a slow green test is one nobody re-examines,
+/// which is exactly how the single-seed guard survived for months. The mitigation is the failure message —
+/// it prints the mutant index, both seeds, and the distinct outcomes, so a red run hands you a reproducer
+/// rather than a mystery.
+///
+/// Do NOT add `serial_guard()`: `run_episode` takes it internally and `HARNESS_LOCK` is not reentrant.
+#[test]
+fn search_rollouts_of_mutants_are_reproducible_under_load() {
+    use foundation_vs_slop::squad_ai::coevolve::{
+        brains_of, mutate_squad_feasible, mutate_swarm_feasible, SquadGenome, SwarmGenome, Templates,
+    };
+    use foundation_vs_slop::squad_ai::evaluate::rollout;
+    use foundation_vs_slop::squad_ai::world_genome;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Distinct mutants. Breadth is the point — see the note above.
+    const MUTANTS: usize = 8;
+    /// Reps per (mutant, world). 3 catches a ~30%-of-runs split with ~66% probability *per cell*, and there
+    /// are `MUTANTS × SEEDS` = 16 cells, so the test as a whole is far more sensitive than any one cell.
+    const REPS: usize = 3;
+    const TICKS: u32 = 7200;
+    const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
+    /// Fixed, so the mutant set is identical run to run — a red here must be reproducible by re-running.
+    const MUTANT_RNG_SEED: u64 = 0x6D07A17;
+
+    let t = Templates::authored();
+    let mut rng = foundation_vs_slop::rng::seeded(MUTANT_RNG_SEED);
+
+    // Draw the mutants up front, serially — the draw order is then independent of anything the rollouts do.
+    let mut genomes = Vec::new();
+    for _ in 0..MUTANTS {
+        let squad = mutate_squad_feasible(&t, &SquadGenome::authored(&t), &mut rng)
+            .expect("feasible squad mutant");
+        let swarm = mutate_swarm_feasible(&t, &SwarmGenome::authored(&t), &mut rng)
+            .expect("feasible swarm mutant");
+        let world = world_genome::mutate(&world_genome::authored(), 0.15, &mut rng)
+            .expect("feasible world mutant");
+        genomes.push((squad, swarm, world));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    let mut split: Vec<String> = Vec::new();
+    for (m, (squad, swarm, world)) in genomes.iter().enumerate() {
+        let wc = world_genome::decode(world).expect("world mutant decodes");
+        for seed in SEEDS {
+            let mut seen: Vec<(u64, usize)> = Vec::new();
+            for _ in 0..REPS {
+                let brains = brains_of(&t, squad, swarm).expect("brains from mutant");
+                let r = rollout(brains, Some(wc.clone()), None, None, seed, TICKS);
+                let key = (r.snapshot, r.trace.decisions.len());
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+            if seen.len() > 1 {
+                split.push(format!(
+                    "mutant #{m} (rng seed {MUTANT_RNG_SEED:#x}) on world {seed:#x}: {} distinct {seen:x?}",
+                    seen.len()
+                ));
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    assert!(
+        split.is_empty(),
+        "MUTANT-ROLLOUT NON-DETERMINISM — the search is scoring noise, so its archives are unusable for \
+         `train apply` (a MAP-Elites cell can be won by evaluation luck rather than by the genome):\n  {}\n\n\
+         Reproduce: re-run this test — the mutant set is fixed by MUTANT_RNG_SEED, so mutant #N is the same \
+         genome every time. Then bisect that (mutant, world) pair with `evaluate::trace_episode` (it folds \
+         snapshot + field + gib hashes) and row-diff at the first divergent tick with `evaluate::row_trace` \
+         (same pair, MULTISET diff — a set-difference lies when tied actors share a row).\n\n\
+         Look for a gameplay decision keyed on ECS query order. Note this guard exists because the AUTHORED \
+         guard cannot see this class: a mutant walks config knobs onto thresholds the shipped values sit \
+         clear of. See docs/rl/2026-07-16-search-rollout-nondeterminism.md",
+        split.join("\n  "),
+    );
+}

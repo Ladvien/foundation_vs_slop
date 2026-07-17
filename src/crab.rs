@@ -1993,6 +1993,8 @@ fn carry_gibs(
             &mut Transform,
             &mut LinearVelocity,
             &mut AngularVelocity,
+            // Carried solely to give the DELIVER pass below a stable total order — see there.
+            &crate::gore::GibKey,
         ),
         With<crate::gore::GibChunk>,
     >,
@@ -2010,7 +2012,20 @@ fn carry_gibs(
     let dt = time.delta_secs();
     let bc = &beh.crab;
 
-    for (ge, mut carry, mut gtf, mut lv, mut av) in &mut gibs {
+    // Deliveries are collected here and applied AFTER the loop, in `GibKey` order.
+    //
+    // The per-gib motion below is order-independent (each gib touches only its own Transform/velocities),
+    // but a DELIVER is not: it accumulates `nest.hoard += weight` and `nest.spawn_boost += …` into a SHARED
+    // nest with a non-associative `f32 +=`, and it despawns (feeding entity-id reuse). Gib query order is
+    // not stable across `App` instances, so two chunks delivering to one nest on one tick summed to
+    // different bits per run. That is not cosmetic: `nest_reproduce` gates on `hoard < meat_per_crab`, and
+    // crossing that gate consumes a slot from the shared `CrabSpawnSeq`, which sets every subsequent crab's
+    // caste, capacity and RNG. The sibling `assign_meat_targets` sorts both its lists for exactly this
+    // reason; this loop was left raw (its INNER capacity sums were canonicalised, so only the outer pass
+    // was missed). Mutant-armed: `deliver_range` ships 1.2 but the genome bounds reach 4.0 (~11× the
+    // delivery area, so deliveries coincide instead of arriving one at a time).
+    let mut delivered: Vec<(u64, Entity, Entity, f32)> = Vec::new(); // (GibKey, gib, nest, weight)
+    for (ge, mut carry, mut gtf, mut lv, mut av, gib_key) in &mut gibs {
         // 1. Prune carriers down to crabs that still exist AND still point at this gib.
         carry
             .carriers
@@ -2170,23 +2185,19 @@ fn carry_gibs(
                 } else if let Some((npos, flow)) = nest_nav {
                     let horiz = (npos - gtf.translation).with_y(0.0);
                     if horiz.length() <= bc.deliver_range {
-                        // --- DELIVER (Kinematic → despawn) ---
+                        // --- DELIVER (Kinematic → despawn) --- deferred to the sorted pass below; the
+                        // hoard/boost accumulate and the despawn are the order-sensitive parts.
                         if let Some(n) = carry.nest {
-                            if let Ok((_, _, mut nest)) = nests.get_mut(n) {
-                                nest.hoard += carry.weight;
-                                // Feeding surge: heavier chunks accelerate births more, up to ~10×.
-                                nest.spawn_boost =
-                                    (nest.spawn_boost + carry.weight * sim.breeding.feed_gain).min(sim.breeding.spawn_boost_max);
-                            }
+                            delivered.push((gib_key.0, ge, n, carry.weight));
                         }
+                        // Releasing this chunk's own carriers is order-independent (a crab hauls exactly
+                        // one chunk), so it stays here.
                         for &c in &carry.carriers {
                             if let Ok((_, mut cc)) = crabs.get_mut(c) {
                                 cc.target = None;
                                 cc.hauling = false;
                             }
                         }
-                        // The ONE early-removal path (drops the id from the ring, then despawns).
-                        gib_ring.consume(&mut commands, ge);
                     } else {
                         // Haul along the nest's flow field so the chunk threads walkways instead of
                         // beelining through walls (Item #3). Speed scales up with crew and down with
@@ -2220,6 +2231,22 @@ fn carry_gibs(
                 }
             }
         }
+    }
+
+    // Apply the deliveries in `GibKey` order — the shared-nest accumulate and the despawn, i.e. exactly the
+    // parts the raw gib query order was deciding. `GibKey` is unique by construction (it mixes a monotonic
+    // `GibSeq`; before that fix it was derived from the death origin and COLLIDED for two creatures dying on
+    // one coordinate — that was G0c), so this is a genuine total order and `sort_total!` proves it.
+    crate::sort_total!(&mut delivered, |&(key, ..): &(u64, Entity, Entity, f32)| key);
+    for (_, ge, n, weight) in delivered {
+        if let Ok((_, _, mut nest)) = nests.get_mut(n) {
+            nest.hoard += weight;
+            // Feeding surge: heavier chunks accelerate births more, up to ~10×.
+            nest.spawn_boost =
+                (nest.spawn_boost + weight * sim.breeding.feed_gain).min(sim.breeding.spawn_boost_max);
+        }
+        // The ONE early-removal path (drops the id from the ring, then despawns).
+        gib_ring.consume(&mut commands, ge);
     }
 }
 
@@ -2317,6 +2344,16 @@ fn scout_mark_prey(
 ) {
     let dt = time.delta_secs();
     let bc = &beh.crab;
+    // Rally marks are collected and sorted before queueing — the same idiom every SCALAR deposit producer
+    // uses (`nest_alarm`, `crab_alarm_on_damage`, `deposit_crab_fields`, …), which this site never got
+    // because `RallyDeposits` had no `sort_*` helper to call: `sort_deposits` is typed `&mut [Deposit]`.
+    // The scout query order is not stable across `App` instances, and `RallyField::deposit` accumulates with
+    // a non-associative `Vec2 +=` over a `deposit_radius`-wide disc, so two scouts within ~2·radius write
+    // the same cells on one tick and raw push order set the low bits of that cell's vector. That is not
+    // cosmetic: `re_role_crabs` gates a caste flip on `rally.sample(..).length() > bc.rally_live`, and while
+    // the authored 0.15 sits clear of the field's noise floor, the genome's lower bound is **0.02** — right
+    // on it. See `field::sort_rally_deposits`.
+    let mut batch: Vec<crate::ai::field::RallyDeposit> = Vec::new();
     for (tf, mut scout) in &mut scouts {
         let pos = tf.translation;
         scout.report_cooldown = (scout.report_cooldown - dt).max(0.0);
@@ -2333,10 +2370,7 @@ fn scout_mark_prey(
                 {
                     let strength =
                         sim.deposit.rally_mark * ((bc.scout_sight - best) / bc.scout_sight).clamp(0.0, 1.0);
-                    deposits.0.push(crate::ai::field::RallyDeposit {
-                        pos,
-                        vec: dir * strength,
-                    });
+                    batch.push(crate::ai::field::RallyDeposit { pos, vec: dir * strength });
                     scout.report_cooldown = bc.rally_deposit_cooldown;
                     if crate::ai::diag::AI_DIAG {
                         info!("scout: MARK prey@{:?} from@{:?}", prey_pos.xz(), pos.xz());
@@ -2349,6 +2383,8 @@ fn scout_mark_prey(
             }
         }
     }
+    crate::ai::field::sort_rally_deposits(&mut batch);
+    deposits.0.extend(batch);
 }
 
 /// Meat-fuelled breeding — the ONE reproduction path. A nest births a crab only when it has hoarded at

@@ -459,6 +459,40 @@ pub struct RallyDeposit {
 #[derive(Resource, Default)]
 pub struct RallyDeposits(pub Vec<RallyDeposit>);
 
+/// [`sort_deposits`]'s twin for the **vectorial** queue. Same contract, same reason — and this one is the
+/// reason the rule below exists.
+///
+/// **This helper did not exist, and that was the whole bug.** The determinism campaign canonicalised the
+/// *scalar* [`Deposit`]/[`StigDeposits`] path — every producer (`nest_alarm`, `crab_alarm_on_damage`,
+/// `deposit_crab_fields`, `deposit_meat_scent`, `deposit_manca_dread`, …) batches and calls
+/// [`sort_deposits`]. `RallyDeposits` is a **separate** path and [`sort_deposits`] is typed `&mut [Deposit]`,
+/// so it never type-checked here; the sole producer (`crab::scout_mark_prey`) therefore pushed bare, in raw
+/// ECS query order, into [`RallyField::deposit`]'s non-associative `grid[i] += s * (accumulate * falloff)`.
+///
+/// Two properties made it survive every previous sweep:
+///  * **Auditing sort sites could not find it** — there was no sort to audit.
+///  * **`sort_total!` could not fire on it** — same reason. The runtime tie-check only guards code that
+///    already decided to sort.
+///
+/// And it is invisible to `snapshot_hash` (which folds only `(Transform, Health)`) until a perturbed cell
+/// flips a threshold — `re_role_crabs`' `rally.sample(..).length() > bc.rally_live`, which the *authored*
+/// config keeps at 0.15 but the genome may push to **0.02**, right onto the field's noise floor. Hence
+/// green for the authored genome, divergent for a mutant.
+///
+/// **The rule this buys, stated so the next queue type inherits it:** *every deposit queue owns a
+/// canonicalising helper next to its type, and a new queue type must add one.* A queue whose producers push
+/// in query order and whose consumer accumulates non-associatively is not reproducible, and no lint in this
+/// repo can tell you so.
+pub fn sort_rally_deposits(batch: &mut [RallyDeposit]) {
+    // VALUE-CANONICAL, not total (same judgement as `sort_deposits`): two rally deposits with the same
+    // position AND the same vector contribute the identical term to the identical cells, so permuting them
+    // cannot change the drained field. The key is the WHOLE value — never a prefix of it, which is how the
+    // ORCA / drink-contention / boss-cull ties happened.
+    crate::util::sort_value_canonical(batch, |d| {
+        (d.pos.x.to_bits(), d.pos.y.to_bits(), d.pos.z.to_bits(), d.vec.x.to_bits(), d.vec.y.to_bits())
+    });
+}
+
 /// The vectorial rally pheromone map (Tang et al. 2019). Each floor cell stores a 2D **direction vector**
 /// — the bearing toward the (moving) prey — not a scalar concentration like the [`Stig`] channels. A
 /// scout that senses prey deposits an intermediate-vector `s` pointing at it; the map accumulates

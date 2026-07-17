@@ -221,6 +221,23 @@ pub fn mutate_squad_feasible(
     propose_squad(t, parent, rng, &mut rejected)
 }
 
+/// Public feasible **swarm** mutation — the twin of [`mutate_squad_feasible`], and the seam
+/// `replay::search_rollouts_of_MUTANTS_are_reproducible` needs.
+///
+/// It exists because the determinism guard must evaluate what the SEARCH evaluates. The older guard ran the
+/// **authored** genome and was green while the search diverged: a mutant reaches code the authored config
+/// never arms (a behaviour gated on a knob that ships clear of its threshold, a mode the shipped brains
+/// never enter). Mutating the swarm is the half that moves crab behaviour, which is where every
+/// order-dependence in this sim has so far lived.
+pub fn mutate_swarm_feasible(
+    t: &Templates,
+    parent: &SwarmGenome,
+    rng: &mut ChaCha8Rng,
+) -> Result<SwarmGenome, String> {
+    let mut rejected = 0;
+    propose_swarm(t, parent, rng, &mut rejected)
+}
+
 /// Redraw a swarm child until it is feasible.
 fn propose_swarm(
     t: &Templates,
