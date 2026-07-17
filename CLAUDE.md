@@ -23,6 +23,19 @@ Non-negotiables (details in `TESTING.md`): exact-hash only the **physics-off** c
 touch pinned state (would appear in `snapshot_hash`), else `Update`. Strategy, oracle rules, and the full
 invariant list live in `TESTING.md` (see its "Strategy" and "Invariants & determinism rules" sections).
 
+## Determinism: ECS query order decides nothing
+
+Query order is **not stable across `App` instances**. Anything it could decide — a shared RNG draw or
+counter, a `take(n)` budget, a clamped accumulate, a last-writer-wins write, a lethal pick — needs a stable
+**total** key: `sort_total!` (panics on a tie, naming the site), `util::sort_value_canonical` (ties
+interchangeable → sort the WHOLE value), or `// SORT-OK: <why>`. `tests/determinism_lint.rs` enforces it.
+
+Four sites documented the exact trap they then fell into, so don't trust a comment claiming a total order.
+Both shapes: a key that is a **prefix of the value** (`(pos)` when the element is `(pos, payload)`), and a
+**tiebreak derived from the tied quantity** — `GibKey` hashed the position it existed to disambiguate.
+
+A determinism probe on an idle box proves nothing: run it under load.
+
 ## Additional Game Assets
 - Additional games assets are cataloged at /mnt/codex_fs/game_assets/CATALOG.md, feel free to use any of these.
 

@@ -23,11 +23,14 @@ harness (`src/sim_harness.rs`). Its fitness stack is **witnessed learnable-surpr
 gated by a `minimal_criterion`.
 
 **Identified gaps** (the roadmap closes these):
-- **G0 / G0b / G0c — ALL FIXED (2026-07-16). The gap is CLOSED.** *Search rollouts were not reproducible* —
-  identical evaluations scored ~6% apart, so every search below was optimizing partly-noisy fitness.
-  `replay::search_rollouts_are_reproducible_under_load` is now green on **both** held-in seeds: 12 rollouts ×
-  7200 ticks × 2 worlds, under CPU load, all bit-identical. **Archives are trustworthy for `train apply`
-  again.** Three distinct root causes:
+- **G0 / G0b / G0c — FIXED. G0d — STILL OPEN. The gap is NOT yet closed.** *Search rollouts were not
+  reproducible* — identical evaluations scored ~6% apart, so every search below was optimizing partly-noisy
+  fitness. `replay::search_rollouts_are_reproducible_under_load` is now green on **both** held-in seeds (12
+  rollouts × 7200 ticks × 2 worlds, under CPU load, bit-identical) — but that guard runs the **authored**
+  genome, and **`tests/search_parallel.rs` is still red**, so the *search* (which evaluates **mutated**
+  genomes) is not yet proven reproducible. **Archives remain unproven for `train apply` until it is green.**
+  Read the green guard as covering exactly what it tests and no more — this investigation has now been burned
+  three times by generalising a green light. Root causes found so far:
   - **G0** — `laser::fire_laser` drew aim-scatter from a **shared stream in raw ECS query order**, so two
     units firing on one tick could swap cones and send a bolt at a different hostile.
   - **G0b** — `config.ron` held a machine-baked levels elite instead of the authored level, so the archive

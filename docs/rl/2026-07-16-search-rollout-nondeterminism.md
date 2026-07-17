@@ -7,12 +7,22 @@
 |---|---|
 | **G0** — `fire_laser`'s shared aim-scatter draw in query order | **FIXED** (session 2), pinned |
 | **G0b** — empty archive from a machine-baked level in `config.ron` | **FIXED** (session 2) |
-| **G0c** — residual rollout non-determinism on seed `0xA11CE` | **FIXED** (session 3), pinned |
+| **G0c** — the `0xA11CE` authored-genome divergence | **FIXED** (session 3), pinned |
+| **G0d** — `search_parallel` STILL red: `jobs=1 ≠ jobs=N` on MUTATED genomes | **OPEN** — see §G0d |
 
-> ## RESOLVED. The objective no longer wobbles.
+> ## PARTLY resolved. Do not read the green guard as a closed gap.
 >
-> `search_rollouts_are_reproducible_under_load` is **green on BOTH held-in seeds** — 12 rollouts × 7200 ticks
-> × 2 worlds, under 8 background load threads, all bit-identical. Archives are trustworthy again.
+> `search_rollouts_are_reproducible_under_load` is green on **both** held-in seeds — 12 rollouts × 7200 ticks
+> × 2 worlds under load, bit-identical. `GibKey` was a real root cause and is fixed.
+>
+> **But `tests/search_parallel.rs` is still RED**, so the *search* is not yet proven reproducible. The guard
+> runs the **authored** genome; the search evaluates **mutated** ones, which reach code the authored genome
+> never arms. This document itself flagged that trap about `update_lasers` ("inert for the authored genome
+> … armed by any mutant") — and then the session's conclusion ignored it. **A guard passing means the thing
+> it tests passes. Nothing more.** That is now the third time this investigation has been burned by reading
+> a green light as a general claim (see the quiet-box caveat, §2, and the A/B method note).
+>
+> **Until `search_parallel` is green, archives remain unproven for `train apply`.**
 >
 > **G0c's root cause: `GibKey` — the tiebreak that could not break its own tie.**
 >
