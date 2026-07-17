@@ -1460,7 +1460,7 @@ fn crab_feeding_sates_hunger(
 /// Counts by PLANAR distance so a crab clinging high on the body still feeds.
 fn crab_contact_damage(
     time: Res<Time>,
-    crabs: Query<(Entity, &Transform), (With<Crab>, Without<Prey>)>,
+    crabs: Query<(Entity, &Transform, &CrabSeed), (With<Crab>, Without<Prey>)>,
     // `Option<&mut LastAttacker>` is present only on the smiley watcher: a crab biting it records itself as
     // the attacker so the watcher retaliates against the swarm (not a bystander unit) — see `enemy::smiley_zap`.
     mut prey: Query<(&Transform, &mut Health, Option<&mut crate::enemy::LastAttacker>), (With<Prey>, Without<Crab>)>,
@@ -1473,19 +1473,27 @@ fn crab_contact_damage(
     let reach_sq = (UNIT_BODY_RADIUS + bc.contact_radius).powi(2);
     for (prey_tf, mut hp, last_attacker) in &mut prey {
         // Count biters and attribute the bite to ONE of them for the boss's retaliation. WHICH biter is
-        // recorded (`LastAttacker`, which `enemy::smiley_zap` instakills) must not depend on query order
-        // — it is not reproducible across same-seed runs (see `util::nearest_planar`) — so pick the
-        // lowest world position among the biters, a stable geometric key.
+        // recorded (`LastAttacker`, which `enemy::smiley_zap` INSTAKILLS) must not depend on query order —
+        // it is not reproducible across same-seed runs (see `util::nearest_planar`).
+        //
+        // `CrabSeed` is the tiebreak and it is load-bearing: world position ALONE is not a total order, and
+        // this key was position-only under a comment calling it "a stable geometric key". Crabs pile onto
+        // the boss to bite it — that is the entire point of this system — and `clamp_to_patch` pins a
+        // pressed crab onto the same float, so the biters routinely sit at BIT-IDENTICAL coordinates. The
+        // `<` then compared false, the loop kept whichever the ECS yielded first, and the boss executed a
+        // different crab run to run. Measured (mutant #4, world `0x5C09191`, tick 94): two crabs at
+        // `(14.9412, 13.9406)`, seeds 2 and 8 — seed 8 zapped in one run, seed 2 in the other.
         let mut count = 0usize;
         let mut biter: Option<Entity> = None;
-        let mut biter_key: Option<(u32, u32, u32)> = None;
-        for (ce, ctf) in &crabs {
+        let mut biter_key: Option<(u32, u32, u32, u32)> = None;
+        for (ce, ctf, seed) in &crabs {
             if (ctf.translation.xz() - prey_tf.translation.xz()).length_squared() <= reach_sq {
                 count += 1;
                 let key = (
                     ctf.translation.x.to_bits(),
                     ctf.translation.y.to_bits(),
                     ctf.translation.z.to_bits(),
+                    seed.0,
                 );
                 if biter_key.is_none_or(|bk| key < bk) {
                     biter = Some(ce);

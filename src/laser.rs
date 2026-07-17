@@ -579,7 +579,7 @@ pub fn bolt_hash(app: &mut App) -> u64 {
     rows.sort_unstable();
 
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |v: u64, h: &mut u64| {
+    let feed = |v: u64, h: &mut u64| {
         for b in v.to_le_bytes() {
             *h ^= b as u64;
             *h = h.wrapping_mul(0x0000_0100_0000_01b3);

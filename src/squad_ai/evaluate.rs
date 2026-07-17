@@ -250,6 +250,9 @@ pub enum TickProbe<'a> {
     /// Capture `gib_rows` (+ ring order) at exactly tick `at`.
     #[cfg(feature = "test-harness")]
     GibRows { tick: u32, at: u32, out: &'a mut (Vec<[u64; 6]>, Vec<u64>) },
+    /// Capture identity-keyed `crab_rows` at EVERY tick — lets a caller follow ONE crab.
+    #[cfg(feature = "test-harness")]
+    CrabTrace { tick: u32, out: &'a mut Vec<Vec<(u32, [u32; 4])>> },
     /// Capture `snapshot_rows` at EVERY tick.
     ///
     /// Necessary because the first divergent tick VARIES between runs (this is a race that can fire at
@@ -292,6 +295,11 @@ impl TickProbe<'_> {
                 }
             }
             #[cfg(feature = "test-harness")]
+            TickProbe::CrabTrace { tick, out } => {
+                *tick += 1;
+                out.push(crate::sim_harness::crab_rows(app));
+            }
+            #[cfg(feature = "test-harness")]
             TickProbe::RowTrace { tick, out } => {
                 *tick += 1;
                 out.push(crate::sim_harness::snapshot_rows(app));
@@ -323,6 +331,20 @@ pub fn trace_episode(
 ) {
     let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
     let mut probe = TickProbe::Trace { tick: 0, every, out };
+    run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture identity-keyed `crab_rows` at EVERY tick (index 0 == tick 1). See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn crab_trace(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+    out: &mut Vec<Vec<(u32, [u32; 4])>>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::CrabTrace { tick: 0, out };
     run_episode_probed(&cfg, ticks, false, &mut probe);
 }
 

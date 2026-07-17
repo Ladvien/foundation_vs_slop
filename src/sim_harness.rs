@@ -570,6 +570,44 @@ pub fn gib_hash(app: &mut App) -> u64 {
 /// moved — a hash says "different", a row diff says "10.0 HP came off the boss and landed on a max=60
 /// actor", which names the system. That row diff is what identified G0.
 #[cfg(feature = "test-harness")]
+/// **Identity-keyed crab rows** — `(CrabSeed, x, y, z, hp)` per crab, sorted by seed.
+///
+/// `snapshot_rows` is anonymous by design: it folds `(Transform, Health)` and deliberately drops the entity,
+/// because entity ids are recycled and hashing them would report false divergence. That is right for a
+/// *hash*, and wrong for a *diff*. Without identity you cannot follow one actor across ticks — a moving crab
+/// changes its key every tick — and a multiset diff of two ticks cannot tell "this crab was damaged" from
+/// "two crabs swapped places". That ambiguity is what stalled the last mutant cell: a 0.868240 HP delta that
+/// matched no rate in the config, because the two rows being compared were not provably the same crab.
+///
+/// `CrabSeed` is the stable spawn identity ("immortal", never reused), so these rows can be joined across
+/// ticks and across runs. Crabs only — they are where every determinism bug in this sim has lived, and
+/// `Health`-bearing actors are otherwise heterogeneous with no shared stable key.
+///
+/// For diffing only. Never hash this: it folds an identity, which `snapshot_hash` excludes on purpose.
+#[cfg(feature = "test-harness")]
+pub fn crab_rows(app: &mut App) -> Vec<(u32, [u32; 4])> {
+    let world = app.world_mut();
+    let mut rows: Vec<(u32, [u32; 4])> = world
+        .query::<(&crate::crab::CrabSeed, &Transform, &crate::health::Health)>()
+        .iter(world)
+        .map(|(s, t, h)| {
+            (
+                s.0,
+                [
+                    t.translation.x.to_bits(),
+                    t.translation.y.to_bits(),
+                    t.translation.z.to_bits(),
+                    h.current.to_bits(),
+                ],
+            )
+        })
+        .collect();
+    // SORT-OK: `CrabSeed` is unique per crab (assigned at spawn, never reused), so this is total by
+    // construction — and it is what lets a caller join the same crab across ticks.
+    rows.sort_unstable_by_key(|(seed, _)| *seed);
+    rows
+}
+
 pub fn snapshot_rows(app: &mut App) -> Vec<[u32; 5]> {
     let world = app.world_mut();
     let mut query = world.query::<(&Transform, &crate::health::Health)>();
