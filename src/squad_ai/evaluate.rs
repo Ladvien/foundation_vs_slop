@@ -247,6 +247,9 @@ pub enum TickProbe<'a> {
     /// Capture the full `snapshot_rows` at exactly tick `at` — for diffing two runs at the tick they split.
     #[cfg(feature = "test-harness")]
     Rows { tick: u32, at: u32, out: &'a mut Vec<[u32; 5]> },
+    /// Capture `gib_rows` (+ ring order) at exactly tick `at`.
+    #[cfg(feature = "test-harness")]
+    GibRows { tick: u32, at: u32, out: &'a mut (Vec<[u64; 6]>, Vec<u64>) },
     /// Capture `snapshot_rows` at EVERY tick.
     ///
     /// Necessary because the first divergent tick VARIES between runs (this is a race that can fire at
@@ -281,6 +284,13 @@ impl TickProbe<'_> {
                 }
             }
             #[cfg(feature = "test-harness")]
+            TickProbe::GibRows { tick, at, out } => {
+                *tick += 1;
+                if *tick == *at {
+                    **out = crate::sim_harness::gib_rows(app);
+                }
+            }
+            #[cfg(feature = "test-harness")]
             TickProbe::RowTrace { tick, out } => {
                 *tick += 1;
                 out.push(crate::sim_harness::snapshot_rows(app));
@@ -297,35 +307,62 @@ fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
 ///
 /// `test-harness` only: the probe is a debugging affordance for the determinism hunt, not a shipped feature.
 #[cfg(feature = "test-harness")]
+///
+/// Takes `config` so a **mutant's** world can be traced, not just the authored one. That is not a nicety:
+/// every determinism bug left in this sim is armed by a mutated genome and inert for the authored config
+/// (a knob that ships clear of its threshold but whose genome bound sits on the noise floor). A probe that
+/// can only run `BrainSource::Authored` with `None` cannot reproduce what the search reports.
 pub fn trace_episode(
     brains: BrainSource,
+    config: Option<WorldConfig>,
     dungeon_seed: u64,
     ticks: u32,
     every: u32,
     out: &mut Vec<(u32, u64, u64, u64)>,
 ) {
-    let cfg = deterministic_cfg(brains, None, None, None, dungeon_seed);
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
     let mut probe = TickProbe::Trace { tick: 0, every, out };
     run_episode_probed(&cfg, ticks, false, &mut probe);
 }
 
 /// Capture `snapshot_rows` at EVERY tick of the real episode (index 0 == tick 1). See [`TickProbe`].
 #[cfg(feature = "test-harness")]
-pub fn row_trace(brains: BrainSource, dungeon_seed: u64, ticks: u32, out: &mut Vec<Vec<[u32; 5]>>) {
-    let cfg = deterministic_cfg(brains, None, None, None, dungeon_seed);
+pub fn row_trace(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+    out: &mut Vec<Vec<[u32; 5]>>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
     let mut probe = TickProbe::RowTrace { tick: 0, out };
     run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture `gib_rows` (+ ring order) at exactly tick `at` of the real episode. See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn gib_rows_at_tick(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    at: u32,
+    out: &mut (Vec<[u64; 6]>, Vec<u64>),
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::GibRows { tick: 0, at, out };
+    run_episode_probed(&cfg, at, false, &mut probe);
 }
 
 /// Capture `snapshot_rows` at exactly tick `at` of the real episode. See [`TickProbe`].
 #[cfg(feature = "test-harness")]
 pub fn rows_at_tick(
     brains: BrainSource,
+    config: Option<WorldConfig>,
     dungeon_seed: u64,
     at: u32,
     out: &mut Vec<[u32; 5]>,
 ) {
-    let cfg = deterministic_cfg(brains, None, None, None, dungeon_seed);
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
     let mut probe = TickProbe::Rows { tick: 0, at, out };
     run_episode_probed(&cfg, at, false, &mut probe);
 }

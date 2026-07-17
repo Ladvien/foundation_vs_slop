@@ -480,6 +480,39 @@ pub fn step(app: &mut App, _cfg: &SimConfig, ticks: u32) {
 ///    chunk the cap evicts. Everything else is keyed and sorted by `GibKey`, which is derived at spawn from
 ///    the death origin — not from an entity id.
 #[cfg(feature = "test-harness")]
+/// The rows [`gib_hash`] folds, plus the ring order — for diffing two runs at the tick their gib state
+/// splits. Returns `(sorted rows, ring as GibKeys in ring order)`. See [`gib_hash`] for why this oracle
+/// exists and why it is `deterministic_core`-only.
+#[cfg(feature = "test-harness")]
+pub fn gib_rows(app: &mut App) -> (Vec<[u64; 6]>, Vec<u64>) {
+    use crate::gore::{Carryable, GibKey, GibRing};
+    let world = app.world_mut();
+    let mut rows: Vec<[u64; 6]> = world
+        .query::<(&GibKey, &Transform, &Carryable)>()
+        .iter(world)
+        .map(|(k, t, c)| {
+            [
+                k.0,
+                t.translation.x.to_bits() as u64,
+                t.translation.y.to_bits() as u64,
+                t.translation.z.to_bits() as u64,
+                c.weight.to_bits() as u64,
+                match c.phase {
+                    crate::gore::CarryPhase::Resting => 0,
+                    crate::gore::CarryPhase::Crewing => 1,
+                    crate::gore::CarryPhase::Hauling => 2,
+                },
+            ]
+        })
+        .collect();
+    // SORT-OK: whole rows — a tie means two gib chunks are bit-identical in everything folded
+    // (GibKey included, which is unique by construction), so swapping them cannot change the fold.
+    rows.sort_unstable();
+    let ids: Vec<bevy::prelude::Entity> = world.resource::<GibRing>().0.iter().copied().collect();
+    let ring: Vec<u64> = ids.iter().map(|e| world.get::<GibKey>(*e).map(|k| k.0).unwrap_or(0)).collect();
+    (rows, ring)
+}
+
 pub fn gib_hash(app: &mut App) -> u64 {
     use crate::gore::{Carryable, GibKey, GibRing};
     let world = app.world_mut();

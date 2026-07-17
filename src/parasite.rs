@@ -1567,24 +1567,33 @@ fn parasite_burst(
     let p = &sim.parasite;
     let dt = time.delta_secs();
 
-    // Erupting hosts in a stable geometric order (position bits) so the brood seq draw + population cap are
-    // reproducible even when several hosts erupt the same tick.
-    let mut order: Vec<((u32, u32, u32), Entity)> = hosts
+    // Erupting hosts in a stable TOTAL order so the brood seq draw + population cap are reproducible even
+    // when several hosts erupt the same tick. Both are shared, greedy state — `seq.0 += 1` hands each
+    // newborn manca the identity that drives its role/stagger/RNG, and `live >= manca_count_max` is a
+    // first-come cap — so the visit order is part of the result. Same shape as `crab::nest_reproduce`.
+    //
+    // `Infestation::seed` is the tiebreak and it is LOAD-BEARING: position bits alone are **not** a total
+    // order here. This sort keyed on them and its comment claimed they were, but hosts sit at bit-identical
+    // coordinates routinely — `clamp_to_patch` pins a crab pressed to a wall onto the same float — so two
+    // coincident hosts erupting on one tick tied, and `sort_unstable` fell through to the ECS query order
+    // this sort exists to erase. `Infestation::seed` is "set on embed, never position-derived" (see its
+    // doc), which is exactly what a tiebreak for a POSITION tie must be: `GibKey` was derived from the
+    // death position and so could not break its own tie (that was G0c).
+    let mut order: Vec<((u32, u32, u32), u32, Entity)> = hosts
         .iter()
         .filter(|(_, _, _, inf, _)| inf.burst != BurstPhase::Idle)
-        .map(|(e, tf, _, _, _)| {
+        .map(|(e, tf, _, inf, _)| {
             let t = tf.translation;
-            ((t.x.to_bits(), t.y.to_bits(), t.z.to_bits()), e)
+            ((t.x.to_bits(), t.y.to_bits(), t.z.to_bits()), inf.seed, e)
         })
         .collect();
     if order.is_empty() {
         return;
     }
-    // SORT-OK: per-manca spawn seed, unique — total by construction.
-    order.sort_unstable_by_key(|(k, _)| *k);
+    crate::sort_total!(&mut order, |&(k, seed, _): &((u32, u32, u32), u32, Entity)| (k, seed));
 
     let mut live = live_mancae.iter().count();
-    for (_key, host_e) in order {
+    for (_key, _seed, host_e) in order {
         let Ok((_, htf, mut hp, mut inf, unit)) = hosts.get_mut(host_e) else { continue };
         let is_unit = unit.is_some();
         let chest = host_chest(htf, is_unit);
