@@ -96,7 +96,21 @@ These are the hard-won constraints. Violating any one either flakes the suite or
    a 24-build determinism gate, because that gate runs 180 ticks with no synthetic player — the squad idles
    at spawn and never fires. Coverage of a *system* is not coverage of its *contended* path. When a guard
    is meant to pin ordering, check that the scenario actually produces >1 concurrent actor in that code.
-10. **An exoneration is only as strong as the condition it was measured under.** Corollary of 8, and the
+10. **Every sort declares its determinism contract — enforced, not commented.** ECS query order is not
+    stable across `App` instances, so a sort whose key ties falls through to it and the sim stops being
+    reproducible. Pick one, explicitly: **`sort_total!(&mut v, |x| key)`** when order is load-bearing (a
+    greedy loop, a `take(n)` budget, a shared RNG draw or counter, a clamped accumulate, a lethal pick) — it
+    panics under `test-harness`/debug naming the site and the duplicated key; **`util::sort_value_canonical`**
+    when tied elements are genuinely *interchangeable* — sort by the WHOLE value, never a prefix, so a tie
+    means they are identical; or **`// SORT-OK: <reason>`** when the input never comes from an ECS query.
+    `tests/determinism_lint.rs` blocks an unannotated sort in the hard gate.
+    This exists because prose failed: three sites (`almond_water_effect`, `enemy::smiley_defense`, the ORCA
+    neighbour sort) *asserted* a total order in a comment while keying on a prefix of the value, and each
+    fell into the exact trap it described. **Sorting by a prefix is the single most common shape of this
+    bug** — `(pos)` when the element is `(pos, payload)`, so coincident actors tie and the payload decides
+    something. Crabs `clamp_to_patch`-ed against a wall hold *bit-identical* coordinates, so this is routine,
+    not theoretical (measured: 6 fully-tied pairs at one tick).
+11. **An exoneration is only as strong as the condition it was measured under.** Corollary of 8, and the
     rule that keeps a ruled-out list honest. "I removed the suspect and it still diverged" does **not** clear
     the suspect — with several order-dependencies live, removing one leaves divergence (the aim-scatter A/B
     was read as REFUTED this way, and it was the actual root cause). "It didn't reproduce over N runs" does
@@ -185,29 +199,38 @@ The canonical map of what pins what. Update this table when you add or retire a 
 
 | File | Gate | What it does |
 |---|---|---|
+| `tests/determinism_lint.rs` | GPU-free (no feature) | **The class-level guard.** Scans `src/` and fails any raw `sort*` that hasn't declared a determinism contract (`sort_total!` / `sort_value_canonical` / `// SORT-OK:`). Instant. Catches the whole family of "sort key ties → falls back to ECS query order" bugs at review time, where seven hand-fixes only caught instances. Its runtime half is `util::sort_total_by_key_at`, which panics naming the site + duplicated key the moment a tie occurs under the harness — reintroduce the `smiley_defense` cull bug and it reds in ~2 s. |
 | `tests/rng_guard.rs` | GPU-free (no feature) | Freezes the exact bit output of every generator — `util` (`next_u32`, `rand01`, `hash01_u32`), `autogib::hash_f32`, and `rng::seeded` ChaCha8 (`raw_u64`, `unit`, `below`). A silent constant change trips here first. |
 | `tests/wfc_pin.rs` | GPU-free (no feature) | Golden FNV-1a hash of `wfc::generate` over a 5-seed corpus + in-process reproducibility + the "a floor link only ever joins two floors" invariant. |
-| `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. Also **`search_rollouts_are_reproducible_under_load`** — the G0 guard: 12 `rollout()`s at the search's real 7200-tick episode **with the synthetic player**, on **both held-in seeds**, must agree bit-for-bit. ~6 min. **Currently RED on `0xA11CE` — that is correct, see G0c below.** |
+| `tests/replay.rs` | `test-harness` (GPU-free) | Boots the sim; same-seed → identical `snapshot_hash` on the core (`deterministic_core_is_bit_identical`); state evolves; the speed knob is deterministic (does **not** assert cross-speed equality); full-sim liveness. Also **`search_rollouts_are_reproducible_under_load`** — the G0 guard: 12 `rollout()`s at the search's real 7200-tick episode **with the synthetic player**, on **both held-in seeds**, must agree bit-for-bit. ~6 min. Green. It was RED on `0xA11CE` until the G0c fix — and it had been green for months on ONE seed while the other split 3 ways, which is why it now runs both. |
 | `tests/liveness.rs` | `test-harness` (GPU-free) | A scripted agent drives the squad across the dungeon (coverage ≥ 15 distinct cells + no soft-lock); a ~10 s unattended survival run over 20 checkpoints. Also: **Almond Water** seeps and pools on the floor (`peak > 0` after 600 ticks) and a wounded biological flooded with water regains HP in one tick. |
 
-### Known-red: `search_rollouts_are_reproducible_under_load` on seed `0xA11CE` (G0c)
+### The G0/G0b/G0c hunt — what it cost, and the one thing that ended it
 
-**This test is red on purpose. Do not `#[ignore]` it, do not narrow it back to one seed, do not "fix" it by
-deleting the seed.** It is reporting a real, pre-existing bug (G0c): the search's rollouts are still not
-reproducible on the held-in world `0xA11CE` — 3 distinct outcomes over 8 reps, **on an idle box**.
+Kept because the *method* is the reusable part. Three root causes, ten order-dependence bugs, and the class
+was only closed by making it **mechanical**:
 
-It was green until 2026-07-16 only because it tested a single seed (`0x5C09191`) that happens to be
-reproducible. That is the failure mode invariants 8-10 exist to prevent, and it is worth internalising:
-*the guard was not wrong about its seed — it was wrong about what one seed proves.*
+* **G0** — `laser::fire_laser` drew a shared RNG stream in raw ECS query order.
+* **G0b** — `config.ron` held a machine-baked level, so the archive came back empty.
+* **G0c** — **`GibKey` was derived from the death origin position**, so the tiebreak for "two chunks at a
+  bit-identical spot" was a function of that spot. Two creatures dying on one coordinate minted identical
+  keys → `assign_meat_targets` tied → crabs committed to different meat chunks per run.
 
-Consequences while this is red:
-- **Archives are not trustworthy for `train apply`.** The objective wobbles, so a MAP-Elites cell can be won
-  by evaluation luck rather than by the genome.
-- `tests/search_parallel.rs` is red too. It is a **symptom** — the parallel reduction is exonerated by
-  measurement *and* by reading. Don't debug `parallel.rs`.
+**The bisect never named G0c.** A session of it narrowed to one tick (1582) and a pair of crabs and stopped
+there — a bisect shows where a divergence *surfaced*, not which of a dozen sorts fell through to query
+order. `util::sort_total_by_key_at` named it in **one second**, on the first harness run after being wired
+up, with the file, the line, and the duplicated key.
 
-Diagnosis, the ruled-out table, and the next step (a per-tick bisect inside the 600–1800 window using the
-~25 s reproducer): `docs/rl/2026-07-16-search-rollout-nondeterminism.md` §G0c.
+Four sites documented the exact trap they then fell into (ORCA, `almond_water_effect`, `smiley_defense`,
+`GibKey`). That is why invariant 10 is enforcement and not advice. The two recurring shapes:
+
+1. **A key that is a PREFIX of the value** — `(pos)` where the element is `(pos, payload)`. Coincident actors
+   tie and the payload decides something. Crabs `clamp_to_patch`-ed against a wall hold *bit-identical*
+   coordinates, so this is routine (measured: 6 fully-tied pairs at one tick).
+2. **A tiebreak derived from the tied quantity** — `GibKey`'s mistake. A position-derived key cannot break a
+   position tie.
+
+Diagnosis, measurements, and the corrected ruled-out table: `docs/rl/2026-07-16-search-rollout-nondeterminism.md`.
 
 ---
 

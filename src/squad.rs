@@ -417,7 +417,7 @@ fn despawn_dead_units(
         .filter(|(_, hp, _, _, _, _)| hp.current <= 0.0)
         .map(|(entity, _, transform, outfit, figurine, member)| (member.0, entity, transform, outfit, figurine))
         .collect();
-    dead.sort_unstable_by_key(|&(member, ..)| member);
+    crate::sort_total!(&mut dead, |&(member, ..)| member);
 
     for (_, entity, transform, outfit, figurine) in dead {
         // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
@@ -633,7 +633,7 @@ fn unit_movement(
         // here (units spawn on cell centres; `resolve_move` clamps to identical floats). Same shape as the
         // crab-side sorts, which append `Seed`/`GibKey` after their bit-triples for this reason.
         // `blocked_by_settled` above is an order-independent OR, so it needs no sort.
-        neighbors.sort_unstable_by_key(|(member, a)| (a.pos.x.to_bits(), a.pos.y.to_bits(), *member));
+        crate::sort_total!(&mut neighbors, |(member, a)| (a.pos.x.to_bits(), a.pos.y.to_bits(), *member));
         let neighbors: Vec<Agent> = neighbors.into_iter().map(|(_, a)| a).collect();
 
         // Nearby solid cells become hard ORCA wall constraints, so a unit dodging a neighbor is never

@@ -710,6 +710,7 @@ fn expand_to_fine(
         incident[b].push((db, a, false));
     }
     for inc in &mut incident {
+        // SORT-OK: WFC graph edges from a seeded generator, not an ECS query.
         inc.sort_by_key(|&(dir, nb, _)| (dir, nb));
     }
 
@@ -985,6 +986,7 @@ fn port_neighbors(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>
         adj[b].push(a);
     }
     for nb in &mut adj {
+        // SORT-OK: seeded generator, not an ECS query.
         nb.sort_unstable();
         nb.dedup();
     }
@@ -1046,6 +1048,7 @@ fn largest_graph_component(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
             best = comp;
         }
     }
+    // SORT-OK: seeded generator, not an ECS query.
     best.sort_unstable();
     best
 }

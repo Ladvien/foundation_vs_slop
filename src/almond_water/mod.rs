@@ -562,6 +562,7 @@ impl AlmondWater {
             }
             sizes.push(size);
         }
+        // SORT-OK: bare sizes from a seeded bake, not an ECS query.
         sizes.sort_unstable_by(|a, b| b.cmp(a));
         sizes
     }
@@ -778,7 +779,7 @@ fn almond_water_effect(
         return;
     }
     // TOTAL order: `smell.id` is the tiebreak, and without it this is not one — see the note above.
-    cands.sort_unstable_by_key(|k| (k.0, k.1, k.2, k.3, k.4, k.5));
+    crate::sort_total!(&mut cands, |k: &(u32, u32, u32, u32, u32, u64, Entity, IVec2)| (k.0, k.1, k.2, k.3, k.4, k.5));
 
     // Mutable pass, in the sorted order. ONE signed path: belief at the cell selects heal (+), poison (−), or
     // inert (the deadband). Both heal and poison DRINK the cell down — you drink the water either way, so a dry

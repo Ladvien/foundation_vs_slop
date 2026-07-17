@@ -611,6 +611,7 @@ fn nest_offsets() -> Vec<(i32, i32)> {
             v.push((dx, dy));
         }
     }
+    // SORT-OK: a fixed constant offset table, not an ECS query — the input order is source-code order.
     v.sort_by_key(|&(dx, dy)| dx * dx + dy * dy);
     v
 }
@@ -722,7 +723,10 @@ fn crab_locomotion(
     // position and cascading into the physics-off replay hash (~1–3% of runs, pinned tick 549). Mirrors the
     // identical fix on the parasite swarm hash (`parasite.rs`, `manca_swarm`).
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+        // VALUE-CANONICAL: the bucket holds bare positions, so two coincident crabs contribute the
+        // identical term to `sep` and their order cannot matter. (Contrast the drink/cull sorts, whose tied
+        // elements carry identity.)
+        crate::util::sort_value_canonical(v, |p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     }
 
     for (
@@ -1223,8 +1227,10 @@ fn re_role_crabs(
     let min_scouts = (total as f32 * bc.scout_min_frac).round() as usize;
     let max_scouts = (total as f32 * bc.scout_max_frac).round() as usize;
     // Deterministic tiebreak: same crabs flip regardless of iteration order.
-    promotes.sort_unstable_by_key(|&(_, s)| s);
-    demotes.sort_unstable_by_key(|&(_, s)| s);
+    // `CrabSeed` is unique per crab, so these ARE total — and the check now proves it rather than trusting
+    // the comment. Both feed a `take(flips_per_tick)` budget, so a tie would silently pick different crabs.
+    crate::sort_total!(&mut promotes, |&(_, s): &(Entity, u32)| s);
+    crate::sort_total!(&mut demotes, |&(_, s): &(Entity, u32)| s);
 
     let mut budget = bc.caste_flips_per_tick;
     for &(e, seed) in &promotes {
@@ -1533,7 +1539,7 @@ fn crab_despawn_dead(
         .filter(|(_, hp, _, _, _)| hp.current <= 0.0)
         .map(|(e, _, tf, culled, seed)| (seed.0, e, tf.translation, culled.is_some()))
         .collect();
-    dead.sort_unstable_by_key(|(seed, _, _, _)| *seed);
+    crate::sort_total!(&mut dead, |(seed, _, _, _)| *seed);
     for (_, entity, pos, culled) in dead {
         if culled {
             // Boss cull (`smiley_defense`): green-ichor swat, and deliberately NO SCENT deposit — a
@@ -1867,6 +1873,7 @@ fn assign_meat_targets(
             // non-associative, so summing in enumeration order lets a carrier-order difference flip that
             // gate at the boundary — diverging which crab commits, and the physics-free replay hash.
             let mut caps_v: Vec<u32> = c.carriers.iter().filter_map(|x| caps.get(x)).map(|v| v.to_bits()).collect();
+            // SORT-OK: bare f32 bits about to be summed — a tie is the same term twice. Interchangeable.
             caps_v.sort_unstable();
             let sum: f32 = caps_v.into_iter().map(f32::from_bits).sum();
             committed.insert(e, sum);
@@ -1879,7 +1886,7 @@ fn assign_meat_targets(
     // an exact distance tie it would commit a crab to a different chunk per run, diverging crab targets
     // and cascading into the physics-free replay hash (`deterministic_core_is_bit_identical`). Sort by
     // world position — a stable key independent of entity order — so the choice depends only on geometry.
-    gib_snap.sort_unstable_by_key(|&(_, p, _, _, key)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), key));
+    crate::sort_total!(&mut gib_snap, |&(_, p, _, _, key)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), key));
 
     // Seeking crabs that still need a chunk. The enlist loop below is greedy and stateful (each commit
     // bumps `committed`, so who picks first decides who gets the last slot on a contested chunk), and it
@@ -1895,7 +1902,7 @@ fn assign_meat_targets(
         })
         .map(|(e, m, _, _, seed)| (e, m.pos, seed.0))
         .collect();
-    seekers.sort_unstable_by_key(|(_, p, seed)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed));
+    crate::sort_total!(&mut seekers, |(_, p, seed)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed));
 
     for (crab_e, cpos, _) in seekers {
         let mut best: Option<(Entity, f32)> = None;
@@ -2028,6 +2035,7 @@ fn carry_gibs(
                 }
             }
         }
+        // SORT-OK: bare f32 bits about to be summed — ties are identical terms.
         total_caps.sort_unstable();
         here_caps.sort_unstable();
         let cap_total: f32 = total_caps.into_iter().map(f32::from_bits).sum();
@@ -2236,6 +2244,8 @@ fn deposit_crab_fields(
     let density = sim.deposit.crab_density_rate * dt;
     let menace = sim.deposit.crab_menace_rate * dt;
     let mut positions: Vec<Vec3> = crabs.iter().map(|tf| tf.translation).collect();
+    // SORT-OK: bare positions — the position IS the whole value, so a tie means two identical deposits,
+    // which contribute identical terms to the same sum. Interchangeable.
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -2272,6 +2282,8 @@ fn deposit_meat_scent(
         .filter(|(_, carry)| carry.phase != crate::gore::CarryPhase::Hauling)
         .map(|(tf, _)| tf.translation)
         .collect();
+    // SORT-OK: bare positions — the position IS the whole value, so a tie means two identical deposits,
+    // which contribute identical terms to the same sum. Interchangeable.
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -2382,7 +2394,7 @@ fn nest_reproduce(
         .iter()
         .map(|(e, n)| (n.pos.x.to_bits(), n.pos.y.to_bits(), n.pos.z.to_bits(), e))
         .collect();
-    order.sort_unstable();
+    crate::sort_total!(&mut order, |k: &(u32, u32, u32, Entity)| (k.0, k.1, k.2));
 
     for (.., nest_e) in order {
         let Ok((_, mut nest)) = nests.get_mut(nest_e) else {

@@ -356,6 +356,7 @@ fn run_episode_probed(
             // the same i64), and `sort_by_key` is *stable*, so tied nests would keep their input order —
             // which `nest_cells` now canonicalises, but relying on that implicitly is how this broke before.
             // Break ties on the cell itself so the tour is a pure function of the map, explicitly.
+            // SORT-OK: the `(c.y, c.x)` suffix makes this total over distinct cells, and `nest_cells` dedups.
             nests.sort_by_key(|c| ((c.as_vec2().distance_squared(from) * 100.0) as i64, c.y, c.x));
             nests
         }

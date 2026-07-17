@@ -502,6 +502,8 @@ pub fn gib_hash(app: &mut App) -> u64 {
             ]
         })
         .collect();
+    // SORT-OK: whole rows — a tie means two actors are bit-identical in everything hashed, so swapping
+    // them cannot change the fold.
     rows.sort_unstable();
 
     // The ring, as GibKeys, in ring order. A missing key (a non-carryable decoration chunk) folds as 0.
@@ -550,6 +552,8 @@ pub fn snapshot_rows(app: &mut App) -> Vec<[u32; 5]> {
             ]
         })
         .collect();
+    // SORT-OK: whole rows — a tie means two actors are bit-identical in everything hashed, so swapping
+    // them cannot change the fold.
     rows.sort_unstable();
     rows
 }
@@ -573,6 +577,8 @@ pub fn snapshot_hash(app: &mut App) -> u64 {
             ]
         })
         .collect();
+    // SORT-OK: whole rows — a tie means two actors are bit-identical in everything hashed, so swapping
+    // them cannot change the fold.
     rows.sort_unstable();
 
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -650,6 +656,7 @@ pub fn issue_squad_order(app: &mut App, goal: IVec2) -> bool {
     // across `App` instances — see `replay::deterministic_core_is_bit_identical_across_many_builds`) into a
     // persistent, run-dependent unit order, and two identical rollouts diverge. `SquadMember` is the stable
     // spawn index, so ordering by it makes this churn a pure function of the squad.
+    // SORT-OK: `SquadMember` is unique per unit (assigned at spawn, never reused) — total by construction.
     units.sort_unstable_by_key(|(member, _)| *member);
     for (_, e) in units {
         world.entity_mut(e).insert(crate::squad::MoveOrder::new(field.clone()));
@@ -672,6 +679,7 @@ pub fn clear_squad_orders(app: &mut App) -> usize {
     let mut ordered: Vec<(usize, Entity)> = q.iter(world).map(|(e, m)| (m.0, e)).collect();
     // CANONICAL ORDER, for the same reason as `issue_squad_order`: `remove` is also an archetype move, so
     // the removal order fixes the units' slots in the destination table. Order by the stable spawn index.
+    // SORT-OK: `SquadMember` is unique per unit — total by construction.
     ordered.sort_unstable_by_key(|(member, _)| *member);
     for (_, e) in &ordered {
         world.entity_mut(*e).remove::<crate::squad::MoveOrder>();
@@ -709,6 +717,7 @@ pub fn squad_health(app: &mut App) -> (f32, f32) {
         curs.push(h.current);
         maxs.push(h.max);
     }
+    // SORT-OK: bare f32s about to be summed — ties are identical terms.
     curs.sort_by(f32::total_cmp);
     maxs.sort_by(f32::total_cmp);
     (curs.iter().sum(), maxs.iter().sum())
@@ -756,6 +765,7 @@ pub fn nest_cells(app: &mut App) -> Vec<IVec2> {
     // hub tour, whose `sort_by_key` is a *stable* sort, so tied nests keep their input order — and two
     // identical rollouts would then tour the map in different orders and diverge. Sorting by cell makes
     // this a pure function of the map.
+    // SORT-OK: grid cells are unique in this set (deduped) — total by construction.
     cells.sort_unstable_by_key(|c| (c.y, c.x));
     cells
 }
@@ -780,6 +790,7 @@ pub fn squad_centroid_cell(app: &mut App) -> IVec2 {
     // flips the distance keys of `run_episode`'s hub tour and diverges the whole episode. Canonicalise the
     // summation order first — the same discipline as `squad_ai::coevolve::mean` and `snapshot_hash`'s
     // sorted rows.
+    // SORT-OK: bare positions — whole value, ties interchangeable.
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     let mean = positions.iter().copied().sum::<Vec3>() / positions.len() as f32;
     dungeon.world_to_cell(mean)

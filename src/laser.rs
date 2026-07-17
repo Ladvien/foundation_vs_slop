@@ -279,7 +279,7 @@ fn fire_laser(
     // `SquadMember` is the stable spawn index — the same key `sim_harness::issue_squad_order` sorts by, and
     // for the same reason. `noise` keeps its own position sort below (its pushes are now canonical too, but
     // the sort is the established idiom and costs nothing).
-    shots.sort_unstable_by_key(|&(member, ..)| member);
+    crate::sort_total!(&mut shots, |&(member, ..)| member);
 
     for (_, unit_entity, muzzle, aim, spread, unit_pos) in shots {
         let forward = scatter(*aim, spread, &mut lrng.aim);
@@ -381,7 +381,7 @@ fn update_lasers(
     //     `drain_deposits` applies the batch UNSORTED, so producer push order is load-bearing.
     //   * `commands.despawn` order feeds Bevy's entity-id reuse — the root entropy itself.
     // `seq` (stamped by `fire_laser` in `SquadMember` order) is the stable TOTAL order; see `Laser::seq`.
-    bolts.sort_unstable_by_key(|&(seq, ..)| seq);
+    crate::sort_total!(&mut bolts, |&(seq, ..)| seq);
 
     // PASS 2 — effects, in fire order.
     for (_, entity, prev, now, life, shooter) in bolts {

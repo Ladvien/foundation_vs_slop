@@ -7,14 +7,28 @@
 |---|---|
 | **G0** — `fire_laser`'s shared aim-scatter draw in query order | **FIXED** (session 2), pinned |
 | **G0b** — empty archive from a machine-baked level in `config.ron` | **FIXED** (session 2) |
-| **G0c** — residual rollout non-determinism on seed `0xA11CE` | **OPEN** — see §G0c |
+| **G0c** — residual rollout non-determinism on seed `0xA11CE` | **FIXED** (session 3), pinned |
 
-> **The headline is not "fixed".** G0 itself is closed and guarded. But session 3 found the guard was passing
-> on a **lucky seed**: the search's other held-in world, `0xA11CE`, still splits **3 ways on an idle box**.
-> The objective still wobbles. Archives remain untrustworthy for `train apply`.
+> ## RESOLVED. The objective no longer wobbles.
 >
-> The good news: G0c reproduces in **~25 s with no load threads**, and `decisions` differs across its
-> outcomes (G0's did not) — so it is a *different*, and much cheaper to chase, bug.
+> `search_rollouts_are_reproducible_under_load` is **green on BOTH held-in seeds** — 12 rollouts × 7200 ticks
+> × 2 worlds, under 8 background load threads, all bit-identical. Archives are trustworthy again.
+>
+> **G0c's root cause: `GibKey` — the tiebreak that could not break its own tie.**
+>
+> `assign_meat_targets` sorts candidate meat chunks by `(position, GibKey)`, and `GibKey` was derived from
+> **the death origin position**. So the key that exists to disambiguate two chunks at a bit-identical spot
+> was *itself a function of that spot*: two different creatures dying on the same coordinate minted
+> byte-identical keys, the sort tied, and the greedy commit fell through to ECS query order — sending crabs
+> to different chunks run to run. `GibKey`'s own doc had anticipated coincident chunks exactly, and then
+> broke the tie with the colliding value.
+>
+> Crabs die on bit-identical coordinates constantly: `clamp_to_patch` pins a crab pressed to a wall onto the
+> same float. That is why `0xA11CE` (74 kills) diverged and `0x5C09191` (47 kills) did not.
+>
+> **It was found by the lint, in one second — not by the bisect.** Seven sessions-worth of hand-bisecting
+> narrowed it to a tick and never named it. `util::sort_total_by_key_at` panicked on the first tied key and
+> printed the file, the line, and the duplicate. See "The lesson" at the end of this document.
 
 ## RESOLVED — root cause and fix
 
@@ -579,24 +593,73 @@ look deterministic. **That contradiction is the next thread**: something the two
 already different at 1581 (`CrabJump.cooldown`/`phase`, `ActiveBehavior.mode`, `ThinkTimer` stagger,
 `CrabCarry.target`, `Caste.cooldown` — none are hashed).
 
-### Next step — hash the AI/component state, don't guess
+### THE ROOT CAUSE — `GibKey` could not break its own tie
 
-Every bisect so far has been blind to per-crab component state. Add a fourth oracle over it (`CrabSeed`-keyed
-rows of `ActiveBehavior.mode`, `CrabJump.phase`/`cooldown`, `ThinkTimer`, `CrabCarry.target`, `Caste`) and
-re-bisect. If that diverges before 1582, it names the system directly — and given the trigger inputs are all
-canonical, it is the most likely place the truth is hiding. The alternative reading is that two crabs holding
-*identical* `(Transform, Health)` are being told apart by something unhashed, and the hash simply cannot see
-the swap.
+Found by the lint (below), one second into the first harness run after it was wired up:
 
-### What this means (read before the next attempt)
+```text
+NON-TOTAL SORT KEY at src/crab.rs:1889: two elements share the key
+  (1097796313, 1051092582, 1096747706, 7977280226326944103)
+in system `crab::assign_meat_targets`
+```
 
-Seven fixes in, the honest conclusion is that **the sim's determinism rests on every one of ~dozens of
-query-iterating sites remembering to impose a stable total order**, and the codebase has no mechanism that
-*enforces* it — only comments, several of which confidently claimed a total order that was not one
-(`almond_water_effect`, `smiley_defense`, the ORCA sort). Three separate sites documented the exact trap they
-then fell into. That is a systemic design gap, not a run of bad luck, and the roadmap should treat it as one:
-a lint, a newtype that makes "sorted by a stable total key" un-bypassable, or a debug-mode assertion that a
-sort key has no duplicates would each catch the whole class at once — where seven hand-fixes did not.
+That is `gib_snap`, keyed `(pos.x, pos.y, pos.z, GibKey)` — and `GibKey` was:
+
+```rust
+key = hash(origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits(), chunk_index)
+```
+
+**A function of the death position.** So the tiebreak for "two chunks at a bit-identical spot" was itself
+derived from that spot: two *different* creatures dying on one coordinate minted identical keys. The sort
+tied → `assign_meat_targets`' greedy nearest-chunk commit fell through to ECS query order → crabs committed
+to different chunks → crab trajectories diverged. `GibKey`'s doc had spelled out the exact scenario
+("two chunks that settle at a bit-identical spot would otherwise be ordered by unstable entity order") and
+then defended against it with the colliding value.
+
+Why coincident deaths are routine, not exotic: `clamp_to_patch` pins a crab pressed against a wall onto the
+*same float*, so crabs pile up and die on one coordinate. `0xA11CE` kills **74** crabs and diverged;
+`0x5C09191` kills **47** and did not.
+
+**The fix.** `GibKey` now mixes in a monotonic `GibSeq`, so keys are unique **by construction** rather than
+by hope. `GibSeq` is deterministic because `drain_gore` sorts the `GoreQueue` canonically before draining —
+one sort at the single *consumer*, deliberately, rather than asking a dozen producers across
+laser/squad/enemy/crab/parasite to each remember. A new producer cannot forget a sort it doesn't have to
+write.
+
+**Proof:** `0xA11CE` 3 distinct → **1 distinct over 10**; `search_rollouts_are_reproducible_under_load` green
+on both seeds under load. `decisions` on `0xA11CE` moved 5579 → 11684 — not a shuffle: the foraging economy
+had been quietly broken, crabs committing to phantom-colliding chunks.
+
+### The lesson — and the mechanism that replaces it
+
+The hand-hunt found **seven** real order-dependence bugs and closed none of them the way this one closed. It
+narrowed G0c to a tick (1582) and a pair of crabs, and still never named the site. The lint named it in one
+second, on the first run.
+
+Why: a bisect tells you *where the divergence surfaced*; it cannot tell you *which of a dozen sorts fell
+through to query order*. The check runs at the moment the tie happens.
+
+The deeper finding is that this class was never one bug with a tail. **The sim's determinism rested on ~dozens
+of query-iterating sites each remembering to impose a stable total order, enforced by nothing but prose** —
+and prose lost, repeatedly and in the same way:
+
+| Site | Comment claimed | Reality |
+|---|---|---|
+| ORCA neighbour sort | "makes the solve a pure function of the neighbour SET" | position-only key; coincident agents permuted the LP |
+| `almond_water_effect` | "sorted by `(cell, current, pos)` … the same discipline `snapshot_hash` uses" | `Entity` collected but left OUT of the key |
+| `smiley_defense` | "WHICH crabs die … must not depend on unstable entity ordering" | position-only key on a **lethal** pick |
+| `GibKey` | "two chunks at a bit-identical spot would otherwise be ordered by unstable entity order" | the tiebreak was a function of the position |
+
+Every one documented the exact trap it then fell into. **The single most common shape is a key that is a
+PREFIX of the value** — `(pos)` where the element is `(pos, payload)` — so coincident actors tie and the
+payload decides something. The second shape is `GibKey`'s: a tiebreak derived from the tied quantity.
+
+Now enforced, not documented (see TESTING.md invariant 10):
+
+* **`sort_total!(&mut v, |x| key)`** — panics under `test-harness`/debug naming the site and the duplicated
+  key. Reintroduce the `smiley_defense` bug and it reds in ~2 s.
+* **`util::sort_value_canonical`** — for genuinely interchangeable ties; sort by the WHOLE value.
+* **`tests/determinism_lint.rs`** — GPU-free, in the hard gate: an unannotated raw `sort*` fails the build.
 
 ## Related
 

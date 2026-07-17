@@ -164,7 +164,23 @@ fn deterministic_core_is_bit_identical() {
 // const below (an unbounded whole-file `str::replace`) — it no longer does, and it no longer re-pins at
 // all without an explicit `--repin-goldens`. Changing a golden is a deliberate, human-reviewed act
 // (TESTING.md); the tool's job is to REFUSE and report the drift, not to resolve it.
-const GOLDEN: u64 = 0x38d3c9107d4eed33;
+//
+// Re-pinned for the G0c FIX — the determinism total-order pass. Was `0x38d3c9107d4eed33`.
+//
+// This one is worth understanding, because "the golden was stable, so why did it move?" is the obvious
+// objection and the answer is the whole point. The old value WAS reproducible on this box — but only
+// because ECS query order happened to come out the same way for this particular no-player scenario. It was
+// consistent by luck, not by construction. Several sums it folds (the flashlight-cone `compose`, the manca
+// swarm's heading/commit, the Almond Water drink contention) were being ordered by whatever the query
+// yielded; they are now ordered canonically, so the value changed. The new one does not depend on query
+// order at all. Precedent and reasoning are the CRAB DETERMINISM re-pin's, above: *"The old value was never
+// a single correct golden — just the most common outcome of the flaky sum."*
+//
+// Verified before pinning, per TESTING.md: `train verify --reps 8` plus three further FRESH processes —
+// 17 independent measurements, all `0xe11eed83902ee648`. `deterministic_core_is_bit_identical_across_many_builds`
+// (24 builds) and `search_rollouts_are_reproducible_under_load` (12 rollouts × both held-in seeds × 7200
+// ticks, under CPU load) are green on this value, which is a stronger statement than the old one could make.
+const GOLDEN: u64 = 0xe11eed83902ee648;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -275,7 +291,12 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // RESTORED alongside `GOLDEN` above — the machine bake re-pinned this to the baked level
 // (`0x9b19982055f7413d`); `train verify --reps 8` recomputes the pre-bake value below on the restored
 // authored level.
-const GOLDEN_FIELD: u64 = 0xe1ec_dc58_3c8d_bfca;
+// Re-pinned alongside `GOLDEN` for the G0c fix (the determinism total-order pass) — see the long note
+// there for why a golden that WAS stable still moved: it was consistent by luck (query order happened to
+// repeat for this scenario), not by construction. This field golden folds the light/Stig/water grids whose
+// per-cell sums are now canonically ordered. Was `0xe1ec_dc58_3c8d_bfca`. Verified over 17 independent
+// measurements (`train verify --reps 8` + three fresh processes), all `0xd504e6a2f019f3fb`.
+const GOLDEN_FIELD: u64 = 0xd504e6a2f019f3fb;
 
 #[test]
 fn field_passes_are_bit_identical() {

@@ -416,7 +416,13 @@ fn bake_light_field(
         return; // fixtures not spawned yet — stay dirty, retry next tick
     }
     // Stable order so the per-cell float summation in `bake` is reproducible across runs/threads.
-    fx.sort_unstable_by_key(|(c, _, _)| (c.x, c.y));
+    //
+    // Sorted by the WHOLE value, not just the cell. Keying on `(c.x, c.y)` alone was a prefix of the value:
+    // two fixtures in one cell with different intensity/range tied, and `sort_unstable` then ordered them by
+    // the ECS query order this sort exists to erase — feeding `bake`'s non-associative per-cell sum in a
+    // run-dependent order. With the full value in the key a tie means the entries are IDENTICAL, hence
+    // interchangeable, which is exactly the claim `sort_value_canonical` makes.
+    crate::util::sort_value_canonical(&mut fx, |(c, i, r)| (c.x, c.y, i.to_bits(), r.to_bits()));
     field.bake(&dungeon, &fx);
 }
 
@@ -482,7 +488,23 @@ pub(crate) fn apply_dynamic_lights(
         })
         .collect();
     // Stable order so the per-cell float summation in `compose` is reproducible across runs/threads.
-    cones.sort_unstable_by_key(|k| (k.source.x, k.source.y));
+    //
+    // Keyed on the WHOLE cone, not just `source`. `(source.x, source.y)` was a PREFIX of the value: two
+    // flashlights in one cell with different dir/range/cone tied, and `sort_unstable` then ordered them by
+    // ECS query order — which `compose`'s non-associative per-cell sum then folds. Full value in the key ⇒
+    // a tie means the cones are identical ⇒ interchangeable.
+    crate::util::sort_value_canonical(&mut cones, |k| {
+        (
+            k.source.x,
+            k.source.y,
+            k.forward.x.to_bits(),
+            k.forward.y.to_bits(),
+            k.intensity.to_bits(),
+            k.range.to_bits(),
+            k.cone_cos.to_bits(),
+            k.edge_softness.to_bits(),
+        )
+    });
     field.compose(&dungeon, &cones);
 }
 

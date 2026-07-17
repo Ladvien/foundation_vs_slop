@@ -939,6 +939,7 @@ fn propose_world(parent: &WorldGenome, rng: &mut ChaCha8Rng) -> Result<WorldGeno
 /// float addition is not associative, and the whole run must be reproducible from its seed.
 fn mean(xs: &[f32]) -> f32 {
     let mut sorted: Vec<u32> = xs.iter().map(|x| x.to_bits()).collect();
+    // SORT-OK: bare f32 bits about to be summed (`mean`) — ties are identical terms.
     sorted.sort_unstable();
     let sum: f32 = sorted.iter().map(|b| f32::from_bits(*b)).sum();
     sum / xs.len() as f32

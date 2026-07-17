@@ -859,6 +859,7 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
             }
             let fmt = |m: &BTreeMap<String, u32>| {
                 let mut v: Vec<_> = m.iter().collect();
+                // SORT-OK: offline reporting over a Vec, not an ECS query.
                 v.sort_by(|a, b| b.1.cmp(a.1));
                 v.iter().take(8).map(|(k, c)| format!("{k} {c}")).collect::<Vec<_>>().join(", ")
             };
@@ -1794,6 +1795,7 @@ fn splice_block(text: &str, name: &str, before_ron: &str, after_ron: &str) -> Re
     }
 
     // Apply right-to-left so earlier spans stay valid.
+    // SORT-OK: byte spans in one file, unique by construction — offline tooling, not an ECS query.
     edits.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
     let mut out = text.to_string();
     for (s, new_text) in &edits {

@@ -160,6 +160,7 @@ pub fn delaunay_edges(points: &[Point]) -> Vec<(usize, usize)> {
             edges.push((a.min(b), a.max(b)));
         }
     }
+    // SORT-OK: pure geometry over a seeded point set, not an ECS query.
     edges.sort_unstable();
     edges.dedup();
     edges
@@ -185,6 +186,7 @@ pub fn prune_to_max_degree(
     }
     // Process longest-first; total_cmp gives a total order over the (finite) squared lengths.
     let mut order: Vec<usize> = (0..edges.len()).collect();
+    // SORT-OK: pure geometry over a seeded point set, not an ECS query.
     order.sort_by(|&i, &j| {
         len2(&edges[j])
             .total_cmp(&len2(&edges[i]))

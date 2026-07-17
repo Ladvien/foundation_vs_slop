@@ -468,6 +468,7 @@ fn deposit_manca_dread(
         .filter(|(_, mood)| mood.state == MoodState::Roused)
         .map(|(tf, _)| tf.translation)
         .collect();
+    // SORT-OK: bare positions — whole value, ties are identical deposits (interchangeable).
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -703,6 +704,7 @@ fn spawn_mancae(
     }
     // Best harborages first; `sort_by` is STABLE, so equal-score cells keep their row-major order — the
     // whole ranking is a pure function of the (fixed) dungeon + furniture layout.
+    // SORT-OK: candidate cells from a seeded generator, not an ECS query.
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
     // Greedily choose huddle sites spread ≥ beh.parasite_swarm.harborage_sep apart so distinct huddles occupy distinct corners.
@@ -905,7 +907,21 @@ fn manca_hunt(
         }
     }
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|nb| (nb.pos.x.to_bits(), nb.pos.y.to_bits(), nb.pos.z.to_bits()));
+        // Sorted by the WHOLE neighbour, not just its position. Position alone was a PREFIX of the value:
+        // two coincident mancae with different `heading`/`commit` tied, so the swarm's non-associative
+        // heading/commit sums ran in ECS query order. With the full value in the key a tie means the
+        // neighbours are identical, hence interchangeable.
+        crate::util::sort_value_canonical(v, |nb| {
+            (
+                nb.pos.x.to_bits(),
+                nb.pos.y.to_bits(),
+                nb.pos.z.to_bits(),
+                nb.heading.x.to_bits(),
+                nb.heading.y.to_bits(),
+                nb.heading.z.to_bits(),
+                nb.commit.to_bits(),
+            )
+        });
     }
 
     for (mut motion, mut anim, leap, mut mood, mut transform) in &mut mancae {
@@ -1222,7 +1238,18 @@ fn manca_huddle(
         }
     }
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|nb| (nb.pos.x.to_bits(), nb.pos.y.to_bits(), nb.pos.z.to_bits()));
+        // Whole neighbour, not just its position — see the sibling swarm hash above.
+        crate::util::sort_value_canonical(v, |nb| {
+            (
+                nb.pos.x.to_bits(),
+                nb.pos.y.to_bits(),
+                nb.pos.z.to_bits(),
+                nb.heading.x.to_bits(),
+                nb.heading.y.to_bits(),
+                nb.heading.z.to_bits(),
+                nb.commit.to_bits(),
+            )
+        });
     }
 
     let signed_gain = -config.lighting.photophobic_gain;
@@ -1440,6 +1467,7 @@ fn manca_embed(
     if ready.is_empty() {
         return;
     }
+    // SORT-OK: per-manca spawn seed, unique — total by construction.
     ready.sort_unstable_by_key(|(seed, _, _)| *seed);
 
     // Snapshot fresh (un-infested) host positions once; `taken` guards against two mancae claiming one host.
@@ -1552,6 +1580,7 @@ fn parasite_burst(
     if order.is_empty() {
         return;
     }
+    // SORT-OK: per-manca spawn seed, unique — total by construction.
     order.sort_unstable_by_key(|(k, _)| *k);
 
     let mut live = live_mancae.iter().count();
@@ -1682,6 +1711,7 @@ fn manca_despawn_dead(
     if dead.is_empty() {
         return;
     }
+    // SORT-OK: per-manca spawn seed, unique — total by construction.
     dead.sort_unstable_by_key(|(seed, _, _)| *seed);
     for (_, entity, pos) in dead {
         gore.0.push(GoreEvent {

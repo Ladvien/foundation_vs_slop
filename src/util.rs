@@ -20,6 +20,90 @@ pub fn in_grid(c: IVec2, width: usize, height: usize) -> bool {
     c.x >= 0 && c.y >= 0 && (c.x as usize) < width && (c.y as usize) < height
 }
 
+/// Sort by a stable **total** key, checked (see [`sort_total_by_key_at`]). Captures the call site so a
+/// violation names the exact file and line.
+///
+/// ```ignore
+/// sort_total!(&mut shots, |s| s.member);
+/// ```
+#[macro_export]
+macro_rules! sort_total {
+    ($v:expr, $f:expr) => {
+        $crate::util::sort_total_by_key_at(concat!(file!(), ":", line!()), $v, $f)
+    };
+}
+
+/// **Sort by a key that must be a TOTAL order — and prove it, don't assert it in a comment.**
+///
+/// Use this for every sort whose *order* is load-bearing: a greedy/stateful loop, a `take(n)` budget, a
+/// shared RNG draw, a shared counter, a clamped accumulate, a last-writer-wins write. If two elements can
+/// produce the same key, `sort_unstable` resolves them by the input order — which in this codebase is ECS
+/// query order, which is **not stable across `App` instances** (GLB scene-child instantiation + entity-id
+/// reuse permute it). That is the single most common determinism bug here.
+///
+/// It exists because prose did not work. Three separate sites — `almond_water_effect`, `enemy::smiley_defense`,
+/// and the ORCA neighbour sort — carried comments *asserting* a total order, and all three were partial:
+/// crabs `clamp_to_patch`-ed against a wall hold BIT-IDENTICAL coordinates, so a position-only key ties
+/// (measured: 6 fully-tied pairs at one tick on held-in world `0xA11CE`). Each site documented the exact
+/// trap it then fell into. A comment cannot fail; this can.
+///
+/// Under `debug_assertions` or `test-harness` it **panics naming the call site and the duplicated key** the
+/// moment a tie occurs — so the harness suite is also a hunting tool for undiscovered instances. Release
+/// builds of the game pay nothing (the check compiles out entirely).
+///
+/// **When ties are legitimate, do NOT reach for this** — use [`sort_value_canonical`] and say why. The two
+/// are different contracts, not a fast path and a safe path.
+///
+/// Prefer the [`sort_total!`](crate::sort_total) macro, which fills in `site` from `file!()`/`line!()`.
+#[inline]
+pub fn sort_total_by_key_at<T, K, F>(site: &'static str, v: &mut [T], mut f: F)
+where
+    K: Ord + std::fmt::Debug,
+    F: FnMut(&T) -> K,
+{
+    v.sort_unstable_by_key(&mut f);
+    #[cfg(any(debug_assertions, feature = "test-harness"))]
+    {
+        for w in v.windows(2) {
+            let (a, b) = (f(&w[0]), f(&w[1]));
+            assert!(
+                a != b,
+                "NON-TOTAL SORT KEY at {site}: two elements share the key {a:?}, so `sort_unstable` breaks \
+                 the tie by INPUT order — i.e. by ECS query order, which is not stable across `App` \
+                 instances. Whatever this ordering decides (a shared draw, a `take(n)` budget, a clamped \
+                 accumulate, a lethal pick) is therefore not reproducible. Add a stable tiebreak: \
+                 `SquadMember` (units), `CrabSeed` (crabs), `GibKey` (chunks), `CyanideSmell::id` (any \
+                 `Biological`), or a monotonic spawn seq. A raw `Entity` will NOT do — recycled ids are the \
+                 instability being guarded against. If the tie is genuinely harmless because tied elements \
+                 are INTERCHANGEABLE, use `util::sort_value_canonical` instead and say why. \
+                 See docs/rl/2026-07-16-search-rollout-nondeterminism.md"
+            );
+        }
+    }
+    let _ = site;
+}
+
+/// Sort by a key where **ties are legitimate because tied elements are interchangeable** — i.e. permuting
+/// them cannot change any observable result.
+///
+/// The canonical example is [`crate::ai::field::sort_deposits`]: two deposits with the same position and
+/// amount contribute the same term to the same non-associative sum, so their order genuinely cannot matter.
+/// Same for the crab separation buckets, which hold bare positions.
+///
+/// This is NOT a relaxed [`sort_total_by_key_at`] — it is a different claim, and the claim is on you. Ask:
+/// *if I swapped two tied elements, could anything downstream tell?* If they carry identity, state, or a
+/// payload (an `Entity`, a seed, a health value, a mode), the answer is yes and you need
+/// [`sort_total_by_key_at`]. `almond_water_effect` looked like this case and was not: its tied drinkers
+/// differed in `anosmic`, mode, and carry phase.
+#[inline]
+pub fn sort_value_canonical<T, K, F>(v: &mut [T], f: F)
+where
+    K: Ord,
+    F: FnMut(&T) -> K,
+{
+    v.sort_unstable_by_key(f);
+}
+
 /// Nearest candidate to `origin` by planar (XZ) distance. Generic over a per-candidate payload (entity,
 /// forward vector, or `()`), so every "nearest target" scan across the AI shares ONE ranking + tie-break
 /// instead of hand-rolling the loop five times (a targeting-policy change — LOS, ignore near-dead prey,

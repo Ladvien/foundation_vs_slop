@@ -26,6 +26,7 @@ where
     F: FnOnce(&[IVec2]),
 {
     let mut current: Vec<IVec2> = cells.collect();
+    // SORT-OK: grid cells, unique in the frontier set — total, and grid-derived not ECS-derived.
     current.sort_unstable_by_key(|c| (c.x, c.y));
     current.dedup();
     if !force && current == *last {

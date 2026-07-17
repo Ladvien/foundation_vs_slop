@@ -126,7 +126,10 @@ pub struct StigDeposits(pub Vec<Deposit>);
 /// the drained field is a pure function of the deposits, not of query order. (Sites that already sort
 /// their source rows by a stable key before pushing — e.g. `crab_despawn_dead` by `Seed` — do not need it.)
 pub fn sort_deposits(batch: &mut [Deposit]) {
-    batch.sort_unstable_by_key(|d| {
+    // VALUE-CANONICAL, not total: two deposits with the same position AND amount contribute the same term
+    // to the same sum, so permuting them cannot change the drained field. Ties here are genuinely harmless —
+    // that is the claim `sort_value_canonical` makes, and it is why this is not `sort_total!`.
+    crate::util::sort_value_canonical(batch, |d| {
         (d.pos.x.to_bits(), d.pos.y.to_bits(), d.pos.z.to_bits(), d.amount.to_bits())
     });
 }

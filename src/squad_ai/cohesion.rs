@@ -72,6 +72,7 @@ fn deterministic_centroid(positions: Vec<Vec3>) -> Option<Vec3> {
     let n = positions.len();
     let mut keyed: Vec<[u32; 3]> =
         positions.into_iter().map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).collect();
+    // SORT-OK: whole keyed tuples — a tie means identical entries (interchangeable).
     keyed.sort_unstable();
     let mut sum = Vec3::ZERO;
     for k in &keyed {

@@ -544,6 +544,7 @@ fn deposit_anomaly_aura(
 ) {
     let amount = sim.deposit.anomaly_aura_rate * time.delta_secs();
     let mut positions: Vec<Vec3> = bosses.iter().map(|tf| tf.translation).collect();
+    // SORT-OK: bare positions — whole value, ties are identical deposits (interchangeable).
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -877,6 +878,8 @@ fn despawn_dead(
         .filter(|(_, hp, _)| hp.current <= 0.0)
         .map(|(entity, _, tf)| (entity, tf.translation))
         .collect();
+    // SORT-OK: two dead enemies at one position are treated identically (same gore push, same SCENT,
+    // same despawn), so the payload does not distinguish them — interchangeable.
     dead.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
 
     let mut scent: Vec<crate::ai::field::Deposit> = Vec::new();
@@ -1135,7 +1138,7 @@ fn smiley_defense(
         // ECS order this sort exists to erase, and `take(cull_max)` then killed a DIFFERENT crab run to run.
         // A "keep-the-first-on-a-tie pick", verbatim the trap
         // `replay::deterministic_core_is_bit_identical_across_many_builds`'s comment names.
-        biters.sort_unstable_by_key(|(_, p, seed)| {
+        crate::sort_total!(&mut biters, |(_, p, seed): &(Entity, Vec3, u32)| {
             (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed)
         });
         for (ce, _, _) in biters.into_iter().take(sim.boss.cull_max) {
