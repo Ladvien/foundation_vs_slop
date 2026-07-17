@@ -387,6 +387,20 @@ impl SearchKind {
             SearchKind::Poet => "poet",
         }
     }
+    /// The canonical single-output archive path for this kind — the stable location a human (or a
+    /// `FVS_*_ELITE` overlay) reads. `--islands` fans winners into `islands_out/` under ephemeral names that
+    /// the next run clears, so the island parent copies its winner HERE; a single search writes here directly.
+    /// `Evolve`/`Evolve3` write fixed multi-archive paths and have no single output.
+    fn archive_path(self) -> Option<&'static str> {
+        match self {
+            SearchKind::Levels => Some(LEVELS_ARCHIVE_PATH),
+            SearchKind::Audio => Some(AUDIO_ARCHIVE_PATH),
+            SearchKind::Behavior => Some(BEHAVIOR_ARCHIVE_PATH),
+            SearchKind::Rl => Some(RL_ARCHIVE_PATH),
+            SearchKind::Poet => Some(POET_ARCHIVE_PATH),
+            SearchKind::Evolve | SearchKind::Evolve3 => None,
+        }
+    }
     /// Progress-bar label.
     fn label(self) -> &'static str {
         match self {
@@ -502,8 +516,16 @@ fn run_all(a: AllArgs) -> Result<(), String> {
 
     banner(1, "prior (baseline the shipped brain)");
     prior(a.ticks, &seeds)?;
+    // `levels` is SEARCH-ONLY here, like `rl` — it is never baked into `config.ron` by the pipeline. Its
+    // elites are STRUCTURAL (`level_genome::decode` adds/drops room types), so a bake would change the
+    // `dungeon:` block's shape, which `splice_block` refuses because rewriting it would strip the authored
+    // rationale (a `--dim levels` bake stripped ~279 comment lines on 2026-07-16 — the incident that built
+    // the refusal). Levels ships via `FVS_LEVELS_ELITE`, its native mechanism, exactly as the policy ships
+    // via `FVS_POLICY_ELITE`. This also keeps the held-in worlds a STABLE reference (authored architecture +
+    // fixed seeds) for the later phases, rather than shifting the maps under the co-evolution mid-run.
+    // (`train apply levels <archive>` by hand still works for a value-only elite that keeps every room type.)
     banner(2, "levels (dungeon architecture + furniture + mushrooms)");
-    run_search(SearchKind::Levels, phase(1, islands, false, apply))?;
+    run_search(SearchKind::Levels, phase(1, islands, false, false))?; // search-only: structural → overlay, not baked
     banner(3, "audio (acoustic stimulus)");
     run_search(SearchKind::Audio, phase(1, islands, false, apply))?;
     // `behavior` (89 knobs of `BehaviorTuning`) was absent from this pipeline entirely, so "retrain
@@ -527,7 +549,15 @@ fn run_all(a: AllArgs) -> Result<(), String> {
         println!("\n═══ train all — verify determinism after auto-apply ═══");
         verify(GOLDEN_STABILITY_REPS)?;
     }
+    // The two overlay-shipped dims: config.ron holds the baked value dims (audio/behavior/world); these two
+    // ride alongside as archives, applied at launch. Print both together so nothing trained is left on the
+    // floor for want of an env var.
     println!("\n✓ train all: full pipeline complete");
+    println!("\nShipped in config.ron: audio + behavior + world (baked).");
+    println!("Ship alongside, via env (structural / opaque — not config-bakeable):");
+    println!("  FVS_LEVELS_ELITE={LEVELS_ARCHIVE_PATH}   # evolved dungeon architecture + furniture + mushrooms");
+    println!("  FVS_POLICY_ELITE={RL_ARCHIVE_PATH}   # the neuroevolved squad policy");
+    println!("Review first: read the archives, and `git diff {CONFIG_PATH}` + {BAKE_LEDGER} for the baked dims.");
     Ok(())
 }
 
@@ -851,10 +881,36 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
         if failed > 0 { format!(", {failed} failed") } else { String::new() }
     );
 
+    // Land the winner at the stable canonical path. `islands_out/` is gitignored and cleared at the start of
+    // the next island run, so a winner left there is gone by the next phase — and the `FVS_*_ELITE` overlay
+    // hints (and any hand bake) would point at a stale file. Copy first, then bake/hint from the canonical
+    // location, so "the winner is at elites_<dim>.ron" is always true.
+    let canonical = match kind.archive_path() {
+        Some(p) => {
+            std::fs::copy(&win_out, p).map_err(|e| format!("copy winner {win_out} -> {p}: {e}"))?;
+            println!("   winner copied to {p}");
+            p.to_string()
+        }
+        None => win_out.clone(),
+    };
+
     if a.apply {
-        bake_winner(kind, &a, Path::new(&win_out))?;
-    } else if let Ok(dim) = kind.apply_dim() {
-        println!("   ship it:  train apply {} {win_out}    (or re-run with --apply)", dim_cli_name(dim));
+        bake_winner(kind, &a, Path::new(&canonical))?;
+    } else {
+        match kind {
+            // Levels elites are often structural (room drops), which `train apply` refuses — so lead with the
+            // overlay, its robust path, and note the bake works only for a value-only elite.
+            SearchKind::Levels => println!(
+                "   ship it:  FVS_LEVELS_ELITE={canonical} (overlay — handles any elite), \
+                 or `train apply levels {canonical}` for a value-only elite that keeps every room type"
+            ),
+            SearchKind::Rl => println!("   ship it:  FVS_POLICY_ELITE={canonical}"),
+            _ if kind.apply_dim().is_ok() => println!(
+                "   ship it:  train apply {} {canonical}   (or re-run with --apply)",
+                kind.cli_name()
+            ),
+            _ => {}
+        }
     }
     Ok(())
 }
