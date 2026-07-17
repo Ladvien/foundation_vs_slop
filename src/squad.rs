@@ -302,6 +302,9 @@ fn spawn_squad(
                     UtterCooldown::default(),
                     MemoryStream::default(),
                     crate::squad_ai::dialogue::SpokenLines::default(),
+                    // Whether this unit can smell the cyanide warning (~1 in 4 can't). On EVERY biological,
+                    // value-only, so it never splits the hashed archetype (see the `PerceptionLatch` note).
+                    crate::health::CyanideSmell::from_seed(seed as u64),
                 ),
                 FigurineSource(figurine.clone()),
                 // The `Unit` carries no mesh of its own (the figurine is a cosmetic child), so nothing
@@ -397,17 +400,26 @@ fn despawn_dead_units(
     mut sfx: MessageWriter<Sfx>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     audio: Res<crate::audio_tuning::AudioTuning>,
-    units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource), With<Unit>>,
+    units: Query<(Entity, &Health, &Transform, &Outfit, &FigurineSource, &SquadMember), With<Unit>>,
 ) {
     // Death-din (`NOISE_SQUAD`) deposits are collected here and sorted before queueing: the query order
     // over dead units is not stable across App instances (async GLB load + entity-id reuse), so an
     // unsorted batch would smear the din channel order-dependently (see `field::sort_deposits`). Every
     // sibling deposit site already sorts (e.g. `crab_despawn_dead` by `Seed`); this one did not.
     let mut noise: Vec<crate::ai::field::Deposit> = Vec::new();
-    for (entity, hp, transform, outfit, figurine) in &units {
-        if hp.current > 0.0 {
-            continue;
-        }
+    // CANONICAL ORDER — load-bearing, and for a second reason beyond the din batch: the `GoreEvent` pushes
+    // below fix `GibRing` insertion order (so the `max_gibs` cap evicts a different `Carryable`, which
+    // `crab::assign_meat_targets` reads) and advance `drain_gore`'s shared per-event seed counter. Sorting
+    // only `noise` left both unguarded. `SquadMember` is the stable spawn index — the same key
+    // `sim_harness::issue_squad_order` and `laser::fire_laser` order by, for the same reason.
+    let mut dead: Vec<(usize, Entity, &Transform, &Outfit, &FigurineSource)> = units
+        .iter()
+        .filter(|(_, hp, _, _, _, _)| hp.current <= 0.0)
+        .map(|(entity, _, transform, outfit, figurine, member)| (member.0, entity, transform, outfit, figurine))
+        .collect();
+    crate::sort_total!(&mut dead, |&(member, ..)| member);
+
+    for (_, entity, transform, outfit, figurine) in dead {
         // The unit's real 3D figurine gets crunched: blood spray + a floor pool + its own
         // mesh sliced into flying meat chunks tinted to its outfit color (see `gore`/`autogib`).
         gore.0.push(GoreEvent {
@@ -510,6 +522,8 @@ fn unit_movement(
             // nothing could observe, since `squad_think` re-resolves the goal every tick before this
             // system runs. `&` makes a second writer a compile error rather than a comment.
             Option<&crate::squad_ai::cohesion::DesiredMove>,
+            // The stable spawn index, carried solely to make the neighbour sort below a TOTAL order.
+            &SquadMember,
         ),
         With<Unit>,
     >,
@@ -539,12 +553,15 @@ fn unit_movement(
     // (see `squad_ai::perception`) makes an idle unit near the anchor hold with `goal == None`, so it
     // is correctly `avoids: false` here. Without that deadband every idle unit carried a standing
     // FollowAnchor goal, was permanently `avoids: true`, and the arrival shortcut could never fire.
-    let agents: Vec<(Entity, Agent)> = units
+    // `member` rides alongside each agent purely as the neighbour sort's tiebreak — `orca::Agent` stays a
+    // pure-math type with no identity field (it has its own unit tests; keep the ECS out of it).
+    let agents: Vec<(Entity, usize, Agent)> = units
         .iter()
-        .map(|(e, t, _, v, order, desired)| {
+        .map(|(e, t, _, v, order, desired, member)| {
             let moving = order.is_some() || desired.is_some_and(|d| d.goal.is_some());
             (
                 e,
+                member.0,
                 Agent {
                     pos: t.translation.xz(),
                     vel: v.0,
@@ -555,7 +572,7 @@ fn unit_movement(
         })
         .collect();
 
-    for (entity, mut transform, speed, mut velocity, mut order, desired) in &mut units {
+    for (entity, mut transform, speed, mut velocity, mut order, desired, _) in &mut units {
         let pos = transform.translation;
         let self_pos = pos.xz();
 
@@ -584,15 +601,15 @@ fn unit_movement(
         // Direction-based (settled unit within the goalward cone) so it propagates cleanly back from
         // the goal even across a room, and never fires at spawn where all neighbors still have orders.
         let to_goal = (goal_xz - self_pos).normalize_or_zero();
-        let mut neighbors: Vec<Agent> = Vec::new();
+        let mut neighbors: Vec<(usize, Agent)> = Vec::new();
         let mut blocked_by_settled = false;
-        for (other, ag) in &agents {
+        for (other, member, ag) in &agents {
             if *other == entity {
                 continue;
             }
             let off = ag.pos - self_pos;
             if off.length_squared() <= beh.squad_move.orca_query_radius * beh.squad_move.orca_query_radius {
-                neighbors.push(*ag);
+                neighbors.push((*member, *ag));
             }
             if !ag.avoids
                 && off.length_squared() <= beh.squad_move.blob_radius * beh.squad_move.blob_radius
@@ -603,13 +620,21 @@ fn unit_movement(
         }
         // Canonicalize neighbour order so ORCA is iteration-order-independent. `new_velocity` pushes one
         // half-plane per neighbour and solves an INCREMENTAL 2D linear program (`orca::new_velocity` →
-        // `linear_program2/3`), whose float output depends on constraint ORDER. ECS query iteration
-        // order is not guaranteed stable across runs (archetype membership shifts as components are
-        // added/removed), so sorting neighbours by position — the value-sort determinism idiom of
-        // `snapshot_hash`/`update_anchor` — makes the solve a pure function of the neighbour SET, a
-        // cheap reproducibility guard on this ≤handful-of-neighbours hot path. `blocked_by_settled`
-        // above is an order-independent OR, so it needs no sort.
-        neighbors.sort_unstable_by_key(|a| (a.pos.x.to_bits(), a.pos.y.to_bits()));
+        // `linear_program2/3`), whose float output depends on constraint ORDER: each line is optimized
+        // only against the lines BEFORE it, and the index of the first infeasible line becomes
+        // `linear_program3`'s `begin_line`. Reorder the constraints and the velocity — hence `Transform`,
+        // hence `snapshot_hash` — can move. ECS query iteration order is not guaranteed stable across runs
+        // (archetype membership shifts as components are added/removed), so neighbours are sorted by the
+        // value-sort determinism idiom of `snapshot_hash`/`update_anchor`.
+        //
+        // `SquadMember` is the tiebreak, and it is what makes this a TOTAL order. Position bits ALONE are
+        // not: two units at bit-identical xz tie, and `sort_unstable` gives no guarantee for ties — it
+        // falls back to the very input order this sort exists to erase. Coincident positions are reachable
+        // here (units spawn on cell centres; `resolve_move` clamps to identical floats). Same shape as the
+        // crab-side sorts, which append `Seed`/`GibKey` after their bit-triples for this reason.
+        // `blocked_by_settled` above is an order-independent OR, so it needs no sort.
+        crate::sort_total!(&mut neighbors, |(member, a)| (a.pos.x.to_bits(), a.pos.y.to_bits(), *member));
+        let neighbors: Vec<Agent> = neighbors.into_iter().map(|(_, a)| a).collect();
 
         // Nearby solid cells become hard ORCA wall constraints, so a unit dodging a neighbor is never
         // steered into a wall (where it would stall). Only walls the unit is actually *close* to bind

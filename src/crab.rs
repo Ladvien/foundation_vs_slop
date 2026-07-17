@@ -538,6 +538,8 @@ fn spawn_crab_on_patch(
             // so runtime-bred crabs (`nest_reproduce`) inherit it and no runtime archetype migration occurs.
             (
                 Biological,
+                // ~1 in 4 crabs can't smell the cyanide warning → walk into poison pools. On every crab.
+                crate::health::CyanideSmell::from_seed(rand_seed as u64),
                 CrabAttached { host: None },
                 CrabCarry {
                     capacity: bc.carry_capacity * (0.8 + 0.4 * draw(2)),
@@ -567,7 +569,11 @@ fn spawn_crab_on_patch(
             // capsule) so bolts test against the crab headlessly + deterministically.
             (
                 Mesh3d(collider.clone()),
-                crate::laser::LaserTarget { radius: CRAB_COLLIDER_R, half_height: 0.0 },
+                crate::laser::LaserTarget {
+                    radius: CRAB_COLLIDER_R,
+                    half_height: 0.0,
+                    id: crate::laser::target_id(crate::laser::TargetKind::Crab, rand_seed as u64),
+                },
             ),
             // Render-only: smooth the crab's 60 Hz movement + surface rotation across the display refresh
             // (see `lib::run`). Grouped with `Transform` so the spawn tuple stays within Bevy's 15-element
@@ -609,6 +615,7 @@ fn nest_offsets() -> Vec<(i32, i32)> {
             v.push((dx, dy));
         }
     }
+    // SORT-OK: a fixed constant offset table, not an ECS query — the input order is source-code order.
     v.sort_by_key(|&(dx, dy)| dx * dx + dy * dy);
     v
 }
@@ -675,6 +682,9 @@ fn crab_locomotion(
             Option<&crate::light::Photophilic>,
             // Health gates the Almond Water forage nudge — only a wounded crab seeks the water.
             &Health,
+            // Whether this crab can smell the cyanide warning — an anosmic crab can't tell a poison pool from
+            // a heal pool, so it forages toward any water (and walks into cyanide).
+            &crate::health::CyanideSmell,
         ),
         With<Crab>,
     >,
@@ -705,7 +715,7 @@ fn crab_locomotion(
     for v in hash.values_mut() {
         v.clear();
     }
-    for (motion, _, _, _, _, _, _, _, _, _, _) in &crabs {
+    for (motion, _, _, _, _, _, _, _, _, _, _, _) in &crabs {
         hash.entry(dungeon.world_to_cell(motion.pos))
             .or_default()
             .push(motion.pos);
@@ -717,7 +727,10 @@ fn crab_locomotion(
     // position and cascading into the physics-off replay hash (~1–3% of runs, pinned tick 549). Mirrors the
     // identical fix on the parasite swarm hash (`parasite.rs`, `manca_swarm`).
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+        // VALUE-CANONICAL: the bucket holds bare positions, so two coincident crabs contribute the
+        // identical term to `sep` and their order cannot matter. (Contrast the drink/cull sorts, whose tied
+        // elements carry identity.)
+        crate::util::sort_value_canonical(v, |p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     }
 
     for (
@@ -732,6 +745,7 @@ fn crab_locomotion(
         photophobic,
         photophilic,
         health,
+        smell,
     ) in &mut crabs
     {
         // Mid-pounce crabs are owned by `crab_jump` (it drives their arc + transform) — skip them here.
@@ -990,20 +1004,36 @@ fn crab_locomotion(
         // *Cognitive Systems Research* 2015). A healthy crab (`fraction` above the wounded threshold) ignores
         // the field — no cost when full — and the push is zero on flat water, so a crab nowhere near a
         // gradient is unbiased. Skipped while latching (a crab riding a unit's body is off the floor water).
-        // Deterministic (field + gradient + config gain) on the pinned FixedUpdate path, folding into the
-        // replay hash like the light nudge above. This is what makes the seeps contested territory: the same
-        // pools heal the squad, so a wounded crab and a wounded unit are drawn to the same water.
+        // Deterministic (field + gradient + belief + config gain) on the pinned FixedUpdate path, folding into
+        // the replay hash like the light nudge above. This is what makes the seeps contested territory: the
+        // same pools heal the squad, so a wounded crab and a wounded unit are drawn to the same water.
+        //
+        // Belief-modulated (the inversion mechanic): a crab that can smell seeks water it reads as heal and
+        // FLEES water it reads as cyanide; an anosmic crab can't tell, so it seeks any water — and forages
+        // straight into poison (emergent selection pressure against anosmia). The reading is gated by the
+        // deadband so an unsettled pool draws no forage either way.
         if !latching && health.fraction() <= config.almond_water.forage_wounded_frac {
-            // The water gradient is on the scale of `capacity` (~100), not light's ~1, so normalise by
-            // capacity to keep `forage_gain` on the same footing as the light gains — otherwise the push is
-            // ~capacity× too strong and a wounded crab lurches across the map toward the nearest seep.
-            let forage_gain =
-                config.almond_water.forage_gain / config.almond_water.capacity.max(1.0e-6);
-            let push = crate::almond_water::almond_push(&almond_water, &dungeon, motion.pos, forage_gain);
-            if push.length_squared() > 1.0e-9 {
-                let p = graph.patch(motion.patch);
-                motion.pos += project_tangent(push, p.normal) * dt;
-                motion.pos = clamp_to_patch(motion.pos, p);
+            let aw = &config.almond_water;
+            let belief = almond_water.belief_at(dungeon.world_to_cell(motion.pos));
+            let seek = if smell.anosmic || belief >= aw.belief_flip_hi {
+                1.0 // seek water (heal pool, or can't smell the danger)
+            } else if belief <= aw.belief_flip_lo {
+                -1.0 // flee (a smelling crab avoids cyanide water)
+            } else {
+                0.0 // unsettled deadband — no forage
+            };
+            if seek != 0.0 {
+                // The water gradient is on the scale of `capacity` (~100), not light's ~1, so normalise by
+                // capacity to keep `forage_gain` on the same footing as the light gains — otherwise the push
+                // is ~capacity× too strong and a wounded crab lurches across the map toward the nearest seep.
+                let forage_gain = seek * aw.forage_gain / aw.capacity.max(1.0e-6);
+                let push =
+                    crate::almond_water::almond_push(&almond_water, &dungeon, motion.pos, forage_gain);
+                if push.length_squared() > 1.0e-9 {
+                    let p = graph.patch(motion.patch);
+                    motion.pos += project_tangent(push, p.normal) * dt;
+                    motion.pos = clamp_to_patch(motion.pos, p);
+                }
             }
         }
 
@@ -1102,8 +1132,15 @@ struct Caste {
 
 /// The crab's immortal spawn seed, kept so a promotion re-seeds [`Scout::new`] deterministically and so
 /// re-role's per-tick flip budget selects the SAME crabs regardless of ECS iteration order (sort key).
+///
+/// `pub` because it is the swarm's only stable identity, and the boss's cull
+/// ([`crate::enemy::smiley_defense`]) needs it too: that swat picks WHICH crabs die by sorted order, and a
+/// position-only key is not a total order — crabs piled on the boss sit at bit-identical coordinates
+/// (measured: 6 fully-tied pairs on held-in world `0xA11CE`), so the tie decided a LETHAL pick by ECS query
+/// order. A raw `Entity` cannot serve: ids are recycled and their order is not reproducible across
+/// same-seed runs — that is the instability being guarded against, not a guard.
 #[derive(Component, Clone, Copy)]
-struct CrabSeed(u32);
+pub struct CrabSeed(pub u32);
 
 // Dynamic-caste policy + bounds (README "let crabs re-role between scout and assault as swarm needs
 // shift") moved to `behavior.crab` (caste_cooldown, caste_flips_per_tick, rally_live, alarm_high,
@@ -1194,8 +1231,10 @@ fn re_role_crabs(
     let min_scouts = (total as f32 * bc.scout_min_frac).round() as usize;
     let max_scouts = (total as f32 * bc.scout_max_frac).round() as usize;
     // Deterministic tiebreak: same crabs flip regardless of iteration order.
-    promotes.sort_unstable_by_key(|&(_, s)| s);
-    demotes.sort_unstable_by_key(|&(_, s)| s);
+    // `CrabSeed` is unique per crab, so these ARE total — and the check now proves it rather than trusting
+    // the comment. Both feed a `take(flips_per_tick)` budget, so a tie would silently pick different crabs.
+    crate::sort_total!(&mut promotes, |&(_, s): &(Entity, u32)| s);
+    crate::sort_total!(&mut demotes, |&(_, s): &(Entity, u32)| s);
 
     let mut budget = bc.caste_flips_per_tick;
     for &(e, seed) in &promotes {
@@ -1333,10 +1372,21 @@ fn crab_jump(
                     // harmless hop; a lunge that connects should hurt.
                     motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
                     let reach_sq = (UNIT_BODY_RADIUS + bc.contact_radius + 0.2).powi(2);
-                    for (ptf, mut hp) in &mut prey {
-                        if (ptf.translation.xz() - motion.pos.xz()).length_squared() <= reach_sq {
-                            hp.current -= sim.combat.crab_jump_damage;
-                            break;
+                    // WHICH unit the lunge bites must not depend on prey query order. This used to take
+                    // the first in-reach prey the ECS happened to yield and `break` — a
+                    // keep-the-first-on-a-tie pick straight into `Health`, and query order is not stable
+                    // across `App` instances. A crab landing between two units bit a different one run to
+                    // run. `nearest_planar` ranks by `(distance bits, position bits)`, so the victim is a
+                    // pure function of geometry — and biting the NEAREST is what the lunge meant anyway.
+                    if let Some((_, tpos, _)) =
+                        crate::util::nearest_planar(motion.pos, prey.iter().map(|(ptf, _)| ((), ptf.translation)))
+                        && (tpos.xz() - motion.pos.xz()).length_squared() <= reach_sq
+                    {
+                        for (ptf, mut hp) in &mut prey {
+                            if ptf.translation == tpos {
+                                hp.current -= sim.combat.crab_jump_damage;
+                                break;
+                            }
                         }
                     }
                     jump.phase = JumpPhase::Ready;
@@ -1410,7 +1460,7 @@ fn crab_feeding_sates_hunger(
 /// Counts by PLANAR distance so a crab clinging high on the body still feeds.
 fn crab_contact_damage(
     time: Res<Time>,
-    crabs: Query<(Entity, &Transform), (With<Crab>, Without<Prey>)>,
+    crabs: Query<(Entity, &Transform, &CrabSeed), (With<Crab>, Without<Prey>)>,
     // `Option<&mut LastAttacker>` is present only on the smiley watcher: a crab biting it records itself as
     // the attacker so the watcher retaliates against the swarm (not a bystander unit) — see `enemy::smiley_zap`.
     mut prey: Query<(&Transform, &mut Health, Option<&mut crate::enemy::LastAttacker>), (With<Prey>, Without<Crab>)>,
@@ -1423,19 +1473,27 @@ fn crab_contact_damage(
     let reach_sq = (UNIT_BODY_RADIUS + bc.contact_radius).powi(2);
     for (prey_tf, mut hp, last_attacker) in &mut prey {
         // Count biters and attribute the bite to ONE of them for the boss's retaliation. WHICH biter is
-        // recorded (`LastAttacker`, which `enemy::smiley_zap` instakills) must not depend on query order
-        // — it is not reproducible across same-seed runs (see `util::nearest_planar`) — so pick the
-        // lowest world position among the biters, a stable geometric key.
+        // recorded (`LastAttacker`, which `enemy::smiley_zap` INSTAKILLS) must not depend on query order —
+        // it is not reproducible across same-seed runs (see `util::nearest_planar`).
+        //
+        // `CrabSeed` is the tiebreak and it is load-bearing: world position ALONE is not a total order, and
+        // this key was position-only under a comment calling it "a stable geometric key". Crabs pile onto
+        // the boss to bite it — that is the entire point of this system — and `clamp_to_patch` pins a
+        // pressed crab onto the same float, so the biters routinely sit at BIT-IDENTICAL coordinates. The
+        // `<` then compared false, the loop kept whichever the ECS yielded first, and the boss executed a
+        // different crab run to run. Measured (mutant #4, world `0x5C09191`, tick 94): two crabs at
+        // `(14.9412, 13.9406)`, seeds 2 and 8 — seed 8 zapped in one run, seed 2 in the other.
         let mut count = 0usize;
         let mut biter: Option<Entity> = None;
-        let mut biter_key: Option<(u32, u32, u32)> = None;
-        for (ce, ctf) in &crabs {
+        let mut biter_key: Option<(u32, u32, u32, u32)> = None;
+        for (ce, ctf, seed) in &crabs {
             if (ctf.translation.xz() - prey_tf.translation.xz()).length_squared() <= reach_sq {
                 count += 1;
                 let key = (
                     ctf.translation.x.to_bits(),
                     ctf.translation.y.to_bits(),
                     ctf.translation.z.to_bits(),
+                    seed.0,
                 );
                 if biter_key.is_none_or(|bk| key < bk) {
                     biter = Some(ce);
@@ -1493,7 +1551,7 @@ fn crab_despawn_dead(
         .filter(|(_, hp, _, _, _)| hp.current <= 0.0)
         .map(|(e, _, tf, culled, seed)| (seed.0, e, tf.translation, culled.is_some()))
         .collect();
-    dead.sort_unstable_by_key(|(seed, _, _, _)| *seed);
+    crate::sort_total!(&mut dead, |(seed, _, _, _)| *seed);
     for (_, entity, pos, culled) in dead {
         if culled {
             // Boss cull (`smiley_defense`): green-ichor swat, and deliberately NO SCENT deposit — a
@@ -1827,6 +1885,7 @@ fn assign_meat_targets(
             // non-associative, so summing in enumeration order lets a carrier-order difference flip that
             // gate at the boundary — diverging which crab commits, and the physics-free replay hash.
             let mut caps_v: Vec<u32> = c.carriers.iter().filter_map(|x| caps.get(x)).map(|v| v.to_bits()).collect();
+            // SORT-OK: bare f32 bits about to be summed — a tie is the same term twice. Interchangeable.
             caps_v.sort_unstable();
             let sum: f32 = caps_v.into_iter().map(f32::from_bits).sum();
             committed.insert(e, sum);
@@ -1839,7 +1898,7 @@ fn assign_meat_targets(
     // an exact distance tie it would commit a crab to a different chunk per run, diverging crab targets
     // and cascading into the physics-free replay hash (`deterministic_core_is_bit_identical`). Sort by
     // world position — a stable key independent of entity order — so the choice depends only on geometry.
-    gib_snap.sort_unstable_by_key(|&(_, p, _, _, key)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), key));
+    crate::sort_total!(&mut gib_snap, |&(_, p, _, _, key)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), key));
 
     // Seeking crabs that still need a chunk. The enlist loop below is greedy and stateful (each commit
     // bumps `committed`, so who picks first decides who gets the last slot on a contested chunk), and it
@@ -1855,7 +1914,7 @@ fn assign_meat_targets(
         })
         .map(|(e, m, _, _, seed)| (e, m.pos, seed.0))
         .collect();
-    seekers.sort_unstable_by_key(|(_, p, seed)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed));
+    crate::sort_total!(&mut seekers, |(_, p, seed)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed));
 
     for (crab_e, cpos, _) in seekers {
         let mut best: Option<(Entity, f32)> = None;
@@ -1946,6 +2005,8 @@ fn carry_gibs(
             &mut Transform,
             &mut LinearVelocity,
             &mut AngularVelocity,
+            // Carried solely to give the DELIVER pass below a stable total order — see there.
+            &crate::gore::GibKey,
         ),
         With<crate::gore::GibChunk>,
     >,
@@ -1963,7 +2024,20 @@ fn carry_gibs(
     let dt = time.delta_secs();
     let bc = &beh.crab;
 
-    for (ge, mut carry, mut gtf, mut lv, mut av) in &mut gibs {
+    // Deliveries are collected here and applied AFTER the loop, in `GibKey` order.
+    //
+    // The per-gib motion below is order-independent (each gib touches only its own Transform/velocities),
+    // but a DELIVER is not: it accumulates `nest.hoard += weight` and `nest.spawn_boost += …` into a SHARED
+    // nest with a non-associative `f32 +=`, and it despawns (feeding entity-id reuse). Gib query order is
+    // not stable across `App` instances, so two chunks delivering to one nest on one tick summed to
+    // different bits per run. That is not cosmetic: `nest_reproduce` gates on `hoard < meat_per_crab`, and
+    // crossing that gate consumes a slot from the shared `CrabSpawnSeq`, which sets every subsequent crab's
+    // caste, capacity and RNG. The sibling `assign_meat_targets` sorts both its lists for exactly this
+    // reason; this loop was left raw (its INNER capacity sums were canonicalised, so only the outer pass
+    // was missed). Mutant-armed: `deliver_range` ships 1.2 but the genome bounds reach 4.0 (~11× the
+    // delivery area, so deliveries coincide instead of arriving one at a time).
+    let mut delivered: Vec<(u64, Entity, Entity, f32)> = Vec::new(); // (GibKey, gib, nest, weight)
+    for (ge, mut carry, mut gtf, mut lv, mut av, gib_key) in &mut gibs {
         // 1. Prune carriers down to crabs that still exist AND still point at this gib.
         carry
             .carriers
@@ -1988,6 +2062,7 @@ fn carry_gibs(
                 }
             }
         }
+        // SORT-OK: bare f32 bits about to be summed — ties are identical terms.
         total_caps.sort_unstable();
         here_caps.sort_unstable();
         let cap_total: f32 = total_caps.into_iter().map(f32::from_bits).sum();
@@ -2122,23 +2197,19 @@ fn carry_gibs(
                 } else if let Some((npos, flow)) = nest_nav {
                     let horiz = (npos - gtf.translation).with_y(0.0);
                     if horiz.length() <= bc.deliver_range {
-                        // --- DELIVER (Kinematic → despawn) ---
+                        // --- DELIVER (Kinematic → despawn) --- deferred to the sorted pass below; the
+                        // hoard/boost accumulate and the despawn are the order-sensitive parts.
                         if let Some(n) = carry.nest {
-                            if let Ok((_, _, mut nest)) = nests.get_mut(n) {
-                                nest.hoard += carry.weight;
-                                // Feeding surge: heavier chunks accelerate births more, up to ~10×.
-                                nest.spawn_boost =
-                                    (nest.spawn_boost + carry.weight * sim.breeding.feed_gain).min(sim.breeding.spawn_boost_max);
-                            }
+                            delivered.push((gib_key.0, ge, n, carry.weight));
                         }
+                        // Releasing this chunk's own carriers is order-independent (a crab hauls exactly
+                        // one chunk), so it stays here.
                         for &c in &carry.carriers {
                             if let Ok((_, mut cc)) = crabs.get_mut(c) {
                                 cc.target = None;
                                 cc.hauling = false;
                             }
                         }
-                        // The ONE early-removal path (drops the id from the ring, then despawns).
-                        gib_ring.consume(&mut commands, ge);
                     } else {
                         // Haul along the nest's flow field so the chunk threads walkways instead of
                         // beelining through walls (Item #3). Speed scales up with crew and down with
@@ -2173,6 +2244,22 @@ fn carry_gibs(
             }
         }
     }
+
+    // Apply the deliveries in `GibKey` order — the shared-nest accumulate and the despawn, i.e. exactly the
+    // parts the raw gib query order was deciding. `GibKey` is unique by construction (it mixes a monotonic
+    // `GibSeq`; before that fix it was derived from the death origin and COLLIDED for two creatures dying on
+    // one coordinate — that was G0c), so this is a genuine total order and `sort_total!` proves it.
+    crate::sort_total!(&mut delivered, |&(key, ..): &(u64, Entity, Entity, f32)| key);
+    for (_, ge, n, weight) in delivered {
+        if let Ok((_, _, mut nest)) = nests.get_mut(n) {
+            nest.hoard += weight;
+            // Feeding surge: heavier chunks accelerate births more, up to ~10×.
+            nest.spawn_boost =
+                (nest.spawn_boost + weight * sim.breeding.feed_gain).min(sim.breeding.spawn_boost_max);
+        }
+        // The ONE early-removal path (drops the id from the ring, then despawns).
+        gib_ring.consume(&mut commands, ge);
+    }
 }
 
 /// Each crab lays into two channels, both at a per-second rate ≈ the channel's evaporation, so each
@@ -2196,6 +2283,8 @@ fn deposit_crab_fields(
     let density = sim.deposit.crab_density_rate * dt;
     let menace = sim.deposit.crab_menace_rate * dt;
     let mut positions: Vec<Vec3> = crabs.iter().map(|tf| tf.translation).collect();
+    // SORT-OK: bare positions — the position IS the whole value, so a tie means two identical deposits,
+    // which contribute identical terms to the same sum. Interchangeable.
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -2232,6 +2321,8 @@ fn deposit_meat_scent(
         .filter(|(_, carry)| carry.phase != crate::gore::CarryPhase::Hauling)
         .map(|(tf, _)| tf.translation)
         .collect();
+    // SORT-OK: bare positions — the position IS the whole value, so a tie means two identical deposits,
+    // which contribute identical terms to the same sum. Interchangeable.
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -2265,6 +2356,16 @@ fn scout_mark_prey(
 ) {
     let dt = time.delta_secs();
     let bc = &beh.crab;
+    // Rally marks are collected and sorted before queueing — the same idiom every SCALAR deposit producer
+    // uses (`nest_alarm`, `crab_alarm_on_damage`, `deposit_crab_fields`, …), which this site never got
+    // because `RallyDeposits` had no `sort_*` helper to call: `sort_deposits` is typed `&mut [Deposit]`.
+    // The scout query order is not stable across `App` instances, and `RallyField::deposit` accumulates with
+    // a non-associative `Vec2 +=` over a `deposit_radius`-wide disc, so two scouts within ~2·radius write
+    // the same cells on one tick and raw push order set the low bits of that cell's vector. That is not
+    // cosmetic: `re_role_crabs` gates a caste flip on `rally.sample(..).length() > bc.rally_live`, and while
+    // the authored 0.15 sits clear of the field's noise floor, the genome's lower bound is **0.02** — right
+    // on it. See `field::sort_rally_deposits`.
+    let mut batch: Vec<crate::ai::field::RallyDeposit> = Vec::new();
     for (tf, mut scout) in &mut scouts {
         let pos = tf.translation;
         scout.report_cooldown = (scout.report_cooldown - dt).max(0.0);
@@ -2281,10 +2382,7 @@ fn scout_mark_prey(
                 {
                     let strength =
                         sim.deposit.rally_mark * ((bc.scout_sight - best) / bc.scout_sight).clamp(0.0, 1.0);
-                    deposits.0.push(crate::ai::field::RallyDeposit {
-                        pos,
-                        vec: dir * strength,
-                    });
+                    batch.push(crate::ai::field::RallyDeposit { pos, vec: dir * strength });
                     scout.report_cooldown = bc.rally_deposit_cooldown;
                     if crate::ai::diag::AI_DIAG {
                         info!("scout: MARK prey@{:?} from@{:?}", prey_pos.xz(), pos.xz());
@@ -2297,6 +2395,8 @@ fn scout_mark_prey(
             }
         }
     }
+    crate::ai::field::sort_rally_deposits(&mut batch);
+    deposits.0.extend(batch);
 }
 
 /// Meat-fuelled breeding — the ONE reproduction path. A nest births a crab only when it has hoarded at
@@ -2313,7 +2413,7 @@ fn nest_reproduce(
     dungeon: Res<Dungeon>,
     stig: Res<crate::ai::field::Stig>,
     crab_assets: Option<Res<CrabAssets>>,
-    mut nests: Query<&mut crate::nest::Nest>,
+    mut nests: Query<(Entity, &mut crate::nest::Nest)>,
     crabs: Query<(), With<Crab>>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
@@ -2324,7 +2424,30 @@ fn nest_reproduce(
     };
     let dt = time.delta_secs();
     let mut total = crabs.iter().count();
-    for mut nest in &mut nests {
+
+    // CANONICAL ORDER — load-bearing, and the same class of bug as `laser::fire_laser`'s shared aim draw.
+    // This loop is greedy and stateful over TWO pieces of shared state, so the order the nests are visited
+    // in is part of the result:
+    //   * `seq` is a SHARED monotonic counter, and `CrabSpawnSeq`'s own doc spells out what rides on it —
+    //     "scout/assault role, think-stagger, jump cadence, carry capacity, climb/angle biases, RNG". When
+    //     two nests breed on the same tick, raw query order decided WHICH nest's newborn got seed N and
+    //     which got N+1, so a crab's caste and capacity flipped between two same-seed runs.
+    //   * `total` gates on `crab_count_max`, so at the cap the visit order decides WHICH nest gets the last
+    //     slot — a keep-the-first-on-a-tie pick.
+    // Nest query order is NOT stable across `App` instances (`sim_harness::nest_cells` was canonicalised
+    // for exactly this reason; the breeding loop itself never was). `nest.pos` is assigned at spawn and
+    // immortal, so its bits are a stable, total key — the `world_to_cell` quantisation is deliberately NOT
+    // used here: two nests can share a cell.
+    let mut order: Vec<(u32, u32, u32, Entity)> = nests
+        .iter()
+        .map(|(e, n)| (n.pos.x.to_bits(), n.pos.y.to_bits(), n.pos.z.to_bits(), e))
+        .collect();
+    crate::sort_total!(&mut order, |k: &(u32, u32, u32, Entity)| (k.0, k.1, k.2));
+
+    for (.., nest_e) in order {
+        let Ok((_, mut nest)) = nests.get_mut(nest_e) else {
+            continue;
+        };
         // Fade the feeding surge, then re-arm the next spawn at the boosted rate (up to 10× faster).
         nest.spawn_boost = (nest.spawn_boost - sim.breeding.spawn_boost_decay * dt).max(0.0);
         nest.respawn_timer -= dt;

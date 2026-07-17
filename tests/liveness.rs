@@ -255,3 +255,47 @@ fn almond_water_heals_a_wounded_biological() {
     };
     assert!(healed > 0, "no wounded biological healed while flooded with Almond Water");
 }
+
+#[test]
+fn almond_water_poisons_when_the_pool_reads_as_cyanide() {
+    // The inversion: a pool the population reads as CYANIDE (belief 0) damages a biological standing in it,
+    // even at full health. Flood the field, force every cell's belief to 0 (poison), set every biological to
+    // full HP, run ONE tick, and assert at least one lost HP. The signed twin of the heal test.
+    use bevy::prelude::With;
+    use foundation_vs_slop::almond_water::AlmondWater;
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::health::{Biological, Health};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 120); // let spawns settle
+
+    // Top every biological to full so any drop is unambiguously the poison, not prior combat.
+    let mut count = 0usize;
+    {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&mut Health, With<Biological>>();
+        for mut h in q.iter_mut(world) {
+            h.current = h.max;
+            count += 1;
+        }
+    }
+    assert!(count > 0, "the sim must have biologicals to poison");
+
+    // Flood the floor and make every pool read as cyanide, then run a single effect tick.
+    let capacity = app.world().resource::<GameConfig>().almond_water.capacity;
+    {
+        let mut field = app.world_mut().resource_mut::<AlmondWater>();
+        field.test_flood(capacity);
+        field.test_set_belief(0.0); // pure cyanide reading everywhere
+    }
+    step(&mut app, &cfg, 1);
+
+    let poisoned = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&Health, With<Biological>>();
+        q.iter(world).filter(|h| h.current < h.max - 1.0e-4).count()
+    };
+    assert!(poisoned > 0, "no biological was poisoned while standing in a cyanide-belief pool");
+}

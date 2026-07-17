@@ -473,6 +473,10 @@ fn spawn_enemies(
                     // The watcher fears nothing — but it must still be tagged, because every `Drives`
                     // carrier needs a faction (`ai::faction::validate_factions`).
                     crate::ai::faction::Faction::Anomaly,
+                    // Flesh: the belief-water heals or poisons the boss too. Seed from its position bits (the
+                    // same deterministic per-spawn seed the boss's brain uses).
+                    crate::health::Biological,
+                    crate::health::CyanideSmell::from_seed((pos.x.to_bits() ^ pos.z.to_bits()) as u64),
                 ),
                 crate::ai::brain::BrainId::Smiley,
                 // Single boss → a stable per-spawn seed from its position bits (the seed just needs to be
@@ -493,7 +497,14 @@ fn spawn_enemies(
                 // hit-volume (same dimensions) so laser bolts test against it headlessly + deterministically.
                 (
                     Mesh3d(capsule.clone()),
-                    crate::laser::LaserTarget { radius: CAPSULE_RADIUS, half_height: CAPSULE_LENGTH * 0.5 },
+                    crate::laser::LaserTarget {
+                        radius: CAPSULE_RADIUS,
+                        half_height: CAPSULE_LENGTH * 0.5,
+                        id: crate::laser::target_id(
+                            crate::laser::TargetKind::Boss,
+                            ((cell.x as u32).wrapping_mul(73_856_093) ^ (cell.y as u32).wrapping_mul(19_349_663)) as u64,
+                        ),
+                    },
                 ),
                 Transform::from_translation(pos),
                 // Explicit so `hide_enemies_in_fog` can toggle it; Hidden propagates to BOTH face children.
@@ -540,6 +551,7 @@ fn deposit_anomaly_aura(
 ) {
     let amount = sim.deposit.anomaly_aura_rate * time.delta_secs();
     let mut positions: Vec<Vec3> = bosses.iter().map(|tf| tf.translation).collect();
+    // SORT-OK: bare positions — whole value, ties are identical deposits (interchangeable).
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -862,27 +874,43 @@ fn despawn_dead(
     enemies: Query<(Entity, &Health, &Transform), With<Enemy>>,
     sim: Res<SimTuning>,
 ) {
-    for (entity, hp, tf) in &enemies {
-        if hp.current <= 0.0 {
-            // Billboard smiley — no mesh to shatter, so a red blood burst + floor pool, no gibs.
-            gore.0.push(GoreEvent {
-                pos: tf.translation,
-                kind: GoreKind::EnemySplat,
-                tint: crate::palette::ENEMY_SCORCH,
-                gib: None,
-                // The boss is the heaviest thing in the level: full camera kick on its death.
-                intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
-            });
-            // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
-            deposits.0.push(crate::ai::field::Deposit {
-                pos: tf.translation,
-                field: crate::ai::field::FieldId::SCENT,
-                amount: sim.deposit.blood_scent,
-            });
-            sfx.write(Sfx::EnemyDeath(tf.translation));
-            commands.entity(entity).despawn();
-        }
+    // Deaths handled in a CANONICAL order (by world position bits), not raw query order — which is not
+    // stable across `App` instances. Both side effects here are order-dependent: the SCENT `Deposit`
+    // accumulates with a non-associative `f32 +=` (`Stig::deposit`) that `drain_deposits` applies in raw
+    // batch order, and the `GoreEvent` push advances `drain_gore`'s shared per-event seed counter and fixes
+    // `GibRing` insertion order. Position is the stable geometric key the sibling producers use
+    // (`deposit_meat_scent`, `deposit_crab_fields`); the SCENT batch still goes through `sort_deposits`.
+    let mut dead: Vec<(Entity, Vec3)> = enemies
+        .iter()
+        .filter(|(_, hp, _)| hp.current <= 0.0)
+        .map(|(entity, _, tf)| (entity, tf.translation))
+        .collect();
+    // SORT-OK: two dead enemies at one position are treated identically (same gore push, same SCENT,
+    // same despawn), so the payload does not distinguish them — interchangeable.
+    dead.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+
+    let mut scent: Vec<crate::ai::field::Deposit> = Vec::new();
+    for (entity, pos) in dead {
+        // Billboard smiley — no mesh to shatter, so a red blood burst + floor pool, no gibs.
+        gore.0.push(GoreEvent {
+            pos,
+            kind: GoreKind::EnemySplat,
+            tint: crate::palette::ENEMY_SCORCH,
+            gib: None,
+            // The boss is the heaviest thing in the level: full camera kick on its death.
+            intensity: crate::gore::death_intensity(sim.boss.start_hp, CONTACT_DPS),
+        });
+        // Blood → SCENT: a death marks a rich feeding site the swarm and boss are drawn to.
+        scent.push(crate::ai::field::Deposit {
+            pos,
+            field: crate::ai::field::FieldId::SCENT,
+            amount: sim.deposit.blood_scent,
+        });
+        sfx.write(Sfx::EnemyDeath(pos));
+        commands.entity(entity).despawn();
     }
+    crate::ai::field::sort_deposits(&mut scent);
+    deposits.0.extend(scent);
 }
 
 /// Pure gate for the "true form" flash: the fractal orb is visible ONLY while the watcher is actually
@@ -1080,7 +1108,10 @@ fn smiley_defense(
     mut commands: Commands,
     mut sfx: MessageWriter<Sfx>,
     mut smileys: Query<(&Transform, &mut SmileyState), With<Enemy>>,
-    mut crabs: Query<(Entity, &Transform, &mut Health), With<crate::crab::Crab>>,
+    mut crabs: Query<
+        (Entity, &Transform, &mut Health, &crate::crab::CrabSeed),
+        With<crate::crab::Crab>,
+    >,
     sim: Res<SimTuning>,
 ) {
     let dt = time.delta_secs();
@@ -1092,20 +1123,33 @@ fn smiley_defense(
         let spos = stf.translation;
         // Only LIVE crabs are cull candidates — a crab already at 0 HP (a laser or `smiley_zap` kill this
         // tick) is left to `crab_despawn_dead`'s normal death path, so the two never both claim one crab.
-        let mut biters: Vec<(Entity, Vec3)> = crabs
+        let mut biters: Vec<(Entity, Vec3, u32)> = crabs
             .iter()
-            .filter(|(_, ctf, hp)| hp.current > 0.0 && planar_dist(ctf.translation, spos) <= sim.boss.cull_radius)
-            .map(|(e, ctf, _)| (e, ctf.translation))
+            .filter(|(_, ctf, hp, _)| {
+                hp.current > 0.0 && planar_dist(ctf.translation, spos) <= sim.boss.cull_radius
+            })
+            .map(|(e, ctf, _, seed)| (e, ctf.translation, seed.0))
             .collect();
         if biters.len() < sim.boss.cull_threshold {
             continue;
         }
-        // Deterministic: cull the first `CULL_MAX` in a STABLE order (by world position), not query
-        // order — WHICH crabs die feeds Health/despawn and must not depend on unstable entity ordering
-        // (query order is not reproducible across same-seed runs; see `util::nearest_planar`).
-        biters.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
-        for (ce, _) in biters.into_iter().take(sim.boss.cull_max) {
-            if let Ok((_, _, mut hp)) = crabs.get_mut(ce) {
+        // Deterministic: cull the first `cull_max` in a STABLE order, not query order — WHICH crabs die
+        // feeds Health/despawn and must not depend on unstable entity ordering (query order is not
+        // reproducible across same-seed runs; see `util::nearest_planar`).
+        //
+        // `CrabSeed` is the tiebreak, and it is LOAD-BEARING: world position alone is **not a total order**
+        // here. This cull fires exactly when crabs pile onto the boss (`cull_threshold` of them inside
+        // `cull_radius` 1.4), which is precisely when they are pressed together and `clamp_to_patch` lands
+        // several of them on BIT-IDENTICAL coordinates — measured on held-in world `0xA11CE`: 6 fully-tied
+        // pairs at `pos=(77.94, 12.94)`. `sort_unstable` gives ties no guarantee, so it fell through to the
+        // ECS order this sort exists to erase, and `take(cull_max)` then killed a DIFFERENT crab run to run.
+        // A "keep-the-first-on-a-tie pick", verbatim the trap
+        // `replay::deterministic_core_is_bit_identical_across_many_builds`'s comment names.
+        crate::sort_total!(&mut biters, |(_, p, seed): &(Entity, Vec3, u32)| {
+            (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), *seed)
+        });
+        for (ce, _, _) in biters.into_iter().take(sim.boss.cull_max) {
+            if let Ok((_, _, mut hp, _)) = crabs.get_mut(ce) {
                 hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
             }
             commands.entity(ce).insert(crate::crab::Culled);

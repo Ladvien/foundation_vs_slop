@@ -775,7 +775,27 @@ fn bake_autogib(
         // into `Assets<Mesh>`. Before the GLTF scene spawns its descendants there are simply no body
         // `Mesh3d` entities to find, so an empty body here means "still streaming", not "no geometry"
         // — retry next frame (same as `recolor_units`), rather than caching an empty fracture set.
-        if !all_loaded || body.is_empty() {
+        //
+        // **`gun.is_empty()` is part of that gate, and leaving it out was a determinism bug (G0d).** The
+        // held item is a SEPARATE `WorldAssetRoot` (`BLASTER_GLB`/`FLASHLIGHT_GLB`) from the body figurine,
+        // so it streams on its own schedule. The `GunModel` child entity exists immediately, but until its
+        // scene instantiates it has no `Mesh3d` descendants to find — so `all_loaded` stays true (nothing
+        // unloaded was *seen*) and `body` is non-empty, and this baked a source with an EMPTY gun and then
+        // marked it `baked` **permanently**. Whether that race was won decided, for the whole run, whether
+        // deaths fling a blaster at all.
+        //
+        // That is not merely cosmetic. The gun chunk takes a `GibRing` slot, so losing it shifts the ring
+        // by one; once the ring reaches `max_gibs`, `cap_gib_chunks` then evicts a DIFFERENT `Carryable`,
+        // `crab::assign_meat_targets` sees a different chunk set, and the crabs diverge. Measured on a
+        // mutated genome: 11 of 12 runs had the gun chunk and 1 did not — gib state split at tick 1750,
+        // actors at 2066. Async GLB scene-child instantiation is *the* documented root entropy of this
+        // codebase (`replay.rs`); this was it reaching gameplay through the gib ring.
+        //
+        // Empty gun ⇒ "still streaming", never "this character has no held item": EVERY unit spawns a
+        // `GunModel` child — the Researcher's flashlight carries the same marker precisely so it inherits
+        // the death-fling (see `squad::spawn_squad`). If a gun-less character is ever added, this gate must
+        // learn to tell "absent" from "not yet", not be relaxed back.
+        if !all_loaded || body.is_empty() || gun.is_empty() {
             continue;
         }
 

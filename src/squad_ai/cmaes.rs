@@ -152,6 +152,7 @@ impl SepCmaEs {
             return;
         }
         // Rank best-first (descending fitness — this is a maximiser).
+        // SORT-OK: CMA-ES samples from its own seeded RNG, not an ECS query.
         samples.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         self.n_gen += 1;
 

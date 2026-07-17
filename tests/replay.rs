@@ -45,95 +45,145 @@ fn deterministic_core_is_bit_identical() {
     assert_eq!(ha, hb, "physics-free core must be bit-identical across same-seed runs");
 }
 
+// Phase-1 byte-identity gate for the const→config (`SimTuning`) migration. Promoting the combat /
+// economy / deposit / fear / boss numbers out of Rust `const`s and into the `sim:` config slice must
+// be a PURE refactor: the deterministic core, run from the shipped config (dungeon seed 0x5C09191) for
+// 1800 fixed ticks, must still hash to the value measured BEFORE the migration. A drifted default — in
+// `SimTuning::default()` or the `config.ron` `sim:` slice — reds this test instead of silently shifting
+// a gameplay value. This is the absolute-value lock the same-seed reproducibility tests above cannot
+// provide.
+//
+// Re-pinned twice since the migration: first for diegetic lighting (crabs went photophobic), then for
+// the SCP-150 parasite — mancae now spawn into the core, hunt/embed hosts, and (over 1800 ticks)
+// manipulate infested units + trip the crab alarm on embed, all of which move actors. So the core
+// moved from the lighting-era `0x3ecce611f2403172` to `0x4b6f6d7f454559c7`. Re-pinned AGAIN for the
+// SCP-150 huddle/dormancy behaviour — mancae now spawn clustered at corner/furniture harborages, stay
+// dormant (passive) until roused, and huddle via cohesion/separation, so real actor motion changed.
+// Legitimate: the same-seed reproducibility tests above (`deterministic_core_is_bit_identical`,
+// `..._across_many_builds`) still pass, so the sim is still bit-reproducible — just different, because a
+// real feature was added.
+//
+// MERGE with main (ATTENTION channel PR #48 + SCP color PR #47) into this WIP branch: this actor golden
+// did NOT move — it still matches the pre-merge WIP value. ATTENTION adds `ai::field::deposit_attention`
+// (a new `FixedUpdate` producer) and the 10th stigmergy channel, but no core actor reads ATTENTION (its
+// consumer, the mould, is windowed-only and absent from the harness), and the added producer did not
+// perturb any actor's trajectory here — so only the field-grid oracle below moved (it folds the new
+// channel). The color PR is cosmetic (palette/HUD) and moves no actor either.
+//
+// Re-pinned for the COMBAT-FEEL pass: the SCP-150 parasite population defaults moved (initial_count 3→8,
+// manca_count_max 12→20) and the mancae spawn geometry/arousal changed (HUDDLE_SIZE 40→4, MIN_SPAWN_DIST
+// 8→5, ROUSE_THREAT 0.04→0.02, ROUSE_PROXIMITY 5→7 in src/parasite.rs) — more mancae, seeded into more
+// huddles at different cells, rousing more readily, so real actor motion changed. The crab light-push is
+// now gain-gated by AI mode (committed Muster/Rally/Latch/Carry crabs ignore the photophobic push); in
+// this no-player seed few crabs commit, but the parasite change alone moves actors. Same-seed
+// reproducibility (`deterministic_core_is_bit_identical`) still passes, so the sim stays bit-reproducible
+// — just different, because real gameplay changed. Folds translation only, so arch-stable. Was
+// `0x6716f1718a9774d1`. Re-measured once more within the same pass after the balance nerf that keeps the
+// shipped brains survivable under the new pressure (crab_contact_dps 3.0→2.3, parasite initial_count
+// 8→6); was the intermediate `0xd18a68ffc4e949b7`.
+//
+// Re-pinned for ALMOND WATER (the `almond_water` resource field + consuming heal): squad units and crabs
+// now carry the `Biological` marker and heal while standing in seeps (the heal writes `Health` on
+// FixedUpdate, so it enters `snapshot_hash`), and a wounded crab forages up the water gradient (moving
+// actors). Adding the marker also shifted the unit/crab archetypes and thus deterministic iteration
+// order. All legitimate: `deterministic_core_is_bit_identical` still passes (same seed → same hash), so
+// the sim is still bit-reproducible — just a different, richer sim. Folds translation only, arch-stable.
+// Was `0xc2fe3752a1fd1f66`. Re-measured once more within the same pass: pinning `almond_water_heal` to
+// run AFTER every `Health` writer (the `HealthDamage` set + the medic) — required so the consuming heal
+// composes deterministically with same-tick combat once foraging brings wounded crabs into weapon range
+// — changed the net HP of those overlaps (the water now gets the last word), so the actor golden moved
+// from the intermediate `0x2c9da14a81d01faa`.
+//
+// Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): `bake_almond_sources` now seeps
+// from a sparse, spaced-out set of springs (greedy `pool_spacing` scatter) instead of every wall-adjacent
+// cell + a weak everywhere-baseline, and drops the weak baseline entirely. The water field the crabs
+// forage on/heal from is therefore different (discrete 2–5 tile pools, not a sheet), moving the foraging
+// trajectory + heal outcomes this actor golden folds. Same-seed reproducibility still passes (just a
+// different, correct sim). Was `0xfd576e421bb17cf6`.
+//
+// Re-pinned for the CRAB DETERMINISM fix: the deterministic core was ~1–3% non-reproducible ACROSS
+// PROCESSES (only caught by `train verify` run in fresh processes; `deterministic_core_is_bit_identical`
+// compares two Apps in ONE process and shares the seed, so it stayed green). Two non-associative float
+// sums over the NON-reproducible crab query order: (1) the crab separation spatial-hash buckets
+// (`crab::crab_movement`) and (2) the wounded-crab ALARM deposit batch (`crab::crab_alarm_on_damage`).
+// Both now sort into canonical order before summing (the same fix the parasite swarm + `sort_deposits`
+// already use), making the core bit-reproducible across processes (verified 65/65 fresh processes). The
+// old value was never a single correct golden — just the most common outcome of the flaky sum. Was
+// `0xc044a98e9f910d9d` (snapshot) / `0xbcb2b8c38e3219a9` (field, below).
+//
+// Re-pinned for the PHASE-3 CPU MOLD FIELD (`src/mold.rs`): a new deterministic reaction-diffusion
+// gameplay mold now runs on `FixedUpdate` in the harness (registered like `LightFieldPlugin`). It moves
+// no actor yet (couplings wired incrementally), but inserting its `mold_update` system perturbed an
+// ambiguous `FixedUpdate` order (the documented schedule-insertion effect), shifting the actor golden;
+// and `MoldField` is now folded into `field_hash` (below). Deterministic across processes (verified
+// 40/40 via `train verify`). Was `0x45b960069537d712` (snapshot) / `0xee06882d2f1421d9` (field).
+//
+// Re-pinned for the MOLD COUPLINGS (load-bearing ecosystem): the mold now (1) dims the LightField
+// (`mold_dim_light`) so photophobic crabs react to mold-made dark zones, (2) occludes LOS (`fog::
+// update_los`) so a crab denned in thick mold is unseen/un-targetable, and (3) boosts almond-water seep
+// live (`AlmondWater::tick`) so moldy zones weep more healing water. All three move real actors, and the
+// field golden folds the couplings' effect on the light/water/Stig grids. Deterministic across processes
+// (44/44). Was `0x5b5a84cf56eadcbe` (snapshot) / `0x5ff6dc475cad0375` (field).
+//
+// Re-pinned for the MOLD SEEP-BOOST retune (3.0 -> 1.5): at seep_boost 3× the grown mold weeps enough
+// that moldy almond pools merged past the 10-tile cap into a sheet (defeating fog of war —
+// `almond_pools_stay_small_and_isolated` red). 1.5 mirrors the old static `mold_seep_mult`; the live ramp
+// `1 + 0.5·mold01` stays <= it, so pools keep their sparse footprint while the coupling stays live +
+// optimizer-tunable. Was `0xcdca49900d7da832` (snapshot) / `0xd705e971d0480409` (field).
+//
+// Re-pinned for the ALMOND-WATER BELIEF/INVERSION mechanic (Stage 2): the water now does what the
+// population believes — belief at a cell selects heal (+HP) OR cyanide poison (−HP), and a
+// `belief_poison_frac` slice of cells is seeded cyanide, so some biologicals now take poison damage that
+// moves their `Health` (folded into `snapshot_hash`). The anomaly factions (Manca + the Smiley boss) are
+// now `Biological` too, so the water heals/poisons them and their added marker shifts the archetype
+// iteration order the actor grids fold. Deterministic across processes (verified bit-identical over two
+// runs). Was `0x06760dc03aeb5ed3`.
+//
+// Re-pinned for BELIEF-MODULATED CRAB FORAGING (Stage 3): a wounded crab now steers toward water it reads
+// as heal and AWAY from water it reads as cyanide (an anosmic crab can't tell and walks into poison), so
+// the forage nudge that moves crab positions — folded into `snapshot_hash` — changed. Verified
+// bit-identical over two runs. Was `0x14ac65f6ef9c649e`.
+// RESTORED, not re-measured. `train apply --dim levels` (run 2026-07-16 08:54 by `cargo train all`)
+// spliced a machine-baked levels elite over the authored `dungeon`/`mycelia`/`placement` slices of
+// `config.ron` — replacing the authored seed, widening corridors 2→6, switching topology to `Graph`,
+// and stripping ~279 lines of hand-written rationale — then AUTO-RE-PINNED this golden to the baked
+// level's hash, `0x1794420ff06a57d8`. That elite came from a search run while G0 was live, i.e. scored
+// against a wobbling objective, so it was partly selected by evaluation luck. The authored level has
+// been restored (keeping the hand-authored `almond_water` belief/inversion work), and `train verify
+// --reps 8` recomputes exactly the pre-bake value below — which is what this constant held before the
+// bake. Five `cargo test` failures (dungeon/placement/level_genome/mycelia) were that swap being
+// correctly detected; all five pass again.
+//
+// (This paragraph previously named the baked hash as `0x38d3c9107d4eed33` — the RESTORED value, not the
+// baked one. A transcription error, corrected here against the field golden's log below, which recorded
+// its own baked value `0x9b19982055f7413d` correctly. Left visible because an audit trail that quietly
+// fixes itself is not an audit trail.)
+//
+// The hashes quoted in the prose above are deliberate archaeology: they are how a future reader
+// reconstructs what moved and why. `train apply` used to rewrite them as collateral of re-pinning the
+// const below (an unbounded whole-file `str::replace`) — it no longer does, and it no longer re-pins at
+// all without an explicit `--repin-goldens`. Changing a golden is a deliberate, human-reviewed act
+// (TESTING.md); the tool's job is to REFUSE and report the drift, not to resolve it.
+//
+// Re-pinned for the G0c FIX — the determinism total-order pass. Was `0x38d3c9107d4eed33`.
+//
+// This one is worth understanding, because "the golden was stable, so why did it move?" is the obvious
+// objection and the answer is the whole point. The old value WAS reproducible on this box — but only
+// because ECS query order happened to come out the same way for this particular no-player scenario. It was
+// consistent by luck, not by construction. Several sums it folds (the flashlight-cone `compose`, the manca
+// swarm's heading/commit, the Almond Water drink contention) were being ordered by whatever the query
+// yielded; they are now ordered canonically, so the value changed. The new one does not depend on query
+// order at all. Precedent and reasoning are the CRAB DETERMINISM re-pin's, above: *"The old value was never
+// a single correct golden — just the most common outcome of the flaky sum."*
+//
+// Verified before pinning, per TESTING.md: `train verify --reps 8` plus three further FRESH processes —
+// 17 independent measurements, all `0xe11eed83902ee648`. `deterministic_core_is_bit_identical_across_many_builds`
+// (24 builds) and `search_rollouts_are_reproducible_under_load` (12 rollouts × both held-in seeds × 7200
+// ticks, under CPU load) are green on this value, which is a stronger statement than the old one could make.
+const GOLDEN: u64 = 0xe11eed83902ee648;
+
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
-    // Phase-1 byte-identity gate for the const→config (`SimTuning`) migration. Promoting the combat /
-    // economy / deposit / fear / boss numbers out of Rust `const`s and into the `sim:` config slice must
-    // be a PURE refactor: the deterministic core, run from the shipped config (dungeon seed 0x5C09191) for
-    // 1800 fixed ticks, must still hash to the value measured BEFORE the migration. A drifted default — in
-    // `SimTuning::default()` or the `config.ron` `sim:` slice — reds this test instead of silently shifting
-    // a gameplay value. This is the absolute-value lock the same-seed reproducibility tests above cannot
-    // provide.
-    //
-    // Re-pinned twice since the migration: first for diegetic lighting (crabs went photophobic), then for
-    // the SCP-150 parasite — mancae now spawn into the core, hunt/embed hosts, and (over 1800 ticks)
-    // manipulate infested units + trip the crab alarm on embed, all of which move actors. So the core
-    // moved from the lighting-era `0x3ecce611f2403172` to `0x4b6f6d7f454559c7`. Re-pinned AGAIN for the
-    // SCP-150 huddle/dormancy behaviour — mancae now spawn clustered at corner/furniture harborages, stay
-    // dormant (passive) until roused, and huddle via cohesion/separation, so real actor motion changed.
-    // Legitimate: the same-seed reproducibility tests above (`deterministic_core_is_bit_identical`,
-    // `..._across_many_builds`) still pass, so the sim is still bit-reproducible — just different, because a
-    // real feature was added.
-    //
-    // MERGE with main (ATTENTION channel PR #48 + SCP color PR #47) into this WIP branch: this actor golden
-    // did NOT move — it still matches the pre-merge WIP value. ATTENTION adds `ai::field::deposit_attention`
-    // (a new `FixedUpdate` producer) and the 10th stigmergy channel, but no core actor reads ATTENTION (its
-    // consumer, the mould, is windowed-only and absent from the harness), and the added producer did not
-    // perturb any actor's trajectory here — so only the field-grid oracle below moved (it folds the new
-    // channel). The color PR is cosmetic (palette/HUD) and moves no actor either.
-    //
-    // Re-pinned for the COMBAT-FEEL pass: the SCP-150 parasite population defaults moved (initial_count 3→8,
-    // manca_count_max 12→20) and the mancae spawn geometry/arousal changed (HUDDLE_SIZE 40→4, MIN_SPAWN_DIST
-    // 8→5, ROUSE_THREAT 0.04→0.02, ROUSE_PROXIMITY 5→7 in src/parasite.rs) — more mancae, seeded into more
-    // huddles at different cells, rousing more readily, so real actor motion changed. The crab light-push is
-    // now gain-gated by AI mode (committed Muster/Rally/Latch/Carry crabs ignore the photophobic push); in
-    // this no-player seed few crabs commit, but the parasite change alone moves actors. Same-seed
-    // reproducibility (`deterministic_core_is_bit_identical`) still passes, so the sim stays bit-reproducible
-    // — just different, because real gameplay changed. Folds translation only, so arch-stable. Was
-    // `0x6716f1718a9774d1`. Re-measured once more within the same pass after the balance nerf that keeps the
-    // shipped brains survivable under the new pressure (crab_contact_dps 3.0→2.3, parasite initial_count
-    // 8→6); was the intermediate `0xd18a68ffc4e949b7`.
-    //
-    // Re-pinned for ALMOND WATER (the `almond_water` resource field + consuming heal): squad units and crabs
-    // now carry the `Biological` marker and heal while standing in seeps (the heal writes `Health` on
-    // FixedUpdate, so it enters `snapshot_hash`), and a wounded crab forages up the water gradient (moving
-    // actors). Adding the marker also shifted the unit/crab archetypes and thus deterministic iteration
-    // order. All legitimate: `deterministic_core_is_bit_identical` still passes (same seed → same hash), so
-    // the sim is still bit-reproducible — just a different, richer sim. Folds translation only, arch-stable.
-    // Was `0xc2fe3752a1fd1f66`. Re-measured once more within the same pass: pinning `almond_water_heal` to
-    // run AFTER every `Health` writer (the `HealthDamage` set + the medic) — required so the consuming heal
-    // composes deterministically with same-tick combat once foraging brings wounded crabs into weapon range
-    // — changed the net HP of those overlaps (the water now gets the last word), so the actor golden moved
-    // from the intermediate `0x2c9da14a81d01faa`.
-    //
-    // Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): `bake_almond_sources` now seeps
-    // from a sparse, spaced-out set of springs (greedy `pool_spacing` scatter) instead of every wall-adjacent
-    // cell + a weak everywhere-baseline, and drops the weak baseline entirely. The water field the crabs
-    // forage on/heal from is therefore different (discrete 2–5 tile pools, not a sheet), moving the foraging
-    // trajectory + heal outcomes this actor golden folds. Same-seed reproducibility still passes (just a
-    // different, correct sim). Was `0xfd576e421bb17cf6`.
-    //
-    // Re-pinned for the CRAB DETERMINISM fix: the deterministic core was ~1–3% non-reproducible ACROSS
-    // PROCESSES (only caught by `train verify` run in fresh processes; `deterministic_core_is_bit_identical`
-    // compares two Apps in ONE process and shares the seed, so it stayed green). Two non-associative float
-    // sums over the NON-reproducible crab query order: (1) the crab separation spatial-hash buckets
-    // (`crab::crab_movement`) and (2) the wounded-crab ALARM deposit batch (`crab::crab_alarm_on_damage`).
-    // Both now sort into canonical order before summing (the same fix the parasite swarm + `sort_deposits`
-    // already use), making the core bit-reproducible across processes (verified 65/65 fresh processes). The
-    // old value was never a single correct golden — just the most common outcome of the flaky sum. Was
-    // `0xc044a98e9f910d9d` (snapshot) / `0xbcb2b8c38e3219a9` (field, below).
-    //
-    // Re-pinned for the PHASE-3 CPU MOLD FIELD (`src/mold.rs`): a new deterministic reaction-diffusion
-    // gameplay mold now runs on `FixedUpdate` in the harness (registered like `LightFieldPlugin`). It moves
-    // no actor yet (couplings wired incrementally), but inserting its `mold_update` system perturbed an
-    // ambiguous `FixedUpdate` order (the documented schedule-insertion effect), shifting the actor golden;
-    // and `MoldField` is now folded into `field_hash` (below). Deterministic across processes (verified
-    // 40/40 via `train verify`). Was `0x45b960069537d712` (snapshot) / `0xee06882d2f1421d9` (field).
-    //
-    // Re-pinned for the MOLD COUPLINGS (load-bearing ecosystem): the mold now (1) dims the LightField
-    // (`mold_dim_light`) so photophobic crabs react to mold-made dark zones, (2) occludes LOS (`fog::
-    // update_los`) so a crab denned in thick mold is unseen/un-targetable, and (3) boosts almond-water seep
-    // live (`AlmondWater::tick`) so moldy zones weep more healing water. All three move real actors, and the
-    // field golden folds the couplings' effect on the light/water/Stig grids. Deterministic across processes
-    // (44/44). Was `0x5b5a84cf56eadcbe` (snapshot) / `0x5ff6dc475cad0375` (field).
-    //
-    // Re-pinned for the MOLD SEEP-BOOST retune (3.0 -> 1.5): at seep_boost 3× the grown mold weeps enough
-    // that moldy almond pools merged past the 10-tile cap into a sheet (defeating fog of war —
-    // `almond_pools_stay_small_and_isolated` red). 1.5 mirrors the old static `mold_seep_mult`; the live ramp
-    // `1 + 0.5·mold01` stays <= it, so pools keep their sparse footprint while the coupling stays live +
-    // optimizer-tunable. Was `0xcdca49900d7da832` (snapshot) / `0xd705e971d0480409` (field).
-    const GOLDEN: u64 = 0x06760dc03aeb5ed3;
-
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -146,85 +196,110 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     );
 }
 
+// The direct oracle for the "iterate only floor cells" optimization of the evaporate/diffuse/hotspot
+// passes (commit 973319d). `snapshot_hash` folds only actor Transform+Health, so it catches a diffusion
+// regression only *transitively* — if the perturbed gradient happens to move a crab to a different cell —
+// and never exercises `saturation_stats` at all. `field_hash` folds the field grids themselves (every
+// Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
+// neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
+// deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
+// Re-pinned again for the SCP-150 parasite (was `0xf56b_eabb_d8d3_aa57`): mancae embed hosts, which
+// damages crabs and trips the ALARM channel, and manipulated units move — both perturb the stigmergy
+// grids `field_hash` folds. Previously re-pinned for the audio + lighting merge (`field_hash` folds the
+// `NOISE_SQUAD`/`NOISE_SWARM` channels and the `light::LightField` grid).
+// [Later SUPERSEDED by the D1 re-pin at the bottom of this block — the cone forward is now arch-stable,
+// so `fold_fingerprint` folds `cells` again.] Reverted to `0xa35b_eaeb_288a_fbca` after the flashlight
+// re-pin (`0x3db0_1bf8_5c5d_d822`) proved
+// ARCH-DEPENDENT: `LightField::fold_fingerprint` now folds the static `base`, not `cells`. The dynamic
+// flashlight cone in `cells` derives its beam direction from unit `Transform.rotation`, computed with
+// glam quaternion/`slerp` transcendentals that are not bit-identical across ARM↔x86 — so an ARM-pinned
+// cone-inclusive value failed `field_passes` on x86 CI while `migrated_defaults` (which folds
+// translation, never rotation) passed. Folding the arch-stable scalar-`f32` base restores a value that
+// matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
+// within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
+//
+// [MERGE re-pin] Combined with main's ATTENTION channel: `Stig::fold_fingerprint` now folds the 10th
+// channel (attention, deposited over the squad LOS set by `ai::field::deposit_attention`) on top of the
+// WIP field state below — arch-stable (fog visibility is position/integer-LOS, no rotation). Value below
+// is the measured merged-tree hash.
+//
+// Re-measured at the restored clean-defaults baseline: `config.ron`'s `sim:` + `ai_tuning:` slices were
+// reset to `SimTuning::default()` / `AiTuning::default()`, resolving the evolved drift + the three
+// `TEMP — RESTORE` overrides (laser_damage ⅓, parasite initial_count/manca_count_max at 300). This value
+// now also captures the SCP-150 readable-swarm change (alignment + collective roused motion + commitment
+// ramp) that the prior `0xa35b_eaeb_288a_fbca` predated. The ACTOR golden above did NOT move: it was
+// already pinned to the pure-defaults value — proven by `authored_world_config_override_is_a_noop`, which
+// runs `decode(authored())` == (AiTuning::default(), SimTuning::default()) and still matches it — so the
+// config restore only moved the field grids this oracle folds.
+//
+// Re-pinned again for FIX 1 (roused SCP-150 mancae now deposit `THREAT_ANOMALY` via
+// `parasite::deposit_manca_dread`, so the whole brood is legible to the squad's anomaly-fear + psi-vision
+// instead of being a silent parallel stack): the golden run rouses mancae, so new dread cells enter the
+// field grids this oracle folds. The ACTOR golden was NOT affected — in this no-player seed the added
+// dread moved no unit's final Transform/Health — so only this field value changed (was
+// `0x5d60_2962_2213_5600`, the clean-defaults baseline).
+//
+// Re-pinned again for the D1 flashlight-determinism fix, which SUPERSEDES the `base`-only workaround
+// described above: `apply_dynamic_lights` now derives the cone's beam direction from the Researcher's
+// deterministic gameplay state (FacingOverride/AimTarget/velocity) with arch-stable ops instead of the
+// slerped `Transform.rotation`, so `cells` (base + cones) is bit-identical across ARM↔x86 again. So
+// `LightField::fold_fingerprint` folds `cells` once more (restoring the moving cone to this oracle's
+// coverage), which moved this value (was `0xe1bb_9db0_7822_411f`). The ACTOR golden did NOT move: in
+// this no-player seed no photophobe is warded into a cone cell, so the cone perturbs no unit's final
+// Transform (the cone→actor coupling stays latent). See `light::apply_dynamic_lights`/`fold_fingerprint`.
+// Re-pinned for the COMBAT-FEEL pass (was `0x03f9_6217_e5b5_fb62`): more mancae (initial_count 3→8) in
+// more huddles rouse and deposit `THREAT_ANOMALY`, and changed crab motion re-writes the CRAB_DENSITY /
+// SCENT / ALARM channels this oracle folds. No rotation-derived folding was touched (the light change is
+// a read-only gradient sample gated by AI mode; the mancae dread is position/integer-cell), so the value
+// stays arch-stable across ARM↔x86. Re-measured once more within the same pass after the balance nerf
+// (crab_contact_dps 3.0→2.3, parasite initial_count 8→6); was the intermediate `0xf212_b7c1_4ef0_9a8c`.
+//
+// Re-pinned for ALMOND WATER: `field_hash` now folds the `AlmondWater` field (`level` + `sources`, full
+// grid, via `AlmondWater::fold_fingerprint`, added to `sim_harness::field_hash`) on top of the Stig /
+// Rally / Light grids. The seeps also accumulate/evaporate/diffuse each tick and the heal drinks them
+// down, so the folded water grid is live state. And the `Biological`-marker archetype shift moved the
+// crab/unit trajectory the stigmergy channels fold. Arch-stable (pure scalar-f32 field ops, no rotation).
+// Was `0x4557_fa4d_8f4b_6262`. Re-measured once more within the same pass for the `almond_water_heal`
+// ordering pin (`.after(HealthDamage)`): the heal now drinks the water field AFTER same-tick combat
+// resolves, shifting which cells drain and the actor motion the stigmergy grids fold. Was the
+// intermediate `0x280d_34a4_87f1_1a3c`.
+//
+// Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): the `AlmondWater` `sources`/`level`
+// grids this oracle folds are now the sparse-spring field (only spaced springs seep; no weak baseline),
+// and the changed water changes the crab motion the Stig channels fold. Arch-stable (scalar-f32 field
+// ops). Was `0x6f0e_14d6_3ad5_206c`.
+//
+// Re-pinned for the CRAB DETERMINISM fix (see the `GOLDEN` note above): sorting the wounded-crab ALARM
+// deposit batch (`crab::crab_alarm_on_damage`) canonicalised the ALARM channel's non-associative sum,
+// which this field oracle folds. Was `0xbcb2_b8c3_8e32_19a9`.
+//
+// Re-pinned for the ALMOND-WATER BELIEF field (Stage 1 of the belief/inversion redesign): `field_hash`
+// now also folds the `AlmondWater::belief` grid (`AlmondWater::fold_fingerprint`). At this stage belief is
+// inert — every floor cell is seeded to `belief_prior` (1.0) at the bake and no tick dynamics touch it yet
+// — so this is a pure additive fold of a constant grid (1.0 on floor, 0.0 on rock), no behaviour change.
+// Verified bit-identical across two runs. Arch-stable (scalar-f32 fold, no rotation). Was `0x272a_e3b0_2e95_d28b`.
+//
+// Re-pinned for the BELIEF/INVERSION mechanic (Stage 2): belief is now seeded per-cell (a
+// `belief_poison_frac` slice = cyanide) and evolves each tick (relax toward base + diffuse + rumor
+// deposits), so the folded belief grid is live state; the poison also drinks cells down differently, and
+// the anomaly-faction `Biological` shift moves the actors the Stig grids fold. Verified bit-identical over
+// two runs. Arch-stable (scalar-f32 field ops, no rotation). Was `0x64ce_5d24_e542_b2ab`.
+//
+// Re-pinned for BELIEF-MODULATED CRAB FORAGING (Stage 3): the wounded-crab forage nudge now depends on the
+// belief the crab reads (seek heal / flee cyanide / anosmic seeks any), so crab motion — and the Stig
+// channels the field oracle folds — changed. Verified bit-identical over two runs. Was `0xb5c1_285d_724c_5a92`.
+// RESTORED alongside `GOLDEN` above — the machine bake re-pinned this to the baked level
+// (`0x9b19982055f7413d`); `train verify --reps 8` recomputes the pre-bake value below on the restored
+// authored level.
+// Re-pinned alongside `GOLDEN` for the G0c fix (the determinism total-order pass) — see the long note
+// there for why a golden that WAS stable still moved: it was consistent by luck (query order happened to
+// repeat for this scenario), not by construction. This field golden folds the light/Stig/water grids whose
+// per-cell sums are now canonically ordered. Was `0xe1ec_dc58_3c8d_bfca`. Verified over 17 independent
+// measurements (`train verify --reps 8` + three fresh processes), all `0xd504e6a2f019f3fb`.
+const GOLDEN_FIELD: u64 = 0xd504e6a2f019f3fb;
+
 #[test]
 fn field_passes_are_bit_identical() {
-    // The direct oracle for the "iterate only floor cells" optimization of the evaporate/diffuse/hotspot
-    // passes (commit 973319d). `snapshot_hash` folds only actor Transform+Health, so it catches a diffusion
-    // regression only *transitively* — if the perturbed gradient happens to move a crab to a different cell —
-    // and never exercises `saturation_stats` at all. `field_hash` folds the field grids themselves (every
-    // Stig channel cell + every RallyField vector, full grid, plus saturation_stats), so a reordered
-    // neighbour sum, a broken floor mask, or a rock cell that stops being 0 reds this test outright. Same
-    // deterministic-core config and tick count as the actor golden above, so the two are directly comparable.
-    // Re-pinned again for the SCP-150 parasite (was `0xf56b_eabb_d8d3_aa57`): mancae embed hosts, which
-    // damages crabs and trips the ALARM channel, and manipulated units move — both perturb the stigmergy
-    // grids `field_hash` folds. Previously re-pinned for the audio + lighting merge (`field_hash` folds the
-    // `NOISE_SQUAD`/`NOISE_SWARM` channels and the `light::LightField` grid).
-    // [Later SUPERSEDED by the D1 re-pin at the bottom of this block — the cone forward is now arch-stable,
-    // so `fold_fingerprint` folds `cells` again.] Reverted to `0xa35b_eaeb_288a_fbca` after the flashlight
-    // re-pin (`0x3db0_1bf8_5c5d_d822`) proved
-    // ARCH-DEPENDENT: `LightField::fold_fingerprint` now folds the static `base`, not `cells`. The dynamic
-    // flashlight cone in `cells` derives its beam direction from unit `Transform.rotation`, computed with
-    // glam quaternion/`slerp` transcendentals that are not bit-identical across ARM↔x86 — so an ARM-pinned
-    // cone-inclusive value failed `field_passes` on x86 CI while `migrated_defaults` (which folds
-    // translation, never rotation) passed. Folding the arch-stable scalar-`f32` base restores a value that
-    // matches on both arches (it is the pre-flashlight static field). The cone's determinism is covered
-    // within-arch by `deterministic_core_is_bit_identical` and its unit tests. See `light::fold_fingerprint`.
-    //
-    // [MERGE re-pin] Combined with main's ATTENTION channel: `Stig::fold_fingerprint` now folds the 10th
-    // channel (attention, deposited over the squad LOS set by `ai::field::deposit_attention`) on top of the
-    // WIP field state below — arch-stable (fog visibility is position/integer-LOS, no rotation). Value below
-    // is the measured merged-tree hash.
-    //
-    // Re-measured at the restored clean-defaults baseline: `config.ron`'s `sim:` + `ai_tuning:` slices were
-    // reset to `SimTuning::default()` / `AiTuning::default()`, resolving the evolved drift + the three
-    // `TEMP — RESTORE` overrides (laser_damage ⅓, parasite initial_count/manca_count_max at 300). This value
-    // now also captures the SCP-150 readable-swarm change (alignment + collective roused motion + commitment
-    // ramp) that the prior `0xa35b_eaeb_288a_fbca` predated. The ACTOR golden above did NOT move: it was
-    // already pinned to the pure-defaults value — proven by `authored_world_config_override_is_a_noop`, which
-    // runs `decode(authored())` == (AiTuning::default(), SimTuning::default()) and still matches it — so the
-    // config restore only moved the field grids this oracle folds.
-    //
-    // Re-pinned again for FIX 1 (roused SCP-150 mancae now deposit `THREAT_ANOMALY` via
-    // `parasite::deposit_manca_dread`, so the whole brood is legible to the squad's anomaly-fear + psi-vision
-    // instead of being a silent parallel stack): the golden run rouses mancae, so new dread cells enter the
-    // field grids this oracle folds. The ACTOR golden was NOT affected — in this no-player seed the added
-    // dread moved no unit's final Transform/Health — so only this field value changed (was
-    // `0x5d60_2962_2213_5600`, the clean-defaults baseline).
-    //
-    // Re-pinned again for the D1 flashlight-determinism fix, which SUPERSEDES the `base`-only workaround
-    // described above: `apply_dynamic_lights` now derives the cone's beam direction from the Researcher's
-    // deterministic gameplay state (FacingOverride/AimTarget/velocity) with arch-stable ops instead of the
-    // slerped `Transform.rotation`, so `cells` (base + cones) is bit-identical across ARM↔x86 again. So
-    // `LightField::fold_fingerprint` folds `cells` once more (restoring the moving cone to this oracle's
-    // coverage), which moved this value (was `0xe1bb_9db0_7822_411f`). The ACTOR golden did NOT move: in
-    // this no-player seed no photophobe is warded into a cone cell, so the cone perturbs no unit's final
-    // Transform (the cone→actor coupling stays latent). See `light::apply_dynamic_lights`/`fold_fingerprint`.
-    // Re-pinned for the COMBAT-FEEL pass (was `0x03f9_6217_e5b5_fb62`): more mancae (initial_count 3→8) in
-    // more huddles rouse and deposit `THREAT_ANOMALY`, and changed crab motion re-writes the CRAB_DENSITY /
-    // SCENT / ALARM channels this oracle folds. No rotation-derived folding was touched (the light change is
-    // a read-only gradient sample gated by AI mode; the mancae dread is position/integer-cell), so the value
-    // stays arch-stable across ARM↔x86. Re-measured once more within the same pass after the balance nerf
-    // (crab_contact_dps 3.0→2.3, parasite initial_count 8→6); was the intermediate `0xf212_b7c1_4ef0_9a8c`.
-    //
-    // Re-pinned for ALMOND WATER: `field_hash` now folds the `AlmondWater` field (`level` + `sources`, full
-    // grid, via `AlmondWater::fold_fingerprint`, added to `sim_harness::field_hash`) on top of the Stig /
-    // Rally / Light grids. The seeps also accumulate/evaporate/diffuse each tick and the heal drinks them
-    // down, so the folded water grid is live state. And the `Biological`-marker archetype shift moved the
-    // crab/unit trajectory the stigmergy channels fold. Arch-stable (pure scalar-f32 field ops, no rotation).
-    // Was `0x4557_fa4d_8f4b_6262`. Re-measured once more within the same pass for the `almond_water_heal`
-    // ordering pin (`.after(HealthDamage)`): the heal now drinks the water field AFTER same-tick combat
-    // resolves, shifting which cells drain and the actor motion the stigmergy grids fold. Was the
-    // intermediate `0x280d_34a4_87f1_1a3c`.
-    //
-    // Re-pinned for the ALMOND-WATER SEEP-MODEL change (sparse springs): the `AlmondWater` `sources`/`level`
-    // grids this oracle folds are now the sparse-spring field (only spaced springs seep; no weak baseline),
-    // and the changed water changes the crab motion the Stig channels fold. Arch-stable (scalar-f32 field
-    // ops). Was `0x6f0e_14d6_3ad5_206c`.
-    //
-    // Re-pinned for the CRAB DETERMINISM fix (see the `GOLDEN` note above): sorting the wounded-crab ALARM
-    // deposit batch (`crab::crab_alarm_on_damage`) canonicalised the ALARM channel's non-associative sum,
-    // which this field oracle folds. Was `0xbcb2_b8c3_8e32_19a9`.
-    const GOLDEN_FIELD: u64 = 0x272a_e3b0_2e95_d28b;
     let _serial = serial_guard();
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
@@ -252,12 +327,19 @@ fn authored_world_config_override_is_a_noop() {
     step(&mut app, &cfg, 1800);
     assert_eq!(
         snapshot_hash(&mut app),
-        // Tracks the Phase-1 actor golden above (combat-feel re-pin). It stays byte-identical to it because
-        // `authored()` encodes the parasite counts straight from `SimTuning::default()` (world_genome.rs), and
-        // the new values (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds
-        // (1–12, 4–40) so encode→decode is still lossless. Tracks the Almond Water re-pins above (incl. the
-        // sparse-spring seep-model re-pin) and the crab-determinism re-pin.
-        0x06760dc03aeb5ed3,
+        // Tracks the Phase-1 actor golden. It stays byte-identical to it because `authored()` encodes the
+        // parasite counts straight from `SimTuning::default()` (world_genome.rs), and the new values
+        // (initial_count 6, manca_count_max 20) sit inside the genome's normalization bounds (1–12, 4–40) so
+        // encode→decode is still lossless. Tracks the Almond Water re-pins (incl. the sparse-spring
+        // seep-model re-pin, the belief/inversion re-pin, the belief-modulated forage re-pin) and the
+        // crab-determinism re-pin.
+        //
+        // This REFERENCES `GOLDEN` rather than repeating its literal. It used to be a hand-maintained copy
+        // of the same hex — two places holding one fact, free to drift apart silently. Worse, that duplicate
+        // is why `train apply`'s `repin_replay` did an unbounded whole-file `str::replace` to keep them in
+        // step, which also rewrote the value wherever it appeared in PROSE (the incident log above quotes
+        // hashes deliberately). One fact, one declaration site: the tracking is now a compile-time identity.
+        GOLDEN,
         "installing the authored world config changed the sim — the override seam or encode/decode is lossy"
     );
 }
@@ -399,6 +481,91 @@ fn deterministic_core_is_bit_identical_across_many_builds() {
             ),
         }
     }
+}
+
+/// **The G0 guard** — the oracle this project needed and never had.
+///
+/// `deterministic_core_is_bit_identical_across_many_builds` misses G0 *by construction*: 180 ticks with no
+/// synthetic player, so the squad idles at spawn and **never fires**. G0 lived in `laser::fire_laser`, which
+/// only runs once a firefight starts — so the strongest guard in the suite was blind to it for months. This
+/// runs the SYNTHETIC PLAYER at the search's real episode length (7200 ticks, matching
+/// `search_parallel::EPISODE_TICKS`) and demands every rollout agree bit-for-bit.
+///
+/// **Why the background load is load-bearing, not paranoia.** G0 was a race whose outcome depended on ECS
+/// enumeration order, and on an *idle* box that order came out the same way every single time: 12 identical
+/// rollouts in one process, and 5 identical across fresh processes, all while the bug was live. It only
+/// split into distinct outcomes when the machine was busy. A quiet CI runner would therefore green-light a
+/// reintroduced G0 every time. The busy threads below are plain OS threads outside Bevy — they do not touch
+/// the sim (which stays pinned to one compute thread, asserted in `build_headless_app`); they only contend
+/// for cores so the scheduler actually varies. Without them this test is decoration.
+///
+/// **Why BOTH held-in seeds, not just one.** This test shipped covering only `0x5C09191` and passed 12/12
+/// — while `0xA11CE`, the search's *other* held-in world, split **3 ways on an idle box**. The guard was
+/// green on a lucky seed. A reproducibility guarantee is a property of the SIM, not of one dungeon: a
+/// single seed only exercises the layouts, spawn positions, and fights that seed happens to produce, and
+/// order-dependence needs the contended path to actually occur (invariant 9). These are the exact seeds
+/// `search_parallel::SEEDS` and `train prior` sweep, so what is pinned here is what the search runs.
+///
+/// Do NOT add `serial_guard()`: `evaluate::run_episode` takes it internally and `HARNESS_LOCK` is not
+/// reentrant, so holding it here deadlocks (same trap as `a_mutated_audio_config_changes_the_sim`).
+#[test]
+fn search_rollouts_are_reproducible_under_load() {
+    use foundation_vs_slop::ai::brain::BrainSource;
+    use foundation_vs_slop::squad_ai::evaluate::rollout;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Enough reps to catch a regression reliably: G0 split ~30% of rollouts under load, so 12 reps miss it
+    /// with probability ~0.7^11 < 2%. Cheap enough for the harness lane (~3 min per seed).
+    const REPS: usize = 12;
+    const TICKS: u32 = 7200;
+    /// Both held-in worlds — mirrors `search_parallel::SEEDS`. See the note above on why one is not enough.
+    const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    let mut split: Vec<(u64, Vec<(u64, usize)>)> = Vec::new();
+    for seed in SEEDS {
+        let mut seen: Vec<(u64, usize)> = Vec::new();
+        for _ in 0..REPS {
+            let r = rollout(BrainSource::Authored, None, None, None, seed, TICKS);
+            let key = (r.snapshot, r.trace.decisions.len());
+            if !seen.contains(&key) {
+                seen.push(key);
+            }
+        }
+        if seen.len() > 1 {
+            split.push((seed, seen));
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for t in load {
+        let _ = t.join();
+    }
+
+    assert!(
+        split.is_empty(),
+        "G0 REGRESSION: {REPS} identical rollouts produced more than one outcome on {} of {} held-in \
+         seed(s): {split:x?} — the offline search is scoring against a wobbling objective again, so a \
+         MAP-Elites cell can be won by evaluation luck rather than by the genome. Look for a gameplay \
+         decision keyed on ECS query order (a shared-RNG draw, a non-associative float sum, or a \
+         keep-the-first-on-a-tie pick) — see docs/rl/2026-07-16-search-rollout-nondeterminism.md",
+        split.len(),
+        SEEDS.len(),
+    );
 }
 
 #[test]
@@ -660,4 +827,116 @@ fn dramatic_burst_is_live_and_deterministic() {
     let a = run();
     let b = run();
     assert_eq!(a, b, "the dramatic host-burst must be bit-reproducible across same-seed runs");
+}
+
+/// **The mutant guard** — same-seed reproducibility of the rollouts the SEARCH actually evaluates.
+///
+/// Its sibling `search_rollouts_are_reproducible_under_load` runs the **authored** genome, and that is the
+/// hole this fills. The search evaluates **mutants**, and a mutant reaches code the authored config never
+/// arms: a behaviour gated on a knob that *ships* clear of its threshold but whose genome bound sits on the
+/// field's noise floor, or a mode the shipped brains never enter. So the authored guard went green while the
+/// search was still scoring noise, and that green was read — twice, by me — as "the search is reproducible".
+/// **A guard proves what it tests. Nothing more.** (Worked example: `bc.rally_live` ships at 0.15 but the
+/// genome bound is 0.02, where one ULP of an unsorted rally accumulate flips a crab's caste.)
+///
+/// **Breadth over depth, deliberately.** K distinct mutants × few reps beats 1 mutant × many reps: different
+/// mutants arm *different code*, and a rep only re-rolls the same dice. Squad AND swarm AND world are
+/// mutated — the world genome is the important one, because it is what moves the config knobs.
+///
+/// Runs at the search's REAL episode length on BOTH held-in worlds, so nothing hides in the tail or on the
+/// lucky seed. It is slow (~40 min) and that is a known cost: a slow green test is one nobody re-examines,
+/// which is exactly how the single-seed guard survived for months. The mitigation is the failure message —
+/// it prints the mutant index, both seeds, and the distinct outcomes, so a red run hands you a reproducer
+/// rather than a mystery.
+///
+/// Do NOT add `serial_guard()`: `run_episode` takes it internally and `HARNESS_LOCK` is not reentrant.
+#[test]
+fn search_rollouts_of_mutants_are_reproducible_under_load() {
+    use foundation_vs_slop::squad_ai::coevolve::{
+        brains_of, mutate_squad_feasible, mutate_swarm_feasible, SquadGenome, SwarmGenome, Templates,
+    };
+    use foundation_vs_slop::squad_ai::evaluate::rollout;
+    use foundation_vs_slop::squad_ai::world_genome;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Distinct mutants. Breadth is the point — see the note above.
+    const MUTANTS: usize = 8;
+    /// Reps per (mutant, world). 3 catches a ~30%-of-runs split with ~66% probability *per cell*, and there
+    /// are `MUTANTS × SEEDS` = 16 cells, so the test as a whole is far more sensitive than any one cell.
+    const REPS: usize = 3;
+    const TICKS: u32 = 7200;
+    const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
+    /// Fixed, so the mutant set is identical run to run — a red here must be reproducible by re-running.
+    const MUTANT_RNG_SEED: u64 = 0x6D07A17;
+
+    let t = Templates::authored();
+    let mut rng = foundation_vs_slop::rng::seeded(MUTANT_RNG_SEED);
+
+    // Draw the mutants up front, serially — the draw order is then independent of anything the rollouts do.
+    let mut genomes = Vec::new();
+    for _ in 0..MUTANTS {
+        let squad = mutate_squad_feasible(&t, &SquadGenome::authored(&t), &mut rng)
+            .expect("feasible squad mutant");
+        let swarm = mutate_swarm_feasible(&t, &SwarmGenome::authored(&t), &mut rng)
+            .expect("feasible swarm mutant");
+        let world = world_genome::mutate(&world_genome::authored(), 0.15, &mut rng)
+            .expect("feasible world mutant");
+        genomes.push((squad, swarm, world));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    let mut split: Vec<String> = Vec::new();
+    for (m, (squad, swarm, world)) in genomes.iter().enumerate() {
+        let wc = world_genome::decode(world).expect("world mutant decodes");
+        for seed in SEEDS {
+            let mut seen: Vec<(u64, usize)> = Vec::new();
+            for _ in 0..REPS {
+                let brains = brains_of(&t, squad, swarm).expect("brains from mutant");
+                let r = rollout(brains, Some(wc.clone()), None, None, seed, TICKS);
+                let key = (r.snapshot, r.trace.decisions.len());
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+            if seen.len() > 1 {
+                split.push(format!(
+                    "mutant #{m} (rng seed {MUTANT_RNG_SEED:#x}) on world {seed:#x}: {} distinct {seen:x?}",
+                    seen.len()
+                ));
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    assert!(
+        split.is_empty(),
+        "MUTANT-ROLLOUT NON-DETERMINISM — the search is scoring noise, so its archives are unusable for \
+         `train apply` (a MAP-Elites cell can be won by evaluation luck rather than by the genome):\n  {}\n\n\
+         Reproduce: re-run this test — the mutant set is fixed by MUTANT_RNG_SEED, so mutant #N is the same \
+         genome every time. Then bisect that (mutant, world) pair with `evaluate::trace_episode` (it folds \
+         snapshot + field + gib hashes) and row-diff at the first divergent tick with `evaluate::row_trace` \
+         (same pair, MULTISET diff — a set-difference lies when tied actors share a row).\n\n\
+         Look for a gameplay decision keyed on ECS query order. Note this guard exists because the AUTHORED \
+         guard cannot see this class: a mutant walks config knobs onto thresholds the shipped values sit \
+         clear of. See docs/rl/2026-07-16-search-rollout-nondeterminism.md",
+        split.join("\n  "),
+    );
 }

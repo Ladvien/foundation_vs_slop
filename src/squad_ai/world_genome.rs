@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use super::genome::{flat_mutate, flat_range_check, push_channel};
 use crate::ai::tuning::{AiTuning, ChannelTuning, FieldsTuning, RallyTuning};
+use crate::almond_water::AlmondWaterDynamics;
 use crate::config::WorldConfig;
 use crate::sim::{
     BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, SimTuning,
@@ -37,7 +38,7 @@ use crate::sim::{
 /// parasite 14). The 8th stigmergy channel is ATTENTION (observation), and the SCP-150 parasite is a
 /// host-killing species, so its lifecycle/lethality dials belong in the search that shapes the ecosystem's
 /// deaths and lives.
-pub const N: usize = 86;
+pub const N: usize = 102;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -122,6 +123,26 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 1.5),    // occlude_los (mold → LOS occlusion strength)
     (0.5, 6.0),    // seep_boost (mold → almond-water seep multiplier)
     (0.2, 1.0),    // dense_v (biomass threshold for "dense" mold)
+    // ── AlmondWaterDynamics (the belief/inversion water — seep/heal/poison/belief the search co-evolves with
+    //    combat, since the water heals AND poisons both squad and swarm). Structural (pool_spacing, capacity)
+    //    and visual knobs stay fixed. `evaporate`/`heal_per_unit_water` floored > 0; `diffuse`/`belief_diffuse`
+    //    capped < 0.25 (stable lerp step).
+    (0.0, 30.0),   // strong_seep (volume/sec at a spring)
+    (0.001, 0.5),  // evaporate (fraction dried/sec; > 0 or the field saturates)
+    (0.0, 0.24),   // diffuse (water blend/tick, < 0.25)
+    (0.0, 20.0),   // heal_rate (HP/sec on a heal pool)
+    (0.1, 10.0),   // heal_per_unit_water (water drunk per HP; > 0)
+    (0.0, 20.0),   // poison_rate (HP/sec on a cyanide pool)
+    (0.0, 1.0),    // belief_prior (heal-reading baseline)
+    (0.0, 0.5),    // belief_relax (rate belief returns to base)
+    (0.0, 0.24),   // belief_diffuse (rumor blend/tick, < 0.25)
+    (0.0, 0.6),    // belief_poison_frac (fraction of cells seeded cyanide)
+    (0.0, 1.0),    // belief_flip_hi (belief >= this heals)
+    (0.0, 1.0),    // belief_flip_lo (belief <= this poisons)
+    (0.0, 5.0),    // rumor_gain (safe-drink → heal-reading nudge)
+    (0.0, 5.0),    // death_rumor_gain (poisoning → cyanide-reading nudge)
+    (0.0, 30.0),   // forage_gain (wounded-crab water taxis strength)
+    (0.0, 1.0),    // forage_wounded_frac (forage only at/below this health)
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
@@ -129,7 +150,12 @@ static BOUNDS: [(f32, f32); N] = [
 pub struct WorldGenome(pub Vec<f32>);
 
 /// Flatten a `(AiTuning, SimTuning, MoldConfig)` into the fixed-order knob vector `BOUNDS`/`decode` agree on.
-pub fn encode(ai: &AiTuning, sim: &SimTuning, mold: &crate::mold::MoldConfig) -> WorldGenome {
+pub fn encode(
+    ai: &AiTuning,
+    sim: &SimTuning,
+    mold: &crate::mold::MoldConfig,
+    almond: &AlmondWaterDynamics,
+) -> WorldGenome {
     let mut v = Vec::with_capacity(N);
     // AiTuning: channels in FieldId slot order, then rally.
     push_channel(&mut v, &ai.fields.scent);
@@ -204,6 +230,23 @@ pub fn encode(ai: &AiTuning, sim: &SimTuning, mold: &crate::mold::MoldConfig) ->
     v.push(mold.occlude_los);
     v.push(mold.seep_boost);
     v.push(mold.dense_v);
+    // AlmondWaterDynamics — the 16 evolvable water dials (in BOUNDS order).
+    v.push(almond.strong_seep);
+    v.push(almond.evaporate);
+    v.push(almond.diffuse);
+    v.push(almond.heal_rate);
+    v.push(almond.heal_per_unit_water);
+    v.push(almond.poison_rate);
+    v.push(almond.belief_prior);
+    v.push(almond.belief_relax);
+    v.push(almond.belief_diffuse);
+    v.push(almond.belief_poison_frac);
+    v.push(almond.belief_flip_hi);
+    v.push(almond.belief_flip_lo);
+    v.push(almond.rumor_gain);
+    v.push(almond.death_rumor_gain);
+    v.push(almond.forage_gain);
+    v.push(almond.forage_wounded_frac);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     WorldGenome(v)
 }
@@ -338,13 +381,37 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
         dense_v: f!(),
         ..crate::mold::MoldConfig::default()
     };
+    // AlmondWaterDynamics — the 16 evolved water dials (encode order).
+    let almond = AlmondWaterDynamics {
+        strong_seep: f!(),
+        evaporate: f!(),
+        diffuse: f!(),
+        heal_rate: f!(),
+        heal_per_unit_water: f!(),
+        poison_rate: f!(),
+        belief_prior: f!(),
+        belief_relax: f!(),
+        belief_diffuse: f!(),
+        belief_poison_frac: f!(),
+        belief_flip_hi: f!(),
+        belief_flip_lo: f!(),
+        rumor_gain: f!(),
+        death_rumor_gain: f!(),
+        forage_gain: f!(),
+        forage_wounded_frac: f!(),
+    };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
-    Ok(WorldConfig { ai, sim, mold })
+    Ok(WorldConfig { ai, sim, mold, almond })
 }
 
 /// The shipped world as a genome — the band origin for [`mutate`] and the co-evolution's baseline.
 pub fn authored() -> WorldGenome {
-    encode(&AiTuning::default(), &SimTuning::default(), &crate::mold::MoldConfig::default())
+    encode(
+        &AiTuning::default(),
+        &SimTuning::default(),
+        &crate::mold::MoldConfig::default(),
+        &AlmondWaterDynamics::default(),
+    )
 }
 
 /// Perturb a world genome: every knob gets a scale-relative Gaussian kick (scale from the **authored**

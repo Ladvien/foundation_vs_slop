@@ -313,6 +313,7 @@ pub fn build(dungeon: &Dungeon, cfg: &MyceliaConfig) -> Result<Vec<u8>, String> 
     // ── Greedy selection to the cell budget ───────────────────────────────────────────────────────────
     // Rank by susceptibility, tie-break on id so the order is total and reproducible.
     let mut order: Vec<usize> = (0..plans.len()).collect();
+    // SORT-OK: seeded habitat bake over grid cells, not an ECS query.
     order.sort_by(|&a, &b| {
         plans[b]
             .score

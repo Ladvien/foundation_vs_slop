@@ -16,13 +16,53 @@ in the reference list (§8).
 
 ## 2. What already exists (the baseline to improve on)
 
-`src/squad_ai/` implements MAP-Elites, CMA-ME, POET, neuroevolution, an island-model search
-(`tune.sh`), 6 genome populations decoded onto `assets/config/config.ron`, and a headless deterministic
+`src/squad_ai/` implements MAP-Elites (batch emitter), CMA-ME, POET, neuroevolution, an island-model search
+(`cargo train`), 6 genome populations decoded onto `assets/config/config.ron`, and a headless deterministic
 harness (`src/sim_harness.rs`). Its fitness stack is **witnessed learnable-surprise** `W·S·L`
 (`surprise.rs`) + **human-interest** proxies (`interest.rs`: suspense / outcome-surprise / effectance),
 gated by a `minimal_criterion`.
 
 **Identified gaps** (the roadmap closes these):
+- **G0 — CLOSED (2026-07-16). The search is reproducible.** *Search rollouts were not reproducible* —
+  identical evaluations scored ~6% apart, so every search below was optimizing noise. All four sub-gaps are
+  fixed and pinned by tests that were written to fail: `search_rollouts_are_reproducible_under_load`
+  (authored genome, **both** held-in seeds, under CPU load),
+  `search_rollouts_of_mutants_are_reproducible_under_load` (8 mutants × 3 reps × both seeds × 7200 ticks —
+  the genomes the search ACTUALLY evaluates), and `tests/search_parallel.rs` (`jobs=1 ≡ jobs=N`,
+  byte-identical archives through the batch emitter, worker pool and common-opponent re-eval).
+  **Archives are trustworthy for `train apply`.**
+  - **G0** — `laser::fire_laser` drew aim-scatter from a shared stream in raw ECS query order.
+  - **G0b** — `config.ron` held a machine-baked levels elite, so the archive came back empty.
+  - **G0c** — **`GibKey` was derived from the death position**, so it could not break the position tie it
+    existed to break.
+  - **G0d** — three more, all invisible to the authored genome: the **autogib bake raced the gun's async
+    scene** (a latch-once cache that waited for the body and never the held item — the documented GLB
+    root entropy reaching gameplay through the gib ring); the **laser's hit tie-break was a mathematical
+    no-op** (`point` is `f(s)`, so `(s, point)` ranks by `s` alone); and **`crab_contact_damage` picked the
+    boss's retaliation victim by position only** — crabs pile onto the boss, so the biters sit at identical
+    floats and it executed a different crab per run.
+  **Sixteen bugs, four species. The durable output is the enforcement, not the fixes** — six shipped with a
+  comment asserting the exact property they lacked (and I added a seventh wrong annotation myself). Now
+  mechanical: `sort_total!` panics naming the tied site; `tests/determinism_lint.rs` fails the hard gate on
+  any unannotated sort; five oracles (snapshot/field/gib/bolt/crab-identity), because every blind spot hid a
+  bug; and a guard that runs **mutants**, since the authored genome is the one configuration the search never
+  evaluates. Full diagnosis, the ruled-out table and the method notes:
+  `2026-07-16-search-rollout-nondeterminism.md`.
+- **Process footgun — FIXED (2026-07-16):** `apply_archive` re-pinned the replay goldens automatically, at
+  odds with TESTING.md (*"a deliberate, human-reviewed act — never auto-approve a diff"*), and `splice_block`
+  wrote bare serialized RON, destroying every comment in the slices it rewrote. A bake could silently replace
+  the authored level **and** move the ruler that would have caught it. Now: (1) `apply` **aborts** on golden
+  drift reporting `old -> new` unless `--repin-goldens` is passed, and the unattended `cargo train all`
+  callers never pass it; (2) `repin_replay` rewrites only the `const` declaration — it used to `str::replace`
+  the hash across the whole file, rewriting the prose hashes in `replay.rs`'s incident log, i.e. eating its
+  own audit trail; (3) `splice_block` now substitutes only the scalars that **changed**, comparing by parsed
+  value so `seed: 0x5C09191` vs the serializer's `96506257` reads as equal and the line is never touched —
+  every comment, hex literal and column of alignment survives (pinned by a byte-identical no-op round-trip
+  over all 8 shipped slices, 1356 leaves). It **refuses** rather than guessing when an elite changes the
+  block's *shape* (a dropped `room_types` entry, a vanished `Option`) or moves a field the authored file
+  leaves at its serde default: there is no honest edit, because the prose around the old shape describes a
+  design the elite no longer has, and a preserved-but-false comment is worse than a deleted one. `--dim
+  levels` elites that drop a room type must ship through the runtime overlay (`FVS_LEVELS_ELITE`) instead.
 - **G1** proxies are never calibrated to a human;
 - **G2** replayability is not an objective;
 - **G3** levels are scored statically, not by play;

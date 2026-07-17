@@ -61,21 +61,65 @@ pub struct NoHealthBar;
 
 /// System set for every `FixedUpdate` system that **damages** `Health` (laser, crab contact/jump, boss
 /// zap/defense, parasite embed/burst). These writers overlap in component access but rarely touch the same
-/// entity the same tick, so their mutual order was never pinned. [`crate::almond_water::almond_water_heal`]
-/// orders itself `.after(HealthDamage)` so the consuming heal always composes on top of the tick's damage
+/// entity the same tick, so their mutual order was never pinned. [`crate::almond_water::almond_water_effect`]
+/// orders itself `.after(HealthDamage)` so the consuming heal/poison always composes on top of the tick's damage
 /// deterministically — otherwise, once foraging clusters wounded crabs into weapon range, heal-vs-damage
 /// clamping races and `snapshot_hash` flips per process. Each damage system opts in with `.in_set(...)` at
 /// its own registration; the set carries no ordering of its own, only a name to sequence the heal behind.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HealthDamage;
 
-/// Living flesh that [`crate::almond_water`] can heal — a **positive** tag, inserted at spawn only on the
-/// flesh factions (squad units, crabs), so `Health`-bearing non-flesh is excluded *by construction*: the
-/// stone Nest has `Health` but no `Biological`, and the anomaly factions (Manca, Smiley) are deliberately
-/// left out too. `Health` alone is not a valid "heal target" predicate; this marker is. Inserted at spawn,
-/// never mid-sim, to avoid a runtime archetype migration.
+/// Living flesh that [`crate::almond_water`] can heal **or poison** — a **positive** tag, inserted at spawn on
+/// every flesh creature (squad units, crabs, mancae, the Smiley boss), so `Health`-bearing non-flesh is
+/// excluded *by construction*: the stone `Nest` has `Health` but no `Biological`. `Health` alone is not a
+/// valid "the water affects me" predicate; this marker is. Inserted at spawn, never mid-sim, to avoid a
+/// runtime archetype migration. Every `Biological` also carries [`CyanideSmell`].
 #[derive(Component)]
 pub struct Biological;
+
+/// Can this creature smell the bitter-almond / hydrogen-cyanide warning? The odour sensitivity is inherited as
+/// an **x-linked recessive**, so roughly **one in four** cannot detect it (Gidlow, *Hydrogen cyanide — an
+/// update*, Occupational Medicine 2017, doi:10.1093/occmed/kqx121). An anosmic creature can't perceive that a
+/// pool reads as cyanide — it is blind to the danger (partial observability for the learned policy), yet the
+/// poison still affects it. Present on **every** [`Biological`] (only the bool differs), never a subset marker:
+/// a component on only some units would split the hashed archetype and make ECS iteration order run-dependent.
+#[derive(Component)]
+pub struct CyanideSmell {
+    /// True ⇒ cannot smell the warning (blind to a pool's cyanide reading).
+    pub anosmic: bool,
+    /// **Stable per-spawn identity** — the mixed spawn seed, kept rather than discarded.
+    ///
+    /// It exists because `Biological` is heterogeneous (units, crabs, mancae, the boss), so there is no one
+    /// stable key across it: `SquadMember` is units-only, `CrabSeed` is crabs-only, and a raw `Entity` id is
+    /// recycled and NOT reproducible across same-seed runs — it is the very instability being guarded
+    /// against. This is the only spawn-time identity every `Biological` already carries.
+    ///
+    /// [`crate::almond_water`]'s drink contention sorts on it. That sort's key was
+    /// `(cell, health, pos.x, pos.z)`, which its own comment called a total order — it is not: two crabs
+    /// `clamp_to_patch`-ed against the same wall land on BIT-IDENTICAL coordinates, and at equal health they
+    /// tie, at which point `sort_unstable` resolves them by the ECS query order the sort exists to erase.
+    /// Measured on held-in world `0xA11CE`: **6 fully-tied pairs at tick 1580**, all at
+    /// `pos=(77.94, 12.94) hp=25/25`. Tied drinkers are NOT interchangeable — they differ in `anosmic`,
+    /// mode, and carry phase — so who drinks first (both `drink` and `nudge_belief` clamp, and a clamp makes
+    /// even equal magnitudes order-dependent) decides who heals and who reads the pool as cyanide.
+    pub id: u64,
+}
+
+impl CyanideSmell {
+    /// Deterministic per-spawn assignment: ~1 in 4 biologicals are anosmic. A pure function of the entity's
+    /// already-hashed spawn seed (a splitmix64 finalizer), so no RNG enters the determinism hash and no
+    /// archetype churns at runtime.
+    ///
+    /// The finalizer is a **bijection**, so distinct spawn seeds give distinct [`id`](Self::id)s — which is
+    /// what makes it usable as a sort tiebreak, not merely a well-mixed one.
+    pub fn from_seed(seed: u64) -> Self {
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        Self { anosmic: z % 4 == 0, id: z }
+    }
+}
 
 /// GPU uniform — mirrors `HealthBarSettings` in `health_bar.wgsl` (field order + types).
 #[derive(Clone, ShaderType)]
@@ -182,5 +226,22 @@ fn update_health_bars(
         if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
             mat.settings.fraction = health.fraction();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cyanide_smell_is_deterministic_and_about_a_quarter() {
+        // Pure function of the spawn seed — same seed, same result (no RNG in the determinism hash).
+        assert_eq!(CyanideSmell::from_seed(42).anosmic, CyanideSmell::from_seed(42).anosmic);
+        assert_eq!(CyanideSmell::from_seed(0).anosmic, CyanideSmell::from_seed(0).anosmic);
+        // ~1 in 4 are anosmic (Gidlow 2017: the HCN-odour sensitivity is x-linked recessive).
+        let n = 20_000u64;
+        let anosmic = (0..n).filter(|&s| CyanideSmell::from_seed(s).anosmic).count();
+        let frac = anosmic as f32 / n as f32;
+        assert!((frac - 0.25).abs() < 0.02, "anosmia fraction {frac} is not ~1/4");
     }
 }

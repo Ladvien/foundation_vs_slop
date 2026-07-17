@@ -94,7 +94,12 @@ fn deposit_fruit_scent(
         })
         .filter(|(_, a)| *a > 0.0)
         .collect();
-    out.sort_unstable_by_key(|(p, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    // Whole value, not just the position: `(pos, amount)` keyed on pos alone was a PREFIX, so two
+    // grazers on one spot with different amounts tied and fed `drain_deposits`' non-associative `+=` in ECS
+    // query order. With `amount` in the key a tie means the deposits are identical ⇒ interchangeable.
+    crate::util::sort_value_canonical(&mut out, |(p, a)| {
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), a.to_bits())
+    });
     for (pos, amount) in out {
         deposits.0.push(Deposit { pos, field: FieldId::MEAT, amount });
     }
@@ -126,7 +131,12 @@ fn mold_mat_scent(
         })
         .filter(|(_, a)| *a > 0.0)
         .collect();
-    out.sort_unstable_by_key(|(p, _)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+    // Whole value, not just the position: `(pos, amount)` keyed on pos alone was a PREFIX, so two
+    // grazers on one spot with different amounts tied and fed `drain_deposits`' non-associative `+=` in ECS
+    // query order. With `amount` in the key a tie means the deposits are identical ⇒ interchangeable.
+    crate::util::sort_value_canonical(&mut out, |(p, a)| {
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), a.to_bits())
+    });
     for (pos, amount) in out {
         deposits.0.push(Deposit { pos, field: FieldId::MEAT, amount });
     }
@@ -209,6 +219,7 @@ fn crabs_graze_fruit_bodies(
         if let Ok((_, _, mut drives)) = crabs.get_mut(entity) {
             // Sum each crab's bites in a fixed (ascending) order so the drained hunger is reproducible
             // regardless of the ECS body-visit order that produced them (`f32 +` is not associative).
+            // SORT-OK: bare f32s about to be reduced — ties are identical terms.
             foods.sort_unstable_by(|a, b| a.total_cmp(b));
             let food: f32 = foods.iter().sum();
             let h = drives.get(DriveId::HUNGER);

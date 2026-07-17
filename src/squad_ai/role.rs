@@ -144,6 +144,7 @@ pub fn validate_role_defs(defs: &HashMap<RoleId, RoleDef>) -> Result<(), String>
 /// path, no repertoire unvalidated.
 pub fn validate_rank_ladder(role: RoleId, behaviors: &[Behavior]) -> Result<(), String> {
     let mut ranks: Vec<u8> = behaviors.iter().map(|b| b.rank).collect();
+    // SORT-OK: bare ranks — whole value, ties interchangeable.
     ranks.sort_unstable();
     if let Some(dup) = ranks.windows(2).find(|w| w[0] == w[1]).map(|w| w[0]) {
         let modes: Vec<Mode> =
@@ -373,6 +374,7 @@ mod tests {
             noise_draw: 0.0,
             // Near the anchor by default so cohesion is quiet unless a test strays it.
             squad: SquadFields { anchor_dist: 0.0, ..SquadFields::neutral() },
+            water: crate::ai::utility::WaterObs::default(),
         }
     }
 

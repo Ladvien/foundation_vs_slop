@@ -11,6 +11,33 @@
 //! handle, bit-for-bit). If the parallelisation ever perturbs the RNG stream, the reduction order, or the
 //! float math, this reds the build. It is slow (each rollout boots the real game and steps 120 s of
 //! simulated time), so it lives in the harness lane, not the fast deterministic-core lane.
+//!
+//! # History — this header has been wrong three times; that is the useful part
+//!
+//! These tests were red for **months** and every explanation offered for it was wrong:
+//!
+//! 1. It blamed **G0** (rollout non-determinism) and asserted the failure was "not a bug in the batch
+//!    emitter". G0 was real — `laser::fire_laser` drew a shared RNG stream in ECS query order — but it was
+//!    never why these tests were red.
+//! 2. They were actually failing at `assert!(filled > 0)`: the archive was **empty**, so no determinism
+//!    comparison ever ran. Cause (G0b): `config.ron` held a machine-baked levels elite instead of the
+//!    authored level, so the squad fought a different map and was wiped.
+//! 3. Once the archive filled, `jobs=1` vs `jobs=N` genuinely disagreed — and the obvious reading, that the
+//!    parallel path was at fault, was **also wrong**. Measured: `inline != inline` at `jobs=1`. The
+//!    reduction is index-addressed, seeds are pre-drawn before any fan-out, and the wire is bit-exact. The
+//!    parallelism was innocent the whole time; these tests were reporting a **rollout** bug (G0c: `GibKey`
+//!    was derived from the death origin position, so it could not break the position tie it existed to
+//!    break — see `docs/rl/2026-07-16-search-rollout-nondeterminism.md`).
+//!
+//! Two lessons worth keeping. **A red test is evidence that something is wrong, not evidence about what.**
+//! And note why the arms are not symmetric: `jobs=N` self-loads (N contending worker processes) while
+//! `jobs=1` is quiet — and this bug class is *hidden* by a quiet box (an idle machine returned 12/12
+//! identical rollouts with G0 live). So the two arms differ in the one variable that gates the bug's
+//! visibility, which is exactly how a rollout bug masquerades as a parallelism bug.
+//!
+//! If these red again, suspect the rollout before `parallel.rs`: run
+//! `replay::search_rollouts_are_reproducible_under_load` first — it is cheaper, it covers both held-in
+//! seeds, and it fails for the real reason.
 #![cfg(feature = "test-harness")]
 
 use foundation_vs_slop::squad_ai::coevolve::{search, sweep_prior, Population, SearchConfig, Templates};
@@ -89,6 +116,50 @@ fn parallel_search_reproduces_the_inline_archives_bit_for_bit() {
     assert_eq!(fingerprint(&inline.world), fingerprint(&parallel.world), "world archive diverged");
 
     // The bookkeeping counters must match too: same evaluations, same infeasible/criterion rejections.
+    assert_eq!(inline.evaluations, parallel.evaluations, "evaluation count diverged");
+    assert_eq!(inline.rejected_infeasible, parallel.rejected_infeasible, "infeasible count diverged");
+    assert_eq!(
+        inline.rejected_by_criterion, parallel.rejected_by_criterion,
+        "criterion-rejection count diverged"
+    );
+}
+
+/// The batch-emitter scaling proof: with the batch variant of MAP-Elites (`batch_population`), a whole
+/// generation's `batch × OPPONENTS` triples are flattened into ONE eval call, so `--jobs` scales past the old
+/// `OPPONENTS = 3` ceiling. This pins that the lift stays bit-exact — `batch 2` (so two children are flattened
+/// per generation, and can contest the same cell inside one batch, driving the deferred re-eval) with
+/// `jobs 4` (> OPPONENTS) must reproduce the inline (jobs 1) archives exactly. The parallel-vs-sequential
+/// (jobs=1 ≡ jobs=N) equivalence test for the new emitter. Kept to one generation to hold the 7200-tick
+/// rollout budget down; the `batch = 1`, two-generation case above pins the cross-generation re-eval path.
+#[test]
+fn batch_emitter_scales_past_opponents_deterministically() {
+    unsafe { std::env::set_var("TRAIN_WORKER_EXE", env!("CARGO_BIN_EXE_train")) };
+    let t = Templates::authored();
+    let prior = sweep_prior(&t, &SEEDS, EPISODE_TICKS).expect("sweep the authored prior");
+
+    let base = SearchConfig {
+        seed: 0x0BA7C4,
+        generations: 1,
+        batch: 2, // > 1: multiple children flattened into one eval per generation (the batch path)
+        episode_ticks: EPISODE_TICKS,
+        dungeon_seeds: SEEDS.to_vec(),
+        resolution: 8,
+        jobs: 1,
+    };
+
+    let inline = search(&t, &prior, &base, |_, _| {}).expect("inline search");
+    // jobs 4 > OPPONENTS (3): only reachable because the emitter now batches the whole generation.
+    let parallel = search(&t, &prior, &SearchConfig { jobs: 4, ..clone_cfg(&base) }, |_, _| {})
+        .expect("parallel search (jobs 4)");
+
+    let filled = inline.squad.archive.coverage()
+        + inline.swarm.archive.coverage()
+        + inline.world.archive.coverage();
+    assert!(filled > 0, "search illuminated no niches — cannot prove determinism on empty archives");
+
+    assert_eq!(fingerprint(&inline.squad), fingerprint(&parallel.squad), "squad archive diverged at jobs=8");
+    assert_eq!(fingerprint(&inline.swarm), fingerprint(&parallel.swarm), "swarm archive diverged at jobs=8");
+    assert_eq!(fingerprint(&inline.world), fingerprint(&parallel.world), "world archive diverged at jobs=8");
     assert_eq!(inline.evaluations, parallel.evaluations, "evaluation count diverged");
     assert_eq!(inline.rejected_infeasible, parallel.rejected_infeasible, "infeasible count diverged");
     assert_eq!(

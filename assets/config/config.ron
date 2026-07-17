@@ -1373,9 +1373,18 @@
                                    // puddle (decay length √(15·diffuse/evaporate) cells) instead of a wide sheet
         heal_rate: 5.0,            // HP/sec restored to a biological standing in water (rate-limited like the medic)
         heal_per_unit_water: 1.5,  // water drunk per HP healed — the consumable coupling (drains the cell)
-        mold_seep_mult: 1.5,       // seep multiplier on mold-colonised concrete (>1: hyphae crack it; <1 flips it)
         forage_gain: 10.0,         // steering gain a WOUNDED creature feels climbing the water gradient
         forage_wounded_frac: 0.6,  // forage only at/below 60% health; a healthy creature ignores the water
+        // --- Belief / inversion (gameplay; the water does what the population believes) ---
+        belief_prior: 1.0,         // heal-reading baseline for non-cyanide pools: 0 = cyanide/poison, 1 = heal
+        belief_relax: 0.05,        // rate/sec belief relaxes back toward each pool's seeded base (rumors fade)
+        belief_diffuse: 0.02,      // blend toward 4-neighbour belief avg per tick — rumor spreads between pools
+        belief_poison_frac: 0.15,  // fraction of floor cells seeded as cyanide (base belief 0) at the bake
+        belief_flip_hi: 0.6,       // belief >= this HEALS; the band (lo,hi) is an inert deadband (no oscillation)
+        belief_flip_lo: 0.4,       // belief <= this POISONS (pre-drift cyanide reading)
+        poison_rate: 5.0,          // HP/sec lost drinking a fully-cyanide pool — the signed twin of heal_rate
+        rumor_gain: 0.5,           // belief nudge/sec a SAFE drink deposits toward the heal reading
+        death_rumor_gain: 1.0,     // belief nudge/sec a POISONING deposits toward the cyanide reading
         // --- Visual (windowed-only; ignored by the gameplay field) ---
         almond_tint: (0.92, 0.85, 0.70),  // pale almond/cream base (linear RGB)
         min_visible_level: 11.0,   // draw a puddle only above this volume (visual-only). Sets how far out from
@@ -1385,6 +1394,8 @@
         film_ior: 1.33,            // index of refraction of the water film (must be >= 1)
         iridescence_strength: 0.25,// subtle oil-slick sheen; more water = more sheen
         moisture_feed_gain: 0.3,   // how strongly water level boosts the mold's Gray-Scott bloom where they overlap
+        iridescence_mute: 0.6,     // pull thin-film reflectance toward its mean (1=rainbow, 0=grey); was hardcoded
+        poison_tint: (0.55, 0.70, 0.40), // sickly hue of a pool the population reads as cyanide (belief 0)
     ),
     // The DETERMINISTIC CPU gameplay mold (src/mold.rs) — Fisher-KPP reaction-diffusion over the dungeon
     // grid, in the harness (optimizer-tunable), distinct from the GPU cosmetic `mycelia` above. Grows in the

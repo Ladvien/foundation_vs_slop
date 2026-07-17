@@ -250,12 +250,23 @@ pub struct Carryable {
     pub crew_timer: f32,
 }
 
-/// A **stable, deterministic** identity for a meat chunk, derived at spawn from the death origin + the
-/// chunk index — NOT from entity id or the gore seed counter (both vary between two same-seed runs).
-/// The crab foraging assignment ([`crate::crab::assign_meat_targets`]) sorts candidate chunks by
-/// `(position, GibKey)`; two chunks that settle at a bit-identical spot would otherwise be ordered by
-/// unstable entity order, and since their weights differ the greedy would fill them in different orders
-/// per run — flipping a crab's commit and breaking the physics-free replay hash.
+/// A **stable, deterministic, UNIQUE** identity for a meat chunk. The crab foraging assignment
+/// ([`crate::crab::assign_meat_targets`]) sorts candidate chunks by `(position, GibKey)`; two chunks at a
+/// bit-identical spot would otherwise be ordered by unstable entity order, and since their committed crews
+/// differ the greedy fills them in different orders per run — flipping a crab's commit and breaking the
+/// physics-free replay hash.
+///
+/// **It used to be derived from the death origin + chunk index, and that was the bug** (G0c): the key that
+/// breaks a POSITION tie cannot itself be a function of the position. Two *different* creatures dying at the
+/// same spot produced byte-identical keys — and crabs die at bit-identical spots constantly, because
+/// `clamp_to_patch` pins a crab pressed to a wall onto the same coordinate (measured: 6 fully-tied pairs at
+/// one tick on held-in world `0xA11CE`). So the sort tied, `assign_meat_targets` fell through to ECS query
+/// order, and crabs committed to different chunks run to run. The site's own doc had anticipated coincident
+/// chunks and then broken the tie with the colliding value itself.
+///
+/// Now: `origin`+index (so a chunk's identity still reads from its death) mixed with a **monotonic
+/// [`GibSeq`]**, which makes it unique BY CONSTRUCTION. `GibSeq` is deterministic because `drain_gore` sorts
+/// the queue canonically before draining it — see there.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct GibKey(pub u64);
 
@@ -330,6 +341,14 @@ struct PoolRing(VecDeque<Entity>);
 /// total exceeds the cap — bounds how many rigid bodies the solver ever tracks.
 #[derive(Resource, Default)]
 pub struct GibRing(pub VecDeque<Entity>);
+
+/// Monotonic chunk counter, mixed into every [`GibKey`] so keys are unique even for two creatures that die
+/// at the same coordinate. A resource, not a `Local`, for the same reason as `laser::BoltSeq` and
+/// `LaserRng`: it is simulation state that must reset per run, and a `Local` lives outside every component
+/// so replay could never capture it. Deterministic because the only site that increments it (`drain_gore`)
+/// drains a canonically-sorted queue.
+#[derive(Resource, Default)]
+pub struct GibSeq(pub u64);
 
 impl GibRing {
     /// The ONE path that removes a live gib early (a crab carrying it home to the nest). It drops the
@@ -493,6 +512,7 @@ impl Plugin for GorePlugin {
             .init_resource::<GoreQueue>()
             .init_resource::<PoolRing>()
             .init_resource::<GibRing>()
+            .init_resource::<GibSeq>()
             .init_resource::<MeatVolumes>()
             .insert_resource(settings)
             .add_systems(Startup, setup_gore_assets)
@@ -600,11 +620,41 @@ fn drain_gore(
         Res<crate::fog::FogGrid>,
     ),
     camera: Single<&GlobalTransform, With<Camera3d>>,
+    mut gib_seq: ResMut<GibSeq>,
     mut seed: Local<u32>,
 ) {
     if queue.0.is_empty() {
         return;
     }
+    // CANONICAL DRAIN ORDER — the choke point that makes `GibSeq` (and so every `GibKey`) deterministic.
+    //
+    // Sorting HERE rather than auditing every producer is deliberate: gore is pushed from a dozen sites
+    // across laser/squad/enemy/crab/parasite, and "every producer remembers to sort" is exactly the
+    // enforcement-by-prose that failed everywhere else in this sim. One sort at the single consumer cannot
+    // be forgotten by a new producer.
+    //
+    // Value-canonical, not total: the key is the WHOLE event, so a tie means two byte-identical deaths at
+    // one spot. Those are interchangeable — each mints the same chunks at the same places with the same
+    // weights, and only their `GibSeq` values swap, which permutes two identical chunk sets.
+    crate::util::sort_value_canonical(&mut queue.0, |e| {
+        let t = e.tint.to_linear();
+        (
+            e.pos.x.to_bits(),
+            e.pos.y.to_bits(),
+            e.pos.z.to_bits(),
+            match e.kind {
+                GoreKind::FleshHit => 0u8,
+                GoreKind::UnitCrunch => 1,
+                GoreKind::EnemySplat => 2,
+                GoreKind::Viscera => 3,
+            },
+            e.gib.is_some(),
+            t.red.to_bits(),
+            t.green.to_bits(),
+            t.blue.to_bits(),
+            e.intensity.to_bits(),
+        )
+    });
     let now = time.elapsed_secs();
     let now_real = real.elapsed_secs();
     let cam_rot = camera.rotation();
@@ -642,13 +692,27 @@ fn drain_gore(
                     g.scale,
                     ev.tint,
                     *seed,
+                    {
+                        gib_seq.0 += 1;
+                        gib_seq.0
+                    },
                 );
             } else {
                 warn!("gore: UnitCrunch without a gib source; no fragment gibs spawned");
             }
         }
         if let GoreKind::UnitCrunch | GoreKind::EnemySplat = ev.kind {
-            spawn_meat_chunks(&mut commands, &assets, &settings, &mut gib_ring, &volumes, ev.pos, *seed);
+            gib_seq.0 += 1;
+            spawn_meat_chunks(
+                &mut commands,
+                &assets,
+                &settings,
+                &mut gib_ring,
+                &volumes,
+                ev.pos,
+                *seed,
+                gib_seq.0,
+            );
         }
 
         // --- Presentation feedback below is fog-gated: a kill the squad can't currently see leaves NO
@@ -846,6 +910,9 @@ fn spawn_fragments(
     scale: f32,
     tint: Color,
     seed: u32,
+    // Monotonic per-death ordinal from `GibSeq` — what makes this batch's `GibKey`s unique even when
+    // another creature already died on this exact coordinate. See `GibKey`.
+    gib_ordinal: u64,
 ) {
     let Some(frags) = cache.fragments(source) else {
         warn!("gore: no autogib bake for this character; skipping fragment gibs");
@@ -890,10 +957,13 @@ fn spawn_fragments(
         let vol = 2.0 * half.x * 2.0 * half.y * 2.0 * half.z;
         let weight = (MEAT_DENSITY * vol * FRAG_FILL).clamp(FRAG_WEIGHT_MIN, FRAG_WEIGHT_MAX);
         // Deterministic identity from the (deterministic) death origin + fragment index — see [`GibKey`].
+        // The `gib_ordinal` mix is what makes this UNIQUE: origin+index alone collides for two creatures
+        // that die on the same coordinate, and a key derived from the position cannot break a position tie.
         let mut key = origin.x.to_bits() as u64;
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.y.to_bits() as u64);
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.z.to_bits() as u64);
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0x5000_0000 + i as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(gib_ordinal);
         commands.entity(id).insert((
             Carryable {
                 weight,
@@ -958,6 +1028,8 @@ fn spawn_meat_chunks(
     volumes: &MeatVolumes,
     origin: Vec3,
     seed: u32,
+    // Monotonic per-death ordinal from `GibSeq` — see `GibKey`.
+    gib_ordinal: u64,
 ) {
     // Determinism: seed each chunk's randomization (velocity, mesh, size → weight) from the DETERMINISTIC
     // death origin, NOT the caller's `seed` — which comes from the gore drain's shared `Local` event
@@ -1026,10 +1098,12 @@ fn spawn_meat_chunks(
         let pos = origin + Vec3::Y * 0.2;
         let id = spawn_gib_body(commands, gib_ring, settings, pos, Vec3::splat(half), velocity, spin);
         // Deterministic identity from the (deterministic) death origin + chunk index — see [`GibKey`].
+        // See the fragment key above: `gib_ordinal` is what makes this unique across two deaths on one spot.
         let mut key = origin.x.to_bits() as u64;
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.y.to_bits() as u64);
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(origin.z.to_bits() as u64);
         key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(i as u64);
+        key = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(gib_ordinal);
         commands.entity(id).insert((
             Carryable {
                 weight,

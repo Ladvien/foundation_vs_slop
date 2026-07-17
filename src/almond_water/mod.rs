@@ -20,7 +20,7 @@
 //! firewall; it never reaches the harness and never perturbs a golden.
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::GameConfig;
 use crate::dungeon::Dungeon;
@@ -55,16 +55,40 @@ pub struct AlmondWaterConfig {
     pub heal_rate: f32,
     /// Water volume consumed per HP healed — the consumable coupling. Higher ⇒ each heal drains more water.
     pub heal_per_unit_water: f32,
-    /// Multiplier applied to a cell's seep where the mold habitat lives. Default > 1: hyphae crack/porous
-    /// the concrete so more water bubbles up (mutual reinforcement — water also feeds the mold visually).
-    /// Set < 1 to flip the reading to "biofilm seals the concrete" — a config-only change, no code path.
-    pub mold_seep_mult: f32,
     /// Steering gain a *wounded* creature feels climbing the water gradient (foraging taxis). Scales the
     /// world-space push added to locomotion; tune against creature speed (cf. `lighting.photophilic_gain`).
     pub forage_gain: f32,
     /// Health fraction at or below which a creature forages toward water. Above it, a healthy creature
     /// ignores the field (no cost when full).
     pub forage_wounded_frac: f32,
+
+    // --- Belief / inversion (gameplay; the water does what the population *believes* it does) ---
+    /// The prior belief every pool relaxes toward, in [0,1]: **0 = pre-drift cyanide (poison), 1 = post-drift
+    /// heal.** The population's baseline reading of the water before any local rumor bends it (lore §6). Belief
+    /// is a per-cell field that spreads and relaxes like a reaction-diffusion of rumor — belief *is* a
+    /// stigmergic medium (Heylighen 2015).
+    pub belief_prior: f32,
+    /// Rate/sec each cell's belief relaxes back toward its seeded base (`belief_base`) — a rumor shift fades,
+    /// so a transiently-poisoned heal pool recovers while a seeded cyanide pocket stays dangerous.
+    pub belief_relax: f32,
+    /// Blend weight [0,1] toward the 4-neighbour belief average each tick — rumor spreads between nearby pools.
+    pub belief_diffuse: f32,
+    /// Fraction [0,1] of floor cells seeded as **cyanide** (base belief 0 = poison) at the bake; the rest read
+    /// as heal (base `belief_prior`). A deterministic per-cell hash picks them, so it stays out of
+    /// `snapshot_hash`. This is the pre-drift reading surviving in pockets.
+    pub belief_poison_frac: f32,
+    /// Belief at/above which a pool HEALS (post-drift reading). The band `(belief_flip_lo, belief_flip_hi)` is
+    /// an inert deadband — neither heal nor poison — so a pool near the flip point doesn't oscillate.
+    pub belief_flip_hi: f32,
+    /// Belief at/below which a pool POISONS (pre-drift cyanide reading). Must be ≤ `belief_flip_hi`.
+    pub belief_flip_lo: f32,
+    /// HP/sec a creature loses drinking a fully-poison (cyanide) pool — the signed twin of `heal_rate`. Drinks
+    /// the cell down exactly as a heal does (you drink the poison), so a dry cyanide cell can't hurt you.
+    pub poison_rate: f32,
+    /// Belief nudge/sec a SAFE drink deposits toward the heal reading — a pool that heals earns its good name.
+    pub rumor_gain: f32,
+    /// Belief nudge/sec a POISONING deposits toward the cyanide reading — "someone was poisoned here" spreads.
+    pub death_rumor_gain: f32,
 
     // --- Visual (windowed-only; read by `visual`, never by the gameplay field) ---
     /// Almond base tint of the puddle (linear-RGB).
@@ -79,6 +103,108 @@ pub struct AlmondWaterConfig {
     pub iridescence_strength: f32,
     /// How strongly water level boosts the mold's Gray-Scott feed where the two overlap (cosmetic).
     pub moisture_feed_gain: f32,
+    /// How much the raw thin-film reflectance is pulled toward its channel mean, [0,1] — real oil/water films
+    /// read as a muted golds/teals/magentas mixture, not a clean rainbow. 1 = full spectral, 0 = grey. (Was a
+    /// hardcoded 0.6 in the shader; exposed for tuning.)
+    pub iridescence_mute: f32,
+    /// Base tint (linear-RGB) of a pool the population reads as **cyanide** (belief 0). The puddle lerps from
+    /// this sickly hue at belief 0 to `almond_tint` at belief 1 — the diegetic "this pool is wrong" tell (that
+    /// an anosmic creature still can't smell). Visual-only.
+    pub poison_tint: [f32; 3],
+}
+
+/// The **evolvable** slice of the Almond Water gameplay dynamics — the 16 knobs the offline world search
+/// (`squad_ai::world_genome`) tunes and the harness installs per rollout, so the RL/QD search can co-evolve
+/// the water (seep/heal/poison/belief) alongside combat. `Copy` + `Serialize` so an evolved world decodes to a
+/// readable RON diff (the reward-hacking guard). Excludes the structural (`pool_spacing`, `capacity`) and
+/// visual knobs — those stay fixed. `Default` MUST mirror the shipped `config.ron` values (guarded by
+/// `authored_world_config_override_is_a_noop`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AlmondWaterDynamics {
+    pub strong_seep: f32,
+    pub evaporate: f32,
+    pub diffuse: f32,
+    pub heal_rate: f32,
+    pub heal_per_unit_water: f32,
+    pub poison_rate: f32,
+    pub belief_prior: f32,
+    pub belief_relax: f32,
+    pub belief_diffuse: f32,
+    pub belief_poison_frac: f32,
+    pub belief_flip_hi: f32,
+    pub belief_flip_lo: f32,
+    pub rumor_gain: f32,
+    pub death_rumor_gain: f32,
+    pub forage_gain: f32,
+    pub forage_wounded_frac: f32,
+}
+
+impl Default for AlmondWaterDynamics {
+    fn default() -> Self {
+        // MUST match the `almond_water:` gameplay knobs in `assets/config/config.ron`.
+        Self {
+            strong_seep: 8.0,
+            evaporate: 0.05,
+            diffuse: 0.02,
+            heal_rate: 5.0,
+            heal_per_unit_water: 1.5,
+            poison_rate: 5.0,
+            belief_prior: 1.0,
+            belief_relax: 0.05,
+            belief_diffuse: 0.02,
+            belief_poison_frac: 0.15,
+            belief_flip_hi: 0.6,
+            belief_flip_lo: 0.4,
+            rumor_gain: 0.5,
+            death_rumor_gain: 1.0,
+            forage_gain: 10.0,
+            forage_wounded_frac: 0.6,
+        }
+    }
+}
+
+impl AlmondWaterDynamics {
+    /// Read the evolvable slice out of a full config.
+    pub fn from_config(c: &AlmondWaterConfig) -> Self {
+        Self {
+            strong_seep: c.strong_seep,
+            evaporate: c.evaporate,
+            diffuse: c.diffuse,
+            heal_rate: c.heal_rate,
+            heal_per_unit_water: c.heal_per_unit_water,
+            poison_rate: c.poison_rate,
+            belief_prior: c.belief_prior,
+            belief_relax: c.belief_relax,
+            belief_diffuse: c.belief_diffuse,
+            belief_poison_frac: c.belief_poison_frac,
+            belief_flip_hi: c.belief_flip_hi,
+            belief_flip_lo: c.belief_flip_lo,
+            rumor_gain: c.rumor_gain,
+            death_rumor_gain: c.death_rumor_gain,
+            forage_gain: c.forage_gain,
+            forage_wounded_frac: c.forage_wounded_frac,
+        }
+    }
+
+    /// Overwrite the evolvable gameplay knobs of a full config, leaving structural + visual knobs untouched.
+    pub fn apply_to(&self, c: &mut AlmondWaterConfig) {
+        c.strong_seep = self.strong_seep;
+        c.evaporate = self.evaporate;
+        c.diffuse = self.diffuse;
+        c.heal_rate = self.heal_rate;
+        c.heal_per_unit_water = self.heal_per_unit_water;
+        c.poison_rate = self.poison_rate;
+        c.belief_prior = self.belief_prior;
+        c.belief_relax = self.belief_relax;
+        c.belief_diffuse = self.belief_diffuse;
+        c.belief_poison_frac = self.belief_poison_frac;
+        c.belief_flip_hi = self.belief_flip_hi;
+        c.belief_flip_lo = self.belief_flip_lo;
+        c.rumor_gain = self.rumor_gain;
+        c.death_rumor_gain = self.death_rumor_gain;
+        c.forage_gain = self.forage_gain;
+        c.forage_wounded_frac = self.forage_wounded_frac;
+    }
 }
 
 /// Loud, one-path validation (mirrors [`crate::light::validate_config`]). Every knob finite and in range;
@@ -88,12 +214,16 @@ pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
         ("strong_seep", c.strong_seep),
         ("evaporate", c.evaporate),
         ("heal_rate", c.heal_rate),
-        ("mold_seep_mult", c.mold_seep_mult),
+        ("belief_relax", c.belief_relax),
+        ("poison_rate", c.poison_rate),
+        ("rumor_gain", c.rumor_gain),
+        ("death_rumor_gain", c.death_rumor_gain),
         ("forage_gain", c.forage_gain),
         ("min_visible_level", c.min_visible_level),
         ("film_thickness_nm", c.film_thickness_nm),
         ("iridescence_strength", c.iridescence_strength),
         ("moisture_feed_gain", c.moisture_feed_gain),
+        ("iridescence_mute", c.iridescence_mute),
     ] {
         if !(v.is_finite() && v >= 0.0) {
             return Err(format!("almond_water.{name} must be finite and >= 0 (got {v})"));
@@ -117,23 +247,37 @@ pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
     if !(c.film_ior.is_finite() && c.film_ior >= 1.0) {
         return Err(format!("almond_water.film_ior must be finite and >= 1.0 (got {})", c.film_ior));
     }
-    // A blend weight and a health fraction are both cosines-of-nothing: they must sit in [0, 1] or the
-    // field either never diffuses / always saturates, or every creature forages regardless of health.
-    for (name, v) in [("diffuse", c.diffuse), ("forage_wounded_frac", c.forage_wounded_frac)] {
+    // Blend weights, a health fraction, and belief (a 0=poison..1=heal reading) all must sit in [0, 1] or the
+    // field never diffuses / always saturates, every creature forages regardless of health, or belief runs
+    // off its poison↔heal axis.
+    for (name, v) in [
+        ("diffuse", c.diffuse),
+        ("forage_wounded_frac", c.forage_wounded_frac),
+        ("belief_prior", c.belief_prior),
+        ("belief_diffuse", c.belief_diffuse),
+        ("belief_poison_frac", c.belief_poison_frac),
+        ("belief_flip_hi", c.belief_flip_hi),
+        ("belief_flip_lo", c.belief_flip_lo),
+    ] {
         if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
             return Err(format!("almond_water.{name} must be in [0, 1] (got {v})"));
         }
     }
-    if c.almond_tint.iter().any(|ch| !ch.is_finite() || *ch < 0.0) {
+    if c.belief_flip_lo > c.belief_flip_hi {
         return Err(format!(
-            "almond_water.almond_tint channels must be finite and >= 0 (got {:?})",
-            c.almond_tint
+            "almond_water.belief_flip_lo ({}) must be <= belief_flip_hi ({}) — an inverted deadband",
+            c.belief_flip_lo, c.belief_flip_hi
         ));
+    }
+    for (name, tint) in [("almond_tint", c.almond_tint), ("poison_tint", c.poison_tint)] {
+        if tint.iter().any(|ch| !ch.is_finite() || *ch < 0.0) {
+            return Err(format!("almond_water.{name} channels must be finite and >= 0 (got {tint:?})"));
+        }
     }
     Ok(())
 }
 
-/// System set for the field writers ([`accumulate_evaporate_diffuse`] then [`almond_water_heal`], chained).
+/// System set for the field writers ([`accumulate_evaporate_diffuse`] then [`almond_water_effect`], chained).
 /// Foraging readers (crab locomotion) order `.after(AlmondWaterWritten)` so they read the current tick's
 /// water level — mirroring [`crate::light::LightFieldWritten`].
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -158,6 +302,19 @@ pub struct AlmondWater {
     level: Vec<f32>,
     /// Reused double-buffer for the diffusion pass (avoids per-tick allocation) — copies `Stig::scratch`.
     scratch: Vec<f32>,
+    /// Per-cell **belief** in [0,1]: 0 = the water reads as pre-drift cyanide (poison), 1 = post-drift heal.
+    /// A rumor field over the floor — seeded from `belief_base` at the bake, then each tick relaxed toward its
+    /// base + diffused, and nudged by the effect system (safe drink → +heal reading; a poisoning →
+    /// +cyanide reading). This is what makes the water do what the population believes (lore §6).
+    belief: Vec<f32>,
+    /// Per-cell **base belief** — the pool's seeded identity that `belief` relaxes back toward (a
+    /// `belief_poison_frac` slice of floor cells are seeded to 0 = cyanide, the rest to `belief_prior`).
+    /// Static after the bake, like `sources`, so a rumor shift is transient (a massacred heal-pool reads
+    /// poison for a while, then recovers) while seeded cyanide pockets stay dangerous.
+    belief_base: Vec<f32>,
+    /// Double-buffer for the belief diffusion pass (kept separate from `scratch` so level and belief can
+    /// diffuse in the same tick without aliasing).
+    belief_scratch: Vec<f32>,
     /// The floor cells (the only cells that ever carry value), precomputed so the per-tick passes skip
     /// rock. `(row_major index, cell)`. Filled by [`bake_almond_sources`].
     floor_cells: Vec<(usize, IVec2)>,
@@ -181,6 +338,9 @@ impl AlmondWater {
             sources: vec![0.0; n],
             level: vec![0.0; n],
             scratch: vec![0.0; n],
+            belief: vec![0.0; n],
+            belief_base: vec![0.0; n],
+            belief_scratch: vec![0.0; n],
             floor_cells: Vec::new(),
             floor_mask: vec![false; n],
             peak: 0.0,
@@ -230,6 +390,26 @@ impl AlmondWater {
         taken
     }
 
+    /// The population's belief at `cell` in [0,1] (0 = cyanide/poison reading, 1 = heal). Off-grid reads 0.
+    /// The effect system turns this into a signed heal/poison rate.
+    pub fn belief_at(&self, cell: IVec2) -> f32 {
+        if in_grid(cell, self.width, self.height) {
+            self.belief[row_major(cell, self.width)]
+        } else {
+            0.0
+        }
+    }
+
+    /// Nudge a cell's belief by `delta`, clamped to [0,1] — the rumor deposit (a safe drink pushes toward the
+    /// heal reading, a poisoning toward cyanide). The caller applies these in a sorted order so the
+    /// non-associative `+=` stays reproducible, exactly like `drink` contention.
+    fn nudge_belief(&mut self, cell: IVec2, delta: f32) {
+        if delta != 0.0 && in_grid(cell, self.width, self.height) {
+            let idx = row_major(cell, self.width);
+            self.belief[idx] = (self.belief[idx] + delta).clamp(0.0, 1.0);
+        }
+    }
+
     /// One accumulate → evaporate → diffuse step, floor cells only, in `Stig::evaporate_diffuse`'s order and
     /// with its determinism discipline (fixed E/W/S/N neighbour order — float add is non-associative — and a
     /// double-buffered diffuse so rock cells stay invariantly 0). `dt` in seconds.
@@ -247,6 +427,10 @@ impl AlmondWater {
         mold: &[f32],
         seep_boost: f32,
         dense_v: f32,
+        // Belief (rumor) dynamics: relax each cell toward its seeded base, then diffuse. Same fixed-order,
+        // double-buffered discipline as the water diffuse, so it stays bit-reproducible.
+        belief_relax: f32,
+        belief_diffuse: f32,
     ) {
         // 1+2. Accumulate the (mold-boosted) seep, then evaporate, in one in-place pass (an evaporation of
         //      the just-added seep is exactly a steady-state cap; the two commute up to O(dt²), same as `Stig`).
@@ -284,10 +468,43 @@ impl AlmondWater {
 
         // Peak for the visual's 0..1 normalisation. Order-independent (`max`), so it never perturbs the sim.
         self.peak = self.floor_cells.iter().map(|&(idx, _)| self.level[idx]).fold(0.0f32, f32::max);
+
+        // 4. Belief relax: each floor cell drifts back toward its seeded base (a rumor shift fades). The
+        //    effect-system deposits (rumor / poison) push it away between ticks; this pulls it home.
+        if belief_relax > 0.0 {
+            let k = (belief_relax * dt).clamp(0.0, 1.0);
+            for &(idx, _) in &self.floor_cells {
+                self.belief[idx] += (self.belief_base[idx] - self.belief[idx]) * k;
+            }
+        }
+
+        // 5. Belief diffuse: rumor spreads to floor neighbours (double-buffered, fixed E/W/S/N order). Blending
+        //    two [0,1] values stays in [0,1], so belief never leaves its poison↔heal axis.
+        if belief_diffuse > 0.0 {
+            let (w, h) = (self.width, self.height);
+            for &(idx, pos) in &self.floor_cells {
+                let (x, y) = (pos.x, pos.y);
+                let mut sum = 0.0;
+                let mut n = 0.0;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let nb = IVec2::new(x + dx, y + dy);
+                    if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h {
+                        let nidx = (nb.y as usize) * w + nb.x as usize;
+                        if self.floor_mask[nidx] {
+                            sum += self.belief[nidx];
+                            n += 1.0;
+                        }
+                    }
+                }
+                let avg = if n > 0.0 { sum / n } else { self.belief[idx] };
+                self.belief_scratch[idx] = self.belief[idx] * (1.0 - belief_diffuse) + avg * belief_diffuse;
+            }
+            std::mem::swap(&mut self.belief, &mut self.belief_scratch);
+        }
     }
 
-    /// FNV-1a-fold the exact bit pattern of every `level` and `sources` cell (the **full** grid, so the
-    /// rock-cells-stay-0 invariant is pinned too) plus `peak`, into `hash`. The determinism oracle for the
+    /// FNV-1a-fold the exact bit pattern of every `level`, `sources`, and `belief` cell (the **full** grid, so
+    /// the rock-cells-stay-0 invariant is pinned too) plus `peak`, into `hash`. The determinism oracle for the
     /// field: `snapshot_hash` folds only actor Transform+Health, so a reordered diffusion neighbour sum or a
     /// broken floor mask that doesn't happen to relocate an agent would ship silently without this. Copies
     /// `Stig::fold_fingerprint`. Test-only.
@@ -303,6 +520,9 @@ impl AlmondWater {
             fold(v, hash);
         }
         for &v in &self.sources {
+            fold(v, hash);
+        }
+        for &v in &self.belief {
             fold(v, hash);
         }
         fold(self.peak, hash);
@@ -342,6 +562,7 @@ impl AlmondWater {
             }
             sizes.push(size);
         }
+        // SORT-OK: bare sizes from a seeded bake, not an ECS query.
         sizes.sort_unstable_by(|a, b| b.cmp(a));
         sizes
     }
@@ -354,6 +575,16 @@ impl AlmondWater {
             self.level[idx] = level;
         }
         self.peak = level;
+    }
+
+    /// Force every floor cell's belief (and its base, so `relax` holds it) to `belief` — a harness helper so a
+    /// poison/heal/flip test can pin the population's reading without waiting for rumor dynamics. Test-only.
+    #[cfg(feature = "test-harness")]
+    pub fn test_set_belief(&mut self, belief: f32) {
+        for &(idx, _) in &self.floor_cells {
+            self.belief[idx] = belief;
+            self.belief_base[idx] = belief;
+        }
     }
 }
 
@@ -374,7 +605,8 @@ pub fn almond_push(field: &AlmondWater, dungeon: &Dungeon, pos: Vec3, gain: f32)
 /// (borders a wall — "bubbles up from the walls" — or is mold-colonised) AND no spring is already placed
 /// within `pool_spacing` tiles. A greedy min-spacing scatter (deterministic row-major order) keeps springs
 /// far enough apart that their puddles never merge, so the field reads as discrete 1–10 tile pools instead
-/// of one continuous sheet. A mold spring seeps `mold_seep_mult`× more. Every non-spring cell stays dry.
+/// of one continuous sheet. A mold spring's extra seep is applied LIVE in [`AlmondWater::tick`] (scaled by
+/// the current mold biomass via `mold.seep_boost`), not baked here. Every non-spring cell stays dry.
 ///
 /// Fallible because it reads the mold habitat (`mycelia::habitat::infested_cells`) — a dungeon/damp-table
 /// contract violation is a loud startup `Err`, never a degraded default. Deterministic (pure geometry + the
@@ -425,17 +657,43 @@ fn bake_almond_sources(
         }
 
         springs.push(c);
-        // Base seep at the spring. The mold-cracked boost is now applied LIVE in `tick` (scaled by the
-        // current `MoldField` biomass over the cell), not baked once — so a spring weeps more as mold thickens
-        // and dries back as the squad's light pushes it away. A mold-habitat cell is still eligible above, so
-        // the moldy regions have springs to boost. (`cfg.mold_seep_mult` is superseded by `mold.seep_boost`.)
+        // Base seep at the spring. The mold-cracked boost is applied LIVE in `tick` (scaled by the current
+        // `MoldField` biomass over the cell via `mold.seep_boost`), not baked once — so a spring weeps more as
+        // mold thickens and dries back as the squad's light pushes it away. A mold-habitat cell is still
+        // eligible above, so the moldy regions have springs to boost.
         sources[idx] = cfg.strong_seep;
     }
 
+    // Seed each floor cell's base belief: a deterministic `belief_poison_frac` slice reads as cyanide (base 0),
+    // the rest as heal (base `belief_prior`). A per-cell splitmix hash picks them — pure/deterministic, like
+    // `sources`, so it stays out of `snapshot_hash`; only the per-tick belief evolution folds into `field_hash`.
+    // `belief` starts at its base (the population's initial reading of each pool).
+    let mut belief_base = vec![0.0f32; w * h];
+    let mut belief = vec![0.0f32; w * h];
+    for &(idx, _) in &floor_cells {
+        let base = if cell_hash01(idx) < cfg.belief_poison_frac { 0.0 } else { cfg.belief_prior };
+        belief_base[idx] = base;
+        belief[idx] = base;
+    }
+
     field.sources = sources;
+    field.belief = belief;
+    field.belief_base = belief_base;
+    field.belief_scratch = vec![0.0f32; w * h];
     field.floor_cells = floor_cells;
     field.floor_mask = floor_mask;
     Ok(())
+}
+
+/// Deterministic per-cell hash → [0,1). A splitmix64 finalizer over the row-major index, so the cyanide-pocket
+/// seeding (and any future per-cell coin-flip) is reproducible and arch-stable — no RNG in the hash path.
+fn cell_hash01(idx: usize) -> f32 {
+    let mut z = (idx as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Top 24 bits → a uniform [0,1) with exact f32 precision.
+    ((z >> 40) as f32) / ((1u64 << 24) as f32)
 }
 
 /// Field update: accumulate the seep, evaporate, diffuse. `FixedUpdate`, in [`AlmondWaterWritten`], before
@@ -450,6 +708,7 @@ fn accumulate_evaporate_diffuse(
 ) {
     let cfg = &config.almond_water;
     let (evaporate, diffuse, capacity) = (cfg.evaporate, cfg.diffuse, cfg.capacity);
+    let (belief_relax, belief_diffuse) = (cfg.belief_relax, cfg.belief_diffuse);
     field.tick(
         time.delta_secs(),
         evaporate,
@@ -458,33 +717,50 @@ fn accumulate_evaporate_diffuse(
         mold.biomass_grid(),
         config.mold.seep_boost,
         config.mold.dense_v,
+        belief_relax,
+        belief_diffuse,
     );
 }
 
-/// Heal every biological creature standing in water, draining the cell as it heals. `FixedUpdate`, after the
-/// field update and after `medic_heal` (both take `&mut Health`, so the order is pinned for deterministic
-/// composition when two heal sources land on one unit in one tick). Mirrors `squad_ai::actions::medic_heal`'s
-/// rate-based `(current + rate·dt).min(max)` idiom, minus the medic proximity gate — the water *is* the source.
+/// Apply the water's effect to every biological standing in it — **the belief/inversion mechanic**: the pool
+/// does what the population believes it does. Belief at the cell selects one signed path: heal (post-drift
+/// reading), poison (pre-drift cyanide reading), or inert (the unsettled deadband). Both heal and poison drink
+/// the cell down. `FixedUpdate`, after the field update and after `medic_heal` (both take `&mut Health`, so the
+/// order is pinned for deterministic composition when two `Health` writers land on one unit in one tick).
+/// Mirrors `squad_ai::actions::medic_heal`'s rate-based idiom, minus the medic gate — the water *is* the source.
 ///
-/// **Drink contention determinism:** several drinkers can share a cell, and `drink` mutates the cell with a
-/// non-associative `f32 -=`, so the candidates are sorted by `(cell, current, pos)` before any drink — the
-/// same sorted-application discipline `snapshot_hash`'s rows and `Stig`'s deposits use.
-fn almond_water_heal(
+/// **Drink contention determinism:** several drinkers can share a cell, and both `drink` (clamped at 0) and
+/// the rumor `nudge_belief` (clamped to [0,1]) mutate the cell with a non-associative, *clamped* `f32 ±`, so
+/// the candidates are sorted before any mutation — the same sorted-application discipline `snapshot_hash`'s
+/// rows and `Stig`'s deposits use. A clamp is what makes this bite even when the magnitudes are equal: on a
+/// nearly-dry cell the first drinker takes what is left and the second gets nothing.
+///
+/// The key ends with [`CyanideSmell::id`], and that tiebreak is load-bearing, not decoration. This sort was
+/// keyed `(cell, current, pos.x, pos.z)` and *documented as* a total order. It was not — two crabs
+/// `clamp_to_patch`-ed against the same wall hold BIT-IDENTICAL coordinates, and at equal health every
+/// component of the key matches, so `sort_unstable` fell through to the ECS query order the sort exists to
+/// erase. Measured on held-in world `0xA11CE`: **6 fully-tied pairs at tick 1580**, all at
+/// `pos=(77.94, 12.94) hp=25/25`, and the episode diverged ~15 ticks later. Tied drinkers are *not*
+/// interchangeable (different `anosmic`, mode, carry phase), so the swap is observable: a wounded crab's
+/// forage push is a ±1 sign flip on `belief` crossing a threshold, which turns a lost drink into a
+/// 0.2-unit-per-tick lurch the other way.
+fn almond_water_effect(
     mut field: ResMut<AlmondWater>,
     dungeon: Res<Dungeon>,
     config: Res<GameConfig>,
     time: Res<Time>,
-    mut drinkers: Query<(Entity, &Transform, &mut Health), With<Biological>>,
+    mut drinkers: Query<(Entity, &Transform, &mut Health, &crate::health::CyanideSmell), With<Biological>>,
 ) {
     let cfg = &config.almond_water;
     let dt = time.delta_secs();
 
-    // Immutable pass: collect the wounded, each with its stable sort key. `to_bits` on a deterministic-core
+    // Immutable pass: collect every living biological with its stable sort key. Not just the wounded — a pool
+    // the population reads as cyanide poisons a full-health drinker too. `to_bits` on a deterministic-core
     // float is a total, reproducible order; the position tie-break decorrelates two co-located drinkers.
-    let mut cands: Vec<(u32, u32, u32, u32, u32, Entity, IVec2)> = drinkers
+    let mut cands: Vec<(u32, u32, u32, u32, u32, u64, Entity, IVec2)> = drinkers
         .iter()
-        .filter(|(_, _, h)| h.current < h.max && h.max > 0.0)
-        .map(|(e, t, h)| {
+        .filter(|(_, _, h, _)| h.max > 0.0)
+        .map(|(e, t, h, smell)| {
             let p = t.translation;
             let cell = dungeon.world_to_cell(p);
             (
@@ -493,6 +769,7 @@ fn almond_water_heal(
                 h.current.to_bits(),
                 p.x.to_bits(),
                 p.z.to_bits(),
+                smell.id,
                 e,
                 cell,
             )
@@ -501,20 +778,40 @@ fn almond_water_heal(
     if cands.is_empty() {
         return;
     }
-    cands.sort_unstable_by_key(|k| (k.0, k.1, k.2, k.3, k.4));
+    // TOTAL order: `smell.id` is the tiebreak, and without it this is not one — see the note above.
+    crate::sort_total!(&mut cands, |k: &(u32, u32, u32, u32, u32, u64, Entity, IVec2)| (k.0, k.1, k.2, k.3, k.4, k.5));
 
-    // Mutable pass: drink + heal in the sorted order. `want` is recomputed from the fresh `Health` so this
-    // stays correct if `medic_heal` topped the same unit up earlier in the schedule.
+    // Mutable pass, in the sorted order. ONE signed path: belief at the cell selects heal (+), poison (−), or
+    // inert (the deadband). Both heal and poison DRINK the cell down — you drink the water either way, so a dry
+    // cell can neither heal nor hurt. `want`/`current` are read fresh so this composes on top of `medic_heal`
+    // and the same-tick damage set. Rumor deposits (a safe drink reinforces the heal reading, a poisoning the
+    // cyanide reading) land in the same sorted order — the non-associative belief `+=` stays reproducible.
     for (.., e, cell) in cands {
-        let Ok((_, _, mut health)) = drinkers.get_mut(e) else {
+        let Ok((_, _, mut health, _)) = drinkers.get_mut(e) else {
             continue;
         };
-        let want = (cfg.heal_rate * dt).min(health.max - health.current);
-        if want <= 0.0 {
-            continue;
+        let belief = field.belief_at(cell);
+        if belief >= cfg.belief_flip_hi {
+            // Heal reading: restore HP, drink the cell down, reinforce the pool's good name.
+            let want = (cfg.heal_rate * dt).min(health.max - health.current);
+            if want <= 0.0 {
+                continue;
+            }
+            let got = field.drink(cell, want / cfg.heal_per_unit_water);
+            if got > 0.0 {
+                health.current = (health.current + got * cfg.heal_per_unit_water).min(health.max);
+                field.nudge_belief(cell, cfg.rumor_gain * dt);
+            }
+        } else if belief <= cfg.belief_flip_lo {
+            // Cyanide reading: drink the poison and take damage (can kill), spread the "poisoned here" rumor.
+            let intended = cfg.poison_rate * dt;
+            let got = field.drink(cell, intended / cfg.heal_per_unit_water);
+            if got > 0.0 {
+                health.current = (health.current - got * cfg.heal_per_unit_water).max(0.0);
+                field.nudge_belief(cell, -cfg.death_rumor_gain * dt);
+            }
         }
-        let got = field.drink(cell, want / cfg.heal_per_unit_water);
-        health.current = (health.current + got * cfg.heal_per_unit_water).min(health.max);
+        // else: the inert deadband — the pool's reading is unsettled, so it neither heals nor poisons.
     }
 }
 
@@ -540,7 +837,7 @@ impl Plugin for AlmondWaterPlugin {
             .add_systems(FixedUpdate, accumulate_evaporate_diffuse.in_set(AlmondWaterWritten))
             .add_systems(
                 FixedUpdate,
-                almond_water_heal
+                almond_water_effect
                     // Reads this tick's accumulated water to drink it down.
                     .after(accumulate_evaporate_diffuse)
                     // The heal writes `Health`, which every damage system also mutates. Those writers overlap
@@ -584,15 +881,25 @@ mod tests {
             diffuse: 0.1,
             heal_rate: 5.0,
             heal_per_unit_water: 1.5,
-            mold_seep_mult: 1.5,
             forage_gain: 10.0,
             forage_wounded_frac: 0.6,
+            belief_prior: 1.0,
+            belief_relax: 0.05,
+            belief_diffuse: 0.02,
+            belief_poison_frac: 0.15,
+            belief_flip_hi: 0.6,
+            belief_flip_lo: 0.4,
+            poison_rate: 5.0,
+            rumor_gain: 0.5,
+            death_rumor_gain: 1.0,
             almond_tint: [0.92, 0.85, 0.70],
             min_visible_level: 1.0,
             film_thickness_nm: 320.0,
             film_ior: 1.33,
             iridescence_strength: 0.25,
             moisture_feed_gain: 0.3,
+            iridescence_mute: 0.6,
+            poison_tint: [0.55, 0.70, 0.40],
         }
     }
 
@@ -623,7 +930,7 @@ mod tests {
         // ~20k ticks: the per-tick convergence factor is (1 − e·dt) ≈ 0.99917, so it takes several
         // thousand ticks to settle to the fixed point within tolerance.
         for _ in 0..20_000 {
-            f.tick(dt, e, 0.0, cap, &[], 1.0, 0.5); // diffuse 0: isolated cell; no mold
+            f.tick(dt, e, 0.0, cap, &[], 1.0, 0.5, 0.0, 0.0); // diffuse 0: isolated cell; no mold; no belief dynamics
             // Monotone non-decreasing from empty toward the fixed point; never over capacity.
             assert!(f.level[0] >= prev - 1.0e-6);
             assert!(f.level[0] <= cap + 1.0e-4);
@@ -638,7 +945,7 @@ mod tests {
     fn tick_clamps_a_huge_seep_to_capacity() {
         let mut f = grid(1, 1, &[(0, 0)]);
         f.sources[0] = 1.0e9;
-        f.tick(1.0 / 60.0, 0.0, 0.0, 42.0, &[], 1.0, 0.5);
+        f.tick(1.0 / 60.0, 0.0, 0.0, 42.0, &[], 1.0, 0.5, 0.0, 0.0);
         assert_eq!(f.level[0], 42.0);
         assert_eq!(f.peak(), 42.0);
     }
@@ -648,7 +955,7 @@ mod tests {
         // Two adjacent floor cells, one full, one dry; no seep, no drying → diffusion only.
         let mut f = grid(2, 1, &[(0, 0), (1, 0)]);
         f.level[0] = 100.0;
-        f.tick(1.0 / 60.0, 0.0, 0.5, 1000.0, &[], 1.0, 0.5);
+        f.tick(1.0 / 60.0, 0.0, 0.5, 1000.0, &[], 1.0, 0.5, 0.0, 0.0);
         // Each blends halfway toward the other; the pair's total is conserved.
         assert!((f.level[0] - 50.0).abs() < 1.0e-4);
         assert!((f.level[1] - 50.0).abs() < 1.0e-4);
@@ -681,5 +988,69 @@ mod tests {
         let mut c = valid_cfg();
         c.pool_spacing = 0.0; // springs must be at least 1 tile apart
         assert!(validate_config(&c).is_err());
+
+        // Belief / inversion knobs.
+        let mut c = valid_cfg();
+        c.belief_poison_frac = 1.5; // a fraction must be in [0, 1]
+        assert!(validate_config(&c).is_err());
+
+        let mut c = valid_cfg();
+        c.poison_rate = -1.0; // a rate can't be negative
+        assert!(validate_config(&c).is_err());
+
+        let mut c = valid_cfg();
+        (c.belief_flip_lo, c.belief_flip_hi) = (0.8, 0.4); // an inverted deadband
+        assert!(validate_config(&c).is_err());
+    }
+
+    #[test]
+    fn belief_relaxes_toward_base_then_diffuses() {
+        // Relax only: a cell poisoned below its heal base drifts back toward the base (the rumor fades).
+        let mut f = grid(2, 1, &[(0, 0), (1, 0)]);
+        f.belief_base[0] = 1.0;
+        f.belief[0] = 0.0;
+        f.belief_base[1] = 1.0;
+        f.belief[1] = 1.0;
+        f.tick(1.0 / 60.0, 0.0, 0.0, 100.0, &[], 1.0, 0.5, 0.5, 0.0); // relax 0.5, no belief diffuse
+        assert!(f.belief[0] > 0.0 && f.belief[0] < 1.0, "belief relaxed toward base: {}", f.belief[0]);
+        assert!((f.belief[1] - 1.0).abs() < 1.0e-6, "a cell already at base stays put");
+
+        // Diffuse only: a poison cell (0) and a heal cell (1) blend halfway toward each other, conserving sum.
+        let mut g = grid(2, 1, &[(0, 0), (1, 0)]);
+        g.belief_base[0] = 0.0;
+        g.belief[0] = 0.0;
+        g.belief_base[1] = 1.0;
+        g.belief[1] = 1.0;
+        g.tick(1.0 / 60.0, 0.0, 0.0, 100.0, &[], 1.0, 0.5, 0.0, 0.5); // no relax, belief diffuse 0.5
+        assert!((g.belief[0] - 0.5).abs() < 1.0e-4, "belief diffused: {}", g.belief[0]);
+        assert!((g.belief[1] - 0.5).abs() < 1.0e-4, "belief diffused: {}", g.belief[1]);
+    }
+
+    #[test]
+    fn nudge_belief_deposits_and_clamps() {
+        let mut f = grid(1, 1, &[(0, 0)]);
+        f.belief[0] = 0.5;
+        f.nudge_belief(IVec2::new(0, 0), 0.3);
+        assert!((f.belief_at(IVec2::new(0, 0)) - 0.8).abs() < 1.0e-6);
+        f.nudge_belief(IVec2::new(0, 0), 5.0); // clamps at 1
+        assert_eq!(f.belief_at(IVec2::new(0, 0)), 1.0);
+        f.nudge_belief(IVec2::new(0, 0), -9.0); // clamps at 0
+        assert_eq!(f.belief_at(IVec2::new(0, 0)), 0.0);
+        // Off-grid is a no-op (and reads 0).
+        f.nudge_belief(IVec2::new(99, 99), 1.0);
+        assert_eq!(f.belief_at(IVec2::new(99, 99)), 0.0);
+    }
+
+    #[test]
+    fn cell_hash01_is_deterministic_and_roughly_uniform() {
+        for idx in [0usize, 1, 42, 1000, 36_863] {
+            assert_eq!(cell_hash01(idx).to_bits(), cell_hash01(idx).to_bits(), "hash is a pure fn");
+            assert!((0.0..1.0).contains(&cell_hash01(idx)), "hash in [0,1)");
+        }
+        // A `belief_poison_frac`-style slice should be about that fraction of cells (uniform hash).
+        let n = 20_000usize;
+        let below = (0..n).filter(|&i| cell_hash01(i) < 0.15).count();
+        let frac = below as f32 / n as f32;
+        assert!((frac - 0.15).abs() < 0.02, "hash not ~uniform (0.15 slice got {frac})");
     }
 }

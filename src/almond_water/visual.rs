@@ -40,6 +40,10 @@ struct AlmondParams {
     params0: Vec4,
     /// `(iridescence_strength, almond_tint.rgb)`.
     params1: Vec4,
+    /// `(iridescence_mute, poison_tint.rgb)` — the belief/inversion look: the base tint lerps from
+    /// `poison_tint` (belief 0) to `almond_tint` (belief 1), and `iridescence_mute` replaces the old
+    /// hardcoded 0.6.
+    params2: Vec4,
 }
 
 /// The puddle material: a plain alpha-blended [`Material`] sampling the level texture by world XZ.
@@ -47,7 +51,8 @@ struct AlmondParams {
 struct AlmondWaterMaterial {
     #[uniform(0)]
     params: AlmondParams,
-    /// Normalised water level (0..1 of `capacity`), one texel per dungeon cell, uploaded each frame.
+    /// Rg8 field texture, one texel per dungeon cell, uploaded each frame: **R** = normalised water level
+    /// (0..1 of `capacity`), **G** = belief (0 = cyanide, 1 = heal).
     #[texture(1)]
     #[sampler(2)]
     level: Handle<Image>,
@@ -93,8 +98,8 @@ fn setup_puddle(
     let mut image = Image::new(
         Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         TextureDimension::D2,
-        vec![0u8; (w * h) as usize], // R8Unorm = 1 byte/texel, zero-filled (dry) until the first upload
-        TextureFormat::R8Unorm,
+        vec![0u8; (w * h * 2) as usize], // Rg8Unorm = 2 bytes/texel (R=level, G=belief), zero until first upload
+        TextureFormat::Rg8Unorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
@@ -109,6 +114,12 @@ fn setup_puddle(
             bounds: Vec4::new(WORLD_ORIGIN.x, WORLD_ORIGIN.y, WORLD_EXTENT.x, WORLD_EXTENT.y),
             params0: Vec4::new(w as f32, min_visible_norm, cfg.film_thickness_nm, cfg.film_ior),
             params1: Vec4::new(cfg.iridescence_strength, tint[0], tint[1], tint[2]),
+            params2: Vec4::new(
+                cfg.iridescence_mute,
+                cfg.poison_tint[0],
+                cfg.poison_tint[1],
+                cfg.poison_tint[2],
+            ),
         },
         level: level.clone(),
     });
@@ -149,15 +160,19 @@ fn upload_level(
         return;
     };
     let cap = config.almond_water.capacity.max(1.0e-6);
-    // `level.len() == width*height == data.len()` (R8Unorm), so the row-major cell index is the texel index.
-    if data.len() != field.level.len() {
+    // Rg8Unorm = 2 bytes/texel, so `data.len() == 2 * level.len()`; texel `i` → bytes `2i` (R) and `2i+1` (G).
+    if data.len() != field.level.len() * 2 {
         return;
     }
     let w = field.width as i32;
-    for (i, (byte, &lvl)) in data.iter_mut().zip(field.level.iter()).enumerate() {
-        // Recover the cell from the row-major texel index (same `y*width + x` layout the level grid uses).
+    for (i, &lvl) in field.level.iter().enumerate() {
+        // Recover the cell from the row-major index (same `y*width + x` layout the level grid uses).
         let cell = IVec2::new(i as i32 % w, i as i32 / w);
-        let shown = if fog.visible_at(cell) { lvl } else { 0.0 };
-        *byte = ((shown / cap).clamp(0.0, 1.0) * 255.0) as u8;
+        let visible = fog.visible_at(cell);
+        let shown = if visible { lvl } else { 0.0 };
+        data[2 * i] = ((shown / cap).clamp(0.0, 1.0) * 255.0) as u8;
+        // Belief in G (0 = cyanide, 1 = heal). Gated by fog too so a hidden cell reads neutral, not a spoiler.
+        let belief = if visible { field.belief_at(cell) } else { 0.0 };
+        data[2 * i + 1] = (belief.clamp(0.0, 1.0) * 255.0) as u8;
     }
 }

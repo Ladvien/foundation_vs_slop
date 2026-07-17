@@ -468,6 +468,7 @@ fn deposit_manca_dread(
         .filter(|(_, mood)| mood.state == MoodState::Roused)
         .map(|(tf, _)| tf.translation)
         .collect();
+    // SORT-OK: bare positions — whole value, ties are identical deposits (interchangeable).
     positions.sort_unstable_by_key(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
     for pos in positions {
         deposits.0.push(crate::ai::field::Deposit {
@@ -703,6 +704,7 @@ fn spawn_mancae(
     }
     // Best harborages first; `sort_by` is STABLE, so equal-score cells keep their row-major order — the
     // whole ranking is a pure function of the (fixed) dungeon + furniture layout.
+    // SORT-OK: candidate cells from a seeded generator, not an ECS query.
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
     // Greedily choose huddle sites spread ≥ beh.parasite_swarm.harborage_sep apart so distinct huddles occupy distinct corners.
@@ -808,11 +810,18 @@ pub fn spawn_manca_on_patch(
         MancaLeap { phase, timer: phase_timer, cooldown: tuning.leap_cooldown, from: Vec3::ZERO, to: Vec3::ZERO, host },
         anim,
         MancaSeed(rand_seed),
+        // Flesh: the belief-water heals or poisons mancae too (a squad tactic — flip a pool one stands in).
+        // On every manca (value-only smell bool), inserted at spawn so no archetype churns at runtime.
+        (crate::health::Biological, crate::health::CyanideSmell::from_seed(rand_seed as u64)),
         // Sphere collider mesh paired with its CPU laser hit-volume (same radius, zero-height capsule) so
         // bolts test against the manca headlessly + deterministically.
         (
             Mesh3d(collider.clone()),
-            crate::laser::LaserTarget { radius: MANCA_COLLIDER_R, half_height: 0.0 },
+            crate::laser::LaserTarget {
+                radius: MANCA_COLLIDER_R,
+                half_height: 0.0,
+                id: crate::laser::target_id(crate::laser::TargetKind::Manca, rand_seed as u64),
+            },
         ),
         // Render-only: smooth the manca's 60 Hz movement + surface rotation across the display refresh.
         (
@@ -902,7 +911,21 @@ fn manca_hunt(
         }
     }
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|nb| (nb.pos.x.to_bits(), nb.pos.y.to_bits(), nb.pos.z.to_bits()));
+        // Sorted by the WHOLE neighbour, not just its position. Position alone was a PREFIX of the value:
+        // two coincident mancae with different `heading`/`commit` tied, so the swarm's non-associative
+        // heading/commit sums ran in ECS query order. With the full value in the key a tie means the
+        // neighbours are identical, hence interchangeable.
+        crate::util::sort_value_canonical(v, |nb| {
+            (
+                nb.pos.x.to_bits(),
+                nb.pos.y.to_bits(),
+                nb.pos.z.to_bits(),
+                nb.heading.x.to_bits(),
+                nb.heading.y.to_bits(),
+                nb.heading.z.to_bits(),
+                nb.commit.to_bits(),
+            )
+        });
     }
 
     for (mut motion, mut anim, leap, mut mood, mut transform) in &mut mancae {
@@ -1219,7 +1242,18 @@ fn manca_huddle(
         }
     }
     for v in hash.values_mut() {
-        v.sort_unstable_by_key(|nb| (nb.pos.x.to_bits(), nb.pos.y.to_bits(), nb.pos.z.to_bits()));
+        // Whole neighbour, not just its position — see the sibling swarm hash above.
+        crate::util::sort_value_canonical(v, |nb| {
+            (
+                nb.pos.x.to_bits(),
+                nb.pos.y.to_bits(),
+                nb.pos.z.to_bits(),
+                nb.heading.x.to_bits(),
+                nb.heading.y.to_bits(),
+                nb.heading.z.to_bits(),
+                nb.commit.to_bits(),
+            )
+        });
     }
 
     let signed_gain = -config.lighting.photophobic_gain;
@@ -1437,6 +1471,7 @@ fn manca_embed(
     if ready.is_empty() {
         return;
     }
+    // SORT-OK: per-manca spawn seed, unique — total by construction.
     ready.sort_unstable_by_key(|(seed, _, _)| *seed);
 
     // Snapshot fresh (un-infested) host positions once; `taken` guards against two mancae claiming one host.
@@ -1536,23 +1571,33 @@ fn parasite_burst(
     let p = &sim.parasite;
     let dt = time.delta_secs();
 
-    // Erupting hosts in a stable geometric order (position bits) so the brood seq draw + population cap are
-    // reproducible even when several hosts erupt the same tick.
-    let mut order: Vec<((u32, u32, u32), Entity)> = hosts
+    // Erupting hosts in a stable TOTAL order so the brood seq draw + population cap are reproducible even
+    // when several hosts erupt the same tick. Both are shared, greedy state — `seq.0 += 1` hands each
+    // newborn manca the identity that drives its role/stagger/RNG, and `live >= manca_count_max` is a
+    // first-come cap — so the visit order is part of the result. Same shape as `crab::nest_reproduce`.
+    //
+    // `Infestation::seed` is the tiebreak and it is LOAD-BEARING: position bits alone are **not** a total
+    // order here. This sort keyed on them and its comment claimed they were, but hosts sit at bit-identical
+    // coordinates routinely — `clamp_to_patch` pins a crab pressed to a wall onto the same float — so two
+    // coincident hosts erupting on one tick tied, and `sort_unstable` fell through to the ECS query order
+    // this sort exists to erase. `Infestation::seed` is "set on embed, never position-derived" (see its
+    // doc), which is exactly what a tiebreak for a POSITION tie must be: `GibKey` was derived from the
+    // death position and so could not break its own tie (that was G0c).
+    let mut order: Vec<((u32, u32, u32), u32, Entity)> = hosts
         .iter()
         .filter(|(_, _, _, inf, _)| inf.burst != BurstPhase::Idle)
-        .map(|(e, tf, _, _, _)| {
+        .map(|(e, tf, _, inf, _)| {
             let t = tf.translation;
-            ((t.x.to_bits(), t.y.to_bits(), t.z.to_bits()), e)
+            ((t.x.to_bits(), t.y.to_bits(), t.z.to_bits()), inf.seed, e)
         })
         .collect();
     if order.is_empty() {
         return;
     }
-    order.sort_unstable_by_key(|(k, _)| *k);
+    crate::sort_total!(&mut order, |&(k, seed, _): &((u32, u32, u32), u32, Entity)| (k, seed));
 
     let mut live = live_mancae.iter().count();
-    for (_key, host_e) in order {
+    for (_key, _seed, host_e) in order {
         let Ok((_, htf, mut hp, mut inf, unit)) = hosts.get_mut(host_e) else { continue };
         let is_unit = unit.is_some();
         let chest = host_chest(htf, is_unit);
@@ -1679,6 +1724,7 @@ fn manca_despawn_dead(
     if dead.is_empty() {
         return;
     }
+    // SORT-OK: per-manca spawn seed, unique — total by construction.
     dead.sort_unstable_by_key(|(seed, _, _)| *seed);
     for (_, entity, pos) in dead {
         gore.0.push(GoreEvent {

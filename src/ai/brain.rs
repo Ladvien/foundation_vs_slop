@@ -268,6 +268,7 @@ pub fn think(
             // Crabs and the boss have no squad context — neutral unit fields (the squad brains never
             // run here; `think` is `Without<Unit>`).
             squad: SquadFields::neutral(),
+            water: crate::ai::utility::WaterObs::default(),
         };
 
         let brain = match brain_id {

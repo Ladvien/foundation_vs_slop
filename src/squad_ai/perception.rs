@@ -112,11 +112,11 @@ pub fn squad_think(
     control: Res<SquadControlMode>,
     brains: Res<RoleBrains>,
     policy: Res<ActivePolicy>,
-    // The illuminance grid — an SCP-150-infested unit is steered toward the darkest nearby cell (Phase 4
-    // host manipulation). Read at this schedule slot; a possibly-1-tick-stale field is still deterministic.
-    light: Res<LightField>,
-    // Parasite manipulation strengths (`sim.parasite.manip_*`).
-    sim: Res<SimTuning>,
+    // `light`: the illuminance grid (an SCP-150-infested unit steers toward the darkest nearby cell, Phase 4
+    // host manipulation; a possibly-1-tick-stale read is still deterministic). `sim`: parasite manipulation
+    // strengths (`sim.parasite.manip_*`). Tupled into one system param to stay under Bevy's 16-param limit
+    // (the water-observation resources below took the freed slot).
+    (light, sim): (Res<LightField>, Res<SimTuning>),
     threats: Query<&Transform, (Or<(With<Crab>, With<Enemy>)>, Without<Unit>)>,
     bosses: Query<&Transform, With<Enemy>>,
     // Light-averse creatures the Researcher wards with its beam — crabs AND parasite mancas (mancas are
@@ -141,10 +141,20 @@ pub fn squad_think(
             &Infestation,
             // The Researcher aims its warding beam here; `None` for every other unit and mode.
             &mut crate::squad::FacingOverride,
+            // Whether this unit can smell the cyanide warning — gates what belief it perceives (an anosmic
+            // unit reads the neutral prior, blind to a poison flip).
+            &crate::health::CyanideSmell,
         ),
         With<Unit>,
     >,
     beh: Res<crate::behavior_tuning::BehaviorTuning>,
+    // Almond Water at the unit's cell → the learned policy's water observation (belief/inversion mechanic).
+    // `squad_think` is ordered `.after(AlmondWaterWritten)` so this reads the current tick's field + belief.
+    // Tupled into one system param (Bevy's 16-param limit; see the `light`/`sim` note above).
+    (almond_water, game): (
+        Res<crate::almond_water::AlmondWater>,
+        Res<crate::config::GameConfig>,
+    ),
 ) {
     // World signals gathered once (planar positions), reused across all units.
     let threat_pos: Vec<Vec3> = threats.iter().map(|t| t.translation).collect();
@@ -160,7 +170,7 @@ pub fn squad_think(
     // the mutable unit query twice.
     let unit_snapshot: Vec<(Entity, Vec3, f32)> = units
         .iter()
-        .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _)| (e, t.translation, health_frac(h)))
+        .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
     let dt = time.delta_secs();
@@ -179,6 +189,7 @@ pub fn squad_think(
         member,
         infestation,
         mut facing_override,
+        smell,
     ) in &mut units
     {
         let pos = tf.translation;
@@ -286,6 +297,20 @@ pub fn squad_think(
             photophobe_bearing_known: if latch.photophobe { 1.0 } else { 0.0 },
         };
 
+        // Almond Water observation for the learned policy (belief/inversion mechanic). Belief is SMELLED: an
+        // anosmic unit reads the neutral prior, so it cannot perceive a pool flipping to cyanide — the poison
+        // still affects it. `safe` = standing in water it reads as heal-grade.
+        let aw = &game.almond_water;
+        let cell = dungeon.world_to_cell(pos);
+        let here = (almond_water.sample(&dungeon, pos) / aw.capacity.max(1.0e-6)).clamp(0.0, 1.0);
+        let smelled = if smell.anosmic { aw.belief_prior } else { almond_water.belief_at(cell) };
+        let water = crate::ai::utility::WaterObs {
+            here,
+            belief: smelled,
+            safe: if here > 0.0 && smelled >= aw.belief_flip_hi { 1.0 } else { 0.0 },
+            anosmic: if smell.anosmic { 1.0 } else { 0.0 },
+        };
+
         let perc = Perception {
             pos,
             nearest_unit: threat.map(|(_, p, _)| p),
@@ -304,6 +329,7 @@ pub fn squad_think(
             // Units don't investigate the din (the acoustic Investigate behaviour is crab-only).
             noise_draw: 0.0,
             squad,
+            water,
         };
 
         // Decide (throttled): re-run the policy only at decision points; keep the cached mode between.
@@ -491,6 +517,7 @@ mod tests {
             seen_by_squad: 0.0,
             noise_draw: 0.0,
             squad,
+            water: crate::ai::utility::WaterObs::default(),
         }
     }
 

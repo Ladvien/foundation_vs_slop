@@ -225,7 +225,177 @@ pub fn rollout_level(
 ///
 /// `sample_belief` gates the per-checkpoint survival-belief series: `true` only for the consumers that read
 /// it (`train probe` / `train poet`), so the hot search paths pay nothing for a signal they never use.
+/// A per-tick observer threaded through [`run_episode`]'s stepping loop.
+///
+/// It exists so a determinism probe can record a per-tick `snapshot_hash` trace **through the real
+/// schedule** — the synthetic player's hub tour, dwell windows, and engage windows — rather than
+/// re-deriving that schedule beside it. A re-derived probe drifts, and a drifted probe lies: an
+/// `elapsed = 1` offset once made a window boundary look like the first divergent tick when the truth was
+/// ~2000 ticks earlier. One schedule, one path; `None` is the production case and costs a null check per
+/// tick against a full `app.update()`.
+pub enum TickProbe<'a> {
+    /// Production: observe nothing.
+    Off,
+    /// Record `(tick, snapshot_hash, field_hash, gib_hash, bolt_hash)` every `every` ticks.
+    ///
+    /// BOTH hashes, deliberately. `snapshot_hash` folds only `(Transform, Health)` — the FIELDS are not in
+    /// it. A field can therefore diverge for hundreds of ticks while every actor still agrees, and only
+    /// surface once a quantised read (`belief_at(world_to_cell(pos))`, a threshold, a mode gate) finally
+    /// flips something. Bisecting on `snapshot_hash` alone finds the first ACTOR divergence and calls it the
+    /// origin, which is how you end up auditing the wrong system.
+    Trace { tick: u32, every: u32, out: &'a mut Vec<(u32, u64, u64, u64, u64)> },
+    /// Capture the full `snapshot_rows` at exactly tick `at` — for diffing two runs at the tick they split.
+    #[cfg(feature = "test-harness")]
+    Rows { tick: u32, at: u32, out: &'a mut Vec<[u32; 5]> },
+    /// Capture `gib_rows` (+ ring order) at exactly tick `at`.
+    #[cfg(feature = "test-harness")]
+    GibRows { tick: u32, at: u32, out: &'a mut (Vec<[u64; 6]>, Vec<u64>) },
+    /// Capture identity-keyed `crab_rows` at EVERY tick — lets a caller follow ONE crab.
+    #[cfg(feature = "test-harness")]
+    CrabTrace { tick: u32, out: &'a mut Vec<Vec<(u32, [u32; 4])>> },
+    /// Capture `snapshot_rows` at EVERY tick.
+    ///
+    /// Necessary because the first divergent tick VARIES between runs (this is a race that can fire at
+    /// several points once crabs pile up), so "bisect with one sample set, then diff rows with a fresh one"
+    /// compares two unrelated pairs: the fresh runs may have split earlier, and their row diff then shows
+    /// accumulated drift rather than the originating change. One run, one record — find the split and read
+    /// its diff from the SAME pair.
+    #[cfg(feature = "test-harness")]
+    RowTrace { tick: u32, out: &'a mut Vec<Vec<[u32; 5]>> },
+}
+
+impl TickProbe<'_> {
+    fn observe(&mut self, app: &mut App) {
+        match self {
+            TickProbe::Off => {}
+            TickProbe::Trace { tick, every, out } => {
+                *tick += 1;
+                if *tick % *every == 0 {
+                    out.push((
+                        *tick,
+                        crate::sim_harness::snapshot_hash(app),
+                        crate::sim_harness::field_hash(app),
+                        crate::sim_harness::gib_hash(app),
+                        crate::laser::bolt_hash(app),
+                    ));
+                }
+            }
+            #[cfg(feature = "test-harness")]
+            TickProbe::Rows { tick, at, out } => {
+                *tick += 1;
+                if *tick == *at {
+                    **out = crate::sim_harness::snapshot_rows(app);
+                }
+            }
+            #[cfg(feature = "test-harness")]
+            TickProbe::GibRows { tick, at, out } => {
+                *tick += 1;
+                if *tick == *at {
+                    **out = crate::sim_harness::gib_rows(app);
+                }
+            }
+            #[cfg(feature = "test-harness")]
+            TickProbe::CrabTrace { tick, out } => {
+                *tick += 1;
+                out.push(crate::sim_harness::crab_rows(app));
+            }
+            #[cfg(feature = "test-harness")]
+            TickProbe::RowTrace { tick, out } => {
+                *tick += 1;
+                out.push(crate::sim_harness::snapshot_rows(app));
+            }
+        }
+    }
+}
+
 fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
+    run_episode_probed(cfg, ticks, sample_belief, &mut TickProbe::Off)
+}
+
+/// [`run_episode`] with a per-tick observer. See [`TickProbe`] for why this seam exists.
+///
+/// `test-harness` only: the probe is a debugging affordance for the determinism hunt, not a shipped feature.
+#[cfg(feature = "test-harness")]
+///
+/// Takes `config` so a **mutant's** world can be traced, not just the authored one. That is not a nicety:
+/// every determinism bug left in this sim is armed by a mutated genome and inert for the authored config
+/// (a knob that ships clear of its threshold but whose genome bound sits on the noise floor). A probe that
+/// can only run `BrainSource::Authored` with `None` cannot reproduce what the search reports.
+pub fn trace_episode(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+    every: u32,
+    out: &mut Vec<(u32, u64, u64, u64, u64)>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::Trace { tick: 0, every, out };
+    run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture identity-keyed `crab_rows` at EVERY tick (index 0 == tick 1). See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn crab_trace(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+    out: &mut Vec<Vec<(u32, [u32; 4])>>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::CrabTrace { tick: 0, out };
+    run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture `snapshot_rows` at EVERY tick of the real episode (index 0 == tick 1). See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn row_trace(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    ticks: u32,
+    out: &mut Vec<Vec<[u32; 5]>>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::RowTrace { tick: 0, out };
+    run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture `gib_rows` (+ ring order) at exactly tick `at` of the real episode. See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn gib_rows_at_tick(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    at: u32,
+    out: &mut (Vec<[u64; 6]>, Vec<u64>),
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::GibRows { tick: 0, at, out };
+    run_episode_probed(&cfg, at, false, &mut probe);
+}
+
+/// Capture `snapshot_rows` at exactly tick `at` of the real episode. See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn rows_at_tick(
+    brains: BrainSource,
+    config: Option<WorldConfig>,
+    dungeon_seed: u64,
+    at: u32,
+    out: &mut Vec<[u32; 5]>,
+) {
+    let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
+    let mut probe = TickProbe::Rows { tick: 0, at, out };
+    run_episode_probed(&cfg, at, false, &mut probe);
+}
+
+fn run_episode_probed(
+    cfg: &SimConfig,
+    ticks: u32,
+    sample_belief: bool,
+    probe: &mut TickProbe<'_>,
+) -> Rollout {
     // Held for the App's whole lifetime (harness invariant 4).
     let _serial = serial_guard();
     let mut app = build_headless_app(cfg);
@@ -242,7 +412,12 @@ fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
             tour_goals(&mut app)
         } else {
             let from = squad_centroid_cell(&mut app).as_vec2();
-            nests.sort_by_key(|c| (c.as_vec2().distance_squared(from) * 100.0) as i64);
+            // TOTAL order: the quantised distance alone ties often (two nests at near-equal range round to
+            // the same i64), and `sort_by_key` is *stable*, so tied nests would keep their input order —
+            // which `nest_cells` now canonicalises, but relying on that implicitly is how this broke before.
+            // Break ties on the cell itself so the tour is a pure function of the map, explicitly.
+            // SORT-OK: the `(c.y, c.x)` suffix makes this total over distinct cells, and `nest_cells` dedups.
+            nests.sort_by_key(|c| ((c.as_vec2().distance_squared(from) * 100.0) as i64, c.y, c.x));
             nests
         }
     };
@@ -289,6 +464,7 @@ fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
                 &mut field_flatness,
                 &mut belief,
                 start_max_health,
+                probe,
             );
             if ordered_unit_count(&mut app) > 0 {
                 ordered_ticks += stepped;
@@ -309,6 +485,7 @@ fn run_episode(cfg: &SimConfig, ticks: u32, sample_belief: bool) -> Rollout {
             &mut field_flatness,
             &mut belief,
             start_max_health,
+            probe,
         );
         hub_idx += 1;
     }
@@ -330,11 +507,19 @@ fn run(
     field_flatness: &mut f32,
     belief: &mut Vec<f32>,
     start_max_health: f32,
+    probe: &mut TickProbe<'_>,
 ) -> u32 {
     let mut done = 0;
     while done < ticks {
         let chunk = (ticks - done).min(LIVENESS_EVERY);
-        step(app, cfg, chunk);
+        // Stepped ONE tick at a time so `probe` can observe every tick. This is not a different schedule:
+        // `sim_harness::step(app, cfg, n)` is exactly `for _ in 0..n { app.update() }`, so the sim cannot
+        // tell the difference. It matters that this stays the real schedule — a probe that re-derives the
+        // synthetic player's hub tour reports a window boundary, not the true first divergence.
+        for _ in 0..chunk {
+            step(app, cfg, 1);
+            probe.observe(app);
+        }
         done += chunk;
         *violations += liveness_violations(app).len() as u32;
         // Field-sanity: track the worst degeneracy (highest peak, flattest smear) across the episode.
