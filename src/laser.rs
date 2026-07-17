@@ -89,6 +89,26 @@ impl Default for LaserRng {
     }
 }
 
+/// Which species a [`LaserTarget::id`] belongs to. The tag namespaces the per-spawn seeds, which are only
+/// unique *within* a species — a crab's `CrabSpawnSeq` value and a manca's `MancaSpawnSeq` value are both
+/// small integers and would otherwise collide across types. A collision would silently reintroduce the tie
+/// this id exists to break, so uniqueness has to hold across the whole `Hostile` set, not per-family.
+#[derive(Clone, Copy)]
+pub enum TargetKind {
+    Crab = 1,
+    Manca = 2,
+    Boss = 3,
+    Nest = 4,
+}
+
+/// Build a stable, cross-species-unique [`LaserTarget::id`] from a spawn seed. See [`LaserTarget::id`].
+pub fn target_id(kind: TargetKind, seed: u64) -> u64 {
+    let mut z = (kind as u64) << 60 ^ seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// A hostile's hit volume for the CPU bolt cast: a vertical capsule (a sphere when `half_height == 0`)
 /// whose core is centred on the entity's `Transform.translation`. Sized to the entity's actual collider
 /// (enemy capsule r=0.18/half-len 0.45; crab sphere r=0.30; nest dome r=0.40) so bolts connect the same
@@ -97,6 +117,22 @@ impl Default for LaserRng {
 pub struct LaserTarget {
     pub radius: f32,
     pub half_height: f32,
+    /// **Stable per-hostile identity — the bolt's tie-break.** `Hostile` is heterogeneous (crabs, nests,
+    /// mancae, the boss), so no existing key spans it: `CrabSeed` is crabs-only, and a raw `Entity` is the
+    /// recycled id being guarded against. Each spawn site derives this from whatever stable seed it already
+    /// has.
+    ///
+    /// It exists because the hit pick in [`update_lasers`] had a tie-break that was **mathematically a
+    /// no-op**. `segment_capsule_hit` returns `(entry, p0 + d1 * entry)` — the strike point is a pure
+    /// function of `entry` and of the bolt itself, which is common to every target in that loop. So ranking
+    /// by `(entry, point)` ranks by `(s, f(s))`, i.e. by `s` alone: two hostiles hit at an equal `entry`
+    /// compared EQUAL and the loop kept whichever the ECS yielded first. Its comment claimed the opposite
+    /// ("resolves by the strike point, not query order") — the strike point *is* the parametric `s`.
+    ///
+    /// Equal `entry` is not exotic: two crabs side by side, perpendicular to a bolt, are reached at the same
+    /// parametric distance. Measured (mutant #1, world `0x5C09191`, tick 969): `laser_damage` 14.46071
+    /// landed on a different crab run to run, with bolts, fields and gibs all bit-identical.
+    pub id: u64,
 }
 
 pub struct LaserPlugin;
@@ -388,27 +424,32 @@ fn update_lasers(
         // Enemy hit: sweep this frame's motion segment against every hostile hit-volume on the CPU and
         // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
         // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
-        let mut best: Option<(Entity, f32, Vec3)> = None;
+        let mut best: Option<(Entity, f32, Vec3, u64)> = None;
         for (te, tt, tv) in &targets {
             if let Some((s, point)) =
                 segment_capsule_hit(prev, now, tt.translation, tv.half_height, tv.radius)
             {
                 // Deterministic tie-break: equal parametric `s` on two overlapping hostiles resolves by
-                // the strike point, not query order (unstable across same-seed runs — see
+                // the target's STABLE ID, not query order (unstable across same-seed runs — see
                 // `util::nearest_planar`); a flip changes WHICH hostile the bolt damages.
+                //
+                // The id is load-bearing and the previous key was a no-op: this ranked by `(s, point)`, but
+                // `segment_capsule_hit` returns `point = p0 + d1 * entry` — a pure function of `entry` and
+                // of this bolt, which is the same for every candidate here. So `(s, point)` IS `(s, f(s))`,
+                // i.e. `s` alone; two hostiles reached at an equal `entry` compared EQUAL and the loop kept
+                // whichever the ECS yielded first. Two crabs side by side, perpendicular to the bolt, are
+                // reached at the same `entry` — measured, and it swapped 14.46 HP between them. See
+                // `LaserTarget::id`.
                 let better = match best {
                     None => true,
-                    Some((_, bs, bp)) => {
-                        (s.to_bits(), point.x.to_bits(), point.y.to_bits(), point.z.to_bits())
-                            < (bs.to_bits(), bp.x.to_bits(), bp.y.to_bits(), bp.z.to_bits())
-                    }
+                    Some((_, bs, _, bid)) => (s.to_bits(), tv.id) < (bs.to_bits(), bid),
                 };
                 if better {
-                    best = Some((te, s, point));
+                    best = Some((te, s, point, tv.id));
                 }
             }
         }
-        if let Some((hit_entity, _, hit_point)) = best {
+        if let Some((hit_entity, _, hit_point, _)) = best {
             if let Ok(mut hp) = healths.get_mut(hit_entity) {
                 hp.current -= sim.combat.laser_damage;
             }
@@ -497,6 +538,60 @@ fn update_lasers(
     }
     sort_deposits(&mut noise);
     deposits.0.extend(noise);
+}
+
+/// **The bolt oracle** — every live bolt's `seq`, position, velocity and shooter, folded in `seq` order.
+///
+/// The fourth blind spot, and the reason it exists: a bolt carries a `Transform` but **no `Health`**, so
+/// `snapshot_hash` (which queries `(&Transform, &Health)`) excludes it by construction; it is not a grid, so
+/// `field_hash` misses it; it is not a chunk, so `gib_hash` misses it. A bolt could therefore diverge —
+/// different scatter, different position, or simply existing in one run and not the other — and leave **no
+/// trace in any oracle** until it damaged a different creature, hundreds of ticks later and somewhere else
+/// entirely.
+///
+/// That is exactly what mutant #1 does: `laser_damage` (14.46071) lands on a different crab, while
+/// `update_lasers`' target pick is bit-tiebroken and so cannot itself flip given identical inputs. The bolt
+/// had to differ first, invisibly.
+///
+/// Folded in `seq` order (not sorted by value): `seq` is the stable total order `fire_laser` stamps, and the
+/// ORDER is part of the state — it is what `update_lasers` iterates. `deterministic_core` only.
+#[cfg(feature = "test-harness")]
+pub fn bolt_hash(app: &mut App) -> u64 {
+    let world = app.world_mut();
+    let mut rows: Vec<[u64; 8]> = world
+        .query::<(&Laser, &Transform)>()
+        .iter(world)
+        .map(|(l, t)| {
+            [
+                l.seq,
+                t.translation.x.to_bits() as u64,
+                t.translation.y.to_bits() as u64,
+                t.translation.z.to_bits() as u64,
+                l.velocity.x.to_bits() as u64,
+                l.velocity.y.to_bits() as u64,
+                l.velocity.z.to_bits() as u64,
+                l.life.to_bits() as u64,
+            ]
+        })
+        .collect();
+    // SORT-OK: `seq` is unique per bolt (a monotonic counter stamped in `fire_laser`'s canonical loop), so
+    // this is total by construction — and sorting by it reproduces the fire order `update_lasers` walks.
+    rows.sort_unstable();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |v: u64, h: &mut u64| {
+        for b in v.to_le_bytes() {
+            *h ^= b as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(rows.len() as u64, &mut hash);
+    for r in &rows {
+        for w in r {
+            feed(*w, &mut hash);
+        }
+    }
+    hash
 }
 
 /// Perturb an aim direction inside a cone of half-angle ≈ `spread` (radians): sample a uniform point

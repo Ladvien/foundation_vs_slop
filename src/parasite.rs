@@ -817,7 +817,11 @@ pub fn spawn_manca_on_patch(
         // bolts test against the manca headlessly + deterministically.
         (
             Mesh3d(collider.clone()),
-            crate::laser::LaserTarget { radius: MANCA_COLLIDER_R, half_height: 0.0 },
+            crate::laser::LaserTarget {
+                radius: MANCA_COLLIDER_R,
+                half_height: 0.0,
+                id: crate::laser::target_id(crate::laser::TargetKind::Manca, rand_seed as u64),
+            },
         ),
         // Render-only: smooth the manca's 60 Hz movement + surface rotation across the display refresh.
         (

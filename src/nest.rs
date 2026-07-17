@@ -126,7 +126,15 @@ pub fn spawn_nest(
             Health::new(NEST_HP),
             (
                 Mesh3d(dome),
-                crate::laser::LaserTarget { radius: NEST_RADIUS, half_height: 0.0 },
+                crate::laser::LaserTarget {
+                    radius: NEST_RADIUS,
+                    half_height: 0.0,
+                    // A nest is static and unique by its wall anchor, so the anchor's bits ARE its identity.
+                    id: crate::laser::target_id(
+                        crate::laser::TargetKind::Nest,
+                        (wall_point.x.to_bits() as u64) << 32 | wall_point.z.to_bits() as u64,
+                    ),
+                },
             ),
             MeshMaterial3d(material),
             Transform::from_translation(center)

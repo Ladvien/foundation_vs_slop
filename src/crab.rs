@@ -569,7 +569,11 @@ fn spawn_crab_on_patch(
             // capsule) so bolts test against the crab headlessly + deterministically.
             (
                 Mesh3d(collider.clone()),
-                crate::laser::LaserTarget { radius: CRAB_COLLIDER_R, half_height: 0.0 },
+                crate::laser::LaserTarget {
+                    radius: CRAB_COLLIDER_R,
+                    half_height: 0.0,
+                    id: crate::laser::target_id(crate::laser::TargetKind::Crab, rand_seed as u64),
+                },
             ),
             // Render-only: smooth the crab's 60 Hz movement + surface rotation across the display refresh
             // (see `lib::run`). Grouped with `Transform` so the spawn tuple stays within Bevy's 15-element

@@ -236,14 +236,14 @@ pub fn rollout_level(
 pub enum TickProbe<'a> {
     /// Production: observe nothing.
     Off,
-    /// Record `(tick, snapshot_hash, field_hash, gib_hash)` every `every` ticks.
+    /// Record `(tick, snapshot_hash, field_hash, gib_hash, bolt_hash)` every `every` ticks.
     ///
     /// BOTH hashes, deliberately. `snapshot_hash` folds only `(Transform, Health)` — the FIELDS are not in
     /// it. A field can therefore diverge for hundreds of ticks while every actor still agrees, and only
     /// surface once a quantised read (`belief_at(world_to_cell(pos))`, a threshold, a mode gate) finally
     /// flips something. Bisecting on `snapshot_hash` alone finds the first ACTOR divergence and calls it the
     /// origin, which is how you end up auditing the wrong system.
-    Trace { tick: u32, every: u32, out: &'a mut Vec<(u32, u64, u64, u64)> },
+    Trace { tick: u32, every: u32, out: &'a mut Vec<(u32, u64, u64, u64, u64)> },
     /// Capture the full `snapshot_rows` at exactly tick `at` — for diffing two runs at the tick they split.
     #[cfg(feature = "test-harness")]
     Rows { tick: u32, at: u32, out: &'a mut Vec<[u32; 5]> },
@@ -273,6 +273,7 @@ impl TickProbe<'_> {
                         crate::sim_harness::snapshot_hash(app),
                         crate::sim_harness::field_hash(app),
                         crate::sim_harness::gib_hash(app),
+                        crate::laser::bolt_hash(app),
                     ));
                 }
             }
@@ -318,7 +319,7 @@ pub fn trace_episode(
     dungeon_seed: u64,
     ticks: u32,
     every: u32,
-    out: &mut Vec<(u32, u64, u64, u64)>,
+    out: &mut Vec<(u32, u64, u64, u64, u64)>,
 ) {
     let cfg = deterministic_cfg(brains, config, None, None, dungeon_seed);
     let mut probe = TickProbe::Trace { tick: 0, every, out };

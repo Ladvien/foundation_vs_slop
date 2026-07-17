@@ -497,7 +497,14 @@ fn spawn_enemies(
                 // hit-volume (same dimensions) so laser bolts test against it headlessly + deterministically.
                 (
                     Mesh3d(capsule.clone()),
-                    crate::laser::LaserTarget { radius: CAPSULE_RADIUS, half_height: CAPSULE_LENGTH * 0.5 },
+                    crate::laser::LaserTarget {
+                        radius: CAPSULE_RADIUS,
+                        half_height: CAPSULE_LENGTH * 0.5,
+                        id: crate::laser::target_id(
+                            crate::laser::TargetKind::Boss,
+                            ((cell.x as u32).wrapping_mul(73_856_093) ^ (cell.y as u32).wrapping_mul(19_349_663)) as u64,
+                        ),
+                    },
                 ),
                 Transform::from_translation(pos),
                 // Explicit so `hide_enemies_in_fog` can toggle it; Hidden propagates to BOTH face children.
