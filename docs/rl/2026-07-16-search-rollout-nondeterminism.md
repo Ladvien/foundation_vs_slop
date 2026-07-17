@@ -527,21 +527,76 @@ before any fix, 2 after the first, 4 after the second — those are **sampling n
 reps**, not a trend. (Treating 3→2 as progress was itself the error this document warns about.) The first
 divergent tick stayed at 1582 across both fixes.
 
-### Next step
+### The gib blind spot — CLOSED by measurement, was not the cause
 
-The divergence at **1582** has a further cause, upstream of the crab positions in that tick. Re-run the row
-diff at 1582 *with* these fixes in place and identify what still moves. Note what is now known:
+`sim_harness::gib_hash` now exists (third oracle: every chunk's `GibKey`/position/weight/phase, **plus the
+`GibRing`'s order** folded unsorted, because the order *is* the state — it decides which chunk the cap
+evicts). Three-hash bisect:
 
-- It is an **actor-position** system (fields are downstream by 2 ticks).
-- Given identical actor AND field state at 1581, one tick's computation still differs — so it reads
-  iteration order directly, or reads state that neither hash covers.
-- **The remaining blind spot: gibs are invisible to BOTH hashes.** `snapshot_hash` excludes them (no
-  `Health`) and `field_hash` folds only grids. A gib divergence — spawn order, `GibRing` insertion, which
-  chunk `cap_gib_chunks` evicts at `max_gibs: 200` — leaves no trace in either until it moves a crab through
-  `assign_meat_targets`. `0xA11CE` kills **74** crabs vs `0x5C09191`'s **47**, so it is far likelier to reach
-  that 200 cap. `spawn_meat_chunks` already derives its params from the death origin (not the shared drain
-  counter), so the suspect is the ring/eviction order, not the chunk params. **A third hash over gib state
-  would make this measurable instead of inferable.**
+```text
+actors (snapshot_hash): 1596     fields (field_hash): 1597     GIBS (gib_hash): 1596
+```
+
+Gibs diverge **with** the actors, never before — a crab dies and its gib spawns in the same tick. The blind
+spot was real and is now instrumented, but it is **not** upstream. Do not re-chase it.
+
+### SIX order-dependence bugs fixed this session — and `0xA11CE` STILL diverges
+
+| # | Site | Defect |
+|---|---|---|
+| 1 | `laser::fire_laser` | shared aim-scatter draw in query order (**this was G0**) |
+| 2 | `laser::update_lasers` | bolt order: friendly-fire draw, `LastAttacker` last-writer-wins, `THREAT_GUN`, gore, despawn |
+| 3 | `squad.rs` ORCA neighbours | position-bit key with no tiebreak → coincident agents permute the LP |
+| 4 | `almond_water_effect` | drink contention key not total (clamped `drink`/`nudge_belief`) |
+| 5 | `enemy::smiley_defense` | **lethal** keep-the-first-on-a-tie cull pick |
+| 6 | `crab::nest_reproduce` | nests iterated in query order while drawing a **shared `CrabSpawnSeq`** (which sets a newborn's caste, capacity, anosmia) and gating a shared population cap |
+| 7 | `crab::crab_jump` landing | bit the first in-reach prey in query order (`break`) |
+
+Every one is real and measured. **None closed G0c.** `0xA11CE`: 3 distinct/8 before any of them, and 2
+distinct/10 after all of them — and those counts are **sampling noise on a ~20-40% event**, so even that
+apparent halving is not evidence. The first divergent tick has not moved from **1582**.
+
+**Read that as the finding it is:** this is not one bug with a long tail, it is a *systemic* pattern — the
+sim has many sites that iterate an ECS query while touching shared or tie-broken state, and fixing them
+one at a time is not converging. See "What this means" below.
+
+### The causal chain at tick 1582 (established, same-pair diff)
+
+40 vs 40 rows, exactly **two** crabs differ:
+
+| actor | delta |
+|---|---|
+| healthy crab (25/25) | `dz = ±0.000434` |
+| wounded crab (15.17/25) | `dpos = ±(0.161, 0.130)` — and it sits **3 mm** from the healthy crab in one run, **0.2** away in the other |
+
+The 0.2 is almost certainly a **pounce** (`crab_jump` owns a crab mid-arc and `crab_movement` skips it), and
+the healthy crab's 0.0004 is then the *downstream* effect: `crab_jump` runs before `crab_movement`, so the
+jumper's new position is already in the separation spatial hash that tick. **So the jump is the cause and the
+float wobble is the symptom — not the other way round.** What is still unexplained is why the pounce fires in
+one run and not the other, given actors *and* fields are bit-identical at 1581. `nearest_prey` →
+`util::nearest_planar` is properly canonical, and `decide` uses a per-entity RNG, so the trigger's inputs all
+look deterministic. **That contradiction is the next thread**: something the two hashes do not cover is
+already different at 1581 (`CrabJump.cooldown`/`phase`, `ActiveBehavior.mode`, `ThinkTimer` stagger,
+`CrabCarry.target`, `Caste.cooldown` — none are hashed).
+
+### Next step — hash the AI/component state, don't guess
+
+Every bisect so far has been blind to per-crab component state. Add a fourth oracle over it (`CrabSeed`-keyed
+rows of `ActiveBehavior.mode`, `CrabJump.phase`/`cooldown`, `ThinkTimer`, `CrabCarry.target`, `Caste`) and
+re-bisect. If that diverges before 1582, it names the system directly — and given the trigger inputs are all
+canonical, it is the most likely place the truth is hiding. The alternative reading is that two crabs holding
+*identical* `(Transform, Health)` are being told apart by something unhashed, and the hash simply cannot see
+the swap.
+
+### What this means (read before the next attempt)
+
+Seven fixes in, the honest conclusion is that **the sim's determinism rests on every one of ~dozens of
+query-iterating sites remembering to impose a stable total order**, and the codebase has no mechanism that
+*enforces* it — only comments, several of which confidently claimed a total order that was not one
+(`almond_water_effect`, `smiley_defense`, the ORCA sort). Three separate sites documented the exact trap they
+then fell into. That is a systemic design gap, not a run of bad luck, and the roadmap should treat it as one:
+a lint, a newtype that makes "sorted by a stable total key" un-bypassable, or a debug-mode assertion that a
+sort key has no duplicates would each catch the whole class at once — where seven hand-fixes did not.
 
 ## Related
 

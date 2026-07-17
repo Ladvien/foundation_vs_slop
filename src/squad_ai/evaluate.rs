@@ -236,17 +236,26 @@ pub fn rollout_level(
 pub enum TickProbe<'a> {
     /// Production: observe nothing.
     Off,
-    /// Record `(tick, snapshot_hash, field_hash)` every `every` ticks.
+    /// Record `(tick, snapshot_hash, field_hash, gib_hash)` every `every` ticks.
     ///
     /// BOTH hashes, deliberately. `snapshot_hash` folds only `(Transform, Health)` — the FIELDS are not in
     /// it. A field can therefore diverge for hundreds of ticks while every actor still agrees, and only
     /// surface once a quantised read (`belief_at(world_to_cell(pos))`, a threshold, a mode gate) finally
     /// flips something. Bisecting on `snapshot_hash` alone finds the first ACTOR divergence and calls it the
     /// origin, which is how you end up auditing the wrong system.
-    Trace { tick: u32, every: u32, out: &'a mut Vec<(u32, u64, u64)> },
+    Trace { tick: u32, every: u32, out: &'a mut Vec<(u32, u64, u64, u64)> },
     /// Capture the full `snapshot_rows` at exactly tick `at` — for diffing two runs at the tick they split.
     #[cfg(feature = "test-harness")]
     Rows { tick: u32, at: u32, out: &'a mut Vec<[u32; 5]> },
+    /// Capture `snapshot_rows` at EVERY tick.
+    ///
+    /// Necessary because the first divergent tick VARIES between runs (this is a race that can fire at
+    /// several points once crabs pile up), so "bisect with one sample set, then diff rows with a fresh one"
+    /// compares two unrelated pairs: the fresh runs may have split earlier, and their row diff then shows
+    /// accumulated drift rather than the originating change. One run, one record — find the split and read
+    /// its diff from the SAME pair.
+    #[cfg(feature = "test-harness")]
+    RowTrace { tick: u32, out: &'a mut Vec<Vec<[u32; 5]>> },
 }
 
 impl TickProbe<'_> {
@@ -260,6 +269,7 @@ impl TickProbe<'_> {
                         *tick,
                         crate::sim_harness::snapshot_hash(app),
                         crate::sim_harness::field_hash(app),
+                        crate::sim_harness::gib_hash(app),
                     ));
                 }
             }
@@ -269,6 +279,11 @@ impl TickProbe<'_> {
                 if *tick == *at {
                     **out = crate::sim_harness::snapshot_rows(app);
                 }
+            }
+            #[cfg(feature = "test-harness")]
+            TickProbe::RowTrace { tick, out } => {
+                *tick += 1;
+                out.push(crate::sim_harness::snapshot_rows(app));
             }
         }
     }
@@ -287,10 +302,18 @@ pub fn trace_episode(
     dungeon_seed: u64,
     ticks: u32,
     every: u32,
-    out: &mut Vec<(u32, u64, u64)>,
+    out: &mut Vec<(u32, u64, u64, u64)>,
 ) {
     let cfg = deterministic_cfg(brains, None, None, None, dungeon_seed);
     let mut probe = TickProbe::Trace { tick: 0, every, out };
+    run_episode_probed(&cfg, ticks, false, &mut probe);
+}
+
+/// Capture `snapshot_rows` at EVERY tick of the real episode (index 0 == tick 1). See [`TickProbe`].
+#[cfg(feature = "test-harness")]
+pub fn row_trace(brains: BrainSource, dungeon_seed: u64, ticks: u32, out: &mut Vec<Vec<[u32; 5]>>) {
+    let cfg = deterministic_cfg(brains, None, None, None, dungeon_seed);
+    let mut probe = TickProbe::RowTrace { tick: 0, out };
     run_episode_probed(&cfg, ticks, false, &mut probe);
 }
 

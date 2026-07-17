@@ -1362,10 +1362,21 @@ fn crab_jump(
                     // harmless hop; a lunge that connects should hurt.
                     motion.pos = clamp_to_patch(motion.pos, graph.patch(motion.patch));
                     let reach_sq = (UNIT_BODY_RADIUS + bc.contact_radius + 0.2).powi(2);
-                    for (ptf, mut hp) in &mut prey {
-                        if (ptf.translation.xz() - motion.pos.xz()).length_squared() <= reach_sq {
-                            hp.current -= sim.combat.crab_jump_damage;
-                            break;
+                    // WHICH unit the lunge bites must not depend on prey query order. This used to take
+                    // the first in-reach prey the ECS happened to yield and `break` — a
+                    // keep-the-first-on-a-tie pick straight into `Health`, and query order is not stable
+                    // across `App` instances. A crab landing between two units bit a different one run to
+                    // run. `nearest_planar` ranks by `(distance bits, position bits)`, so the victim is a
+                    // pure function of geometry — and biting the NEAREST is what the lunge meant anyway.
+                    if let Some((_, tpos, _)) =
+                        crate::util::nearest_planar(motion.pos, prey.iter().map(|(ptf, _)| ((), ptf.translation)))
+                        && (tpos.xz() - motion.pos.xz()).length_squared() <= reach_sq
+                    {
+                        for (ptf, mut hp) in &mut prey {
+                            if ptf.translation == tpos {
+                                hp.current -= sim.combat.crab_jump_damage;
+                                break;
+                            }
                         }
                     }
                     jump.phase = JumpPhase::Ready;
@@ -2342,7 +2353,7 @@ fn nest_reproduce(
     dungeon: Res<Dungeon>,
     stig: Res<crate::ai::field::Stig>,
     crab_assets: Option<Res<CrabAssets>>,
-    mut nests: Query<&mut crate::nest::Nest>,
+    mut nests: Query<(Entity, &mut crate::nest::Nest)>,
     crabs: Query<(), With<Crab>>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
@@ -2353,7 +2364,30 @@ fn nest_reproduce(
     };
     let dt = time.delta_secs();
     let mut total = crabs.iter().count();
-    for mut nest in &mut nests {
+
+    // CANONICAL ORDER — load-bearing, and the same class of bug as `laser::fire_laser`'s shared aim draw.
+    // This loop is greedy and stateful over TWO pieces of shared state, so the order the nests are visited
+    // in is part of the result:
+    //   * `seq` is a SHARED monotonic counter, and `CrabSpawnSeq`'s own doc spells out what rides on it —
+    //     "scout/assault role, think-stagger, jump cadence, carry capacity, climb/angle biases, RNG". When
+    //     two nests breed on the same tick, raw query order decided WHICH nest's newborn got seed N and
+    //     which got N+1, so a crab's caste and capacity flipped between two same-seed runs.
+    //   * `total` gates on `crab_count_max`, so at the cap the visit order decides WHICH nest gets the last
+    //     slot — a keep-the-first-on-a-tie pick.
+    // Nest query order is NOT stable across `App` instances (`sim_harness::nest_cells` was canonicalised
+    // for exactly this reason; the breeding loop itself never was). `nest.pos` is assigned at spawn and
+    // immortal, so its bits are a stable, total key — the `world_to_cell` quantisation is deliberately NOT
+    // used here: two nests can share a cell.
+    let mut order: Vec<(u32, u32, u32, Entity)> = nests
+        .iter()
+        .map(|(e, n)| (n.pos.x.to_bits(), n.pos.y.to_bits(), n.pos.z.to_bits(), e))
+        .collect();
+    order.sort_unstable();
+
+    for (.., nest_e) in order {
+        let Ok((_, mut nest)) = nests.get_mut(nest_e) else {
+            continue;
+        };
         // Fade the feeding surge, then re-arm the next spawn at the boosted rate (up to 10× faster).
         nest.spawn_boost = (nest.spawn_boost - sim.breeding.spawn_boost_decay * dt).max(0.0);
         nest.respawn_timer -= dt;

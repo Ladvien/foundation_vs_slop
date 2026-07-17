@@ -460,6 +460,76 @@ pub fn step(app: &mut App, _cfg: &SimConfig, ticks: u32) {
 /// non-reproducible physics debris (whose float transforms must never be hashed). Rows are keyed and
 /// sorted by the stable spawn-order entity index so the hash is order-independent, and floats are hashed
 /// by exact bit pattern. This is the replay oracle: same seed ⇒ same hash.
+/// **The third oracle: gib state.** Folds every meat chunk's stable [`GibKey`], position, weight and carry
+/// phase — **plus the [`GibRing`]'s ORDER**, expressed as a `GibKey` sequence.
+///
+/// This exists because gibs were a blind spot between the other two oracles, and blind spots are where
+/// determinism bugs live. `snapshot_hash` queries `(Transform, Health)` and gibs carry no `Health`, so they
+/// are excluded *by construction* (correctly — their physics transforms are not bit-reproducible).
+/// `field_hash` folds only the grids. So a gib divergence — a permuted `GoreQueue` drain, a different
+/// `GibRing` insertion order, a different `Carryable` evicted by `cap_gib_chunks` at `max_gibs` — left **no
+/// trace in either hash** until it steered a crab through `crab::assign_meat_targets`, by which point the
+/// bisect points at the crab and not at the cause.
+///
+/// Two things make this sound to hash even though gibs are `RigidBody::Dynamic` (TESTING.md invariant 2 says
+/// never hash physics transforms):
+///  * It is for `deterministic_core()` only, where physics is **off**, so a gib never moves from its
+///    deterministic spawn transform. Do not call it on a physics-on run — that is what invariant 2 forbids,
+///    and it would flake.
+///  * Ring order is folded **unsorted**, deliberately: the order IS the state, because it decides which
+///    chunk the cap evicts. Everything else is keyed and sorted by `GibKey`, which is derived at spawn from
+///    the death origin — not from an entity id.
+#[cfg(feature = "test-harness")]
+pub fn gib_hash(app: &mut App) -> u64 {
+    use crate::gore::{Carryable, GibKey, GibRing};
+    let world = app.world_mut();
+
+    let mut rows: Vec<[u64; 6]> = world
+        .query::<(&GibKey, &Transform, &Carryable)>()
+        .iter(world)
+        .map(|(k, t, c)| {
+            [
+                k.0,
+                t.translation.x.to_bits() as u64,
+                t.translation.y.to_bits() as u64,
+                t.translation.z.to_bits() as u64,
+                c.weight.to_bits() as u64,
+                match c.phase {
+                    crate::gore::CarryPhase::Resting => 0,
+                    crate::gore::CarryPhase::Crewing => 1,
+                    crate::gore::CarryPhase::Hauling => 2,
+                },
+            ]
+        })
+        .collect();
+    rows.sort_unstable();
+
+    // The ring, as GibKeys, in ring order. A missing key (a non-carryable decoration chunk) folds as 0.
+    let ring: Vec<u64> = {
+        let ids: Vec<bevy::prelude::Entity> = world.resource::<GibRing>().0.iter().copied().collect();
+        ids.iter().map(|e| world.get::<GibKey>(*e).map(|k| k.0).unwrap_or(0)).collect()
+    };
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let feed = |v: u64, h: &mut u64| {
+        for b in v.to_le_bytes() {
+            *h ^= b as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(rows.len() as u64, &mut hash);
+    for row in &rows {
+        for w in row {
+            feed(*w, &mut hash);
+        }
+    }
+    feed(ring.len() as u64, &mut hash);
+    for k in &ring {
+        feed(*k, &mut hash);
+    }
+    hash
+}
+
 /// The rows [`snapshot_hash`] folds: `[x, y, z, hp_current, hp_max]` bits per actor, in the same sorted
 /// order. Exposed so a determinism probe can diff two diverging runs at the tick they split and read WHAT
 /// moved — a hash says "different", a row diff says "10.0 HP came off the boss and landed on a max=60
