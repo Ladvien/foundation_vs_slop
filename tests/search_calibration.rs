@@ -20,6 +20,7 @@
 use foundation_vs_slop::sim_harness::serial_guard;
 use foundation_vs_slop::squad_ai::coevolve::{
     brains_of, feasible, squad_descriptor, swarm_descriptor, SquadGenome, SwarmGenome, Templates,
+    HELD_IN_SEEDS,
 };
 use foundation_vs_slop::squad_ai::evaluate::rollout;
 use foundation_vs_slop::squad_ai::surprise::{minimal_criterion, witnessed_fraction};
@@ -28,9 +29,11 @@ use foundation_vs_slop::squad_ai::surprise::{minimal_criterion, witnessed_fracti
 /// so the criterion's "nothing was at stake" clause rejects the shipped game itself.
 const EPISODE_TICKS: u32 = 7200;
 
-/// The search's held-in worlds. The gate checks all of them: resting the whole calibration on one seed
-/// means an unrelated dungeon-generation tweak can red the build with no other signal.
-const WORLDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xB0BA];
+/// The search's held-in worlds — sourced from `coevolve::HELD_IN_SEEDS`, never re-spelled here: a stale copy
+/// would validate the shipped brains on worlds the search no longer runs (exactly the 0xA11CE/0xBEEF trap the
+/// single-source constant exists to kill). The gate checks all of them: resting the whole calibration on one
+/// seed means an unrelated dungeon-generation tweak can red the build with no other signal.
+const WORLDS: [u64; 3] = HELD_IN_SEEDS;
 
 #[test]
 fn the_authored_brains_produce_a_real_encounter_on_every_world() {

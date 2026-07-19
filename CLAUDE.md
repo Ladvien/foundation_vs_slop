@@ -52,12 +52,7 @@ sleep 1.5                      # give it a frame or two to render + write
 ```
 
 - Output is `screenshot.png` in the project root (gitignored, overwritten each time).
-- Mechanism: `Screenshot::primary_window()` + `save_to_disk` (bevy 0.19), triggered by the sentinel
-  file so it can be driven headlessly from the shell.
-- **Caveat:** a *fully hidden/occluded* macOS window releases its Metal drawable, so a capture then
-  comes back **black** (~57 KB PNG). A real frame is >150 KB. If you get black, the game window is
-  hidden — retry once it's visible (even unfocused is fine; `WinitSettings` renders continuously).
-- Keystroke injection into the window is blocked this environment, so to verify input-driven
-  behavior (movement, selection, fog reveal) drive it with a **temporary** auto-input/self-test
-  system, screenshot, then revert the temp code.
+- Mechanism: `Screenshot::primary_window()` + `save_to_disk` (bevy 0.19), triggered by the sentinel file so it can be driven headlessly from the shell.
+- **Caveat:** a *fully hidden/occluded* macOS window releases its Metal drawable, so a capture then comes back **black** (~57 KB PNG). A real frame is >150 KB. If you get black, the game window is hidden — retry once it's visible (even unfocused is fine; `WinitSettings` renders continuously).
+- Keystroke injection into the window is blocked this environment, so to verify input-driven behavior (movement, selection, fog reveal) drive it with a **temporary** auto-input/self-test system, screenshot, then revert the temp code.
 - `devshot` is dev-only; strip the module + its plugin registration for release builds.

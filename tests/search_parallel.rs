@@ -108,6 +108,7 @@ fn parallel_search_reproduces_the_inline_archives_bit_for_bit() {
         dungeon_seeds: SEEDS.to_vec(),
         resolution: 8,
         jobs: 1,
+        patience: 0, // no early-stop: exercise the full fixed-length run
     };
 
     let inline = search(&t, &prior, &base, |_, _| {}).expect("inline search");
@@ -159,6 +160,7 @@ fn batch_emitter_scales_past_opponents_deterministically() {
         dungeon_seeds: SEEDS.to_vec(),
         resolution: 8,
         jobs: 1,
+        patience: 0, // no early-stop: exercise the full fixed-length run
     };
 
     let inline = search(&t, &prior, &base, |_, _| {}).expect("inline search");
@@ -193,5 +195,6 @@ fn clone_cfg(cfg: &SearchConfig) -> SearchConfig {
         dungeon_seeds: cfg.dungeon_seeds.clone(),
         resolution: cfg.resolution,
         jobs: cfg.jobs,
+        patience: cfg.patience,
     }
 }

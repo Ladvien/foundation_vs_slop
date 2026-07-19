@@ -36,6 +36,9 @@ pub struct BehaviorSearchConfig {
     pub resolution: usize,
     pub dungeon_seeds: Vec<u64>,
     pub episode_ticks: u32,
+    /// Convergence early-stop patience (generations without QD-score gain); `0` disables. See
+    /// [`crate::squad_ai::qd::PlateauStop`].
+    pub patience: u32,
 }
 
 impl Default for BehaviorSearchConfig {
@@ -47,7 +50,10 @@ impl Default for BehaviorSearchConfig {
             sigma: 0.3,
             resolution: 8,
             dungeon_seeds: crate::squad_ai::coevolve::HELD_IN_SEEDS.to_vec(),
-            episode_ticks: 1800,
+            // Measured minimal-criterion floor (see `audio_search::AudioSearchConfig::default` and
+            // `tests/search_calibration.rs`); below it feasible episodes are rejected and the archive stays empty.
+            episode_ticks: 7200,
+            patience: 0,
         }
     }
 }
@@ -95,6 +101,7 @@ pub fn search(
         &authored_g,
         cfg.generations,
         cfg.batch,
+        cfg.patience,
         "the shipped behaviour config failed the minimal criterion on the held-in seeds",
         |parent, rng| mutate(parent, &authored_g, cfg.sigma, rng),
         |child| behavior_genome::is_feasible(child, &base).is_ok(),

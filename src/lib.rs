@@ -32,6 +32,10 @@ pub mod config;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
+/// Dev-only performance overlay (FPS / frame-ms / entity-count / CPU / mem, toggled with F4) plus the
+/// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
+#[cfg(debug_assertions)]
+pub mod perf_hud;
 pub mod dialogue;
 pub mod dungeon;
 /// Evolved-elite runtime overlay: `FVS_*_ELITE` env vars install a search elite (behaviour / world / audio
@@ -228,11 +232,26 @@ pub fn run() {
     // `FixedUpdate` registrations (ai, squad, enemy, crab, nest, laser).
     app.insert_resource(Time::<bevy::time::Fixed>::from_hz(60.0));
 
+    // Spiral-of-death guard: cap how far the virtual clock may advance in one rendered frame, so a single
+    // slow frame can't ask `FixedUpdate` to run a runaway burst of sub-steps — each of which re-runs the
+    // full field simulation (stigmergy / mold / light / almond-water). Bevy's default `max_delta` is 250 ms
+    // (~15 sub-steps at 60 Hz); 100 ms (~6) keeps one hitch from cascading. Under sustained overload the sim
+    // gently loses real-time sync instead of spiralling. Windowed-only: the headless harness drives time via
+    // `TimeUpdateStrategy::ManualDuration`, so this never touches the deterministic goldens.
+    app.insert_resource(Time::<bevy::time::Virtual>::from_max_delta(
+        std::time::Duration::from_millis(100),
+    ));
+
     // devshot is a dev-only in-process screenshot tool — strip it (and its `mod`) from release builds
     // (see CLAUDE.md). Gating both the registration and `mod devshot;` on `debug_assertions` keeps the
     // release binary free of the module and its per-frame `screenshot.request` sentinel polling.
     #[cfg(debug_assertions)]
     app.add_plugins(devshot::DevShotPlugin);
+
+    // Dev-only perf overlay (F4) + diagnostics. Debug-only, never in the headless harness, so it stays
+    // out of the deterministic core and the shipped binary (see `perf_hud`).
+    #[cfg(debug_assertions)]
+    app.add_plugins(perf_hud::PerfHudPlugin);
 
     // The watcher's "is the player looking at it?" gaze — WINDOWED-ONLY. It reads the live camera (which
     // eases over wall-clock time), so registering it only here keeps it out of the headless deterministic

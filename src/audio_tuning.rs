@@ -68,34 +68,29 @@ pub struct AudioTuning {
 
 impl Default for AudioTuning {
     fn default() -> Self {
-        Self {
+        AudioTuning {
             stimulus: AcousticStimulusTuning {
-                // The squad's din carries: a firefight seeps down a corridor (wide radius, gentle
-                // diffusion, moderate fade) so a swarm a room away can sense — and react to — the fight.
-                noise_squad: ChannelTuning { evaporate: 0.8, diffuse: 0.18, deposit_radius: 5.0 },
-                // The swarm's din is a little tighter and sharper than the squad's.
-                noise_swarm: ChannelTuning { evaporate: 0.7, diffuse: 0.15, deposit_radius: 4.0 },
-                // Sustained gunfire is the loudest ongoing source; a lone death is a sharp one-off.
-                fire_loudness: 0.6,
-                impact_wall_loudness: 0.3,
-                impact_flesh_loudness: 0.5,
-                enemy_death_loudness: 0.7,
-                unit_death_loudness: 0.9,
+                noise_squad: ChannelTuning {
+                    evaporate: 2.492324,
+                    diffuse: 0.20195086,
+                    deposit_radius: 8.0,
+                },
+                noise_swarm: ChannelTuning {
+                    evaporate: 0.09777509,
+                    diffuse: 0.15594381,
+                    deposit_radius: 7.540029,
+                },
+                fire_loudness: 0.0,
+                impact_wall_loudness: 0.2898777,
+                impact_flesh_loudness: 0.15307344,
+                enemy_death_loudness: 0.9537805,
+                unit_death_loudness: 0.7733592,
             },
             perception: AcousticPerceptionTuning {
-                // Sound-as-perception is ON (FIX 2). The whole read+write din pipeline (NOISE_SQUAD/
-                // NOISE_SWARM channels, the additive `DriveRule::TrackMaxPlusDin` FEAR rule, and the rank-2
-                // `Mode::Investigate` behaviour) was fully wired but shipped with every gain at 0 — written
-                // each frame, reacted to by nobody. These conservative positive defaults turn a firefight into
-                // a battlefield-shaping stimulus: `crab_draw_to_din` dominates `crab_fear_of_din`, so the
-                // swarm CONVERGES on gunfire — the design's own in-code question ("run from the guns or toward
-                // them?") answered *toward* — while `unit_fear_of_din` lets the swarm's death-roar unnerve the
-                // squad. Additive, so they give the offline audio search (`squad_ai::audio_genome` bounds) a
-                // real gradient to refine; these are the shipped starting point, not the search's last word.
-                crab_fear_of_din: 0.15,
-                unit_fear_of_din: 0.15,
-                crab_draw_to_din: 0.3,
-                investigate_threshold: 0.5,
+                crab_fear_of_din: 0.35405704,
+                unit_fear_of_din: 0.3944512,
+                crab_draw_to_din: 0.20777673,
+                investigate_threshold: 0.22598898,
             },
         }
     }

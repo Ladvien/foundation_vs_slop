@@ -510,6 +510,10 @@ pub(crate) fn apply_dynamic_lights(
         With<crate::squad::Unit>,
     >,
 ) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`). Inspection
+    // shows this recompose is a cheap `copy_from_slice` + max-scan plus a small (≈1-cone) scatter — deliberately
+    // left serial; this span lets that be confirmed rather than assumed.
+    let _span = info_span!("light_recompose").entered();
     let c = &config.lighting;
     let mut cones: Vec<FlashlightCone> = researchers
         .iter()
@@ -796,7 +800,14 @@ fn flicker_lights(
         } else {
             hum
         };
-        light.intensity = fl.base_intensity * mult;
+        // Only write — and thereby mark the light `Changed`, forcing a GPU light-buffer re-extract — when
+        // the value actually moves. A failing tube clamped near-off (the `0.04` branch) and any fixture with
+        // `flicker_hum_depth == 0` hold a constant value across frames, so this skips their per-frame churn
+        // with zero visual change.
+        let next = fl.base_intensity * mult;
+        if light.intensity != next {
+            light.intensity = next;
+        }
     }
 }
 

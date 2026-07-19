@@ -513,6 +513,10 @@ pub struct SearchConfig {
     /// ceiling is now `batch × OPPONENTS` (per population per generation) — a whole batch is scored at once —
     /// so `jobs` scales to the box; raise `batch` for more width.
     pub jobs: usize,
+    /// Convergence early-stop: stop when the combined QD-score of the three archives has not improved for
+    /// this many consecutive generations (Mouret & Clune 2015 archive-property termination). `0` disables it
+    /// (run every generation). Bit-reproducible — see [`super::qd::PlateauStop`].
+    pub patience: u32,
 }
 
 impl Default for SearchConfig {
@@ -525,6 +529,7 @@ impl Default for SearchConfig {
             dungeon_seeds: HELD_IN_SEEDS.to_vec(),
             resolution: 8,
             jobs: 1,
+            patience: 0,
         }
     }
 }
@@ -680,6 +685,8 @@ pub fn search(
     // the OTHER two archives (three-way co-evolution in the spirit of POET, arXiv:1901.01753, and multi-
     // agent autocurricula, Baker et al. arXiv:1909.07528): a squad child fights (swarm, world) pairs, a
     // swarm child fights (squad, world), and a world child is judged by the (squad, swarm) it induces.
+    // Convergence early-stop on the three archives' combined QD-score (no-op when `cfg.patience == 0`).
+    let mut plateau = super::qd::PlateauStop::new(cfg.patience);
     for generation in 0..cfg.generations {
         // Each population's whole generation is proposed and scored as ONE batch (see `batch_population`):
         // `cfg.batch` children against a frozen archive snapshot, every child's `OPPONENTS` triples flattened
@@ -778,6 +785,12 @@ pub fn search(
         )?;
 
         report(generation, &result);
+        let qd_total = result.squad.archive.qd_score()
+            + result.swarm.archive.qd_score()
+            + result.world.archive.qd_score();
+        if plateau.should_stop(qd_total) {
+            break;
+        }
     }
     Ok(result)
 }

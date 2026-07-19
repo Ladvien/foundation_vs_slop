@@ -311,7 +311,9 @@ mod tests {
             ron::to_string(&almond).expect("ser almond"),
             ron::to_string(&lighting).expect("ser lighting"),
         );
-        let path = std::env::temp_dir().join("fvs_apply_dim_world_roundtrip.ron");
+        // pid-unique so two concurrent runs of this test binary (a CI matrix or an overlapping local `cargo
+        // test`) don't race on one shared /tmp path — one reading a half-written or already-removed file.
+        let path = std::env::temp_dir().join(format!("fvs_apply_dim_world_roundtrip_{}.ron", std::process::id()));
         std::fs::write(&path, &doc).expect("write the test archive");
         let spec = path.to_str().expect("utf-8 temp path").to_string();
 
@@ -342,7 +344,8 @@ mod tests {
             ron::to_string(&gc.ai_tuning).expect("ser ai"),
             ron::to_string(&gc.sim).expect("ser sim"),
         );
-        let path = std::env::temp_dir().join("fvs_apply_dim_world_stale.ron");
+        // pid-unique — see the roundtrip test above.
+        let path = std::env::temp_dir().join(format!("fvs_apply_dim_world_stale_{}.ron", std::process::id()));
         std::fs::write(&path, &doc).expect("write the stale archive");
         let spec = path.to_str().expect("utf-8 temp path").to_string();
 

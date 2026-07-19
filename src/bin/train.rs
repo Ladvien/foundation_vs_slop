@@ -183,6 +183,11 @@ struct SearchArgs {
     /// Generations (POET: outer iterations).
     #[arg(long, default_value_t = 30, value_parser = parse_pos_u32)]
     generations: u32,
+    /// Convergence early-stop: quit a search once its QD-score has not improved for this many consecutive
+    /// generations (Mouret & Clune 2015 archive-property termination). `0` disables it (run every
+    /// generation). Cuts wall-clock on phases that converge early; the result stays bit-reproducible.
+    #[arg(long, default_value_t = 8)]
+    patience: u32,
     /// Children proposed per generation (per side, for co-evolution).
     #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
     batch: u32,
@@ -196,7 +201,7 @@ struct SearchArgs {
     #[arg(long, default_value_t = 0xC0FFEE, value_parser = parse_seed)]
     seed: u64,
     /// Held-in dungeon seeds the objective is evaluated on (comma-separated; decimal or 0x-hex). Needs >= 2.
-    /// Default: 0x5C09191,0x1CE5,0xB0BA.
+    /// Default: the held-in set (`coevolve::HELD_IN_SEEDS`).
     #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
     seeds: Vec<u64>,
     /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); capped useful at OPPONENTS (3).
@@ -244,6 +249,10 @@ struct AllArgs {
     /// Generations per phase.
     #[arg(long, default_value_t = 30, value_parser = parse_pos_u32)]
     generations: u32,
+    /// Convergence early-stop per phase: quit once the QD-score has not improved for this many consecutive
+    /// generations (`0` disables). Applied to every phase; the big automatic wall-clock win for `train all`.
+    #[arg(long, default_value_t = 8)]
+    patience: u32,
     /// Children proposed per generation (per side, for co-evolution).
     #[arg(long, default_value_t = 16, value_parser = parse_pos_u32)]
     batch: u32,
@@ -498,6 +507,7 @@ fn run_all(a: AllArgs) -> Result<(), String> {
     // A per-phase SearchArgs from the shared flags.
     let phase = |jobs: usize, islands: usize, cma: bool, apply: bool| SearchArgs {
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         ticks: a.ticks,
         res: a.res,
@@ -553,11 +563,25 @@ fn run_all(a: AllArgs) -> Result<(), String> {
     // ride alongside as archives, applied at launch. Print both together so nothing trained is left on the
     // floor for want of an env var.
     println!("\n✓ train all: full pipeline complete");
-    println!("\nShipped in config.ron: audio + behavior + world (baked).");
+    if apply {
+        println!("\nShipped in config.ron: audio + behavior + world (baked).");
+    } else {
+        // --no-apply bakes NOTHING (see run_all's mode note above): every phase searched against the same
+        // base and wrote its archive for hand-baking. Printing "baked" here — and pointing at a
+        // config.ron/BAKES.md diff that shows nothing changed — would tell an operator reading only the log
+        // tail that the trained values ship. They do not, and the archives would be silently discarded.
+        println!("\nNothing baked (--no-apply): audio + behavior + world were searched but NOT written to");
+        println!("config.ron. Each phase wrote its archive for you to review and bake by hand with");
+        println!("`train apply <dim> <archive>`.");
+    }
     println!("Ship alongside, via env (structural / opaque — not config-bakeable):");
     println!("  FVS_LEVELS_ELITE={LEVELS_ARCHIVE_PATH}   # evolved dungeon architecture + furniture + mushrooms");
     println!("  FVS_POLICY_ELITE={RL_ARCHIVE_PATH}   # the neuroevolved squad policy");
-    println!("Review first: read the archives, and `git diff {CONFIG_PATH}` + {BAKE_LEDGER} for the baked dims.");
+    if apply {
+        println!("Review first: read the archives, and `git diff {CONFIG_PATH}` + {BAKE_LEDGER} for the baked dims.");
+    } else {
+        println!("Review first: read each archive before deciding whether to bake it.");
+    }
     Ok(())
 }
 
@@ -773,6 +797,9 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
         if a.cma {
             cmd.arg("--cma");
         }
+        // Die with the driver: without this, a Ctrl+C/kill on the parent orphaned these island processes
+        // (they kept searching at ~75% CPU each and pegged the box). See `parallel::set_pdeathsig`.
+        foundation_vs_slop::squad_ai::parallel::set_pdeathsig(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn island {i}: {e}"))?;
         let stdout = child.stdout.take().ok_or("island child stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("island child stderr unavailable")?;
@@ -1164,6 +1191,7 @@ fn coevo_config(a: &SearchArgs) -> SearchConfig {
     SearchConfig {
         seed: a.seed,
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         episode_ticks: a.ticks,
         dungeon_seeds: a.seeds.clone(),
@@ -1281,6 +1309,7 @@ fn levels_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, Stri
     let cfg = LevelSearchConfig {
         seed: a.seed,
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         sigma: 0.3,
         resolution: a.res,
@@ -1318,6 +1347,7 @@ fn audio_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, Strin
     let cfg = AudioSearchConfig {
         seed: a.seed,
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         sigma: 0.3,
         resolution: a.res,
@@ -1356,6 +1386,7 @@ fn behavior_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, St
     let cfg = BehaviorSearchConfig {
         seed: a.seed,
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         sigma: 0.3,
         resolution: a.res,
@@ -1394,6 +1425,7 @@ fn rl_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> 
     let cfg = RlSearchConfig {
         seed: a.seed,
         generations: a.generations,
+        patience: a.patience,
         batch: a.batch,
         sigma: 0.3,
         resolution: a.res,
@@ -1713,7 +1745,12 @@ fn apply_archive(
     } else {
         println!("      review:  git diff        verify:  cargo test --features test-harness");
     }
-    println!("      revert:  git checkout -- {}", touched.join(" "));
+    // `git checkout -- …` restores tracked files only; BAKE_LEDGER is an append-only ledger, untracked on
+    // its first write. Passing an untracked path makes git reject the WHOLE pathspec and revert nothing, so
+    // list it apart from the checkout rather than let it abort the recipe an operator copies verbatim.
+    let reverts: Vec<&str> = touched.iter().map(String::as_str).filter(|f| *f != BAKE_LEDGER).collect();
+    println!("      revert:  git checkout -- {}", reverts.join(" "));
+    println!("               then drop this bake's entry from {BAKE_LEDGER} (delete the file if it was the first bake).");
     Ok(())
 }
 

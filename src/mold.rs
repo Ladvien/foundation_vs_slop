@@ -157,8 +157,16 @@ pub struct MoldField {
     cells: Vec<(usize, IVec2)>,
     /// Per-tick normalised illuminance, refilled each tick before the substeps (reused to avoid realloc).
     light01: Vec<f32>,
-    /// Double-buffer scratch for the diffusion pass (reused).
-    scratch: Vec<f32>,
+    /// Reused floor-indexed output buffer for the *parallel* reaction-diffusion map: one slot per `cells`
+    /// entry, same order. Each substep writes disjoint slots here (no cross-cell reduction), then a serial
+    /// scatter copies it back into `v`. Lazily sized to `cells.len()` after bake; never allocates per tick.
+    react_out: Vec<f32>,
+    /// Precomputed floor-neighbour grid indices per `cells` entry, in the fixed **N, E, S, W** Laplacian
+    /// order — `-1` where that neighbour is off-grid or wall (no-flux). The floor mask is static after bake,
+    /// so hoisting the per-neighbour bounds + `floor[]` test out of the per-tick stencil is **exact** (same
+    /// terms, same fixed order → bit-identical `v`); it just removes the branches and lets the hot loop over
+    /// the millions of training-rollout ticks vectorise (pbrt SIMD; Turk 1991 grid stencil). Built at bake.
+    nbr: Vec<[i32; 4]>,
 }
 
 impl MoldField {
@@ -172,7 +180,8 @@ impl MoldField {
             floor: vec![false; n],
             cells: Vec::new(),
             light01: vec![0.0; n],
-            scratch: vec![0.0; n],
+            react_out: Vec::new(), // lazily sized to cells.len() on first diffuse_react after bake
+            nbr: Vec::new(),       // filled at bake once `floor` + `cells` exist
         }
     }
 
@@ -194,29 +203,66 @@ impl MoldField {
     /// from the per-cell `light01` filled by the caller. Pure over the field's own grids (row-major, fixed
     /// order) → bit-reproducible. Extracted from [`mold_update`] so it is unit-testable without the sim.
     fn diffuse_react(&mut self, c: &MoldConfig) {
-        let (w, h) = (self.width, self.height);
-        for _ in 0..c.substeps {
-            for &(idx, cell) in &self.cells {
-                let v0 = self.v[idx];
-                // 4-neighbour Laplacian, fixed N,E,S,W order; a non-floor (wall/off-grid) neighbour is
-                // no-flux (contributes 0), so mold does not leak through walls.
-                let mut lap = 0.0f32;
-                for (dx, dy) in [(0, 1), (1, 0), (0, -1), (-1, 0)] {
-                    let nx = cell.x + dx;
-                    let ny = cell.y + dy;
-                    if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h {
-                        let ni = ny as usize * w + nx as usize;
-                        if self.floor[ni] {
-                            lap += self.v[ni] - v0;
+        // Each substep is a pure stencil: every floor cell's next value is a function of the CURRENT `v`
+        // with the fixed N,E,S,W Laplacian order preserved inside the cell, so the result is identical for
+        // any thread count (no cross-cell reduction). Parallelised across `cells` — the same data-parallel
+        // property Dourvas et al. (2019) exploit to accelerate a Physarum reaction-diffusion CA. The harness
+        // pins rayon to one thread and `fold_fingerprint` hashes `v`, so any divergence fails loudly.
+        use rayon::prelude::*;
+        let Self { v, k, floor, cells, light01, react_out, nbr, width, height, .. } = self;
+        if react_out.len() != cells.len() {
+            react_out.resize(cells.len(), 0.0); // one-time after bake fills `cells`; a no-op thereafter
+        }
+        // Branch-free neighbour table: each cell's 4 floor-neighbour grid indices in the fixed N,E,S,W order
+        // (`-1` = wall/off-grid = no-flux), precomputed from the STATIC floor mask. Recomputed only when
+        // `cells` changes (bake, or a unit test that sets `cells` directly); a cheap length check every real
+        // tick. It lets the per-substep stencil below skip the per-neighbour bounds + `floor[]` test — exact
+        // (same terms, same order → bit-identical `v`), just branch-free and easier to vectorise.
+        if nbr.len() != cells.len() {
+            let (w, h) = (*width, *height);
+            *nbr = cells
+                .iter()
+                .map(|&(_, c)| {
+                    let mut n = [-1i32; 4];
+                    for (slot, (dx, dy)) in [(0, 1), (1, 0), (0, -1), (-1, 0)].into_iter().enumerate() {
+                        let (nx, ny) = (c.x + dx, c.y + dy);
+                        if nx >= 0
+                            && ny >= 0
+                            && (nx as usize) < w
+                            && (ny as usize) < h
+                            && floor[ny as usize * w + nx as usize]
+                        {
+                            n[slot] = (ny as usize * w + nx as usize) as i32;
                         }
                     }
-                }
-                let growth = c.growth * v0 * (self.k[idx] - v0);
-                let recoil = c.light_recoil * self.light01[idx] * v0;
-                self.scratch[idx] = (v0 + growth + c.diffuse * lap - recoil).clamp(0.0, 1.0);
-            }
-            for &(idx, _) in &self.cells {
-                self.v[idx] = self.scratch[idx];
+                    n
+                })
+                .collect();
+        }
+        for _ in 0..c.substeps {
+            react_out
+                .par_iter_mut()
+                .zip(cells.par_iter())
+                .zip(nbr.par_iter())
+                .for_each(|((out, &(idx, _cell)), n)| {
+                    let v0 = v[idx];
+                    // 4-neighbour Laplacian in the fixed N,E,S,W order; a `-1` slot is a wall/off-grid
+                    // neighbour = no-flux (contributes 0), so mold does not leak through walls. The neighbours
+                    // are precomputed at bake from the static floor mask, so this is the same sum in the same
+                    // order as the branchy version — bit-identical, just branch-free (see `MoldField::nbr`).
+                    let mut lap = 0.0f32;
+                    for &ni in n {
+                        if ni >= 0 {
+                            lap += v[ni as usize] - v0;
+                        }
+                    }
+                    let growth = c.growth * v0 * (k[idx] - v0);
+                    let recoil = c.light_recoil * light01[idx] * v0;
+                    *out = (v0 + growth + c.diffuse * lap - recoil).clamp(0.0, 1.0);
+                });
+            // Serial scatter: floor-indexed results → grid-indexed `v` (the double-buffer swap).
+            for (&(idx, _), &nv) in cells.iter().zip(react_out.iter()) {
+                v[idx] = nv;
             }
         }
     }
@@ -267,6 +313,8 @@ fn bake_mold(
         }
     }
     field.cells = cells;
+    // `nbr` (the branch-free neighbour table) is computed lazily on the first `diffuse_react` after `cells`
+    // is set — one compute site, so a test that sets `cells` directly and the real bake can never diverge.
     Ok(())
 }
 
@@ -279,6 +327,8 @@ fn mold_update(
     config: Res<GameConfig>,
     light: Res<LightField>,
 ) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`).
+    let _span = info_span!("mold_update").entered();
     // Fill the per-cell normalised illuminance once (reused across substeps). Split the borrow: read
     // `cells` while writing `light01`, then hand the list back before the reaction-diffusion.
     let light_ref = config.mold.light_ref;

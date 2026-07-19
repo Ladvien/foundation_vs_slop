@@ -44,6 +44,39 @@ use std::sync::Mutex;
 use super::coevolve::{score_triple_compact, Templates, TripleJob, TripleScore};
 use super::surprise::ModePrior;
 
+/// Ask the kernel to `SIGKILL` this child the instant the driver (its parent) dies — for **any** reason
+/// (SIGINT/SIGTERM/SIGKILL, panic, crash), including the signals that skip Rust destructors. This is what
+/// makes "kill the `train` driver → the whole island/worker tree dies" reliable. Without it a Ctrl+C/kill
+/// orphaned the 24 island workers, which kept running at ~75% CPU and pegged the box.
+///
+/// Applied to BOTH child-spawn sites (co-evolution workers here, island children in `train.rs`). Linux-only
+/// (`PR_SET_PDEATHSIG`, which survives the non-setuid `execve` of the re-invoked binary); a no-op elsewhere
+/// and in the shipped game (which never spawns processes, and where `libc` isn't linked).
+#[cfg(all(target_os = "linux", feature = "test-harness"))]
+pub fn set_pdeathsig(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `pre_exec` runs in the forked child between `fork` and `execve`; we call only async-signal-safe
+    // libc functions (`prctl`/`getppid`/`_exit`) and touch no allocator or lock.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Race guard: if the driver already died before the `prctl` above ran, we were reparented to
+            // init (pid 1) and will never receive the signal — exit now rather than orphan.
+            if libc::getppid() == 1 {
+                libc::_exit(0);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// No-op fallback: non-Linux, or the shipped game (no `test-harness`, no `libc`). `WorkerPool` is only ever
+/// built by the offline search under `test-harness`, so the game compiles this call away entirely.
+#[cfg(not(all(target_os = "linux", feature = "test-harness")))]
+pub fn set_pdeathsig(_cmd: &mut Command) {}
+
 /// A pool of worker processes. Held by [`super::coevolve::Evaluator::Pool`] for the run's lifetime; on drop
 /// every worker is killed and reaped.
 pub(crate) struct WorkerPool {
@@ -72,15 +105,16 @@ impl WorkerPool {
         };
         let mut workers = Vec::with_capacity(n);
         for i in 0..n {
-            let mut child = Command::new(&exe)
-                .arg("worker")
+            let mut cmd = Command::new(&exe);
+            cmd.arg("worker")
                 // Silence the sim's tracing so nothing but framed results reaches the worker's stdout.
                 .env("RUST_LOG", "off")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .map_err(|e| format!("spawn worker {i}: {e}"))?;
+                .stderr(Stdio::inherit());
+            // Die with the driver — see `set_pdeathsig`. Otherwise a signal orphans these workers.
+            set_pdeathsig(&mut cmd);
+            let mut child = cmd.spawn().map_err(|e| format!("spawn worker {i}: {e}"))?;
             let stdin = BufWriter::new(
                 child.stdin.take().ok_or_else(|| format!("worker {i} has no stdin"))?,
             );

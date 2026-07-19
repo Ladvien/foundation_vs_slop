@@ -144,6 +144,11 @@ pub struct Stig {
     defs: [ChannelDef; CHANNEL_COUNT],
     /// Reused double-buffer for the diffusion pass (avoids per-frame allocation).
     scratch: Vec<f32>,
+    /// Reused contiguous, floor-indexed output buffer for the *parallel* diffusion map: one slot per
+    /// `floor_cells` entry, same order. The parallel pass writes disjoint slots here (no cross-cell
+    /// reduction), then a serial scatter copies it into the grid-indexed `scratch` double-buffer. A field so
+    /// the per-tick parallel diffuse never allocates.
+    diffuse_out: Vec<f32>,
     /// The floor cells (the only cells that ever carry value), precomputed once so the per-tick
     /// evaporation/diffusion/hotspot passes skip the rock cells. See [`floor_cells_of`].
     floor_cells: Vec<FloorCell>,
@@ -208,13 +213,16 @@ impl Stig {
     /// Allocate empty grids sized to the dungeon. `defs` come from tuning.
     pub fn new(dungeon: &Dungeon, defs: [ChannelDef; CHANNEL_COUNT]) -> Self {
         let cells = dungeon.width * dungeon.height;
+        let floor_cells = floor_cells_of(dungeon);
+        let diffuse_out = vec![0.0; floor_cells.len()];
         Self {
             width: dungeon.width,
             height: dungeon.height,
             channels: std::array::from_fn(|_| vec![0.0; cells]),
             defs,
             scratch: vec![0.0; cells],
-            floor_cells: floor_cells_of(dungeon),
+            diffuse_out,
+            floor_cells,
         }
     }
 
@@ -271,39 +279,62 @@ impl Stig {
         // a rock cell (0·retain) and diffusion's old `scratch[rock] = grid[rock]` (0) were both no-ops, and
         // the double-buffer's rock cells stay 0 across the swap. The neighbour sum keeps its fixed
         // E/W/S/N order — float add is non-associative, so the order is load-bearing.
+        //
+        // The diffusion is a pure stencil — each cell's new value is a function of the PREVIOUS grid only,
+        // with the E/W/S/N order preserved inside each cell — so the result is identical for any thread
+        // count (no cross-cell float reduction). We parallelise it across `floor_cells`; Dourvas, Sirakoulis
+        // & Adamatzky (2019, IEEE Access) parallelise the same Physarum reaction-diffusion CA on exactly this
+        // basis. The headless harness pins the rayon pool to one thread (`sim_harness`) and `fold_fingerprint`
+        // hashes the post-step grids, so any accidental divergence fails `tests/replay.rs` loudly.
+        use rayon::prelude::*;
         let w = self.width;
         let h = self.height;
+        // Split the disjoint field borrows so the parallel map can read `channels[ch]`, write the reused
+        // `diffuse_out`, and read `floor_cells` at once.
+        let Self { channels, defs, scratch, diffuse_out, floor_cells, .. } = self;
         for ch in 0..CHANNEL_COUNT {
-            let def = self.defs[ch];
+            let def = defs[ch];
             let retain = (1.0 - def.evaporate * dt).clamp(0.0, 1.0);
+            // Evaporate in place (cell-local, cheap) and note whether any mass survives. An empty channel
+            // diffuses 0 → 0, so we skip its diffusion entirely — bit-identical, and several of the ten
+            // channels are empty on a typical tick.
+            let mut any_mass = false;
             {
-                let grid = &mut self.channels[ch];
-                for fc in &self.floor_cells {
-                    grid[fc.idx] *= retain;
+                let grid = &mut channels[ch];
+                for fc in floor_cells.iter() {
+                    let v = grid[fc.idx] * retain;
+                    grid[fc.idx] = v;
+                    any_mass |= v != 0.0;
                 }
             }
-            if def.diffuse <= 0.0 {
+            if def.diffuse <= 0.0 || !any_mass {
                 continue;
             }
-            // Blend each floor cell toward the average of its floor neighbours (double-buffered).
+            // Blend each floor cell toward the average of its floor neighbours (double-buffered, parallel).
             let diffuse = def.diffuse;
-            let grid = &self.channels[ch];
-            let scratch = &mut self.scratch;
-            for fc in &self.floor_cells {
-                let (x, y) = (fc.pos.x, fc.pos.y);
-                let mut sum = 0.0;
-                let mut n = 0.0;
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let nb = IVec2::new(x + dx, y + dy);
-                    if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h && dungeon.is_floor(nb) {
-                        sum += grid[(nb.y as usize) * w + nb.x as usize];
-                        n += 1.0;
+            let grid = &channels[ch];
+            diffuse_out
+                .par_iter_mut()
+                .zip(floor_cells.par_iter())
+                .for_each(|(out, fc)| {
+                    let (x, y) = (fc.pos.x, fc.pos.y);
+                    let mut sum = 0.0;
+                    let mut n = 0.0;
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let nb = IVec2::new(x + dx, y + dy);
+                        if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h && dungeon.is_floor(nb) {
+                            sum += grid[(nb.y as usize) * w + nb.x as usize];
+                            n += 1.0;
+                        }
                     }
-                }
-                let avg = if n > 0.0 { sum / n } else { grid[fc.idx] };
-                scratch[fc.idx] = grid[fc.idx] * (1.0 - diffuse) + avg * diffuse;
+                    let avg = if n > 0.0 { sum / n } else { grid[fc.idx] };
+                    *out = grid[fc.idx] * (1.0 - diffuse) + avg * diffuse;
+                });
+            // Serial scatter: contiguous floor-indexed results → grid-indexed `scratch`, then swap in.
+            for (fc, &v) in floor_cells.iter().zip(diffuse_out.iter()) {
+                scratch[fc.idx] = v;
             }
-            std::mem::swap(&mut self.channels[ch], &mut self.scratch);
+            std::mem::swap(&mut channels[ch], scratch);
         }
     }
 
@@ -380,6 +411,8 @@ pub fn drain_deposits(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, mut deposit
 
 /// Evaporate + diffuse every channel once per frame.
 pub fn evaporate_diffuse(mut stig: ResMut<Stig>, dungeon: Res<Dungeon>, time: Res<Time>) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`).
+    let _span = info_span!("stig_evaporate_diffuse").entered();
     let dt = time.delta_secs();
     stig.evaporate_diffuse(&dungeon, dt);
 }

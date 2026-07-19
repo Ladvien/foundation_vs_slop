@@ -41,6 +41,7 @@ pub(crate) fn map_elites_loop<G, FM, FF, FE, FR>(
     authored_g: &G,
     generations: u32,
     batch: u32,
+    patience: u32,
     seed_criterion_err: &str,
     mut mutate: FM,
     is_feasible: FF,
@@ -63,6 +64,9 @@ where
         None => return Err(seed_criterion_err.to_string()),
     }
 
+    // Convergence early-stop on QD-score plateau (Mouret & Clune 2015 archive-property termination). A no-op
+    // when `patience == 0`. Deterministic: stopping the outer loop leaves the gen-K archive byte-identical.
+    let mut plateau = super::qd::PlateauStop::new(patience);
     for generation in 0..generations {
         for _ in 0..batch {
             let parent = result
@@ -85,6 +89,9 @@ where
             }
         }
         report(generation, result);
+        if plateau.should_stop(result.pop.archive.qd_score()) {
+            break;
+        }
     }
     Ok(())
 }
@@ -113,6 +120,7 @@ pub(crate) fn map_elites_cma_loop<G, FF, FE, TV, FV, FR>(
     authored_g: &G,
     generations: u32,
     batch: u32,
+    patience: u32,
     sigma: f32,
     seed_criterion_err: &str,
     to_vec: TV,
@@ -140,6 +148,8 @@ where
 
     let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
 
+    // QD-score plateau early-stop (no-op when `patience == 0`), independent of the emitter's own restart rule.
+    let mut plateau = super::qd::PlateauStop::new(patience);
     for generation in 0..generations {
         let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
         let mut added_new = false;
@@ -181,6 +191,9 @@ where
         }
 
         report(generation, result);
+        if plateau.should_stop(result.pop.archive.qd_score()) {
+            break;
+        }
     }
     Ok(())
 }
@@ -208,6 +221,7 @@ pub(crate) fn map_elites_cma_mae_loop<G, FF, FE, TV, FV, FR>(
     authored_g: &G,
     generations: u32,
     batch: u32,
+    patience: u32,
     sigma: f32,
     alpha: f32,
     min_f: f32,
@@ -244,6 +258,8 @@ where
 
     let mut emitter = super::cmaes::SepCmaEs::new(to_vec(authored_g), sigma, batch as usize);
 
+    // QD-score plateau early-stop (no-op when `patience == 0`), independent of the emitter's own restart rule.
+    let mut plateau = super::qd::PlateauStop::new(patience);
     for generation in 0..generations {
         let mut told: Vec<(super::cmaes::Sample, f32)> = Vec::new();
         let mut any_improved = false;
@@ -285,6 +301,9 @@ where
         }
 
         report(generation, result);
+        if plateau.should_stop(result.pop.archive.qd_score()) {
+            break;
+        }
     }
     Ok(())
 }
@@ -314,6 +333,7 @@ mod tests {
             &authored,
             30,
             12,
+            0, // patience: 0 = no early-stop (test the full run)
             0.6,
             "seed failed",
             |g: &Vec<f32>| g.clone(),
@@ -338,7 +358,7 @@ mod tests {
         let authored = vec![0.0f32; 4];
         let mut rng = seeded(0xC0A5_E11E);
         map_elites_cma_mae_loop(
-            &mut rng, &mut result, &authored, 30, 12, 0.6, 0.5, -100.0, "seed failed",
+            &mut rng, &mut result, &authored, 30, 12, 0, 0.6, 0.5, -100.0, "seed failed",
             |g: &Vec<f32>| g.clone(),
             |v: &[f32]| v.to_vec(),
             |_g| true,
@@ -362,7 +382,7 @@ mod tests {
         let mut result = MapElitesResult { pop: Population::new(8), evaluations: 0, rejected_infeasible: 0, rejected_by_criterion: 0 };
         let mut rng = seeded(0xF1A7_C0DE);
         map_elites_cma_mae_loop(
-            &mut rng, &mut result, &authored, 40, 12, 0.8, 0.5, 0.0, "seed",
+            &mut rng, &mut result, &authored, 40, 12, 0, 0.8, 0.5, 0.0, "seed",
             |g: &Vec<f32>| g.clone(),
             |v: &[f32]| v.to_vec(),
             |_g| true,
