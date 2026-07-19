@@ -37,6 +37,9 @@ pub struct LevelSearchConfig {
     pub sigma: f32,
     pub resolution: usize,
     pub dungeon_seeds: Vec<u64>,
+    /// Convergence early-stop patience (generations without QD-score gain); `0` disables. See
+    /// [`crate::squad_ai::qd::PlateauStop`].
+    pub patience: u32,
 }
 
 impl Default for LevelSearchConfig {
@@ -47,7 +50,8 @@ impl Default for LevelSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
+            dungeon_seeds: crate::squad_ai::coevolve::HELD_IN_SEEDS.to_vec(),
+            patience: 0,
         }
     }
 }
@@ -87,6 +91,7 @@ pub fn search(
         &authored_g,
         cfg.generations,
         cfg.batch,
+        cfg.patience,
         "the shipped level failed the minimal criterion on the held-in seeds",
         |parent, rng| Ok(mutate(parent, cfg.sigma, rng)),
         |child| level_genome::is_feasible(child, base).is_ok(),

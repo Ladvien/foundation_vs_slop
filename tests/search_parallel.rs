@@ -36,18 +36,32 @@
 //! visibility, which is exactly how a rollout bug masquerades as a parallelism bug.
 //!
 //! If these red again, suspect the rollout before `parallel.rs`: run
-//! `replay::search_rollouts_are_reproducible_under_load` first — it is cheaper, it covers both held-in
-//! seeds, and it fails for the real reason.
+//! `replay::search_rollouts_are_reproducible_under_load` first — it is cheaper, it covers the same two
+//! worlds, and it fails for the real reason.
 #![cfg(feature = "test-harness")]
 
 use foundation_vs_slop::squad_ai::coevolve::{search, sweep_prior, Population, SearchConfig, Templates};
 
-/// Two held-in worlds — the minimum `evolve` allows (a candidate's two rollouts must run on different
-/// worlds). Kept to two to hold the test's rollout budget down.
+/// Two worlds — the minimum `evolve` allows (a candidate's two rollouts must run on different worlds). Kept
+/// to two to hold the test's rollout budget down.
+///
+/// **NOT the search's held-in set** — that is `coevolve::HELD_IN_SEEDS`, and `0xA11CE` was retired from it
+/// when the mold tipped it into squad wipes. It stays here for the same reason it stays in
+/// `replay::search_rollouts_are_reproducible_under_load`: it *splits*, which is what a determinism gate
+/// wants. Determinism is a property of the sim, not of the seeds the search happens to run.
 const SEEDS: [u64; 2] = [0x5C09191, 0xA11CE];
 
-/// The calibrated episode floor. Below it the authored-derived children take no damage on some worlds and
-/// the criterion rejects them, so the archives come back empty and the test proves nothing.
+/// The measured episode floor — `coevolve::SearchConfig`'s doc carries the damage-per-seed table. Below it
+/// the minimal criterion sits on a knife's edge, the admitted fraction collapses, and `filled > 0` below
+/// gets flaky.
+///
+/// **Mind the causality.** An earlier version of this comment said that below the floor "the archives come
+/// back empty and the test proves nothing" — and the empty archives this test really suffered were **G0b**
+/// (a machine-baked levels elite in `config.ron`, so the squad fought a different map and was wiped; see the
+/// History note above), *not* the tick count. Re-measured 2026-07-17: every held-in seed passes the criterion
+/// even at 1800, so a short episode **thins** archives rather than emptying them. The floor is real; this
+/// comment was citing it for a failure it did not cause, and that misattribution later cost a reader a full
+/// investigation.
 const EPISODE_TICKS: u32 = 7200;
 
 /// A bit-exact fingerprint of one archive: every occupied cell in the archive's fixed sorted order, with
@@ -94,6 +108,7 @@ fn parallel_search_reproduces_the_inline_archives_bit_for_bit() {
         dungeon_seeds: SEEDS.to_vec(),
         resolution: 8,
         jobs: 1,
+        patience: 0, // no early-stop: exercise the full fixed-length run
     };
 
     let inline = search(&t, &prior, &base, |_, _| {}).expect("inline search");
@@ -145,6 +160,7 @@ fn batch_emitter_scales_past_opponents_deterministically() {
         dungeon_seeds: SEEDS.to_vec(),
         resolution: 8,
         jobs: 1,
+        patience: 0, // no early-stop: exercise the full fixed-length run
     };
 
     let inline = search(&t, &prior, &base, |_, _| {}).expect("inline search");
@@ -179,5 +195,6 @@ fn clone_cfg(cfg: &SearchConfig) -> SearchConfig {
         dungeon_seeds: cfg.dungeon_seeds.clone(),
         resolution: cfg.resolution,
         jobs: cfg.jobs,
+        patience: cfg.patience,
     }
 }

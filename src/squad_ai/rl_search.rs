@@ -33,6 +33,9 @@ pub struct RlSearchConfig {
     pub resolution: usize,
     pub dungeon_seeds: Vec<u64>,
     pub episode_ticks: u32,
+    /// Convergence early-stop patience (generations without QD-score gain); `0` disables. See
+    /// [`crate::squad_ai::qd::PlateauStop`].
+    pub patience: u32,
     /// Use the CMA-ME adaptive emitter (`map_elites_cma_loop`) instead of the isotropic-Gaussian mutation.
     /// **Default `false`** so the isotropic path — and any archive committed from it — stays bit-reproducible;
     /// opt in with `train rl --cma`.
@@ -47,8 +50,11 @@ impl Default for RlSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
-            episode_ticks: 1800,
+            dungeon_seeds: crate::squad_ai::coevolve::HELD_IN_SEEDS.to_vec(),
+            // Measured minimal-criterion floor (see `audio_search::AudioSearchConfig::default` and
+            // `tests/search_calibration.rs`); below it feasible episodes are rejected and the archive stays empty.
+            episode_ticks: 7200,
+            patience: 0,
             use_cma: false,
         }
     }
@@ -103,6 +109,7 @@ pub fn search(
             &authored_g,
             cfg.generations,
             cfg.batch,
+            cfg.patience,
             cfg.sigma,
             seed_err,
             |g: &PolicyGenome| g.0.clone(),
@@ -118,6 +125,7 @@ pub fn search(
             &authored_g,
             cfg.generations,
             cfg.batch,
+            cfg.patience,
             seed_err,
             |parent, rng| mutate(parent, &authored_g, cfg.sigma, rng),
             is_feasible,

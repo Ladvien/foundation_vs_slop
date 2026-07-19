@@ -139,9 +139,13 @@ pub struct AlmondWaterDynamics {
     pub forage_wounded_frac: f32,
 }
 
+/// MUST match the `almond_water:` gameplay knobs in `assets/config/config.ron`.
+///
+/// **Never put comments inside `fn default()`.** `train apply --dim world` rewrites that body verbatim from
+/// the baked elite (`regen_default` in `src/bin/train.rs` brace-matches and replaces the whole body), so
+/// anything in there is deleted by the first bake. Document above this impl instead.
 impl Default for AlmondWaterDynamics {
     fn default() -> Self {
-        // MUST match the `almond_water:` gameplay knobs in `assets/config/config.ron`.
         Self {
             strong_seep: 8.0,
             evaporate: 0.05,
@@ -302,6 +306,11 @@ pub struct AlmondWater {
     level: Vec<f32>,
     /// Reused double-buffer for the diffusion pass (avoids per-tick allocation) — copies `Stig::scratch`.
     scratch: Vec<f32>,
+    /// Reused floor-indexed output buffer for the *parallel* diffusion maps. The level and belief passes run
+    /// sequentially within a tick, so they share it: the map writes disjoint slots (one per `floor_cells`
+    /// entry, no cross-cell reduction), then a serial scatter copies into the grid-indexed double-buffer.
+    /// Lazily sized to `floor_cells.len()` after the bake; never allocates per tick.
+    diffuse_out: Vec<f32>,
     /// Per-cell **belief** in [0,1]: 0 = the water reads as pre-drift cyanide (poison), 1 = post-drift heal.
     /// A rumor field over the floor — seeded from `belief_base` at the bake, then each tick relaxed toward its
     /// base + diffused, and nudged by the effect system (safe drink → +heal reading; a poisoning →
@@ -338,6 +347,7 @@ impl AlmondWater {
             sources: vec![0.0; n],
             level: vec![0.0; n],
             scratch: vec![0.0; n],
+            diffuse_out: Vec::new(), // lazily sized to floor_cells.len() on first tick after bake
             belief: vec![0.0; n],
             belief_base: vec![0.0; n],
             belief_scratch: vec![0.0; n],
@@ -432,6 +442,14 @@ impl AlmondWater {
         belief_relax: f32,
         belief_diffuse: f32,
     ) {
+        // The two diffusion passes below are pure stencils — each cell's next value is a function of the
+        // PREVIOUS grid with the fixed E/W/S/N order preserved — so they parallelise bit-identically for any
+        // thread count (no cross-cell reduction; Dourvas et al. 2019 exploit the same for a Physarum CA). Size
+        // the shared floor-indexed scratch once after the bake fills `floor_cells`.
+        use rayon::prelude::*;
+        if self.diffuse_out.len() != self.floor_cells.len() {
+            self.diffuse_out.resize(self.floor_cells.len(), 0.0);
+        }
         // 1+2. Accumulate the (mold-boosted) seep, then evaporate, in one in-place pass (an evaporation of
         //      the just-added seep is exactly a steady-state cap; the two commute up to O(dt²), same as `Stig`).
         let retain = (1.0 - evaporate * dt).clamp(0.0, 1.0);
@@ -444,26 +462,34 @@ impl AlmondWater {
         }
 
         // 3. Diffuse: blend each floor cell toward the average of its floor neighbours (double-buffered).
+        //    Parallel: the map reads the OLD `level`, the barrier completes, then a serial scatter + swap.
         if diffuse > 0.0 {
             let (w, h) = (self.width, self.height);
-            for &(idx, pos) in &self.floor_cells {
-                let (x, y) = (pos.x, pos.y);
-                let mut sum = 0.0;
-                let mut n = 0.0;
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let nb = IVec2::new(x + dx, y + dy);
-                    if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h {
-                        let nidx = (nb.y as usize) * w + nb.x as usize;
-                        if self.floor_mask[nidx] {
-                            sum += self.level[nidx];
-                            n += 1.0;
+            let Self { level, scratch, floor_cells, floor_mask, diffuse_out, .. } = self;
+            diffuse_out
+                .par_iter_mut()
+                .zip(floor_cells.par_iter())
+                .for_each(|(out, &(idx, pos))| {
+                    let (x, y) = (pos.x, pos.y);
+                    let mut sum = 0.0;
+                    let mut n = 0.0;
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let nb = IVec2::new(x + dx, y + dy);
+                        if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h {
+                            let nidx = (nb.y as usize) * w + nb.x as usize;
+                            if floor_mask[nidx] {
+                                sum += level[nidx];
+                                n += 1.0;
+                            }
                         }
                     }
-                }
-                let avg = if n > 0.0 { sum / n } else { self.level[idx] };
-                self.scratch[idx] = self.level[idx] * (1.0 - diffuse) + avg * diffuse;
+                    let avg = if n > 0.0 { sum / n } else { level[idx] };
+                    *out = level[idx] * (1.0 - diffuse) + avg * diffuse;
+                });
+            for (&(idx, _), &v) in floor_cells.iter().zip(diffuse_out.iter()) {
+                scratch[idx] = v;
             }
-            std::mem::swap(&mut self.level, &mut self.scratch);
+            std::mem::swap(level, scratch);
         }
 
         // Peak for the visual's 0..1 normalisation. Order-independent (`max`), so it never perturbs the sim.
@@ -482,24 +508,31 @@ impl AlmondWater {
         //    two [0,1] values stays in [0,1], so belief never leaves its poison↔heal axis.
         if belief_diffuse > 0.0 {
             let (w, h) = (self.width, self.height);
-            for &(idx, pos) in &self.floor_cells {
-                let (x, y) = (pos.x, pos.y);
-                let mut sum = 0.0;
-                let mut n = 0.0;
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let nb = IVec2::new(x + dx, y + dy);
-                    if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h {
-                        let nidx = (nb.y as usize) * w + nb.x as usize;
-                        if self.floor_mask[nidx] {
-                            sum += self.belief[nidx];
-                            n += 1.0;
+            let Self { belief, belief_scratch, floor_cells, floor_mask, diffuse_out, .. } = self;
+            diffuse_out
+                .par_iter_mut()
+                .zip(floor_cells.par_iter())
+                .for_each(|(out, &(idx, pos))| {
+                    let (x, y) = (pos.x, pos.y);
+                    let mut sum = 0.0;
+                    let mut n = 0.0;
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let nb = IVec2::new(x + dx, y + dy);
+                        if nb.x >= 0 && nb.y >= 0 && (nb.x as usize) < w && (nb.y as usize) < h {
+                            let nidx = (nb.y as usize) * w + nb.x as usize;
+                            if floor_mask[nidx] {
+                                sum += belief[nidx];
+                                n += 1.0;
+                            }
                         }
                     }
-                }
-                let avg = if n > 0.0 { sum / n } else { self.belief[idx] };
-                self.belief_scratch[idx] = self.belief[idx] * (1.0 - belief_diffuse) + avg * belief_diffuse;
+                    let avg = if n > 0.0 { sum / n } else { belief[idx] };
+                    *out = belief[idx] * (1.0 - belief_diffuse) + avg * belief_diffuse;
+                });
+            for (&(idx, _), &v) in floor_cells.iter().zip(diffuse_out.iter()) {
+                belief_scratch[idx] = v;
             }
-            std::mem::swap(&mut self.belief, &mut self.belief_scratch);
+            std::mem::swap(belief, belief_scratch);
         }
     }
 
@@ -706,6 +739,8 @@ fn accumulate_evaporate_diffuse(
     // biomass — `mold_update` is ordered `.after(AlmondWaterWritten)` so the read/write pair is acyclic.
     mold: Res<crate::mold::MoldField>,
 ) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`).
+    let _span = info_span!("almond_water_diffuse").entered();
     let cfg = &config.almond_water;
     let (evaporate, diffuse, capacity) = (cfg.evaporate, cfg.diffuse, cfg.capacity);
     let (belief_relax, belief_diffuse) = (cfg.belief_relax, cfg.belief_diffuse);

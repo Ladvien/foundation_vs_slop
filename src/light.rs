@@ -19,7 +19,7 @@
 
 use bevy::pbr::ContactShadows;
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::GameConfig;
 use crate::dungeon::Dungeon;
@@ -96,6 +96,65 @@ pub struct LightingConfig {
     pub flashlight_spot_color: [f32; 3],
     /// Cosmetic spot light outer cone half-angle (radians) — the visible beam spread.
     pub flashlight_spot_outer_angle: f32,
+}
+
+/// The evolvable **gameplay** subset of [`LightingConfig`], as one value — so the world search can
+/// co-evolve the light the ecosystem steers on instead of holding it frozen while it evolves the mold's
+/// *response* to it (`mold.light_recoil` / `mold.dim_light`). `Copy` + `Serialize` so an evolved world
+/// decodes to a readable RON diff (the reward-hacking guard). Mirrors [`crate::almond_water::
+/// AlmondWaterDynamics`], which is the established pattern for this.
+///
+/// **Only knobs that are both gameplay-affecting and non-visual are here**, and that is a short list:
+///
+/// - [`LightingConfig::field_intensity`] — the gameplay illuminance baked into [`LightField`] on
+///   `FixedUpdate`. Deliberately separate from the render `fixture_intensity` (lumens), so evolving it
+///   cannot change how the game looks.
+/// - [`LightingConfig::photophobic_gain`] — the push a [`Photophobic`] creature takes down the light
+///   gradient. Pure steering; nothing renders it. `tests/replay.rs`'s `photophobia_pulls_crabs_into_shadow`
+///   pins that it moves the trajectory.
+///
+/// **Deliberately excluded, each for a measured reason:**
+///
+/// - `fixture_range` and the `flashlight_*` knobs feed the FixedUpdate field *and* the renderer. Evolving
+///   them would let the search restyle the game's look, which is an authored decision, not a search's.
+/// - `photophilic_gain` is a **no-op in rollouts**: its only reader (`crab_locomotion`) is gated on a
+///   `Photophilic` component no crab carries — `config.ron` calls it a "toolkit; no carrier yet". The only
+///   inserter is windowed-only.
+/// - `mushroom_light_size_*` are read by `mycelia::grow_fruit_bodies`, which runs on `Update` inside the
+///   windowed-only `MyceliaPlugin` and never reaches the harness; they scale a mesh with no `Health`, so
+///   they are not even in `snapshot_hash`.
+/// - `ambient_*` / `key_illuminance` / `fixture_intensity` / `fixture_*` / `flicker_*` are cosmetic.
+///
+/// A knob that cannot move fitness must not be in the genome: it spends a search dimension and an RNG draw
+/// per mutation to buy nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LightingDynamics {
+    pub field_intensity: f32,
+    pub photophobic_gain: f32,
+}
+
+/// MUST match the `lighting:` gameplay knobs in `assets/config/config.ron`.
+///
+/// **Never put comments inside `fn default()`.** `train apply --dim world` rewrites that body verbatim from
+/// the baked elite (`regen_default` in `src/bin/train.rs` brace-matches and replaces the whole body), so
+/// anything in there is deleted by the first bake. Document above this impl instead.
+impl Default for LightingDynamics {
+    fn default() -> Self {
+        Self { field_intensity: 1.0, photophobic_gain: 6.0 }
+    }
+}
+
+impl LightingDynamics {
+    /// Read the evolvable slice out of a full config.
+    pub fn from_config(c: &LightingConfig) -> Self {
+        Self { field_intensity: c.field_intensity, photophobic_gain: c.photophobic_gain }
+    }
+
+    /// Overwrite the evolvable gameplay knobs of a full config, leaving the visual knobs untouched.
+    pub fn apply_to(&self, c: &mut LightingConfig) {
+        c.field_intensity = self.field_intensity;
+        c.photophobic_gain = self.photophobic_gain;
+    }
 }
 
 /// Loud, one-path validation (mirrors `config::validate_density` and the other `validate_*` checks).
@@ -451,6 +510,10 @@ pub(crate) fn apply_dynamic_lights(
         With<crate::squad::Unit>,
     >,
 ) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`). Inspection
+    // shows this recompose is a cheap `copy_from_slice` + max-scan plus a small (≈1-cone) scatter — deliberately
+    // left serial; this span lets that be confirmed rather than assumed.
+    let _span = info_span!("light_recompose").entered();
     let c = &config.lighting;
     let mut cones: Vec<FlashlightCone> = researchers
         .iter()
@@ -737,7 +800,14 @@ fn flicker_lights(
         } else {
             hum
         };
-        light.intensity = fl.base_intensity * mult;
+        // Only write — and thereby mark the light `Changed`, forcing a GPU light-buffer re-extract — when
+        // the value actually moves. A failing tube clamped near-off (the `0.04` branch) and any fixture with
+        // `flicker_hum_depth == 0` hold a constant value across frames, so this skips their per-frame churn
+        // with zero visual change.
+        let next = fl.base_intensity * mult;
+        if light.intensity != next {
+            light.intensity = next;
+        }
     }
 }
 

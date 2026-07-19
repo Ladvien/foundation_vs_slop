@@ -1420,22 +1420,22 @@
     // The cosmetic waveform mix stays in code (src/audio.rs) and is NOT tuned here.
     audio: (
         stimulus: (
-            noise_squad: (evaporate: 0.8, diffuse: 0.18, deposit_radius: 5.0),
-            noise_swarm: (evaporate: 0.7, diffuse: 0.15, deposit_radius: 4.0),
-            fire_loudness: 0.6,
-            impact_wall_loudness: 0.3,
-            impact_flesh_loudness: 0.5,
-            enemy_death_loudness: 0.7,
-            unit_death_loudness: 0.9,
+            noise_squad: (evaporate: 2.492324, diffuse: 0.20195086, deposit_radius: 8.0),
+            noise_swarm: (evaporate: 0.09777509, diffuse: 0.15594381, deposit_radius: 7.540029),
+            fire_loudness: 0.0,
+            impact_wall_loudness: 0.2898777,
+            impact_flesh_loudness: 0.15307344,
+            enemy_death_loudness: 0.9537805,
+            unit_death_loudness: 0.7733592,
         ),
         perception: (
             // Sound-as-perception ON (FIX 2): din-response gains ship positive so a firefight shapes the
             // battlefield. crab_draw_to_din > crab_fear_of_din ⇒ the swarm converges on gunfire. Must stay
             // byte-identical to AudioTuning::default() (audio_default_equals_shipped_config guards it).
-            crab_fear_of_din: 0.15,
-            unit_fear_of_din: 0.15,
-            crab_draw_to_din: 0.3,
-            investigate_threshold: 0.5,
+            crab_fear_of_din: 0.35405704,
+            unit_fear_of_din: 0.3944512,
+            crab_draw_to_din: 0.20777673,
+            investigate_threshold: 0.22598898,
         ),
     ),
 )

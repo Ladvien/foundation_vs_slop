@@ -451,14 +451,47 @@ impl<G: Clone> Population<G> {
 
 // ── The search ───────────────────────────────────────────────────────────────────────────────────
 
+/// The **held-in dungeon seeds** every search evaluates against. Defined once, on purpose: a re-selection
+/// must not be able to leave a stale copy behind. It already has — `0xA11CE` and `0xBEEF` were retired when
+/// the mold landed (see `mold::MoldConfig`'s `Default`), and survived for months in docs and test comments
+/// that still called them "held-in", long enough to mislead a later reader into re-tuning the episode floor
+/// against a world the search no longer runs.
+///
+/// Chosen so the shipped squad produces a real encounter on each: it survives with margin AND the swarm
+/// survives, so neither side is wiped.
+pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xB0BA];
+
 /// Everything one run needs. `episode_ticks` at 60 Hz: 7200 ≈ 120 s of simulated time.
 ///
-/// 120 s is a **floor**, not a preference, and it was measured (`train probe`) rather than chosen. The
-/// evaluation alternates 5 s of player-ordered advance with 5 s of AI-controlled engagement (see
-/// `evaluate`), so only half the episode moves the squad toward the nests. At 60 s under that schedule the
-/// authored squad takes 0–1 damage on two of three worlds and fails the criterion's "nothing was at stake"
-/// clause — the shipped game's own brains. At 120 s it takes 2–15 damage, records 162–373 duty decisions,
-/// and passes on all three worlds. A shorter episode does not make the search cheaper; it makes it empty.
+/// 120 s is a **floor**, not a preference, and it is measured (`train probe`) rather than chosen. The
+/// evaluation alternates player-ordered advance with AI-controlled engagement (see `evaluate`), so only part
+/// of the episode moves the squad toward the nests.
+///
+/// **Measured 2026-07-17** — authored brains on the default world, `train probe --ticks N`, reporting
+/// `unit_damage_taken` per held-in seed:
+///
+/// | seed | 1800 | 3600 | 5400 | 7200 |
+/// |---|---|---|---|---|
+/// | `0x5C09191` | 46 | 46 | 46 | 46 |
+/// | `0x1CE5` | 0\* | 0\* | 0\* | 91 |
+/// | `0xB0BA` | 1 | 1 | 207 | 489 |
+///
+/// \* `train probe` prints damage with `{:.0}`. These cells PASS the `unit_damage_taken > 0.0` clause, so
+/// they are non-zero — but under half a hit point.
+///
+/// **Every cell passes `minimal_criterion`.** So — contrary to what this comment claimed before it was
+/// re-measured — a short episode does not outright *reject* the shipped game. What it does is leave the
+/// criterion balanced on a knife's edge: below 7200, `0x1CE5` clears "nothing was at stake" by less than one
+/// hit point and `0xB0BA` by one. A candidate marginally less aggressive than the authored brain is rejected
+/// there, so the admitted fraction collapses and the archives come back thin — the same empty-archive
+/// failure as before, arriving probabilistically rather than absolutely. `0x1CE5` is the binding world: it
+/// only acquires real stakes between 5400 and 7200. Cross-seed replayability tracks the same edge — 0.049 /
+/// 0.026 / 0.111 / 0.114 at 1800 / 3600 / 5400 / 7200.
+///
+/// A shorter episode does not make the search cheaper; it makes it thin.
+///
+/// **Re-measure with `train probe` after anything that moves the deterministic trajectory.** These numbers
+/// are a snapshot, not a law. The previous snapshot went stale silently and was later read as authoritative.
 pub struct SearchConfig {
     pub seed: u64,
     pub generations: u32,
@@ -480,6 +513,10 @@ pub struct SearchConfig {
     /// ceiling is now `batch × OPPONENTS` (per population per generation) — a whole batch is scored at once —
     /// so `jobs` scales to the box; raise `batch` for more width.
     pub jobs: usize,
+    /// Convergence early-stop: stop when the combined QD-score of the three archives has not improved for
+    /// this many consecutive generations (Mouret & Clune 2015 archive-property termination). `0` disables it
+    /// (run every generation). Bit-reproducible — see [`super::qd::PlateauStop`].
+    pub patience: u32,
 }
 
 impl Default for SearchConfig {
@@ -489,9 +526,10 @@ impl Default for SearchConfig {
             generations: 8,
             batch: 4,
             episode_ticks: 7200,
-            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
+            dungeon_seeds: HELD_IN_SEEDS.to_vec(),
             resolution: 8,
             jobs: 1,
+            patience: 0,
         }
     }
 }
@@ -647,6 +685,8 @@ pub fn search(
     // the OTHER two archives (three-way co-evolution in the spirit of POET, arXiv:1901.01753, and multi-
     // agent autocurricula, Baker et al. arXiv:1909.07528): a squad child fights (swarm, world) pairs, a
     // swarm child fights (squad, world), and a world child is judged by the (squad, swarm) it induces.
+    // Convergence early-stop on the three archives' combined QD-score (no-op when `cfg.patience == 0`).
+    let mut plateau = super::qd::PlateauStop::new(cfg.patience);
     for generation in 0..cfg.generations {
         // Each population's whole generation is proposed and scored as ONE batch (see `batch_population`):
         // `cfg.batch` children against a frozen archive snapshot, every child's `OPPONENTS` triples flattened
@@ -745,6 +785,12 @@ pub fn search(
         )?;
 
         report(generation, &result);
+        let qd_total = result.squad.archive.qd_score()
+            + result.swarm.archive.qd_score()
+            + result.world.archive.qd_score();
+        if plateau.should_stop(qd_total) {
+            break;
+        }
     }
     Ok(result)
 }
@@ -895,22 +941,6 @@ fn reeval_on_recorded<R>(
     let jobs: Vec<TripleJob> = recorded.iter().map(to_job).collect();
     let scores: Vec<f32> = evaluator.eval(&jobs)?.into_iter().flatten().map(|s| s.score).collect();
     Ok(if scores.is_empty() { None } else { Some(mean(&scores)) })
-}
-
-/// Expose one squad mutation to the integration tests, which must prove that a candidate genome actually
-/// reaches `utility::decide` — every other test runs the authored brains, so a silently-dropped candidate
-/// would go unnoticed.
-pub fn mutate_squad_for_test(
-    t: &Templates,
-    parent: &SquadGenome,
-    sigma: f32,
-    mut rng: ChaCha8Rng,
-) -> SquadGenome {
-    let mut out = Vec::with_capacity(parent.0.len());
-    for (template, p) in t.roles.iter().zip(&parent.0) {
-        out.push(mutate(template, p, sigma, 0.0, &mut rng).expect("mutate"));
-    }
-    SquadGenome(out)
 }
 
 /// Mutate every role's genome. The band origin is the *template*, derived inside `genome::mutate`, so it
@@ -1244,8 +1274,13 @@ pub fn swarm_archive_doc(t: &Templates, pop: &Population<SwarmGenome>) -> Result
     })
 }
 
-/// One world elite, decoded back into its two config slices — a readable RON diff of the shipped world's
-/// dials (the reward-hacking guard: a human reads what the search found before it ships).
+/// One world elite, decoded back into **all four** of its config slices — a readable RON diff of the
+/// shipped world's dials (the reward-hacking guard: a human reads what the search found before it ships).
+///
+/// Every slice `world_genome` encodes must appear here. The rollout scores the whole [`WorldConfig`], so a
+/// slice omitted from this doc is a knob the search optimised and the game can never ship — the elite's
+/// reported fitness would not be reproducible from the config it bakes. (`mold` + `almond` were exactly
+/// that until they were added here: 23 of 102 knobs evaluated, then dropped on write.)
 #[derive(Serialize)]
 pub struct WorldEliteDoc {
     pub cell: (usize, usize),
@@ -1257,6 +1292,12 @@ pub struct WorldEliteDoc {
     pub fitness: f32,
     pub ai: crate::ai::tuning::AiTuning,
     pub sim: crate::sim::SimTuning,
+    pub mold: crate::mold::MoldConfig,
+    /// The evolvable gameplay subset of `almond_water` (`AlmondWaterDynamics`), not the full config: the
+    /// structural + visual knobs are not evolved and stay shipped.
+    pub almond: crate::almond_water::AlmondWaterDynamics,
+    /// The evolvable gameplay subset of `lighting` (`LightingDynamics`) — likewise not the full config.
+    pub lighting: crate::light::LightingDynamics,
 }
 
 /// Decode every world elite for review/commit — each is a readable diff of the shipped world's dials.
@@ -1272,6 +1313,9 @@ pub fn world_archive_doc(pop: &Population<WorldGenome>) -> Result<ArchiveDoc<Wor
             fitness: elite.fitness,
             ai: wc.ai,
             sim: wc.sim,
+            mold: wc.mold,
+            almond: wc.almond,
+            lighting: wc.lighting,
         });
     }
     Ok(ArchiveDoc {

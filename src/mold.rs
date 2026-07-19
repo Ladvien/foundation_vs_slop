@@ -41,7 +41,7 @@ use crate::util::row_major;
 
 /// The evolvable mold parameters (the `mold:` config slice). Per-substep coefficients (the fixed 60 Hz
 /// `FixedUpdate` × `substeps` sets the wall-clock rate), so nothing here depends on `dt`.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MoldConfig {
     /// Logistic growth coefficient per substep — how fast biomass climbs toward the habitat capacity.
     pub growth: f32,
@@ -67,10 +67,32 @@ pub struct MoldConfig {
     pub dense_v: f32,
 }
 
+/// A stable spot-and-spread regime; couplings moderate. Calibrated to leave the field sparse (mold
+/// fills its damp habitat over ~tens of seconds and is pushed back by the squad's light).
+///
+/// **These MUST mirror the `mold:` block in `assets/config/config.ron`** — guarded by
+/// `authored_world_config_override_is_a_noop`.
+///
+/// **The couplings are SHIPPED defaults.** The mold is load-bearing (Phase 3): it dims light (crabs are
+/// less light-pushed) and, where dense (biomass >= `dense_v`/`occlude_los` ~= 0.83), hides crabs from the
+/// squad's line of sight — a real tactical cost, not cosmetic. Adding the mold also shifts the
+/// deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf. `tests/replay.rs`),
+/// which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes. Those were
+/// re-selected: the held-in set is now `[0x5C09191, 0x1CE5, 0xB0BA]`, where the shipped squad produces a
+/// real encounter — it survives with margin AND the swarm survives (neither side is wiped). The couplings
+/// stay LIVE and tunable: the optimizer (`world_genome` BOUNDS: `dim_light` 0..1, `occlude_los` 0..1.5,
+/// `seep_boost` 0.5..6) can push them and weigh the "mold makes it scarier" cost.
+///
+/// `seep_boost: 1.5` mirrors the old static `almond_water.mold_seep_mult`: the live ramp `1 + 0.5·mold01`
+/// stays <= that at all times, so moldy pools keep the sparse, fog-preserving footprint the
+/// `almond_pools_stay_small_and_isolated` liveness test guards. The optimizer may push it up to 6×
+/// (`world_genome` BOUNDS) and weigh the "moldy zones flood into a healing sheet" trade-off itself.
+///
+/// **Never put comments inside `fn default()`.** `train apply --dim world` rewrites that body verbatim
+/// from the baked elite (`regen_default` in `src/bin/train.rs` brace-matches and replaces the whole
+/// body), so anything in there is deleted by the first bake. Document above this impl instead.
 impl Default for MoldConfig {
     fn default() -> Self {
-        // A stable spot-and-spread regime; couplings moderate. Calibrated to leave the field sparse (mold
-        // fills its damp habitat over ~tens of seconds and is pushed back by the squad's light).
         MoldConfig {
             growth: 0.08,
             diffuse: 0.12,
@@ -78,21 +100,8 @@ impl Default for MoldConfig {
             seed_v: 0.15,
             light_recoil: 0.05,
             light_ref: 6.0,
-            // SHIPPED coupling defaults. The mold is load-bearing (Phase 3): it dims light (crabs are less
-            // light-pushed) and, where dense (biomass >= dense_v/occlude_los ~= 0.83), hides crabs from the
-            // squad's line of sight — a real tactical cost, not cosmetic. Adding the mold also shifts the
-            // deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf. tests/replay.rs),
-            // which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes. Those were
-            // re-selected: the held-in set is now [0x5C09191, 0x1CE5, 0xB0BA], where the shipped squad produces
-            // a real encounter — it survives with margin AND the swarm survives (neither side is wiped). The
-            // couplings stay LIVE and tunable: the optimizer (world_genome BOUNDS: dim_light 0..1,
-            // occlude_los 0..1.5, seep_boost 0.5..6) can push them and weigh the "mold makes it scarier" cost.
             dim_light: 0.5,
             occlude_los: 0.6,
-            // 1.5 mirrors the old static `almond_water.mold_seep_mult`: the live ramp `1 + 0.5·mold01` stays
-            // <= that at all times, so moldy pools keep the sparse, fog-preserving footprint the
-            // `almond_pools_stay_small_and_isolated` liveness test guards. The optimizer may push it up to 6×
-            // (world_genome BOUNDS) and weigh the "moldy zones flood into a healing sheet" trade-off itself.
             seep_boost: 1.5,
             dense_v: 0.5,
         }
@@ -148,8 +157,16 @@ pub struct MoldField {
     cells: Vec<(usize, IVec2)>,
     /// Per-tick normalised illuminance, refilled each tick before the substeps (reused to avoid realloc).
     light01: Vec<f32>,
-    /// Double-buffer scratch for the diffusion pass (reused).
-    scratch: Vec<f32>,
+    /// Reused floor-indexed output buffer for the *parallel* reaction-diffusion map: one slot per `cells`
+    /// entry, same order. Each substep writes disjoint slots here (no cross-cell reduction), then a serial
+    /// scatter copies it back into `v`. Lazily sized to `cells.len()` after bake; never allocates per tick.
+    react_out: Vec<f32>,
+    /// Precomputed floor-neighbour grid indices per `cells` entry, in the fixed **N, E, S, W** Laplacian
+    /// order — `-1` where that neighbour is off-grid or wall (no-flux). The floor mask is static after bake,
+    /// so hoisting the per-neighbour bounds + `floor[]` test out of the per-tick stencil is **exact** (same
+    /// terms, same fixed order → bit-identical `v`); it just removes the branches and lets the hot loop over
+    /// the millions of training-rollout ticks vectorise (pbrt SIMD; Turk 1991 grid stencil). Built at bake.
+    nbr: Vec<[i32; 4]>,
 }
 
 impl MoldField {
@@ -163,7 +180,8 @@ impl MoldField {
             floor: vec![false; n],
             cells: Vec::new(),
             light01: vec![0.0; n],
-            scratch: vec![0.0; n],
+            react_out: Vec::new(), // lazily sized to cells.len() on first diffuse_react after bake
+            nbr: Vec::new(),       // filled at bake once `floor` + `cells` exist
         }
     }
 
@@ -185,29 +203,66 @@ impl MoldField {
     /// from the per-cell `light01` filled by the caller. Pure over the field's own grids (row-major, fixed
     /// order) → bit-reproducible. Extracted from [`mold_update`] so it is unit-testable without the sim.
     fn diffuse_react(&mut self, c: &MoldConfig) {
-        let (w, h) = (self.width, self.height);
-        for _ in 0..c.substeps {
-            for &(idx, cell) in &self.cells {
-                let v0 = self.v[idx];
-                // 4-neighbour Laplacian, fixed N,E,S,W order; a non-floor (wall/off-grid) neighbour is
-                // no-flux (contributes 0), so mold does not leak through walls.
-                let mut lap = 0.0f32;
-                for (dx, dy) in [(0, 1), (1, 0), (0, -1), (-1, 0)] {
-                    let nx = cell.x + dx;
-                    let ny = cell.y + dy;
-                    if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h {
-                        let ni = ny as usize * w + nx as usize;
-                        if self.floor[ni] {
-                            lap += self.v[ni] - v0;
+        // Each substep is a pure stencil: every floor cell's next value is a function of the CURRENT `v`
+        // with the fixed N,E,S,W Laplacian order preserved inside the cell, so the result is identical for
+        // any thread count (no cross-cell reduction). Parallelised across `cells` — the same data-parallel
+        // property Dourvas et al. (2019) exploit to accelerate a Physarum reaction-diffusion CA. The harness
+        // pins rayon to one thread and `fold_fingerprint` hashes `v`, so any divergence fails loudly.
+        use rayon::prelude::*;
+        let Self { v, k, floor, cells, light01, react_out, nbr, width, height, .. } = self;
+        if react_out.len() != cells.len() {
+            react_out.resize(cells.len(), 0.0); // one-time after bake fills `cells`; a no-op thereafter
+        }
+        // Branch-free neighbour table: each cell's 4 floor-neighbour grid indices in the fixed N,E,S,W order
+        // (`-1` = wall/off-grid = no-flux), precomputed from the STATIC floor mask. Recomputed only when
+        // `cells` changes (bake, or a unit test that sets `cells` directly); a cheap length check every real
+        // tick. It lets the per-substep stencil below skip the per-neighbour bounds + `floor[]` test — exact
+        // (same terms, same order → bit-identical `v`), just branch-free and easier to vectorise.
+        if nbr.len() != cells.len() {
+            let (w, h) = (*width, *height);
+            *nbr = cells
+                .iter()
+                .map(|&(_, c)| {
+                    let mut n = [-1i32; 4];
+                    for (slot, (dx, dy)) in [(0, 1), (1, 0), (0, -1), (-1, 0)].into_iter().enumerate() {
+                        let (nx, ny) = (c.x + dx, c.y + dy);
+                        if nx >= 0
+                            && ny >= 0
+                            && (nx as usize) < w
+                            && (ny as usize) < h
+                            && floor[ny as usize * w + nx as usize]
+                        {
+                            n[slot] = (ny as usize * w + nx as usize) as i32;
                         }
                     }
-                }
-                let growth = c.growth * v0 * (self.k[idx] - v0);
-                let recoil = c.light_recoil * self.light01[idx] * v0;
-                self.scratch[idx] = (v0 + growth + c.diffuse * lap - recoil).clamp(0.0, 1.0);
-            }
-            for &(idx, _) in &self.cells {
-                self.v[idx] = self.scratch[idx];
+                    n
+                })
+                .collect();
+        }
+        for _ in 0..c.substeps {
+            react_out
+                .par_iter_mut()
+                .zip(cells.par_iter())
+                .zip(nbr.par_iter())
+                .for_each(|((out, &(idx, _cell)), n)| {
+                    let v0 = v[idx];
+                    // 4-neighbour Laplacian in the fixed N,E,S,W order; a `-1` slot is a wall/off-grid
+                    // neighbour = no-flux (contributes 0), so mold does not leak through walls. The neighbours
+                    // are precomputed at bake from the static floor mask, so this is the same sum in the same
+                    // order as the branchy version — bit-identical, just branch-free (see `MoldField::nbr`).
+                    let mut lap = 0.0f32;
+                    for &ni in n {
+                        if ni >= 0 {
+                            lap += v[ni as usize] - v0;
+                        }
+                    }
+                    let growth = c.growth * v0 * (k[idx] - v0);
+                    let recoil = c.light_recoil * light01[idx] * v0;
+                    *out = (v0 + growth + c.diffuse * lap - recoil).clamp(0.0, 1.0);
+                });
+            // Serial scatter: floor-indexed results → grid-indexed `v` (the double-buffer swap).
+            for (&(idx, _), &nv) in cells.iter().zip(react_out.iter()) {
+                v[idx] = nv;
             }
         }
     }
@@ -258,6 +313,8 @@ fn bake_mold(
         }
     }
     field.cells = cells;
+    // `nbr` (the branch-free neighbour table) is computed lazily on the first `diffuse_react` after `cells`
+    // is set — one compute site, so a test that sets `cells` directly and the real bake can never diverge.
     Ok(())
 }
 
@@ -270,6 +327,8 @@ fn mold_update(
     config: Res<GameConfig>,
     light: Res<LightField>,
 ) {
+    // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`).
+    let _span = info_span!("mold_update").entered();
     // Fill the per-cell normalised illuminance once (reused across substeps). Split the borrow: read
     // `cells` while writing `light01`, then hand the list back before the reaction-diffusion.
     let light_ref = config.mold.light_ref;

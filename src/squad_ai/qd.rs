@@ -127,6 +127,48 @@ impl MapElitesArchive {
     }
 }
 
+/// Convergence early-stop for a quality-diversity search: stop once the archive's **QD-score** (Σ elite
+/// fitness — quality × diversity, Pugh et al. 2016) has not improved by more than `EPS` for `patience`
+/// consecutive generations. This is exactly the archive-property termination Mouret & Clune (2015) prescribe
+/// for MAP-Elites ("a fixed amount of computational resources are consumed, or *some property of the archive
+/// is produced* … a certain percentage of the map cells being filled, average fitness reaching a level").
+/// We plateau on QD-score, NOT best-fitness, because MAP-Elites keeps gaining *diversity* after fitness
+/// saturates — a `levels` phase hits fitness 1.0 early yet the archive is still filling, so a best-fitness
+/// stop would quit too soon (Pugh et al. 2016; empirically Alvarez et al. 2020, IC MAP-Elites).
+///
+/// **Determinism:** `qd_score()` is a fixed-order `BTreeMap` sum, and the search draws all its RNG *before*
+/// the rollouts of each generation, so the generation-K archive is byte-identical whether or not later
+/// generations were planned — a `patience`-stopped run is bit-reproducible and reproduces the exact prefix
+/// of a full run. `patience == 0` disables the stop (run every generation — today's behaviour).
+pub struct PlateauStop {
+    patience: u32,
+    best_qd: f32,
+    stall: u32,
+}
+
+impl PlateauStop {
+    pub fn new(patience: u32) -> Self {
+        PlateauStop { patience, best_qd: f32::NEG_INFINITY, stall: 0 }
+    }
+
+    /// Feed this generation's QD-score; returns `true` once the search has plateaued for `patience`
+    /// consecutive generations and should stop.
+    pub fn should_stop(&mut self, qd_score: f32) -> bool {
+        if self.patience == 0 {
+            return false;
+        }
+        // Require a real gain, not float noise: QD-score sums [0,1] fitnesses over filled cells.
+        const EPS: f32 = 1.0e-4;
+        if qd_score > self.best_qd + EPS {
+            self.best_qd = qd_score;
+            self.stall = 0;
+        } else {
+            self.stall += 1;
+        }
+        self.stall >= self.patience
+    }
+}
+
 /// Summary statistics from one headless episode, from which the descriptor + interestingness fitness
 /// are computed.
 #[derive(Clone, Copy, Debug)]

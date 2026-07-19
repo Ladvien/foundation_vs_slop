@@ -91,3 +91,34 @@ jobs:
       - name: Test (harness — replay + liveness + search-calibration, single-threaded)
         # Serial: headless Apps must not overlap (serial_guard + --test-threads=1).
         run: cargo test --features test-harness -- --test-threads=1
+
+  # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
+  # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,
+  # in principle, diverge only in release. This job re-runs the deterministic core under `--release` to
+  # prove it does not. LTO / codegen-units are forced OFF here purely for CI speed: they change
+  # scheduling/inlining only, never IEEE-754 results, so this still exercises the release-only behaviour
+  # (opt-level 3 + assertions off) that actually bears on determinism. The full LTO link is a build-only
+  # concern validated at ship time, not a determinism one.
+  release-determinism:
+    name: determinism (release profile)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test (deterministic core, release profile)
+        run: cargo test --release

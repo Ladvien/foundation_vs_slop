@@ -36,6 +36,9 @@ pub struct AudioSearchConfig {
     pub resolution: usize,
     pub dungeon_seeds: Vec<u64>,
     pub episode_ticks: u32,
+    /// Convergence early-stop patience (generations without QD-score gain); `0` disables. See
+    /// [`crate::squad_ai::qd::PlateauStop`].
+    pub patience: u32,
 }
 
 impl Default for AudioSearchConfig {
@@ -46,8 +49,13 @@ impl Default for AudioSearchConfig {
             batch: 32,
             sigma: 0.3,
             resolution: 8,
-            dungeon_seeds: vec![0x5C09191, 0x1CE5, 0xB0BA],
-            episode_ticks: 1800,
+            dungeon_seeds: crate::squad_ai::coevolve::HELD_IN_SEEDS.to_vec(),
+            // The measured minimal-criterion floor (`tests/search_calibration.rs`, and `SearchConfig`'s own
+            // default): below it the authored squad takes no damage on some held-in worlds, so the criterion
+            // rejects every candidate and the archive stays empty (Mouret & Clune 2015 — the evaluation must
+            // let the behaviour play out; Yannakakis et al. 2019 on the minimal criterion in constrained QD).
+            episode_ticks: 7200,
+            patience: 0,
         }
     }
 }
@@ -93,6 +101,7 @@ pub fn search(
         &authored_g,
         cfg.generations,
         cfg.batch,
+        cfg.patience,
         "the shipped audio config failed the minimal criterion on the held-in seeds",
         |parent, rng| mutate(parent, cfg.sigma, rng),
         |child| audio_genome::is_feasible(child).is_ok(),

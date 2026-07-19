@@ -7,7 +7,7 @@ edition = "2024"
 # Opt-in test/replay scaffolding: gates the headless `sim_harness`, the deterministic snapshot/hash
 # accessors, and any test-only visual-decoupling hooks. Off by default so the shipped binary carries
 # none of it. Enable with `cargo test --features test-harness`.
-test-harness = ["bevy/debug", "dep:clap", "dep:indicatif"]
+test-harness = ["bevy/debug", "dep:clap", "dep:indicatif", "dep:libc"]
 
 # Both binaries are declared explicitly. `src/bin/train.rs` would otherwise be auto-discovered and
 # compiled on a plain `cargo check`, where `sim_harness` does not exist — `required-features` is the
@@ -49,6 +49,12 @@ rayon = "1"
 # per-generation progress bar (ETA + stats) and the multi-bar island display.
 clap = { version = "4", features = ["derive"], optional = true }
 indicatif = { version = "0.17", optional = true }
+# Linux `prctl(PR_SET_PDEATHSIG)` so the offline `train` search's island/worker child PROCESSES are killed by
+# the kernel the instant the driver dies — for any reason, including a signal that skips Rust destructors.
+# Without it a Ctrl+C/kill orphaned the 24 island workers and pegged the box (they outlived their driver).
+# `train`-only: pulled in by `test-harness`, never in the shipped game binary. Already resolved in Cargo.lock
+# (transitive via bevy), so this adds no new download.
+libc = { version = "0.2", optional = true }
 
 # Bevy's recommended dev compile-speed profile: keep our own crate light so
 # iteration is fast, but optimize dependencies so the engine runs at speed.
@@ -66,3 +72,19 @@ debug = false
 # Package overrides above do not reach build scripts or proc macros; those need build-override.
 [profile.dev.build-override]
 debug = false
+
+# Shipping/runtime profile. Bevy's recommended release settings: whole-program `thin` LTO plus a single
+# codegen unit trade longer link time for faster generated code across the whole 58k-LOC crate (the game
+# and the `--release` `train` driver both use this). These flags change scheduling/inlining only — they do
+# NOT alter IEEE-754 results (rustc never reassociates floats or contracts FMA without `-ffast-math`), so
+# the exact-hash determinism goldens are unaffected. Verified by running the determinism suite in release.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Final-distribution profile: `fat` LTO squeezes a bit more at the cost of even longer link time. Use for
+# shipped builds (`cargo build --profile dist`); day-to-day and training stay on `release`.
+[profile.dist]
+inherits = "release"
+lto = "fat"
