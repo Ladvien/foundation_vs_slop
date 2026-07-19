@@ -149,6 +149,24 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Break a Unix-epoch **day** count into proleptic-Gregorian `(year, month, day)`. Howard Hinnant's
+/// civil-from-days algorithm ("chrono-Compatible Low-Level Date Algorithms"). The one calendar routine
+/// in the tree — the bake ledger's `utc_stamp` (`bin/train.rs`) and the debug-capture filename
+/// (`region_capture`) both call it, so there is deliberately no date crate. `month`/`day` are 1-based.
+#[inline]
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m as u32, d as u32)
+}
+
 /// Advance a linear congruential generator (Numerical Recipes constants) and return the new state.
 #[inline]
 pub fn next_u32(state: &mut u32) -> u32 {

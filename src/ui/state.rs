@@ -81,12 +81,17 @@ pub fn sync_sim_blocked(
     app_state: Res<State<AppState>>,
     // `State<MenuState>` only exists while `InGame` (it's a substate); absent otherwise.
     menu: Option<Res<State<MenuState>>>,
+    // The dev-only region-capture note box freezes the frame while the player types. Routed through
+    // this single `SimBlocked` writer (not a second writer of `Time<Virtual>`/`GameSpeed`) so the one
+    // pause path holds. Never present in release — the resource is only inserted by the debug tool.
+    note_input: Option<Res<crate::NoteInputActive>>,
     mut blocked: ResMut<SimBlocked>,
 ) {
-    let want = match app_state.get() {
-        AppState::Boot | AppState::Title | AppState::Warmup => true,
-        AppState::InGame => menu.map(|m| m.get().is_blocking()).unwrap_or(false),
-    };
+    let want = note_input.is_some()
+        || match app_state.get() {
+            AppState::Boot | AppState::Title | AppState::Warmup => true,
+            AppState::InGame => menu.map(|m| m.get().is_blocking()).unwrap_or(false),
+        };
     if blocked.0 != want {
         blocked.0 = want;
     }

@@ -77,8 +77,14 @@ pub fn command_input(
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     selected: Query<(Entity, &Transform), With<Selected>>,
+    capture: Res<crate::DebugCaptureActive>,
     mut sfx: MessageWriter<Sfx>,
 ) {
+    // Stand down while the dev-only region-capture tool (Ctrl+P) owns the mouse, so a capture drag
+    // doesn't also issue a squad move order. Always `false` in release (the plugin isn't registered).
+    if capture.0 {
+        return;
+    }
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }

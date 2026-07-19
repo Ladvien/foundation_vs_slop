@@ -151,6 +151,10 @@ pub enum Sfx {
     MoveOrder,
     /// A move click had nowhere reachable to go. (UI — non-spatial.)
     Invalid,
+    /// A debug region-capture was taken (Ctrl+P dev tool). A short snap confirming the gesture —
+    /// fired on mouse-release so it lands within the 20–70 ms window Kaaresoja (2015) gives for a
+    /// button-feedback sound to read as simultaneous with the action. (UI — non-spatial, dev-only.)
+    Screenshot,
     /// One laser bolt left a muzzle, at the muzzle.
     Fire(Vec3),
     /// A bolt struck a wall, at the impact point.
@@ -180,6 +184,8 @@ impl Sfx {
 struct AudioAssets {
     move_order: Handle<AudioSource>,
     invalid: Handle<AudioSource>,
+    /// Camera-shutter "snap" for the Ctrl+P debug region-capture (see `region_capture`).
+    shutter: Handle<AudioSource>,
     fire: Handle<AudioSource>,
     wall: Handle<AudioSource>,
     /// Wet splat for a bolt biting flesh (per hit).
@@ -310,6 +316,7 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
     let a = AudioAssets {
         move_order: assets.load("audio/ui/move_order.ogg"),
         invalid: assets.load("audio/ui/invalid.ogg"),
+        shutter: assets.load("audio/ui/shutter.ogg"),
         fire: assets.load("audio/weapon/fire.ogg"),
         wall: assets.load("audio/impact/wall.ogg"),
         splat: assets.load("audio/impact/splat.ogg"),
@@ -427,6 +434,12 @@ fn play_sfx(
                 commands.spawn((
                     AudioPlayer::new(assets.invalid.clone()),
                     one_shot(UI_VOL * bus.ui, jitter(&mut rng, 0.03)),
+                ));
+            }
+            Sfx::Screenshot => {
+                commands.spawn((
+                    AudioPlayer::new(assets.shutter.clone()),
+                    one_shot(UI_VOL * bus.ui, jitter(&mut rng, 0.04)),
                 ));
             }
             // World sounds — spatialized at the event point.

@@ -21,7 +21,14 @@ impl Plugin for PauseMenuPlugin {
         // Keyboard navigation and focus cleanup are handled globally in `UiPlugin` for every menu
         // screen; this plugin only owns the Esc toggle and the overlay's own lifecycle. Its buttons
         // live inside a `TabGroup` (see `spawn_pause`) so the shared nav can reach them.
-        app.add_systems(Update, toggle_pause.run_if(in_state(AppState::InGame)))
+        // Gate Escape off while the dev-only region-capture note box is open, so it finalizes the note
+        // instead of opening the pause overlay. `NoteInputActive` is never present in release.
+        app.add_systems(
+            Update,
+            toggle_pause
+                .run_if(in_state(AppState::InGame))
+                .run_if(not(resource_exists::<crate::NoteInputActive>)),
+        )
             .add_systems(OnEnter(MenuState::Pause), spawn_pause)
             .add_systems(
                 OnExit(MenuState::Pause),

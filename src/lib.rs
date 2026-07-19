@@ -32,6 +32,11 @@ pub mod config;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
+/// Dev-only visual-debug region capture: Ctrl+P → drag a screenspace rectangle → save just that region
+/// to `debug_screenshots/` with a snap sound, so a later session can see what the player pointed at.
+/// Debug-only, stripped from release like `devshot`.
+#[cfg(debug_assertions)]
+pub mod region_capture;
 /// Dev-only performance overlay (FPS / frame-ms / entity-count / CPU / mem, toggled with F4) plus the
 /// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
@@ -90,6 +95,22 @@ use bevy::winit::{UpdateMode, WinitSettings};
 /// settle fast — arcade feel over realism. Only `RigidBody::Dynamic` gib chunks are affected;
 /// nothing else in the game is a physics body (see `gore`/`autogib`).
 const GIB_GRAVITY: f32 = 18.0;
+
+/// While the dev-only region-capture tool (Ctrl+P, see `region_capture`) owns the mouse, the squad
+/// move-order in `selection::command_input` must stand down so a capture drag doesn't also march the
+/// squad. Defined here (always compiled) and driven only by the debug-only `RegionCapturePlugin`, so the
+/// release binary keeps one code path: the resource is always present and simply stays `false`.
+#[derive(Resource, Default)]
+pub struct DebugCaptureActive(pub bool);
+
+/// Present only while the dev-only region-capture **note box** (see `region_capture`) is open for text
+/// entry. Its presence is the single public signal that (a) freezes the sim through the one existing
+/// path — `ui::state::sync_sim_blocked` ORs it into `SimBlocked` — and (b) gates other keyboard systems
+/// (`pause::toggle_pause`, `region_capture::drive`) via `run_if(not(resource_exists::<NoteInputActive>))`
+/// so keystrokes don't leak while typing. Inserted only by the debug-only note box, so in release it is
+/// never present and every reader sees the default (unfrozen, ungated) path.
+#[derive(Resource)]
+pub struct NoteInputActive;
 
 /// Build and run the full windowed game. The headless test harness (`sim_harness`, behind the
 /// `test-harness` feature) constructs an equivalent `App` without render/winit/audio so the same
@@ -247,6 +268,15 @@ pub fn run() {
     // release binary free of the module and its per-frame `screenshot.request` sentinel polling.
     #[cfg(debug_assertions)]
     app.add_plugins(devshot::DevShotPlugin);
+
+    // Always present so `selection::command_input` can gate on it in every build (see `DebugCaptureActive`);
+    // only the debug-only `RegionCapturePlugin` below ever flips it true.
+    app.init_resource::<DebugCaptureActive>();
+
+    // Dev-only Ctrl+P region capture (screenspace rectangle → cropped PNG + snap). Debug-only, on `Update`,
+    // never in the headless harness, so it stays out of the deterministic core and the shipped binary.
+    #[cfg(debug_assertions)]
+    app.add_plugins(region_capture::RegionCapturePlugin);
 
     // Dev-only perf overlay (F4) + diagnostics. Debug-only, never in the headless harness, so it stays
     // out of the deterministic core and the shipped binary (see `perf_hud`).
