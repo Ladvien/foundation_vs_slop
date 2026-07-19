@@ -79,7 +79,13 @@ impl Plugin for RegionCapturePlugin {
                     .chain(),
             )
             // The note box only lives while a `NoteDraft` exists (opened by `run_pending_capture`).
-            .add_systems(Update, note_input.run_if(resource_exists::<NoteDraft>));
+            .add_systems(Update, note_input.run_if(resource_exists::<NoteDraft>))
+            // One-line boot confirmation: if this line is absent from the log, the tool wasn't compiled in
+            // (a release build strips the whole `debug_assertions`-only module), which is the first thing to
+            // rule out when Ctrl/Super+P appears to do nothing.
+            .add_systems(Startup, || {
+                info!("region_capture: ready — Ctrl+P (or Super+P) arms a debug region capture");
+            });
     }
 }
 
@@ -123,8 +129,12 @@ fn drive(
     mut commands: Commands,
 ) {
     let (win_entity, win) = *window;
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let toggle = ctrl && keys.just_pressed(KeyCode::KeyP);
+    // Accept Ctrl OR Super/Meta as the modifier: a Ctrl<->Meta remap (or a Cmd-key habit) still arms it.
+    let modifier = keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
+    let toggle = modifier && keys.just_pressed(KeyCode::KeyP);
     let cancel = keys.just_pressed(KeyCode::Escape);
     let cursor = win.cursor_position(); // logical px, `None` when off-window
 
@@ -133,6 +143,15 @@ fn drive(
             if toggle {
                 state.phase = Phase::Armed;
                 set_cursor(&mut commands, win_entity, SystemCursorIcon::Crosshair);
+                info!("region_capture: armed — drag a box, release to capture (Esc or Ctrl/Super+P to cancel)");
+            } else if keys.just_pressed(KeyCode::KeyP) {
+                // 'P' reached the app but no Ctrl/Super was held — surface it, since a Ctrl<->Meta remap
+                // (this box's keys were reported flipped) is the usual cause. No log at all ⇒ either a
+                // release build (this whole module is `debug_assertions`-only) or the window isn't focused.
+                info!(
+                    "region_capture: 'P' pressed with no Ctrl/Super modifier registered — hold Ctrl or \
+                     Super (Meta) and press P to arm"
+                );
             }
         }
         Phase::Armed => {
