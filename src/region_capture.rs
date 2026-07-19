@@ -22,7 +22,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::ButtonState;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::input::{ButtonState, InputSystems};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
@@ -80,6 +81,17 @@ impl Plugin for RegionCapturePlugin {
             )
             // The note box only lives while a `NoteDraft` exists (opened by `run_pending_capture`).
             .add_systems(Update, note_input.run_if(resource_exists::<NoteDraft>))
+            // While the note box owns the keyboard, swallow ALL gameplay input at the source so no shortcut
+            // (camera pan/rotate/zoom, speed digits, overlay toggles, …) fires while the player types. Runs
+            // in `PreUpdate` right after Bevy populates the input resources, so every `Update` reader sees
+            // them empty. `note_input` reads raw `KeyboardInput` *events* (not `ButtonInput`), so text entry
+            // is unaffected. This is the one place that guarantees coverage — no per-system gate to forget.
+            .add_systems(
+                PreUpdate,
+                swallow_input_during_note
+                    .after(InputSystems)
+                    .run_if(resource_exists::<NoteInputActive>),
+            )
             // One-line boot confirmation: if this line is absent from the log, the tool wasn't compiled in
             // (a release build strips the whole `debug_assertions`-only module), which is the first thing to
             // rule out when Ctrl/Super+P appears to do nothing.
@@ -707,6 +719,22 @@ fn note_input(
     if let Ok(mut t) = line.single_mut() {
         t.0 = format!("{}\u{2588}", draft.note);
     }
+}
+
+/// Swallow every gameplay input while the note box is open, so typing a note can't drive the camera, change
+/// game speed, toggle overlays, etc. Clears the derived input resources (keyboard/mouse buttons + the
+/// accumulated scroll/motion) after Bevy fills them and before any `Update` reader runs. `note_input` reads
+/// raw `KeyboardInput` events, which this does not touch, so text entry keeps working.
+fn swallow_input_during_note(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut scroll: ResMut<AccumulatedMouseScroll>,
+    mut motion: ResMut<AccumulatedMouseMotion>,
+) {
+    keys.reset_all();
+    mouse.reset_all();
+    scroll.delta = Vec2::ZERO;
+    motion.delta = Vec2::ZERO;
 }
 
 /// Write the `.md` sidecar: the player's note (or a placeholder) above the snapshotted metadata block.
