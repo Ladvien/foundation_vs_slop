@@ -78,7 +78,7 @@ pub struct MoldConfig {
 /// squad's line of sight — a real tactical cost, not cosmetic. Adding the mold also shifts the
 /// deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf. `tests/replay.rs`),
 /// which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes. Those were
-/// re-selected: the held-in set is now `[0x5C09191, 0x1CE5, 0xB0BA]`, where the shipped squad produces a
+/// re-selected: the held-in set is now `[0x5C09191, 0x1CE5, 0xD00D]`, where the shipped squad produces a
 /// real encounter — it survives with margin AND the swarm survives (neither side is wiped). The couplings
 /// stay LIVE and tunable: the optimizer (`world_genome` BOUNDS: `dim_light` 0..1, `occlude_los` 0..1.5,
 /// `seep_boost` 0.5..6) can push them and weigh the "mold makes it scarier" cost.

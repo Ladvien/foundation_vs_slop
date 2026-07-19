@@ -64,11 +64,12 @@ struct field-by-field from the flags, so the `Default` impl never runs on this p
 table and the reason a shorter episode thins the archives), archive resolution 8, RNG seed `0xC0FFEE`,
 `--jobs 1` (single-process; `train all` instead defaults it to every core).
 
-Held-in seeds are `[0x5C09191, 0x1CE5, 0xB0BA]`. **Do not copy that list** — the one definition is
+Held-in seeds are `[0x5C09191, 0x1CE5, 0xD00D]`. **Do not copy that list** — the one definition is
 `squad_ai::coevolve::HELD_IN_SEEDS`, and every default reads it. The previous set (`0xA11CE`, `0xBEEF`) was
-retired when the mold tipped those worlds into squad wipes (see `mold::MoldConfig`'s `Default`), and stale
-copies of it in this file outlived the change long enough to send a later reader re-tuning the episode floor
-against a world the search no longer runs. `--seeds` accepts hex (`0x5C09191,0x1CE5`).
+retired when the mold tipped those worlds into squad wipes, and `0xB0BA` was retired on 2026-07-19 when the
+baked audio elite tipped it into a wipe too (see `mold::MoldConfig`'s `Default` and `HELD_IN_SEEDS`); stale
+copies of the old list in this file outlived the change long enough to send a later reader re-tuning the
+episode floor against a world the search no longer runs. `--seeds` accepts hex (`0x5C09191,0x1CE5`).
 
 **`--jobs N` — parallel rollout evaluation.** The search is CPU-bound in `rollout`, which can't be threaded
 (the harness pins each process to one thread and holds a process-wide lock for determinism). `--jobs N`
@@ -129,21 +130,21 @@ criterion`. Writes `elites_squad.ron`, `elites_swarm.ron`, `elites_world.ron` un
 **gitignored**: they are reproducible outputs of `(prior, seed, config)`, not source.
 
 Keep `--ticks` at 7200 — it is the default, and it is a **measured** floor, not a preference. Re-measured
-2026-07-17 (`train probe --ticks N`, authored brains, damage taken per held-in seed):
+2026-07-19 after the audio elite was baked into `config.ron` (`train probe --ticks N`, authored brains,
+damage taken per held-in seed; every cell is 5/5 survivors with the swarm alive):
 
 | seed | 1800 | 3600 | 5400 | 7200 |
 |---|---|---|---|---|
-| `0x5C09191` | 46 | 46 | 46 | 46 |
-| `0x1CE5` | 0\* | 0\* | 0\* | 91 |
-| `0xB0BA` | 1 | 1 | 207 | 489 |
+| `0x5C09191` | 119 | 119 | 238 | 238 |
+| `0x1CE5` | 0\* | 0\* | 0\* | 31 |
+| `0xD00D` | 0\* | 77 | 157 | 205 |
 
-\* PASSes the `unit_damage_taken > 0.0` clause, so non-zero — but under half a hit point (`probe` prints
-`{:.0}`). Every cell above passes `minimal_criterion`, so a short episode does **not** outright reject the
-shipped game — an earlier version of this warning claimed it did. What it does is leave the criterion on a
-knife's edge: below 7200, `0x1CE5` clears "nothing was at stake" by less than one hit point, so a candidate
-slightly less aggressive than the authored brain is rejected, the admitted fraction collapses, and the
-archives come back thin. `0x1CE5` is the binding world and only acquires real stakes between 5400 and 7200.
-Replayability tracks the same edge: 0.049 / 0.026 / 0.111 / 0.114.
+\* under half a hit point (`probe` prints `{:.0}`); at that episode length the cell would fail the
+`unit_damage_taken > 0.0` clause — which is why the floor sits at 7200. At 7200 every cell passes
+`minimal_criterion` with margin (probe reports "all seeds admitted"). Below 7200 it does not: `0x1CE5` is the
+binding world — it takes no measurable damage until 7200 (0 → 31), so a candidate slightly less aggressive
+than the authored brain is rejected, the admitted fraction collapses, and the archives come back thin.
+Replayability spread across the three seeds: 0.078 / 0.071 / 0.067 / 0.054.
 
 `tests/search_calibration.rs` gates the absolute version of this failure. **Re-measure after anything that
 moves the deterministic trajectory** — these numbers are a snapshot, and the last one went stale silently.

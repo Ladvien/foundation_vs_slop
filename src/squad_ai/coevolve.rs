@@ -455,11 +455,16 @@ impl<G: Clone> Population<G> {
 /// must not be able to leave a stale copy behind. It already has — `0xA11CE` and `0xBEEF` were retired when
 /// the mold landed (see `mold::MoldConfig`'s `Default`), and survived for months in docs and test comments
 /// that still called them "held-in", long enough to mislead a later reader into re-tuning the episode floor
-/// against a world the search no longer runs.
+/// against a world the search no longer runs. `0xB0BA` was retired on 2026-07-19 for the same class of
+/// reason: baking the searched audio elite into `config.ron` (the `audio:` slice) made the swarm's acoustic
+/// coordination more lethal, tipping that knife-edge world from a one-hit-point survival (489 dmg) into a
+/// squad wipe (779 dmg). It is replaced by `0xD00D`, where the authored squad survives 5/5 with margin
+/// (205 dmg at 7200) and the swarm survives — re-verified by
+/// `the_authored_brains_produce_a_real_encounter_on_every_world`.
 ///
 /// Chosen so the shipped squad produces a real encounter on each: it survives with margin AND the swarm
 /// survives, so neither side is wiped.
-pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xB0BA];
+pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xD00D];
 
 /// Everything one run needs. `episode_ticks` at 60 Hz: 7200 ≈ 120 s of simulated time.
 ///
@@ -467,26 +472,25 @@ pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xB0BA];
 /// evaluation alternates player-ordered advance with AI-controlled engagement (see `evaluate`), so only part
 /// of the episode moves the squad toward the nests.
 ///
-/// **Measured 2026-07-17** — authored brains on the default world, `train probe --ticks N`, reporting
-/// `unit_damage_taken` per held-in seed:
+/// **Measured 2026-07-19** — re-measured after the audio elite was baked into `config.ron` (which retired
+/// the previous knife-edge seed `0xB0BA`; see [`HELD_IN_SEEDS`]). Authored brains, `train probe --ticks N`,
+/// reporting `unit_damage_taken` per held-in seed; every cell below is 5/5 survivors with the swarm alive:
 ///
 /// | seed | 1800 | 3600 | 5400 | 7200 |
 /// |---|---|---|---|---|
-/// | `0x5C09191` | 46 | 46 | 46 | 46 |
-/// | `0x1CE5` | 0\* | 0\* | 0\* | 91 |
-/// | `0xB0BA` | 1 | 1 | 207 | 489 |
+/// | `0x5C09191` | 119 | 119 | 238 | 238 |
+/// | `0x1CE5` | 0\* | 0\* | 0\* | 31 |
+/// | `0xD00D` | 0\* | 77 | 157 | 205 |
 ///
-/// \* `train probe` prints damage with `{:.0}`. These cells PASS the `unit_damage_taken > 0.0` clause, so
-/// they are non-zero — but under half a hit point.
+/// \* `train probe` prints damage with `{:.0}`; these sub-half-hit-point cells would fail the
+/// `unit_damage_taken > 0.0` clause at that episode length — which is exactly why the floor sits at 7200.
 ///
-/// **Every cell passes `minimal_criterion`.** So — contrary to what this comment claimed before it was
-/// re-measured — a short episode does not outright *reject* the shipped game. What it does is leave the
-/// criterion balanced on a knife's edge: below 7200, `0x1CE5` clears "nothing was at stake" by less than one
-/// hit point and `0xB0BA` by one. A candidate marginally less aggressive than the authored brain is rejected
-/// there, so the admitted fraction collapses and the archives come back thin — the same empty-archive
-/// failure as before, arriving probabilistically rather than absolutely. `0x1CE5` is the binding world: it
-/// only acquires real stakes between 5400 and 7200. Cross-seed replayability tracks the same edge — 0.049 /
-/// 0.026 / 0.111 / 0.114 at 1800 / 3600 / 5400 / 7200.
+/// **At 7200 every cell passes `minimal_criterion` with margin** (probe: "all seeds admitted"). A shorter
+/// episode does not: `0x1CE5` is the binding world — it takes no measurable damage until 7200 (0 → 31), so
+/// below that its "nothing was at stake" clause fails and every candidate marginally less aggressive than the
+/// authored brain is rejected, collapsing the admitted fraction and thinning the archive — the same
+/// empty-archive failure, arriving probabilistically rather than absolutely. Cross-seed replayability spread
+/// across the three seeds: 0.078 / 0.071 / 0.067 / 0.054 at 1800 / 3600 / 5400 / 7200.
 ///
 /// A shorter episode does not make the search cheaper; it makes it thin.
 ///
