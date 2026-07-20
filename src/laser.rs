@@ -241,7 +241,10 @@ fn fire_laser(
         if *role == crate::squad_ai::role::RoleId::Researcher {
             continue;
         }
-        let muzzle = unit.transform_point(crate::squad::MUZZLE_LOCAL);
+        // Rotated + translated but NOT scaled: the muzzle world offset is fixed gameplay geometry,
+        // independent of the cosmetic `FIGURINE_SCALE` (see `squad::MUZZLE_OFFSET`). This reproduces the
+        // shipped greybox's muzzle world position bit-for-bit, so the mesh swap leaves combat unperturbed.
+        let muzzle = unit.translation + unit.rotation * crate::squad::MUZZLE_OFFSET;
         // The unit faces its travel direction (local -Z); it can only shoot what's in front of it.
         let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let mut best = f32::MAX;

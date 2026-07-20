@@ -700,7 +700,7 @@ pub fn field_hash(app: &mut App) -> u64 {
     if let Some(water) = world.get_resource::<crate::almond_water::AlmondWater>() {
         water.fold_fingerprint(&mut hash);
     }
-    // The CPU gameplay mold field feeds crab/light/LOS/water couplings, so a bake/diffusion/recoil bug that
+    // The CPU gameplay mold field feeds crab/light/water couplings, so a bake/diffusion/recoil bug that
     // shifts the mold moves the replay hash even when no actor has moved yet. Fold it too, like the others.
     if let Some(mold) = world.get_resource::<crate::mold::MoldField>() {
         mold.fold_fingerprint(&mut hash);

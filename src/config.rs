@@ -38,6 +38,7 @@ const GAME_CONFIG_PATH: &str = "assets/config/config.ron";
 /// and the density knobs (how much furniture per room). A nested struct so the placement inputs read
 /// as one logical group in the RON.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlacementConfig {
     pub furniture: FurnitureManifest,
     pub metropolis: MetropolisWeights,
@@ -51,6 +52,7 @@ pub struct PlacementConfig {
 /// (The pure rendering-fit contracts — `FURNITURE_SCALE`, `SURFACE_INSET`, `WALL_LIGHT_HEIGHT` — stay in
 /// code: rescaling furniture would push pieces through the 2.4 m ceiling, so they are not "amount" dials.)
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct PlacementDensity {
     /// Cap on tiled decor props (WFC scatter) per room.
     pub tiled_per_room: usize,
@@ -98,7 +100,17 @@ pub fn validate_density(d: &PlacementDensity) -> Result<(), String> {
 
 /// The whole game's data-driven configuration, deserialized from [`GAME_CONFIG_PATH`]. Each field is the
 /// exact struct its subsystem already used; the master RON simply nests them under one top-level tuple.
+///
+/// `#[serde(deny_unknown_fields)]` here and on **every** nested config struct is the "one path, no
+/// fallback" rule applied to the config surface: a typo'd RON field (`behaviour:` for `behavior:`, or a
+/// mistyped leaf key) is a **loud parse error at load**, not a silently-`Default`ed value the game then
+/// runs on. A silently created-or-ignored config value is a well-documented hidden-bug class (Lamb &
+/// Zacchiroli, "Reproducible Builds", IEEE Software 2021, DOI 10.1109/ms.2021.3073045; and silent
+/// fallbacks as a reproducibility hazard in Politowski, Petrillo & Guéhéneuc, "A Survey of Video Game
+/// Testing", arXiv:2103.06431). NB: the evolvable-overlay/archive *mirror* types in `elite_overlay.rs`
+/// deliberately do NOT carry this — they must tolerate the archive's unnamed descriptor/fitness fields.
 #[derive(Resource, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameConfig {
     pub dungeon: DungeonConfig,
     pub placement: PlacementConfig,
@@ -187,5 +199,30 @@ impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
         let config = load_game_config().unwrap_or_else(|e| panic!("config: {e}"));
         app.insert_resource(config);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `deny_unknown_fields` guard (Finding A, 2026-07-19 review): a valid config slice still parses, but
+    /// a typo'd/unknown field is a loud `Err`, not a silent `Default`. Locks the behaviour so a future
+    /// derive change (or a dropped attribute) that reopens the silent-ignore path trips here first.
+    /// Research: Lamb & Zacchiroli 2021 (config silently ignored is a hidden-bug class).
+    #[test]
+    fn config_structs_reject_unknown_fields() {
+        let good = "(tiled_per_room: 1, freestanding_per_room: 1, scatter_per_room: 1, \
+                    wall_lights_per_room: 1, freestanding_min_gap: 1.0, group_near_max: 1.0)";
+        ron::from_str::<PlacementDensity>(good).expect("a valid PlacementDensity slice must parse");
+
+        // Same slice with one extra (typo'd) field — must be rejected, not silently dropped.
+        let typo = "(tiled_per_room: 1, freestanding_per_room: 1, scatter_per_room: 1, \
+                    wall_lights_per_room: 1, freestanding_min_gap: 1.0, group_near_max: 1.0, \
+                    tiled_per_rooom: 9)";
+        assert!(
+            ron::from_str::<PlacementDensity>(typo).is_err(),
+            "an unknown/typo'd field must be a loud parse error under deny_unknown_fields"
+        );
     }
 }

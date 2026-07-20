@@ -57,12 +57,23 @@ impl Rect2 {
 }
 
 /// A doorway / corridor mouth on a region's boundary — derived from the coarse `CellData.open`
-/// links + the corridor carve. `cell` is the interior floor cell at the opening, `dir` the wall it
-/// pierces (N/E/S/W). Anchors like doors dispatch onto these.
+/// links + the corridor carve. `cell` is the interior floor cell at lane 0 of the opening, `dir` the
+/// wall it pierces (N/E/S/W), and `width` the number of open lanes (≥1) — the doorway necks down from
+/// its corridor's carved width to `width` lanes, stacked perpendicular to `dir` from `cell`. Anchors
+/// like doors and header lintels dispatch onto these and span all `width` lanes.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Opening {
     pub dir: Dir,
     pub cell: [i32; 2],
+    /// Open lanes at the mouth (≥1). `#[serde(default = ...)]` → a hand-written `Opening` with no
+    /// `width` (older fixtures/tests) reads as a 1-tile doorway, the historical behaviour.
+    #[serde(default = "one")]
+    pub width: usize,
+}
+
+/// serde default for [`Opening::width`] — a 1-tile doorway when the field is absent.
+fn one() -> usize {
+    1
 }
 
 /// Opaque token bag on a region (room type, style tags). The code *matches* these tokens but never

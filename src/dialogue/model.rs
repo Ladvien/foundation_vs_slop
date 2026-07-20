@@ -44,6 +44,7 @@ pub enum Emotion {
 
 /// One selectable option in a [`Node::Choice`]: its label and the node id it jumps to.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Choice {
     pub text: String,
     pub next: String,
@@ -74,6 +75,7 @@ pub enum Node {
 
 /// A named conversation: the id of its `start` node plus the node graph.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Conversation {
     pub start: String,
     pub nodes: HashMap<String, Node>,
@@ -81,6 +83,7 @@ pub struct Conversation {
 
 /// The whole authored dialogue set, one RON file, deserialized once into this resource.
 #[derive(Resource, Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DialogueScript {
     pub conversations: HashMap<String, Conversation>,
 }

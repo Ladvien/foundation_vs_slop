@@ -180,7 +180,38 @@ fn deterministic_core_is_bit_identical() {
 // 17 independent measurements, all `0xe11eed83902ee648`. `deterministic_core_is_bit_identical_across_many_builds`
 // (24 builds) and `search_rollouts_are_reproducible_under_load` (12 rollouts × both held-in seeds × 7200
 // ticks, under CPU load) are green on this value, which is a stronger statement than the old one could make.
-const GOLDEN: u64 = 0xe11eed83902ee648;
+// Re-pinned 2026-07-19 across a run of player-reported worldgen fixes: doorway width, desk-lamp→worktop,
+// almond-water rarity (`pool_spacing` 8→12), and finally the CEILING-LIGHT RECLASSIFICATION — the kit's
+// "Ceiling Light" model was a misclassified table lamp anchored overhead; making it a Scatter worktop
+// lamp removes the room-centre light, so the `LightField` (and the crab photophobia it drives) shifts the
+// units/crabs `snapshot_hash` folds. Not a determinism break — `authored_world_config_override_is_a_noop`
+// measured the SAME new value (world-config seam untouched). Prior chain: 0xe11eed83902ee648 →
+// 0xed748bc555d5529e → 0xf175e0f71ce92183.
+//
+// Re-pinned 2026-07-19 for the WALL-SCONCE ROW rule (player region-capture request: "3-to-X sconces in
+// a row along a wall, gap before the corner"). `furnish.rs` Pass 1b now lays a per-wall row instead of a
+// single mid-room pick, and `wall_lights_per_room` became a real per-room budget (shipped 6, up from 1).
+// More sconces = more `LightEmitter`s = a brighter `LightField`, and the crab photophobia it drives moves
+// the units/crabs `snapshot_hash` folds — the SAME mechanism as the ceiling-light re-pin above, opposite
+// sign (adding light, not removing it). Not a determinism break: `deterministic_core_is_bit_identical`
+// stays green and the value was measured identical across 3 fresh processes. Was `0x819ab83bc5c5540b`.
+//
+// Re-pinned 2026-07-19 for the TRASHCAN MIN-DISTANCE rule (player region-capture request: bins must not
+// cluster). `furnish.rs` Pass 2 now greedily disperses tiled props to `TILED_MIN_GAP` apart, so bin
+// positions moved — and furniture is a nav obstacle the crabs path around, so the crab trajectory (and the
+// `snapshot_hash` it folds) shifts. Not a determinism break: `deterministic_core_is_bit_identical` stays
+// green and the value was identical across 3 fresh processes. Was `0xbf77f8e2024b0c86`.
+//
+// Re-pinned 2026-07-20 for the FURNITURE FOOTPRINT/PIVOT correction + DOORWAY KEEP-CLEAR rule (player
+// region-capture requests: "furniture must not sit in a doorway" and "not halfway through a wall"). The
+// manifest footprints were re-measured off the glbs and off-centre meshes now carry a `pivot` so they
+// recentre on their placement point, and `furnish.rs` rejects any footprint overlapping a doorway
+// approach band. Both change which furniture lands where — furniture is a nav obstacle the crabs path
+// around (and support pieces carry the scatter lamps whose `LightEmitter`s drive crab photophobia), so
+// the crab trajectory the `snapshot_hash` folds shifts. Not a determinism break:
+// `deterministic_core_is_bit_identical` stays green and `authored_world_config_override_is_a_noop`
+// measured the SAME new value (world-config seam untouched). Was `0x6bd480d83f264117`.
+const GOLDEN: u64 = 0x793366008d9878fb;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -296,7 +327,30 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // repeat for this scenario), not by construction. This field golden folds the light/Stig/water grids whose
 // per-cell sums are now canonically ordered. Was `0xe1ec_dc58_3c8d_bfca`. Verified over 17 independent
 // measurements (`train verify --reps 8` + three fresh processes), all `0xd504e6a2f019f3fb`.
-const GOLDEN_FIELD: u64 = 0xd504e6a2f019f3fb;
+// Re-pinned 2026-07-19 alongside `GOLDEN` across the same worldgen-fix run (doorway, desk-lamp, almond
+// rarity, and the CEILING-LIGHT RECLASSIFICATION). This oracle folds the `LightField` and the `AlmondWater`
+// grids directly, so removing the room-centre light and thinning the springs both move it, plus the changed
+// crab motion the Stig channels fold. Arch-stable (scalar-f32 field ops, no rotation). Prior chain:
+// 0xd504e6a2f019f3fb → 0xc609b6efd2e6da78 → 0x131098b2650bd15a.
+//
+// Re-pinned 2026-07-19 alongside `GOLDEN` for the WALL-SCONCE ROW rule (see the `GOLDEN` note). This oracle
+// folds the `LightField` grid directly, so laying a row of sconces along every wall (shipped budget 6, up
+// from one per room) rewrites it outright — and the brighter field moves the crab photophobia the Stig
+// channels fold. Arch-stable (scalar-f32 field ops, no rotation). Verified identical across fresh processes.
+// Was `0x01dbc17ff855b586`.
+//
+// Re-pinned 2026-07-19 alongside `GOLDEN` for the TRASHCAN MIN-DISTANCE rule (see the `GOLDEN` note). Bins
+// are nav obstacles; dispersing them moves the crab trajectory, which re-writes the CRAB_DENSITY / SCENT /
+// ALARM stigmergy channels this oracle folds (the LightField itself is unchanged — bins don't emit).
+// Arch-stable (scalar-f32 field ops, no rotation). Verified identical across fresh processes. Was
+// `0xebd044119a67f842`.
+//
+// Re-pinned 2026-07-20 alongside `GOLDEN` for the FURNITURE FOOTPRINT/PIVOT + DOORWAY KEEP-CLEAR changes
+// (see the `GOLDEN` note). Recentring off-centre support pieces and rejecting doorway-blocking furniture
+// moves where scatter lamps rest, so their `LightEmitter`s rewrite the `LightField` this oracle folds —
+// and the changed crab photophobia moves the stigmergy channels it also folds. Arch-stable (scalar-f32
+// field ops, no rotation). Was `0x5692ad7429ff5736`.
+const GOLDEN_FIELD: u64 = 0xd4db701cc41588ac;
 
 #[test]
 fn field_passes_are_bit_identical() {
@@ -573,6 +627,76 @@ fn search_rollouts_are_reproducible_under_load() {
         split.len(),
         SEEDS.len(),
     );
+}
+
+// TEMP localization probe for the G0 regression exposed by the trashcan min-distance rule. Records
+// per-tick (snapshot, field, gib, bolt) hashes under load and reports the EARLIEST divergent tick and
+// WHICH oracle splits first (field/gib can lead snapshot by hundreds of ticks — see `TickProbe`). Remove
+// once the tie-break is found.
+#[test]
+fn zz_localize_g0() {
+    use foundation_vs_slop::ai::brain::BrainSource;
+    use foundation_vs_slop::squad_ai::evaluate::trace_episode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    const SEED: u64 = 0x5C09191;
+    const TICKS: u32 = 7200;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    let mut base = Vec::new();
+    trace_episode(BrainSource::Authored, None, SEED, TICKS, 1, &mut base);
+
+    let mut earliest: Option<(u32, &'static str, (u64, u64), (u64, u64), (u64, u64), (u64, u64))> = None;
+    for _ in 0..24 {
+        let mut t = Vec::new();
+        trace_episode(BrainSource::Authored, None, SEED, TICKS, 1, &mut t);
+        for (a, b) in base.iter().zip(t.iter()) {
+            if a == b {
+                continue;
+            }
+            let (tick, s0, f0, g0, b0) = *a;
+            let (_, s1, f1, g1, b1) = *b;
+            let which = if s0 != s1 {
+                "snapshot"
+            } else if f0 != f1 {
+                "field"
+            } else if g0 != g1 {
+                "gib"
+            } else {
+                "bolt"
+            };
+            if earliest.map_or(true, |(et, ..)| tick < et) {
+                earliest = Some((tick, which, (s0, s1), (f0, f1), (g0, g1), (b0, b1)));
+            }
+            break;
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    match earliest {
+        Some((tick, which, s, f, g, b)) => println!(
+            "G0-LOCALIZE: earliest split at tick {tick}, first oracle = {which}\n  snapshot {:#018x} / {:#018x}\n  field    {:#018x} / {:#018x}\n  gib      {:#018x} / {:#018x}\n  bolt     {:#018x} / {:#018x}",
+            s.0, s.1, f.0, f.1, g.0, g.1, b.0, b.1
+        ),
+        None => println!("G0-LOCALIZE: no divergence in 24 attempts"),
+    }
 }
 
 #[test]

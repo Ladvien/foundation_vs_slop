@@ -74,6 +74,8 @@ pub mod sim;
 /// Headless deterministic replay/liveness harness — opt-in so it never enters the shipped binary.
 #[cfg(feature = "test-harness")]
 pub mod sim_harness;
+/// Registers the shared `foundation::noise` WGSL import library (windowed-only).
+pub mod shader_lib;
 /// Perceptual (SSIM) image comparison for FX/render visual-regression — opt-in test infrastructure.
 #[cfg(feature = "test-harness")]
 pub mod visual_regression;
@@ -151,6 +153,10 @@ pub fn run() {
             }),
             ..default()
         }))
+        // Shared `foundation::noise` WGSL library — must load after `DefaultPlugins` (AssetPlugin's
+        // EmbeddedAssetRegistry) and before any material shader specializes, so `#import foundation::noise`
+        // resolves for the blood/vhs/impact/mycelia shaders (2026-07-19 review Finding E).
+        .add_plugins(shader_lib::ShaderLibraryPlugin)
         // avian3d rigid-body physics — deliberately scoped: only gib chunks are dynamic bodies and
         // only the floor + walls are static colliders (see `gore`/`autogib`/`dungeon`). Units,
         // enemies, and lasers keep their own custom movement and never touch the solver.
@@ -181,7 +187,7 @@ pub fn run() {
             // cosmetic puddle `AlmondWaterVisualPlugin` sits with the windowed FX below, never in the harness.
             // `MoldPlugin` (the CPU reaction-diffusion gameplay mold) is grouped here too and kept
             // harness-visible, like `LightFieldPlugin`/`AlmondWaterPlugin` — it is pinned CPU gameplay state
-            // (it reads the LightField to recoil and, via its couplings, dims light / occludes LOS / boosts
+            // (it reads the LightField to recoil and, via its couplings, dims light / boosts almond-water
             // seep). The GPU `MyceliaPlugin` below is the cosmetic mirror and stays windowed-only.
             (
                 dungeon::DungeonPlugin,

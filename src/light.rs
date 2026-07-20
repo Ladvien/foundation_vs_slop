@@ -17,8 +17,10 @@
 //!   exact-hash core never depends on a GPU.
 //! - [`LightField`] (Phase 1) is CPU gameplay state read by creature AI, so it *is* harness-visible.
 
-use bevy::pbr::ContactShadows;
+use bevy::pbr::{ContactShadows, Material, MaterialPlugin};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 use serde::{Deserialize, Serialize};
 
 use crate::config::GameConfig;
@@ -29,6 +31,7 @@ use crate::util::{in_grid, row_major};
 /// (see [`GameConfig`]). Read by both [`crate::world`] (environment fill) and [`LightingPlugin`]
 /// (fixtures). No fallback: a missing/invalid slice is a loud startup panic via [`validate_config`].
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct LightingConfig {
     /// Ambient fill brightness — the flat Backrooms fluorescent wash. Lower than the old hardcoded 500
     /// so fixtures carve real contrast (dread/immersion rise as ambient falls — FDG 2014). Read by
@@ -623,6 +626,84 @@ struct FixtureLight {
     failing: bool,
 }
 
+/// Marker for a screen prop (a TV) — inserted at spawn by `placement::furnish` when the manifest item
+/// `affords("screen")`. The windowed `attach_screen_lights` gives it an eery cool-cyan flickering LOS
+/// spotlight *instead* of the generic fixture light, so a TV reads as a dead-channel CRT glowing into the
+/// room rather than a lamp. Cosmetic only: the TV also keeps `LightEmitter` (via `affords("emit")`), so
+/// the gameplay `LightField` is unchanged and this marker never touches the deterministic sim.
+#[derive(Component)]
+pub struct ScreenEmitter;
+
+/// Idempotency guard: set once a [`ScreenEmitter`] has been given its cosmetic screen spotlight.
+#[derive(Component)]
+struct ScreenLit;
+
+/// Idempotency guard: set once a [`ScreenEmitter`]'s CRT face mesh has been swapped to an emissive
+/// material (the self-lit "the screen is on" cue), so `glow_screens` runs once per TV.
+#[derive(Component)]
+struct ScreenGlowing;
+
+/// Flicker state for a TV's screen spotlight (cosmetic, windowed-only). `base_intensity` is the
+/// un-flickered lumens; `phase` decorrelates one TV from another.
+#[derive(Component)]
+struct ScreenLight {
+    base_intensity: f32,
+    phase: f32,
+}
+
+/// Eery CRT screen glow — a cool cyan, the classic dead-channel cast. Held as a code constant (a
+/// cosmetic rendering-fit value, like [`FLICKER_HUM_HZ`]); the gameplay light stays config-driven.
+const SCREEN_COLOR: [f32; 3] = [0.40, 0.78, 0.92];
+/// Spotlight lumens for the screen cast — enough to throw a visible cool wash onto the dresser/floor in
+/// front of the TV (a shadowless 55k cast read too faintly in an already-lit room), still dimmer than a
+/// room fixture so it broods rather than lights.
+const SCREEN_INTENSITY: f32 = 90_000.0;
+/// How far the screen glow spills into the room (metres).
+const SCREEN_RANGE: f32 = 6.5;
+/// Overall glow/brightness multiplier for the animated CRT-static face (the `a` of the material tint).
+/// The material is unlit, so its output IS the emitted colour — a modest multiplier on the cool snow
+/// reads as a bright, self-lit dead-channel screen. The spotlight above supplies the actual cast light.
+const SCREEN_EMISSIVE: f32 = 2.6;
+
+/// GPU uniform for [`TvStaticMaterial`] — mirrors the `TvStatic` struct in `tv_static.wgsl`.
+#[derive(Clone, ShaderType)]
+struct TvStaticUniform {
+    /// rgb = cool CRT tint applied to the snow; a = overall glow multiplier.
+    tint: Vec4,
+}
+
+/// The animated CRT "dead channel" static material for a TV screen mesh (see `tv_static.wgsl`). Unlit —
+/// the fragment output is emitted directly, so the screen self-glows — and driven by `globals.time`, so
+/// one shared instance animates every TV. Windowed-only (registered in [`LightingPlugin`], never the
+/// headless harness). Replaces the flat teal screen material so the TV shows moving snow, scanlines, and
+/// vertical roll like a real untuned set (player request).
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct TvStaticMaterial {
+    #[uniform(0)]
+    settings: TvStaticUniform,
+}
+
+impl Material for TvStaticMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/tv_static.wgsl".into()
+    }
+}
+
+impl Default for TvStaticMaterial {
+    fn default() -> Self {
+        TvStaticMaterial {
+            settings: TvStaticUniform {
+                tint: Vec4::new(SCREEN_COLOR[0], SCREEN_COLOR[1], SCREEN_COLOR[2], SCREEN_EMISSIVE),
+            },
+        }
+    }
+}
+/// Cone half-angle of the screen cast (radians) — wide, so the glow washes the near floor/wall.
+const SCREEN_OUTER_ANGLE: f32 = 0.75;
+/// Base flicker rate of the screen (Hz) — faster and less regular than a fluorescent hum: a CRT's
+/// restless scan roll.
+const SCREEN_FLICKER_HZ: f32 = 11.0;
+
 // ---------------------------------------------------------------------------------------------------
 // Light-response markers — the composable toolkit. Any creature can carry one to gain emergent behaviour
 // around light and its absence; the generic `light_push` (below) reads the shared LightField gradient.
@@ -683,9 +764,18 @@ pub struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<TvStaticMaterial>::default());
         app.add_systems(PostStartup, setup_camera_fx).add_systems(
             Update,
-            (attach_fixture_lights, glow_fixtures, flicker_lights, attach_flashlight_spots),
+            (
+                attach_fixture_lights,
+                glow_fixtures,
+                flicker_lights,
+                attach_flashlight_spots,
+                attach_screen_lights,
+                glow_screens,
+                flicker_screens,
+            ),
         );
     }
 }
@@ -730,6 +820,59 @@ fn attach_flashlight_spots(
     }
 }
 
+/// Give a TV (`ScreenEmitter`) its cosmetic eery glow: a cool-cyan `SpotLight` cast forward out of the
+/// screen, wall-occluded by range (the same shadowless "LOS by placement" idiom as the flashlight and
+/// fixtures). The spot is a child of the TV, so it inherits the TV's yaw (set by the scatter pass to face
+/// the room) and the fog-reveal `Visibility`. Windowed-only (`LightingPlugin`), never in the harness, and
+/// the TV keeps its `LightEmitter` for the gameplay field — so this is determinism-neutral.
+fn attach_screen_lights(
+    mut commands: Commands,
+    screens: Query<Entity, (With<ScreenEmitter>, Without<ScreenLit>)>,
+) {
+    let color = Color::srgb(SCREEN_COLOR[0], SCREEN_COLOR[1], SCREEN_COLOR[2]);
+    for e in &screens {
+        let phase = e.to_bits() as f32 * 2.399_963; // golden-angle decorrelation between TVs
+        commands.entity(e).insert(ScreenLit).with_child((
+            SpotLight {
+                color,
+                intensity: SCREEN_INTENSITY,
+                range: SCREEN_RANGE,
+                outer_angle: SCREEN_OUTER_ANGLE,
+                inner_angle: SCREEN_OUTER_ANGLE * 0.5, // soft, diffuse screen wash
+                // A real TV throws shadows of whatever stands in front of it (player request). Unlike the
+                // shadowless room fixtures, this one spotlight casts — one shadow map per TV, affordable
+                // since TVs are rare (one per living room with a media surface).
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            // At screen height, a touch in front of the face. The furniture forward convention is +Z
+            // (yaw = atan2(sin, cos)) while Bevy's spot axis is −Z, so a PI yaw-flip beams the glow out of
+            // the screen into the room. (If a kit's TV model faces the other way, flip this PI.)
+            Transform::from_xyz(0.0, 0.42, 0.18)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            ScreenLight { base_intensity: SCREEN_INTENSITY, phase },
+        ));
+    }
+}
+
+/// A restless CRT flicker on each TV's screen spotlight — a faster, less regular shimmer than the
+/// fluorescent hum, with a slow roll beneath it (a dead channel breathing). **Cosmetic and windowed:**
+/// modulates only the rendered `SpotLight` intensity, never the gameplay `LightField`. Runs on `Update`.
+fn flicker_screens(time: Res<Time>, mut lights: Query<(&ScreenLight, &mut SpotLight)>) {
+    let t = time.elapsed_secs();
+    for (sl, mut light) in &mut lights {
+        // A fast shimmer times a slow roll — the product gives the irregular scan-roll beat a lone sine
+        // can't, with a floor so the screen never fully dies.
+        let fast = 0.5 + 0.5 * (t * SCREEN_FLICKER_HZ + sl.phase).sin();
+        let roll = 0.5 + 0.5 * (t * 2.7 + sl.phase * 1.7).sin();
+        let mult = 0.62 + 0.38 * fast * roll; // ∈ [0.62, 1.0]: mostly lit, restless dips
+        let next = sl.base_intensity * mult;
+        if light.intensity != next {
+            light.intensity = next;
+        }
+    }
+}
+
 /// Attach contact shadows to the camera. Runs once at `PostStartup` (after `camera::setup_camera`'s
 /// `Startup` spawn has flushed). Contact shadows re-attach props to the floor "without the cost of full
 /// raytracing" and, unlike Bevy's GTAO/SSAO, do **not** require `Msaa::Off` — so the scene keeps its
@@ -751,7 +894,9 @@ fn setup_camera_fx(mut commands: Commands, cam: Query<Entity, With<Camera3d>>) {
 fn attach_fixture_lights(
     mut commands: Commands,
     config: Res<GameConfig>,
-    fixtures: Query<Entity, (With<LightEmitter>, Without<FixtureLit>)>,
+    // A TV (`ScreenEmitter`) is excluded — it gets an eery screen spotlight in `attach_screen_lights`
+    // instead of this generic room-fixture point light.
+    fixtures: Query<Entity, (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>)>,
 ) {
     let c = &config.lighting;
     let color = Color::srgb(c.fixture_color[0], c.fixture_color[1], c.fixture_color[2]);
@@ -820,7 +965,9 @@ fn glow_fixtures(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     config: Res<GameConfig>,
-    fixtures: Query<Entity, (With<LightEmitter>, Without<FixtureGlowing>)>,
+    // A TV keeps its own screen material (the teal CRT face); its glow is the spotlight cast, not an
+    // emissive mesh swap — so exclude `ScreenEmitter` here.
+    fixtures: Query<Entity, (With<LightEmitter>, Without<FixtureGlowing>, Without<ScreenEmitter>)>,
     children: Query<&Children>,
     has_material: Query<(), With<MeshMaterial3d<StandardMaterial>>>,
 ) {
@@ -858,6 +1005,62 @@ fn glow_fixtures(
         }
         if material.is_some() {
             commands.entity(fixture).insert(FixtureGlowing);
+        }
+    }
+}
+
+/// Give a TV's CRT face its animated **static** by swapping just the screen sub-mesh's material for the
+/// unlit [`TvStaticMaterial`] (moving snow + scanlines + vertical roll; player request). Being unlit it
+/// self-glows — the "the screen is on" cue — while the spotlight in [`attach_screen_lights`] supplies the
+/// cast light. Kit-agnostic: the screen face is identified by its cool, chromatic base colour (the teal
+/// dead-channel face vs. the neutral-grey chassis), never a kit-specific material name, so any kit's TV
+/// works with zero code change. Same async-scene-load walk as [`glow_fixtures`]; one shared static
+/// material instance drives every TV (minted lazily). Windowed-only, never the harness — cosmetic and
+/// determinism-neutral (the gameplay `LightField` reads the TV via its `LightEmitter`, unchanged).
+fn glow_screens(
+    mut commands: Commands,
+    mut static_mats: ResMut<Assets<TvStaticMaterial>>,
+    std_mats: Res<Assets<StandardMaterial>>,
+    mut shared: Local<Option<Handle<TvStaticMaterial>>>,
+    screens: Query<Entity, (With<ScreenEmitter>, Without<ScreenGlowing>)>,
+    children: Query<&Children>,
+    mats: Query<&MeshMaterial3d<StandardMaterial>>,
+) {
+    for tv in &screens {
+        // Scene not instantiated yet → retry next frame (the async GLB load, exactly as `glow_fixtures`).
+        let mut stack: Vec<Entity> = match children.get(tv) {
+            Ok(ch) => ch.iter().collect(),
+            Err(_) => continue,
+        };
+        let mut lit_any = false;
+        while let Some(e) = stack.pop() {
+            if let Ok(mm) = mats.get(e) {
+                // The CRT face is the cool, chromatic material (teal); a neutral-grey chassis (r≈g≈b) fails.
+                let is_screen = std_mats.get(&mm.0).is_some_and(|base| {
+                    let c = base.base_color.to_linear();
+                    c.green + c.blue > 3.0 * c.red + 0.05
+                });
+                if is_screen {
+                    // One shared static material animates every TV (its motion comes from `globals.time`).
+                    let handle = shared
+                        .get_or_insert_with(|| static_mats.add(TvStaticMaterial::default()))
+                        .clone();
+                    // Replace the StandardMaterial with the custom one — remove the old so the mesh isn't
+                    // drawn twice (once per material pipeline).
+                    commands
+                        .entity(e)
+                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .insert(MeshMaterial3d(handle));
+                    lit_any = true;
+                }
+            }
+            if let Ok(ch) = children.get(e) {
+                stack.extend(ch.iter());
+            }
+        }
+        // Only guard once a face was actually found; a TV whose screen mesh hasn't streamed in yet retries.
+        if lit_any {
+            commands.entity(tv).insert(ScreenGlowing);
         }
     }
 }

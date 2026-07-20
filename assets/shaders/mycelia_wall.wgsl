@@ -12,6 +12,7 @@
 #import bevy_pbr::pbr_fragment::pbr_input_from_standard_material
 #import bevy_pbr::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing}
 #import bevy_pbr::forward_io::{VertexOutput, FragmentOutput}
+#import foundation::noise::fbm4
 
 // MUST byte-match `MoldSurfaceParams` in `src/mycelia/material.rs`.
 struct MoldSurfaceParams {
@@ -30,6 +31,8 @@ struct MoldSurfaceParams {
     margin_roughness: f32,
     sheen_strength: f32,
     ao_strength: f32,
+    reveal_warp_amp: f32,
+    reveal_warp_scale: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> mold: MoldSurfaceParams;
@@ -57,36 +60,6 @@ const MOLD_REFLECTANCE: f32 = 0.08;
 // (0.1875) past that lands the sample squarely on the pooled floor rather than on the slab's own footprint.
 // Geometry, not taste — hence a constant, not a dial.
 const WALL_FOOT_OFFSET: f32 = 0.19;
-
-// ── Procedural noise (see `mycelia_floor.wgsl` for provenance) ────────────────────────────────────────
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-fn vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i + vec2<f32>(0.0, 0.0));
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var amp = 0.5;
-    var pp = p;
-    for (var i = 0; i < 4; i = i + 1) {
-        v = v + amp * vnoise(pp);
-        pp = pp * 2.0;
-        amp = amp * 0.5;
-    }
-    return v;
-}
 
 fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
@@ -120,7 +93,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
     let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
     let bio = smoothstep(0.10, 0.35, f.g);
-    let substrate = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    // Domain-warp the reveal/coverage tap so the coat's edge stops snapping to the per-cell control
+    // grid (see `mycelia_floor.wgsl` for the why). Warp by the foot world-XZ, the point the wall reads.
+    let warp = vec2<f32>(
+        fbm4(foot * mold.reveal_warp_scale),
+        fbm4(foot * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
+    ) - 0.5;
+    let ctrl_uv = uv + warp * mold.reveal_warp_amp;
+    let substrate = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 
@@ -146,7 +126,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // tendrils reaching up out of a dense skirting.
     let h = height / max(mold.climb_height, 0.001);
     let fs = mold.fiber_scale;
-    let m = fbm(vec2<f32>(along * fs * 0.35, height * fs * 0.12));
+    let m = fbm4(vec2<f32>(along * fs * 0.35, height * fs * 0.12));
     // Falls from 1 at the skirting to 0 at `climb_height`. Written out rather than as
     // `smoothstep(1.0, 0.0, ...)`: WGSL leaves smoothstep undefined when `edge0 >= edge1`. It happens to do
     // the right thing under naga/Metal, which is not a guarantee worth depending on.
@@ -172,17 +152,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // face's own frame to perturb the normal — the wall has no thickness field of its own to gradient.
         let e = 0.06;
         let sp = vec2<f32>(along * fs, height * fs * 0.25);
-        let sa = fbm(sp + vec2<f32>(e * fs, 0.0));
-        let sb = fbm(sp - vec2<f32>(e * fs, 0.0));
-        let sc = fbm(sp + vec2<f32>(0.0, e * fs * 0.25));
-        let sd = fbm(sp - vec2<f32>(0.0, e * fs * 0.25));
+        let sa = fbm4(sp + vec2<f32>(e * fs, 0.0));
+        let sb = fbm4(sp - vec2<f32>(e * fs, 0.0));
+        let sc = fbm4(sp + vec2<f32>(0.0, e * fs * 0.25));
+        let sd = fbm4(sp - vec2<f32>(0.0, e * fs * 0.25));
         let ridge = mold.fiber_strength * coat;
         pbr_input.N = normalize(
             n - tangent * (sa - sb) * ridge - up * (sc - sd) * ridge
         );
 
         // Cavity AO: without it the bright uniform ambient flattens every strand. See the floor shader.
-        let strand = fbm(sp);
+        let strand = fbm4(sp);
         let ao = clamp(1.0 - mold.ao_strength * (1.0 - strand) * coat, 0.0, 1.0);
         pbr_input.diffuse_occlusion = vec3<f32>(ao);
         pbr_input.specular_occlusion = ao * (1.0 - 0.8 * coat);

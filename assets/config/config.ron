@@ -24,6 +24,8 @@
         corridor_width: 2,          // minimum corridor width (block-centre lane + 1 more)
         corridor_width_max: Some(5), // each corridor draws its width in 2..=5 tiles, so passages vary from
                                     // tight squeezes to broad halls instead of every corridor being identical
+        doorway_ratio: 0.5,         // doorway opens round(corridor_width * ratio) lanes, clamped 1..=cw —
+                                    // wide corridors get 2-3 wide mouths instead of every doorway being 1 tile
         seed: 0x5C09191,            // nods to SCP-9191, the slop generator
         max_attempts: 20,
 
@@ -87,14 +89,22 @@
         furniture: (
             items: [
                 // ---- Anchors: deterministic host attachment ----
-                ( key: "ceiling_light", glb: "low_poly_furniture/glb/Lights/Ceiling Light.glb",
-                  category: "light", tags: ["ceiling"], role: Anchor(host: Ceiling),
-                  footprint: (0.62, 0.62), affordances: ["emit"] ),
+                // NOTE: the kit's "Ceiling Light.glb" is a green/silver TABLE-lamp model, not a ceiling
+                // fixture — it was misclassified as Anchor(Ceiling), which pinned it to the room centre at
+                // 2.4 m where the open-top (no-ceiling) view left it floating in mid-air. Reclassified as a
+                // Scatter worktop lamp (a 2nd desk-lamp variant beside `lamp`); footprint is its narrow base
+                // so it seats on a desk/table without overhanging. There is no real ceiling-light model in
+                // this kit, so nothing anchors to the ceiling now — rooms light by wall sconces + desk lamps.
+                ( key: "lamp_tall", glb: "low_poly_furniture/glb/Lights/Ceiling Light.glb",
+                  category: "light", tags: ["decor"], role: Scatter(surface: "worktop"),
+                  footprint: (0.35, 0.35), affordances: ["emit"], height: 0.5 ),
                 ( key: "wall_light", glb: "low_poly_furniture/glb/Lights/Wall Light.glb",
                   category: "light", tags: ["wall"], role: Anchor(host: Wall),
                   footprint: (0.38, 0.20), affordances: ["emit"] ),
 
-                // ---- Tiled: small floor props scattered by WFC (Stage 2) ----
+                // ---- Tiled: small floor props scattered by WFC (Stage 2). The furnish tiled pass
+                // biases these to wall-adjacent cells so a bin lines the perimeter instead of sitting
+                // marooned in the middle of the room (Merrell et al. 2011 edge alignment). ----
                 ( key: "bin", glb: "low_poly_furniture/glb/Miscellaneous/Bin.glb",
                   category: "bin", tags: ["decor"], role: Tiled, footprint: (0.40, 0.40),
                   affordances: ["store"] ),
@@ -113,28 +123,36 @@
                 ( key: "plant_b", glb: "low_poly_furniture/glb/Miscellaneous/Plant B.glb",
                   category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.18, 0.18),
                   affordances: ["decor"], height: 0.25 ),
+                // A desk lamp rests on a WORKTOP (a desk or table), never a bed or dresser — the
+                // `surface: "worktop"` token gates it to supports affording "worktop" (see furnish.rs
+                // `surface_bits`). A room with no desk/table simply gets no lamp (one path, no fallback).
                 ( key: "lamp", glb: "low_poly_furniture/glb/Lights/Lamp C.glb",
-                  category: "light", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.32, 0.32),
+                  category: "light", tags: ["decor"], role: Scatter(surface: "worktop"), footprint: (0.32, 0.32),
                   affordances: ["emit"], height: 0.40 ),
 
                 // ---- Freestanding: placed against walls with clearance by the Metropolis solver (Stage 3).
+                // `height` = the GLB mesh TOP (measured from the glb bbox), i.e. the exact plane a scatter
+                // prop rests on. Keep these synced with the model — an eyeballed value floats/sinks the prop.
+                // `pivot` = the glb bbox-centre offset (measured), so the furnish spawn recentres the model
+                // on its placement point and its symmetric footprint seats flush to a wall (no clip-through).
                 ( key: "bed_double", glb: "low_poly_furniture/glb/Beds/Bed Double.glb",
                   category: "bed", tags: ["bedroom"], role: Freestanding, footprint: (1.72, 2.22),
-                  affordances: ["sleep", "support"], height: 0.55 ),
+                  affordances: ["sleep", "support"], height: 0.714, pivot: (0.0, 0.278) ),
                 ( key: "sofa", glb: "low_poly_furniture/glb/Sofas/Sofa A.glb",
                   category: "seating", tags: ["living"], role: Freestanding, footprint: (2.08, 0.88),
-                  affordances: ["sit"] ),
+                  affordances: ["sit"], pivot: (0.0, 0.058) ),
+                // A table is a worktop (a lamp/desk prop may rest on it), as well as a generic support.
                 ( key: "table", glb: "low_poly_furniture/glb/Tables/Table A.glb",
                   category: "table", tags: ["living", "dining"], role: Freestanding, footprint: (1.66, 0.71),
-                  affordances: ["support"], height: 0.74 ),
+                  affordances: ["support", "worktop"], height: 0.796 ),
                 ( key: "chair", glb: "low_poly_furniture/glb/Chairs/Chair A.glb",
                   category: "seating", tags: ["dining"], role: Freestanding, footprint: (0.41, 0.51),
-                  affordances: ["sit"] ),
+                  affordances: ["sit"], pivot: (0.0, 0.057) ),
                 // A chest of drawers backs onto a wall (`back_to_wall`) and still hosts props on top
                 // (`support`) — the dresser/armoire "back against the wall" rule.
                 ( key: "drawer", glb: "low_poly_furniture/glb/Drawers/Drawer A.glb",
                   category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (1.55, 0.60),
-                  affordances: ["store", "support", "back_to_wall"], height: 0.80 ),
+                  affordances: ["store", "support", "back_to_wall"], height: 0.756, pivot: (0.0, -0.141) ),
                 // Shelf A's source FBX is malformed (~10 m of stray geometry that survives conversion); use
                 // Shelf D, which measures a correct 1.23 × 0.38 × 2.15 m.
                 ( key: "shelf", glb: "low_poly_furniture/glb/Shelves/Shelf D.glb",
@@ -143,29 +161,38 @@
                 // A fridge stands boxed in against a wall — `back_to_wall` seats it flush to the perimeter.
                 ( key: "fridge", glb: "low_poly_furniture/glb/Kitchen/Fridge A.glb",
                   category: "appliance", tags: ["kitchen"], role: Freestanding, footprint: (0.88, 0.61),
-                  affordances: ["store", "back_to_wall"] ),
+                  affordances: ["store", "back_to_wall"], pivot: (-0.157, -0.136) ),
                 // A TV rests on a media unit / table — a Scatter prop; footprint is the flatscreen STAND's
                 // shallow contact area so it seats on a ~0.6 m-deep desk without overhanging.
+                // "screen" gives the TV an eery flickering cool-cyan LOS glow (windowed-only; see
+                // light.rs `attach_screen_lights`). "emit" keeps it feeding the gameplay LightField.
                 ( key: "tv", glb: "low_poly_furniture/glb/Electronics/TV A.glb",
                   category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.30),
-                  affordances: ["emit"], height: 0.50 ),
+                  affordances: ["emit", "screen"], height: 0.50 ),
 
-                // Office — a desk so "office"-tagged rooms (a generation-time room type) read as workspaces.
+                // Office — a desk so "office"-tagged rooms (a generation-time room type) read as
+                // workspaces. A desk is a worktop (hosts a desk lamp), as well as a generic support.
+                // Footprint re-measured from the glb: the L-desk is 1.90 × 0.90 m and its origin sits at
+                // the inner corner, not the centre (the old (1.20, 0.60) under-reserved and let the side
+                // return clip walls). `pivot` recentres the model on the placement point.
                 ( key: "desk", glb: "low_poly_furniture/glb/Tables/Desk.glb",
-                  category: "table", tags: ["office"], role: Freestanding, footprint: (1.20, 0.60),
-                  affordances: ["support"], height: 0.74 ),
+                  category: "table", tags: ["office"], role: Freestanding, footprint: (1.897, 0.895),
+                  affordances: ["support", "worktop"], height: 0.854, pivot: (-0.347, -0.126) ),
 
                 // Bathroom fixtures for "bathroom"-tagged rooms. Plumbing backs onto a wall (`back_to_wall`),
                 // and the toilet + sink cluster together (`group: "bath"`) so they read as a plumbed wall.
+                // Footprints/pivots re-measured from the glbs (the plumbing meshes are off-centre — the
+                // toilet bowl and the bath basin sit to one side of the origin), so they seat flush to the
+                // wall instead of poking the far side through it.
                 ( key: "toilet", glb: "low_poly_furniture/glb/Bathroom/Toilet.glb",
-                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.40, 0.60),
-                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.592, 0.765),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath"), pivot: (-0.029, 0.124) ),
                 ( key: "sink", glb: "low_poly_furniture/glb/Bathroom/Sink.glb",
-                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.50, 0.42),
-                  affordances: ["hygiene", "back_to_wall"], group: Some("bath") ),
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (0.444, 0.29),
+                  affordances: ["hygiene", "back_to_wall"], group: Some("bath"), pivot: (-0.006, 0.09) ),
                 ( key: "bath", glb: "low_poly_furniture/glb/Bathroom/Bath.glb",
-                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (1.70, 0.70),
-                  affordances: ["hygiene", "back_to_wall"] ),
+                  category: "fixture", tags: ["bathroom"], role: Freestanding, footprint: (1.412, 0.781),
+                  affordances: ["hygiene", "back_to_wall"], pivot: (0.545, 0.004) ),
             ],
         ),
 
@@ -204,7 +231,12 @@
             freestanding_per_room: 2,   // freestanding furniture per room (sparse: a 4-5 tile room reads
                                         // furnished without crowding)
             scatter_per_room: 3,        // props rested on support surfaces per room (so a desk isn't buried)
-            wall_lights_per_room: 1,    // sconces per room
+            wall_lights_per_room: 6,    // total sconce budget per room. The furnish pass lays a 3-to-X
+                                        // row along each full-height wall (gap before each corner) and
+                                        // keeps up to this many, round-robin across walls; 0 = unlit. 6
+                                        // gives the ~2 visible (N/W) walls a clean 3-in-a-row each.
+                                        // Evolvable brightness knob (search bound WALL_LIGHTS in
+                                        // src/squad_ai/level_genome.rs).
             freestanding_min_gap: 1.5,  // min centre-to-centre spacing (m) between freestanding pieces
             group_near_max: 1.2,        // max distance (m) a Near band pulls same-group pieces (toilet+sink)
         ),
@@ -355,7 +387,7 @@
             min_speed: 0.4, max_speed: 2.5, accel: 0.4, turn_cos: 0.87,
             sight_near: 3.0, sight_far: 12.0, wander_interval: 2.5,
             sep_radius: 1.2, sep_strength: 2.5, observe_dist: 3.0, look_amount: 0.35, gaze_cos: 0.927,
-            hit_memory: 0.6, flee_speed: 3.2,
+            hit_memory: 0.6, flee_speed: 3.2, wall_standoff: 0.8,
         ),
         // Squad weapon ballistics + aim cone (laser.rs). Damage/friendly-fire live in sim.combat.
         laser: (
@@ -718,6 +750,11 @@
         // normals entirely. Without a cavity-occlusion term the filaments render flat however hard the
         // normal is perturbed. This is the dial that actually makes the strands visible.
         ao_strength: 0.75,      // cavity AO written into pbr_input.diffuse_occlusion
+        // Feather the mold's reveal/coverage edge so it stops snapping to the per-cell control-texture
+        // grid (which read as square "tiles"). Domain-warp the coverage tap with world-space fbm
+        // (Lagae et al. 2010 noise survey). 0 amp = the old cell-aligned edge.
+        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams, no cross-wall bleed
+        reveal_warp_scale: 0.7,   // warp frequency (cycles/world unit); ~cell-scale wander
 
         // ── Fruiting (src/mycelia/fruit.rs). Where the mat has grown thick and eaten its substrate, in the
         // dark, a death cap erupts. Gray-Scott already integrates both halves of the real trigger: V is the
@@ -1366,7 +1403,8 @@
     // high-volume so pools rarely run dry under normal play, leaving a wounded-swarm drain as the exception.
     almond_water: (
         strong_seep: 8.0,          // seep/sec at a spring (sparse wall-adjacent/mold cell) — only springs seep
-        pool_spacing: 8.0,         // min tiles between springs — caps each pool to a small, isolated puddle
+        pool_spacing: 12.0,        // min tiles between springs — caps each pool to a small, isolated puddle,
+                                   // and (higher = rarer) how sparse the pools are across the map
         capacity: 100.0,           // per-cell volume ceiling — a rich seep pools but never runs away
         evaporate: 0.05,           // fraction dried per sec; steady state ≈ seep/evaporate (weak≈40, wall→cap)
         diffuse: 0.02,             // blend toward 4-neighbour avg per tick — kept low so a pool stays a tight
@@ -1386,16 +1424,25 @@
         rumor_gain: 0.5,           // belief nudge/sec a SAFE drink deposits toward the heal reading
         death_rumor_gain: 1.0,     // belief nudge/sec a POISONING deposits toward the cyanide reading
         // --- Visual (windowed-only; ignored by the gameplay field) ---
-        almond_tint: (0.92, 0.85, 0.70),  // pale almond/cream base (linear RGB)
+        // Tints shifted COOL + saturated so the pool contrasts the warm olive/tan carpet — colour is the top
+        // pop-out feature (Itti-Koch 1998 / Feature-Integration-Theory). Heal = cyan-teal, cyanide = toxic green.
+        almond_tint: (0.20, 0.80, 0.85),  // heal pool: cool cyan-teal (linear RGB) — high contrast vs the floor
         min_visible_level: 11.0,   // draw a puddle only above this volume (visual-only). Sets how far out from
-                                   // each spring reads as wet; with pool_spacing=8 + diffuse=0.02 this yields
-                                   // discrete 2–5 tile puddles (see the `almond_pools_stay_small` harness test).
+                                   // each spring reads as wet; with pool_spacing=12 + diffuse=0.02 this yields
+                                   // sparse, discrete 2–5 tile puddles (see the `almond_pools_stay_small` harness test).
         film_thickness_nm: 320.0,  // thin-film thickness — sets the iridescence hue via optical path difference
         film_ior: 1.33,            // index of refraction of the water film (must be >= 1)
         iridescence_strength: 0.25,// subtle oil-slick sheen; more water = more sheen
         moisture_feed_gain: 0.3,   // how strongly water level boosts the mold's Gray-Scott bloom where they overlap
         iridescence_mute: 0.6,     // pull thin-film reflectance toward its mean (1=rainbow, 0=grey); was hardcoded
-        poison_tint: (0.55, 0.70, 0.40), // sickly hue of a pool the population reads as cyanide (belief 0)
+        poison_tint: (0.55, 0.95, 0.15), // cyanide pool: vivid toxic green (belief 0) — pops against warm floor
+        // Readability/saliency knobs (windowed-only): opacity, glowing shoreline, wet glint, motion multiplier.
+        base_alpha: 0.85,          // peak opacity of a full-depth pool (was a hardcoded 0.6 faint film)
+        rim_strength: 1.6,         // brightness of the glowing shoreline waterline (figure-ground edge; 0=off)
+        glint_strength: 0.6,       // wet specular glint that catches the room light and sparkles on the ripples
+        ripple_strength: 1.0,      // multiplier on the animated bubble-up/ripple motion (1 = authored baseline)
+        edge_feather: 0.22,        // how far fBm noise wiggles the pool boundary (breaks the tile-edge look)
+        feather_scale: 0.9,        // spatial frequency of that edge noise (cycles/tile; higher = lacier margin)
     ),
     // The DETERMINISTIC CPU gameplay mold (src/mold.rs) — Fisher-KPP reaction-diffusion over the dungeon
     // grid, in the harness (optimizer-tunable), distinct from the GPU cosmetic `mycelia` above. Grows in the
@@ -1409,7 +1456,6 @@
         light_recoil: 0.05,    // recoil sink per substep per unit illuminance — the photophobia strength
         light_ref: 6.0,        // illuminance that reads as fully lit (light01 = min(1, light / light_ref))
         dim_light: 0.5,        // biomass -> LightField attenuation (mold darkens rooms; crabs less light-pushed)
-        occlude_los: 0.6,      // dense mold (biomass >= ~0.83) hides crabs from squad LOS (tactical cost; tunable 0..1.5)
         seep_boost: 1.5,       // dense biomass -> almond-water seep multiplier (live; mirrors old mold_seep_mult)
         dense_v: 0.5,          // biomass at/above which a cell counts as "dense" mold (LOS + seep)
     ),

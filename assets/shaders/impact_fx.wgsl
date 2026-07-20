@@ -10,6 +10,7 @@
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::globals
+#import foundation::noise::{hash21, rand_dir}
 
 // Compile-time upper bound; `particle_count` cuts the loop short at runtime (WGSL allows a uniform
 // loop bound, but a fixed max keeps it unrollable/portable).
@@ -31,20 +32,6 @@ struct ImpactSettings {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: ImpactSettings;
 
-// Hash-based value noise in [0,1) (Dave Hoskins style), our texture-free stand-in for iChannel0.
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-// A pseudo-random launch direction for particle `i`, roughly filling the unit disc.
-fn rand_dir(i: f32, seed: f32) -> vec2<f32> {
-    let angle = hash21(vec2<f32>(i, seed)) * 6.2831853;
-    let radius = 0.3 + 0.7 * hash21(vec2<f32>(i + 11.0, seed + 3.0));
-    return vec2<f32>(cos(angle), sin(angle)) * radius;
-}
-
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let age = clamp(
@@ -61,7 +48,7 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
             break;
         }
         let fi = f32(i);
-        let dir = rand_dir(fi, material.seed) * material.spread;
+        let dir = rand_dir(fi, material.seed, 0.3, 0.7) * material.spread;
         // Fly outward from the center, with a little gravity droop as the burst ages.
         var pos = dir * material.speed * age;
         pos.y = pos.y - material.gravity * age * age;

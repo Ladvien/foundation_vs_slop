@@ -51,6 +51,35 @@ const SURFACE_INSET: f32 = 0.08;
 /// Height up the wall to seat a wall light's origin (a sconce sits above head height).
 const WALL_LIGHT_HEIGHT: f32 = 1.8;
 
+/// Preferred centre-to-centre spacing (metres) between sconces in a wall row — about one every 2 m
+/// reads as a lit corridor. The row still forces a minimum of [`SCONCE_ROW_MIN`] where the wall can
+/// hold them, and grows up to the wall's capacity (the player's "3-to-X" rule; X = space to the
+/// corner). Merrell et al. 2011 align decor to a wall — a "prominent feature" — rather than scattering.
+const SCONCE_SPACING: f32 = 2.0;
+
+/// Hard minimum centre-to-centre spacing (metres): the sconce mesh is ~0.38 m wide, so 0.6 m keeps a
+/// forced-minimum row from overlapping on a short wall.
+const SCONCE_MIN_SEP: f32 = 0.6;
+
+/// Gap (metres) between the end sconce and the corner, so a row never crowds into a corner.
+const SCONCE_CORNER_GAP: f32 = 0.9;
+
+/// Minimum sconces in a row when the wall is long enough to seat them without overlap (the "3" in
+/// "3-to-X"). A wall too short for three falls to whatever fits — never crammed (one path, no fudge).
+const SCONCE_ROW_MIN: usize = 3;
+
+/// Minimum centre-to-centre distance (metres, = tiles) between two tiled floor props (bins). A room's
+/// bins are dispersed to at least this far apart so a couple of trashcans never cluster in one corner
+/// (player request). A hard placement rule, not an "amount" dial — the *number* of bins is the evolvable
+/// knob (`tiled_per_room`); this is a spacing contract like [`SCONCE_SPACING`]. ~11 ft.
+const TILED_MIN_GAP: f32 = 3.5;
+
+/// How far (metres, = tiles) into a room a doorway's keep-clear band reaches from the wall it pierces.
+/// No furniture footprint may overlap this band, so a piece never lands in a corridor mouth and blocks
+/// the only way in/out of a room (player request 2026-07-19). A hard placement rule, not an "amount"
+/// dial — a spacing contract like [`TILED_MIN_GAP`]. ~1.1 tiles ≈ a body-width of approach room.
+const DOORWAY_KEEP_CLEAR: f32 = 1.1;
+
 /// The parsed furniture catalogue, held in the ECS world for the furnish pass.
 #[derive(Resource)]
 pub struct Manifest(pub FurnitureManifest);
@@ -74,12 +103,59 @@ struct SpawnReq {
     /// bake reads its position. Kit-agnostic (affordance, not asset key) — an asset kit lights its rooms
     /// with zero code change.
     emits: bool,
+    /// True when the piece `affords("screen")` — a TV/monitor. The serial spawn tags it
+    /// `light::ScreenEmitter` so the windowed lighting gives it an eery flickering screen glow (a cool-cyan
+    /// LOS spotlight) instead of the generic fixture light. Kit-agnostic (affordance, not asset key).
+    /// Purely cosmetic: the gameplay `LightField` still reads it via `emits`, so it is determinism-neutral.
+    screen: bool,
+    /// The item's mesh-centre pivot (world XZ, scaled) — see [`ManifestItem::pivot`]. The serial spawn
+    /// shifts the model by `−(rot · pivot)` so its bounding-box centre lands on `pos`, so the symmetric
+    /// `footprint` the placement solver reserved is what actually occupies the floor and an off-centre
+    /// mesh never pokes through the wall its footprint clears.
+    pivot: Vec2,
 }
 
 /// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
 /// way to reason about what a piece is *for* (Fisher 2012; Qi 2018), rather than its kit-specific key.
 fn affords(item: &ManifestItem, aff: &str) -> bool {
     item.affordances.iter().any(|a| a == aff)
+}
+
+// Support-surface classes — the bitmask vocabulary that pairs a scatter prop with the *kind* of top it
+// may rest on. A support piece `provides` the OR of the class bits for every surface token among its
+// affordances; a scatter prop `requires` the bit for its `Role::Scatter { surface }` token, and rests
+// only where `provides & requires != 0`. This makes the `surface` token — previously dead config — the
+// one lever that keeps a desk lamp on a desk/table and off a bed or dresser. A typed support is a
+// surface *feature*, not a generic shelf (Tutenel et al. 2010, "A Semantic Scene Description Language
+// for Procedural Layout Solving", AIIDE; props attach to a specific support class in Infinigen Indoors,
+// Raistrick et al. 2024, arXiv 2406.11824).
+const SURFACE_SUPPORT: u32 = 1 << 0; // any support top (bed/drawer/table/desk)
+const SURFACE_WORKTOP: u32 = 1 << 1; // a desk/table worktop only
+
+/// Map a support-surface token to its class bit. `support` = any support top; `worktop` = a desk/table.
+/// An unrecognised token is `0` (matches nothing) — a scatter prop targeting it is dropped, never placed
+/// on a wrong surface. Used both for a support's provided classes and a scatter prop's required class.
+fn surface_bits(token: &str) -> u32 {
+    match token {
+        "support" => SURFACE_SUPPORT,
+        "worktop" => SURFACE_WORKTOP,
+        _ => 0,
+    }
+}
+
+/// The surface classes a support piece provides — the OR of [`surface_bits`] over its affordances (a
+/// desk affording `support` + `worktop` provides both; a bed affording only `support` provides only it).
+fn provided_surfaces(item: &ManifestItem) -> u32 {
+    item.affordances.iter().map(|a| surface_bits(a)).fold(0, |acc, b| acc | b)
+}
+
+/// The surface class a scatter prop requires, from its `Role::Scatter { surface }` token. A non-Scatter
+/// role (never reached in Pass 4) requires nothing.
+fn required_surface(item: &ManifestItem) -> u32 {
+    match &item.role {
+        Role::Scatter { surface } => surface_bits(surface),
+        _ => 0,
+    }
 }
 
 /// Pick a freestanding furniture set for a region from whatever the manifest offers, keyed by the
@@ -173,31 +249,114 @@ fn room_profile<'a>(
     chosen
 }
 
-/// Full-height wall faces `(face_point, inward_normal)` bounding a region — the W/N faces (inward
-/// normals +X/+Z). The camera-facing E/S knee walls (normals -X/-Z, squashed to `CAMERA_WALL_FRACTION`)
-/// are excluded so a wall-mounted prop never floats in the cutaway gap above a short wall — the same
-/// rule the nest placement uses (`crab.rs`). Only border cells can carry a bounding wall.
-fn full_height_wall_faces(dungeon: &Dungeon, region: &Region) -> Vec<(Vec3, Vec3)> {
+/// A maximal run of contiguous full-height wall faces along one side of a region: the ordered face
+/// points (world, y=0, on the wall's inner plane) and the shared inward normal. Grouping wall faces
+/// into runs is what lets a sconce *row* align to a whole wall (from one corner to the next) instead
+/// of the old flat-list "one light somewhere in the room" pick. The camera-facing E/S knee walls are
+/// excluded (see [`wall_runs`]) so a wall-mounted light never floats in the cutaway gap above a short
+/// wall — the same rule the nest placement uses (`crab.rs`).
+struct WallRun {
+    normal: Vec3,
+    faces: Vec<Vec3>,
+}
+
+/// Group the region's full-height wall faces into contiguous runs (one per straight wall segment). Only
+/// the +X (west) and +Z (north) inward normals survive the camera-facing filter, so faces split into
+/// two families: north walls run along X at a fixed Z, west walls run along Z at a fixed X. Within a
+/// family a run is a set of collinear, cell-adjacent faces. Deterministic: the sort key `(line, moving)`
+/// is a cell coordinate pair, unique per face, so it is a total order (no RNG, no query input).
+fn wall_runs(dungeon: &Dungeon, region: &Region) -> Vec<WallRun> {
     let (mn, mx) = (region.rect.min, region.rect.max);
-    let mut faces = Vec::new();
+    // (line, moving, face): north keyed by (cz line, cx moving); west by (cx line, cz moving).
+    let mut north: Vec<(i32, i32, Vec3)> = Vec::new();
+    let mut west: Vec<(i32, i32, Vec3)> = Vec::new();
     for cx in mn[0]..mx[0] {
         for cz in mn[1]..mx[1] {
             if cx != mn[0] && cx != mx[0] - 1 && cz != mn[1] && cz != mx[1] - 1 {
                 continue; // interior cell — no bounding wall
             }
-            if !dungeon.is_floor(IVec2::new(cx, cz)) {
-                continue; // a notched-out corner of a non-rectangular room — no real wall here
+            let cell = IVec2::new(cx, cz);
+            if !dungeon.is_floor(cell) {
+                continue; // notched-out corner — no real wall
             }
-            let center = dungeon.cell_center(IVec2::new(cx, cz));
-            for (face, normal) in dungeon.wall_faces_near(center) {
-                if !crate::dungeon::SHORT_CAMERA_WALLS || !crate::dungeon::is_camera_facing(normal)
-                {
-                    faces.push((face, normal));
+            for (face, normal) in dungeon.wall_faces_near(dungeon.cell_center(cell)) {
+                if crate::dungeon::SHORT_CAMERA_WALLS && crate::dungeon::is_camera_facing(normal) {
+                    continue; // camera-facing knee wall — a sconce there floats in the cutaway gap
+                }
+                if normal == Vec3::Z {
+                    north.push((cz, cx, face));
+                } else if normal == Vec3::X {
+                    west.push((cx, cz, face));
                 }
             }
         }
     }
-    faces
+    let mut runs = Vec::new();
+    split_into_runs(&mut north, Vec3::Z, &mut runs);
+    split_into_runs(&mut west, Vec3::X, &mut runs);
+    runs
+}
+
+/// Split `(line, moving, face)` entries into maximal runs: same `line` (collinear) and consecutive
+/// `moving` (cell-adjacent). Appends each run to `out`.
+fn split_into_runs(items: &mut Vec<(i32, i32, Vec3)>, normal: Vec3, out: &mut Vec<WallRun>) {
+    // SORT-OK: input is region geometry (cell coordinates), never an ECS query; the key is unique.
+    crate::sort_total!(items, |&(line, moving, _)| (line, moving));
+    let mut cur: Vec<Vec3> = Vec::new();
+    let mut prev: Option<(i32, i32)> = None;
+    for &(line, moving, face) in items.iter() {
+        let contiguous = matches!(prev, Some((pl, pm)) if pl == line && moving == pm + 1);
+        if !contiguous && !cur.is_empty() {
+            out.push(WallRun {
+                normal,
+                faces: std::mem::take(&mut cur),
+            });
+        }
+        cur.push(face);
+        prev = Some((line, moving));
+    }
+    if !cur.is_empty() {
+        out.push(WallRun { normal, faces: cur });
+    }
+}
+
+/// The sconce positions for one wall run: a row filling the wall with a minimum of [`SCONCE_ROW_MIN`]
+/// lights (where it fits) up to the wall's capacity, spaced ~[`SCONCE_SPACING`] apart and inset
+/// [`SCONCE_CORNER_GAP`] from each corner (the player's "3-to-X in a row, gap before the corner").
+/// Positions are on the wall's inner plane at y=0; the caller lifts them to [`WALL_LIGHT_HEIGHT`].
+fn sconce_row(run: &WallRun) -> Vec<Vec3> {
+    let n = run.faces.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let f0 = run.faces[0];
+    let fl = run.faces[n - 1];
+    let tile = crate::dungeon::TILE_SIZE;
+    // Direction along the wall. A single-cell run's endpoints coincide, so take the perpendicular of
+    // the inward normal in the ground plane instead of normalising a zero vector.
+    let dir = if n == 1 {
+        Vec3::new(run.normal.z, 0.0, -run.normal.x)
+    } else {
+        (fl - f0).normalize_or_zero()
+    };
+    // The wall's true corners sit half a tile past the end cell centres; its length is n tiles.
+    let wall_len = n as f32 * tile;
+    let usable = wall_len - 2.0 * SCONCE_CORNER_GAP;
+    if usable <= 0.0 {
+        // Too short to inset a gap at both ends: one centred sconce.
+        return vec![(f0 + fl) * 0.5];
+    }
+    let a = f0 - dir * (0.5 * tile) + dir * SCONCE_CORNER_GAP; // first slot (gap in from one corner)
+    let b = fl + dir * (0.5 * tile) - dir * SCONCE_CORNER_GAP; // last slot (gap in from the other)
+    let hard_cap = (usable / SCONCE_MIN_SEP).floor() as usize + 1; // most that fit without overlap
+    let nominal = (usable / SCONCE_SPACING).floor() as usize + 1; // count at the preferred spacing
+    let count = nominal.max(SCONCE_ROW_MIN).min(hard_cap).max(1);
+    if count == 1 {
+        return vec![(a + b) * 0.5];
+    }
+    (0..count)
+        .map(|i| a.lerp(b, i as f32 / (count - 1) as f32))
+        .collect()
 }
 
 /// Nearest floor cell to `start` within a region's bounding rect (Chebyshev distance). Non-rectangular
@@ -286,10 +445,15 @@ pub fn furnish_regions(
     // ---- Serial spawn. ----
     for req in requests {
         let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(req.glb));
+        // Recentre the model on its placement point: shift the glTF origin by −(yaw · pivot) so the
+        // mesh's bounding-box centre — not its (often off-centre) authored origin — lands on `req.pos`.
+        // This is what makes the symmetric footprint an accurate reservation, so an against-wall piece
+        // sits flush instead of poking its far side through the wall (README: furniture through a wall).
+        let origin = req.pos - req.rot * Vec3::new(req.pivot.x, 0.0, req.pivot.y);
         let mut entity = commands.spawn((
             PlacedIn(req.region),
             WorldAssetRoot(scene),
-            Transform::from_translation(req.pos)
+            Transform::from_translation(origin)
                 .with_rotation(req.rot)
                 .with_scale(Vec3::splat(FURNITURE_SCALE)),
             // Starts hidden; `furniture_room_visibility` shows it once the squad has entered its room.
@@ -309,6 +473,11 @@ pub fn furnish_regions(
         // churns iteration order later — furniture is not a sim actor, so this is harness-safe.
         if req.emits {
             entity.insert(crate::light::LightEmitter);
+        }
+        // A screen (TV) additionally gets the eery-glow marker; the windowed lighting swaps its generic
+        // fixture light for a cool-cyan flickering LOS spotlight. Cosmetic — never read by the harness.
+        if req.screen {
+            entity.insert(crate::light::ScreenEmitter);
         }
     }
 }
@@ -348,38 +517,67 @@ fn furnish_region(
                 rot: Quat::from_rotation_x(PI),
                 cutaway_outward: None,
                 emits: affords(item, "emit"),
+                screen: affords(item, "screen"),
+                pivot: Vec2::ZERO, // ceiling light hangs at the cell centre; no recentre
             });
         }
     }
     // No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still
     // frames each with a header lintel, so it reads as a doorway, just without a door).
 
-    // Pass 1b — wall lights: sconces on the room's full-height walls. Kit-agnostic — any
+    // Pass 1b — wall lights: sconce rows on the room's full-height walls. Kit-agnostic — any
     // manifest item with role Anchor{Wall} is placed here, so an asset kit lights its rooms
     // with zero code changes (the Stage-5 asset-swap contract). Camera-facing knee walls are
-    // skipped (see `full_height_wall_faces`) so a light never floats in the cutaway gap.
+    // skipped (see `wall_runs`) so a light never floats in the cutaway gap.
     if let Some(light) = wall_lights.first() {
-        let faces = full_height_wall_faces(&dungeon, region);
-        let n = faces.len();
-        for i in 0..density.wall_lights_per_room.min(n) {
-            // Space the lights evenly along the collected faces (mid-wall for a single light).
-            let (face, normal) = faces[(i * n + n / 2) / density.wall_lights_per_room.max(1)];
-            let pos = face.with_y(WALL_LIGHT_HEIGHT) + normal * 0.02;
-            // Yaw the sconce so its front points into the room along the inward normal.
-            let yaw = normal.x.atan2(normal.z);
-            out.push(SpawnReq {
-                region: region.id,
-                glb: light.glb.clone(),
-                pos,
-                rot: Quat::from_rotation_y(yaw),
-                // Tag with the host wall's outward normal (opposite the inward face) so the sconce
-                // hides when Q/E rotation squashes that wall to knee height — otherwise it would
-                // float in the cutaway gap.
-                cutaway_outward: Some(-normal),
-                emits: affords(light, "emit"),
-            });
+        // Group the room's full-height walls into runs and lay a 3-to-X sconce row along each (gap in
+        // from each corner). `wall_lights_per_room` is the room's total budget, an evolvable brightness
+        // knob (0 = unlit): fill the wall rows, then keep up to the budget, taken round-robin across
+        // runs so a cap doesn't dump every light on one wall and leave the rest dark.
+        let runs = wall_runs(&dungeon, region);
+        let rows: Vec<Vec<Vec3>> = runs.iter().map(sconce_row).collect();
+        let total: usize = rows.iter().map(Vec::len).sum();
+        let budget = density.wall_lights_per_room.min(total);
+        let mut kept = 0usize;
+        let mut col = 0usize;
+        'fill: while kept < budget {
+            let before = kept;
+            for (ri, row) in rows.iter().enumerate() {
+                if col >= row.len() {
+                    continue;
+                }
+                let normal = runs[ri].normal;
+                out.push(SpawnReq {
+                    region: region.id,
+                    glb: light.glb.clone(),
+                    // Sit the sconce on the wall's inner plane at head height, a touch proud of it.
+                    pos: row[col].with_y(WALL_LIGHT_HEIGHT) + normal * 0.02,
+                    // Front points into the room along the inward normal.
+                    rot: Quat::from_rotation_y(normal.x.atan2(normal.z)),
+                    // Tag with the host wall's outward normal so the sconce hides when Q/E rotation
+                    // squashes that wall to knee height — otherwise it floats in the cutaway gap.
+                    cutaway_outward: Some(-normal),
+                    emits: affords(light, "emit"),
+                    screen: false, // a wall sconce is never a screen
+                    pivot: Vec2::ZERO, // mounted on the wall plane deliberately; no recentre
+                });
+                kept += 1;
+                if kept >= budget {
+                    break 'fill;
+                }
+            }
+            if kept == before {
+                break; // every row exhausted
+            }
+            col += 1;
         }
     }
+
+    // Footprints of the freestanding pieces placed below, so no other mesh spawns inside them (player
+    // report: a bin fully inside a couch). Furniture has priority: tiled clutter is collected here and
+    // pushed only AFTER the freestanding layout is known, dropping any bin that would sit in a piece.
+    let mut placed_fp: Vec<(Vec3, Vec2, f32)> = Vec::new();
+    let mut tiled_kept: Vec<(SpawnReq, Vec2, f32)> = Vec::new();
 
     // Pass 2 — tiled scatter (→ WfcSolver). WFC returns a sparse fill in row-major order, so
     // taking the first N would bunch the props in the room's min (upper-left) corner; shuffle
@@ -392,27 +590,64 @@ fn furnish_region(
         };
         let mut placed = solve_placements(orchestrator, &problem, &mut rng, region.id, "tiled");
         shuffle_placements(&mut placed, &mut rng);
-        for p in placed.into_iter().take(density.tiled_per_room) {
-            if let Some(item) = tiled.get(p.candidate) {
-                let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
-                let pos = dungeon.cell_center(cell);
-                // Footprint-aware containment: the WFC solver scatters over the bounding rect,
-                // so reject any slot whose *body* would cross a wall or fall in a notched-out
-                // corner of a non-rectangular room — not just a center-cell test (README
-                // ISSUES 1 & 2). Merrell et al. 2011 free-configuration-space non-penetration.
-                let half = footprint_half(item);
-                if !dungeon.footprint_on_floor(pos, half, p.yaw) {
-                    continue;
-                }
-                out.push(SpawnReq {
+        // Perimeter bias: small floor props (a bin) read as clutter marooned in the middle of a
+        // room — the amateur "push it to the wall" instinct that Merrell et al. 2011 formalize as
+        // aligning with the room's edges. Stably partition wall-adjacent cells to the front so the
+        // `take(N)` below keeps those first; the shuffle already fixed a deterministic order, and a
+        // stable sort preserves it within each group (no RNG, no query input).
+        // SORT-OK: input is the deterministic WFC solve + seeded shuffle, never an ECS query; stable
+        // sort keeps the seeded order within each partition.
+        placed.sort_by_key(|p| {
+            let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
+            !(0..4).any(|d| dungeon.walled(cell, d)) // false (wall-adjacent) sorts before true
+        });
+        // Greedy min-distance dispersion: walk the perimeter-biased order and keep a prop only if it is
+        // at least `TILED_MIN_GAP` from every prop already kept, up to `tiled_per_room`. So two bins
+        // never cluster in one corner — a candidate too close to a kept one is skipped and the next
+        // far-enough one taken (player request: "a trashcan can't spawn within X feet of another"). A
+        // room too small to disperse simply keeps fewer — one path, never crammed.
+        let mut kept_pos: Vec<Vec3> = Vec::new();
+        for p in placed.into_iter() {
+            if kept_pos.len() >= density.tiled_per_room {
+                break;
+            }
+            let Some(item) = tiled.get(p.candidate) else {
+                continue;
+            };
+            let cell = IVec2::new(p.pos[0] as i32, p.pos[2] as i32);
+            let pos = dungeon.cell_center(cell);
+            // Footprint-aware containment: the WFC solver scatters over the bounding rect, so reject any
+            // slot whose *body* would cross a wall or fall in a notched-out corner of a non-rectangular
+            // room — not just a center-cell test. Merrell et al. 2011 free-configuration-space.
+            let half = footprint_half(item);
+            if !dungeon.footprint_on_floor(pos, half, p.yaw) {
+                continue;
+            }
+            // Keep the doorway approach clear: a prop dropped in a corridor mouth blocks the only way
+            // in/out (player request 2026-07-19). `region.openings` carries each doorway's interior cell
+            // + pierced wall, so reject any footprint overlapping a doorway keep-clear band.
+            if !dungeon.footprint_clears_openings(pos, half, p.yaw, &region.openings, DOORWAY_KEEP_CLEAR) {
+                continue;
+            }
+            if kept_pos.iter().any(|q| q.distance(pos) < TILED_MIN_GAP) {
+                continue; // too close to an already-placed bin — skip, take a farther candidate
+            }
+            kept_pos.push(pos);
+            // Defer: pushed after the freestanding pass so a bin overlapping furniture can be dropped.
+            tiled_kept.push((
+                SpawnReq {
                     region: region.id,
                     glb: item.glb.clone(),
                     pos,
                     rot: Quat::from_rotation_y(p.yaw),
                     cutaway_outward: None,
                     emits: affords(item, "emit"),
-                });
-            }
+                    screen: affords(item, "screen"),
+                    pivot: footprint_pivot(item),
+                },
+                half,
+                p.yaw,
+            ));
         }
     }
 
@@ -453,6 +688,16 @@ fn furnish_region(
                 if !dungeon.footprint_on_floor(pos, half, p.yaw) {
                     continue;
                 }
+                // Keep the doorway approach clear (player request 2026-07-19): a freestanding piece in a
+                // corridor mouth blocks the room's entrance. Same opening-band reject as the tiled pass.
+                if !dungeon.footprint_clears_openings(pos, half, p.yaw, &region.openings, DOORWAY_KEEP_CLEAR) {
+                    continue;
+                }
+                // No mesh-in-mesh: the Metropolis overlap term is soft, so hard-reject a piece that would
+                // still intersect one already accepted this pass (player report 2026-07-20).
+                if footprint_overlaps(pos, half, p.yaw, &placed_fp) {
+                    continue;
+                }
                 out.push(SpawnReq {
                     region: region.id,
                     glb: item.glb.clone(),
@@ -460,11 +705,23 @@ fn furnish_region(
                     rot: Quat::from_rotation_y(p.yaw),
                     cutaway_outward: None,
                     emits: affords(item, "emit"),
+                    screen: affords(item, "screen"),
+                    pivot: footprint_pivot(item),
                 });
+                placed_fp.push((pos, half, p.yaw));
                 if affords(item, "support") {
                     placed_supports.push((*item, pos, p.yaw));
                 }
             }
+        }
+    }
+
+    // Push the deferred tiled clutter now that the freestanding layout is known, dropping any bin that
+    // would sit inside a piece of furniture (player report 2026-07-20: a bin inside a couch). Furniture
+    // wins; bin-vs-bin spacing was already enforced by `TILED_MIN_GAP` above.
+    for (req, half, yaw) in tiled_kept {
+        if !footprint_overlaps(req.pos, half, yaw, &placed_fp) {
+            out.push(req);
         }
     }
 
@@ -491,6 +748,9 @@ fn furnish_region(
                     candidate: i,
                     half_x: it.footprint.0 * 0.5 * FURNITURE_SCALE,
                     half_z: it.footprint.1 * 0.5 * FURNITURE_SCALE,
+                    // The support class this prop demands (desk lamp → worktop); it rests only on a
+                    // support that provides it, else it is dropped (no fallback onto a bed/dresser).
+                    requires: required_surface(it),
                 })
                 .collect();
             for pl in scatter::scatter_on_surfaces(&surfaces, &props, &mut rng) {
@@ -503,6 +763,8 @@ fn furnish_region(
                         rot: Quat::from_rotation_y(pl.yaw),
                         cutaway_outward: None,
                         emits: affords(item, "emit"),
+                        screen: affords(item, "screen"),
+                        pivot: footprint_pivot(item),
                     });
                 }
             }
@@ -685,6 +947,30 @@ fn footprint_half(item: &ManifestItem) -> Vec2 {
     )
 }
 
+/// A manifest item's mesh-centre pivot in rendered (scaled) metres — the local XZ offset the spawn
+/// shifts the model by (see [`ManifestItem::pivot`]) so an off-centre mesh recentres on its placement
+/// point. `(0,0)` for a centred piece.
+fn footprint_pivot(item: &ManifestItem) -> Vec2 {
+    Vec2::new(item.pivot.0 * FURNITURE_SCALE, item.pivot.1 * FURNITURE_SCALE)
+}
+
+/// Does a yaw-snapped footprint centred at `center` overlap any already-placed one? Each `placed` entry
+/// is `(centre, pre-rotation half-extents, yaw)`. An AABB test on the quarter-turn-swapped half-extents
+/// (matching [`Dungeon::footprint_on_floor`]), used to stop furniture meshes spawning inside one another
+/// across placement passes (player report: a bin fully inside a couch). Edge-touching (zero overlap
+/// area) is allowed, so pieces may still sit flush side by side.
+fn footprint_overlaps(center: Vec3, half: Vec2, yaw: f32, placed: &[(Vec3, Vec2, f32)]) -> bool {
+    let swap = |h: Vec2, y: f32| -> Vec2 {
+        let quarter = (y / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
+        if quarter % 2 == 1 { Vec2::new(h.y, h.x) } else { h }
+    };
+    let a = swap(half, yaw);
+    placed.iter().any(|(c, h, y)| {
+        let b = swap(*h, *y);
+        (a.x + b.x) - (center.x - c.x).abs() > 0.0 && (a.y + b.y) - (center.z - c.z).abs() > 0.0
+    })
+}
+
 /// The usable top of a placed support piece as a [`scatter::SupportSurface`], or `None` if the piece
 /// has no authored height (nothing to rest a prop on). The usable area is the footprint (yaw-aware,
 /// so a rotated table swaps width/depth) inset by [`SURFACE_INSET`] so props don't perch on the edge;
@@ -703,6 +989,11 @@ fn support_surface(item: &ManifestItem, pos: Vec3, yaw: f32) -> Option<scatter::
         half_x: (hx - SURFACE_INSET).max(0.02),
         half_z: (hz - SURFACE_INSET).max(0.02),
         top_y: item.height * FURNITURE_SCALE,
+        // Props rested here inherit the host's facing (TV on a drawer faces the way the drawers open).
+        yaw,
+        // The classes this top offers, so a typed scatter prop (desk lamp → worktop) only rests here
+        // when this support actually provides that class.
+        provides: provided_surfaces(item),
     })
 }
 
@@ -730,6 +1021,29 @@ mod tests {
     use super::*;
     use crate::placement::ir::{Predicate, Role};
 
+    /// `footprint_overlaps` flags a mesh spawned inside another (the bin-in-couch report), allows a piece
+    /// well clear, and allows two pieces flush edge-to-edge (zero overlap area).
+    #[test]
+    fn footprint_overlaps_detects_mesh_intersection() {
+        // A couch at the origin (half 1.04 × 0.44).
+        let couch = [(Vec3::ZERO, Vec2::new(1.04, 0.44), 0.0)];
+        // A bin sitting inside it (the captured case: ~0.68/0.29 offset, half 0.20) → overlaps.
+        assert!(
+            footprint_overlaps(Vec3::new(0.68, 0.0, 0.29), Vec2::splat(0.20), 0.0, &couch),
+            "a bin inside the couch footprint must be flagged"
+        );
+        // A bin well clear of the couch → no overlap.
+        assert!(
+            !footprint_overlaps(Vec3::new(3.0, 0.0, 0.0), Vec2::splat(0.20), 0.0, &couch),
+            "a bin far from the couch must not be flagged"
+        );
+        // Flush side by side (edges exactly touching: 1.04 + 0.20 = 1.24 apart) → allowed.
+        assert!(
+            !footprint_overlaps(Vec3::new(1.24, 0.0, 0.0), Vec2::splat(0.20), 0.0, &couch),
+            "edge-touching pieces must be allowed"
+        );
+    }
+
     /// The shipped density knobs, inlined so the unit tests don't need the config file.
     const TEST_DENSITY: PlacementDensity = PlacementDensity {
         tiled_per_room: 2,
@@ -751,6 +1065,7 @@ mod tests {
             affordances: affs.iter().map(|s| s.to_string()).collect(),
             group: None,
             height: 0.0,
+            pivot: (0.0, 0.0),
         }
     }
 
@@ -782,6 +1097,68 @@ mod tests {
                 !has_seat || has_screen,
                 "living room {region_id} picked a seat but no screen: {:?}",
                 profile.iter().map(|it| it.key.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Build a north-wall run (inward normal +Z) of `n` cells along +X at cell centres, z fixed.
+    fn north_run(n: usize) -> WallRun {
+        let faces = (0..n)
+            .map(|i| Vec3::new(i as f32 + 0.5, 0.0, 0.0))
+            .collect();
+        WallRun {
+            normal: Vec3::Z,
+            faces,
+        }
+    }
+
+    #[test]
+    fn a_long_wall_gets_a_row_of_at_least_three_with_corner_gaps() {
+        // A 6-tile wall: corners at x=0 and x=6. Expect ≥3 sconces, each inset ≥ the corner gap.
+        let run = north_run(6);
+        let row = sconce_row(&run);
+        assert!(
+            row.len() >= SCONCE_ROW_MIN,
+            "a 6 m wall should seat at least {SCONCE_ROW_MIN} sconces, got {}",
+            row.len()
+        );
+        let (lo, hi) = (0.0f32, 6.0f32);
+        for p in &row {
+            assert!(
+                p.x >= lo + SCONCE_CORNER_GAP - 1e-3 && p.x <= hi - SCONCE_CORNER_GAP + 1e-3,
+                "sconce at x={} crowds a corner (gap {SCONCE_CORNER_GAP})",
+                p.x
+            );
+            assert!(p.z.abs() < 1e-6, "sconce stays on the wall line (z=0)");
+        }
+        // Rows fill more of a longer wall (X grows with available space).
+        assert!(
+            sconce_row(&north_run(12)).len() > row.len(),
+            "a longer wall should seat more sconces (the 'X' in 3-to-X)"
+        );
+    }
+
+    #[test]
+    fn a_short_wall_gets_one_centred_sconce_never_crammed() {
+        // A 2-tile wall cannot hold 3 with corner gaps — one path is a single centred light, not a
+        // forced-and-overlapping trio.
+        let row = sconce_row(&north_run(2));
+        assert_eq!(row.len(), 1, "a 2 m wall seats a single sconce");
+        assert!((row[0].x - 1.0).abs() < 1e-3, "centred on the 2 m wall");
+    }
+
+    #[test]
+    fn sconce_row_is_ordered_and_evenly_spaced() {
+        let row = sconce_row(&north_run(8));
+        assert!(row.len() >= 3);
+        // Strictly increasing along the wall, with equal gaps (an even row, no bunching).
+        let gaps: Vec<f32> = row.windows(2).map(|w| w[1].x - w[0].x).collect();
+        for g in &gaps {
+            assert!(*g > 0.0, "row is ordered along the wall");
+            assert!(
+                (g - gaps[0]).abs() < 1e-3,
+                "sconces are evenly spaced (gap {g} vs {})",
+                gaps[0]
             );
         }
     }

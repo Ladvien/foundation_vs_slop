@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Squad perception sight ranges + Schmitt-trigger hysteresis bands (`squad_ai/perception.rs`,
 /// `squad_ai/role.rs`). Each `*_sight` is the trigger radius; `*_release` is the (larger) let-go radius.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PerceptionTuning {
     pub examine_sight: f32,
     pub examine_sight_release: f32,
@@ -61,6 +62,7 @@ pub struct PerceptionTuning {
 /// Squad-unit locomotion, ORCA collision-avoidance, pack cohesion, and action ranges (`squad.rs`,
 /// `squad_ai/cohesion.rs`, `squad_ai/actions.rs`).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SquadMoveTuning {
     /// Squad cruise speed (world units / s).
     pub unit_speed: f32,
@@ -96,6 +98,7 @@ pub struct SquadMoveTuning {
 /// The watcher/boss locomotion + senses (`enemy.rs`). Its HP/zap-cadence/cull live in `sim.boss`; this is
 /// how it *moves and looks*. Damage (`CONTACT_DPS`) and VFX durations stay in code.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BossTuning {
     pub min_speed: f32,
     pub max_speed: f32,
@@ -117,11 +120,18 @@ pub struct BossTuning {
     /// Seconds the boss remembers a hit (drives its flee/retaliate).
     pub hit_memory: f32,
     pub flee_speed: f32,
+    /// How far (metres) the boss keeps its *centre* off a wall face while steering. Its visible face is
+    /// a wide camera-facing billboard (~0.8 m half-width) but its collision box is only 0.27, so without
+    /// a standoff the billboard sweeps into any wall it stands near. Set ~a billboard half-width so the
+    /// face clears walls in open rooms (narrow corridors are handled cosmetically by the camera-forward
+    /// face offset in `enemy::update_smiley_faces`). Read by `enemy::enemy_seek`.
+    pub wall_standoff: f32,
 }
 
 /// Squad weapon ballistics + aim cone (`laser.rs`). Damage/friendly-fire live in `sim.combat`; this is
 /// the fire cadence and spread model.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaserTuning {
     pub fire_interval: f32,
     pub laser_speed: f32,
@@ -142,6 +152,7 @@ pub struct LaserTuning {
 /// Crab HP/damage/breeding live in `sim.combat`/`sim.breeding`; spawn counts/layout and render geometry
 /// stay in code.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrabTuning {
     /// Contact range at which a crab's touch registers.
     pub contact_radius: f32,
@@ -204,6 +215,7 @@ pub struct CrabTuning {
 /// `sim.parasite`; render geometry, spawn jitter, wall-detection threshold, and the burst damage divisor
 /// stay in code (the last to avoid double-searching parasite lethality with the world genome).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParasiteSwarmTuning {
     /// Range at which a manca can embed into a host.
     pub embed_range: f32,
@@ -259,6 +271,7 @@ pub struct ParasiteSwarmTuning {
 /// Crab↔mould ecosystem coupling: grazing/deposit rates and stigmergy splat radii (`mycelia/grazing.rs`,
 /// `mycelia/control.rs`). The mould growth clock stays in `mycelia`; these are the *interaction* rates.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MyceliaCouplingTuning {
     /// Cap on MEAT deposit / s from a grazed fruit body.
     pub fruit_meat_rate: f32,
@@ -284,6 +297,7 @@ pub struct MyceliaCouplingTuning {
 /// insert pattern as `SimTuning`/`AudioTuning`), so systems read `Res<BehaviorTuning>` and the harness's
 /// single `GameConfig` seam can install an evolved slice before that extraction runs.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BehaviorTuning {
     pub perception: PerceptionTuning,
     pub squad_move: SquadMoveTuning,
@@ -347,6 +361,7 @@ impl Default for BehaviorTuning {
                 gaze_cos: 0.927,
                 hit_memory: 0.6,
                 flee_speed: 3.2,
+                wall_standoff: 0.8,
             },
             laser: LaserTuning {
                 fire_interval: 0.15,
@@ -553,6 +568,7 @@ pub fn validate_tuning(t: &BehaviorTuning) -> Result<(), String> {
         ("boss.observe_dist", b.observe_dist),
         ("boss.hit_memory", b.hit_memory),
         ("boss.flee_speed", b.flee_speed),
+        ("boss.wall_standoff", b.wall_standoff),
     ] {
         positive(n, v)?;
     }

@@ -40,6 +40,7 @@ impl Default for SpeciesId {
 /// [`SpeciesGeometry`]; only the *measured* numbers live here so the RON carries a single fact per
 /// field. See the module header for how these are produced and kept honest.
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SpeciesGeometryData {
     /// Longest vertex chord across each of the six morph segments — the basis of the speed limit.
     pub stage_max_disp: [f32; 6],
@@ -73,6 +74,7 @@ pub enum LightBehavior {
 /// One entry of a species' room affinity — how strongly it prefers to fruit in a given room type.
 /// Mirrors [`super::DampWeight`]; a species' saprotrophic/substrate preference expressed as habitat.
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SpeciesAffinity {
     pub tag: String,
     pub weight: f32,
@@ -82,6 +84,7 @@ pub struct SpeciesAffinity {
 /// part mask (R cap / G flesh / B volva); these tint each part. The cap darkens `young → old` with
 /// maturity. Harmonised toward the mold mat so a species reads as the same organism, not a garden prop.
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SpeciesColors {
     pub cap_young: [f32; 3],
     pub cap_old: [f32; 3],
@@ -92,6 +95,7 @@ pub struct SpeciesColors {
 
 /// One row of [`super::MyceliaConfig::species`] — a species as configuration.
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SpeciesConfig {
     /// Human-readable name, e.g. `"Death Cap"`. For diagnostics and error messages.
     pub name: String,

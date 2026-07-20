@@ -50,6 +50,9 @@ use crate::util::{next_u32, rand01, smoothstep};
 const WIND_VOL: f32 = 0.22;
 const MUSIC_VOL: f32 = 0.32;
 const FOOT_VOL: f32 = 0.08;
+/// A squad unit stepping into an Almond-Water pool — a muddy footfall, well under the world sounds (a
+/// background wet-foot cue, not a splash you'd notice over gunfire).
+const SPLASH_VOL: f32 = 0.10;
 /// UI / command blips (select, deselect, move order…). Deliberately way under the world sounds — a
 /// faint tick you feel more than hear, so a fidgety player isn't machine-gunned with pings.
 const UI_VOL: f32 = 0.12;
@@ -165,6 +168,9 @@ pub enum Sfx {
     EnemyDeath(Vec3),
     /// A squad unit was killed, at its position.
     UnitDeath(Vec3),
+    /// A squad unit stepped into a visible Almond-Water pool, at the unit. A muddy footfall — cosmetic,
+    /// emitted only by the windowed step-splash trigger (never in the headless harness).
+    SplashWater(Vec3),
 }
 
 impl Sfx {
@@ -206,6 +212,11 @@ struct AudioAssets {
     footsteps: [Handle<AudioSource>; 4],
     /// Sparse ambient one-shots (door creaks, water drips, a clock tick) for the randomized layer.
     ambient: [Handle<AudioSource>; 6],
+    /// Footstep voice for a squad unit stepping into an Almond-Water pool — mud-footstep recordings
+    /// (`audio/foot/mud_step_{1..8}.ogg`, horror_sfx_vol_2), randomly varied across 8 clips (plus pitch
+    /// jitter) so a unit wading through doesn't stamp one clip (Böttcher & Serafin — sample variation is
+    /// the first rung against audible repetition).
+    splash: [Handle<AudioSource>; 8],
     wind: Handle<AudioSource>,
     music_calm: Handle<AudioSource>,
     music_combat: Handle<AudioSource>,
@@ -345,6 +356,16 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
             assets.load("audio/ambience/oneshot/drip_2.ogg"),
             assets.load("audio/ambience/oneshot/clock.ogg"),
         ],
+        splash: [
+            assets.load("audio/foot/mud_step_1.ogg"),
+            assets.load("audio/foot/mud_step_2.ogg"),
+            assets.load("audio/foot/mud_step_3.ogg"),
+            assets.load("audio/foot/mud_step_4.ogg"),
+            assets.load("audio/foot/mud_step_5.ogg"),
+            assets.load("audio/foot/mud_step_6.ogg"),
+            assets.load("audio/foot/mud_step_7.ogg"),
+            assets.load("audio/foot/mud_step_8.ogg"),
+        ],
         wind: assets.load("audio/ambience/wind.ogg"),
         music_calm: assets.load("audio/music/calm.ogg"),
         music_combat: assets.load("audio/music/combat.ogg"),
@@ -482,6 +503,15 @@ fn play_sfx(
                 commands.spawn((
                     AudioPlayer::new(assets.bone_snap.clone()),
                     one_shot_spatial(*pos, 0.7 * bus.sfx, jitter(&mut rng, 0.1)),
+                ));
+            }
+            Sfx::SplashWater(pos) => {
+                // A muddy footfall when a unit steps into a pool, randomly varied + pitch-jittered so
+                // wading doesn't stamp one clip. Cosmetic; does not duck the beds (see `Sfx::ducks`).
+                let clip = (*rng as usize) % assets.splash.len();
+                commands.spawn((
+                    AudioPlayer::new(assets.splash[clip].clone()),
+                    one_shot_spatial(*pos, SPLASH_VOL * bus.sfx, jitter(&mut rng, 0.18)),
                 ));
             }
         }

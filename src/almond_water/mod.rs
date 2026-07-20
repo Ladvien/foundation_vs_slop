@@ -34,6 +34,7 @@ pub mod visual;
 /// windowed [`visual::AlmondWaterVisualPlugin`]. No fallback: a missing/invalid slice is a loud startup
 /// panic via [`validate_config`].
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct AlmondWaterConfig {
     /// Seep rate (volume/sec) baked into a **spring** — a sparse, spaced-out floor cell that borders a wall
     /// (or is mold-colonised), where the water "bubbles up from the concrete." Only springs seep; every
@@ -111,6 +112,27 @@ pub struct AlmondWaterConfig {
     /// this sickly hue at belief 0 to `almond_tint` at belief 1 — the diegetic "this pool is wrong" tell (that
     /// an anosmic creature still can't smell). Visual-only.
     pub poison_tint: [f32; 3],
+    // --- Readability/saliency (windowed-only). Grounds: Itti, Koch & Niebur 1998 (saliency = center-surround
+    //     contrast in colour + intensity + motion) and Feature-Integration-Theory pop-out — a pool reads only
+    //     when it contrasts the warm carpet in a basic feature. These knobs push each such feature. ---
+    /// Peak opacity of a full-depth pool, [0,1]. Higher = the water reads as a solid liquid, not a faint film
+    /// (the old hardcoded cap was 0.6). Intensity/α contrast against the floor.
+    pub base_alpha: f32,
+    /// Brightness of the glowing shoreline rim drawn at the pool's shallow margin (0 = off). A defined edge
+    /// separates the pool from the floor as a distinct object (figure-ground).
+    pub rim_strength: f32,
+    /// Strength of the wet specular glint (0 = off) — a bright highlight where the view looks down the pool
+    /// normal, so the surface reads as wet/liquid. Luminance contrast + material cue.
+    pub glint_strength: f32,
+    /// Multiplier on the animated bubble-up/ripple motion (1 = the authored baseline). Motion is the strongest
+    /// pre-attentive attention cue, so a livelier surface catches the eye even in peripheral vision.
+    pub ripple_strength: f32,
+    /// How far (in normalised level) procedural noise perturbs the pool boundary, breaking the per-cell
+    /// bilinear field into an organic puddle edge instead of tile-aligned diamonds. 0 = raw field edge.
+    pub edge_feather: f32,
+    /// Spatial frequency of that edge-feather noise, in cycles per world unit (≈ per tile). Higher = finer,
+    /// lacier margin; lower = broad lobes.
+    pub feather_scale: f32,
 }
 
 /// The **evolvable** slice of the Almond Water gameplay dynamics — the 16 knobs the offline world search
@@ -228,6 +250,11 @@ pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
         ("iridescence_strength", c.iridescence_strength),
         ("moisture_feed_gain", c.moisture_feed_gain),
         ("iridescence_mute", c.iridescence_mute),
+        ("rim_strength", c.rim_strength),
+        ("glint_strength", c.glint_strength),
+        ("ripple_strength", c.ripple_strength),
+        ("edge_feather", c.edge_feather),
+        ("feather_scale", c.feather_scale),
     ] {
         if !(v.is_finite() && v >= 0.0) {
             return Err(format!("almond_water.{name} must be finite and >= 0 (got {v})"));
@@ -262,6 +289,7 @@ pub fn validate_config(c: &AlmondWaterConfig) -> Result<(), String> {
         ("belief_poison_frac", c.belief_poison_frac),
         ("belief_flip_hi", c.belief_flip_hi),
         ("belief_flip_lo", c.belief_flip_lo),
+        ("base_alpha", c.base_alpha),
     ] {
         if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
             return Err(format!("almond_water.{name} must be in [0, 1] (got {v})"));
@@ -405,6 +433,16 @@ impl AlmondWater {
     pub fn belief_at(&self, cell: IVec2) -> f32 {
         if in_grid(cell, self.width, self.height) {
             self.belief[row_major(cell, self.width)]
+        } else {
+            0.0
+        }
+    }
+
+    /// The water volume at `cell` (same units as `capacity`). Off-grid reads 0. Read by the cosmetic
+    /// step-splash trigger to tell whether a unit is standing in a visible pool.
+    pub fn level_at(&self, cell: IVec2) -> f32 {
+        if in_grid(cell, self.width, self.height) {
+            self.level[row_major(cell, self.width)]
         } else {
             0.0
         }
@@ -927,14 +965,20 @@ mod tests {
             poison_rate: 5.0,
             rumor_gain: 0.5,
             death_rumor_gain: 1.0,
-            almond_tint: [0.92, 0.85, 0.70],
+            almond_tint: [0.20, 0.80, 0.85],
             min_visible_level: 1.0,
             film_thickness_nm: 320.0,
             film_ior: 1.33,
             iridescence_strength: 0.25,
             moisture_feed_gain: 0.3,
             iridescence_mute: 0.6,
-            poison_tint: [0.55, 0.70, 0.40],
+            poison_tint: [0.55, 0.95, 0.15],
+            base_alpha: 0.85,
+            rim_strength: 1.6,
+            glint_strength: 0.6,
+            ripple_strength: 1.0,
+            edge_feather: 0.22,
+            feather_scale: 0.9,
         }
     }
 

@@ -413,7 +413,18 @@ impl Perception {
     }
 }
 
-/// A behaviour must score at least this to "turn on" and claim its rank (screens out curve tails).
+/// A behaviour must score at least this (on its final, product-of-considerations score) to "turn on" and
+/// claim its rank — the low-weight screen of Dill's dual-utility selection ("Dual-Utility Reasoning",
+/// Game AI Pro 2, Ch. 3: eliminate the weakest options by "screening out the lowest weight options").
+///
+/// **Why 0.1** (for a future tuner recalibrating the response curves): it sits an order of magnitude
+/// above a consideration's "off" tail (~0.01) and an order below an active `Step` gate (~1.0). Concretely
+/// against the canonical soft gate this codebase uses — `Curve::Logistic { k: 10, x0: 0.5 }` (see
+/// `squad_ai::role`, `ai::brain`) — `f(x) = 1/(1+e^(−10·(x−0.5)))` equals ≈0.1 at `x ≈ 0.28`. So the
+/// threshold is "a gate whose input is still ~0.22 below its 0.5 midpoint": barely triggered. If you
+/// change the gates' `k`/`x0`, re-solve `logistic(x) = MIN_SCORE` for the new midpoint to keep the same
+/// "barely on" meaning. `validate_unconditional_default` guarantees at startup that some unconditional
+/// behaviour clears this, so the `decide` "nothing eligible" fallback is unreachable.
 const MIN_SCORE: f32 = 0.1;
 
 /// A lower bound on this curve's output over the whole input domain.

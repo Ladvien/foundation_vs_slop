@@ -13,6 +13,7 @@ use super::field::{ChannelDef, RallyDef, CHANNEL_COUNT, FieldId};
 
 /// Per-channel tuning (mirrors [`ChannelDef`]).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelTuning {
     pub evaporate: f32,
     pub diffuse: f32,
@@ -30,6 +31,7 @@ impl From<ChannelTuning> for ChannelDef {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldsTuning {
     pub scent: ChannelTuning,
     /// Danger emitted by the squad's weapons (read by crabs and the boss).
@@ -64,6 +66,7 @@ impl FieldsTuning {
 /// Tuning for the vectorial rally pheromone (mirrors [`RallyDef`]). Not a scalar channel — it has its
 /// own decay/accumulate model (Tang et al. 2019), so it lives outside [`FieldsTuning`].
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RallyTuning {
     pub decay: f32,
     pub accumulate: f32,
@@ -82,6 +85,7 @@ impl From<RallyTuning> for RallyDef {
 
 /// Root tuning resource. Extend with new sections (`drives`, `steer`, `think`) in later phases.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiTuning {
     pub fields: FieldsTuning,
     pub rally: RallyTuning,

@@ -195,6 +195,7 @@ pub enum Topology {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DungeonConfig {
     /// Coarse WFC grid, in room slots. Each slot expands to a `block`×`block` fine-tile patch. For
     /// `Topology::Graph` this defines the level extent (`coarse_w*block × coarse_h*block`) that the
@@ -213,6 +214,13 @@ pub struct DungeonConfig {
     /// runs; an unset/collapsed range just yields a constant width).
     #[serde(default)]
     pub corridor_width_max: Option<usize>,
+    /// Doorway width as a fraction of each corridor's carved width, in `(0, 1]`. A corridor carved `cw`
+    /// tiles wide opens a doorway of `round(cw * doorway_ratio)` lanes, clamped to `1..=cw` (see
+    /// [`doorway_width`]). At `1.0` the mouth is as wide as the corridor; small values pinch it toward a
+    /// single lane. This is the evolvable knob behind the "every doorway is one body wide" fix — surfaced
+    /// to the QD level search (`squad_ai::level_genome`). `#[serde(default)]` keeps older configs valid.
+    #[serde(default = "default_doorway_ratio")]
+    pub doorway_ratio: f32,
     pub seed: u64,
     /// WFC restart budget before a convergence failure panics (loud, one-path).
     pub max_attempts: u32,
@@ -235,6 +243,7 @@ pub struct DungeonConfig {
 
 /// The six coarse WFC base-prototype weights, in `wfc::build_prototypes` order.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WfcWeights {
     pub rock: f64,
     pub dead_end: f64,
@@ -248,6 +257,7 @@ pub struct WfcWeights {
 /// Realistic residential ranges: Merrell, Schkufza & Koltun, "Computer-Generated Residential Building
 /// Layouts"; Smelik et al., "A Survey on Procedural Modelling for Virtual Worlds" (cgf.12276).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoomType {
     pub tag: String,
     pub area_min: f32,
@@ -271,6 +281,7 @@ pub struct RoomType {
 /// doorway derivation is unchanged. Purely a shape knob; walls/fog/collision/nav follow the per-cell
 /// walkable mask and need no changes.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotchConfig {
     /// Probability an *eligible* room (min side ≥ `min_side`) gets any notches at all.
     pub chance: f64,
@@ -325,6 +336,12 @@ pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
                 cfg.corridor_width, cfg.block, max
             ));
         }
+    }
+    if !(cfg.doorway_ratio.is_finite() && cfg.doorway_ratio > 0.0 && cfg.doorway_ratio <= 1.0) {
+        return Err(format!(
+            "doorway_ratio must be in (0,1] (got {})",
+            cfg.doorway_ratio
+        ));
     }
     if !(0.0..=1.0).contains(&cfg.liminality) {
         return Err(format!(
@@ -826,22 +843,26 @@ fn expand_to_fine(
 
     // Opening pass — record each region's adjacency + the interior wall cell where its corridor actually
     // meets the room (derived from the carved L geometry, not a dominant-axis guess), and neck the doorway
-    // down to the centre lane. Iterated in sort order per site so openings/adjacency match the grid's
-    // N,E,S,W scan. `derive_opening` is byte-identical to the old cell formula for axis-aligned edges.
+    // down to a proportional band of lanes (`doorway_width`), keeping lanes `0..doorway_w` open. Iterated
+    // in sort order per site so openings/adjacency match the grid's N,E,S,W scan. `derive_opening` is
+    // byte-identical to the old cell formula for axis-aligned edges.
     for (si, inc) in incident.iter().enumerate() {
         let sc = layout.sites[si].center;
         let rect = regions[si].rect;
         for &(_, nb, is_first) in inc {
             let (dir, cell) = derive_opening(sc, layout.sites[nb].center, rect, is_first);
             regions[si].adjacency.push(nb as u32);
-            regions[si].openings.push(Opening { dir, cell });
-            // Same width the corridor was carved at (looked up per unordered edge), so the doorway necks
-            // down from this corridor's real width — not a global constant — to the single centre lane.
+            // Same width the corridor was carved at (looked up per unordered edge). The doorway necks
+            // down from this corridor's real width — not a global constant — to a PROPORTIONAL band of
+            // lanes (`doorway_width`), so a broad corridor keeps a broad mouth instead of every doorway
+            // pinching to one body-width (player report 2026-07-19). `doorway_ratio` is the evolvable knob.
             let cw = edge_width
                 .get(&(si.min(nb), si.max(nb)))
                 .copied()
                 .unwrap_or(cw_min);
-            for lane in 1..cw as i32 {
+            let doorway_w = doorway_width(cw, config.doorway_ratio);
+            regions[si].openings.push(Opening { dir, cell, width: doorway_w });
+            for lane in doorway_w as i32..cw as i32 {
                 let neck = match dir {
                     E => IVec2::new(cell[0] + 1, cell[1] + lane),
                     W => IVec2::new(cell[0] - 1, cell[1] + lane),
@@ -865,6 +886,25 @@ fn expand_to_fine(
     // survives, which is harmless: every read goes through `is_corridor`/`corridor_id`, and both gate on
     // `is_floor` first. A necked-out doorway cell is simply not floor, so it is not a corridor cell either.
     (walkable, regions, spawn, corridor_of)
+}
+
+/// Doorway width (open lanes) for a corridor carved `cw` tiles wide, given the evolvable `ratio`.
+/// Proportional so a broad corridor keeps a broad mouth and a tight one stays tight, clamped to
+/// `1..=cw` — at least one lane is always open, and the mouth never exceeds the corridor's carved width.
+/// This is the fix for every doorway being pinned to a single body-width regardless of corridor width
+/// (player report 2026-07-19). `ratio` is surfaced to the QD level search as `DungeonConfig::doorway_ratio`;
+/// exposing generation structure through a weight parameter is the WFC-tuning idiom (Kim, Hahn, Kim &
+/// Kang, "Graph-Based Wave Function Collapse Algorithm for Procedural Content Generation in Games",
+/// IEICE Trans. Inf. & Syst. 2020, doi 10.1587/transinf.2019edp7295).
+fn doorway_width(cw: usize, ratio: f32) -> usize {
+    ((cw as f32 * ratio).round() as usize).clamp(1, cw.max(1))
+}
+
+/// serde default for [`DungeonConfig::doorway_ratio`]. Ships wider than the old hard-pinned 1-lane
+/// mouth: at `0.5`, a 2-wide corridor still necks to 1 but a 4–5-wide corridor opens a 2–3-lane
+/// doorway, so passage width finally varies across the map instead of every mouth being one body wide.
+fn default_doorway_ratio() -> f32 {
+    0.5
 }
 
 /// Carve a `lanes`-wide corridor between two site centres. Axis-aligned edges (always, for the grid) are
@@ -1313,6 +1353,49 @@ impl Dungeon {
                 if self.is_solid(x, z) {
                     return false;
                 }
+            }
+        }
+        true
+    }
+
+    /// Does a yaw-snapped furniture footprint centred at `center` keep clear of every doorway's
+    /// approach band? Furniture parked in a corridor mouth blocks the room's only entrance (player
+    /// request 2026-07-19), so this rejects any footprint AABB overlapping the keep-clear band a
+    /// doorway projects `keep_clear` metres into the room. Each [`Opening`] carries its interior floor
+    /// cell (`cell`, lane 0) and the wall it pierces (`dir`); the doorway spans `width` lanes stacked
+    /// perpendicular to `dir` (E/W stack along +Z, N/S along +X — matching the necking pass in
+    /// `carve`), and the room interior lies opposite `dir`. Complements [`Self::footprint_on_floor`]:
+    /// that keeps a piece out of the *walls*, this keeps it out of the *doorways*.
+    pub fn footprint_clears_openings(
+        &self,
+        center: Vec3,
+        half: Vec2,
+        yaw: f32,
+        openings: &[Opening],
+        keep_clear: f32,
+    ) -> bool {
+        // Yaw-snapped footprint half-extents (quarter turns swap width/depth), as in `footprint_on_floor`.
+        let quarter = (yaw / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
+        let (hx, hz) = if quarter % 2 == 1 { (half.y, half.x) } else { (half.x, half.y) };
+        let (fx0, fx1) = (center.x - hx, center.x + hx);
+        let (fz0, fz1) = (center.z - hz, center.z + hz);
+        let h = 0.5 * TILE_SIZE;
+        for op in openings {
+            let cx = op.cell[0] as f32 * TILE_SIZE;
+            let cz = op.cell[1] as f32 * TILE_SIZE;
+            let span = (op.width.max(1) as f32 - 0.5) * TILE_SIZE; // lanes 0..width from `cell`
+            // Keep-clear band: from the pierced wall plane, `keep_clear` deep into the room, across the
+            // doorway's open lanes.
+            let (bx0, bx1, bz0, bz1) = match op.dir {
+                E => (cx + h - keep_clear, cx + h, cz - h, cz + span),
+                W => (cx - h, cx - h + keep_clear, cz - h, cz + span),
+                N => (cx - h, cx + span, cz - h, cz - h + keep_clear),
+                S => (cx - h, cx + span, cz + h - keep_clear, cz + h),
+                _ => continue,
+            };
+            // AABB overlap (strict, so a piece flush at the band edge is allowed).
+            if fx0 < bx1 && fx1 > bx0 && fz0 < bz1 && fz1 > bz0 {
+                return false;
             }
         }
         true
@@ -2113,25 +2196,36 @@ fn spawn_tiles(
         }
     }
 
-    // Doorway lintels: a short wall header above each 1-tile doorway (region opening), so the wall
-    // reads as one continuous run from above — the door tucks under it. Placed on the doorway cell's
-    // open wall edge, raised to `DOORWAY_HEIGHT`. A lintel is a `Cutaway::Mounted` decoration: it shows
-    // only while its wall is far/full and hides (scale 0) when that wall becomes a near knee wall, so it
-    // never floats in the cutaway gap. All four edges are spawned (the pose seeds E/S hidden at yaw=0);
-    // rotation reveals the pair on whichever wall is currently full-height.
+    // Doorway lintels: a short wall header above each doorway (region opening), so the wall reads as one
+    // continuous run from above — the door tucks under it. A doorway is now a band of `op.width` lanes
+    // (necked down from its corridor's carved width), so a lintel is spawned over EVERY open lane —
+    // stacked perpendicular to `op.dir` from lane 0, matching the necking geometry — instead of framing
+    // only the centre lane and leaving a wide opening half-headed. Each lintel is raised to
+    // `DOORWAY_HEIGHT`. A lintel is a `Cutaway::Mounted` decoration: it shows only while its wall is
+    // far/full and hides (scale 0) when that wall becomes a near knee wall, so it never floats in the
+    // cutaway gap. All four edges are spawned (the pose seeds E/S hidden at yaw=0); rotation reveals the
+    // pair on whichever wall is currently full-height.
     let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
     let header_mesh = meshes.add(wall_mesh(header_size));
     for region in &dungeon.regions {
         for op in &region.openings {
-            let cell = IVec2::new(op.cell[0], op.cell[1]);
-            spawn_tile(
-                cell,
-                header_mesh.clone(),
-                wall_mat.clone(),
-                header_wall(cell, op.dir),
-                None,
-                Cutaway::Mounted,
-            );
+            // Open lanes stack +y for an E/W mouth and +x for an N/S mouth — the same axis the necking
+            // pass leaves open, so the header sits exactly over the cleared doorway lanes.
+            for lane in 0..op.width as i32 {
+                let cell = match op.dir {
+                    E | W => IVec2::new(op.cell[0], op.cell[1] + lane),
+                    N | S => IVec2::new(op.cell[0] + lane, op.cell[1]),
+                    _ => IVec2::new(op.cell[0], op.cell[1]),
+                };
+                spawn_tile(
+                    cell,
+                    header_mesh.clone(),
+                    wall_mat.clone(),
+                    header_wall(cell, op.dir),
+                    None,
+                    Cutaway::Mounted,
+                );
+            }
         }
     }
 }
@@ -2139,6 +2233,36 @@ fn spawn_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The doorway keep-clear reject (`footprint_clears_openings`): a footprint parked in a doorway's
+    /// approach band is rejected; one clear of it is accepted; and a corridor mouth on the +X wall neans
+    /// the band lies just inside the room, not out in the corridor. Uses a hand-built `Opening` (the
+    /// method reads only the opening geometry + `TILE_SIZE`, not the walkable mask).
+    #[test]
+    fn footprint_clears_openings_rejects_doorway_and_accepts_clear() {
+        // Minimal dungeon — the method doesn't consult the walkable mask, only the openings passed in.
+        let d = Dungeon::from_walkable(1, 1, vec![true]);
+        // A 1-lane doorway piercing the +X (east) wall of interior cell (5,5): the keep-clear band is
+        // x ∈ [5.5 − keep_clear, 5.5], z ∈ [4.5, 5.5].
+        let openings = [Opening { dir: E, cell: [5, 5], width: 1 }];
+        let keep = 1.1;
+        let half = Vec2::splat(0.3);
+        // Sitting in the mouth (centre on the doorway cell) → overlaps the band → NOT clear.
+        assert!(
+            !d.footprint_clears_openings(Vec3::new(5.0, 0.0, 5.0), half, 0.0, &openings, keep),
+            "a piece in the doorway must be rejected"
+        );
+        // Two tiles into the room (well past the 1.1 m band) → clear.
+        assert!(
+            d.footprint_clears_openings(Vec3::new(3.0, 0.0, 5.0), half, 0.0, &openings, keep),
+            "a piece clear of the doorway approach must be accepted"
+        );
+        // Off to the side of the doorway lane (different z) → clear.
+        assert!(
+            d.footprint_clears_openings(Vec3::new(5.0, 0.0, 7.0), half, 0.0, &openings, keep),
+            "a piece beside the doorway lane must be accepted"
+        );
+    }
 
     /// Corridor identity is a partition of floor: every cell is room floor XOR corridor floor, never both,
     /// and rock is neither. This is the invariant `mycelia::habitat` leans on to keep patches out of halls.
@@ -2181,6 +2305,7 @@ mod tests {
             block: 16,
             corridor_width: 2,
             corridor_width_max: Some(4),
+            doorway_ratio: 0.5,
             seed: 0x5C0_9191,
             max_attempts: 20,
             liminality: 1.0,
@@ -2405,6 +2530,63 @@ mod tests {
             parse_config(empty_types).is_err(),
             "empty room_types must be rejected"
         );
+    }
+
+    #[test]
+    fn doorway_width_is_proportional_and_clamped() {
+        // Proportional to the corridor's carved width, always ≥1, never wider than the corridor.
+        // At ratio 0.5 a 2-wide corridor still necks to 1, but 3/4/5-wide corridors open 2/2/3 lanes —
+        // so passage width varies instead of every doorway being one body wide (player report 2026-07-19).
+        assert_eq!(doorway_width(2, 0.5), 1);
+        assert_eq!(doorway_width(3, 0.5), 2); // round(1.5) = 2
+        assert_eq!(doorway_width(4, 0.5), 2);
+        assert_eq!(doorway_width(5, 0.5), 3); // round(2.5) = 3
+        // ratio 1.0 opens the full corridor; a tiny ratio still keeps at least one lane; never > corridor.
+        assert_eq!(doorway_width(5, 1.0), 5);
+        assert_eq!(doorway_width(4, 0.05), 1);
+        assert_eq!(doorway_width(1, 1.0), 1);
+    }
+
+    #[test]
+    fn validate_config_rejects_bad_doorway_ratio() {
+        let mut cfg = test_config();
+        cfg.doorway_ratio = 0.0;
+        assert!(validate_config(&cfg).is_err(), "0 doorway_ratio must be rejected (empty (0,1])");
+        cfg.doorway_ratio = 1.5;
+        assert!(validate_config(&cfg).is_err(), ">1 doorway_ratio must be rejected");
+        cfg.doorway_ratio = f32::NAN;
+        assert!(validate_config(&cfg).is_err(), "NaN doorway_ratio must be rejected");
+        cfg.doorway_ratio = 0.5;
+        assert!(validate_config(&cfg).is_ok(), "an in-range doorway_ratio is accepted");
+    }
+
+    #[test]
+    fn doorways_open_a_proportional_band_of_floor_lanes() {
+        // Fix the corridor width so the doorway width is deterministic: every corridor is exactly 3 wide,
+        // so at ratio 0.5 every doorway necks to round(1.5) = 2 lanes. Assert each opening (a) records
+        // width 2, and (b) has BOTH of its lanes (stacked perpendicular to `dir` from the mouth) as
+        // walkable floor — i.e. the doorway is genuinely 2 wide, not necked back to a single body-width.
+        let mut cfg = test_config();
+        cfg.corridor_width = 3;
+        cfg.corridor_width_max = None; // every corridor exactly 3 wide
+        cfg.doorway_ratio = 0.5;
+        let d = Dungeon::generate(&cfg).expect("gen");
+        let mut checked = 0usize;
+        for r in &d.regions {
+            for op in &r.openings {
+                assert_eq!(op.width, 2, "a 3-wide corridor at ratio 0.5 opens a 2-lane doorway");
+                for lane in 0..op.width as i32 {
+                    let cell = match op.dir {
+                        E | W => IVec2::new(op.cell[0], op.cell[1] + lane),
+                        N | S => IVec2::new(op.cell[0] + lane, op.cell[1]),
+                        _ => IVec2::new(op.cell[0], op.cell[1]),
+                    };
+                    assert!(d.is_floor(cell), "open doorway lane {cell:?} must be walkable floor");
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "a connected dungeon must have at least one doorway to check");
     }
 
     #[test]
@@ -2737,13 +2919,15 @@ mod tests {
     // Re-pinned for the layout-diversity work: per-corridor width variation (`corridor_width_max`) and
     // type-aware expansion (`RoomType::expands`) deliberately change the carve — a legitimate worldgen
     // change with sign-off, not accidental drift.
+    // Re-pinned 2026-07-19: proportional doorway widths (`doorway_ratio`, default 0.5) legitimately
+    // widen every corridor mouth beyond the old 1-tile neck, so the Grid carve changed with sign-off.
     const GOLDEN_DUNGEON: [u64; 6] = [
-        2568236482067835968,
-        5241347363305519598,
-        7950630862814937742,
-        2581036281007484390,
-        9682684589496540033,
-        18361432492331364935,
+        15713791351976089880,
+        9641188687789941418,
+        11115380735315394124,
+        6071063408633908684,
+        14844288061605299761,
+        11008265804405502608,
     ];
 
     /// FNV-1a accumulator — deterministic across runs (unlike `DefaultHasher`'s per-process seed).

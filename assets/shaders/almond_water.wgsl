@@ -25,6 +25,8 @@ struct AlmondParams {
     params0: vec4<f32>,  // (field_res, min_visible_norm, film_thickness_nm, film_ior)
     params1: vec4<f32>,  // (iridescence_strength, almond_tint.rgb)
     params2: vec4<f32>,  // (iridescence_mute, poison_tint.rgb)
+    params3: vec4<f32>,  // (base_alpha, rim_strength, glint_strength, ripple_strength)
+    params4: vec4<f32>,  // (edge_feather, feather_scale, _, _)
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> mat: AlmondParams;
@@ -37,6 +39,30 @@ fn hash13(p3in: vec3<f32>) -> f32 {
     var p3 = fract(p3in * 0.1031);
     p3 = p3 + dot(p3, p3.zyx + 31.32);
     return fract((p3.x + p3.y) * p3.z);
+}
+
+// Smooth 2D value noise + 3-octave fBm from the same hash — used to perturb the pool boundary so the
+// per-cell (bilinear) water field breaks into an organic puddle margin instead of tile-aligned diamonds.
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f); // smoothstep interpolation
+    let a = hash13(vec3<f32>(i + vec2<f32>(0.0, 0.0), 0.0));
+    let b = hash13(vec3<f32>(i + vec2<f32>(1.0, 0.0), 0.0));
+    let c = hash13(vec3<f32>(i + vec2<f32>(0.0, 1.0), 0.0));
+    let d = hash13(vec3<f32>(i + vec2<f32>(1.0, 1.0), 0.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+fn fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        v = v + amp * vnoise(q);
+        q = q * 2.03;
+        amp = amp * 0.5;
+    }
+    return v; // ~[0, 0.875], mean ~0.4375
 }
 
 // Layer A — bubble-up blooms in cell UV. A handful of blobs per neighbourhood, each with a hashed position
@@ -76,8 +102,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Field texture: R = normalised water level (0..1), G = belief (0 = cyanide, 1 = heal). `textureSampleLevel`
     // (LOD 0) is derivative-safe after the `discard`.
     let field = textureSampleLevel(level_tex, level_smp, uv, 0.0).rg;
-    let level = field.r;
     let belief = field.g;
+    // Feather the boundary: shift the water level by fBm noise keyed to WORLD position, so the pool's edge
+    // wiggles organically (sub-cell) instead of tracing the bilinear per-cell diamonds that read as tiles.
+    // Centred (mean ~0.4375) so it neither grows nor shrinks the pool on average — it just breaks the line.
+    let edge_feather = mat.params4.x;
+    let feather_scale = mat.params4.y;
+    let fn_ = fbm(in.world_position.xz * feather_scale) - 0.4375;
+    let level = clamp(field.r + fn_ * edge_feather, 0.0, 1.0);
     let min_vis = mat.params0.y;
     if (level <= min_vis) {
         discard; // dry concrete
@@ -114,11 +146,33 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let strength = mat.params1.x * wet;
     var color = mix(base, base * (0.5 + irid), strength);
 
-    // --- Layer A: bubble-up blooms, welling from the concrete where water pools --------------------------
-    let bloom = blooms(uv, globals.time) * wet;
+    // Readability/saliency knobs (Itti-Koch 1998 — a pool reads only when it out-contrasts the warm carpet
+    // in colour / intensity / MOTION). params3 = (base_alpha, rim_strength, glint_strength, ripple_strength).
+    let base_alpha = mat.params3.x;
+    let rim_strength = mat.params3.y;
+    let glint_strength = mat.params3.z;
+    let ripple_strength = mat.params3.w;
+
+    // --- Layer A: bubble-up blooms + ripples, welling where water pools. Motion is the strongest attention
+    //     cue, so `ripple_strength` scales the simmer up from the authored baseline. --------------------
+    let bloom = blooms(uv, globals.time) * wet * ripple_strength;
     color = color + vec3<f32>(bloom * 0.25);
 
-    // Translucent: more water = more opaque, but never a hard sheet (concrete reads through the shallows).
-    let alpha = wet * 0.6;
+    // --- Shoreline rim: a glowing waterline at the shallow margin so the pool reads as a distinct object
+    //     (figure-ground edge). `wet` is ~0 at the just-wet edge and →1 in the deep, so a band near the
+    //     edge traces the shore. A brightened pool colour rims a heal pool cyan, a cyanide pool green. ---
+    let rim = smoothstep(0.0, 0.16, wet) * (1.0 - smoothstep(0.16, 0.42, wet));
+    let rim_col = base + vec3<f32>(0.35);
+    color = color + rim_col * (rim * rim_strength);
+
+    // --- Wet specular glint: a broad view-aligned sheen plus bright sparkles riding the ripple crests, so
+    //     the surface catches the room light and glints as it moves (luminance contrast; reads as liquid).
+    let sheen = pow(cos1, 8.0) * 0.15;
+    let sparkle = pow(clamp(bloom, 0.0, 1.0), 2.0) * 1.5;
+    color = color + vec3<f32>((sheen + sparkle) * glint_strength);
+
+    // Opacity: deeper water is more opaque (up to `base_alpha`, no longer a faint 0.6 film); the shoreline
+    // rim is a touch crisper so the boundary stays legible even in the shallows.
+    let alpha = clamp(wet * base_alpha + rim * rim_strength * 0.25, 0.0, 1.0);
     return vec4<f32>(color, alpha);
 }

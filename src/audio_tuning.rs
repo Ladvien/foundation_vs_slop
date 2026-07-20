@@ -24,6 +24,7 @@ use crate::ai::tuning::ChannelTuning;
 /// is the "loudness" of that sound as a *stimulus* (not its playback gain): a louder event floods a
 /// wider, stronger acoustic bloom that more distant creatures can sense.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcousticStimulusTuning {
     /// Propagation of `NOISE_SQUAD` — din from squad entities (fire, bolt impacts, unit death).
     pub noise_squad: ChannelTuning,
@@ -45,6 +46,7 @@ pub struct AcousticStimulusTuning {
 /// investigate gate/draw pulls toward approaching the din's hotspot. Their relative magnitude decides
 /// the emergent **sign** — whether a swarm scatters from a firefight or converges on it.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcousticPerceptionTuning {
     /// Repulsion gain: `NOISE_SQUAD` fed into the crab `FEAR` drive (`TrackMaxFields`).
     pub crab_fear_of_din: f32,
@@ -61,6 +63,7 @@ pub struct AcousticPerceptionTuning {
 /// Root audio-tuning resource — the `audio:` config slice. All-continuous, `Copy`, so an evolved value
 /// decodes to a readable RON diff (the reward-hacking guard, mirroring [`crate::config::WorldConfig`]).
 #[derive(Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioTuning {
     pub stimulus: AcousticStimulusTuning,
     pub perception: AcousticPerceptionTuning,

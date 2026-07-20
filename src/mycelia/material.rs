@@ -72,6 +72,11 @@ pub struct MoldSurfaceParams {
     /// Strength of the cavity ambient occlusion written into `diffuse_occlusion`. Without this the scene's
     /// bright uniform ambient fills every crevice and the filaments render flat regardless of the normal.
     ao_strength: f32,
+    /// UV distance the reveal/coverage tap is domain-warped by world-space fbm, so the coat's edge stops
+    /// snapping to the per-cell control-texture grid (the "tiled" read). `0` = off.
+    reveal_warp_amp: f32,
+    /// Frequency (cycles per world unit) of that warp noise.
+    reveal_warp_scale: f32,
 }
 
 impl MoldSurfaceParams {
@@ -92,6 +97,8 @@ impl MoldSurfaceParams {
             margin_roughness: cfg.margin_roughness,
             sheen_strength: cfg.sheen_strength,
             ao_strength: cfg.ao_strength,
+            reveal_warp_amp: cfg.reveal_warp_amp,
+            reveal_warp_scale: cfg.reveal_warp_scale,
         }
     }
 }

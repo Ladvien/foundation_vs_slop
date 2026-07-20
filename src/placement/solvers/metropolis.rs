@@ -41,6 +41,7 @@ const WALL_INSET: f32 = WALL_THICKNESS;
 
 /// Tunable cost weights + MH schedule, loaded from RON (Merrell 2011 density terms).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetropolisWeights {
     pub iterations: u32,
     pub temp_start: f64,

@@ -27,14 +27,20 @@
 //! with no Bevy types, so it unit-tests without an `App`. Only the thin adapters at the edges
 //! (`append_mesh` reads a loaded [`Mesh`], `soup_to_mesh` writes one) touch Bevy.
 //!
-//! **Generality (this figurine is only a greybox — a richer, possibly skinned character replaces it
-//! later):** nothing keys off primitive counts or vertex layouts. Body geometry is discovered by
-//! walking whatever scene a unit loads (skipping the gun), sub-meshes with missing normals/UVs are
-//! synthesized, arbitrary/non-watertight input is welded and any unclosed cap dropped (never a
-//! panic), fragment count/size scale off the mesh bounding box, and the cache is keyed by the source
-//! asset id so swapping the GLB needs zero code change. The skinned path (snapshot the death pose
-//! before fracturing, since bind-pose geometry isn't what the player sees) is not built — our
-//! figurine is static.
+//! **Generality (the squad member is now the skinned VALKYRIE rig, no longer a greybox):** nothing keys
+//! off primitive counts or vertex layouts. Body geometry is discovered by walking whatever scene a unit
+//! loads (pruning the `GunModel`-tagged rifle subtree), sub-meshes with missing normals/UVs are
+//! synthesized, arbitrary/non-watertight input is welded and any unclosed cap dropped (never a panic),
+//! fragment count/size scale off the mesh bounding box, and the cache is keyed by the source asset id so
+//! swapping the GLB needs zero code change.
+//!
+//! **Skinned limitation (documented, accepted):** we read **bind-pose** `Mesh3d` geometry, so gibs
+//! fracture from VALKYRIE's rest pose, not the exact death pose. A death-pose snapshot path is the proper
+//! upgrade but is out of scope: per the fracture literature above (Sellán et al. §, Museth et al.), plane-
+//! cut prefracture artifacts are "hidden behind destruction dust or obscured by fast explosions" — and our
+//! gibs are flung fast and bloody the instant a unit dies, so the rest-vs-death pose gap is not visible.
+//! VALKYRIE's rifle is a rigid, Transform-driven bone-child node (not single-joint skinned), so the gun
+//! chunk is placed correctly by the same bind-pose Transform DFS the body uses.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
@@ -44,7 +50,7 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use crate::gore::GoreSettings;
-use crate::squad::{FigurineSource, GunModel, Unit};
+use crate::squad::{FigurineModel, FigurineSource, GunModel, Unit};
 use crate::util::hash_f32;
 
 /// Classification tolerance: a vertex within `EPS` of the cut plane is treated as lying *on* it, so
@@ -827,12 +833,58 @@ fn bake_autogib(
     }
 }
 
+/// Marks a `FigurineModel` child whose in-scene rifle has already been tagged `GunModel`, so
+/// `tag_valkyrie_rifle` runs once per unit. Lives on the cosmetic figurine child (never the `Unit`), so
+/// it can't split the hashed squad archetype — same discipline as `squad::Recolored`.
+#[derive(Component)]
+struct RifleTagged;
+
+/// VALKYRIE carries her rifle *inside* the body scene (a rigid mesh on the `spine_03` bone), not as the
+/// separate held-item child the old greybox used. Once the scene streams in, find that `rifle` sub-mesh
+/// and tag it `GunModel` so [`bake_autogib`] prunes it into the intact, self-materialed gun chunk exactly
+/// as it did the old blaster — the rifle still flies off on death, and the `gun.is_empty()` bake gate
+/// (below) stays satisfied. Runs `.before(bake_autogib)` so the tag is in place the same frame the scene's
+/// meshes finish loading. Because the rifle now streams with the body (one GLB, not a second
+/// `WorldAssetRoot`), the separate-scene load race the gate was hardened against (see G0d note below) can
+/// no longer occur.
+fn tag_valkyrie_rifle(
+    mut commands: Commands,
+    figurines: Query<Entity, (With<FigurineModel>, Without<RifleTagged>)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+) {
+    for figurine in &figurines {
+        let mut stack: Vec<Entity> = match children.get(figurine) {
+            Ok(c) => c.iter().collect(),
+            Err(_) => continue, // scene not instantiated yet — retry next frame
+        };
+        let mut tagged = false;
+        while let Some(e) = stack.pop() {
+            if names.get(e).map(|n| n.as_str().contains("rifle")).unwrap_or(false) {
+                // Tag the whole rifle node subtree as the gun chunk; don't descend past it.
+                commands.entity(e).insert(GunModel);
+                tagged = true;
+                continue;
+            }
+            if let Ok(ch) = children.get(e) {
+                stack.extend(ch.iter());
+            }
+        }
+        if tagged {
+            commands.entity(figurine).insert(RifleTagged);
+        }
+    }
+}
+
 /// Registers the autogib fracture cache and its one-shot bake system.
 pub struct AutogibPlugin;
 
 impl Plugin for AutogibPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AutogibCache>().add_systems(Update, bake_autogib);
+        app.init_resource::<AutogibCache>()
+            // Tag the in-scene rifle `GunModel` before the bake reads the scene, so the gun chunk is pruned
+            // out of the body soup and the bake gate sees a non-empty gun (see `tag_valkyrie_rifle`).
+            .add_systems(Update, (tag_valkyrie_rifle, bake_autogib).chain());
     }
 }
 

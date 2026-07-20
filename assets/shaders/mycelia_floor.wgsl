@@ -20,6 +20,7 @@
 #import bevy_pbr::pbr_fragment::pbr_input_from_standard_material
 #import bevy_pbr::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing}
 #import bevy_pbr::forward_io::{VertexOutput, FragmentOutput}
+#import foundation::noise::fbm4
 
 // MUST byte-match `MoldSurfaceParams` in `src/mycelia/material.rs`.
 struct MoldSurfaceParams {
@@ -38,6 +39,8 @@ struct MoldSurfaceParams {
     margin_roughness: f32,
     sheen_strength: f32,
     ao_strength: f32,
+    reveal_warp_amp: f32,
+    reveal_warp_scale: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> mold: MoldSurfaceParams;
@@ -79,41 +82,6 @@ const FOG_DIM: vec3<f32> = vec3<f32>(0.30, 0.30, 0.38);
 // THAT is the shine — not the roughness alone. Dropping F0 by ~6x is what finally kills the wet look.
 const MOLD_REFLECTANCE: f32 = 0.08;
 
-
-// ── Procedural noise ──────────────────────────────────────────────────────────────────────────────────
-// Dave Hoskins `hash21` + value noise + fbm, the same chain used by `vhs.wgsl`. Copied rather than imported:
-// this repo has no shared WGSL module and bevy_pbr ships no gradient noise. Texture-free, so it tiles
-// infinitely and needs no repeat-address sampler (nothing in this project configures one).
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-fn vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i + vec2<f32>(0.0, 0.0));
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// Four octaves. One fewer than `vhs.wgsl`'s five: this runs over the whole floor footprint, not a
-// post-process quad, and the fifth octave is below the pixel scale at any playable camera height.
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var amp = 0.5;
-    var pp = p;
-    for (var i = 0; i < 4; i = i + 1) {
-        v = v + amp * vnoise(pp);
-        pp = pp * 2.0;
-        amp = amp * 0.5;
-    }
-    return v;
-}
 
 fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
@@ -162,7 +130,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let contact = f.b;
     // Coverage gates drawing (explored floor only, or the coat traces the map through the fog); `lit` dims
     // the mold to match the fogged floor under it. Both are player-caused and therefore instantaneous.
-    let substrate = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    // The control texture is one texel per dungeon CELL, so tapping it at the bare `uv` snaps the coat's
+    // reveal/coverage edge to the cell grid — the coat reads as square tiles. Domain-warp the tap with the
+    // same world-space fbm the colony margin uses (Lagae et al. 2010, procedural-noise survey) so the edge
+    // wanders off the grid. Kept small (~1-2 cells) so mold never bleeds across a wall.
+    let warp = vec2<f32>(
+        fbm4(world_xz * mold.reveal_warp_scale),
+        fbm4(world_xz * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
+    ) - 0.5;
+    let ctrl_uv = uv + warp * mold.reveal_warp_amp;
+    let substrate = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 
@@ -188,7 +165,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // a filament, fast variation between neighbouring filaments. That anisotropy is what makes it read as
     // fibres rather than isotropic lumps.
     let fiber_uv = vec2<f32>(dot(world_xz, along) * 0.22, dot(world_xz, across)) * mold.fiber_scale;
-    let strand = fbm(fiber_uv);
+    let strand = fbm4(fiber_uv);
 
     // ── Coat, with a dendritic margin ─────────────────────────────────────────────────────────────────
     let body = clamp(max(max(veins * 0.85, bio * 0.55), sheen * 0.14) + contact * bio * 0.35, 0.0, 1.0);
@@ -200,7 +177,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // unconditionally it lifts bare carpet — where `body` is exactly 0 — to as much as +margin_roughness/2,
     // far above the discard threshold, hazing the whole floor with phantom mold. `gate` is zero wherever
     // there is no mold to feather, so bare floor stays bare and only the fringe (0 < body < 0.12) moves.
-    let lobes = fbm(world_xz * mold.fiber_scale * 0.25);
+    let lobes = fbm4(world_xz * mold.fiber_scale * 0.25);
     let gate = smoothstep(0.0, 0.12, body);
     let coat = clamp(body + (lobes - 0.5) * mold.margin_roughness * gate, 0.0, 1.0)
              * coverage * mold.intensity;

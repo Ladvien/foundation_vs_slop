@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 /// against one or two crabs and breaks it under four — a firefight, not a rout. `of_anomaly` is near-total:
 /// standing in the watcher's aura is meant to rout the squad. Nothing may fear a channel it emits.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FearTuning {
     /// A unit's fear per nearby crab (tracks `THREAT_CRAB`).
     pub per_crab: f32,
@@ -35,6 +36,7 @@ pub struct FearTuning {
 /// `deposit ≈ evaporate` (a cell reads as a "count"), so evolving one without the other shifts semantics —
 /// that is why both sides are promoted together.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepositTuning {
     /// `THREAT_GUN` laid at muzzle + impact per shot.
     pub threat_per_shot: f32,
@@ -64,6 +66,7 @@ pub struct DepositTuning {
 /// Combat numbers — weapon damage, the crab bite, and hit points. `crab_damage_exponent` makes a pile-on
 /// super-linear (`dps · count^exp`), so being swarmed is the real threat, not a single bite.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CombatTuning {
     /// Damage per laser hit.
     pub laser_damage: f32,
@@ -88,6 +91,7 @@ pub struct CombatTuning {
 /// Swarm economy — breeding, feeding, and the population cap. `crab_count_max` is the operative cap the
 /// nests breed toward (the initial spawn count is a separate spawn-structure knob, not promoted here).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BreedingTuning {
     /// Hard population cap the swarm breeds toward.
     pub crab_count_max: usize,
@@ -113,6 +117,7 @@ pub struct BreedingTuning {
 /// swats biting crabs off itself. The vestigial `CONTACT_DPS` (a death-camera mass weight, never applied
 /// as damage) is deliberately **not** promoted — it is not a dynamics knob.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BossTuning {
     /// The watcher's hit points.
     pub start_hp: f32,
@@ -136,6 +141,7 @@ pub struct BossTuning {
 /// the offline search can evolve the parasite like the crab swarm. `manca_count_max` is the load-bearing
 /// cap that keeps the burst→brood→infest loop from exploding.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParasiteTuning {
     /// Free mancae seeded at level start.
     pub initial_count: usize,
@@ -170,6 +176,7 @@ pub struct ParasiteTuning {
 /// Root simulation-tuning resource. Extend with new sections as later phases need them; keep
 /// [`SimTuning::default`] bit-identical to the shipped consts, guarded by the deterministic-core hash.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimTuning {
     pub fear: FearTuning,
     pub deposit: DepositTuning,

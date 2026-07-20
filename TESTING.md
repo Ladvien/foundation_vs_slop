@@ -330,11 +330,15 @@ CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves 
 - **The harness no longer needs a GPU.** It runs with `RenderPlugin { backends: None }` (see "What's in
   the box" §2). The *windowed* game obviously still needs a real backend; only `build_headless_app` omits it.
 - **`devshot` can't run inside the harness** — `Screenshot::primary_window()` needs a window, and the
-  harness has none. Full SSIM visual-regression therefore needs the *windowed* game driven by `devshot`
-  (`touch screenshot.request`; see `CLAUDE.md` → "Taking screenshots"), plus decoding `screenshot.png`.
-  `Cargo.toml` has **no `[dev-dependencies]` section yet**, so the `image` crate needed to decode the PNG is
-  absent — adding it is part of building this capture rig. The SSIM oracle itself is built and tested; the
-  windowed capture is the remaining piece.
+  harness has none. So full SSIM visual-regression runs against the *windowed* game, in the display-gated
+  `tests/visual_capture.rs` (`#[ignore]`d, since CI without a display/GPU can't run it):
+  `cargo test --features test-harness --test visual_capture -- --ignored`. It launches the game binary,
+  drives a `devshot` capture via the `screenshot.request` sentinel, decodes `screenshot.png` with the
+  `image` dev-dependency, downscales to a monitor-independent 688×288, and asserts `ssim(shot, golden) ≥
+  0.95` (best of a few frames, so a transient VHS-glitch frame can't fail a healthy run) against the
+  committed `tests/golden/title_screen.png`. Regenerate the golden after an intentional title-screen art
+  change (see that file's module doc). The SSIM oracle math lives in `src/visual_regression.rs` and is
+  separately unit-tested.
 - **Cross-speed exact equality is not asserted.** The speed knob (`SimConfig.speed`) is deterministic at a
   *fixed* speed, but per-frame `Update` systems that touch the wall clock (hitstop) run once per update
   regardless of sub-step count, so the fixed-step count can differ by one across speeds. Same-seed /

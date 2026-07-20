@@ -35,10 +35,11 @@ use crate::sim::{
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
 /// + rally × 3) + 52 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 9, boss 7,
-/// parasite 14) + 7 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is ATTENTION
+/// parasite 14) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is ATTENTION
 /// (observation), and the SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials
-/// belong in the search that shapes the ecosystem's deaths and lives.
-pub const N: usize = 104;
+/// belong in the search that shapes the ecosystem's deaths and lives. (Mold dropped to 6 dials when the
+/// mold→LOS occlusion coupling was removed — see `mold::MoldConfig`.)
+pub const N: usize = 103;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -114,13 +115,12 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 1.0),    // manip_curiosity_gain (probability)
     (0.1, 10.0),   // manip_dark_gain (validate_tuning requires > 0)
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
-    //    co-evolves with combat, since mold shapes light/LOS/healing). substeps/seed_v/light_ref stay fixed
-    //    (structural/calibration), so only the 7 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
+    //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
+    //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
     (0.0, 0.2),    // growth (logistic coeff/substep)
     (0.0, 0.24),   // diffuse (lerp weight/substep, must stay < 0.25)
     (0.0, 0.2),    // light_recoil (photophobia sink/substep)
     (0.0, 1.0),    // dim_light (mold → LightField attenuation)
-    (0.0, 1.5),    // occlude_los (mold → LOS occlusion strength)
     (0.5, 6.0),    // seep_boost (mold → almond-water seep multiplier)
     (0.2, 1.0),    // dense_v (biomass threshold for "dense" mold)
     // ── AlmondWaterDynamics (the belief/inversion water — seep/heal/poison/belief the search co-evolves with
@@ -230,12 +230,11 @@ pub fn encode(
     v.push(sim.parasite.manip_cohesion_drop);
     v.push(sim.parasite.manip_curiosity_gain);
     v.push(sim.parasite.manip_dark_gain);
-    // MoldConfig — the 7 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
+    // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
     v.push(mold.light_recoil);
     v.push(mold.dim_light);
-    v.push(mold.occlude_los);
     v.push(mold.seep_boost);
     v.push(mold.dense_v);
     // AlmondWaterDynamics — the 16 evolvable water dials (in BOUNDS order).
@@ -381,13 +380,12 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             }
         },
     };
-    // MoldConfig — the 7 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
+    // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
     let mold = crate::mold::MoldConfig {
         growth: f!(),
         diffuse: f!(),
         light_recoil: f!(),
         dim_light: f!(),
-        occlude_los: f!(),
         seep_boost: f!(),
         dense_v: f!(),
         ..crate::mold::MoldConfig::default()
