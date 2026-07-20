@@ -42,6 +42,7 @@ use crate::util::row_major;
 /// The evolvable mold parameters (the `mold:` config slice). Per-substep coefficients (the fixed 60 Hz
 /// `FixedUpdate` × `substeps` sets the wall-clock rate), so nothing here depends on `dt`.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MoldConfig {
     /// Logistic growth coefficient per substep — how fast biomass climbs toward the habitat capacity.
     pub growth: f32,
@@ -56,14 +57,12 @@ pub struct MoldConfig {
     /// Illuminance that reads as "fully lit" (`light01 = min(1, light/light_ref)`).
     pub light_ref: f32,
 
-    // ── Gameplay couplings (consumed by the light / fog / almond-water read-edges; see their systems) ──
+    // ── Gameplay couplings (consumed by the light / almond-water read-edges; see their systems) ──
     /// How strongly biomass attenuates the gameplay `LightField` (0 = no dimming, 1 = a full mat blacks out).
     pub dim_light: f32,
-    /// How strongly dense biomass occludes line-of-sight (soft cover).
-    pub occlude_los: f32,
     /// Multiplier applied to almond-water seep under dense mold (mold-cracked concrete weeps more).
     pub seep_boost: f32,
-    /// Biomass at or above which a cell counts as "dense" mold (for the LOS occlusion + seep couplings).
+    /// Biomass at or above which a cell counts as "dense" mold (for the seep coupling).
     pub dense_v: f32,
 }
 
@@ -73,14 +72,16 @@ pub struct MoldConfig {
 /// **These MUST mirror the `mold:` block in `assets/config/config.ron`** — guarded by
 /// `authored_world_config_override_is_a_noop`.
 ///
-/// **The couplings are SHIPPED defaults.** The mold is load-bearing (Phase 3): it dims light (crabs are
-/// less light-pushed) and, where dense (biomass >= `dense_v`/`occlude_los` ~= 0.83), hides crabs from the
-/// squad's line of sight — a real tactical cost, not cosmetic. Adding the mold also shifts the
-/// deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf. `tests/replay.rs`),
-/// which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes. Those were
-/// re-selected: the held-in set is now `[0x5C09191, 0x1CE5, 0xD00D]`, where the shipped squad produces a
-/// real encounter — it survives with margin AND the swarm survives (neither side is wiped). The couplings
-/// stay LIVE and tunable: the optimizer (`world_genome` BOUNDS: `dim_light` 0..1, `occlude_los` 0..1.5,
+/// **The couplings are SHIPPED defaults.** The mold is load-bearing (Phase 3): it dims light, so crabs
+/// denned in a dense mat are less light-pushed — a real tactical effect, not cosmetic. (The mold→LOS
+/// "soft cover" coupling that also hid crabs from the squad's sight was REMOVED — it blinded the squad
+/// to the floor under its own feet, breaking fog-of-war; mold now only dims light, never sight.) Adding
+/// the mold shifts the deterministic trajectory (every new FixedUpdate producer re-bakes the golden, cf.
+/// `tests/replay.rs`), which tipped two knife's-edge *held-in* worlds (0xA11CE, 0xBEEF) into squad wipes.
+/// Those were re-selected; the held-in set is now `[0x5C09191, 0x1CE5, 0xFEED]` (`0xB0BA` then `0xD00D` were
+/// retired later for unrelated trajectory shifts — the audio bake and the VALKYRIE mesh swap; see
+/// `HELD_IN_SEEDS`), where the shipped squad produces a real encounter — it survives AND the swarm survives.
+/// The couplings stay LIVE and tunable: the optimizer (`world_genome` BOUNDS: `dim_light` 0..1,
 /// `seep_boost` 0.5..6) can push them and weigh the "mold makes it scarier" cost.
 ///
 /// `seep_boost: 1.5` mirrors the old static `almond_water.mold_seep_mult`: the live ramp `1 + 0.5·mold01`
@@ -101,7 +102,6 @@ impl Default for MoldConfig {
             light_recoil: 0.05,
             light_ref: 6.0,
             dim_light: 0.5,
-            occlude_los: 0.6,
             seep_boost: 1.5,
             dense_v: 0.5,
         }
@@ -116,7 +116,6 @@ pub fn validate_config(c: &MoldConfig) -> Result<(), String> {
         ("seed_v", c.seed_v),
         ("light_recoil", c.light_recoil),
         ("dim_light", c.dim_light),
-        ("occlude_los", c.occlude_los),
         ("seep_boost", c.seep_boost),
         ("dense_v", c.dense_v),
     ] {

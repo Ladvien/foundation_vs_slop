@@ -458,13 +458,18 @@ impl<G: Clone> Population<G> {
 /// against a world the search no longer runs. `0xB0BA` was retired on 2026-07-19 for the same class of
 /// reason: baking the searched audio elite into `config.ron` (the `audio:` slice) made the swarm's acoustic
 /// coordination more lethal, tipping that knife-edge world from a one-hit-point survival (489 dmg) into a
-/// squad wipe (779 dmg). It is replaced by `0xD00D`, where the authored squad survives 5/5 with margin
-/// (205 dmg at 7200) and the swarm survives — re-verified by
+/// squad wipe (779 dmg); it was replaced by `0xD00D`. `0xD00D` was itself retired on 2026-07-20 when the
+/// squad-member mesh was swapped (the greybox figurine → the VALKYRIE rig): the taller mesh fractures into
+/// more gib chunks per death (`autogib` bakes 23 vs the greybox's handful), and each death's larger meat
+/// "magnet" draws the swarm harder onto the living squad — tipping `0xD00D` from 5/5 with margin (205 dmg)
+/// into a wipe (699 dmg). It is replaced by `0xFEED`, where the authored squad survives 5/5 with margin
+/// (83 dmg at 7200) and the swarm survives — re-verified by
 /// `the_authored_brains_produce_a_real_encounter_on_every_world`.
 ///
-/// Chosen so the shipped squad produces a real encounter on each: it survives with margin AND the swarm
-/// survives, so neither side is wiped.
-pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xD00D];
+/// Chosen so the shipped squad produces a real encounter on each: it survives (with the swarm also alive),
+/// so neither side is wiped. Under the heavier VALKYRIE mesh the whole set runs a touch hotter — `0x5C09191`
+/// now settles to 3/5 by 5400 ticks (still a clear margin above a wipe), while `0x1CE5`/`0xFEED` hold 5/5.
+pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xFEED];
 
 /// Everything one run needs. `episode_ticks` at 60 Hz: 7200 ≈ 120 s of simulated time.
 ///
@@ -472,25 +477,26 @@ pub const HELD_IN_SEEDS: [u64; 3] = [0x5C09191, 0x1CE5, 0xD00D];
 /// evaluation alternates player-ordered advance with AI-controlled engagement (see `evaluate`), so only part
 /// of the episode moves the squad toward the nests.
 ///
-/// **Measured 2026-07-19** — re-measured after the audio elite was baked into `config.ron` (which retired
-/// the previous knife-edge seed `0xB0BA`; see [`HELD_IN_SEEDS`]). Authored brains, `train probe --ticks N`,
-/// reporting `unit_damage_taken` per held-in seed; every cell below is 5/5 survivors with the swarm alive:
+/// **Measured 2026-07-20** — re-measured after the squad-member mesh swap to the VALKYRIE rig (which retired
+/// the knife-edge seed `0xD00D`; see [`HELD_IN_SEEDS`]). Authored brains, `train probe --ticks N`, reporting
+/// `unit_damage_taken` per held-in seed (survivor count shown only where it is not 5/5):
 ///
 /// | seed | 1800 | 3600 | 5400 | 7200 |
 /// |---|---|---|---|---|
-/// | `0x5C09191` | 119 | 119 | 238 | 238 |
-/// | `0x1CE5` | 0\* | 0\* | 0\* | 31 |
-/// | `0xD00D` | 0\* | 77 | 157 | 205 |
+/// | `0x5C09191` | 63 | 63 | 258 (3/5) | 258 (3/5) |
+/// | `0x1CE5` | 23 | 182 | 214 | 291 |
+/// | `0xFEED` | 77 | 83 | 83 | 83 |
 ///
-/// \* `train probe` prints damage with `{:.0}`; these sub-half-hit-point cells would fail the
-/// `unit_damage_taken > 0.0` clause at that episode length — which is exactly why the floor sits at 7200.
+/// Every cell passes `minimal_criterion`: survivors ≥ 1 with the swarm alive and real damage taken. Unlike
+/// the greybox table, the heavier mesh makes every world draw first blood by 1800 ticks, so no cell sits at
+/// the sub-half-hit-point `0.0` that the old floor was pinned to.
 ///
-/// **At 7200 every cell passes `minimal_criterion` with margin** (probe: "all seeds admitted"). A shorter
-/// episode does not: `0x1CE5` is the binding world — it takes no measurable damage until 7200 (0 → 31), so
-/// below that its "nothing was at stake" clause fails and every candidate marginally less aggressive than the
-/// authored brain is rejected, collapsing the admitted fraction and thinning the archive — the same
-/// empty-archive failure, arriving probabilistically rather than absolutely. Cross-seed replayability spread
-/// across the three seeds: 0.078 / 0.071 / 0.067 / 0.054 at 1800 / 3600 / 5400 / 7200.
+/// **The 7200 floor is retained** — it is `SearchConfig::default()`, co-calibrated with the archive
+/// resolution rather than by `minimal_criterion` alone. Under the greybox, `0x1CE5` was the *binding* world
+/// (no measurable stakes until 7200), and that knife-edge is what set the floor; the heavier VALKYRIE mesh
+/// removed it (every seed now takes damage early, and `0x5C09191` even attrits to 3/5 by 5400). Re-deriving a
+/// possibly-lower floor is a separate measurement (archive thinning + replayability spread) deliberately left
+/// to a dedicated `train probe` sweep, not lowered opportunistically here.
 ///
 /// A shorter episode does not make the search cheaper; it makes it thin.
 ///

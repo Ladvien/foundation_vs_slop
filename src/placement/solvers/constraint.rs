@@ -118,9 +118,9 @@ mod tests {
             id: 0,
             rect: Rect2 { min: [0, 0], max: [5, 5] },
             openings: vec![
-                Opening { dir: N, cell: [2, 0] },
-                Opening { dir: E, cell: [4, 2] },
-                Opening { dir: W, cell: [0, 2] },
+                Opening { dir: N, cell: [2, 0], width: 1 },
+                Opening { dir: E, cell: [4, 2], width: 1 },
+                Opening { dir: W, cell: [0, 2], width: 1 },
             ],
             adjacency: Vec::new(),
             props: PropertyBag::default(),

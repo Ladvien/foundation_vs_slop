@@ -135,6 +135,7 @@ pub const COARSE_SIZE: u32 = 128;
 /// Dussutour (2016), 10.1098/rspb.2016.0446: *P. polycephalum* learns to ignore a repeatedly-presented
 /// *harmless* repellent, showing both responsiveness decline AND spontaneous recovery once it is withheld.
 #[derive(Resource, Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct MyceliaConfig {
     // ── Field geometry ────────────────────────────────────────────────────────────────────────────────
     /// Side length (texels) of the square world-space mold field. Must be a multiple of [`WORKGROUP_SIZE`].
@@ -277,6 +278,16 @@ pub struct MyceliaConfig {
     /// ambient is a bright *uniform* fill, which ignores surface normals entirely, so without an occlusion
     /// term the filaments render flat no matter how hard the normal is perturbed.
     pub ao_strength: f32,
+    /// How far (UV units) the reveal/coverage sample point is jostled by world-space fbm before the
+    /// control texture is tapped. The control texture is one texel per dungeon CELL, so a straight
+    /// smoothstep over it snaps the mold's edge to the cell grid and the coat reads as square tiles.
+    /// Domain-warping the tap (Lagae et al. 2010, "A Survey of Procedural Noise Functions") makes that
+    /// edge wander like the colony margin. `0` = the old cell-aligned edge. ~1–2 cells (0.005–0.015) hides
+    /// the seams without letting mold bleed across a wall.
+    pub reveal_warp_amp: f32,
+    /// Spatial frequency (cycles per world unit) of that warp. Low = broad, few-cell wander that breaks the
+    /// grid; high = fine jitter. ~0.7 puts the wander at the cell scale where the seams are.
+    pub reveal_warp_scale: f32,
 
     // ── Fruiting (see `fruit.rs`) ─────────────────────────────────────────────────────────────────────
     /// Biomass `V` above which a texel is a candidate to pin a fruit body.
@@ -396,6 +407,7 @@ pub struct MyceliaConfig {
 
 /// One row of [`MyceliaConfig::damp_weights`] — how readily a room type rots.
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct DampWeight {
     /// The room-type tag, as stamped into `Region::props.tags` by `dungeon::pick_room`.
     pub tag: String,
@@ -534,6 +546,9 @@ pub fn validate_config(c: &MyceliaConfig) -> Result<(), String> {
     non_negative("carrion_bloom", c.carrion_bloom)?;
     // A zero fiber frequency collapses the filament noise to a single constant sample: no strands at all.
     positive("fiber_scale", c.fiber_scale)?;
+    // The reveal-warp knobs: a non-negative jostle over a positive-frequency noise. 0 amp = feather off.
+    non_negative("reveal_warp_amp", c.reveal_warp_amp)?;
+    positive("reveal_warp_scale", c.reveal_warp_scale)?;
 
     unit("hab_strength", c.hab_strength)?;
     unit("intensity", c.intensity)?;
@@ -1383,6 +1398,8 @@ mod tests {
             margin_roughness: 0.55,
             sheen_strength: 0.18,
             ao_strength: 0.75,
+            reveal_warp_amp: 0.012,
+            reveal_warp_scale: 0.7,
             v_fruit: 0.35,
             u_exhausted: 0.30,
             pin_dwell_secs: 6.0,

@@ -203,7 +203,7 @@ mod tests {
         Region {
             id: 0,
             rect: Rect2 { min: [0, 0], max: [4, 4] },
-            openings: vec![Opening { dir: 0, cell: [2, 0] }],
+            openings: vec![Opening { dir: 0, cell: [2, 0], width: 1 }],
             adjacency: Vec::new(),
             props: PropertyBag::default(),
         }

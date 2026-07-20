@@ -13,6 +13,7 @@
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::globals
+#import foundation::noise::hash21
 
 struct PoolSettings {
     color: vec4<f32>,   // deep blood red (rgb); a=1
@@ -33,12 +34,6 @@ struct PoolSettings {
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var base_smp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var normal_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var normal_smp: sampler;
-
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
 
 // Polynomial smooth-min: unions the main pool with satellite droplets/streaks into one blobby mass.
 fn smin(a: f32, b: f32, k: f32) -> f32 {

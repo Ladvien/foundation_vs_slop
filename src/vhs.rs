@@ -47,6 +47,7 @@ impl FullscreenMaterial for VhsSettings {
 /// Human-facing, RON-persisted tunables: the fade cycle timing plus each effect's strength. A field of
 /// the unified `crate::config::GameConfig` (the `vhs:` slice of `assets/config/config.ron`).
 #[derive(Resource, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct VhsConfig {
     /// Always-on texture floor (0 = off) — the constant analog grain/scanline the picture always
     /// carries. Distortions spike on top of this; see `drive_fade`.

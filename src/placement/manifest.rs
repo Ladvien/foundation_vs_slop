@@ -14,6 +14,7 @@ use super::ir::Role;
 /// One catalogued asset. `glb` is a path under `assets/`; `footprint` is (width, depth) in metres
 /// (= tiles, since `TILE_SIZE` is 1 m). Fields default so a terse manifest stays valid.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestItem {
     pub key: String,
     pub glb: String,
@@ -37,10 +38,20 @@ pub struct ManifestItem {
     // Defaults to 0 for pieces whose height no rule needs (floor props, anchors).
     #[serde(default)]
     pub height: f32,
+    // Local XZ offset (metres, from the glb bbox) of the mesh's bounding-box centre relative to its
+    // glTF origin. Kit meshes are often authored off-centre — e.g. Drawer A's body spans z ∈ [−0.44,
+    // +0.16], so its bbox centre sits at −0.14, not the origin. Placement reasons about a *symmetric*
+    // footprint about the origin, so an off-centre mesh seated against a wall pokes its far side
+    // through it (the "furniture halfway through a wall" report). The furnish spawn shifts the model by
+    // −(yaw · pivot) so its bbox centre lands on the placement point, making the symmetric `footprint`
+    // an accurate reservation. Defaults to (0,0) — a centred mesh needs no correction.
+    #[serde(default)]
+    pub pivot: (f32, f32),
 }
 
 /// A parsed furniture manifest.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FurnitureManifest {
     pub items: Vec<ManifestItem>,
 }

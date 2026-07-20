@@ -25,6 +25,7 @@
 #import bevy_pbr::mesh_functions
 #import bevy_pbr::morph::{morph_position, morph_normal, morph_tangent}
 #import bevy_pbr::view_transformations::position_world_to_clip
+#import foundation::noise::fbm4
 
 // MUST byte-match `MoldSurfaceParams` in `src/mycelia/material.rs`.
 struct MoldSurfaceParams {
@@ -275,36 +276,6 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     return out;
 }
 
-// ── Procedural noise (see `mycelia_floor.wgsl` for provenance) ────────────────────────────────────────
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-fn vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i + vec2<f32>(0.0, 0.0));
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var amp = 0.5;
-    var pp = p;
-    for (var i = 0; i < 4; i = i + 1) {
-        v = v + amp * vnoise(pp);
-        pp = pp * 2.0;
-        amp = amp * 0.5;
-    }
-    return v;
-}
-
 fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
 }
@@ -356,7 +327,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // The body's own vein network, the same fbm ridge the mat's trail field resolves into. This is what
     // carries the family resemblance: the veins do not stop at the floor, they climb into the fruit body.
-    let body_vein = smoothstep(0.52, 0.86, fbm(sp * 0.55));
+    let body_vein = smoothstep(0.52, 0.86, fbm4(sp * 0.55));
 
     // ── Albedo by part ────────────────────────────────────────────────────────────────────────────────
     // The pileus darkens toward the mat's own flesh as the veil thins. `tint`, never `growth` — see header.
@@ -370,12 +341,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     );
     // Mottle the cap with the same fbm the colony's advancing margin is broken by, so its surface is
     // dappled like the mat rather than a clean painted dome.
-    let mottle = smoothstep(0.35, 0.78, fbm(sp * 1.3));
+    let mottle = smoothstep(0.35, 0.78, fbm4(sp * 1.3));
     let cap_col = mix(pileus, FLESH_DEEP, mottle * mold.margin_roughness * 0.55);
 
     // The volva is a torn sac still half in the ground: fleck it with substrate. Keyed off height above the
     // base, so the flecks sit on the sac rather than swimming down it as the body rises out of the mat.
-    let grime = fbm(in.world_position.xz * fs * 2.0 + vec2<f32>(height * fs, 0.0));
+    let grime = fbm4(in.world_position.xz * fs * 2.0 + vec2<f32>(height * fs, 0.0));
     let sac = mix(fruit.volva, fruit.substrate, smoothstep(0.45, 0.75, grime) * 0.7);
 
     var albedo = cap_col * cap + fruit.stipe * flesh + sac * volva;
@@ -399,7 +370,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // physical thickness whatever `body_scale` this mushroom drew. Written out rather than as an inverted
     // smoothstep: WGSL leaves smoothstep undefined when edge0 >= edge1.
     let h = clamp(height / SKIRT_HEIGHT, 0.0, 1.0);
-    let ragged = (fbm(vec2<f32>(in.world_position.x, in.world_position.z) * fs * 1.5) - 0.5)
+    let ragged = (fbm4(vec2<f32>(in.world_position.x, in.world_position.z) * fs * 1.5) - 0.5)
                * mold.margin_roughness;
     let t = clamp(1.0 - (h + ragged), 0.0, 1.0);
     let skirt = t * t * (3.0 - 2.0 * t);
@@ -425,16 +396,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // frame — it has no thickness field of its own to take a gradient of.
     let fibrous = 1.0 - 0.5 * cap;
     let e = 0.02;
-    let sa = fbm(sp + vec2<f32>(e * fs, 0.0));
-    let sb = fbm(sp - vec2<f32>(e * fs, 0.0));
-    let sc = fbm(sp + vec2<f32>(0.0, e * fs * 0.6));
-    let sd = fbm(sp - vec2<f32>(0.0, e * fs * 0.6));
+    let sa = fbm4(sp + vec2<f32>(e * fs, 0.0));
+    let sb = fbm4(sp - vec2<f32>(e * fs, 0.0));
+    let sc = fbm4(sp + vec2<f32>(0.0, e * fs * 0.6));
+    let sd = fbm4(sp - vec2<f32>(0.0, e * fs * 0.6));
     let ridge = mold.fiber_strength * fibrous * 0.5;
     pbr_input.N = normalize(n - tangent * (sa - sb) * ridge - up * (sc - sd) * ridge);
 
     // Cavity AO. Without it the scene's bright uniform ambient — which ignores normals entirely — flattens
     // every strand and the gills read as a painted disc.
-    let strand = fbm(sp);
+    let strand = fbm4(sp);
     let ao = clamp(1.0 - mold.ao_strength * (1.0 - strand) * fibrous, 0.0, 1.0);
     pbr_input.diffuse_occlusion = vec3<f32>(ao);
     pbr_input.specular_occlusion = ao;

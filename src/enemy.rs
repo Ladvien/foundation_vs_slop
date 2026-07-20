@@ -71,6 +71,16 @@ const ENEMY_Y: f32 = CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
 /// Billboard face size (world units) and its local offset up the capsule toward the "head".
 const FACE_SIZE: f32 = 1.6;
 const FACE_LOCAL: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+/// Gain on the wall-standoff steering push (folded into `enemy_seek`'s `desired`). Paired with
+/// `boss.wall_standoff` (the distance the push acts within): the boss's centre is steered off a wall so
+/// its wide camera-facing billboard (±`FACE_SIZE/2`) doesn't sweep into it, since its collision box
+/// (`ENEMY_HALF`) is far narrower than the face.
+const WALL_PUSH_GAIN: f32 = 2.0;
+/// Depth bias (world units) nudging the face/orb billboards toward the camera along its view axis, so
+/// the wide plane wins the depth test against a wall it stands near instead of embedding in it. Under the
+/// orthographic iso projection this is a *pure depth shift* — the face's on-screen position is unchanged,
+/// it just draws in front. Backstops `boss.wall_standoff` in narrow corridors that can't fit the billboard.
+const FACE_CAMERA_OFFSET: f32 = 0.7;
 /// Only floor cells at least this far (tiles) from the squad spawn are candidate enemy positions,
 /// and accepted enemies are kept at least `SPAWN_SEP` apart so they don't stack.
 const MIN_SPAWN_DIST: f32 = 4.0;
@@ -591,6 +601,26 @@ fn rebuild_enemy_field(
 /// heading and resets to a crawl on a turn
 /// (steering-with-acceleration; Wang, Kearney, Cremer & Willemsen, "Steering Behaviors for
 /// Autonomous Vehicles in Virtual Environments", IEEE VR 2006, DOI 10.1109/vr.2005.69).
+/// Steering push that keeps the boss's centre off nearby wall faces (see [`WALL_PUSH_GAIN`]). Pure —
+/// a function of `pos` and the static dungeon geometry — so [`enemy_seek`] stays a thin caller and the
+/// standoff geometry is unit-testable. Sums an inward-normal push per bounding wall of `pos`'s cell,
+/// growing to `gain` at the face and fading to 0 at `standoff`; opposite walls in a corridor cancel, so
+/// the boss still funnels straight through instead of stalling. `standoff <= 0` disables it.
+fn wall_standoff_push(dungeon: &Dungeon, pos: Vec3, standoff: f32, gain: f32) -> Vec2 {
+    if standoff <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let mut push = Vec2::ZERO;
+    for (face, normal) in dungeon.wall_faces_near(pos) {
+        let d = (pos - face).dot(normal); // distance from the wall face into the room
+        if d < standoff {
+            let t = ((standoff - d) / standoff).clamp(0.0, 1.0);
+            push += normal.xz() * (t * gain);
+        }
+    }
+    push
+}
+
 fn enemy_seek(
     time: Res<Time>,
     dungeon: Res<Dungeon>,
@@ -714,7 +744,12 @@ fn enemy_seek(
             sep -= fwd * sep.dot(fwd).min(0.0);
         }
 
-        let desired = (base + sep * boss.sep_strength).normalize_or_zero();
+        // Wall standoff: steer the boss's centre off nearby wall faces so its wide camera-facing
+        // billboard doesn't sweep into them (its collision box `ENEMY_HALF` is far narrower than the
+        // face). Deterministic and pure (see `wall_standoff_push`) — no query-order input.
+        let wall_push = wall_standoff_push(&dungeon, pos, boss.wall_standoff, WALL_PUSH_GAIN);
+
+        let desired = (base + sep * boss.sep_strength + wall_push).normalize_or_zero();
         if desired == Vec2::ZERO {
             continue; // no pull and no push (e.g. pinning the target) — hold position
         }
@@ -802,6 +837,10 @@ fn update_smiley_faces(
     // camera's right/up — project the world glance direction onto those to get the shader `look`.
     let right = camera.right();
     let up = camera.up();
+    // Local position for the billboards: the head offset, biased toward the camera along its view axis
+    // so the wide plane draws in front of a wall it stands near rather than embedding in it. The iso
+    // camera is orthographic, so this bias is pure depth — the face's on-screen position is unchanged.
+    let face_offset = FACE_LOCAL + camera.back() * FACE_CAMERA_OFFSET;
 
     for (etf, children, state) in &enemies {
         let angry = state.is_angry();
@@ -839,6 +878,7 @@ fn update_smiley_faces(
         for &child in children {
             if let Ok((mut ftf, mut vis, mat)) = faces.get_mut(child) {
                 ftf.rotation = cam_rot; // billboard
+                ftf.translation = face_offset; // head offset + camera-ward depth bias (see above)
                 // The face shows in every mood EXCEPT the brief real-form flash.
                 let want = if flashing { Visibility::Hidden } else { Visibility::Inherited };
                 if *vis != want {
@@ -853,6 +893,7 @@ fn update_smiley_faces(
                 }
             } else if let Ok((mut otf, mut vis)) = orbs.get_mut(child) {
                 otf.rotation = cam_rot; // billboard
+                otf.translation = face_offset; // match the face's camera-ward depth bias
                 // The orb shows ONLY during the flash — a hard `Visibility` cut on/off (which also skips
                 // its expensive ray-march while hidden). No fade: the flash is only ~FLASH_TIME long.
                 let want = if flashing { Visibility::Inherited } else { Visibility::Hidden };
@@ -1241,6 +1282,40 @@ mod tests {
         // Camera at origin looking down −Z; a watcher straight ahead is centred in view.
         let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
         assert!(is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, -5.0), gaze_cos));
+    }
+
+    /// `wall_standoff_push` steers the boss away from a wall on one side, and cancels to ~zero when
+    /// walls bracket it on opposite sides (a corridor) so it still funnels through.
+    #[test]
+    fn wall_standoff_push_steers_off_wall_and_cancels_in_corridor() {
+        // Plus-shaped floor: centre (1,1) open with floor N/S/W neighbours but rock to the E, so cell
+        // (1,1) is walled only on its +X face.
+        let f = true;
+        let r = false;
+        let one_wall = Dungeon::from_walkable(
+            3,
+            3,
+            vec![r, f, r, /* y0 */ f, f, r, /* y1 */ r, f, r /* y2 */],
+        );
+        let push = wall_standoff_push(&one_wall, Vec3::new(1.0, 0.0, 1.0), 0.8, 2.0);
+        assert!(push.x < -0.1, "should be pushed in −X, away from the east wall: {push:?}");
+        assert!(push.y.abs() < 1e-4, "no Z push from a purely east wall: {push:?}");
+
+        // A 1-wide vertical corridor: cell (1,1) floor with rock E and W (walls both sides) → the two
+        // inward pushes cancel, so the boss isn't shoved sideways and can still travel the corridor.
+        let corridor = Dungeon::from_walkable(
+            3,
+            3,
+            vec![r, f, r, /* y0 */ r, f, r, /* y1 */ r, f, r /* y2 */],
+        );
+        let c = wall_standoff_push(&corridor, Vec3::new(1.0, 0.0, 1.0), 0.8, 2.0);
+        assert!(c.length() < 1e-4, "opposite corridor walls must cancel: {c:?}");
+
+        // Disabled when standoff <= 0.
+        assert_eq!(
+            wall_standoff_push(&one_wall, Vec3::new(1.0, 0.0, 1.0), 0.0, 2.0),
+            Vec2::ZERO
+        );
     }
 
     #[test]

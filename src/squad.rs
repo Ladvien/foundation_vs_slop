@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bevy::prelude::*;
 
@@ -141,11 +142,12 @@ pub struct FigurineSource(pub Handle<WorldAsset>);
 #[derive(Component)]
 struct Recolored;
 
-/// Scale the figurine to a ~6 ft squad member: the base mesh is 0.7 m tall, so 0.7 × 2.6 ≈ 1.82 m —
-/// about three-quarters of the 2.4 m (~8 ft) ceiling, a believable human proportion. Uniform, so the
-/// carried gun and the autogib fragments stay proportional. Collision (`UNIT_HALF_EXTENTS`) stays
-/// narrower than the visual on purpose — see below.
-const FIGURINE_SCALE: f32 = 2.6;
+/// Scale VALKYRIE to a ~6 ft squad member: her rig exports at 1.61 m native, so 1.61 × 1.13 ≈ 1.82 m —
+/// about three-quarters of the 2.4 m (~8 ft) ceiling, a believable human proportion. Deliberately the
+/// same ~1.82 m target the old greybox used, so the floating health bar (`health::BAR_Y`) and every other
+/// eyeballed offset stay calibrated. Uniform, so the slung rifle and the autogib fragments stay
+/// proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the visual on purpose — see below.
+const FIGURINE_SCALE: f32 = 1.13;
 /// Square collision half-extent. Sized well under the narrowest walkable channel so units don't
 /// wedge/catch in 1-tile doorways: a doorway walled on both sides has `TILE - 2·WALL_THICKNESS = 0.6`
 /// of clear width, and 0.44-wide unit leaves ~0.08 m of slack per side to slide through cleanly. Well
@@ -160,15 +162,26 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 // `Res<BehaviorTuning>`. See src/behavior_tuning.rs. (The laser scales fire spread by unit speed via the
 // same slice's `squad_move.unit_speed`.)
 
-const FIGURINE_GLB: &str = "kenney_prototype-kit/Models/GLB format/figurine.glb";
+/// VALKYRIE — SCP MTF assault operative: a single-skin rig (60 bones, root `Root`), 5 looping 24 fps
+/// clips (idle / idle_alert / walk / crouch_walk / run), and a rifle rigidly parented to the `spine_03`
+/// bone (part of THIS scene — not a separate held model). Replaces the old un-rigged Kenney greybox.
+/// See `/mnt/codex_fs/game_assets/SCP_Characters/gltf/valkyrie_bevy_integration.md`.
+const FIGURINE_GLB: &str = "characters/valkyrie.glb";
 
-/// Compact blaster carried in the figurine's hand (CC0, Kenney Blaster Kit 2.1).
-const BLASTER_GLB: &str = "kenney_blaster-kit_2.1/Models/GLB format/blaster-a.glb";
-const GUN_OFFSET: Vec3 = Vec3::new(0.18, 0.3, -0.2);
-const GUN_SCALE: f32 = 0.35;
-const GUN_YAW: f32 = 0.0;
-/// The gun's barrel tip in figurine-local space — laser bolts spawn here (see `laser`).
-pub const MUZZLE_LOCAL: Vec3 = Vec3::new(GUN_OFFSET.x, GUN_OFFSET.y, GUN_OFFSET.z - 0.35);
+/// Laser bolts spawn from this fixed offset in the unit's **rotated, unscaled** local frame:
+/// `laser::fire_laser` computes `unit.translation + unit.rotation * MUZZLE_OFFSET`. Deliberately
+/// **decoupled from the cosmetic `FIGURINE_SCALE`** — the muzzle's world position feeds the hashed sim
+/// (combat targeting: front-arc gate + nearest-enemy rank, and bolt spawn), so it must NOT move when the
+/// art is rescaled. Tying it to the model scale is what let the VALKYRIE swap silently shift targeting and
+/// wipe the squad on a borderline world (`search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world`).
+/// Kept a `const` (never read from the async-loaded rifle bone) for the same determinism reason.
+///
+/// The value reproduces the SHIPPED muzzle world offset **exactly**: the old greybox fired from
+/// `transform_point((0.18, 0.3, -0.55))` at `FIGURINE_SCALE` 2.6 — and `transform_point` applies scale
+/// (component-wise) then rotation then translation, so that is `rotation * (2.6 * (0.18, 0.3, -0.55))`.
+/// `f32` multiply is commutative, so folding the 2.6 into the constant is bit-identical — the deterministic
+/// core stays frozen (golden hash unchanged) across the mesh swap.
+pub const MUZZLE_OFFSET: Vec3 = Vec3::new(0.18 * 2.6, 0.3 * 2.6, -0.55 * 2.6);
 
 /// The Researcher carries this handheld flashlight instead of the blaster (CC0, authored via BlenderMCP;
 /// see `/mnt/codex_fs/game_assets/low_poly_flashlight`). The lens faces the model's local +Y after the
@@ -176,8 +189,13 @@ pub const MUZZLE_LOCAL: Vec3 = Vec3::new(GUN_OFFSET.x, GUN_OFFSET.y, GUN_OFFSET.
 /// it so the beam points forward out of the figurine's hand. These transform constants are cosmetic only
 /// — the gameplay light cone points along the unit's facing, not the model (see `light`).
 const FLASHLIGHT_GLB: &str = "low_poly_flashlight/low_poly_flashlight.glb";
-const FLASHLIGHT_OFFSET: Vec3 = Vec3::new(0.18, 0.3, -0.2);
-const FLASHLIGHT_SCALE: f32 = 0.12;
+// Chest-height, forward — VALKYRIE's hands rest at her slung rifle across the torso, so the flashlight
+// reads as held there. Pre-scale local (child of the unit, ×`FIGURINE_SCALE`); scale bumped to keep the
+// same world size now that the unit scale dropped from 2.6 to 1.13. Cosmetic — tune by devshot.
+const FLASHLIGHT_OFFSET: Vec3 = Vec3::new(0.15, 1.2, -0.35);
+// The flashlight model exports ~2.5 units tall, so this lands it at a handheld ~0.2 m once multiplied
+// through `FIGURINE_SCALE` (child of the unit). Cosmetic — tune by devshot.
+const FLASHLIGHT_SCALE: f32 = 0.08;
 /// Pitch that tips the model's local +Y (lens up) forward to the unit's −Z; tuned by screenshot.
 const FLASHLIGHT_PITCH: f32 = -std::f32::consts::FRAC_PI_2;
 
@@ -202,6 +220,164 @@ const SPAWN_SPIRAL: [(i32, i32); 13] = [
     (0, -2),
 ];
 
+// ---------------------------------------------------------------------------------------------
+// VALKYRIE skeletal locomotion animation (cosmetic — mirrors `crate::crab`'s attach/drive pattern).
+// ---------------------------------------------------------------------------------------------
+
+/// Cross-fade time between locomotion clips (matches the crab/manca convention).
+const ANIM_CROSSFADE: Duration = Duration::from_millis(150);
+/// Ground speed (m/s) each in-place clip was authored for (from the integration doc). Playback rate is
+/// scaled by (actual speed / author speed) so the leg cadence tracks real movement instead of
+/// foot-sliding — the speed-correction technique of Anguelov, "Realizing NPCs: Animation and Behavior
+/// Control for Believable Characters", Game AI Pro 2 ch. 36 (§36.2.5). VALKYRIE's clips carry no root
+/// motion, so movement is entirely `Transform`-driven (see `unit_movement`) and the clip only supplies leg
+/// motion — exactly the in-place case §36.2.5 addresses.
+const WALK_AUTHOR_SPEED: f32 = 1.5;
+const RUN_AUTHOR_SPEED: f32 = 2.5;
+/// At or above this fraction of the unit's `MoveSpeed`, a moving unit plays `run`; below it, `walk`.
+const RUN_SPEED_FRAC: f32 = 0.6;
+/// Planar speed (world u/s) under which a unit counts as stationary (idle / idle_alert).
+const IDLE_SPEED_EPS: f32 = 0.05;
+/// Clamp on the playback-rate correction so a stalled or sprinting outlier can't freeze or gabble the legs.
+const ANIM_RATE_CLAMP: (f32, f32) = (0.5, 2.0);
+
+/// The locomotion clip a unit is playing — a purely cosmetic view of its movement, derived each frame
+/// from `Velocity`/`AimTarget` and **never** a hashed sim component. Keeping the animation state machine
+/// separate from the gameplay/AI decision state is the separation-of-concerns Bonny recommends in
+/// "Separation of Concerns Architecture for AI and Animation", Game AI Pro 2 ch. 12.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocoState {
+    Idle,
+    IdleAlert,
+    Walk,
+    Run,
+}
+
+/// The one shared animation graph + the four wired VALKYRIE clip node handles (`crouch_walk` is
+/// deliberately not wired — no crouch mechanic drives it).
+#[derive(Resource)]
+struct ValkyrieAnim {
+    graph: Handle<AnimationGraph>,
+    idle: AnimationNodeIndex,
+    idle_alert: AnimationNodeIndex,
+    walk: AnimationNodeIndex,
+    run: AnimationNodeIndex,
+}
+
+/// Link from a `FigurineModel` child to its async-spawned `AnimationPlayer`, plus the clip it's currently
+/// playing (change-guard). Lives on the COSMETIC figurine child — never the `Unit` — so wiring it at an
+/// async, wall-clock-dependent tick can't split the hashed squad archetype (issue #18; same reason the
+/// scene + `Recolored` tag live here).
+#[derive(Component)]
+struct ValkyrieAnimPlayer {
+    player: Entity,
+    playing: Option<LocoState>,
+}
+
+/// Build the shared VALKYRIE animation graph once at startup (before any unit can die/animate).
+fn build_valkyrie_anim(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    // glb clips: 0 idle, 1 idle_alert, 2 walk, 3 crouch_walk, 4 run. crouch_walk (index 3) is skipped.
+    let (graph, nodes) = AnimationGraph::from_clips([
+        assets.load(GltfAssetLabel::Animation(0).from_asset(FIGURINE_GLB)),
+        assets.load(GltfAssetLabel::Animation(1).from_asset(FIGURINE_GLB)),
+        assets.load(GltfAssetLabel::Animation(2).from_asset(FIGURINE_GLB)),
+        assets.load(GltfAssetLabel::Animation(4).from_asset(FIGURINE_GLB)),
+    ]);
+    let handle = graphs.add(graph);
+    commands.insert_resource(ValkyrieAnim {
+        graph: handle,
+        idle: nodes[0],
+        idle_alert: nodes[1],
+        walk: nodes[2],
+        run: nodes[3],
+    });
+}
+
+/// Wire each unit's asynchronously-spawned `AnimationPlayer` to the shared graph. Walks up from the
+/// `Added<AnimationPlayer>` to the owning `FigurineModel` child (skips crab/other players, and any static
+/// held-item scene that has no ancestor figurine), inserting the graph + transitions on the player and the
+/// state-link on the figurine child.
+fn attach_valkyrie_animation(
+    mut commands: Commands,
+    anim: Res<ValkyrieAnim>,
+    added: Query<Entity, Added<AnimationPlayer>>,
+    parents: Query<&ChildOf>,
+    figurines: Query<(), With<FigurineModel>>,
+) {
+    for player in &added {
+        let mut cur = player;
+        let owner = loop {
+            if figurines.get(cur).is_ok() {
+                break Some(cur);
+            }
+            match parents.get(cur) {
+                Ok(child_of) => cur = child_of.parent(),
+                Err(_) => break None,
+            }
+        };
+        let Some(owner) = owner else { continue };
+        commands
+            .entity(player)
+            .insert((AnimationGraphHandle(anim.graph.clone()), AnimationTransitions::new()));
+        commands.entity(owner).insert(ValkyrieAnimPlayer { player, playing: None });
+    }
+}
+
+/// The clip node + speed-corrected playback rate for a locomotion state at a given planar speed.
+fn valkyrie_clip(anim: &ValkyrieAnim, state: LocoState, speed: f32) -> (AnimationNodeIndex, f32) {
+    let (lo, hi) = ANIM_RATE_CLAMP;
+    match state {
+        LocoState::Idle => (anim.idle, 1.0),
+        LocoState::IdleAlert => (anim.idle_alert, 1.0),
+        LocoState::Walk => (anim.walk, (speed / WALK_AUTHOR_SPEED).clamp(lo, hi)),
+        LocoState::Run => (anim.run, (speed / RUN_AUTHOR_SPEED).clamp(lo, hi)),
+    }
+}
+
+/// Pick each unit's locomotion clip from its live movement and cross-fade to it on change; while moving,
+/// keep the playback rate tracking the live speed every frame so the legs never drift into a foot-slide
+/// within the walk/run band (continuous speed correction — Game AI Pro 2 ch. 36 §36.2.5).
+fn drive_valkyrie_animation(
+    anim: Res<ValkyrieAnim>,
+    mut figurines: Query<(&ChildOf, &mut ValkyrieAnimPlayer), With<FigurineModel>>,
+    units: Query<(&Velocity, &AimTarget, &MoveSpeed), With<Unit>>,
+    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+) {
+    for (child_of, mut link) in &mut figurines {
+        let Ok((velocity, aim, move_speed)) = units.get(child_of.parent()) else {
+            continue; // parent isn't a unit (or despawned)
+        };
+        let speed = velocity.0.length();
+        let want = if speed < IDLE_SPEED_EPS {
+            if aim.0.is_some() { LocoState::IdleAlert } else { LocoState::Idle }
+        } else if speed < RUN_SPEED_FRAC * move_speed.0.max(1.0e-3) {
+            LocoState::Walk
+        } else {
+            LocoState::Run
+        };
+
+        if link.playing != Some(want) {
+            let Ok((mut player, mut transitions)) = players.get_mut(link.player) else {
+                continue; // transitions component not applied yet — retry next frame
+            };
+            let (node, rate) = valkyrie_clip(&anim, want, speed);
+            transitions.play(&mut player, node, ANIM_CROSSFADE).repeat().set_speed(rate);
+            link.playing = Some(want);
+        } else if matches!(want, LocoState::Walk | LocoState::Run) {
+            // Same clip — just retrack the rate to this frame's speed (no re-transition/restart).
+            let Ok((mut player, _)) = players.get_mut(link.player) else { continue };
+            let (node, rate) = valkyrie_clip(&anim, want, speed);
+            if let Some(active) = player.animation_mut(node) {
+                active.set_speed(rate);
+            }
+        }
+    }
+}
+
 pub struct SquadPlugin;
 
 impl Plugin for SquadPlugin {
@@ -210,7 +386,8 @@ impl Plugin for SquadPlugin {
         // `command_input` stays on `Update` (it reads mouse/cursor input, which is a per-frame concern);
         // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
-        app.add_systems(Startup, spawn_squad)
+        // The shared animation graph must exist before any figurine's `AnimationPlayer` streams in.
+        app.add_systems(Startup, (build_valkyrie_anim, spawn_squad))
             // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
             // `AiSet::Think`, so that edge is pinned explicitly rather than left to registration order.
             // Both are on `FixedUpdate`, so without the constraint Bevy is free to run them in either
@@ -227,7 +404,9 @@ impl Plugin for SquadPlugin {
                     despawn_dead_units,
                 ),
             )
-            .add_systems(Update, recolor_units);
+            // Cosmetic skeletal animation attach/drive stays on `Update` (never touches hashed state),
+            // mirroring `crate::crab`.
+            .add_systems(Update, (recolor_units, attach_valkyrie_animation, drive_valkyrie_animation));
         // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
         // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
         // two archetypes and make the pinned iteration order (ORCA in `unit_movement`, crab nearest-prey
@@ -327,22 +506,28 @@ fn spawn_squad(
         unit.insert(crate::parasite::host_infestation_bundle());
         // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
         // not here — putting it on one unit in the headless core would split the hashed archetype.
-        // The figurine body scene, on a cosmetic child with an identity transform: it inherits the
-        // unit's position + `FIGURINE_SCALE`, so it renders exactly where the old root-attached scene
-        // did, but the async `Children`/scene-instance churn lands on this child, not the `Unit`.
+        // The figurine body scene, on a cosmetic child: it inherits the unit's position + `FIGURINE_SCALE`,
+        // and the async `Children`/scene-instance churn lands on this child, not the `Unit`. The 180° yaw
+        // aligns VALKYRIE's rig (authored facing local +Z) with the game's forward convention (local −Z —
+        // what `unit_facing`, the muzzle, and the smiley gaze test all use); without it the model renders
+        // backward and the legs cycle in reverse as the unit moves. Purely visual — the muzzle is decoupled
+        // from the model (`MUZZLE_OFFSET` uses the *unit* rotation), and this same yaw is baked into the
+        // `autogib` gib cloud (it accumulates this child's transform), so fragments still fly body-aligned.
         unit.with_child((
             FigurineModel,
             WorldAssetRoot(figurine),
-            Transform::default(),
+            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
         ));
-        // Held item. The Researcher (the "Scientist" archetype) trades the blaster for a flashlight and
-        // becomes a light-based crowd-control unit — its beam repels photophobic creatures rather than
-        // dealing damage (see `laser::fire_laser`, which skips it, and `light::apply_dynamic_lights`).
+        // Held item. Combat roles carry NO separate held-item model — VALKYRIE's rifle is part of the body
+        // scene (a rigid mesh slung on the `spine_03` bone), and `autogib::tag_valkyrie_rifle` tags that
+        // `rifle` sub-mesh `GunModel` after the scene streams so the death-fling + bake gate keep working.
+        // The Researcher (the "Scientist" archetype) additionally carries a flashlight and becomes a
+        // light-based crowd-control unit — its beam repels photophobic creatures rather than dealing damage
+        // (see `laser::fire_laser`, which skips it, and `light::apply_dynamic_lights`).
         // Ref: Björk & Michelsen, FDG 2014 — the flashlight as a vision-limiting, non-lethal deterrent.
         // Branch on the role *value* (every unit already carries `RoleId`), never a marker component, so
-        // the hashed squad archetype stays uniform across the five members. Both items keep the `GunModel`
-        // marker: it is "the held item" for the recolor-skip and the autogib death-fling, which apply to
-        // the flashlight identically.
+        // the hashed squad archetype stays uniform across the five members. The flashlight keeps the
+        // `GunModel` marker so it inherits the recolor-skip and the autogib death-fling.
         if RoleId::ALL[i] == RoleId::Researcher {
             unit.with_child((
                 GunModel,
@@ -351,14 +536,6 @@ fn spawn_squad(
                 Transform::from_translation(FLASHLIGHT_OFFSET)
                     .with_scale(Vec3::splat(FLASHLIGHT_SCALE))
                     .with_rotation(Quat::from_rotation_x(FLASHLIGHT_PITCH)),
-            ));
-        } else {
-            unit.with_child((
-                GunModel,
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(BLASTER_GLB))),
-                Transform::from_translation(GUN_OFFSET)
-                    .with_scale(Vec3::splat(GUN_SCALE))
-                    .with_rotation(Quat::from_rotation_y(GUN_YAW)),
             ));
         }
     }
@@ -463,24 +640,33 @@ fn recolor_units(
     figurines: Query<(Entity, &ChildOf), (With<FigurineModel>, Without<Recolored>)>,
     outfits: Query<&Outfit, With<Unit>>,
     children: Query<&Children>,
+    names: Query<&Name>,
     has_material: Query<(), With<MeshMaterial3d<StandardMaterial>>>,
 ) {
     for (figurine, child_of) in &figurines {
         let Ok(outfit) = outfits.get(child_of.parent()) else {
             continue; // parent isn't a unit (or despawned) — nothing to color
         };
-        let mut stack: Vec<Entity> = match children.get(figurine) {
-            Ok(c) => c.iter().collect(),
+        // DFS the figurine subtree carrying "are we inside the chest-rig (`valkyrie_chestrig`) node's
+        // subtree?". Only meshes under that accent node get recolored — VALKYRIE's authored body / gear /
+        // rifle / hair materials are left untouched, so members stay identifiable without discarding the
+        // MTF palette. The chest rig ships as a flat olive PBR factor (no texture), so a flat outfit-tinted
+        // `StandardMaterial` matches its authored style exactly.
+        let mut stack: Vec<(Entity, bool)> = match children.get(figurine) {
+            Ok(c) => c.iter().map(|e| (e, false)).collect(),
             Err(_) => continue, // scene not instantiated yet — retry next frame
         };
-        // Mint the outfit material lazily — only once we've actually found a mesh to recolor. Creating
-        // it up-front orphaned a fresh `StandardMaterial` on every frame the scene was still streaming
-        // (the guard above `continue`s) or had spawned meshes but no material yet, churning one throwaway
-        // asset per unit per frame across the whole async-load window. `material.is_some()` also doubles
-        // as the "did we recolor anything?" flag that gates the `Recolored` tag.
+        // Mint the outfit material lazily — only once we've actually found the accent mesh to recolor.
+        // Creating it up-front would orphan a fresh `StandardMaterial` every frame the scene is still
+        // streaming (the guard above `continue`s) or before the accent mesh appears, churning one throwaway
+        // asset per unit per frame across the async-load window. `material.is_some()` also doubles as the
+        // "did we recolor the accent?" flag that gates the `Recolored` tag — so a unit is never marked done
+        // before its chest rig has actually streamed in.
         let mut material: Option<Handle<StandardMaterial>> = None;
-        while let Some(e) = stack.pop() {
-            if has_material.get(e).is_ok() {
+        while let Some((e, in_accent)) = stack.pop() {
+            let here = in_accent
+                || names.get(e).map(|n| n.as_str().contains("chestrig")).unwrap_or(false);
+            if here && has_material.get(e).is_ok() {
                 let handle = material.get_or_insert_with(|| {
                     materials.add(StandardMaterial {
                         base_color: outfit.0,
@@ -491,7 +677,7 @@ fn recolor_units(
                 commands.entity(e).insert(MeshMaterial3d(handle.clone()));
             }
             if let Ok(ch) = children.get(e) {
-                stack.extend(ch.iter());
+                stack.extend(ch.iter().map(|c| (c, here)));
             }
         }
         if material.is_some() {

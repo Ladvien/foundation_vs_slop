@@ -23,7 +23,10 @@ required-features = ["test-harness"]
 
 [dependencies]
 avian3d = "0.7.0"
-bevy = "0.19.0"
+# `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
+# keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole
+# `characters/*.glb` fails to load ("invalid image mime type: image/jpeg") and the unit renders as nothing.
+bevy = { version = "0.19.0", features = ["jpeg"] }
 ron = "0.12.2"
 # Bit-exact binary framing for the offline search's worker IPC (`squad_ai::parallel`). RON's shortest-
 # decimal `f32` text is NOT a guaranteed bit-identical round-trip across platforms; that 1-ULP perturbation
@@ -55,6 +58,12 @@ indicatif = { version = "0.17", optional = true }
 # `train`-only: pulled in by `test-harness`, never in the shipped game binary. Already resolved in Cargo.lock
 # (transitive via bevy), so this adds no new download.
 libc = { version = "0.2", optional = true }
+
+# Test-only. `image` (PNG decode) backs the windowed SSIM visual-regression capture test
+# (`tests/visual_capture.rs`, 2026-07-19 review Finding F). Pinned to the version Bevy already resolves
+# (0.25.x), PNG-only, so it adds no new download and no new crate to the shipped binary.
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Bevy's recommended dev compile-speed profile: keep our own crate light so
 # iteration is fast, but optimize dependencies so the engine runs at speed.

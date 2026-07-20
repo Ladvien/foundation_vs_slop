@@ -65,9 +65,14 @@ fn every_sort_declares_its_determinism_contract() {
         let Ok(text) = std::fs::read_to_string(path) else { continue };
         let lines: Vec<&str> = text.lines().collect();
 
-        // Everything from a `#[cfg(test)]` module to EOF is test-only: its inputs are hand-built Vecs, not
-        // ECS queries, so the contract does not apply.
-        let test_mod = lines.iter().position(|l| l.trim_start().starts_with("#[cfg(test)]"));
+        // Everything from a `#[cfg(test)]` module (or an explicit `// determinism-lint: off` marker) to
+        // EOF is test-only: its inputs are hand-built Vecs, not ECS queries, so the contract does not
+        // apply. Robust to `#[cfg(any(test, ...))]`, `#[cfg(all(test, ...))]`, and internal spacing — not
+        // just the bare `#[cfg(test)]` the old `starts_with` matched (Finding C, 2026-07-19 review).
+        let test_mod = lines.iter().position(|l| {
+            let t = l.trim_start();
+            (t.starts_with("#[cfg(") && cfg_enables_test(t)) || t.starts_with("// determinism-lint: off")
+        });
 
         for (i, line) in lines.iter().enumerate() {
             if test_mod.is_some_and(|t| i >= t) {
@@ -111,4 +116,15 @@ fn every_sort_declares_its_determinism_contract() {
         offenders.len(),
         offenders.join("\n"),
     );
+}
+
+/// True when a `#[cfg(...)]` attribute line enables the `test` cfg — matching `#[cfg(test)]`,
+/// `#[cfg(any(test, ...))]`, `#[cfg(all(test, ...))]`, and spaced variants (`#[cfg( test )]`), so a test
+/// module written any of those ways is exempted (its inputs are hand-built, not ECS queries). A cheap
+/// whole-token scan: `test` must appear as a complete cfg token, so `#[cfg(feature = "test_util")]` (token
+/// `test_util`) does NOT match. Stays allocation-light, matching the rest of this line-scanning lint.
+fn cfg_enables_test(attr_line: &str) -> bool {
+    attr_line
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|tok| tok == "test")
 }

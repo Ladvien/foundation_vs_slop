@@ -458,10 +458,7 @@ fn classify(
     } else if nest {
         Some(("nest", "procedural mesh (nest.rs)"))
     } else if unit {
-        Some((
-            "squad-unit",
-            "kenney_prototype-kit/Models/GLB format/figurine.glb",
-        ))
+        Some(("squad-unit", "characters/valkyrie.glb"))
     } else if prop {
         Some(("prop/furniture", "glTF scene (glb path not on entity)"))
     } else {

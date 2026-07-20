@@ -41,6 +41,10 @@ const FACTORS: [(usize, usize); 4] = [(6, 32), (4, 48), (8, 24), (12, 16)];
 const LIMINALITY: (f32, f32) = (0.0, 1.0);
 const CORRIDOR_WIDTH: (i32, i32) = (1, 6);
 const CORRIDOR_EXTRA: (i32, i32) = (0, 6);
+// Doorway width as a fraction of each corridor's carved width (see `dungeon::doorway_width`). Lower
+// bound stays > 0 so `dungeon::validate_config`'s `(0,1]` gate always holds after clamp; 1.0 lets a
+// mouth open as wide as its corridor. The search tunes how open vs. pinched the map's doorways read.
+const DOORWAY_RATIO: (f32, f32) = (0.2, 1.0);
 const WFC_ROCK: (f32, f32) = (0.0, 4.0);
 const WFC_OTHER: (f32, f32) = (0.05, 4.0);
 const NOTCH_CHANCE: (f32, f32) = (0.0, 1.0);
@@ -54,7 +58,10 @@ const ROOM_WEIGHT: (f32, f32) = (0.05, 3.0);
 const TILED: (i32, i32) = (0, 5);
 const FREESTANDING: (i32, i32) = (0, 5);
 const SCATTER: (i32, i32) = (0, 5);
-const WALL_LIGHTS: (i32, i32) = (0, 3);
+// Total sconce budget per room. Widened from (0,3) when the furnish pass moved from "one sconce per
+// room" to a 3-to-X row along every wall (see furnish.rs Pass 1b): the search now spans unlit rooms
+// (0) through fully-lit rooms (a few walls × a handful each), so brightness is a real QD axis.
+const WALL_LIGHTS: (i32, i32) = (0, 16);
 const MIN_GAP: (f32, f32) = (0.5, 3.0);
 const GROUP_NEAR: (f32, f32) = (0.3, 2.5);
 const COHERENCE: (f32, f32) = (0.0, 1.0);
@@ -65,6 +72,10 @@ const PATCH_RADIUS_EXTRA: (f32, f32) = (0.0, 4.0);
 const CORRIDOR_INFEST: (f32, f32) = (0.0, 0.5);
 const CLUSTER_SPACING: (f32, f32) = (1.5, 6.0);
 const CLUSTER_RADIUS: (f32, f32) = (0.3, 1.5);
+/// Minimum margin by which a decoded `cluster_spacing` must clear `cluster_radius` — their bounds
+/// overlap at 1.5, so `decode` floors the spacing this far past the radius to satisfy the strict
+/// `cluster_spacing > cluster_radius` rule (`mycelia::validate_config`) for every mutated child.
+const CLUSTER_GAP_MIN: f32 = 0.1;
 const CLUSTER_SIZE_MAX: (i32, i32) = (2, 12);
 const MAX_FRUIT: (i32, i32) = (5, 120);
 const EDGE_NOISE_AMP: (f32, f32) = (0.0, 1.0);
@@ -100,6 +111,8 @@ pub struct LevelGenome {
     pub corridor_width: i32,
     /// Corridor width spread: `corridor_width_max = clamp(corridor_width + extra, cw, block)`.
     pub corridor_extra: i32,
+    /// Doorway width as a fraction of each corridor's carved width, in `(0,1]` (see [`DOORWAY_RATIO`]).
+    pub doorway_ratio: f32,
     /// WFC prototype weights: [rock, dead_end, corridor, corner, tee, cross].
     pub wfc: [f32; 6],
     pub notch_present: bool,
@@ -217,6 +230,7 @@ pub fn authored(base: &LevelBase) -> LevelGenome {
         liminality: d.liminality,
         corridor_width,
         corridor_extra,
+        doorway_ratio: d.doorway_ratio,
         wfc,
         notch_present,
         notch_chance,
@@ -269,6 +283,7 @@ pub fn mutate(parent: &LevelGenome, sigma: f32, rng: &mut ChaCha8Rng) -> LevelGe
         liminality: mut_real(parent.liminality, LIMINALITY, sigma, rng),
         corridor_width: mut_int(parent.corridor_width, CORRIDOR_WIDTH, sigma, rng),
         corridor_extra: mut_int(parent.corridor_extra, CORRIDOR_EXTRA, sigma, rng),
+        doorway_ratio: mut_real(parent.doorway_ratio, DOORWAY_RATIO, sigma, rng),
         wfc,
         notch_present: mut_flip(parent.notch_present, p, rng),
         notch_chance: mut_real(parent.notch_chance, NOTCH_CHANCE, sigma, rng),
@@ -375,6 +390,7 @@ pub fn decode(g: &LevelGenome, base: &LevelBase) -> Result<LevelPhenotype, Strin
         block,
         corridor_width: cw,
         corridor_width_max: Some(cw_max),
+        doorway_ratio: g.doorway_ratio.clamp(DOORWAY_RATIO.0, DOORWAY_RATIO.1),
         seed: base.dungeon.seed,
         max_attempts: base.dungeon.max_attempts,
         liminality: g.liminality.clamp(LIMINALITY.0, LIMINALITY.1),
@@ -405,8 +421,17 @@ pub fn decode(g: &LevelGenome, base: &LevelBase) -> Result<LevelPhenotype, Strin
     mycelia.patch_radius_min = radius_min;
     mycelia.patch_radius_max = radius_min + g.patch_radius_extra.clamp(PATCH_RADIUS_EXTRA.0, PATCH_RADIUS_EXTRA.1);
     mycelia.corridor_infest_chance = g.corridor_infest.clamp(CORRIDOR_INFEST.0, CORRIDOR_INFEST.1);
-    mycelia.cluster_spacing = g.cluster_spacing.clamp(CLUSTER_SPACING.0, CLUSTER_SPACING.1);
-    mycelia.cluster_radius = g.cluster_radius.clamp(CLUSTER_RADIUS.0, CLUSTER_RADIUS.1);
+    // cluster_spacing must strictly EXCEED cluster_radius (`mycelia::validate_config`: neighbouring
+    // flushes merge otherwise). The two genes have overlapping hard bounds — both reach 1.5 — so a
+    // mutated child can collide them. Resolve the coupling in decode, exactly like the patch-radius and
+    // notch-depth ranges above: floor the spacing to a small margin past the radius so every child is
+    // feasible by construction (no rejection loop). Leaves the shipped 3.0 > 0.7 untouched.
+    let cluster_radius = g.cluster_radius.clamp(CLUSTER_RADIUS.0, CLUSTER_RADIUS.1);
+    mycelia.cluster_radius = cluster_radius;
+    mycelia.cluster_spacing = g
+        .cluster_spacing
+        .clamp(CLUSTER_SPACING.0, CLUSTER_SPACING.1)
+        .max(cluster_radius + CLUSTER_GAP_MIN);
     mycelia.cluster_size_max = g.cluster_size_max.clamp(CLUSTER_SIZE_MAX.0, CLUSTER_SIZE_MAX.1) as u32;
     mycelia.max_fruit_bodies = g.max_fruit.clamp(MAX_FRUIT.0, MAX_FRUIT.1) as u32;
     mycelia.edge_noise_amp = g.edge_noise_amp.clamp(EDGE_NOISE_AMP.0, EDGE_NOISE_AMP.1);
@@ -475,6 +500,12 @@ mod tests {
         assert_eq!(p.dungeon.block, base.dungeon.block);
         assert_eq!(p.dungeon.corridor_width, base.dungeon.corridor_width);
         assert_eq!(p.dungeon.corridor_width_max, base.dungeon.corridor_width_max);
+        assert!(
+            (p.dungeon.doorway_ratio - base.dungeon.doorway_ratio).abs() < 1e-6,
+            "doorway_ratio must round-trip: got {} vs {}",
+            p.dungeon.doorway_ratio,
+            base.dungeon.doorway_ratio
+        );
         assert_eq!(p.dungeon.room_types.len(), base.dungeon.room_types.len());
         assert!(matches!(p.dungeon.topology, Topology::Grid));
         assert!(p.dungeon.notch.is_some());

@@ -18,6 +18,7 @@
 // in one source is Ashima/McEwan (MIT, webgl-noise); we substitute cheaper value noise here.
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
+#import foundation::noise::{hash21, vnoise, fbm5}
 
 const PI: f32 = 3.14159265;
 
@@ -45,38 +46,6 @@ fn tex(uv: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(screen_tex, screen_sampler, uv, 0.0).rgb;
 }
 
-// Dave Hoskins hash21 — texture-free, cited via Lagae 2010 (see header).
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-// Bilinearly-interpolated value noise on the hash lattice.
-fn vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i + vec2<f32>(0.0, 0.0));
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// A few octaves of value noise (fbm) — stands in for the sources' iChannel0 noise texture.
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var amp = 0.5;
-    var pp = p;
-    for (var i = 0; i < 5; i = i + 1) {
-        v = v + amp * vnoise(pp);
-        pp = pp * 2.0;
-        amp = amp * 0.5;
-    }
-    return v;
-}
-
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let src = textureSampleLevel(screen_tex, screen_sampler, in.uv, 0.0);
@@ -97,10 +66,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // --- tape wave (slow) + bad-tracking jitter (fast) : horizontal UV displacement ---
     // Spike-gated: at rest (dist_amt ≈ 0) the picture is geometrically undistorted.
-    var dx = (fbm(vec2<f32>(uv.y * 3.0, t)) - 0.5) * 0.02;
+    var dx = (fbm5(vec2<f32>(uv.y * 3.0, t)) - 0.5) * 0.02;
     dx = dx + (vnoise(vec2<f32>(uv.y * 100.0, t * 10.0)) - 0.5) * 0.01;
     // tape crease: an occasional strong horizontal shove along a moving band.
-    let crease = clamp((sin(uv.y * 8.0 - t * 3.7) - 0.92) * fbm(vec2<f32>(t, t)), 0.0, 0.01) * 10.0;
+    let crease = clamp((sin(uv.y * 8.0 - t * 3.7) - 0.92) * fbm5(vec2<f32>(t, t)), 0.0, 0.01) * 10.0;
     dx = dx - crease * (vnoise(vec2<f32>(uv.y * 120.0, t * 12.0)) - 0.5);
     uv.x = uv.x + dx * settings.wave * dist_amt;
 

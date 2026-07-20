@@ -57,8 +57,8 @@ fn room(id: u32, w: i32, h: i32) -> Region {
         id,
         rect: Rect2 { min: [0, 0], max: [w, h] },
         openings: vec![
-            Opening { dir: 0, cell: [2, 0] },
-            Opening { dir: 1, cell: [w - 1, 2] },
+            Opening { dir: 0, cell: [2, 0], width: 1 },
+            Opening { dir: 1, cell: [w - 1, 2], width: 1 },
         ],
         adjacency: Vec::new(),
         props: PropertyBag::default(),

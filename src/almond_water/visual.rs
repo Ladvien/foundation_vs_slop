@@ -44,6 +44,12 @@ struct AlmondParams {
     /// `poison_tint` (belief 0) to `almond_tint` (belief 1), and `iridescence_mute` replaces the old
     /// hardcoded 0.6.
     params2: Vec4,
+    /// `(base_alpha, rim_strength, glint_strength, ripple_strength)` — the readability/saliency knobs
+    /// (opacity, glowing shoreline, wet specular glint, animated-motion multiplier).
+    params3: Vec4,
+    /// `(edge_feather, feather_scale, _, _)` — procedural edge-feathering (amount, spatial frequency) that
+    /// breaks the per-cell field boundary into an organic puddle margin.
+    params4: Vec4,
 }
 
 /// The puddle material: a plain alpha-blended [`Material`] sampling the level texture by world XZ.
@@ -79,7 +85,7 @@ impl Plugin for AlmondWaterVisualPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<AlmondWaterMaterial>::default())
             .add_systems(Startup, setup_puddle)
-            .add_systems(Update, upload_level);
+            .add_systems(Update, (upload_level, splash_on_step));
     }
 }
 
@@ -120,6 +126,13 @@ fn setup_puddle(
                 cfg.poison_tint[1],
                 cfg.poison_tint[2],
             ),
+            params3: Vec4::new(
+                cfg.base_alpha,
+                cfg.rim_strength,
+                cfg.glint_strength,
+                cfg.ripple_strength,
+            ),
+            params4: Vec4::new(cfg.edge_feather, cfg.feather_scale, 0.0, 0.0),
         },
         level: level.clone(),
     });
@@ -140,12 +153,16 @@ fn setup_puddle(
 }
 
 /// Copy the gameplay `level` grid into the puddle texture each frame, normalised to `capacity` → 0..255,
-/// **gated by fog of war**: a cell outside every unit's live line of sight is written as 0 (dry) so the
-/// shader's dry-cell `discard` hides the puddle there — the puddle can never paint over unexplored/
-/// unwatched black fog and reveal the map. `super::AlmondWater`'s fields are private but visible here (a
-/// child module sees its parent's privates), so this reads `level`/`width` directly rather than sampling
-/// cell-by-cell. Cosmetic: it only mutates a GPU image (reads the last-written [`FogGrid`], no ordering
-/// needed).
+/// **gated by fog of war**: a cell outside every unit's *live* line of sight is written as 0 (dry) so the
+/// shader's dry-cell `discard` hides the puddle there. The gate is `visible_at` (live LOS) — the fog
+/// covers the water again the instant the squad looks away, the same partial-observability the enemies
+/// get, so the pools don't paint a persistent map through the dark. This only reveals what a unit can
+/// actually see *now*; it works because the mold→LOS occlusion was removed (`crate::fog::update_los`), so
+/// live sight genuinely reaches the pools instead of being blocked by the mould that grows on them.
+///
+/// `super::AlmondWater`'s fields are private but visible here (a child module sees its parent's
+/// privates), so this reads `level`/`width` directly rather than sampling cell-by-cell. Cosmetic: it
+/// only mutates a GPU image (reads the last-written [`FogGrid`], no ordering needed).
 fn upload_level(
     field: Res<AlmondWater>,
     config: Res<GameConfig>,
@@ -171,8 +188,35 @@ fn upload_level(
         let visible = fog.visible_at(cell);
         let shown = if visible { lvl } else { 0.0 };
         data[2 * i] = ((shown / cap).clamp(0.0, 1.0) * 255.0) as u8;
-        // Belief in G (0 = cyanide, 1 = heal). Gated by fog too so a hidden cell reads neutral, not a spoiler.
+        // Belief in G (0 = cyanide, 1 = heal). Gated by the same live LOS so a cell the squad can't
+        // currently see reads neutral, not a spoiler.
         let belief = if visible { field.belief_at(cell) } else { 0.0 };
         data[2 * i + 1] = (belief.clamp(0.0, 1.0) * 255.0) as u8;
+    }
+}
+
+/// Cosmetic: emit a subtle splash the moment a squad unit steps into a *visible* Almond-Water pool. Reads
+/// the same `level` field the puddle draws (a unit is "in water" exactly where the pool would render) and
+/// fires once per dry→wet transition per unit, so wading in plips once instead of every frame. Windowed-
+/// only — it writes an [`crate::audio::Sfx`] message the headless harness never registers — and it only
+/// READS sim state (unit transforms + the water field), never writes it, so it can't perturb a golden.
+fn splash_on_step(
+    field: Res<AlmondWater>,
+    config: Res<GameConfig>,
+    dungeon: Res<Dungeon>,
+    units: Query<(Entity, &Transform), With<crate::squad::Unit>>,
+    mut sfx: MessageWriter<crate::audio::Sfx>,
+    mut was_wet: Local<std::collections::HashMap<Entity, bool>>,
+) {
+    // A cell "has water underfoot" at the same threshold the shader uses to draw the pool, so the plip
+    // fires exactly when the unit visibly enters the water.
+    let min_vis = config.almond_water.min_visible_level;
+    for (e, t) in &units {
+        let cell = dungeon.world_to_cell(t.translation);
+        let wet = field.level_at(cell) > min_vis;
+        let prev = was_wet.insert(e, wet).unwrap_or(false);
+        if wet && !prev {
+            sfx.write(crate::audio::Sfx::SplashWater(t.translation));
+        }
     }
 }

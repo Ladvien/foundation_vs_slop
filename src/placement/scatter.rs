@@ -22,8 +22,12 @@ use crate::rng::DetRng;
 pub const INNER_GRID: usize = 9;
 
 /// The usable top of a placed support piece: centre `(cx, cz)` in world coords, half-extents of the
-/// area props may occupy (the footprint already inset so props don't overhang), and `top_y` — the
-/// height props rest at.
+/// area props may occupy (the footprint already inset so props don't overhang), `top_y` — the height
+/// props rest at — and `provides`: a bitmask of the support-surface *classes* this top offers (e.g. a
+/// desk provides both the generic `support` class and the `worktop` class; a bed provides only
+/// `support`). A prop is only placed here when `provides & prop.requires != 0`, so a typed prop (a
+/// desk lamp) never lands on the wrong surface (a bed). Following Tutenel et al. 2010, a support is a
+/// *typed* surface feature, not a generic shelf.
 #[derive(Clone, Copy, Debug)]
 pub struct SupportSurface {
     pub cx: f32,
@@ -31,15 +35,26 @@ pub struct SupportSurface {
     pub half_x: f32,
     pub half_z: f32,
     pub top_y: f32,
+    /// The host piece's yaw (radians about +Y). A prop rested here inherits it, so a TV on a chest of
+    /// drawers faces the same way the drawers open (both fronts point into the room). Merrell et al.
+    /// 2011 "align with prominent features"; Infinigen Indoors (Raistrick et al. 2024) spatial-relation
+    /// constraints treat a support and the object on it as co-oriented.
+    pub yaw: f32,
+    /// Bitmask of surface classes this top offers (see [`crate::placement::furnish`] `surface_bits`).
+    pub provides: u32,
 }
 
-/// A prop to rest on a surface: its candidate index (for the caller to map back to an asset) and its
-/// footprint half-extents in world units.
+/// A prop to rest on a surface: its candidate index (for the caller to map back to an asset), its
+/// footprint half-extents in world units, and `requires`: the bitmask of support-surface classes it is
+/// allowed to rest on. A surface is eligible for this prop iff `surface.provides & requires != 0`; a
+/// `requires` of 0 (an unknown/unmatched surface token) means the prop rests on nothing and is dropped.
 #[derive(Clone, Copy, Debug)]
 pub struct ScatterProp {
     pub candidate: CandidateIx,
     pub half_x: f32,
     pub half_z: f32,
+    /// Bitmask of surface classes this prop may rest on (see [`crate::placement::furnish`] `surface_bits`).
+    pub requires: u32,
 }
 
 #[inline]
@@ -90,6 +105,12 @@ pub fn scatter_on_surfaces(
         for s_off in 0..surfaces.len() {
             let si = (start + s_off) % surfaces.len();
             let s = surfaces[si];
+            // Surface-class gate: this prop may only rest on a support whose provided classes include
+            // one the prop requires (a desk lamp → worktop, never a bed). A prop with no matching
+            // surface simply isn't placed — one path, no fallback onto the wrong furniture.
+            if s.provides & prop.requires == 0 {
+                continue;
+            }
             let cell_w = (2.0 * s.half_x) / INNER_GRID as f32;
             let cell_d = (2.0 * s.half_z) / INNER_GRID as f32;
             if cell_w <= 0.0 || cell_d <= 0.0 {
@@ -121,7 +142,9 @@ pub fn scatter_on_surfaces(
                         out.push(Placement {
                             candidate: prop.candidate,
                             pos: [x, s.top_y, z],
-                            yaw: 0.0,
+                            // Inherit the support's facing so the prop faces the same way its host does
+                            // (a TV on a drawer faces into the room, matching the drawers' front).
+                            yaw: s.yaw,
                         });
                         done = true;
                         break;
@@ -144,6 +167,9 @@ mod tests {
     use super::*;
     use crate::rng::seeded;
 
+    // Test surfaces provide every class and test props require class bit 0, so the class gate is a
+    // no-op here (`!0 & 1 != 0`) — the placement-geometry tests below are unaffected by the gate. The
+    // gate itself is exercised by `a_prop_only_rests_on_a_matching_surface_class`.
     fn surface(cx: f32, cz: f32, half_x: f32, half_z: f32, top_y: f32) -> SupportSurface {
         SupportSurface {
             cx,
@@ -151,6 +177,8 @@ mod tests {
             half_x,
             half_z,
             top_y,
+            yaw: 0.0,
+            provides: !0,
         }
     }
     fn prop(candidate: usize, half_x: f32, half_z: f32) -> ScatterProp {
@@ -158,6 +186,7 @@ mod tests {
             candidate,
             half_x,
             half_z,
+            requires: 1,
         }
     }
 
@@ -203,6 +232,60 @@ mod tests {
         assert!(
             placed.is_empty(),
             "an over-sized prop is dropped, never forced on"
+        );
+    }
+
+    #[test]
+    fn a_prop_only_rests_on_a_matching_surface_class() {
+        // Two surfaces: a worktop (provides bit 0b01|0b10) and a bed (provides bit 0b01 only). A desk
+        // lamp requires the worktop class (0b10). It must land on the worktop, never the bed — even
+        // though the bed has ample free area. This is the fix for the "desk lamp floating on a bed" bug.
+        const SUPPORT: u32 = 0b01;
+        const WORKTOP: u32 = 0b10;
+        let worktop = SupportSurface {
+            cx: 0.0,
+            cz: 0.0,
+            half_x: 0.6,
+            half_z: 0.3,
+            top_y: 0.74,
+            yaw: 0.0,
+            provides: SUPPORT | WORKTOP,
+        };
+        let bed = SupportSurface {
+            cx: 10.0,
+            cz: 10.0,
+            half_x: 0.86,
+            half_z: 1.11,
+            top_y: 0.55,
+            yaw: 0.0,
+            provides: SUPPORT,
+        };
+        let lamp = ScatterProp {
+            candidate: 0,
+            half_x: 0.16,
+            half_z: 0.16,
+            requires: WORKTOP,
+        };
+        // Try many seeds: the lamp must NEVER land on the bed regardless of the random surface scan.
+        for seed in 0..32u64 {
+            let mut rng = seeded(seed);
+            let placed = scatter_on_surfaces(&[worktop, bed], &[lamp], &mut rng);
+            assert_eq!(placed.len(), 1, "lamp fits on the worktop");
+            assert!(
+                (placed[0].pos[1] - worktop.top_y).abs() < 1e-6,
+                "lamp rested at the worktop height, not the bed"
+            );
+            assert!(
+                (placed[0].pos[0] - worktop.cx).abs() <= worktop.half_x + 1e-4
+                    && (placed[0].pos[2] - worktop.cz).abs() <= worktop.half_z + 1e-4,
+                "lamp landed inside the worktop footprint (never near the bed at (10,10))"
+            );
+        }
+        // With ONLY a bed available, the worktop-only lamp is dropped, not forced onto the bed.
+        let mut rng = seeded(1);
+        assert!(
+            scatter_on_surfaces(&[bed], &[lamp], &mut rng).is_empty(),
+            "no worktop -> no lamp (never falls back onto a bed)"
         );
     }
 

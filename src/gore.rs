@@ -363,6 +363,7 @@ impl GibRing {
 
 /// Human-facing, serializable knobs — the `gore:` slice of the unified `assets/config/config.ron`.
 #[derive(Resource, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct GoreSettings {
     // Blood spray.
     spray_color_a: [f32; 3],
@@ -523,11 +524,36 @@ impl Plugin for GorePlugin {
                     drain_gore,
                     update_droplets,
                     confine_gibs,
+                    hide_gibs_in_fog,
                     cap_blood_pools,
                     cap_gib_chunks,
                     despawn_gore,
                 ),
             );
+    }
+}
+
+/// Hide gib chunks that sit on a cell the squad cannot currently SEE, so gore never shines through the
+/// fog of war (player report: gibs on fogged floor). Modelled verbatim on `enemy::hide_enemies_in_fog`
+/// — read `FogGrid` (written on `FixedUpdate` by `fog::update_los`), write only `Visibility`. Cosmetic:
+/// `Visibility` enters no replay oracle (`snapshot_hash` folds `(Transform, Health)`; `gib_hash` folds
+/// `GibKey`/`Transform`/`Carryable`/ring order — never visibility), so this is harness-safe on `Update`.
+/// Only toggles visibility — never despawns or reorders, which would perturb the `GibRing` `gib_hash` folds.
+fn hide_gibs_in_fog(
+    fog: Res<crate::fog::FogGrid>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+    mut gibs: Query<(&Transform, &mut Visibility), With<GibChunk>>,
+) {
+    for (tf, mut vis) in &mut gibs {
+        let cell = dungeon.world_to_cell(tf.translation);
+        let want = if fog.visible_at(cell) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
     }
 }
 

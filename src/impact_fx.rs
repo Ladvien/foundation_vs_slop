@@ -54,6 +54,7 @@ impl Material for ImpactMaterial {
 /// `assets/config/config.ron` (read-only — there is no in-game panel and nothing serializes these back
 /// out). A field of `crate::config::GameConfig`.
 #[derive(Resource, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ImpactFxSettings {
     particle_count: i32,
     color_a: [f32; 3],
