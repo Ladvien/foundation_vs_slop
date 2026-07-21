@@ -34,6 +34,22 @@ impl Health {
             (self.current / self.max).clamp(0.0, 1.0)
         }
     }
+
+    /// Apply `amount` of damage, clamping `current` at a 0 floor. Every [`HealthDamage`] writer must
+    /// go through this instead of `current -=` directly — a negative `current` is observable to any
+    /// system that reads `Health` before the despawn pass (most acutely `almond_water`'s heal, which
+    /// computed `max - current` and over-healed a negative-HP unit back past `max`, resurrecting a unit
+    /// killed in a heal pool). Centralizing the floor here means a future damage site can't reintroduce
+    /// that class of bug.
+    pub fn apply_damage(&mut self, amount: f32) {
+        self.current = (self.current - amount).max(0.0);
+    }
+
+    /// Kill outright (an instant-kill swat/zap, not a magnitude of damage). Routed through the same
+    /// clamp API as [`Self::apply_damage`] for a single, consistent way to mutate `current` downward.
+    pub fn kill(&mut self) {
+        self.current = 0.0;
+    }
 }
 
 /// Height of the bar above the owner's transform origin (owners sit near Y=0). Calibrated to float
@@ -61,11 +77,19 @@ pub struct NoHealthBar;
 
 /// System set for every `FixedUpdate` system that **damages** `Health` (laser, crab contact/jump, boss
 /// zap/defense, parasite embed/burst). These writers overlap in component access but rarely touch the same
-/// entity the same tick, so their mutual order was never pinned. [`crate::almond_water::almond_water_effect`]
-/// orders itself `.after(HealthDamage)` so the consuming heal/poison always composes on top of the tick's damage
-/// deterministically — otherwise, once foraging clusters wounded crabs into weapon range, heal-vs-damage
-/// clamping races and `snapshot_hash` flips per process. Each damage system opts in with `.in_set(...)` at
-/// its own registration; the set carries no ordering of its own, only a name to sequence the heal behind.
+/// entity the same tick. [`crate::almond_water::almond_water_effect`] orders itself `.after(HealthDamage)`
+/// so the consuming heal/poison always composes on top of the tick's damage deterministically — otherwise,
+/// once foraging clusters wounded crabs into weapon range, heal-vs-damage clamping races and `snapshot_hash`
+/// flips per process. Each damage system opts in with `.in_set(...)` at its own registration; the set name
+/// alone sequences the heal behind the whole group, but the writers' MUTUAL order among themselves is an
+/// explicit `.after()` chain across four plugins/files — `smiley_zap` → `smiley_defense` → `crab_jump` →
+/// `crab_contact_damage` → `manca_embed` → `parasite_burst` → `fire_laser` (see each system's registration
+/// comment) — not accidental plugin-registration order. Three-way float subtraction on a near-death host is
+/// non-associative (`(a−b)−c ≠ (a−c)−b` in IEEE-754), so an unpinned composition order is a real
+/// reproducibility hazard, the same class `ai::field::sort_deposits` exists to prevent for stigmergy
+/// deposits (Defour & Collange, "Reproducible floating-point atomic addition in data-parallel environment",
+/// FedCSIS 2015, DOI 10.15439/2015f86 — unordered concurrent writers to a shared float are a reproducibility
+/// hazard, the same shape this chain closes).
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HealthDamage;
 

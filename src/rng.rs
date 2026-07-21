@@ -18,8 +18,9 @@ pub fn seeded(seed: u64) -> ChaCha8Rng {
 pub trait DetRng {
     /// A fresh full 64-bit draw (e.g. a sub-seed for a nested generator).
     fn raw_u64(&mut self) -> u64;
-    /// Uniform integer in `[0, n)` (unbiased). Returns 0 for the degenerate `n == 0` (a caller bug)
-    /// rather than panicking.
+    /// Uniform integer in `[0, n)` (unbiased). `n == 0` is a caller bug (no valid result exists) — it
+    /// fails loudly under `debug_assertions`/`test-harness`, matching the `sort_total!` discipline, and
+    /// is elided in release builds (which pay nothing for the check).
     fn below(&mut self, n: usize) -> usize;
     /// Uniform float in `[0, 1)`.
     fn unit(&mut self) -> f64;
@@ -34,12 +35,9 @@ impl DetRng for ChaCha8Rng {
     #[inline]
     fn below(&mut self, n: usize) -> usize {
         // Unbiased uniform draw in [0, n) via `rand`'s range sampler — not the modulo reduction
-        // `raw_u64() % n`, which skews toward low indices whenever n does not divide 2^64. `n == 0`
-        // has no valid result; every caller guarantees n > 0, but guard so a bug can't panic.
-        if n == 0 {
-            return 0;
-        }
-        self.random_range(0..n)
+        // `raw_u64() % n`, which skews toward low indices whenever n does not divide 2^64.
+        debug_assert!(n > 0, "DetRng::below(0): degenerate range — caller bug, not a valid zero-draw");
+        self.random_range(0..n.max(1))
     }
     #[inline]
     fn unit(&mut self) -> f64 {

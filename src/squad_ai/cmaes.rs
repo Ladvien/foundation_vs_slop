@@ -136,12 +136,17 @@ impl SepCmaEs {
     /// Re-derive the `(z, y)` of an externally-adjusted point `x` — e.g. one a caller box-clamped back into
     /// the feasible region — so [`tell`](Self::tell) updates the distribution from the point **actually
     /// evaluated**, not the raw proposal. This is the standard "repair + re-inject" boundary handling that
-    /// stops the mean marching past a clamp (Hansen's boundary-handling note). `x` must have length `n`;
-    /// a shorter slice truncates to what the emitter tracks. `sigma > 0` and `C_j >= 1e-12`, so no div-by-0.
-    pub fn repair(&self, x: &[f32]) -> Sample {
-        let y: Vec<f64> = (0..self.n).map(|j| (f64::from(x[j.min(x.len().saturating_sub(1))]) - self.mean[j]) / self.sigma).collect();
+    /// stops the mean marching past a clamp (Hansen's boundary-handling note). `x` must have length `n` —
+    /// a caller passing the wrong length is a bug upstream (a mismatched encode/decode), not a case to
+    /// silently paper over by repeating the last element, which would manufacture false gradients for the
+    /// missing dims instead of erroring. `sigma > 0` and `C_j >= 1e-12`, so no div-by-0.
+    pub fn repair(&self, x: &[f32]) -> Result<Sample, String> {
+        if x.len() != self.n {
+            return Err(format!("cmaes::repair: expected {} dims, got {}", self.n, x.len()));
+        }
+        let y: Vec<f64> = (0..self.n).map(|j| (f64::from(x[j]) - self.mean[j]) / self.sigma).collect();
         let z: Vec<f64> = (0..self.n).map(|j| y[j] / self.c[j].sqrt()).collect();
-        Sample { x: x.to_vec(), z, y }
+        Ok(Sample { x: x.to_vec(), z, y })
     }
 
     /// Update mean, covariance diagonal, and step size from a generation's evaluated candidates. `samples`
@@ -240,6 +245,14 @@ mod tests {
         assert!(end_err > start_err, "fitness must improve: {end_err} !> {start_err}");
         assert!(end_err > -0.05, "the mean should get close to the optimum, err² = {}", -end_err);
         assert!(es.sigma() < start_sigma, "sigma must contract as it converges: {} !< {start_sigma}", es.sigma());
+    }
+
+    #[test]
+    fn repair_rejects_wrong_length_input() {
+        let es = SepCmaEs::new(vec![0.0; 4], 1.0, 8);
+        assert!(es.repair(&[1.0, 2.0, 3.0, 4.0]).is_ok(), "a full-length vector must repair cleanly");
+        let err = es.repair(&[1.0, 2.0, 3.0]).expect_err("a short vector must be rejected, not repeated-fill");
+        assert!(err.contains('4') && err.contains('3'), "error should name expected vs. got: {err}");
     }
 
     #[test]

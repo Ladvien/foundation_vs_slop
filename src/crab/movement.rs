@@ -738,7 +738,7 @@ pub(crate) fn crab_jump(
                     {
                         for (ptf, mut hp) in &mut prey {
                             if ptf.translation == tpos {
-                                hp.current -= sim.combat.crab_jump_damage;
+                                hp.apply_damage(sim.combat.crab_jump_damage);
                                 break;
                             }
                         }

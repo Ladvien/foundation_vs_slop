@@ -2,11 +2,12 @@
 //!
 //! A slow-burn body-horror **anomaly** that is nothing like the crab swarm's fast attrition: a lone,
 //! free-crawling juvenile (a **manca**, the real animal's host-seeking larval stage) stalks a host,
-//! leaps onto it, burrows *inside*, gestates for an in-world "hour", then **bursts out** — killing the
-//! host and birthing a small brood that begins the cycle again. Its horror is the reproduction loop:
-//! it can only breed by spending a host, so it is a self-limiting parasite (Ruiz-L & Madrid-V 1992,
-//! *Biology of Cymothoa exigua*, DOI 10.7773/cm.v18i1.885 — the manca stage, the single-brood-then-death
-//! life history) rather than an infinite spawner. Later phases give it the **extended phenotype** —
+//! leaps onto it, burrows *inside*, gestates for an in-world "hour", then **bursts out** — wounding the
+//! host (deliberately not an instakill; see [`parasite_burst`]) and birthing a small brood that begins
+//! the cycle again. Its horror is the reproduction loop: it can only breed by spending a host's flesh,
+//! so it is a self-limiting parasite (Ruiz-L & Madrid-V 1992, *Biology of Cymothoa exigua*,
+//! DOI 10.7773/cm.v18i1.885 — the manca stage, the single-brood-then-death life history) rather than an
+//! infinite spawner. Later phases give it the **extended phenotype** —
 //! hijacking the host's AI to isolate it from its group before the burst (Heil 2016, *Host Manipulation
 //! by Parasites*, DOI 10.3389/fevo.2016.00080).
 //!
@@ -330,6 +331,11 @@ pub struct MancaMood {
     /// to 0. While positive the manca bursts outward from the cluster — the "it woke up" pop that rides the
     /// rouse contagion as an expanding ripple. Stamped in `manca_rouse`, decayed + applied in `manca_hunt`.
     flash: f32,
+    /// Last observed `Health.current`, to detect a *drop* this tick (order-independent, unlike change
+    /// detection): `current < last_hp` ⇒ it was just shot. `Health::is_changed()` alone also fires on the
+    /// Almond Water heal (mancae are `Biological`), which would false-fire "shot" every heal tick. Seeded
+    /// to spawn HP.
+    last_hp: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -376,7 +382,7 @@ struct Wound;
 /// The shared wound-disc mesh + material, built once so `parasite_burst` can tear a hole into a host at
 /// runtime without reloading (mirrors [`MancaAssets`]).
 #[derive(Resource)]
-struct WoundAssets {
+pub(crate) struct WoundAssets {
     disc: Handle<Mesh>,
     mat: Handle<StandardMaterial>,
 }
@@ -418,7 +424,12 @@ impl Plugin for ParasitePlugin {
                         .after(crate::light::LightFieldWritten),
                     manca_hunt.after(manca_huddle),
                     manca_leap.after(manca_hunt),
-                    manca_embed.after(manca_leap).in_set(crate::health::HealthDamage),
+                    // Fifth link in the cross-plugin `HealthDamage` chain (see `health::HealthDamage`'s
+                    // doc and `enemy::smiley_zap`'s registration comment).
+                    manca_embed
+                        .after(manca_leap)
+                        .after(crate::crab::crab_contact_damage)
+                        .in_set(crate::health::HealthDamage),
                     gestation_tick.after(manca_embed),
                     // The eruption driver: convulse → erupt (⅓-HP damage + wound + chest-spawned brood + gush)
                     // → bleed. Still ordered before the crab despawn owner (harmless now the burst no longer
@@ -835,7 +846,14 @@ pub fn spawn_manca_on_patch(
     // never churn the hashed archetype at runtime.
     ec.insert((
         Photophobic,
-        MancaMood { state: MoodState::Dormant, calm_timer: 0.0, embed_cd, commit: 0.0, flash: 0.0 },
+        MancaMood {
+            state: MoodState::Dormant,
+            calm_timer: 0.0,
+            embed_cd,
+            commit: 0.0,
+            flash: 0.0,
+            last_hp: tuning.manca_hp,
+        },
     ));
     // The scaled glTF body, `−X`→`−Z` corrected, seated so its body rests on the surface.
     ec.with_child((
@@ -1137,7 +1155,7 @@ fn manca_rouse(
     stig: Res<Stig>,
     beh: Res<BehaviorTuning>,
     hosts: Query<(&Transform, &Infestation), (With<Parasitizable>, Without<Manca>)>,
-    mut mancae: Query<(&MancaMotion, Ref<Health>, &mut MancaMood), With<Manca>>,
+    mut mancae: Query<(&MancaMotion, &Health, &mut MancaMood), With<Manca>>,
 ) {
     let dt = time.delta_secs();
 
@@ -1156,10 +1174,11 @@ fn manca_rouse(
         if mood.embed_cd > 0.0 {
             mood.embed_cd -= dt;
         }
-        // Being shot is the most direct disturbance: a manca's Health only ever changes when a bolt hits it,
-        // so `Changed` (minus the spawn-add tick) is a bulletproof "I was just shot" trigger — independent of
-        // the gunfire field's magnitude or drain timing. This is the core fix for "won't react even when shot".
-        let shot = health.is_changed() && !health.is_added();
+        // Being shot is the most direct disturbance. A stored last_hp delta, not `Health::is_changed()` —
+        // mancae are `Biological`, so Almond Water can heal (or poison) them too, and `Changed` alone
+        // would fire "shot" on a heal tick just as readily as a bolt hit.
+        let shot = health.current < mood.last_hp - 1.0e-3;
+        mood.last_hp = health.current;
         let gunfire = stig.sample(FieldId::THREAT_GUN, &dungeon, motion.pos) > beh.parasite_swarm.rouse_threat;
         let host_near =
             host_pos.iter().any(|h| (h.xz() - motion.pos.xz()).length_squared() < prox_sq);
@@ -1446,7 +1465,7 @@ fn manca_leap(
 /// host claimed this tick is added to `taken` so a second manca can't also embed into it — so which manca
 /// claims which host, and the despawn order (which reuses freed entity ids), are reproducible across
 /// same-seed runs. Host selection uses the shared `nearest_planar` geometric tie-break.
-fn manca_embed(
+pub(crate) fn manca_embed(
     mut commands: Commands,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
@@ -1474,10 +1493,13 @@ fn manca_embed(
     // SORT-OK: per-manca spawn seed, unique — total by construction.
     ready.sort_unstable_by_key(|(seed, _, _)| *seed);
 
-    // Snapshot fresh (un-infested) host positions once; `taken` guards against two mancae claiming one host.
+    // Snapshot fresh (un-infested, still-alive) host positions once; `taken` guards against two mancae
+    // claiming one host. `hp.current > 0.0` excludes a host that's about to despawn — without it, a manca
+    // could embed into a dying host and be lost with it (no gestation, no burst) the moment its own
+    // despawn path fires.
     let fresh: Vec<(Entity, Vec3)> = hosts
         .iter()
-        .filter(|(_, _, _, inf)| !inf.active)
+        .filter(|(_, _, hp, inf)| !inf.active && hp.current > 0.0)
         .map(|(e, t, _, _)| (e, t.translation))
         .collect();
     let reach_sq = (HOST_BODY_RADIUS + beh.parasite_swarm.embed_range).powi(2);
@@ -1493,7 +1515,7 @@ fn manca_embed(
             continue; // nearest fresh host is out of burrow-in reach
         }
         if let Ok((_, _, mut hp, mut inf)) = hosts.get_mut(host_e) {
-            hp.current -= sim.parasite.embed_damage;
+            hp.apply_damage(sim.parasite.embed_damage);
             inf.active = true;
             inf.timer = 0.0;
             inf.seed = seed; // the embedding manca's seed salts the brood RNG at burst
@@ -1547,7 +1569,7 @@ fn brood_size(seed: u32, min: u32, max: u32) -> u32 {
 /// erupt, how many mancae, and the entity-id order are reproducible. The wound/blood/shake are cosmetic
 /// (gore/juice on `Update`), invisible to `snapshot_hash`.
 #[allow(clippy::type_complexity)]
-fn parasite_burst(
+pub(crate) fn parasite_burst(
     mut commands: Commands,
     time: Res<Time>,
     graph: Option<Res<SurfaceGraph>>,
@@ -1613,7 +1635,8 @@ fn parasite_burst(
                 trauma.add(beh.parasite_swarm.convulse_trauma_per_tick); // a rising, dreadful rumble
                 if inf.burst_timer <= 0.0 {
                     // --- ERUPT: the manca tears out ---
-                    hp.current -= hp.max / BURST_DAMAGE_DIVISOR; // ⅓ damage — deliberately NOT an instakill
+                    let burst_damage = hp.max / BURST_DAMAGE_DIVISOR; // ⅓ damage — deliberately NOT an instakill
+                    hp.apply_damage(burst_damage);
 
                     // Tear a persistent hole into the chest: a dark disc parented to the host ROOT (a sibling
                     // of the figurine, so `recolor_units` leaves it alone), facing outward (−Z) and sat just

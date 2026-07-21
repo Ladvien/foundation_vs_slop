@@ -249,9 +249,12 @@ fn update_nests(
 /// Razed by the squad: a nest whose Health hit zero despawns, ending its birth loop (it drops out of
 /// `crab::nest_reproduce`'s query) and orphaning any in-flight haul (which then aborts and drops).
 fn despawn_dead_nests(mut commands: Commands, nests: Query<(Entity, &Health), With<Nest>>) {
-    for (e, hp) in &nests {
-        if hp.current <= 0.0 {
-            commands.entity(e).despawn();
-        }
+    let mut dead: Vec<Entity> = nests.iter().filter(|(_, hp)| hp.current <= 0.0).map(|(e, _)| e).collect();
+    // Nest query order is not stable across `App` instances; sort by entity bits so despawn order (and
+    // the entity-id reuse it drives) is reproducible if two nests are ever razed on the same tick —
+    // matching `crab_despawn_dead`/`despawn_dead_units`/the boss's `despawn_dead`.
+    crate::sort_total!(&mut dead, |e: &Entity| e.to_bits());
+    for e in dead {
+        commands.entity(e).despawn();
     }
 }

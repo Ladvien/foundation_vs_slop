@@ -817,7 +817,6 @@ pub(crate) fn nest_reproduce(
     mut commands: Commands,
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
-    stig: Res<crate::ai::field::Stig>,
     crab_assets: Option<Res<CrabAssets>>,
     mut nests: Query<(Entity, &mut crate::nest::Nest)>,
     crabs: Query<(), With<Crab>>,
@@ -832,14 +831,11 @@ pub(crate) fn nest_reproduce(
     let mut total = crabs.iter().count();
 
     // CANONICAL ORDER — load-bearing, and the same class of bug as `laser::fire_laser`'s shared aim draw.
-    // This loop is greedy and stateful over TWO pieces of shared state, so the order the nests are visited
-    // in is part of the result:
-    //   * `seq` is a SHARED monotonic counter, and `CrabSpawnSeq`'s own doc spells out what rides on it —
-    //     "scout/assault role, think-stagger, jump cadence, carry capacity, climb/angle biases, RNG". When
-    //     two nests breed on the same tick, raw query order decided WHICH nest's newborn got seed N and
-    //     which got N+1, so a crab's caste and capacity flipped between two same-seed runs.
-    //   * `total` gates on `crab_count_max`, so at the cap the visit order decides WHICH nest gets the last
-    //     slot — a keep-the-first-on-a-tie pick.
+    // This loop is greedy and stateful over a SHARED counter, so the order the nests are visited in is
+    // part of the result: `seq` is a monotonic counter, and `CrabSpawnSeq`'s own doc spells out what rides
+    // on it — "scout/assault role, think-stagger, jump cadence, carry capacity, climb/angle biases, RNG".
+    // When two nests breed on the same tick, raw query order decided WHICH nest's newborn got seed N and
+    // which got N+1, so a crab's caste and capacity flipped between two same-seed runs.
     // Nest query order is NOT stable across `App` instances (`sim_harness::nest_cells` was canonicalised
     // for exactly this reason; the breeding loop itself never was). `nest.pos` is assigned at spawn and
     // immortal, so its bits are a stable, total key — the `world_to_cell` quantisation is deliberately NOT
@@ -861,20 +857,14 @@ pub(crate) fn nest_reproduce(
             continue;
         }
         // Effective rate = 1 + spawn_boost (SPAWN_BOOST_MAX ⇒ ~10× faster). Re-arm even if this tick
-        // can't spawn (cap/crowd), so a fed nest keeps its fast cadence.
+        // can't spawn (no hoard yet, or the delivery cell isn't floor), so a fed nest keeps its fast
+        // cadence. No population cap or local-crowding gate: the meat economy below is the swarm's only
+        // size lever — a nest that keeps feeding keeps breeding.
         nest.respawn_timer = sim.breeding.respawn_interval / (1.0 + nest.spawn_boost);
 
-        if total >= sim.breeding.crab_count_max {
-            continue;
-        }
         // Meat gate: breeding both requires and consumes hoarded meat. No hoard → no birth, so cutting
         // off the swarm's food halts reinforcements (the economy's one lever).
         if nest.hoard < sim.breeding.meat_per_crab {
-            continue;
-        }
-        // Don't pile births onto a crowded nest cell (territorial self-limiting).
-        let density = stig.sample(crate::ai::field::FieldId::CRAB_DENSITY, &dungeon, nest.pos);
-        if density >= sim.breeding.crowd_cap {
             continue;
         }
         let Some(patch) = graph.floor_patch_cell(dungeon.world_to_cell(nest.pos)) else {

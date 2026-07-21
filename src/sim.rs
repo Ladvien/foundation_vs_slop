@@ -88,13 +88,11 @@ pub struct CombatTuning {
     pub crab_drag: f32,
 }
 
-/// Swarm economy — breeding, feeding, and the population cap. `crab_count_max` is the operative cap the
-/// nests breed toward (the initial spawn count is a separate spawn-structure knob, not promoted here).
+/// Swarm economy — breeding, feeding. No population cap and no local crowding gate: the meat economy
+/// (`meat_per_crab` vs. hoard) is the swarm's only size lever, so a well-fed nest breeds without limit.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BreedingTuning {
-    /// Hard population cap the swarm breeds toward.
-    pub crab_count_max: usize,
     /// Minimum seconds between a nest's births (breed rate limiter).
     pub respawn_interval: f32,
     /// Meat consumed per birth.
@@ -105,8 +103,6 @@ pub struct BreedingTuning {
     pub spawn_boost_max: f32,
     /// Per-second decay of the spawn boost.
     pub spawn_boost_decay: f32,
-    /// Local `CRAB_DENSITY` above which breeding is suppressed (territorial).
-    pub crowd_cap: f32,
     /// Per-second rise of a crab's HUNGER drive (pushes foraging/feeding).
     pub hunger_rate: f32,
     /// Per-second drain of HUNGER while feeding.
@@ -218,13 +214,11 @@ impl Default for SimTuning {
                 crab_drag: 0.15,
             },
             breeding: BreedingTuning {
-                crab_count_max: 90,
                 respawn_interval: 5.0,
                 meat_per_crab: 1.0,
                 feed_gain: 6.0,
                 spawn_boost_max: 9.0,
                 spawn_boost_decay: 1.0,
-                crowd_cap: 5.0,
                 hunger_rate: 0.03,
                 hunger_sate_rate: 0.3,
             },
@@ -318,15 +312,11 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     non_negative("combat.crab_drag", t.combat.crab_drag)?;
 
     // Breeding.
-    if t.breeding.crab_count_max == 0 {
-        return Err("sim tuning: breeding.crab_count_max must be >= 1".into());
-    }
     positive("breeding.respawn_interval", t.breeding.respawn_interval)?;
     positive("breeding.meat_per_crab", t.breeding.meat_per_crab)?;
     positive("breeding.feed_gain", t.breeding.feed_gain)?;
     positive("breeding.spawn_boost_max", t.breeding.spawn_boost_max)?;
     positive("breeding.spawn_boost_decay", t.breeding.spawn_boost_decay)?;
-    positive("breeding.crowd_cap", t.breeding.crowd_cap)?;
     positive("breeding.hunger_rate", t.breeding.hunger_rate)?;
     positive("breeding.hunger_sate_rate", t.breeding.hunger_sate_rate)?;
 
@@ -402,8 +392,8 @@ mod tests {
         assert!(validate_tuning(&t).is_err(), "an exponent < 1 must be rejected");
 
         let mut t = SimTuning::default();
-        t.breeding.crab_count_max = 0;
-        assert!(validate_tuning(&t).is_err(), "a zero population cap must be rejected");
+        t.breeding.respawn_interval = 0.0;
+        assert!(validate_tuning(&t).is_err(), "a non-positive respawn interval must be rejected");
 
         let mut t = SimTuning::default();
         t.fear.per_crab = 0.0;

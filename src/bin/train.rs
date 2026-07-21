@@ -830,10 +830,16 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
                     for tok in rest.split_whitespace() {
                         if let Some(v) = tok.strip_prefix("gen=") {
                             if let Some((cur, _)) = v.split_once('/') {
-                                g = cur.parse().unwrap_or(0);
+                                g = cur.parse().unwrap_or_else(|e| {
+                                    eprintln!("island {i}: malformed PROGRESS gen token {cur:?}: {e}");
+                                    0
+                                });
                             }
                         } else if let Some(v) = tok.strip_prefix("best=") {
-                            b = v.parse().unwrap_or(0.0);
+                            b = v.parse().unwrap_or_else(|e| {
+                                eprintln!("island {i}: malformed PROGRESS best token {v:?}: {e}");
+                                0.0
+                            });
                         }
                     }
                     bar.set_position(g);

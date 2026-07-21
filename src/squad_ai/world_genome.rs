@@ -34,12 +34,13 @@ use crate::sim::{
 };
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 52 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 9, boss 7,
+/// + rally × 3) + 50 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
 /// parasite 14) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is ATTENTION
 /// (observation), and the SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials
 /// belong in the search that shapes the ecosystem's deaths and lives. (Mold dropped to 6 dials when the
-/// mold→LOS occlusion coupling was removed — see `mold::MoldConfig`.)
-pub const N: usize = 103;
+/// mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped to 7 dials when the
+/// population cap and local crowding gate were removed — the meat economy is the swarm's only size lever.)
+pub const N: usize = 101;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -82,13 +83,11 @@ static BOUNDS: [(f32, f32); N] = [
     (25.0, 300.0),// unit_hp
     (0.0, 1.0),   // crab_drag
     // ── SimTuning::breeding ──
-    (40.0, 400.0),// crab_count_max (usize)
     (1.0, 20.0),  // respawn_interval
     (0.25, 5.0),  // meat_per_crab
     (1.0, 20.0),  // feed_gain
     (1.0, 30.0),  // spawn_boost_max
     (0.1, 5.0),   // spawn_boost_decay
-    (1.0, 20.0),  // crowd_cap
     (0.005, 0.3), // hunger_rate
     (0.05, 2.0),  // hunger_sate_rate
     // ── SimTuning::boss ──
@@ -200,13 +199,11 @@ pub fn encode(
     v.push(sim.combat.crab_hp);
     v.push(sim.combat.unit_hp);
     v.push(sim.combat.crab_drag);
-    v.push(sim.breeding.crab_count_max as f32);
     v.push(sim.breeding.respawn_interval);
     v.push(sim.breeding.meat_per_crab);
     v.push(sim.breeding.feed_gain);
     v.push(sim.breeding.spawn_boost_max);
     v.push(sim.breeding.spawn_boost_decay);
-    v.push(sim.breeding.crowd_cap);
     v.push(sim.breeding.hunger_rate);
     v.push(sim.breeding.hunger_sate_rate);
     v.push(sim.boss.start_hp);
@@ -323,13 +320,11 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             crab_drag: f!(),
         },
         breeding: BreedingTuning {
-            crab_count_max: to_usize(f!()),
             respawn_interval: f!(),
             meat_per_crab: f!(),
             feed_gain: f!(),
             spawn_boost_max: f!(),
             spawn_boost_decay: f!(),
-            crowd_cap: f!(),
             hunger_rate: f!(),
             hunger_sate_rate: f!(),
         },

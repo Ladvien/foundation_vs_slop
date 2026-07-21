@@ -165,7 +165,7 @@ where
             // Re-derive the sample from the CLAMPED genome actually evaluated (`from_vec` box-clamps), so the
             // CMA update is driven by the in-bounds point, not the raw proposal — this is what stops the mean
             // marching past the box bound.
-            let repaired = emitter.repair(&to_vec(&child));
+            let repaired = emitter.repair(&to_vec(&child))?;
             match evaluate(&child) {
                 Some((d, fitness)) => {
                     let inserted = result.pop.insert(d, fitness, child);
@@ -270,7 +270,7 @@ where
                 result.rejected_infeasible += 1;
                 continue;
             }
-            let repaired = emitter.repair(&to_vec(&child));
+            let repaired = emitter.repair(&to_vec(&child))?;
             match evaluate(&child) {
                 Some((d, fitness)) => {
                     let cell = d.cell(res);

@@ -174,10 +174,18 @@ fn drain_impacts(
     }
 }
 
-fn despawn_impacts(mut commands: Commands, time: Res<Time>, bursts: Query<(Entity, &ImpactFx)>) {
+fn despawn_impacts(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut materials: ResMut<Assets<ImpactMaterial>>,
+    bursts: Query<(Entity, &ImpactFx, &MeshMaterial3d<ImpactMaterial>)>,
+) {
     let now = time.elapsed_secs();
-    for (entity, fx) in &bursts {
+    for (entity, fx, material) in &bursts {
         if now >= fx.despawn_at {
+            // Despawning the entity alone leaves its per-burst material orphaned in `Assets` — the same
+            // leak this codebase already fixed once in `psi_vision` (see its module doc).
+            materials.remove(&material.0);
             commands.entity(entity).despawn();
         }
     }

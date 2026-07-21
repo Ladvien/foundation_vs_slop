@@ -77,6 +77,15 @@ fn chacha_unit_and_below_are_frozen() {
     let mut rng = seeded(7);
     let below: Vec<usize> = (0..8).map(|_| rng.below(10)).collect();
     assert_eq!(below, [1, 1, 1, 1, 2, 7, 0, 7]);
-    // Degenerate guard: `below(0)` returns 0 rather than panicking (documented caller-bug behaviour).
-    assert_eq!(seeded(1).below(0), 0);
+}
+
+// `debug_assert!` is elided in `--release` (same discipline as `sort_total!`: release builds pay nothing
+// for the check), so this can only assert the panic under debug_assertions.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "DetRng::below(0): degenerate range")]
+fn chacha_below_zero_fails_loudly() {
+    // `below(0)` has no valid result — a caller bug, not a valid zero-draw. Fails loudly under
+    // debug_assertions/test-harness instead of silently returning 0 (see `rng::DetRng::below`).
+    let _ = seeded(1).below(0);
 }

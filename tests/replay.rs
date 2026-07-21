@@ -211,7 +211,28 @@ fn deterministic_core_is_bit_identical() {
 // the crab trajectory the `snapshot_hash` folds shifts. Not a determinism break:
 // `deterministic_core_is_bit_identical` stays green and `authored_world_config_override_is_a_noop`
 // measured the SAME new value (world-config seam untouched). Was `0x6bd480d83f264117`.
-const GOLDEN: u64 = 0x793366008d9878fb;
+//
+// Re-pinned 2026-07-20 for the BACKLOG.md correctness-bug sweep — several deliberate gameplay changes in
+// one pass, each individually documented as golden-moving in BACKLOG.md at the time it was written:
+//   * H1/Health root fix: `Health::apply_damage`/`kill()` now clamp `current` at a 0 floor at every damage
+//     site, so a unit killed in a heal pool can no longer be over-healed back past `max` and resurrected.
+//   * M10: nest breeding no longer gates on a hard population cap (`crab_count_max`) or a local crowding
+//     gate (`crowd_cap`) — removed per design decision; the meat economy is now the swarm's only size
+//     lever, so population (and therefore crab trajectories/combat) diverges from the old capped run.
+//   * M8: `crab_alarm_on_damage`/`manca_rouse` switched from `Health::is_changed()` to a stored `last_hp`
+//     delta, so they no longer false-fire "damaged"/"shot" on an Almond Water heal tick — fewer spurious
+//     ALARM deposits and manca rouses change crab/manca motion.
+//   * M6: the Smiley's `Scared` flee vector now falls back to its current heading (instead of `Vec2::ZERO`)
+//     when no unit is alive to flee from.
+//   * M1: the `HealthDamage` system set's 7 writers are now an explicit `.after()` chain (`smiley_zap` →
+//     `smiley_defense` → `crab_jump` → `crab_contact_damage` → `manca_embed` → `parasite_burst` →
+//     `fire_laser`) instead of accidental plugin-registration order — same effective order as before, but
+//     making it explicit surfaces float non-associativity that was previously masked.
+// Not a determinism break: `deterministic_core_is_bit_identical` and
+// `deterministic_core_is_bit_identical_across_many_builds` stay green, and
+// `authored_world_config_override_is_a_noop` measured the SAME new value (world-config seam untouched).
+// Was `0x793366008d9878fb`.
+const GOLDEN: u64 = 0x991b80282f2def20;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -350,7 +371,12 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // moves where scatter lamps rest, so their `LightEmitter`s rewrite the `LightField` this oracle folds —
 // and the changed crab photophobia moves the stigmergy channels it also folds. Arch-stable (scalar-f32
 // field ops, no rotation). Was `0x5692ad7429ff5736`.
-const GOLDEN_FIELD: u64 = 0xd4db701cc41588ac;
+//
+// Re-pinned 2026-07-20 alongside `GOLDEN` for the BACKLOG.md correctness-bug sweep (see the `GOLDEN` note
+// for the full list). M10 (nest cap removal) and M8 (alarm/rouse false-fire fix) both change crab/manca
+// motion and ALARM-channel deposits directly, which this oracle folds. Arch-stable (scalar-f32 field ops,
+// no rotation). Was `0xd4db701cc41588ac`.
+const GOLDEN_FIELD: u64 = 0xdf805ab8088f34ee;
 
 #[test]
 fn field_passes_are_bit_identical() {

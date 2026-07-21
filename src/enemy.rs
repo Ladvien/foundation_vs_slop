@@ -300,7 +300,7 @@ struct AttackSphereFace;
 /// cosmetic `drain_lightning` (`Update`) drains and spawns the beam VFX. Decoupled like `ImpactQueue`
 /// so the pinned kill stays render-free (the beam has no `Health`, so it never enters `snapshot_hash`).
 #[derive(Resource, Default)]
-struct LightningQueue(Vec<(Vec3, Vec3)>);
+pub(crate) struct LightningQueue(Vec<(Vec3, Vec3)>);
 
 /// Shared beam mesh + emissive material for lightning VFX, built once.
 #[derive(Resource)]
@@ -390,11 +390,19 @@ impl Plugin for EnemyPlugin {
                     // Reflex first so movement + the zap see this tick's mood.
                     smiley_reflex.after(crate::ai::AiSet::Think),
                     // Smite attackers while unleashing (instakill = pinned state → FixedUpdate).
+                    // First link in the cross-plugin `HealthDamage` chain (see `health::HealthDamage`'s
+                    // doc) — its 7 writers overlap in component access but rarely the same entity the same
+                    // tick, so the set alone carries no order; this `.after()` chain across
+                    // enemy/crab/parasite/laser makes their mutual composition order an explicit contract
+                    // instead of accidental plugin-registration order.
                     smiley_zap.after(smiley_reflex).in_set(crate::health::HealthDamage),
                     // Bounded no-heal crab cull so the swarm can't free-farm the coexisting god. It TAGS
                     // its victims (`crab::Culled`) rather than despawning them, so it must run before the
                     // one despawn owner — an `insert` command applied after that despawn panics.
-                    smiley_defense.before(crate::crab::CrabDespawn).in_set(crate::health::HealthDamage),
+                    smiley_defense
+                        .after(smiley_zap)
+                        .before(crate::crab::CrabDespawn)
+                        .in_set(crate::health::HealthDamage),
                     // Move after the brain chose this tick's mode and the reflex set the mood.
                     enemy_seek
                         .after(rebuild_enemy_field)
@@ -661,11 +669,13 @@ fn enemy_seek(
                 motion.speed = boss.min_speed;
                 continue;
             }
-            // Scared (attacked while watched): it "runs away" — flee straight from the nearest unit.
+            // Scared (attacked while watched): it "runs away" — flee straight from the nearest unit. If
+            // every unit is dead, there's nothing to flee FROM, but "runs away" still means it keeps
+            // moving: fall back to its current heading rather than standing still.
             SmileyMood::Scared => {
                 let away = match nearest {
                     Some(t) => (pos.xz() - t.xz()).normalize_or_zero(),
-                    None => Vec2::ZERO,
+                    None => motion.heading.xz().normalize_or_zero(),
                 };
                 if away != Vec2::ZERO {
                     let desired3 = Vec3::new(away.x, 0.0, away.y);
@@ -1082,7 +1092,7 @@ fn smiley_reflex(
 /// removes it with the correct death VFX; here we only set `hp = 0` (pinned) and queue the beam VFX
 /// (cosmetic). Deterministic: single recorded attacker, no RNG.
 #[allow(clippy::type_complexity)]
-fn smiley_zap(
+pub(crate) fn smiley_zap(
     mut lightning: ResMut<LightningQueue>,
     mut impacts: ResMut<ImpactQueue>,
     mut sfx: MessageWriter<Sfx>,
@@ -1106,13 +1116,13 @@ fn smiley_zap(
         let struck = if let Ok((vtf, mut hp)) = crabs.get_mut(victim) {
             let vpos = vtf.translation;
             (planar_dist(vpos, spos) <= ZAP_RANGE).then(|| {
-                hp.current = 0.0; // instant kill — the crab's own despawn does gore/SCENT/SFX next tick
+                hp.kill(); // instant kill — the crab's own despawn does gore/SCENT/SFX next tick
                 vpos
             })
         } else if let Ok((vtf, mut hp)) = units.get_mut(victim) {
             let vpos = vtf.translation;
             (planar_dist(vpos, spos) <= ZAP_RANGE).then(|| {
-                hp.current = 0.0; // the unit that shot it once it was unleashing (its real attacker, not a bystander)
+                hp.kill(); // the unit that shot it once it was unleashing (its real attacker, not a bystander)
                 vpos
             })
         } else {
@@ -1144,7 +1154,7 @@ fn smiley_zap(
 /// ordered `.before(crab::CrabDespawn)` because tagging is not despawning: a `Culled` insert queued after
 /// the despawn command is applied to a dead entity and panics. The `Culled` tag tells that despawner to emit
 /// the green-ichor swat gore but NO SCENT bloom — a scent here would just magnet more crabs into a loop.
-fn smiley_defense(
+pub(crate) fn smiley_defense(
     time: Res<Time>,
     mut commands: Commands,
     mut sfx: MessageWriter<Sfx>,
@@ -1191,7 +1201,7 @@ fn smiley_defense(
         });
         for (ce, _, _) in biters.into_iter().take(sim.boss.cull_max) {
             if let Ok((_, _, mut hp, _)) = crabs.get_mut(ce) {
-                hp.current = 0.0; // lethal swat — the single crab-death despawner finishes it next tick
+                hp.kill(); // lethal swat — the single crab-death despawner finishes it next tick
             }
             commands.entity(ce).insert(crate::crab::Culled);
         }

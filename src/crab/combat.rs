@@ -2,15 +2,24 @@
 
 use super::*;
 
+/// Per-crab damage watermark for [`crab_alarm_on_damage`]: `current < last_hp` this tick means it was
+/// just hit. A stored delta comparison, not `Health::is_changed()` — `Changed` also fires on an *upward*
+/// mutation (the Almond Water heal, `almond_water::almond_water_effect`), which would flood ALARM every
+/// heal tick a wounded crab spends standing in a pool. Seeded to spawn HP.
+#[derive(Component)]
+pub(crate) struct CrabDamageWatch {
+    pub(crate) last_hp: f32,
+}
+
 /// Alarm-pheromone recruitment to defense: a wounded crab floods the local ALARM channel so every crab
 /// within ~one room reads `Fact::AlarmHere`, musters (converges on the squad), and stops fleeing — the
 /// fix for "shoot the crabs and they just scatter". This is the retaliatory, *local* twin of the nest's
 /// own alarm (`nest::nest_alarm`): nest hit → a stronger, wider bloom, crab hit → a one-room alarm bloom
-/// that self-limits as the field evaporates. Detection mirrors `nest_alarm`'s idiom — a crab whose
-/// `Health` changed this frame and now sits below full was just hit (crabs never heal), so it deposits.
-/// A stigmergic warning cry (Heylighen, "Stigmergy as a universal coordination mechanism", CSR 2016).
+/// that self-limits as the field evaporates. Detection is a [`CrabDamageWatch`] delta, not
+/// `Health::is_changed()` — see its doc for why. A stigmergic warning cry (Heylighen, "Stigmergy as a
+/// universal coordination mechanism", CSR 2016).
 pub(crate) fn crab_alarm_on_damage(
-    crabs: Query<(Ref<Health>, &Transform), With<Crab>>,
+    mut crabs: Query<(&Health, &mut CrabDamageWatch, &Transform), With<Crab>>,
     mut deposits: ResMut<crate::ai::field::StigDeposits>,
     sim: Res<SimTuning>,
 ) {
@@ -23,16 +32,15 @@ pub(crate) fn crab_alarm_on_damage(
     // function of the deposits, exactly as `ai::field::sort_deposits` documents (the same class of fix as
     // the crab-separation bucket sort above).
     let mut batch: Vec<crate::ai::field::Deposit> = Vec::new();
-    for (hp, tf) in &crabs {
-        // `is_changed()` also fires on spawn; `is_added()` screens that out. `current < max` restricts to
-        // an actual wound (a fresh full-health crab that was merely touched by the ECS won't deposit).
-        if hp.is_changed() && !hp.is_added() && hp.current < hp.max {
+    for (hp, mut watch, tf) in &mut crabs {
+        if hp.current < watch.last_hp - 1.0e-3 {
             batch.push(crate::ai::field::Deposit {
                 pos: tf.translation,
                 field: crate::ai::field::FieldId::ALARM,
                 amount: sim.deposit.alarm_crab,
             });
         }
+        watch.last_hp = hp.current;
     }
     crate::ai::field::sort_deposits(&mut batch);
     deposits.0.extend(batch);
@@ -107,7 +115,7 @@ pub(crate) fn crab_contact_damage(
             }
         }
         if count > 0 {
-            hp.current -= sim.combat.crab_contact_dps * (count as f32).powf(sim.combat.crab_damage_exponent) * dt;
+            hp.apply_damage(sim.combat.crab_contact_dps * (count as f32).powf(sim.combat.crab_damage_exponent) * dt);
             if let Some(mut la) = last_attacker {
                 la.entity = biter;
                 la.age = 0.0;
