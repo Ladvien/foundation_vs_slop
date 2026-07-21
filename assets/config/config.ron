@@ -299,6 +299,29 @@
     ),
 
     // =============================================================================================
+    // hair — Valkyrie's physics-reactive accent strands, layered over the static hair-card mesh
+    // (see src/hair.rs). Verlet + XPBD-compliant distance/bend constraints, substepped.
+    // =============================================================================================
+    hair: (
+        clumps_per_unit: 8,
+        segments_per_strand: 5,
+        rest_length: 0.05,
+        compliance: 0.0002,
+        bend_compliance: 0.002,
+        damping: 0.96,
+        gravity: 9.8,
+        gravity_scale: 0.6,
+        wind_strength: 0.4,
+        wind_freq: 1.6,
+        substeps: 4,
+        // Matches HairCards.ROOT_W/TIP_W in the asset generator (scp_characters/hair.py) for a
+        // consistent card width against the static valkyrie_hair card.
+        strand_width_root: 0.062,
+        strand_width_tip: 0.010,
+        tint: (0.25, 0.14, 0.08),
+    ),
+
+    // =============================================================================================
     // impact_fx — laser-impact particle burst (see src/impact_fx.rs).
     // =============================================================================================
     impact_fx: (
