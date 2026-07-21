@@ -51,6 +51,7 @@ pub mod flowfield;
 pub mod fog;
 pub mod geom;
 pub mod gore;
+pub mod hair;
 pub mod health;
 pub mod juice;
 pub mod impact_fx;
@@ -235,6 +236,10 @@ pub fn run() {
                 // The iridescent Almond Water puddle + the mold moisture-feed. Cosmetic/GPU, windowed-only —
                 // never in `sim_harness`, so the deterministic core never depends on it.
                 almond_water::visual::AlmondWaterVisualPlugin,
+                // Physics-reactive accent hair (see `hair` module docs). Cosmetic/`Update`-only, no
+                // collider, no perception feed, never touches hashed state — windowed-only alongside
+                // `MyceliaPlugin`/`LightingPlugin`/`AlmondWaterVisualPlugin`, never in `sim_harness`.
+                hair::HairPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
