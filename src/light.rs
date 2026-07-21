@@ -445,7 +445,7 @@ impl LightField {
 /// One moving directional light contributed to the [`LightField`] each tick — the Researcher's flashlight.
 /// `source` is its dungeon cell, `forward` the world-XZ beam direction (unit length), the rest the beam's
 /// reach/brightness/shape (see [`LightingConfig`]). Sorted by `source` before compose for determinism.
-struct FlashlightCone {
+pub(crate) struct FlashlightCone {
     source: IVec2,
     forward: Vec2,
     intensity: f32,
@@ -512,13 +512,17 @@ pub(crate) fn apply_dynamic_lights(
         ),
         With<crate::squad::Unit>,
     >,
+    mut cones: Local<Vec<FlashlightCone>>,
 ) {
     // Profiling span: read the per-system cost under `--features bevy/trace_tracy` (see `perf_hud`). Inspection
     // shows this recompose is a cheap `copy_from_slice` + max-scan plus a small (≈1-cone) scatter — deliberately
     // left serial; this span lets that be confirmed rather than assumed.
     let _span = info_span!("light_recompose").entered();
     let c = &config.lighting;
-    let mut cones: Vec<FlashlightCone> = researchers
+    // Reused buffer (`Local`), cleared each tick, instead of a fresh `Vec` — usually 0-1 researchers, but
+    // this runs every `FixedUpdate` tick on the deterministic path, so a per-tick heap alloc is pure waste.
+    cones.clear();
+    cones.extend(researchers
         .iter()
         .filter(|(.., role)| **role == crate::squad_ai::role::RoleId::Researcher)
         .map(|(t, velocity, aim, facing_override, _)| {
@@ -551,8 +555,7 @@ pub(crate) fn apply_dynamic_lights(
                 cone_cos: c.flashlight_cone_cos,
                 edge_softness: c.flashlight_edge_softness,
             }
-        })
-        .collect();
+        }));
     // Stable order so the per-cell float summation in `compose` is reproducible across runs/threads.
     //
     // Keyed on the WHOLE cone, not just `source`. `(source.x, source.y)` was a PREFIX of the value: two
@@ -896,14 +899,19 @@ fn attach_fixture_lights(
     config: Res<GameConfig>,
     // A TV (`ScreenEmitter`) is excluded — it gets an eery screen spotlight in `attach_screen_lights`
     // instead of this generic room-fixture point light.
-    fixtures: Query<Entity, (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>)>,
+    fixtures: Query<(Entity, &Transform), (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>)>,
 ) {
     let c = &config.lighting;
     let color = Color::srgb(c.fixture_color[0], c.fixture_color[1], c.fixture_color[2]);
-    for e in &fixtures {
-        // Per-fixture flicker seed from the entity id (cosmetic only). A golden-angle phase decorrelates
-        // the shimmer; a hash of the id picks the `flicker_fail_ratio` fraction that fail.
-        let seed = e.to_bits() as u32;
+    for (e, tf) in &fixtures {
+        // Per-fixture flicker seed from the fixture's WORLD POSITION, not its entity id. `e.to_bits()` is
+        // run-dependent (spawn order/allocator), so which tubes flicker/fail and their phase would vary
+        // same-seed run to run — cosmetic only (never touches `LightField`/`snapshot_hash`), but a
+        // position is stable, immortal, and level geometry never shares a cell with itself.
+        let p = tf.translation;
+        let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
+        // A golden-angle phase decorrelates the shimmer; a hash of the seed picks the `flicker_fail_ratio`
+        // fraction that fail.
         let phase = seed as f32 * 2.399_963; // golden angle (radians)
         let mut h = seed.wrapping_mul(0x9E37_79B1);
         h ^= h >> 16;

@@ -475,16 +475,14 @@
             crab_drag: 0.15,          // speed / (1 + clinging_crabs · drag)
         ),
 
-        // Swarm economy: breeding toward the cap, feeding, and hunger. crab_count_max is the operative
-        // population cap the nests breed toward (initial spawn count is a separate spawn-structure knob).
+        // Swarm economy: breeding, feeding, and hunger. No population cap and no local crowding gate —
+        // the meat economy below (meat_per_crab vs. hoard) is the swarm's only size lever.
         breeding: (
-            crab_count_max: 90,
             respawn_interval: 5.0,
             meat_per_crab: 1.0,
             feed_gain: 6.0,
             spawn_boost_max: 9.0,
             spawn_boost_decay: 1.0,
-            crowd_cap: 5.0,           // local CRAB_DENSITY above this suppresses breeding (territorial)
             hunger_rate: 0.03,        // per-second HUNGER rise (pushes foraging/feeding)
             hunger_sate_rate: 0.3,    // per-second HUNGER drain while feeding
         ),

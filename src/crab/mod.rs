@@ -290,12 +290,17 @@ impl Plugin for CrabPlugin {
                         // forage nudge steers on the current level (post-heal), not last tick's.
                         .after(crate::almond_water::AlmondWaterWritten),
                     // Pounce owns the transform of mid-jump crabs; runs after locomotion set the rest.
-                    crab_jump.after(crab_locomotion).in_set(crate::health::HealthDamage),
+                    // Third link in the cross-plugin `HealthDamage` chain (see `health::HealthDamage`'s
+                    // doc and `enemy::smiley_zap`'s registration comment).
+                    crab_jump
+                        .after(crab_locomotion)
+                        .after(crate::enemy::smiley_defense)
+                        .in_set(crate::health::HealthDamage),
                     // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
                     carry_gibs
                         .after(crab_locomotion)
                         .after(assign_meat_targets),
-                    crab_contact_damage.in_set(crate::health::HealthDamage),
+                    crab_contact_damage.after(crab_jump).in_set(crate::health::HealthDamage),
                     // Flood the local ALARM channel when a crab is wounded, before the deposits drain so
                     // the muster bloom is live this tick (mirrors `scout_mark_prey`'s ordering).
                     crab_alarm_on_damage.before(crate::ai::AiSet::Deposits),

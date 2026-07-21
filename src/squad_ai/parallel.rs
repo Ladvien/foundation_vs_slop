@@ -271,6 +271,13 @@ fn read_frame(r: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
         Err(e) => return Err(format!("read frame length: {e}")),
     }
     let n = u32::from_le_bytes(len) as usize;
+    // A worker is a local child process we spawned, not an external attacker — but a corrupted frame
+    // (a worker bug, a truncated pipe) should fail loudly here rather than let a garbage length field
+    // request up to 4 GiB before the body read fails anyway.
+    const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+    if n > MAX_FRAME_BYTES {
+        return Err(format!("read frame length: {n} bytes exceeds {MAX_FRAME_BYTES}-byte cap"));
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf).map_err(|e| format!("read frame body ({n} bytes): {e}"))?;
     Ok(Some(buf))

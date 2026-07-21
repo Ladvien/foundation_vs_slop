@@ -55,11 +55,11 @@ struct Laser {
 /// outside every component, so replay could never capture it. Deterministic by construction — the only
 /// site that increments it (`fire_laser`) does so in `SquadMember` order.
 #[derive(Resource, Default)]
-struct BoltSeq(u64);
+pub(crate) struct BoltSeq(u64);
 
 /// Shared bolt mesh + emissive material, built once so every bolt is a cheap handle clone.
 #[derive(Resource)]
-struct LaserAssets {
+pub(crate) struct LaserAssets {
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
 }
@@ -67,7 +67,7 @@ struct LaserAssets {
 /// Fixed-rate fire gate. Repeating: it ticks every frame and wraps every `behavior.laser.fire_interval`;
 /// a shot is emitted on each wrap tick while Space is held.
 #[derive(Resource)]
-struct FireCooldown(Timer);
+pub(crate) struct FireCooldown(Timer);
 
 /// Deterministic laser RNG state, held as a resource rather than per-system `Local<u32>` so it is part
 /// of the simulation state — snapshotable and reset per run (a `Local` lives outside every component and
@@ -160,7 +160,12 @@ impl Plugin for LaserPlugin {
         .add_systems(
             FixedUpdate,
             (
-                fire_laser.after(crate::fog::LosWritten).in_set(crate::health::HealthDamage),
+                // Last link in the cross-plugin `HealthDamage` chain (see `health::HealthDamage`'s doc and
+                // `enemy::smiley_zap`'s registration comment).
+                fire_laser
+                    .after(crate::fog::LosWritten)
+                    .after(crate::parasite::parasite_burst)
+                    .in_set(crate::health::HealthDamage),
                 update_lasers,
             ),
         );
@@ -185,7 +190,7 @@ fn setup_laser_assets(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fire_laser(
+pub(crate) fn fire_laser(
     mut commands: Commands,
     time: Res<Time>,
     dungeon: Res<Dungeon>,
@@ -454,7 +459,7 @@ fn update_lasers(
         }
         if let Some((hit_entity, _, hit_point, _)) = best {
             if let Ok(mut hp) = healths.get_mut(hit_entity) {
-                hp.current -= sim.combat.laser_damage;
+                hp.apply_damage(sim.combat.laser_damage);
             }
             // If we hit the watcher, record WHO fired this bolt so it retaliates against the real shooter
             // (only the boss carries `LastAttacker`, so this no-ops for crabs/nests).
@@ -473,7 +478,7 @@ fn update_lasers(
                 && rand01(&mut lrng.friendly) < sim.combat.friendly_fire_chance
                 && let Ok(mut host_hp) = unit_healths.get_mut(host)
             {
-                host_hp.current -= sim.combat.friendly_fire_damage;
+                host_hp.apply_damage(sim.combat.friendly_fire_damage);
             }
             if !is_nest {
                 // Flesh bleeds: a small blood spray + spatter at the strike point (walls keep the spark

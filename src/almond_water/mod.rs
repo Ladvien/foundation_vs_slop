@@ -880,7 +880,7 @@ fn almond_water_effect(
             let intended = cfg.poison_rate * dt;
             let got = field.drink(cell, intended / cfg.heal_per_unit_water);
             if got > 0.0 {
-                health.current = (health.current - got * cfg.heal_per_unit_water).max(0.0);
+                health.apply_damage(got * cfg.heal_per_unit_water);
                 field.nudge_belief(cell, -cfg.death_rumor_gain * dt);
             }
         }

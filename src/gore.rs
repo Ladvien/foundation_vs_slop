@@ -1452,11 +1452,22 @@ fn update_droplets(
 }
 
 /// Keep the number of permanent floor stains bounded: recycle the oldest once over the cap.
-fn cap_blood_pools(mut commands: Commands, settings: Res<GoreSettings>, mut ring: ResMut<PoolRing>) {
+fn cap_blood_pools(
+    mut commands: Commands,
+    settings: Res<GoreSettings>,
+    mut ring: ResMut<PoolRing>,
+    mut pool_mats: ResMut<Assets<BloodPoolMaterial>>,
+    materials: Query<&MeshMaterial3d<BloodPoolMaterial>>,
+) {
     while ring.0.len() > settings.max_pools {
         if let Some(old) = ring.0.pop_front() {
             // Only this system despawns pools (they are otherwise permanent) and each id is popped
-            // exactly once, so the entity is always still alive here.
+            // exactly once, so the entity is always still alive here. Despawning the entity alone leaves
+            // its `BloodPoolMaterial` orphaned in `Assets` — the same leak already fixed once in
+            // `psi_vision` (see its module doc).
+            if let Ok(material) = materials.get(old) {
+                pool_mats.remove(&material.0);
+            }
             commands.entity(old).despawn();
         }
     }
@@ -1500,10 +1511,18 @@ fn cap_gib_chunks(
     }
 }
 
-fn despawn_gore(mut commands: Commands, time: Res<Time>, fx: Query<(Entity, &GoreFx)>) {
+fn despawn_gore(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut spray_mats: ResMut<Assets<BloodSprayMaterial>>,
+    fx: Query<(Entity, &GoreFx, &MeshMaterial3d<BloodSprayMaterial>)>,
+) {
     let now = time.elapsed_secs();
-    for (entity, f) in &fx {
+    for (entity, f, material) in &fx {
         if now >= f.despawn_at {
+            // Despawning the entity alone leaves its per-spray material orphaned in `Assets` — the same
+            // leak already fixed once in `psi_vision` (see its module doc).
+            spray_mats.remove(&material.0);
             commands.entity(entity).despawn();
         }
     }

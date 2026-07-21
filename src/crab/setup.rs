@@ -246,6 +246,7 @@ pub(crate) fn spawn_crab_on_patch(
                     from: Vec3::ZERO,
                     to: Vec3::ZERO,
                 },
+                CrabDamageWatch { last_hp: sim.combat.crab_hp },
             ),
             CrabMotion {
                 patch,

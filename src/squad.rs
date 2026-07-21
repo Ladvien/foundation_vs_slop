@@ -432,6 +432,13 @@ fn spawn_squad(
         .filter(|&c| dungeon.is_floor(c))
         .take(5)
         .collect();
+    if cells.len() < 5 {
+        warn!(
+            "squad spawn: only {} floor cells in the spawn spiral, spawning {} member(s) instead of 5",
+            cells.len(),
+            cells.len()
+        );
+    }
 
     // The role + persona roster, index-matched to spawn order (member i plays role i). Loaded from
     // `assets/config/personas.ron` when present (validated), else the code-literal defaults — a
