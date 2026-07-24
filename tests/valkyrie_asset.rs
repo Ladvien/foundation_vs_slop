@@ -140,11 +140,10 @@ fn every_masked_lower_body_bone_exists_in_the_rig() {
 #[test]
 fn the_locomotion_clips_are_still_authored_in_place() {
     let glb = Glb::load(GLB);
-    let root = glb
-        .node_names()
-        .iter()
-        .position(|n| *n == "Root")
-        .unwrap_or_else(|| panic!("{GLB} has no `Root` node")) as u64;
+    // The FULL-array node id (see `Glb::node_index`) — a `position()` in the name-filtered list would be a
+    // different number the moment the rig gains an unnamed node before `Root`, no channel would match, and
+    // this gate would pass without ever running its assertion.
+    let root = glb.node_index("Root");
 
     // Every clip carries a `Root` translation *channel* — the exporter writes one per bone — but the
     // keys are all identical, so the root never actually moves. It is that displacement, not the

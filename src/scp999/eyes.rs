@@ -92,12 +92,11 @@ pub(crate) struct Scp999Eyes {
 /// windowed-only), which is exactly why the eyes are attached in the cosmetic plugin, not at gameplay spawn.
 pub(crate) fn attach_scp999_eyes(
     mut commands: Commands,
-    blobs: Query<Entity, (With<Scp999>, Without<Scp999EyesAttached>)>,
+    blobs: Query<(Entity, &super::Scp999Seed), (With<Scp999>, Without<Scp999EyesAttached>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<Scp999EyesMaterial>>,
-    mut counter: Local<u32>,
 ) {
-    for blob in &blobs {
+    for (blob, seed) in &blobs {
         let quad = meshes.add(Rectangle::new(EYE_QUAD_SIZE, EYE_QUAD_SIZE));
         let material = materials.add(Scp999EyesMaterial {
             settings: Scp999EyesUniform {
@@ -108,8 +107,11 @@ pub(crate) fn attach_scp999_eyes(
                 joy: 0.55,
             },
         });
-        let phase = hash01_u32(*counter) * BLINK_PERIOD;
-        *counter = counter.wrapping_add(1);
+        // Phase from the blob's OWN birth seed, not an attach-order counter: this system wires blobs in
+        // whatever order their entities are yielded once they exist, so a counter numbered them by a
+        // per-run quantity and two runs of one seed gave the same blob different blink phases. The seed is
+        // the number `Scp999Seq` exists to provide (see `Scp999Seed`).
+        let phase = hash01_u32(seed.0) * BLINK_PERIOD;
         commands.entity(blob).insert(Scp999EyesAttached).with_children(|p| {
             p.spawn((
                 Scp999Eyes {
@@ -132,15 +134,13 @@ pub(crate) fn attach_scp999_eyes(
 /// Billboard each blob's eye quad toward the iso camera, glance the irises toward the comforted member, and
 /// drive the blink + joy. Reads the gameplay-written [`Scp999Motion`]. Cosmetic → `Update`; skipped headless
 /// (the `Single<Camera3d>` param finds no camera).
-/// One substepped step of a detuned 2D damped spring toward `target` (the eye-bounce integrator).
+/// One substepped step of a detuned 2D damped spring toward `target` (the eye-bounce integrator) — the
+/// two axes are independent oscillators, so this is [`super::jiggle::step_damped`] applied per component
+/// rather than a second hand-rolled copy of the same integration.
 fn step_eye_bob(x: &mut Vec2, v: &mut Vec2, target: Vec2, omega: f32, zeta: f32, dt: f32) {
-    let sub = 4u32;
-    let h = dt / sub as f32;
-    for _ in 0..sub {
-        let a = -(omega * omega) * (*x - target) - 2.0 * zeta * omega * *v;
-        *v += a * h;
-        *x += *v * h;
-    }
+    const SUBSTEPS: u32 = 4;
+    super::jiggle::step_damped(&mut x.x, &mut v.x, target.x, omega, zeta, dt, SUBSTEPS);
+    super::jiggle::step_damped(&mut x.y, &mut v.y, target.y, omega, zeta, dt, SUBSTEPS);
 }
 
 #[allow(clippy::type_complexity)]
@@ -159,7 +159,7 @@ pub(crate) fn update_scp999_eyes(
     let cam_back = camera.back();
     let cam_pos = camera.translation();
     let elapsed = time.elapsed_secs();
-    let dt = time.delta_secs().min(1.0 / 30.0);
+    let dt = time.delta_secs().min(super::MAX_FRAME_DT);
 
     for (gxf, motion, jiggle, children) in &blobs {
         // Seat the eyes on the dome's camera-facing near hemisphere (+ up + a small depth bias), recomputed

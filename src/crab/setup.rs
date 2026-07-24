@@ -246,7 +246,10 @@ pub(crate) fn spawn_crab_on_patch(
             (
                 Biological,
                 // ~1 in 4 crabs can't smell the cyanide warning → walk into poison pools. On every crab.
-                crate::health::CyanideSmell::from_seed(rand_seed as u64),
+                crate::health::CyanideSmell::from_seed_in(
+                    crate::health::smell_seed::CRAB,
+                    rand_seed as u64,
+                ),
                 CrabAttached { host: None },
                 CrabCarry {
                     capacity: bc.carry_capacity * (0.8 + 0.4 * draw(2)),

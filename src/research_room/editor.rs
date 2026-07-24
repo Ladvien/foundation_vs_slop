@@ -319,13 +319,6 @@ fn spawn_prop(
     info!("research_room: spawned {} at cell {:?}", spec.label, cell);
 }
 
-/// Decorrelated per-spawn seed from the monotonic spawn counter. Dev-only: the Research Room is exempt
-/// from the deterministic core, so any spread-out mapping is fine — `salt` (a Knuth multiplicative-hash
-/// constant) just keeps the crab and manca seed streams from lining up. Not a `DetRng` draw on purpose.
-fn decorrelate(n: u32, salt: u32) -> u32 {
-    n.wrapping_mul(salt).wrapping_add(1)
-}
-
 /// Fan-out cell for the Nth spawn, spread across the chamber interior (12x8 distinct cells before it
 /// wraps) so successive drops don't stack, then snapped to the nearest floor so nothing spawns in a wall.
 fn fan_cell(dungeon: &Dungeon, n: u32) -> IVec2 {
@@ -376,7 +369,7 @@ fn spawn_live_crab(
     let cell = fan_cell(dungeon, n);
     match crate::crab::pick_patch(graph, dungeon, cell, false) {
         Some(patch) => {
-            let seed = decorrelate(n, 2_654_435_761);
+            let seed = room_spawn_seed(n, ROOM_SPECIES_CRAB);
             let e = crate::crab::spawn_crab_on_patch(
                 commands,
                 graph,
@@ -402,6 +395,36 @@ fn spawn_live_crab(
 /// disjoint from the squad. The per-unit decision seed (`= squad_member + 1`, which seeds `CyanideSmell`,
 /// another total-sort tiebreak) derives from `squad_member`, so it is offset the same way and stays disjoint too.
 const RESEARCH_ROOM_MEMBER_BASE: usize = 1_000_000;
+
+/// The same reservation, for the **creature** seed streams. `CrabSeed`/`MancaSeed` are total-sort keys
+/// (`re_role_crabs`'s flip budget, `crab_despawn_dead`, `manca_embed`'s greedy host claim,
+/// `manca_despawn_dead`), and those sorts PANIC on a duplicate under `debug_assertions` — which is the
+/// only build the Research Room exists in, so a collision takes the whole session down.
+///
+/// The previous `n·salt + 1` mapping did not prevent that: it decorrelated the two dev streams from
+/// *each other*, but it evaluates to `1` at `n = 0` for every salt, so the very first F6 crab or manca
+/// minted seed `1` — exactly what the native `CrabSpawnSeq`/`MancaSpawnSeq` counters hand their second
+/// creature.
+/// Adding a base far above those counters (they are click/population bounded, never near a million) makes
+/// the dev seeds disjoint from the native streams, and the monotonic `n` keeps them unique within.
+/// Downstream draws stay decorrelated because every consumer mixes the seed through `hash01_u32`.
+const RESEARCH_ROOM_SEED_BASE: u32 = 1_000_000;
+
+/// Width of each species' reserved seed band.
+const RESEARCH_ROOM_SEED_SPAN: u32 = 1_000_000;
+
+/// Species bands within the reserved range — one per creature stream, so a dev crab and a dev manca
+/// spawned on the same click never share a raw seed either.
+const ROOM_SPECIES_CRAB: u32 = 0;
+const ROOM_SPECIES_MANCA: u32 = 1;
+const ROOM_SPECIES_SCP999: u32 = 2;
+
+/// A dev-spawn seed for the Nth F6 click, inside `species`' reserved band. Unique within the band by
+/// construction (`n` is monotonic and click counts never approach the span), and disjoint both from the
+/// other species' band and from the native `CrabSpawnSeq`/`MancaSpawnSeq` counters.
+fn room_spawn_seed(n: u32, species: u32) -> u32 {
+    RESEARCH_ROOM_SEED_BASE + species * RESEARCH_ROOM_SEED_SPAN + (n % RESEARCH_ROOM_SEED_SPAN)
+}
 
 /// Spawn a live squad unit through the real path (`crate::squad::spawn_unit`) so it behaves and auto-fires.
 fn spawn_live_unit(
@@ -459,7 +482,7 @@ fn spawn_live_manca(
     let cell = fan_cell(dungeon, n);
     match crate::crab::pick_patch(graph, dungeon, cell, false) {
         Some(patch) => {
-            let seed = decorrelate(n, 2_246_822_519);
+            let seed = room_spawn_seed(n, ROOM_SPECIES_MANCA);
             let home = dungeon.cell_center(cell);
             let e = crate::parasite::spawn_manca_on_patch(
                 commands,
@@ -494,7 +517,7 @@ fn spawn_live_scp999(
     let n = state.spawn_count;
     state.spawn_count += 1;
     let cell = fan_cell(dungeon, n);
-    let seed = decorrelate(n, 0x9E37_79B9);
+    let seed = room_spawn_seed(n, ROOM_SPECIES_SCP999);
     let e = crate::scp999::spawn_scp999_at(commands, assets, seed, dungeon.cell_center(cell));
     commands.entity(e).insert(RoomSpawned);
     info!("research_room: spawned live SCP-999 comfort blob at cell {cell:?}");
@@ -558,10 +581,20 @@ pub(super) fn refresh_quantity_label(
 
 /// Space toggles the sim pause via the game's single-writer `UserPaused`, so you can stage a scene
 /// (spawn + arrange) with everything frozen, then resume to watch it run.
+///
+/// Space is **not** an exclusive hotkey: it is also `bevy_ui_widgets::Button`'s activation key (see
+/// `ui::widgets`), and the Ctrl+P note box takes raw text. Unguarded, one press both clicked the focused
+/// palette button and toggled the pause — two unrelated actions from one keystroke. When something else
+/// owns the keyboard, the press belongs to it.
 pub(super) fn toggle_pause_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<bevy::input_focus::InputFocus>,
+    note_input: Option<Res<crate::NoteInputActive>>,
     mut paused: ResMut<crate::time_control::UserPaused>,
 ) {
+    if focus.get().is_some() || note_input.is_some() {
+        return;
+    }
     if keys.just_pressed(KeyCode::Space) {
         paused.0 = !paused.0;
     }

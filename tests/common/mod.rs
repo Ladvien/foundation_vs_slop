@@ -83,6 +83,20 @@ impl Glb {
             .collect()
     }
 
+    /// The index of `name` in the **full** `nodes` array — i.e. the id that `channels[].target.node`
+    /// uses. Do NOT derive this from [`node_names`]: that list drops unnamed nodes, so a `position()`
+    /// within it is a *filtered* index that silently diverges from the real node id the moment the rig
+    /// gains an unnamed node before the one you want. A channel lookup keyed on the wrong id matches
+    /// nothing, and an assertion that only fires inside `if channel.node == id` then passes vacuously.
+    pub fn node_index(&self, name: &str) -> u64 {
+        self.json["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} has no nodes array", self.path))
+            .iter()
+            .position(|n| n["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("{} has no `{name}` node", self.path)) as u64
+    }
+
     /// The longest keyframe time in an animation, i.e. what Bevy will report as its `duration`.
     pub fn duration(&self, anim: &serde_json::Value) -> f32 {
         let accessors = self.json["accessors"]

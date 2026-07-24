@@ -850,7 +850,10 @@ pub(crate) fn spawn_manca_on_patch(
         MancaSeed(rand_seed),
         // Flesh: the belief-water heals or poisons mancae too (a squad tactic — flip a pool one stands in).
         // On every manca (value-only smell bool), inserted at spawn so no archetype churns at runtime.
-        (crate::health::Biological, crate::health::CyanideSmell::from_seed(rand_seed as u64)),
+        (
+            crate::health::Biological,
+            crate::health::CyanideSmell::from_seed_in(crate::health::smell_seed::MANCA, rand_seed as u64),
+        ),
         // Sphere collider mesh paired with its CPU laser hit-volume (same radius, zero-height capsule) so
         // bolts test against the manca headlessly + deterministically.
         (

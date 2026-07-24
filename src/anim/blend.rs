@@ -86,8 +86,16 @@ pub fn dir_weights(theta: f32) -> [f32; 4] {
         w[DIR_FWD] = 1.0;
         return w;
     }
-    let u = theta.rem_euclid(std::f32::consts::TAU) / std::f32::consts::FRAC_PI_2; // [0, 4)
-    let lobe = (u.floor() as usize).min(3);
+    // `rem_euclid` is documented to return the modulus itself for tiny negative inputs (`-1e-30 + TAU`
+    // rounds to `TAU` in f32), so this is `[0, 4]`, not the `[0, 4)` the lobe pick assumes. At exactly 4
+    // the fraction is 0 and `min(3)` clamps the lobe to DIR_LEFT — a unit travelling dead ahead would get
+    // a full-weight strafe-LEFT pose for that frame. Fold the wrapped end back onto lobe 0, where it
+    // belongs: an angle of TAU IS an angle of 0.
+    let mut u = theta.rem_euclid(std::f32::consts::TAU) / std::f32::consts::FRAC_PI_2; // [0, 4]
+    if u >= 4.0 {
+        u = 0.0;
+    }
+    let lobe = (u.floor() as usize).min(3); // `min` is now belt-and-braces; the wrap above is the guard
     let s = smoothstep(0.0, 1.0, u - u.floor());
     w[lobe] += 1.0 - s;
     w[(lobe + 1) % 4] += s;
@@ -177,6 +185,24 @@ mod tests {
         assert!(w.iter().all(|x| x.is_finite()));
         let (m, f) = tier_weights(f32::NAN);
         assert_eq!((m, f), (0.0, 0.0));
+    }
+
+    /// REGRESSION: a hair-negative travel angle must read as straight AHEAD, not as a full strafe-left.
+    /// `f32::rem_euclid` returns the modulus itself when the input is too small to subtract from it
+    /// (`-1e-30 + TAU == TAU` at f32 precision), so the normalised angle reached exactly 4.0, the lobe
+    /// pick clamped to DIR_LEFT, and the interpolation fraction was 0 — a clean 100% strafe-left pose on
+    /// a unit walking dead ahead, for the one frame the angle rounded that way.
+    #[test]
+    fn a_hair_negative_angle_does_not_pop_to_a_full_strafe() {
+        for theta in [-1e-30f32, -1e-38, -f32::MIN_POSITIVE, -0.0] {
+            let w = dir_weights(theta);
+            assert!(
+                w[DIR_FWD] > 0.999,
+                "theta {theta:e} must read as forward, got {w:?} (lobe wrap at rem_euclid == TAU)"
+            );
+            let sum: f32 = w.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-6, "weights must stay a partition of unity: {w:?}");
+        }
     }
 
     #[test]

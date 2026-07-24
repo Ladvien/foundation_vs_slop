@@ -206,3 +206,35 @@ fn apply_floor_fog(
         }
     }
 }
+
+/// Conceal every `T` standing on a cell the squad cannot currently SEE — the one fog-of-war visibility
+/// pass, generic over the marker that selects which actors it governs.
+///
+/// This is the partial observability that defines an RTS (Yang, Xie & Peng, "Fuzzy Theory Based Single
+/// Belief State Generation for Partially Observable Real-Time Strategy Games", IEEE Access 2019,
+/// DOI 10.1109/access.2019.2923419). It existed as three byte-identical copies — enemies, gib chunks,
+/// and the SCP-999 blob — differing only in that marker; register `hide_in_fog::<Marker>` instead of
+/// writing a fourth.
+///
+/// **Cosmetic, and safe on `Update`.** It reads `FogGrid` (written on `FixedUpdate` by `update_los`) and
+/// writes only `Visibility`, which enters no replay oracle: `snapshot_hash` folds `(Transform, Health)`
+/// and `gib_hash` folds `GibKey`/`Transform`/`Carryable`/ring order — never visibility. It never
+/// despawns or reorders, which WOULD perturb the `GibRing` folds. Driven every frame rather than off the
+/// fog dirty flag, because actors move in and out of line of sight while the squad's own cell is
+/// unchanged. Hiding the root propagates to child meshes (faces, gel, eye billboards).
+pub fn hide_in_fog<T: Component>(
+    fog: Res<FogGrid>,
+    dungeon: Res<Dungeon>,
+    mut actors: Query<(&Transform, &mut Visibility), With<T>>,
+) {
+    for (tf, mut vis) in &mut actors {
+        let want = if fog.visible_at(dungeon.world_to_cell(tf.translation)) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}

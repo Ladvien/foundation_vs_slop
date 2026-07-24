@@ -129,19 +129,71 @@ pub struct CyanideSmell {
     pub id: u64,
 }
 
+/// Species namespaces for [`CyanideSmell::from_seed_in`]. The raw per-species spawn seeds — unit
+/// `member + 1` (1..=N), the crab and manca sequence counters (0, 1, 2, …), the boss's position hash —
+/// **overlap as bare integers**, and the splitmix64 finalizer is a bijection, so identical raw seeds
+/// would mint identical [`CyanideSmell::id`]s *across* species. `id` is the cross-species total-sort
+/// tiebreak (the almond-water drink contention, every `nearest_planar_keyed` host/prey pick), so its
+/// uniqueness must hold by construction, not by luck: each species ORs a distinct base into the 64-bit
+/// seed before mixing. Raw seeds are `u32`-sized (< 2^32), far below the 2^40 bases, so the namespaced
+/// inputs are disjoint by construction and the bijection keeps the outputs disjoint too. (Same shape as
+/// `laser::target_id`'s `TargetKind` namespace.)
+pub mod smell_seed {
+    pub const UNIT: u64 = 1 << 40;
+    pub const CRAB: u64 = 2 << 40;
+    pub const MANCA: u64 = 3 << 40;
+    pub const BOSS: u64 = 4 << 40;
+}
+
+/// The splitmix64 finalizer — a bijection on `u64`, so distinct inputs give distinct outputs, which is
+/// what makes [`CyanideSmell::id`] usable as a sort tiebreak rather than merely a well-mixed hash.
+fn mix64(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 impl CyanideSmell {
-    /// Deterministic per-spawn assignment: ~1 in 4 biologicals are anosmic. A pure function of the entity's
-    /// already-hashed spawn seed (a splitmix64 finalizer), so no RNG enters the determinism hash and no
-    /// archetype churns at runtime.
+    /// Deterministic per-spawn assignment: ~1 in 4 biologicals are anosmic. A pure function of the
+    /// entity's spawn seed (no RNG enters the determinism hash, no archetype churns at runtime), with the
+    /// species' [`smell_seed`] namespace folded into the **id only**:
     ///
-    /// The finalizer is a **bijection**, so distinct spawn seeds give distinct [`id`](Self::id)s — which is
-    /// what makes it usable as a sort tiebreak, not merely a well-mixed one.
-    pub fn from_seed(seed: u64) -> Self {
-        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        Self { anosmic: z % 4 == 0, id: z }
+    /// - `anosmic` draws from the RAW seed — the namespace exists for id disjointness, and must not
+    ///   redistribute a gameplay trait across the population;
+    /// - `id` mixes the namespaced seed, so it is unique within a species (bijection over the species'
+    ///   own seed stream) *and* across species (the namespaced input ranges are disjoint).
+    pub fn from_seed_in(species: u64, seed: u64) -> Self {
+        Self { anosmic: mix64(seed) % 4 == 0, id: mix64(species | seed) }
+    }
+}
+
+#[cfg(test)]
+mod smell_tests {
+    use super::*;
+
+    /// The cross-species disjointness contract: the same raw seed through different species namespaces
+    /// yields distinct ids (unit member 0's seed `1` vs the crab spawned with sequence seed `1` vs the
+    /// manca with sequence seed `1` — the exact collision that let a keyed nearest-host pick fall through
+    /// to query order), while the anosmic draw is namespace-independent by design.
+    #[test]
+    fn same_raw_seed_yields_distinct_ids_across_species() {
+        let bases = [smell_seed::UNIT, smell_seed::CRAB, smell_seed::MANCA, smell_seed::BOSS];
+        for raw in [0u64, 1, 5, 0xFFFF_FFFF] {
+            let ids: Vec<u64> = bases.iter().map(|&b| CyanideSmell::from_seed_in(b, raw).id).collect();
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    assert_ne!(ids[i], ids[j], "raw seed {raw}: namespaces {i} and {j} collide");
+                }
+            }
+            for &b in &bases {
+                assert_eq!(
+                    CyanideSmell::from_seed_in(b, raw).anosmic,
+                    CyanideSmell::from_seed_in(smell_seed::UNIT, raw).anosmic,
+                    "anosmic must draw from the raw seed, not the namespace"
+                );
+            }
+        }
     }
 }
 
@@ -259,12 +311,19 @@ mod tests {
 
     #[test]
     fn cyanide_smell_is_deterministic_and_about_a_quarter() {
+        use super::smell_seed::CRAB;
         // Pure function of the spawn seed — same seed, same result (no RNG in the determinism hash).
-        assert_eq!(CyanideSmell::from_seed(42).anosmic, CyanideSmell::from_seed(42).anosmic);
-        assert_eq!(CyanideSmell::from_seed(0).anosmic, CyanideSmell::from_seed(0).anosmic);
+        assert_eq!(
+            CyanideSmell::from_seed_in(CRAB, 42).anosmic,
+            CyanideSmell::from_seed_in(CRAB, 42).anosmic
+        );
+        assert_eq!(
+            CyanideSmell::from_seed_in(CRAB, 0).anosmic,
+            CyanideSmell::from_seed_in(CRAB, 0).anosmic
+        );
         // ~1 in 4 are anosmic (Gidlow 2017: the HCN-odour sensitivity is x-linked recessive).
         let n = 20_000u64;
-        let anosmic = (0..n).filter(|&s| CyanideSmell::from_seed(s).anosmic).count();
+        let anosmic = (0..n).filter(|&s| CyanideSmell::from_seed_in(CRAB, s).anosmic).count();
         let frac = anosmic as f32 / n as f32;
         assert!((frac - 0.25).abs() < 0.02, "anosmia fraction {frac} is not ~1/4");
     }

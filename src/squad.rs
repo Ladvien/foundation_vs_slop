@@ -713,7 +713,7 @@ pub(crate) fn spawn_unit(
             UtterCooldown::default(),
             MemoryStream::default(),
             crate::squad_ai::dialogue::SpokenLines::default(),
-            crate::health::CyanideSmell::from_seed(seed as u64),
+            crate::health::CyanideSmell::from_seed_in(crate::health::smell_seed::UNIT, seed as u64),
         ),
         FigurineSource(figurine.clone()),
         Visibility::default(),
