@@ -30,17 +30,19 @@ use crate::ai::tuning::{AiTuning, ChannelTuning, FieldsTuning, RallyTuning};
 use crate::almond_water::AlmondWaterDynamics;
 use crate::config::WorldConfig;
 use crate::sim::{
-    BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, SimTuning,
+    BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, Scp999Tuning,
+    SimTuning,
 };
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 50 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
-/// parasite 14) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is ATTENTION
-/// (observation), and the SCP-150 parasite is a host-killing species, so its lifecycle/lethality dials
-/// belong in the search that shapes the ecosystem's deaths and lives. (Mold dropped to 6 dials when the
-/// mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped to 7 dials when the
-/// population cap and local crowding gate were removed — the meat economy is the swarm's only size lever.)
-pub const N: usize = 101;
+/// + rally × 3) + 56 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
+/// parasite 14, scp999 6) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is
+/// ATTENTION (observation); the SCP-150 parasite is a host-killing species and SCP-999 is a fear-*lowering*
+/// comfort creature, so both belong in the search that shapes the ecosystem's fear/deaths/lives. (Mold
+/// dropped to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding
+/// dropped to 7 dials when the population cap and local crowding gate were removed — the meat economy is
+/// the swarm's only size lever.)
+pub const N: usize = 107;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -113,6 +115,16 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 1.0),    // manip_cohesion_drop (probability)
     (0.0, 1.0),    // manip_curiosity_gain (probability)
     (0.1, 10.0),   // manip_dark_gain (validate_tuning requires > 0)
+    // ── SimTuning::scp999 (the friendly comfort blob — the one fear-LOWERING creature) ──
+    (1.0, 4.0),    // count (usize) — comfort blobs seeded into the level (decode rounds >= 1)
+    (0.5, 6.0),    // move_speed
+    (0.3, 2.5),    // contact_radius
+    (0.05, 3.0),   // calm_rate (FEAR drained/sec on contact; validate_tuning requires > 0)
+    (0.05, 3.0),   // morale_rate (MORALE lifted/sec on contact; validate_tuning requires > 0)
+    // spawn_min_dist — tiles from the squad spawn the blob seeds at. Floored above the squad's own
+    // footprint (a blob inside the huddle would make the mechanic free) and capped well inside a small
+    // level, so `spawn_scp999`'s far-from-spawn scan always finds a cell and never warns itself empty.
+    (4.0, 40.0),
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -227,6 +239,13 @@ pub fn encode(
     v.push(sim.parasite.manip_cohesion_drop);
     v.push(sim.parasite.manip_curiosity_gain);
     v.push(sim.parasite.manip_dark_gain);
+    // SCP-999 comfort blob.
+    v.push(sim.scp999.count as f32);
+    v.push(sim.scp999.move_speed);
+    v.push(sim.scp999.contact_radius);
+    v.push(sim.scp999.calm_rate);
+    v.push(sim.scp999.morale_rate);
+    v.push(sim.scp999.spawn_min_dist);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -374,6 +393,16 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
                 manip_dark_gain,
             }
         },
+        // SCP-999 comfort blob. `count` rounds to >= 1 (a search world always has at least one comfort
+        // blob to exercise the mechanic); the five continuous dials read in `encode` order.
+        scp999: Scp999Tuning {
+            count: to_usize(f!()),
+            move_speed: f!(),
+            contact_radius: f!(),
+            calm_rate: f!(),
+            morale_rate: f!(),
+            spawn_min_dist: f!(),
+        },
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
     let mold = crate::mold::MoldConfig {
@@ -386,7 +415,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
         ..crate::mold::MoldConfig::default()
     };
     // AlmondWaterDynamics — the 16 evolved water dials (encode order).
-    let almond = AlmondWaterDynamics {
+    let mut almond = AlmondWaterDynamics {
         strong_seep: f!(),
         evaporate: f!(),
         diffuse: f!(),
@@ -404,6 +433,12 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
         forage_gain: f!(),
         forage_wounded_frac: f!(),
     };
+    // Clamped AFTER the literal so the `f!()` reads keep encode order. The two flip knobs mutate
+    // independently within [0, 1], but the loader (`almond_water::validate_config`) rejects an inverted
+    // deadband (`lo > hi`) — and a feasibility gate that validates less than the loader is not a gate
+    // (the level-genome incident: a passing elite baked an unloadable `config.ron`). Mirrors the
+    // `brood_max.max(brood_min)` clamp above: children stay feasible BY CONSTRUCTION, no rejection loop.
+    almond.belief_flip_lo = almond.belief_flip_lo.min(almond.belief_flip_hi);
     // LightingDynamics — the 2 evolved gameplay light dials (encode order).
     let lighting = crate::light::LightingDynamics { field_intensity: f!(), photophobic_gain: f!() };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
@@ -436,6 +471,12 @@ pub fn mutate(parent: &WorldGenome, sigma: f32, rng: &mut ChaCha8Rng) -> Result<
 /// The genome-level feasibility gate: right length, every knob finite and within [`BOUNDS`], and the
 /// decoded `SimTuning` passes `sim::validate_tuning`. `mutate` guarantees this by construction; the check
 /// exists for genomes built any other way (e.g. loaded from a committed archive). One `Err`, no fallback.
+///
+/// The almond/lighting slices carry no validator call here because [`decode`] + [`BOUNDS`] already
+/// guarantee everything the loader checks on those dials: every range check is a `BOUNDS` row, and the
+/// one cross-field invariant (`belief_flip_lo <= belief_flip_hi`) is clamped in `decode`. The test
+/// `an_inverted_belief_deadband_cannot_out_lenient_the_loader` pins that claim against the REAL loader
+/// validators, so it cannot silently rot.
 pub fn is_feasible(g: &WorldGenome) -> Result<(), String> {
     if g.0.len() != N {
         return Err(format!("world genome has {} knobs, expected {N}", g.0.len()));
@@ -514,5 +555,64 @@ mod tests {
     fn decode_rejects_a_wrong_length_genome() {
         assert!(decode(&WorldGenome(vec![0.0; N - 1])).is_err());
         assert!(is_feasible(&WorldGenome(vec![0.0; N + 1])).is_err());
+    }
+
+    /// REGRESSION-CLASS guard — the level-genome incident, replayed on the world genome before it could
+    /// happen: `belief_flip_lo` and `belief_flip_hi` mutate independently within [0, 1], but the loader
+    /// (`almond_water::validate_config`) rejects an inverted deadband (`lo > hi`). A gate that validates
+    /// less than the loader bakes elites that leave `config.ron` unloadable at the NEXT startup. `decode`
+    /// clamps (feasibility by construction); this test pins that claim against the REAL loader validators
+    /// on the decoded slices, exactly as `level_genome`'s `dropping_a_room_type_...` does — so the gate
+    /// can never silently out-lenient the loader again.
+    #[test]
+    fn an_inverted_belief_deadband_cannot_out_lenient_the_loader() {
+        // Locate the two flip knobs' flat indices by probing, so a BOUNDS/encode reorder can't silently
+        // stale this test into probing the wrong knob.
+        let base = authored();
+        let idx_of = |perturb: fn(&mut AlmondWaterDynamics)| {
+            let mut almond = AlmondWaterDynamics::default();
+            perturb(&mut almond);
+            let probed = encode(
+                &AiTuning::default(),
+                &SimTuning::default(),
+                &crate::mold::MoldConfig::default(),
+                &almond,
+                &crate::light::LightingDynamics::default(),
+            );
+            base.0
+                .iter()
+                .zip(&probed.0)
+                .position(|(a, b)| a != b)
+                .expect("the probed knob must have a flat index")
+        };
+        let hi_idx = idx_of(|a| a.belief_flip_hi = 0.876_543);
+        let lo_idx = idx_of(|a| a.belief_flip_lo = 0.123_456);
+
+        let mut g = base;
+        g.0[hi_idx] = 0.2;
+        g.0[lo_idx] = 0.9; // inverted: lo > hi — what independent per-knob mutation can produce
+
+        // The gate passes because decode clamps — and the decoded value proves the clamp fired.
+        is_feasible(&g).expect("an inverted deadband is repaired by decode, not silently passed");
+        let wc = decode(&g).expect("decodes");
+        assert!(
+            wc.almond.belief_flip_lo <= wc.almond.belief_flip_hi,
+            "decode must clamp belief_flip_lo ({}) <= belief_flip_hi ({})",
+            wc.almond.belief_flip_lo,
+            wc.almond.belief_flip_hi
+        );
+
+        // The loader's OWN validators accept every decoded slice, grafted exactly the way the harness and
+        // `train apply` graft them. This is the line that keeps `is_feasible`'s "BOUNDS + clamp cover the
+        // loader" claim honest if either side ever grows a new invariant.
+        let shipped = crate::config::load_game_config().expect("shipped game config");
+        let mut almond_cfg = shipped.almond_water.clone();
+        wc.almond.apply_to(&mut almond_cfg);
+        crate::almond_water::validate_config(&almond_cfg)
+            .expect("the loader must accept the decoded almond slice");
+        let mut lighting_cfg = shipped.lighting.clone();
+        wc.lighting.apply_to(&mut lighting_cfg);
+        crate::light::validate_config(&lighting_cfg)
+            .expect("the loader must accept the decoded lighting slice");
     }
 }

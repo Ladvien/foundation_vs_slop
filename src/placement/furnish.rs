@@ -122,31 +122,36 @@ fn affords(item: &ManifestItem, aff: &str) -> bool {
 }
 
 // Support-surface classes — the bitmask vocabulary that pairs a scatter prop with the *kind* of top it
-// may rest on. A support piece `provides` the OR of the class bits for every surface token among its
-// affordances; a scatter prop `requires` the bit for its `Role::Scatter { surface }` token, and rests
-// only where `provides & requires != 0`. This makes the `surface` token — previously dead config — the
-// one lever that keeps a desk lamp on a desk/table and off a bed or dresser. A typed support is a
-// surface *feature*, not a generic shelf (Tutenel et al. 2010, "A Semantic Scene Description Language
-// for Procedural Layout Solving", AIIDE; props attach to a specific support class in Infinigen Indoors,
-// Raistrick et al. 2024, arXiv 2406.11824).
-const SURFACE_SUPPORT: u32 = 1 << 0; // any support top (bed/drawer/table/desk)
+// may rest on. A support piece `provides` the OR of the class bits for every token in its `surfaces`
+// field (the *feature* axis — what a piece OFFERS — kept separate from `affordances`, the *service*
+// axis, so a bed can afford "sleep" without doubling as a shelf); a scatter prop `requires` the bit for
+// its `Role::Scatter { surface }` token, and rests only where `provides & requires != 0`. A typed
+// support is a surface *feature*, not a generic shelf (Tutenel et al. 2010, "A Semantic Scene
+// Description Language for Procedural Layout Solving", AIIDE; props attach to a specific support class in
+// Infinigen Indoors, Raistrick et al. 2024, arXiv 2406.11824).
+const SURFACE_SUPPORT: u32 = 1 << 0; // any support top (drawer/table/desk) — never a bed
 const SURFACE_WORKTOP: u32 = 1 << 1; // a desk/table worktop only
 
+/// The whole surface-class vocabulary, token → class bit — THE single source of truth. [`surface_bits`]
+/// resolves through this table and `manifest::validate_manifest` walks it to reject unknown tokens at
+/// load, so growing the vocabulary is one row here — never a second list that can drift.
+pub(crate) const SURFACE_CLASSES: &[(&str, u32)] =
+    &[("support", SURFACE_SUPPORT), ("worktop", SURFACE_WORKTOP)];
+
 /// Map a support-surface token to its class bit. `support` = any support top; `worktop` = a desk/table.
-/// An unrecognised token is `0` (matches nothing) — a scatter prop targeting it is dropped, never placed
-/// on a wrong surface. Used both for a support's provided classes and a scatter prop's required class.
-fn surface_bits(token: &str) -> u32 {
-    match token {
-        "support" => SURFACE_SUPPORT,
-        "worktop" => SURFACE_WORKTOP,
-        _ => 0,
-    }
+/// An unrecognised token is `0` (matches nothing) — and `manifest::validate_manifest` rejects it at load
+/// time, so a typo'd token errors at the door instead of silently dropping props at furnish time. Used
+/// both for a support's provided classes and a scatter prop's required class.
+pub(crate) fn surface_bits(token: &str) -> u32 {
+    SURFACE_CLASSES.iter().find(|(t, _)| *t == token).map_or(0, |(_, b)| *b)
 }
 
-/// The surface classes a support piece provides — the OR of [`surface_bits`] over its affordances (a
-/// desk affording `support` + `worktop` provides both; a bed affording only `support` provides only it).
+/// The surface classes a support piece provides — the OR of [`surface_bits`] over its `surfaces` field
+/// (a desk with `surfaces: ["support", "worktop"]` provides both; a bed with no `surfaces` provides
+/// nothing, so no prop ever rests on it). Sourced from `surfaces`, NOT `affordances`: what a piece
+/// OFFERS (the feature axis) is separate from what it is FOR (the service axis) — Tutenel et al. 2010.
 fn provided_surfaces(item: &ManifestItem) -> u32 {
-    item.affordances.iter().map(|a| surface_bits(a)).fold(0, |acc, b| acc | b)
+    item.surfaces.iter().map(|s| surface_bits(s)).fold(0, |acc, b| acc | b)
 }
 
 /// The surface class a scatter prop requires, from its `Role::Scatter { surface }` token. A non-Scatter
@@ -709,7 +714,10 @@ fn furnish_region(
                     pivot: footprint_pivot(item),
                 });
                 placed_fp.push((pos, half, p.yaw));
-                if affords(item, "support") {
+                // Collect any piece that OFFERS a surface (its `surfaces` field is non-empty) as a
+                // support for Pass 4 — sourced from `surfaces`, not the affordance list, so a bed
+                // (affords "sleep", offers no surface) is never collected as a prop shelf.
+                if provided_surfaces(item) != 0 {
                     placed_supports.push((*item, pos, p.yaw));
                 }
             }
@@ -910,12 +918,24 @@ pub struct RevealedRooms(pub HashSet<RegionId>);
 /// An earlier revision keyed off *live* occupancy and rooms visibly emptied as the squad left; the one-way
 /// [`RevealedRooms`] guard is what makes entry-gating stable, and it is why this reads occupancy rather
 /// than the fog at all. Matches [`super::PlacedIn`]'s original intent.
+///
+/// Gated on the sim being live (`!SimBlocked`): the squad occupies its spawn room from `Startup`, but the
+/// floor tiles only reveal via the fog's `update_los`, which runs on the **frozen** `FixedUpdate` during
+/// boot/title/warmup — so revealing furniture here (on `Update`) would float it on a still-black map
+/// (player debug capture 2026-07-22). `SimBlocked` is never written in the headless harness (stays
+/// `false`), so this is a windowed-only gate, and furniture `Visibility` is cosmetic (outside `snapshot_hash`).
 pub fn furniture_room_visibility(
+    blocked: Res<crate::time_control::SimBlocked>,
     dungeon: Res<Dungeon>,
     units: Query<&Transform, With<crate::squad::Unit>>,
     mut revealed: ResMut<RevealedRooms>,
     mut furniture: Query<(&PlacedIn, &mut Visibility)>,
 ) {
+    // While a blocking screen (boot/title/warmup) or a pause freezes the sim, the map is still unrevealed
+    // (fog's `update_los` is on the frozen `FixedUpdate`) — don't reveal furniture onto that black map.
+    if blocked.0 {
+        return;
+    }
     // Once per call, not once per region: a squad is a handful of units, a dungeon is many rooms.
     let occupied: Vec<IVec2> = units.iter().map(|t| dungeon.world_to_cell(t.translation)).collect();
 
@@ -1063,21 +1083,51 @@ mod tests {
             role: Role::Freestanding,
             footprint: (1.0, 1.0),
             affordances: affs.iter().map(|s| s.to_string()).collect(),
+            surfaces: Vec::new(),
             group: None,
             height: 0.0,
             pivot: (0.0, 0.0),
         }
     }
 
+    #[test]
+    fn surfaces_come_from_the_surfaces_field_not_affordances() {
+        // Regression for "a prop rests on a bed": a bed *affords* sleep but *offers* no surface, so no
+        // scatter prop can rest on it. `provided_surfaces` reads only the `surfaces` field, kept separate
+        // from `affordances` (the service axis) — Tutenel et al. 2010's feature/service split.
+        let bed = ManifestItem { surfaces: Vec::new(), ..item("bed", &["bedroom"], &["sleep"]) };
+        let desk = ManifestItem {
+            surfaces: vec!["support".into(), "worktop".into()],
+            ..item("desk", &["office"], &[])
+        };
+        assert_eq!(provided_surfaces(&bed), 0, "a bed offers no surface — nothing rests on it");
+        assert_ne!(provided_surfaces(&desk), 0, "a desk offers support+worktop surfaces");
+        // The strong guard: even a surface token wrongly left in `affordances` is ignored — the bug
+        // cannot recur by re-tagging a bed, because surfaces come ONLY from the `surfaces` field.
+        let bed_mistagged =
+            ManifestItem { surfaces: Vec::new(), ..item("bed2", &["bedroom"], &["sleep", "support"]) };
+        assert_eq!(
+            provided_surfaces(&bed_mistagged),
+            0,
+            "a `support` token in `affordances` is dead config — surfaces come only from `surfaces`"
+        );
+    }
+
     /// The shipped kit's 8 freestanding items in manifest order: the seat (sofa) and screen (tv) are
     /// both "living"-tagged but the screen is last, which the old cap+order could never co-select.
+    /// Mirrors the post-split manifest shape: services stay in `affordances`, the tops a piece OFFERS
+    /// live in `surfaces` — and the bed offers none, so nothing ever rests on it.
     fn kit() -> Vec<ManifestItem> {
+        let offering = |it: ManifestItem, s: &[&str]| ManifestItem {
+            surfaces: s.iter().map(|t| t.to_string()).collect(),
+            ..it
+        };
         vec![
-            item("bed", &["bedroom"], &["sleep", "support"]),
+            item("bed", &["bedroom"], &["sleep"]),
             item("sofa", &["living"], &["sit"]),
-            item("table", &["living", "dining"], &["support"]),
+            offering(item("table", &["living", "dining"], &[]), &["support"]),
             item("chair", &["dining"], &["sit"]),
-            item("drawer", &["bedroom"], &["store", "support"]),
+            offering(item("drawer", &["bedroom"], &["store"]), &["support"]),
             item("shelf", &["living"], &["store"]),
             item("fridge", &["kitchen"], &["store"]),
             item("tv", &["living"], &["emit"]),
@@ -1190,7 +1240,7 @@ mod tests {
         // A room's generation-time type tag drives selection: an "office" room prefers the office desk
         // over the bed/sofa, even though all three are eligible freestanding items.
         let items = vec![
-            item("desk", &["office"], &["support"]),
+            item("desk", &["office"], &[]),
             item("bed", &["bedroom"], &["sleep"]),
             item("sofa", &["living"], &["sit"]),
         ];
@@ -1333,19 +1383,20 @@ mod tests {
         use crate::placement::solvers::metropolis::MetropolisSolver;
         use crate::placement::solvers::wfc::WfcSolver;
 
-        // 8×8 grid with a 6×6 floor room (cells (1,1)..=(6,6)) walled in by rock.
-        let (w, h) = (8usize, 8usize);
+        // 12×12 grid with a 10×10 floor room (cells (1,1)..=(10,10)) walled in by rock — roomy enough that
+        // the lone desk (an off-centre 1.9×0.9 m piece) reliably seats against a wall for the scatter pass.
+        let (w, h) = (12usize, 12usize);
         let mut mask = vec![false; w * h];
-        for y in 1..7 {
-            for x in 1..7 {
+        for y in 1..11 {
+            for x in 1..11 {
                 mask[y * w + x] = true;
             }
         }
         let mut dungeon = Dungeon::from_walkable(w, h, mask);
-        // An "office" room → room_profile prefers the desk, which affords "support" (a surface).
+        // An "office" room → room_profile prefers the desk, which OFFERS a surface (`surfaces` field).
         dungeon.regions.push(Region {
             id: 0,
-            rect: Rect2 { min: [1, 1], max: [7, 7] },
+            rect: Rect2 { min: [1, 1], max: [11, 11] },
             openings: Vec::new(),
             adjacency: Vec::new(),
             props: PropertyBag { tags: vec!["room".into(), "office".into()] },
@@ -1361,7 +1412,14 @@ mod tests {
         orch.register(Box::new(MetropolisSolver::new(weights)));
         orch.register(Box::new(ConstraintSolver));
 
-        let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts, &cfg.placement.density);
+        // Give the office room a lone desk so the stacking SURFACE is deterministic. (With the shipped
+        // freestanding_per_room=2 the room also draws a bed as top-up; post the surface/affordance split a
+        // bed correctly offers no surface, and the desk can lose the tight 6×6 layout to the bed — leaving
+        // nothing to stack on. Multi-piece layout is covered by the other furnish tests; this one pins the
+        // scatter-on-a-support integration, so it needs a support reliably placed.)
+        let mut density = cfg.placement.density;
+        density.freestanding_per_room = 1;
+        let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts, &density);
         assert!(!reqs.is_empty(), "the office room should be furnished");
 
         // Phase 3: at least one scatter prop rests on the desk surface. Floor furniture sits at y≈0, the

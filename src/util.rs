@@ -111,6 +111,13 @@ where
 /// than a `&Query`, so it serves both live queries and a precomputed `Vec` (and needs no ECS imports);
 /// each caller `.map`s its candidates to `(payload, position)`. Strict `<` keeps the FIRST candidate on a
 /// tie, matching every scan it replaced.
+///
+/// **Payload contract — the claim is on you, exactly as with [`sort_value_canonical`].** The tiebreak
+/// below is total over GEOMETRY only. Candidates CAN hold bit-identical positions (measured, not
+/// theoretical: crabs `clamp_to_patch`-ed against one wall; two creatures dying on one coordinate — the
+/// G0c bug), and there the pick falls through to iteration order. So `T` here must be `()` or otherwise
+/// interchangeable between co-located candidates. If the payload carries identity or state that
+/// downstream consumes — an `Entity`, a forward vector, a mode — use [`nearest_planar_keyed`].
 pub fn nearest_planar<T>(
     origin: Vec3,
     candidates: impl IntoIterator<Item = (T, Vec3)>,
@@ -138,6 +145,39 @@ pub fn nearest_planar<T>(
         }
     }
     best
+}
+
+/// [`nearest_planar`] for candidates whose payload is **not** interchangeable: ranks by
+/// `(planar distance, position bits, key)`, so a bit-identical-position tie — routine, not theoretical
+/// (six fully-tied crab pairs were measured at one tick; see [`crate::health::CyanideSmell::id`]) —
+/// resolves by a STABLE per-candidate key instead of falling through to ECS query order. Without this,
+/// two co-located hosts that differ only in the payload (facing, `Entity`) hand the pick to iteration
+/// order and the physics-free replay hash stops reproducing (TESTING.md invariant 10).
+///
+/// The key must be (a) reproducible across same-seed `App` instances, (b) unique per candidate, and (c)
+/// **never derived from the tied quantity** — a position-derived key cannot break a position tie (the
+/// original `GibKey` mistake). Good keys: `CyanideSmell::id` (every `Biological`), `SquadMember`,
+/// `CrabSeed`, `GibKey`. A raw `Entity` id is NOT one — id recycling is the instability being erased.
+pub fn nearest_planar_keyed<T>(
+    origin: Vec3,
+    candidates: impl IntoIterator<Item = (u64, T, Vec3)>,
+) -> Option<(T, Vec3, f32)> {
+    let o = origin.xz();
+    let mut best: Option<(u64, T, Vec3, f32)> = None;
+    for (key, payload, pos) in candidates {
+        let d = (pos.xz() - o).length();
+        let take = match best.as_ref() {
+            None => true,
+            Some((bkey, _, bpos, bd)) => {
+                (d.to_bits(), pos.x.to_bits(), pos.y.to_bits(), pos.z.to_bits(), key)
+                    < (bd.to_bits(), bpos.x.to_bits(), bpos.y.to_bits(), bpos.z.to_bits(), *bkey)
+            }
+        };
+        if take {
+            best = Some((key, payload, pos, d));
+        }
+    }
+    best.map(|(_, payload, pos, d)| (payload, pos, d))
 }
 
 /// GLSL-style `smoothstep` (Hermite ramp), clamped to `[0, 1]`. When `edge0 > edge1` the ramp is

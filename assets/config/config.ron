@@ -116,7 +116,8 @@
 
                 // ---- Scatter: small props that rest ON a support surface (desk/table/drawer), placed by
                 // the furnish scatter pass on the inner 9×9 lattice (Stage 3). `surface: "support"` targets
-                // the `support` affordance; `height` is cosmetic (vertical position comes from the surface).
+                // a support piece's `surfaces` field, NOT its affordances (a bed affords sleep but offers no
+                // surface, so nothing rests on it); `height` is cosmetic (vertical position comes from the surface).
                 ( key: "plant_a", glb: "low_poly_furniture/glb/Miscellaneous/Plant A.glb",
                   category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.52, 0.55),
                   affordances: ["decor"], height: 0.50 ),
@@ -124,7 +125,7 @@
                   category: "plant", tags: ["decor"], role: Scatter(surface: "support"), footprint: (0.18, 0.18),
                   affordances: ["decor"], height: 0.25 ),
                 // A desk lamp rests on a WORKTOP (a desk or table), never a bed or dresser — the
-                // `surface: "worktop"` token gates it to supports affording "worktop" (see furnish.rs
+                // `surface: "worktop"` token gates it to supports offering "worktop" (see furnish.rs
                 // `surface_bits`). A room with no desk/table simply gets no lamp (one path, no fallback).
                 ( key: "lamp", glb: "low_poly_furniture/glb/Lights/Lamp C.glb",
                   category: "light", tags: ["decor"], role: Scatter(surface: "worktop"), footprint: (0.32, 0.32),
@@ -137,14 +138,15 @@
                 // on its placement point and its symmetric footprint seats flush to a wall (no clip-through).
                 ( key: "bed_double", glb: "low_poly_furniture/glb/Beds/Bed Double.glb",
                   category: "bed", tags: ["bedroom"], role: Freestanding, footprint: (1.72, 2.22),
-                  affordances: ["sleep", "support"], height: 0.714, pivot: (0.0, 0.278) ),
+                  affordances: ["sleep"], height: 0.714, pivot: (0.0, 0.278) ),
                 ( key: "sofa", glb: "low_poly_furniture/glb/Sofas/Sofa A.glb",
                   category: "seating", tags: ["living"], role: Freestanding, footprint: (2.08, 0.88),
                   affordances: ["sit"], pivot: (0.0, 0.058) ),
                 // A table is a worktop (a lamp/desk prop may rest on it), as well as a generic support.
+                // Both are SURFACE classes (what it offers), not affordances (what it is for).
                 ( key: "table", glb: "low_poly_furniture/glb/Tables/Table A.glb",
                   category: "table", tags: ["living", "dining"], role: Freestanding, footprint: (1.66, 0.71),
-                  affordances: ["support", "worktop"], height: 0.796 ),
+                  surfaces: ["support", "worktop"], height: 0.796 ),
                 ( key: "chair", glb: "low_poly_furniture/glb/Chairs/Chair A.glb",
                   category: "seating", tags: ["dining"], role: Freestanding, footprint: (0.41, 0.51),
                   affordances: ["sit"], pivot: (0.0, 0.057) ),
@@ -152,7 +154,7 @@
                 // (`support`) — the dresser/armoire "back against the wall" rule.
                 ( key: "drawer", glb: "low_poly_furniture/glb/Drawers/Drawer A.glb",
                   category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (1.55, 0.60),
-                  affordances: ["store", "support", "back_to_wall"], height: 0.756, pivot: (0.0, -0.141) ),
+                  affordances: ["store", "back_to_wall"], surfaces: ["support"], height: 0.756, pivot: (0.0, -0.141) ),
                 // Shelf A's source FBX is malformed (~10 m of stray geometry that survives conversion); use
                 // Shelf D, which measures a correct 1.23 × 0.38 × 2.15 m.
                 ( key: "shelf", glb: "low_poly_furniture/glb/Shelves/Shelf D.glb",
@@ -177,7 +179,7 @@
                 // return clip walls). `pivot` recentres the model on the placement point.
                 ( key: "desk", glb: "low_poly_furniture/glb/Tables/Desk.glb",
                   category: "table", tags: ["office"], role: Freestanding, footprint: (1.897, 0.895),
-                  affordances: ["support", "worktop"], height: 0.854, pivot: (-0.347, -0.126) ),
+                  surfaces: ["support", "worktop"], height: 0.854, pivot: (-0.347, -0.126) ),
 
                 // Bathroom fixtures for "bathroom"-tagged rooms. Plumbing backs onto a wall (`back_to_wall`),
                 // and the toilet + sink cluster together (`group: "bath"`) so they read as a plumbed wall.
@@ -539,6 +541,17 @@
             manip_cohesion_drop: 0.05, // forced COHESION on an infested unit (low ⇒ strays)
             manip_curiosity_gain: 0.9, // forced CURIOSITY on an infested unit (high ⇒ wanders)
             manip_dark_gain: 3.0,      // world units the infested unit's goal is pushed toward shadow
+        ),
+        // SCP-999 — the friendly "Tickle Monster" comfort blob (see src/scp999/). The ONLY creature that
+        // LOWERS squad fear: it oozes to the most-anxious member and, on contact, drains FEAR + lifts
+        // MORALE (companion-animal social buffering). All dials are evolvable (squad_ai::world_genome).
+        scp999: (
+            count: 1,               // comfort blobs seeded into the level at start
+            move_speed: 2.2,        // ooze speed toward the most-anxious member (world units/s)
+            contact_radius: 0.9,    // reach = UNIT_BODY_RADIUS(0.33) + 0.9 ≈ 1.23 m tickle range
+            calm_rate: 0.6,         // FEAR drained/sec while tickling (~1.6 s to soothe 1→0)
+            morale_rate: 0.4,       // MORALE lifted/sec while tickling
+            spawn_min_dist: 18.0,   // tiles from the squad spawn — relief is found, not handed over
         ),
     ),
 

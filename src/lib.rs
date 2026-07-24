@@ -15,6 +15,9 @@
 // idiomatic ECS code, so it's disabled crate-wide (the standard Bevy convention).
 #![allow(clippy::type_complexity)]
 
+/// Cosmetic pose blending — the shared clip-weight/gait-phase driver every skinned model goes
+/// through (squad figurine, crab, manca). Never touches hashed sim state; see its module docs.
+pub mod anim;
 pub mod audio;
 /// Data-driven acoustic-stimulus + audio tuning — the `audio:` config slice. The propagation/salience
 /// of the acoustic stigmergy channels (`ai::field::NOISE_*`) and the per-faction perception gains that
@@ -41,6 +44,12 @@ pub mod region_capture;
 /// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
 pub mod perf_hud;
+/// Dev-only **Research Room** (`FVS_RESEARCH_ROOM=1`): boots into the real WFC dungeon — the actual game,
+/// with every auto-spawner running natively — and arms an F6 spawn palette on top, so any creature / prop
+/// / character can be dropped in, tuned, and screenshotted, and evolved elites witnessed. Debug-only,
+/// stripped from release like `devshot`/`region_capture`/`perf_hud`.
+#[cfg(debug_assertions)]
+pub mod research_room;
 pub mod dialogue;
 pub mod dungeon;
 /// Evolved-elite runtime overlay: `FVS_*_ELITE` env vars install a search elite (behaviour / world / audio
@@ -67,6 +76,10 @@ pub mod pathfind;
 pub mod psi_vision;
 pub mod placement;
 pub mod rng;
+/// SCP-999 — the friendly "Tickle Monster" comfort blob: seeks the most-anxious squad member and tickles
+/// away their FEAR (the game's one fear-*lowering* creature). Split gameplay/cosmetic plugins for the
+/// determinism gate; see the module docs.
+pub mod scp999;
 pub mod selection;
 pub mod settings;
 /// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
@@ -115,6 +128,16 @@ pub struct DebugCaptureActive(pub bool);
 #[derive(Resource)]
 pub struct NoteInputActive;
 
+/// Present only when the dev-only Research Room was requested (`FVS_RESEARCH_ROOM=1`, see
+/// [`research_room`]). Its presence arms the F6 debug panel (spawn / pause / quantity) over the real,
+/// unmodified game — `DungeonPlugin` still generates the full WFC dungeon, and the auto-spawners, the
+/// furniture-placement grammar, and mycelia / mold all run exactly as in a normal launch, so the room is
+/// game-faithful. Defined here (always compiled, like `DebugCaptureActive`) so release and the headless
+/// harness keep ONE path: the only code that inserts it is `#[cfg(debug_assertions)]`, so it is never
+/// present there.
+#[derive(Resource)]
+pub struct ResearchRoomActive;
+
 /// Build and run the full windowed game. The headless test harness (`sim_harness`, behind the
 /// `test-harness` feature) constructs an equivalent `App` without render/winit/audio so the same
 /// gameplay plugins can be driven deterministically off-screen.
@@ -134,6 +157,15 @@ pub fn run() {
             std::process::exit(1);
         }
     }
+
+    // Dev-only Research Room (`FVS_RESEARCH_ROOM=1`): insert the `ResearchRoomActive` marker that arms the
+    // F6 spawn palette, alongside the policy-elite pre-install above. The room is game-faithful — the
+    // marker only adds a debug overlay; `DungeonPlugin` still generates the real WFC level and every
+    // auto-spawner runs natively. Gated on `debug_assertions` like `devshot`/`region_capture`/`perf_hud`,
+    // so the shipped binary and the headless harness never see it and keep one execution path.
+    #[cfg(debug_assertions)]
+    research_room::install_if_requested(&mut app);
+
     app
         // Keep rendering at full rate even when the window is unfocused/occluded, so the game
         // stays live in the background (and the `devshot` in-process screenshots aren't black).
@@ -199,7 +231,10 @@ pub fn run() {
             ),
             world::WorldPlugin,
             camera::CameraPlugin,
-            (squad::SquadPlugin, squad_ai::SquadAiPlugin),
+            // `PoseBlendPlugin` runs the one apply pass every skinned model's clip weights go through
+            // (squad, crab, manca), so it is registered once here rather than by each creature plugin.
+            // Cosmetic, but grouped with the squad because that is where the drivers order against it.
+            (anim::PoseBlendPlugin, squad::SquadPlugin, squad_ai::SquadAiPlugin),
             selection::SelectionPlugin,
             fog::FogPlugin,
             health::HealthPlugin,
@@ -209,6 +244,10 @@ pub fn run() {
                 crab::CrabPlugin,
                 nest::NestPlugin,
                 parasite::ParasitePlugin,
+                // SCP-999 comfort blob: its tickle-calm mutates squad FEAR/MORALE, which feeds the pinned
+                // AI → movement → hashed Transform, so the GAMEPLAY half is harness-visible (registered in
+                // `sim_harness` too). The cosmetic half (`Scp999VisualsPlugin`) is windowed-only, below.
+                scp999::Scp999Plugin,
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
@@ -240,6 +279,10 @@ pub fn run() {
                 // collider, no perception feed, never touches hashed state — windowed-only alongside
                 // `MyceliaPlugin`/`LightingPlugin`/`AlmondWaterVisualPlugin`, never in `sim_harness`.
                 hair::HairPlugin,
+                // SCP-999's eyes + soft-body jiggle. Cosmetic (writes only MorphWeights + a billboard
+                // Transform + material uniforms), windowed-only — never in `sim_harness`. The gameplay
+                // `Scp999Plugin` (seek + tickle-calm) is in the harness-visible creature tuple above.
+                scp999::Scp999VisualsPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
@@ -280,9 +323,10 @@ pub fn run() {
     #[cfg(debug_assertions)]
     app.add_plugins(devshot::DevShotPlugin);
 
-    // Always present so `selection::command_input` can gate on it in every build (see `DebugCaptureActive`);
-    // only the debug-only `RegionCapturePlugin` below ever flips it true.
-    app.init_resource::<DebugCaptureActive>();
+    // `DebugCaptureActive` is initialised by the plugins whose systems READ it (`SelectionPlugin`,
+    // `UiPlugin`) rather than here, so the guarantee travels with the reader instead of depending on this
+    // one call site — a bare `App` that adds `UiPlugin` (the UI-liveness test) used to panic on the
+    // missing resource. Only the debug-only `RegionCapturePlugin` below ever flips it true.
 
     // Dev-only Ctrl+P region capture (screenspace rectangle → cropped PNG + snap). Debug-only, on `Update`,
     // never in the headless harness, so it stays out of the deterministic core and the shipped binary.
@@ -293,6 +337,11 @@ pub fn run() {
     // out of the deterministic core and the shipped binary (see `perf_hud`).
     #[cfg(debug_assertions)]
     app.add_plugins(perf_hud::PerfHudPlugin);
+
+    // Dev-only Research Room editor/observation systems (`FVS_RESEARCH_ROOM=1`). Debug-only, all on
+    // `Update`, never in the headless harness — outside the deterministic core and the shipped binary.
+    #[cfg(debug_assertions)]
+    app.add_plugins(research_room::ResearchRoomPlugin);
 
     // The watcher's "is the player looking at it?" gaze — WINDOWED-ONLY. It reads the live camera (which
     // eases over wall-clock time), so registering it only here keeps it out of the headless deterministic

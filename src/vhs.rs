@@ -1,7 +1,9 @@
 //! Full-screen **VHS** post-process pass. Most of the time the screen is clean; every
 //! ~60 s (or the instant a real anomaly manifests, whichever comes first) the effect fades in for a brief
 //! "tracking-error" glitch (chromatic split, tape-wave warp, a switching-noise band, scanlines, grain, a
-//! chroma-bloom smear) and fades back out. A refractory window caps it at one glitch per `cycle_period`.
+//! chroma-bloom smear) and fades back out. A refractory window caps it at one glitch per `cycle_period`,
+//! and is pre-loaded at boot so the first glitch waits a full cycle of *play* (the clock is virtual, so
+//! title/warmup/pause don't count) — the game never cold-opens on a glitch.
 //!
 //! Implementation uses Bevy 0.19's built-in [`FullscreenMaterial`] abstraction
 //! (`bevy_core_pipeline::fullscreen_material`): the engine handles the render-graph wiring
@@ -90,9 +92,15 @@ impl Plugin for VhsPlugin {
         // Required config — one path, no fallback. The `vhs:` slice comes from the unified
         // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
         let config = app.world().resource::<crate::config::GameConfig>().vhs.clone();
+        // Pre-load the glitch refractory with one full cycle so the first glitch waits a normal
+        // `cycle_period` of *play* instead of firing at boot. `drive_glitch` ages this off the virtual
+        // clock, which `time_control` freezes on boot/title/warmup/pause — so the countdown runs only
+        // during active play, giving the player a clean first ~`cycle_period` (60 s) in-game. The
+        // cold-open glitch read as a bug, not a found-footage tell (player debug capture 2026-07-22).
+        let startup_cooldown = config.cycle_period;
         app.add_plugins(FullscreenMaterialPlugin::<VhsSettings>::default())
             .insert_resource(config)
-            .init_resource::<VhsGlitch>()
+            .insert_resource(VhsGlitch { phase: f32::MAX, cooldown: startup_cooldown })
             .add_systems(
                 Update,
                 (ensure_camera_settings, drive_glitch, drive_fade.after(drive_glitch)),
@@ -167,16 +175,9 @@ pub struct VhsGlitch {
     /// glitches, so the picture is clean until the next trigger.
     phase: f32,
     /// Refractory seconds remaining before a new glitch may start — caps the cadence at one per
-    /// `cycle_period`.
+    /// `cycle_period`. `VhsPlugin` pre-loads this with one full `cycle_period` at boot so the first glitch
+    /// waits a normal cycle of *play* rather than firing on frame 1 (the clock is virtual → play-time only).
     cooldown: f32,
-}
-
-impl Default for VhsGlitch {
-    fn default() -> Self {
-        // Start idle (`phase` past any envelope span) but with the refractory already clear, so the ambient
-        // metronome can fire the first glitch shortly after boot rather than only after a full period.
-        Self { phase: f32::MAX, cooldown: 0.0 }
-    }
 }
 
 /// Advance the glitch clock and (re)trigger the pulse. Each frame: age `phase`, drain the `cooldown`, and

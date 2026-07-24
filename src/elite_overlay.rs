@@ -274,7 +274,7 @@ mod tests {
     /// **Every slice the world genome encodes must survive `apply_dim`.**
     ///
     /// This module shipped with `WorldEntry` naming only `ai` + `sim`, so `mold` and `almond` were silently
-    /// dropped: 23 of the world genome's 102 knobs were scored by the search and could never reach the game,
+    /// dropped: 23 of the world genome's then-102 knobs were scored by the search and could never reach the game,
     /// and an elite's archived fitness was unreproducible from the config `train apply` baked. Nothing failed
     /// loudly, because serde deliberately ignores archive fields a mirror does not name (see the module doc)
     /// — so the omission is invisible unless a test asserts each slice individually. `apply_dim` had no test

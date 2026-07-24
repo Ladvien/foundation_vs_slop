@@ -2,6 +2,8 @@
 
 **If you are a Claude Code session, read this first.**
 
+- After fixing an issue, delete the screenshot and write up in `debug_screenshots/`
+
 Each capture is a **pair** sharing one base name:
 
 - `region_<timestamp>.png` — a **screenspace region the player deliberately cropped** while the game was running (dev tool: **Ctrl+P**, drag a rectangle, release). Not a full screenshot — *just the area the player boxed*, because that box **is the message**: it marks exactly the thing they want you to look at (a visual bug, artifact, UI element, creature, or question about what's on screen).

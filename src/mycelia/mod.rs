@@ -1600,13 +1600,24 @@ struct CoatedFurniture(std::collections::HashMap<AssetId<StandardMaterial>, Hand
 ///
 /// Furniture is instantiated from glTF **asynchronously**, so this cannot be a run-once startup system: it
 /// polls, and each mesh is coated exactly once (guarded by [`MoldCoated`]).
+///
+/// **A light-emitting prop is not mold's to coat.** `light::glow_fixtures` swaps a fixture's meshes for an
+/// emissive material and `light::glow_screens` swaps a TV's CRT face for the unlit `TvStaticMaterial`, and
+/// both look for the same `MeshMaterial3d<StandardMaterial>` this pass removes. With no ordering between
+/// them the two raced, and whenever mold won the mesh was marked [`MoldCoated`], the lighting could never
+/// find it again, and the TV lost both its static and its self-glow (player debug capture 2026-07-24).
+/// The fix is a static filter, not a marker plus system ordering: `Commands` are deferred, so a marker
+/// written by the lighting would not be visible here in the same frame even with an explicit `.before()`.
+/// Filtering on [`crate::light::LightEmitter`] — which every emitting prop carries via `affords("emit")`,
+/// TVs included — leaves exactly one owner per mesh and no frame-ordering window. The cost is that mold
+/// no longer climbs lamps or a TV chassis; it still climbs every other piece of furniture.
 #[allow(clippy::too_many_arguments)]
 fn coat_furniture(
     mut commands: Commands,
     cfg: Res<MyceliaConfig>,
     images: Res<MoldImages>,
     control: Res<control::MoldControlImage>,
-    roots: Query<Entity, With<crate::placement::PlacedIn>>,
+    roots: Query<Entity, (With<crate::placement::PlacedIn>, Without<crate::light::LightEmitter>)>,
     children: Query<&Children>,
     painted: Query<&MeshMaterial3d<StandardMaterial>, Without<MoldCoated>>,
     std_materials: Res<Assets<StandardMaterial>>,

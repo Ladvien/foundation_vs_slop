@@ -21,8 +21,8 @@ use crate::placement::manifest::FurnitureManifest;
 use super::level_genome::{self, LevelBase, LevelGenome};
 use super::level_quality;
 
-/// The result of scoring one genome: its mean fitness and the mean descriptor axes (openness ×
-/// infestation) used to place it in the MAP-Elites archive.
+/// The result of scoring one genome: its mean fitness and the mean descriptor axes (clutter ×
+/// infestation — see `level_quality::descriptor_axes`) used to place it in the MAP-Elites archive.
 #[derive(Clone, Copy, Debug)]
 pub struct LevelEvaluation {
     pub fitness: f32,
@@ -44,7 +44,7 @@ pub fn evaluate(
     let pheno = level_genome::decode(genome, base).ok()?;
 
     let mut sum_fit = 0.0f32;
-    let mut sum_open = 0.0f32;
+    let mut sum_clutter = 0.0f32;
     let mut sum_infest = 0.0f32;
     for &seed in seeds {
         let mut dungeon_cfg = pheno.dungeon.clone();
@@ -63,16 +63,16 @@ pub fn evaluate(
         let metrics = level_quality::measure(&dungeon, &furniture, &habitat);
         // Minimal criterion: any seed that fails rejects the whole genome (robustness across maps).
         let fitness = metrics.score()?;
-        let (open, infest) = metrics.descriptor_axes();
+        let (clutter, infest) = metrics.descriptor_axes();
         sum_fit += fitness;
-        sum_open += open;
+        sum_clutter += clutter;
         sum_infest += infest;
     }
 
     let n = seeds.len() as f32;
     Some(LevelEvaluation {
         fitness: sum_fit / n,
-        axes: (sum_open / n, sum_infest / n),
+        axes: (sum_clutter / n, sum_infest / n),
     })
 }
 
@@ -84,7 +84,7 @@ pub fn evaluate(
 pub struct LevelPlaytestEvaluation {
     /// Mean engagement (experience + interest proxies) over the admitted seeds.
     pub fitness: f32,
-    /// The static expressive-range descriptor axes (openness × infestation) — the MAP-Elites niche.
+    /// The static expressive-range descriptor axes (clutter × infestation) — the MAP-Elites niche.
     pub axes: (f32, f32),
 }
 

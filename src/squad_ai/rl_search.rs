@@ -22,8 +22,8 @@ use super::rl_eval;
 use super::surprise::ModePrior;
 
 /// Knobs for a policy search. `dungeon_seeds` are the worlds each genome is scored across (the learnability
-/// pair uses the first two, which must differ); `resolution` is the MAP-Elites grid side over the squad
-/// descriptor (aggression × exploration).
+/// pair uses the first two, which must differ); `resolution` is the MAP-Elites grid side over the policy
+/// descriptor (initiative × caretaking; see `rl_eval::policy_descriptor`).
 #[derive(Clone, Debug)]
 pub struct RlSearchConfig {
     pub seed: u64,
@@ -143,10 +143,10 @@ pub fn search(
 #[derive(Serialize)]
 pub struct RlEliteDoc {
     pub cell: (usize, usize),
-    /// Descriptor axis 1 — squad aggression.
-    pub aggression: f32,
-    /// Descriptor axis 2 — squad exploration.
-    pub exploration: f32,
+    /// Descriptor axis 1 — **initiative** (non-`FollowAnchor` share); see `rl_eval::policy_descriptor`.
+    pub initiative: f32,
+    /// Descriptor axis 2 — **caretaking** (self-care/defence share of the squad's non-follow decisions).
+    pub caretaking: f32,
     pub fitness: f32,
     /// The flat MLP weight vector — feed to `NeuralPolicy::from_weights` (via `policy_genome::decode`).
     pub weights: Vec<f32>,
@@ -160,8 +160,9 @@ pub fn rl_archive_doc(pop: &Population<PolicyGenome>) -> Result<ArchiveDoc<RlEli
         let g = pop.get(elite.genome).ok_or("dangling elite handle")?;
         elites.push(RlEliteDoc {
             cell: *cell,
-            aggression: elite.descriptor.aggression,
-            exploration: elite.descriptor.exploration,
+            // BehaviorDescriptor's two generic slots carry (initiative, caretaking) for the policy archive.
+            initiative: elite.descriptor.aggression,
+            caretaking: elite.descriptor.exploration,
             fitness: elite.fitness,
             weights: g.0.clone(),
         });

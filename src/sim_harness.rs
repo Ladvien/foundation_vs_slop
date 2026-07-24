@@ -399,7 +399,10 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // shifted ECS iteration order between same-seed runs. That is now fixed at the root: the unit
         // figurine scene lives on a cosmetic child, not the `Unit` (see `crate::squad`, issue #18), so
         // the sim archetype is fixed at spawn and iteration order is stable.
-        (crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
+        // `PoseBlendPlugin` is the one apply pass for every skinned model's clip weights. Cosmetic
+        // (`Update` only, writes nothing hashed), but registered here so the harness's plugin graph
+        // stays identical to production and the liveness oracle can read the blend state.
+        (crate::anim::PoseBlendPlugin, crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,
         crate::health::HealthPlugin,
@@ -411,6 +414,10 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // SCP-150 parasite: its lifecycle (spawn/hunt/leap, later embed/gestate/burst) changes pinned
             // Transform/Health/timer state, so the exact-hash determinism gate must cover it.
             crate::parasite::ParasitePlugin,
+            // SCP-999 comfort blob (GAMEPLAY half only): its tickle-calm mutates squad FEAR/MORALE, which
+            // feeds Think → movement → hashed Transform, so the determinism gate must cover it. Its cosmetic
+            // half (`Scp999VisualsPlugin`: eyes + jiggle) is windowed-only and never registered here.
+            crate::scp999::Scp999Plugin,
         ),
         crate::laser::LaserPlugin,
         crate::impact_fx::ImpactFxPlugin,

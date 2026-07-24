@@ -18,7 +18,7 @@ pub(crate) fn crab_locomotion(
     // wounded-forage nudge below (a wounded crab climbs the water gradient toward a seep).
     almond_water: Res<crate::almond_water::AlmondWater>,
     config: Res<crate::config::GameConfig>,
-    units: Query<(Entity, &Transform), (With<Prey>, Without<Crab>)>,
+    units: Query<(Entity, &Transform, &crate::health::CyanideSmell), (With<Prey>, Without<Crab>)>,
     // Gib transforms, for a `SeekMeat`/`Carry` crab to steer to the specific chunk it's committed to.
     gibs: Query<&Transform, (With<crate::gore::GibChunk>, Without<Crab>, Without<Unit>)>,
     mut crabs: Query<
@@ -55,12 +55,14 @@ pub(crate) fn crab_locomotion(
     let dt = time.delta_secs().min(MAX_FRAME_DT);
     let now = time.elapsed_secs(); // for per-crab path jitter (see CRAB_JITTER_*)
 
-    // Per-unit: entity, foot position, and forward (local -Z) — its gun only reaches the front.
-    let unit_data: Vec<(Entity, Vec3, Vec3)> = units
+    // Per-unit: stable id, entity, foot position, and forward (local -Z) — its gun only reaches the
+    // front. The id (`CyanideSmell::id`) keys the nearest-unit pick below: its payload (entity + facing)
+    // decides latch commitment, so a co-located pair must resolve by stable id, not query order.
+    let unit_data: Vec<(u64, Entity, Vec3, Vec3)> = units
         .iter()
-        .map(|(e, t)| {
+        .map(|(e, t, smell)| {
             let fwd = (t.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
-            (e, t.translation, fwd)
+            (smell.id, e, t.translation, fwd)
         })
         .collect();
 
@@ -125,10 +127,11 @@ pub(crate) fn crab_locomotion(
         }
 
         // Nearest unit on the ground plane (the brain decides *whether* to latch; this is *which* unit).
-        // Payload carries the entity + precomputed forward vector; the shared ranking returns the winner.
-        let nunit = crate::util::nearest_planar(
+        // Payload carries the entity + precomputed forward vector, so the pick is KEYED by the unit's
+        // stable id — never left to query order between co-located units.
+        let nunit = crate::util::nearest_planar_keyed(
             motion.pos,
-            unit_data.iter().map(|&(e, up, fwd)| ((e, fwd), up)),
+            unit_data.iter().map(|&(id, e, up, fwd)| (id, (e, fwd), up)),
         )
         .map(|((e, fwd), up, _d)| (e, up, fwd));
         let t = (NORMAL_EASE * dt).min(1.0);
@@ -402,76 +405,33 @@ pub(crate) fn crab_locomotion(
 }
 
 
-/// Wire the crab's asynchronously-spawned `AnimationPlayer` to the shared graph. Skips players that
-/// don't belong to a crab (e.g. squad figurines) and tolerates the player not existing yet.
-pub(crate) fn attach_crab_animation(
-    mut commands: Commands,
-    anim: Res<CrabAnim>,
-    added: Query<Entity, Added<AnimationPlayer>>,
-    parents: Query<&ChildOf>,
-    crabs: Query<(), With<Crab>>,
-) {
-    for player in &added {
-        // Walk up the hierarchy to find the owning crab, if any.
-        let mut cur = player;
-        let owner = loop {
-            if crabs.get(cur).is_ok() {
-                break Some(cur);
-            }
-            match parents.get(cur) {
-                Ok(child_of) => cur = child_of.parent(),
-                Err(_) => break None,
-            }
-        };
-        let Some(owner) = owner else { continue };
-
-        commands
-            .entity(player)
-            .insert((AnimationGraphHandle(anim.graph.clone()), AnimationTransitions::new()));
-        commands.entity(owner).insert(CrabAnimPlayer {
-            player,
-            playing: None,
+/// Point each crab's blend weights at its current state. The clips stay resident and cross-fade by
+/// weight — none is ever rewound, so a crab flicking Idle→Walk→Idle on the edge of a stimulus no longer
+/// restarts its scuttle from the first frame every time. The walk/attack clips carry their own
+/// playback multipliers (see [`WALK_ANIM_SPEED`]/[`ATTACK_ANIM_SPEED`]) so the legs keep pace with the
+/// scuttle rather than foot-sliding.
+pub(crate) fn drive_crab_animation(mut crabs: Query<(&CrabState, &mut crate::anim::PoseBlender)>) {
+    for (state, mut blender) in &mut crabs {
+        blender.set_only(match state {
+            CrabState::Idle => SLOT_IDLE,
+            CrabState::Walk => SLOT_WALK,
+            CrabState::Attack => SLOT_ATTACK,
         });
-    }
-}
-
-/// Cross-fade each crab's clip to match its state; only acts on a real change (or first wiring). The
-/// walk/attack clips play faster than authored so the leg cycle keeps pace with the scuttle rather than
-/// foot-sliding.
-pub(crate) fn drive_crab_animation(
-    anim: Res<CrabAnim>,
-    mut crabs: Query<(&CrabState, &mut CrabAnimPlayer)>,
-    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
-) {
-    for (state, mut link) in &mut crabs {
-        if link.playing == Some(*state) {
-            continue;
-        }
-        let Ok((mut player, mut transitions)) = players.get_mut(link.player) else {
-            continue; // transitions component not applied yet — retry next frame
-        };
-        let (node, speed) = match state {
-            CrabState::Idle => (anim.idle, 1.0),
-            CrabState::Walk => (anim.walk, WALK_ANIM_SPEED),
-            CrabState::Attack => (anim.attack, ATTACK_ANIM_SPEED),
-        };
-        let active = transitions.play(&mut player, node, CROSSFADE);
-        active.repeat().set_speed(speed);
-        link.playing = Some(*state);
     }
 }
 
 /// Nearest prey: its position, its planar **forward** (`rotation * −Z`, for the blind-side pounce gate),
 /// and the planar distance to `pos`. Read-only over the pounce system's prey query; a thin wrapper over
-/// [`crate::util::nearest_planar`] (the shared ranking) carrying the forward vector as the payload.
+/// [`crate::util::nearest_planar_keyed`] (the shared ranking). Keyed by `CyanideSmell::id` because the
+/// payload (facing) gates the pounce — a co-located prey pair must resolve by stable id, not query order.
 pub(crate) fn nearest_prey(
-    prey: &Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+    prey: &Query<(&Transform, &mut Health, &crate::health::CyanideSmell), (With<Prey>, Without<Crab>)>,
     pos: Vec3,
 ) -> Option<(Vec3, Vec3, f32)> {
-    crate::util::nearest_planar(
+    crate::util::nearest_planar_keyed(
         pos,
         prey.iter()
-            .map(|(ptf, _)| (ptf.rotation * Vec3::NEG_Z, ptf.translation)),
+            .map(|(ptf, _, smell)| (smell.id, ptf.rotation * Vec3::NEG_Z, ptf.translation)),
     )
     .map(|(fwd, p, d)| (p, fwd, d))
 }
@@ -640,7 +600,10 @@ pub(crate) fn crab_jump(
         ),
         With<Crab>,
     >,
-    mut prey: Query<(&Transform, &mut Health), (With<Prey>, Without<Crab>)>,
+    mut prey: Query<
+        (&Transform, &mut Health, &crate::health::CyanideSmell),
+        (With<Prey>, Without<Crab>),
+    >,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
 ) {
@@ -730,14 +693,17 @@ pub(crate) fn crab_jump(
                     // the first in-reach prey the ECS happened to yield and `break` — a
                     // keep-the-first-on-a-tie pick straight into `Health`, and query order is not stable
                     // across `App` instances. A crab landing between two units bit a different one run to
-                    // run. `nearest_planar` ranks by `(distance bits, position bits)`, so the victim is a
-                    // pure function of geometry — and biting the NEAREST is what the lunge meant anyway.
-                    if let Some((_, tpos, _)) =
-                        crate::util::nearest_planar(motion.pos, prey.iter().map(|(ptf, _)| ((), ptf.translation)))
-                        && (tpos.xz() - motion.pos.xz()).length_squared() <= reach_sq
+                    // run. The pick is keyed by `CyanideSmell::id` and the damage targets that ID — a
+                    // position match could not identify a unique victim when two prey stand on
+                    // bit-identical coordinates (routine against a wall clamp), and the old
+                    // `translation == tpos` scan would have handed exactly that choice back to query order.
+                    if let Some((victim, tpos, _)) = crate::util::nearest_planar_keyed(
+                        motion.pos,
+                        prey.iter().map(|(ptf, _, smell)| (smell.id, smell.id, ptf.translation)),
+                    ) && (tpos.xz() - motion.pos.xz()).length_squared() <= reach_sq
                     {
-                        for (ptf, mut hp) in &mut prey {
-                            if ptf.translation == tpos {
+                        for (_, mut hp, smell) in &mut prey {
+                            if smell.id == victim {
                                 hp.apply_damage(sim.combat.crab_jump_damage);
                                 break;
                             }

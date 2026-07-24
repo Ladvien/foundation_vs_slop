@@ -376,7 +376,15 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // for the full list). M10 (nest cap removal) and M8 (alarm/rouse false-fire fix) both change crab/manca
 // motion and ALARM-channel deposits directly, which this oracle folds. Arch-stable (scalar-f32 field ops,
 // no rotation). Was `0xd4db701cc41588ac`.
-const GOLDEN_FIELD: u64 = 0xdf805ab8088f34ee;
+//
+// Re-pinned 2026-07-24 for the SCP-999 / squad-rework branch. The ACTOR golden (`GOLDEN`) did NOT move —
+// only this field oracle did, which is exactly the blind spot it exists to cover: state that steers agents
+// without (yet) relocating one. Attribution was measured, not assumed: a probe run with the comfort blob
+// zeroed out of the core (`scp999.count = 0`) produced this SAME fingerprint, so SCP-999 moves nothing
+// here (the calm no-player squad keeps the blob inert — the same reason the actor golden held); the
+// movement is the branch's squad rework + config re-tuning + creature changes. Verified bit-stable across
+// two fresh single-process runs under load. Was `0xdf805ab8088f34ee`.
+const GOLDEN_FIELD: u64 = 0x2e884ae0bb33f60c;
 
 #[test]
 fn field_passes_are_bit_identical() {

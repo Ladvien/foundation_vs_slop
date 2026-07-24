@@ -30,6 +30,11 @@ pub struct SelectionPlugin;
 
 impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
+        // Same rule as `UiPlugin`: `command_input` reads `DebugCaptureActive` non-optionally, so this
+        // plugin guarantees it. Today the system is skipped headless anyway (its `Single<&Window>` finds
+        // no match), which is the only reason the harness never hit the missing-resource panic `UiPlugin`
+        // did — that is luck, not a contract, so claim the resource explicitly. `init_resource` is idempotent.
+        app.init_resource::<crate::DebugCaptureActive>();
         // Order-issuing input runs in `RunFixedMainLoop` *before* the fixed step, not in `Update`. `Update`
         // runs after the fixed loop, so a `MoveOrder` inserted there wasn't seen by `unit_movement` (on
         // `FixedUpdate`) until the next frame — a one-frame lag. `BeforeFixedMainLoop` flushes the command
