@@ -22,7 +22,6 @@
 
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::sync::Arc;
-pub(crate) use std::time::Duration;
 
 pub(crate) use avian3d::prelude::{AngularVelocity, LinearVelocity, RigidBody};
 pub(crate) use bevy::prelude::*;
@@ -84,13 +83,16 @@ pub(crate) const TRANSFER_RADIUS: f32 = 0.22;
 pub(crate) const NORMAL_EASE: f32 = 12.0;
 /// Frame-dt clamp so a hitch can't fling a crab off its surface (mirrors `enemy::MAX_FRAME_DT`).
 pub(crate) const MAX_FRAME_DT: f32 = 1.0 / 30.0;
-/// Cross-fade between animation clips.
-pub(crate) const CROSSFADE: Duration = Duration::from_millis(150);
 /// Clip playback-rate multipliers. The authored clips are extremely long (walk ≈ 10.5 s/loop, attack
 /// ≈ 2.5 s), so at 1× the legs crawl through one cycle over many seconds — playing them several times
 /// faster turns it into a frantic scuttle / rapid chomp. Tuned by eye.
 pub(crate) const WALK_ANIM_SPEED: f32 = 7.0;
 pub(crate) const ATTACK_ANIM_SPEED: f32 = 4.0;
+
+/// Blend-set slot indices, matching the order [`build_crab_anim`] wires them in.
+pub(crate) const SLOT_IDLE: usize = 0;
+pub(crate) const SLOT_WALK: usize = 1;
+pub(crate) const SLOT_ATTACK: usize = 2;
 
 pub(crate) const CRAB_GLB: &str = "dimensional_crab/dimensional_crab.glb";
 
@@ -223,13 +225,9 @@ impl Scout {
     }
 }
 
-/// Link from a crab to its (asynchronously-spawned) `AnimationPlayer`, plus which state's clip is
-/// currently playing (so `drive_crab_animation` only re-triggers on a real change).
-#[derive(Component)]
-pub(crate) struct CrabAnimPlayer {
-    player: Entity,
-    playing: Option<CrabState>,
-}
+// The old `CrabAnimPlayer` change-guard is gone: `crate::anim::PoseBlender` now holds the link to the
+// asynchronously-spawned `AnimationPlayer` and cross-fades the three clips by weight, so there is no
+// "which clip is playing" to guard — every clip stays resident and is never rewound.
 
 /// The shared surface pursuit field (analog of `enemy::EnemyField`): rebuilt only when the set of unit
 /// cells changes, shared read-only by the whole swarm.
@@ -247,13 +245,11 @@ pub(crate) struct CrabField {
 #[derive(Resource, Default)]
 pub(crate) struct CrabSpawnSeq(u64);
 
-/// The one shared animation graph + node handles for the three crab clips.
+/// The one shared animation graph + the crab's blend-set slot table (see `crate::anim`).
 #[derive(Resource)]
 pub(crate) struct CrabAnim {
-    graph: Handle<AnimationGraph>,
-    idle: AnimationNodeIndex,
-    walk: AnimationNodeIndex,
-    attack: AnimationNodeIndex,
+    pub(crate) graph: Handle<AnimationGraph>,
+    pub(crate) slots: Arc<[crate::anim::Slot]>,
 }
 
 pub struct CrabPlugin;
@@ -319,8 +315,16 @@ impl Plugin for CrabPlugin {
                     nest_reproduce,
                 ),
             )
-            // Cosmetic: skeletal animation attach/drive stays on `Update`.
-            .add_systems(Update, (attach_crab_animation, drive_crab_animation));
+            // Cosmetic: skeletal animation stays on `Update`. Attaching is the shared
+            // `anim::attach_pose_blenders` pass (each crab root carries a `BlendSource` from spawn);
+            // `drive` after it (so a crab wired this frame gets its first weights immediately) and
+            // before the shared apply pass in `crate::anim`.
+            .add_systems(
+                Update,
+                drive_crab_animation
+                    .after(crate::anim::PoseAttachSet)
+                    .before(crate::anim::PoseBlendSet),
+            );
     }
 }
 

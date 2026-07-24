@@ -14,7 +14,9 @@
 //!   2. a scalar **fitness** ([`LevelMetrics::score`]) — a weighted blend of band/target terms over
 //!      connectivity, room richness, size hierarchy, furniture balance, and mushroom distribution.
 //! The **descriptor axes** ([`LevelMetrics::descriptor_axes`]) illuminate the MAP-Elites archive along
-//! two designer dimensions: *openness* (floor fraction) × *infestation* (mould coverage).
+//! two designer dimensions: *clutter* (furniture per room) × *infestation* (mould coverage). (Openness
+//! was tried as an axis and dropped — it barely varies across feasible levels (~0.06 spread), which
+//! would degenerate the archive to a single column; see `descriptor_axes`.)
 
 use std::collections::VecDeque;
 

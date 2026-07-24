@@ -9,19 +9,19 @@
 
 use std::sync::Arc;
 
-use crate::ai::utility::MODE_COUNT;
+use crate::ai::utility::{Mode, MODE_COUNT};
 use crate::config::WorldConfig;
 
-use super::coevolve::squad_descriptor;
 use super::evaluate::rollout_with_policy;
 use super::fairness::{mode_concentration, survival_competence};
 use super::policy::SquadPolicy;
 use super::policy_genome::{self, PolicyGenome};
 use super::surprise::{fitness, minimal_criterion, ActorKind, EpisodeTrace, ModePrior};
 
-/// One policy genome's score: the fitness scalar plus the two MAP-Elites descriptor axes (the squad's
-/// aggression × exploration, so the archive illuminates a range of playstyles, exactly as the squad
-/// brain population does).
+/// One policy genome's score: the fitness scalar plus the two MAP-Elites descriptor axes. For the learned
+/// policy the axes are `(initiative, caretaking)` (see [`policy_descriptor`]) — chosen because the shared
+/// `squad_descriptor` axes (aggression × map-coverage) are near-constant across *feasible* policies and
+/// collapse the archive, whereas mode-usage genuinely varies.
 pub struct PolicyEvaluation {
     pub fitness: f32,
     pub axes: (f32, f32),
@@ -64,10 +64,11 @@ pub fn evaluate(
     );
     minimal_criterion(&b.outcome).ok()?;
 
-    // The squad descriptor (aggression × exploration) is the natural niche axis for a learned squad
-    // controller — the same axes the authored squad brain population is illuminated over.
-    let d = squad_descriptor(&a.trace, &a.outcome);
-    Some(PolicyEvaluation { fitness: fitness(&a.trace, &b.trace, prior).score(), axes: (d.aggression, d.exploration) })
+    // Behaviour axes chosen so *feasible* policies actually spread (see `policy_descriptor`): the shared
+    // aggression × map-coverage axes are near-constant for any policy that clears `minimal_criterion`, so a
+    // grid over them bins every survivor into one cell. Fitness is unchanged — descriptors carry diversity.
+    let axes = policy_descriptor(&a.trace);
+    Some(PolicyEvaluation { fitness: fitness(&a.trace, &b.trace, prior).score(), axes })
 }
 
 /// Squad-mode usage histogram (length [`MODE_COUNT`]) over a trace's **unit** decisions — the input to
@@ -81,6 +82,55 @@ pub fn unit_mode_histogram(trace: &EpisodeTrace) -> [u32; MODE_COUNT] {
         }
     }
     counts
+}
+
+/// The **behaviour-characterisation axes for the learned squad policy**, chosen so that *feasible* neural
+/// policies actually spread across them. The shared `squad_descriptor` axes — combat-share `aggression` and
+/// map-coverage `exploration` — are near-constant for any policy that clears the survival
+/// `minimal_criterion` (a surviving squad barely presses the fight, and coverage tracks the player anchor,
+/// not the policy), so a MAP-Elites grid over them collapses every feasible policy into one cell (observed:
+/// the isotropic and CMA runs both filled 1–2 cells, all at aggression≈0). MAP-Elites only illuminates the
+/// *dimensions of variation you choose*, and those must be dimensions feasible solutions vary in (Mouret &
+/// Clune, "Illuminating search spaces by mapping elites", arXiv:1504.04909). Feasible policies vary in *how
+/// they use their behaviours*, so both axes are read off the squad mode histogram:
+///
+/// - **initiative** — the share of unit decisions that are *not* the default `FollowAnchor` tether: how much
+///   the squad acts on its own vs. trailing the player anchor.
+/// - **caretaking** — among those non-follow decisions, the fraction spent on self-directed care/defence
+///   (`TendWounded`/`Ward`/`Commune`/`Regroup`/`SecureDoor`/`DeploySensor`) rather than
+///   scouting/watching/fleeing: a medic-minded squad vs. a vigilant/roaming one.
+///
+/// Both are pure functions of integer mode counts — deterministic, order-independent, no RNG — so the
+/// committed archive stays bit-reproducible. Returned as the generic `(x, y)` grid coordinate the archive
+/// bins, exactly as `swarm_descriptor` reuses the two `BehaviorDescriptor` slots for its own axes.
+fn policy_descriptor(trace: &EpisodeTrace) -> (f32, f32) {
+    policy_axes(&unit_mode_histogram(trace))
+}
+
+/// Pure `(initiative, caretaking)` axis math for [`policy_descriptor`], split out so it is unit-testable
+/// without an ECS trace. Empty history → `(0, 0)`; an all-`FollowAnchor` squad → `(0, 0.5)` (no non-follow
+/// signal, so `initiative` alone pins it, and `caretaking` sits neutral rather than biasing a corner).
+fn policy_axes(hist: &[u32; MODE_COUNT]) -> (f32, f32) {
+    let total: u32 = hist.iter().sum();
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+    let follow = hist[Mode::FollowAnchor.index()];
+    let non_follow = total - follow;
+    let initiative = non_follow as f32 / total as f32;
+
+    // Self-directed care/defence modes (vs. scouting/watching/fleeing). One list, kept beside the axis doc.
+    const CARE: [Mode; 6] = [
+        Mode::TendWounded,
+        Mode::Ward,
+        Mode::Commune,
+        Mode::Regroup,
+        Mode::SecureDoor,
+        Mode::DeploySensor,
+    ];
+    let care: u32 = CARE.iter().map(|&m| hist[m.index()]).sum();
+    let caretaking = if non_follow > 0 { care as f32 / non_follow as f32 } else { 0.5 };
+    (initiative, caretaking)
 }
 
 /// One playtester genome's exploit signal on a config: the **competence** it achieves (mean survival
@@ -136,4 +186,40 @@ pub fn evaluate_playtester(
         competence: competence_sum / seeds.len() as f32,
         concentration: mode_concentration(&hist),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hist_of(pairs: &[(Mode, u32)]) -> [u32; MODE_COUNT] {
+        let mut h = [0u32; MODE_COUNT];
+        for &(m, c) in pairs {
+            h[m.index()] = c;
+        }
+        h
+    }
+
+    #[test]
+    fn policy_axes_separate_playstyles_the_old_axes_could_not() {
+        // Empty history → origin, never a panic (no decisions logged).
+        assert_eq!(policy_axes(&[0; MODE_COUNT]), (0.0, 0.0));
+
+        // A squad that only follows the anchor: zero initiative, neutral (0.5) caretaking — pinned by axis 1.
+        let (i, c) = policy_axes(&hist_of(&[(Mode::FollowAnchor, 100)]));
+        assert!(i.abs() < 1e-6);
+        assert!((c - 0.5).abs() < 1e-6);
+
+        // Half-follow and every non-follow decision is care → initiative 0.5, caretaking 1.0.
+        let (i, c) = policy_axes(&hist_of(&[(Mode::FollowAnchor, 50), (Mode::TendWounded, 50)]));
+        assert!((i - 0.5).abs() < 1e-6 && (c - 1.0).abs() < 1e-6);
+
+        // The point of the fix: two feasible policies the OLD aggression axis scored identically (~0 combat)
+        // now land in DIFFERENT cells — a caretaker (all Ward) vs. a scout (all Examine): same initiative,
+        // opposite caretaking.
+        let caretaker = policy_axes(&hist_of(&[(Mode::FollowAnchor, 20), (Mode::Ward, 80)]));
+        let scout = policy_axes(&hist_of(&[(Mode::FollowAnchor, 20), (Mode::Examine, 80)]));
+        assert!((caretaker.0 - scout.0).abs() < 1e-6, "same initiative (0.8 each)");
+        assert!(caretaker.1 > 0.9 && scout.1 < 0.1, "caretaking axis separates them");
+    }
 }

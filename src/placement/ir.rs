@@ -148,8 +148,11 @@ pub struct Candidate {
     /// Footprint (width, depth) in world units — for clearance / collision reasoning.
     pub footprint: [f32; 2],
     pub dof: Dof,
-    /// Opaque affordance tokens ("sit", "support", "emit"…) copied from the manifest so relational
-    /// rules can target what an object *affords* rather than its kit-specific name (Fisher 2012; Qi 2018).
+    /// Opaque affordance tokens ("sit", "sleep", "emit"…) copied from the manifest so relational
+    /// rules can target what an object *affords* rather than its kit-specific name (Fisher 2012; Qi
+    /// 2018). Surface classes a piece OFFERS are a separate manifest axis (`ManifestItem::surfaces`),
+    /// deliberately not mirrored here — a support relation pairs a `Role::Scatter` requirement with a
+    /// provider's `surfaces`, never with an affordance.
     pub affordances: Vec<String>,
 }
 

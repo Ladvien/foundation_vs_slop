@@ -45,6 +45,12 @@ impl Plugin for UiPlugin {
                 settings_menu::SettingsMenuPlugin,
                 hud::HudPlugin,
             ))
+            // `state::sync_sim_blocked` reads `DebugCaptureActive` non-optionally (it is documented as
+            // "always compiled … stays false in release"), so the plugin that registers the reader is what
+            // guarantees the resource exists. Init here rather than in `lib::run` alone: `UiPlugin` is also
+            // added to a bare `App` by the UI-liveness test, which otherwise panics on a missing resource.
+            // `init_resource` is idempotent, so a plugin can safely claim every resource its systems read.
+            .init_resource::<crate::DebugCaptureActive>()
             // Sole writer of `SimBlocked`: freeze the sim under any blocking screen.
             .add_systems(Update, state::sync_sim_blocked)
             // Shared menu behavior for every screen — registered once, globally. Each no-ops when no

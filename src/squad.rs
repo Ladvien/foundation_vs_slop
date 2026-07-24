@@ -10,10 +10,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
+use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::prelude::*;
 
+use crate::anim;
 use crate::audio::Sfx;
 use crate::crab::CrabAttached;
 use crate::dungeon::Dungeon;
@@ -162,9 +163,15 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 // `Res<BehaviorTuning>`. See src/behavior_tuning.rs. (The laser scales fire spread by unit speed via the
 // same slice's `squad_move.unit_speed`.)
 
-/// VALKYRIE — SCP MTF assault operative: a single-skin rig (60 bones, root `Root`), 5 looping 24 fps
-/// clips (idle / idle_alert / walk / crouch_walk / run), and a rifle rigidly parented to the `spine_03`
-/// bone (part of THIS scene — not a separate held model). Replaces the old un-rigged Kenney greybox.
+/// VALKYRIE — SCP MTF assault operative: a single-skin rig (62 joints, root `Root`), 20 looping 24 fps
+/// clips, with an integrated rifle, thigh holster and ammo pouch skinned into THIS scene (not separate
+/// held models). Replaces the old un-rigged Kenney greybox.
+///
+/// Ten clips are wired: idle, idle_alert and the six-way gait blend space (walk / run / walk_back /
+/// run_back / both strafes) on the body, plus aim and fire masked to the upper body — see the
+/// locomotion section below. `reload`, `crouch_walk`, `jump_fwd`, `jump_back`, `aim_walk`,
+/// `walk_start`/`walk_stop` and their backward twins, and `death` are authored but deliberately NOT
+/// wired: no mechanic drives them, and a wired clip nothing can trigger is a stub.
 /// See `/mnt/codex_fs/game_assets/SCP_Characters/gltf/valkyrie_bevy_integration.md`.
 const FIGURINE_GLB: &str = "characters/valkyrie.glb";
 
@@ -221,160 +228,338 @@ const SPAWN_SPIRAL: [(i32, i32); 13] = [
 ];
 
 // ---------------------------------------------------------------------------------------------
-// VALKYRIE skeletal locomotion animation (cosmetic — mirrors `crate::crab`'s attach/drive pattern).
+// VALKYRIE skeletal locomotion — a continuous blend space over one shared gait phase.
 // ---------------------------------------------------------------------------------------------
+//
+// Ten clips stay resident on every figurine's `AnimationPlayer` and are never restarted; each frame
+// this module writes ten weights and one phase. Eight of them are the locomotion blend space
+// (`anim::blend`), driven by the unit's smoothed speed and its travel direction *in its own frame*.
+// The last two — aim and fire — are masked to the upper body and layered over the top, so a unit
+// keeps walking while it shoots (Shroff, "Realizing NPCs", Game AI Pro 2 ch. 36 §36.4.1/§36.4.3).
+//
+// The blend/phase machinery itself lives in `crate::anim`; read its module docs for why there is no
+// transition at all. What lives here is the VALKYRIE-specific half: which glb clip fills which slot,
+// each gait clip's measured metadata, and the mapping from `Velocity`/`AimTarget` to weights.
 
-/// Cross-fade time between locomotion clips (matches the crab/manca convention).
-const ANIM_CROSSFADE: Duration = Duration::from_millis(150);
-/// Ground speed (m/s) each in-place clip was authored for (from the integration doc). Playback rate is
-/// scaled by (actual speed / author speed) so the leg cadence tracks real movement instead of
-/// foot-sliding — the speed-correction technique of Anguelov, "Realizing NPCs: Animation and Behavior
-/// Control for Believable Characters", Game AI Pro 2 ch. 36 (§36.2.5). VALKYRIE's clips carry no root
-/// motion, so movement is entirely `Transform`-driven (see `unit_movement`) and the clip only supplies leg
-/// motion — exactly the in-place case §36.2.5 addresses.
-const WALK_AUTHOR_SPEED: f32 = 1.5;
-const RUN_AUTHOR_SPEED: f32 = 2.5;
-/// At or above this fraction of the unit's `MoveSpeed`, a moving unit plays `run`; below it, `walk`.
-const RUN_SPEED_FRAC: f32 = 0.6;
-/// Planar speed (world u/s) under which a unit counts as stationary (idle / idle_alert).
-const IDLE_SPEED_EPS: f32 = 0.05;
-/// Clamp on the playback-rate correction so a stalled or sprinting outlier can't freeze or gabble the legs.
-const ANIM_RATE_CLAMP: (f32, f32) = (0.5, 2.0);
+/// glb animation indices in the 20-clip retargeted rig. **Load-bearing** — the Mixamo rifle retarget
+/// already reordered them once, so `tests/valkyrie_asset.rs` pins index → name against the asset.
+const CLIP_IDLE: usize = 0;
+const CLIP_IDLE_ALERT: usize = 1;
+const CLIP_AIM: usize = 3;
+const CLIP_FIRE: usize = 4;
+const CLIP_WALK: usize = 5;
+const CLIP_WALK_BACK: usize = 8;
+const CLIP_RUN: usize = 11;
+const CLIP_RUN_BACK: usize = 12;
+/// `valkyrie_strafe_l` (13) and `valkyrie_strafe_r` (14) are wired **by measured direction, not by
+/// name**: the rig faces glTF `+Z`, so the character's own right is local `−X` (`hand_r`, `foot_r` and
+/// `thigh_r` all sit at negative X in the bind pose), and clip 13's planted foot drives the body toward
+/// `−X` — i.e. clip 13 sidesteps to the character's RIGHT and clip 14 to its LEFT. The names are
+/// inverted in the source asset; wiring them by name would send units skating the wrong way on both
+/// sides. See the artist notes in `docs/artist_guide.md`.
+const CLIP_STRAFE_LEFTWARD: usize = 14;
+const CLIP_STRAFE_RIGHTWARD: usize = 13;
 
-/// The locomotion clip a unit is playing — a purely cosmetic view of its movement, derived each frame
-/// from `Velocity`/`AimTarget` and **never** a hashed sim component. Keeping the animation state machine
-/// separate from the gameplay/AI decision state is the separation-of-concerns Bonny recommends in
-/// "Separation of Concerns Architecture for AI and Animation", Game AI Pro 2 ch. 12.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LocoState {
-    Idle,
-    IdleAlert,
-    Walk,
-    Run,
-}
+/// `(duration s, phase offset, cycle distance world u)` for each gait clip, measured off
+/// `assets/characters/valkyrie.glb` and scaled by [`FIGURINE_SCALE`]:
+///
+/// * **duration** — the clip's own length.
+/// * **phase offset** — where this clip sits relative to `walk`, from cross-correlating both feet's
+///   height curves. It is the *negative* of the lag that best aligns them, because the shared φ is
+///   expressed in `walk`'s frame and each clip is seeked to `frac(φ + offset)`. Walk and run come out
+///   0.016 apart — the pair that matters most was already aligned by the retarget.
+/// * **cycle distance** — how far the character actually travels per cycle, taken from the *planted*
+///   foot's velocity relative to the static `Root` (these are in-place clips: every one has a
+///   bit-exactly zero root translation). This is what sets the cadence, so it is measured rather than
+///   guessed; the previous hand-entered `WALK_AUTHOR_SPEED = 1.5` was ~1.5× the real 0.98 u/s and made
+///   every walking unit drag its feet.
+///
+/// Speed correction from these numbers is §36.2.5, generalised from one clip to a blend by
+/// `anim::gait_cycles_per_sec`.
+const GAIT_WALK: (f32, f32, f32) = (1.417, 0.000, 1.388);
+const GAIT_RUN: (f32, f32, f32) = (0.750, -0.016, 2.135);
+const GAIT_WALK_BACK: (f32, f32, f32) = (1.458, -0.141, 1.538);
+const GAIT_RUN_BACK: (f32, f32, f32) = (0.583, -0.062, 1.185);
+/// Clip 14 (`valkyrie_strafe_r`), which travels to the character's left.
+const GAIT_STRAFE_LEFTWARD: (f32, f32, f32) = (0.583, 0.047, 1.259);
+/// Clip 13 (`valkyrie_strafe_l`), which travels to the character's right.
+const GAIT_STRAFE_RIGHTWARD: (f32, f32, f32) = (0.708, -0.031, 1.937);
 
-/// The one shared animation graph + the four wired VALKYRIE clip node handles (`crouch_walk` is
-/// deliberately not wired — no crouch mechanic drives it).
+/// Mask group holding every bone below the waist. The aim/fire clips mask it out, so on those bones
+/// they contribute nothing and the locomotion mixture poses the legs alone.
+const MASK_LOWER_BODY: u32 = 0;
+
+/// The bones in [`MASK_LOWER_BODY`]. Everything from `spine_01` up stays with the action layer, which
+/// is where a rifle pose belongs. Matched by name against the live skeleton (never by a precomputed
+/// path), so a re-export that renames a bone shows up as a missing name rather than a silently wrong
+/// mask — `tests/valkyrie_asset.rs` asserts every one of these exists in the glb.
+const LOWER_BODY_BONES: [&str; 14] = [
+    "Root",
+    "pelvis",
+    "thigh_l",
+    "thigh_r",
+    "calf_l",
+    "calf_r",
+    "foot_l",
+    "foot_r",
+    "ball_l",
+    "ball_r",
+    "skirt_l",
+    "skirt_r",
+    "thigh_holster",
+    "ammo_pouch",
+];
+
+/// Slot index of the looping aim pose, and of the one-shot fire recoil — both on the masked upper-body
+/// layer, immediately after the eight locomotion slots of [`anim::blend`].
+const SLOT_AIM: usize = anim::blend::LOCO_SLOTS;
+const SLOT_FIRE: usize = anim::blend::LOCO_SLOTS + 1;
+const N_SLOTS: usize = anim::blend::LOCO_SLOTS + 2;
+
+/// Share of the upper body the action layer takes when a unit is aiming or firing.
+///
+/// Deliberately short of 1.0. The root blend node normalises per bone, so the locomotion clips carry
+/// `1 − ACTION_ALPHA` and the action clips carry `ACTION_ALPHA`; on lower-body bones the action clips
+/// are masked out and never pushed, leaving the locomotion mixture as the sole contributor at whatever
+/// common factor — its internal ratios, and hence the pose, are untouched. At exactly 1.0 every
+/// locomotion weight would be bit-zero, `animate_targets` would skip them all, and the legs would fall
+/// to the bind pose. The 10% residue also keeps the arms swinging a little with the stride, which
+/// reads better than a hard override.
+const ACTION_ALPHA: f32 = 0.9;
+
+/// Time constant of the cosmetic speed/direction filter, seconds.
+///
+/// `unit_movement` slams `Velocity` to zero the tick a unit arrives (and holds it there while idle), so
+/// the raw signal is a cliff, not a curve. §36.2.5 wants the controller to approach its target speed
+/// "using smoothing or an acceleration/deceleration curve" — but `Velocity` is hashed sim state, so the
+/// smoothing has to live out here on the cosmetic side instead.
+///
+/// Kept short on purpose: the smoothed speed also drives the gait phase, so a long tail would keep the
+/// legs striding after the character has physically stopped. At 0.10 s the residual foot-slide on a
+/// hard stop is a few centimetres — a much better trade than the snap it replaces.
+const LOCO_SMOOTH_TAU: f32 = 0.10;
+
+/// Below this planar speed the travel direction is meaningless, so the smoothed direction holds its
+/// last value instead of chasing numerical noise — a decelerating unit keeps facing the way it was going.
+const DIR_HOLD_SPEED: f32 = 0.05;
+
+/// The one shared VALKYRIE animation graph and its slot table. Every figurine's `AnimationPlayer`
+/// points at this graph; the table is handed out by refcount, never copied. `pub(crate)` so the
+/// Research Room's spawn button can pass it to [`spawn_unit`].
 #[derive(Resource)]
-struct ValkyrieAnim {
+pub(crate) struct ValkyrieAnim {
     graph: Handle<AnimationGraph>,
-    idle: AnimationNodeIndex,
-    idle_alert: AnimationNodeIndex,
-    walk: AnimationNodeIndex,
-    run: AnimationNodeIndex,
+    slots: Arc<[anim::Slot]>,
 }
 
-/// Link from a `FigurineModel` child to its async-spawned `AnimationPlayer`, plus the clip it's currently
-/// playing (change-guard). Lives on the COSMETIC figurine child — never the `Unit` — so wiring it at an
-/// async, wall-clock-dependent tick can't split the hashed squad archetype (issue #18; same reason the
-/// scene + `Recolored` tag live here).
-#[derive(Component)]
-struct ValkyrieAnimPlayer {
-    player: Entity,
-    playing: Option<LocoState>,
+/// Cosmetically smoothed locomotion parameters for one figurine. Lives on the `FigurineModel` child
+/// beside its [`anim::BlendSource`] — never on the `Unit` — so the hashed squad archetype is never
+/// split (issue #18; same reason the scene and the `Recolored` tag live here). Inserted in the spawn
+/// batch itself, so the child's archetype never churns at an async tick either.
+#[derive(Component, Default)]
+struct LocoSmooth {
+    /// Smoothed planar speed, world units/second.
+    speed: f32,
+    /// Smoothed travel direction as `(x, z)` **in the unit's own frame** — a vector, not an angle, so
+    /// the filter can't blow up wrapping across ±π. Zero until the unit first moves.
+    dir: Vec2,
 }
 
-/// Build the shared VALKYRIE animation graph once at startup (before any unit can die/animate).
+/// Build the shared VALKYRIE animation graph once at startup (before any unit can animate).
+///
+/// Flat by necessity: a blend node contributes its own *static* weight, and per-instance control
+/// exists only on the leaf clips (`weight = active_animation.weight * graph_node.weight`), so an
+/// intermediate "action layer" node could not be faded per unit. Masking the two action clips
+/// individually gets the same layering with none of that problem.
 fn build_valkyrie_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
-    // glb clips: 0 idle, 1 idle_alert, 2 walk, 3 crouch_walk, 4 run. crouch_walk (index 3) is skipped.
-    let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(0).from_asset(FIGURINE_GLB)),
-        assets.load(GltfAssetLabel::Animation(1).from_asset(FIGURINE_GLB)),
-        assets.load(GltfAssetLabel::Animation(2).from_asset(FIGURINE_GLB)),
-        assets.load(GltfAssetLabel::Animation(4).from_asset(FIGURINE_GLB)),
+    let mut graph = AnimationGraph::new();
+    let root = graph.root;
+    let clip = |i: usize| {
+        assets.load::<AnimationClip>(GltfAssetLabel::Animation(i).from_asset(FIGURINE_GLB))
+    };
+
+    // Order matters: these must line up with `anim::blend`'s `SLOT_*` constants.
+    let idle = graph.add_clip(clip(CLIP_IDLE), 1.0, root);
+    let idle_alert = graph.add_clip(clip(CLIP_IDLE_ALERT), 1.0, root);
+    let walk = graph.add_clip(clip(CLIP_WALK), 1.0, root);
+    let run = graph.add_clip(clip(CLIP_RUN), 1.0, root);
+    let walk_back = graph.add_clip(clip(CLIP_WALK_BACK), 1.0, root);
+    let run_back = graph.add_clip(clip(CLIP_RUN_BACK), 1.0, root);
+    let strafe_l = graph.add_clip(clip(CLIP_STRAFE_LEFTWARD), 1.0, root);
+    let strafe_r = graph.add_clip(clip(CLIP_STRAFE_RIGHTWARD), 1.0, root);
+    // The upper-body layer. The mask is populated from the live skeleton on the first attach.
+    let mask = 1 << MASK_LOWER_BODY;
+    let aim = graph.add_clip_with_mask(clip(CLIP_AIM), mask, 1.0, root);
+    let fire = graph.add_clip_with_mask(clip(CLIP_FIRE), mask, 1.0, root);
+
+    let slots: Arc<[anim::Slot]> = Arc::from([
+        anim::Slot::free(idle, 1.0),
+        anim::Slot::free(idle_alert, 1.0),
+        anim::Slot::gait(walk, GAIT_WALK.0, GAIT_WALK.1, GAIT_WALK.2),
+        anim::Slot::gait(run, GAIT_RUN.0, GAIT_RUN.1, GAIT_RUN.2),
+        anim::Slot::gait(walk_back, GAIT_WALK_BACK.0, GAIT_WALK_BACK.1, GAIT_WALK_BACK.2),
+        anim::Slot::gait(run_back, GAIT_RUN_BACK.0, GAIT_RUN_BACK.1, GAIT_RUN_BACK.2),
+        anim::Slot::gait(
+            strafe_l,
+            GAIT_STRAFE_LEFTWARD.0,
+            GAIT_STRAFE_LEFTWARD.1,
+            GAIT_STRAFE_LEFTWARD.2,
+        ),
+        anim::Slot::gait(
+            strafe_r,
+            GAIT_STRAFE_RIGHTWARD.0,
+            GAIT_STRAFE_RIGHTWARD.1,
+            GAIT_STRAFE_RIGHTWARD.2,
+        ),
+        anim::Slot::free(aim, 1.0),
+        anim::Slot::one_shot(fire, 1.0),
     ]);
-    let handle = graphs.add(graph);
-    commands.insert_resource(ValkyrieAnim {
-        graph: handle,
-        idle: nodes[0],
-        idle_alert: nodes[1],
-        walk: nodes[2],
-        run: nodes[3],
-    });
+    debug_assert_eq!(slots.len(), N_SLOTS);
+
+    commands.insert_resource(ValkyrieAnim { graph: graphs.add(graph), slots });
 }
 
-/// Wire each unit's asynchronously-spawned `AnimationPlayer` to the shared graph. Walks up from the
-/// `Added<AnimationPlayer>` to the owning `FigurineModel` child (skips crab/other players, and any static
-/// held-item scene that has no ancestor figurine), inserting the graph + transitions on the player and the
-/// state-link on the figurine child.
-fn attach_valkyrie_animation(
-    mut commands: Commands,
+/// Populate [`MASK_LOWER_BODY`] from the first VALKYRIE skeleton to finish streaming in. Every figurine
+/// shares one skeleton, so the `AnimationTargetId`s are identical across instances and the group is
+/// built exactly once.
+///
+/// It is a system of its own rather than a step inside the shared attach pass because the bones
+/// carry their `AnimationTargetId`/`AnimatedBy` on their own schedule: keying the build to the single
+/// frame an `AnimationPlayer` appears would make it depend on scene-spawn ordering. Here it simply
+/// retries until a real skeleton answers, then stops for good.
+fn build_lower_body_mask(
     anim: Res<ValkyrieAnim>,
-    added: Query<Entity, Added<AnimationPlayer>>,
-    parents: Query<&ChildOf>,
-    figurines: Query<(), With<FigurineModel>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut done: Local<bool>,
+    figurines: Query<&anim::PoseBlender, With<FigurineModel>>,
+    bones: Query<(&Name, &AnimationTargetId, &AnimatedBy)>,
 ) {
-    for player in &added {
-        let mut cur = player;
-        let owner = loop {
-            if figurines.get(cur).is_ok() {
-                break Some(cur);
-            }
-            match parents.get(cur) {
-                Ok(child_of) => cur = child_of.parent(),
-                Err(_) => break None,
-            }
-        };
-        let Some(owner) = owner else { continue };
-        commands
-            .entity(player)
-            .insert((AnimationGraphHandle(anim.graph.clone()), AnimationTransitions::new()));
-        commands.entity(owner).insert(ValkyrieAnimPlayer { player, playing: None });
+    if *done {
+        return;
+    }
+    // Any figurine will do, and it does not matter which one the (unstable) query order hands back:
+    // `AnimationTargetId` is a hash of the bone's name path, so every VALKYRIE instance produces the
+    // same ids and therefore the same mask group.
+    let Some(figurine) = figurines.iter().next() else {
+        return; // no figurine has been wired yet
+    };
+    // `AssetMut`, so it must be a `mut` binding to deref-mut through; the write also flags the graph
+    // as changed, which is what makes `thread_animation_graphs` re-thread it with the new mask.
+    let Some(mut graph) = graphs.get_mut(&anim.graph) else {
+        return;
+    };
+    let mut found = 0;
+    for (name, id, animated_by) in &bones {
+        if animated_by.0 == figurine.player && LOWER_BODY_BONES.contains(&name.as_str()) {
+            graph.add_target_to_mask_group(*id, MASK_LOWER_BODY);
+            found += 1;
+        }
+    }
+    if found == 0 {
+        return; // the skeleton's bones have not been given their targets yet — try again next frame
+    }
+    *done = true;
+    if found == LOWER_BODY_BONES.len() {
+        // A one-shot line, so a windowed run positively confirms the mask was built — otherwise
+        // "nothing logged" is ambiguous between "matched all 14" and "still waiting for bones".
+        info!("valkyrie: upper-body mask built — {found} lower-body bones excluded from aim/fire");
+    } else {
+        // A real skeleton answered but does not carry the bones the mask contract names, so the
+        // upper-body layer would silently pose the legs. Say so loudly — `tests/valkyrie_asset.rs` is
+        // the gate that stops this reaching a build in the first place.
+        error!(
+            "valkyrie: lower-body mask matched {found}/{} bones — aim/fire will bleed into the legs. \
+             Expected {LOWER_BODY_BONES:?}",
+            LOWER_BODY_BONES.len()
+        );
     }
 }
 
-/// The clip node + speed-corrected playback rate for a locomotion state at a given planar speed.
-fn valkyrie_clip(anim: &ValkyrieAnim, state: LocoState, speed: f32) -> (AnimationNodeIndex, f32) {
-    let (lo, hi) = ANIM_RATE_CLAMP;
-    match state {
-        LocoState::Idle => (anim.idle, 1.0),
-        LocoState::IdleAlert => (anim.idle_alert, 1.0),
-        LocoState::Walk => (anim.walk, (speed / WALK_AUTHOR_SPEED).clamp(lo, hi)),
-        LocoState::Run => (anim.run, (speed / RUN_AUTHOR_SPEED).clamp(lo, hi)),
+/// This frame's ten slot weights for one figurine.
+///
+/// [`anim::blend::locomotion_weights`] gives a partition of unity over the eight locomotion slots;
+/// those are scaled by `1 − α` and the two masked action slots take `α`. The total therefore stays
+/// exactly 1, which is what lets `anim::apply_pose_blenders` ease every weight at one rate without the
+/// mixture drifting — and, because the action clips are masked out of the lower body, what makes the
+/// legs keep walking at full strength while the upper body aims or recoils (§36.4.1/§36.4.3).
+fn valkyrie_weights(speed: f32, theta: f32, aiming: bool, firing: bool) -> [f32; N_SLOTS] {
+    let alpha = if firing || aiming { ACTION_ALPHA } else { 0.0 };
+    let mut weights = [0.0f32; N_SLOTS];
+    for (slot, w) in anim::blend::locomotion_weights(speed, theta, aiming).iter().enumerate() {
+        weights[slot] = w * (1.0 - alpha);
     }
+    // Within the layer, the recoil owns it while it plays and hands back to the aim pose after.
+    weights[SLOT_FIRE] = if firing { alpha } else { 0.0 };
+    weights[SLOT_AIM] = if firing { 0.0 } else { alpha };
+    weights
 }
 
-/// Pick each unit's locomotion clip from its live movement and cross-fade to it on change; while moving,
-/// keep the playback rate tracking the live speed every frame so the legs never drift into a foot-slide
-/// within the walk/run band (continuous speed correction — Game AI Pro 2 ch. 36 §36.2.5).
+/// Turn each unit's live movement into this frame's blend weights. Speed and travel direction are
+/// filtered first (see [`LOCO_SMOOTH_TAU`]); [`valkyrie_weights`] does the rest.
 fn drive_valkyrie_animation(
-    anim: Res<ValkyrieAnim>,
-    mut figurines: Query<(&ChildOf, &mut ValkyrieAnimPlayer), With<FigurineModel>>,
-    units: Query<(&Velocity, &AimTarget, &MoveSpeed), With<Unit>>,
-    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+    time: Res<Time>,
+    // Bolts spawned this frame; their `shooter` tells us which units just fired so the figurine can
+    // play the one-shot fire clip. A purely cosmetic read of the sim's output — never writes hashed
+    // state, and `fire_laser` already gates firing by role, so the flashlight Researcher never appears.
+    new_bolts: Query<&crate::laser::Laser, Added<crate::laser::Laser>>,
+    mut figurines: Query<
+        (&ChildOf, &mut anim::PoseBlender, &mut LocoSmooth),
+        With<FigurineModel>,
+    >,
+    units: Query<(&Transform, &Velocity, &AimTarget), With<Unit>>,
 ) {
-    for (child_of, mut link) in &mut figurines {
-        let Ok((velocity, aim, move_speed)) = units.get(child_of.parent()) else {
+    let dt = time.delta_secs().min(MAX_FRAME_DT);
+    if dt <= 0.0 {
+        return;
+    }
+    let ease = 1.0 - (-dt / LOCO_SMOOTH_TAU).exp();
+
+    // Units that fired a bolt this frame. Tiny (≤ squad size), so the linear `contains` below is fine —
+    // this is a membership set with no ordering, so there is no sort to make canonical (a raw sort here
+    // would trip the determinism lint for nothing).
+    let fired: Vec<Entity> = new_bolts.iter().map(|b| b.shooter).collect();
+
+    for (child_of, mut blender, mut smooth) in &mut figurines {
+        let unit = child_of.parent();
+        let Ok((transform, velocity, aim)) = units.get(unit) else {
             continue; // parent isn't a unit (or despawned)
         };
-        let speed = velocity.0.length();
-        let want = if speed < IDLE_SPEED_EPS {
-            if aim.0.is_some() { LocoState::IdleAlert } else { LocoState::Idle }
-        } else if speed < RUN_SPEED_FRAC * move_speed.0.max(1.0e-3) {
-            LocoState::Walk
-        } else {
-            LocoState::Run
-        };
 
-        if link.playing != Some(want) {
-            let Ok((mut player, mut transitions)) = players.get_mut(link.player) else {
-                continue; // transitions component not applied yet — retry next frame
-            };
-            let (node, rate) = valkyrie_clip(&anim, want, speed);
-            transitions.play(&mut player, node, ANIM_CROSSFADE).repeat().set_speed(rate);
-            link.playing = Some(want);
-        } else if matches!(want, LocoState::Walk | LocoState::Run) {
-            // Same clip — just retrack the rate to this frame's speed (no re-transition/restart).
-            let Ok((mut player, _)) = players.get_mut(link.player) else { continue };
-            let (node, rate) = valkyrie_clip(&anim, want, speed);
-            if let Some(active) = player.animation_mut(node) {
-                active.set_speed(rate);
-            }
+        // --- smooth the raw sim signal ----------------------------------------------------------
+        let raw_speed = velocity.0.length();
+        smooth.speed += (raw_speed - smooth.speed) * ease;
+        if raw_speed > DIR_HOLD_SPEED {
+            // Rotate the world-space travel direction into the unit's own frame. `unit_facing` only
+            // ever yaws, so this is a planar rotation and the y component stays ~0.
+            let world = Vec3::new(velocity.0.x, 0.0, velocity.0.y) / raw_speed;
+            let local = transform.rotation.inverse() * world;
+            let want = Vec2::new(local.x, local.z);
+            smooth.dir = (smooth.dir + (want - smooth.dir) * ease).normalize_or(want);
         }
+
+        // --- the upper-body action layer --------------------------------------------------------
+        // `active_shot` is bookkept by the apply pass, which runs *after* this system, so a bolt fired
+        // this frame is not visible there yet — counting it here keeps the recoil from lagging a frame
+        // behind the muzzle flash.
+        let just_fired = fired.contains(&unit);
+        if just_fired {
+            blender.trigger(SLOT_FIRE);
+        }
+        let firing = just_fired || blender.active_shot() == Some(SLOT_FIRE);
+        let aiming = aim.0.is_some();
+
+        // --- the locomotion blend space + the masked action layer --------------------------------
+        let theta = anim::blend::travel_angle(smooth.dir);
+        let weights = valkyrie_weights(smooth.speed, theta, aiming, firing);
+
+        if let Err(e) = blender.set_targets(&weights) {
+            error!("valkyrie: {e}");
+        }
+        blender.set_ground_speed(smooth.speed);
     }
 }
 
@@ -386,8 +571,9 @@ impl Plugin for SquadPlugin {
         // `command_input` stays on `Update` (it reads mouse/cursor input, which is a per-frame concern);
         // the `MoveOrder` it inserts is simply picked up by the next fixed tick — a sub-frame latency the
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
-        // The shared animation graph must exist before any figurine's `AnimationPlayer` streams in.
-        app.add_systems(Startup, (build_valkyrie_anim, spawn_squad))
+        // Chained: `spawn_unit` pins the `ValkyrieAnim` graph + slots on each figurine child as an
+        // `anim::BlendSource`, so the resource must exist before the first unit spawns.
+        app.add_systems(Startup, (build_valkyrie_anim, spawn_squad).chain())
             // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
             // `AiSet::Think`, so that edge is pinned explicitly rather than left to registration order.
             // Both are on `FixedUpdate`, so without the constraint Bevy is free to run them in either
@@ -404,9 +590,21 @@ impl Plugin for SquadPlugin {
                     despawn_dead_units,
                 ),
             )
-            // Cosmetic skeletal animation attach/drive stays on `Update` (never touches hashed state),
-            // mirroring `crate::crab`.
-            .add_systems(Update, (recolor_units, attach_valkyrie_animation, drive_valkyrie_animation));
+            // Cosmetic skeletal animation stays on `Update` (never touches hashed state). Attaching is
+            // the shared `anim::attach_pose_blenders` pass (the figurine child carries a `BlendSource`
+            // from spawn); `drive` runs after it so a figurine wired this frame gets its first weights
+            // immediately (Bevy inserts the command flush on the ordered edge), and before
+            // `PoseBlendSet` so the shared apply pass sees this frame's targets.
+            .add_systems(
+                Update,
+                (
+                    recolor_units,
+                    build_lower_body_mask.after(anim::PoseAttachSet),
+                    drive_valkyrie_animation
+                        .after(anim::PoseAttachSet)
+                        .before(anim::PoseBlendSet),
+                ),
+            );
         // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
         // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into
         // two archetypes and make the pinned iteration order (ORCA in `unit_movement`, crab nearest-prey
@@ -421,6 +619,7 @@ fn spawn_squad(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
     assets: Res<AssetServer>,
+    valk: Res<ValkyrieAnim>,
     sim: Res<SimTuning>,
     beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
@@ -446,106 +645,103 @@ fn spawn_squad(
     let personas = load_personas().unwrap_or_else(|e| panic!("personas.ron: {e}"));
 
     for (i, &cell) in cells.iter().enumerate() {
-        let outfit = OUTFITS[i];
-        // Per-unit decision seed from the spawn index (deterministic; never from position, mirroring
-        // the crab/scout convention in `ai::brain`).
-        let seed = (i as u32).wrapping_add(1);
-        // The figurine body scene: loaded once, then referenced from two places — a stable
-        // `FigurineSource` on the `Unit` (spawn-time id for gib/death code) and the async
-        // `WorldAssetRoot` on the cosmetic `FigurineModel` child below. Attaching the scene to a child
-        // (not the `Unit`) keeps the sim entity's archetype fixed across the async load, so ECS
-        // iteration order is stable between same-seed runs — the fix that lets the squad AI into the
-        // deterministic replay gate (issue #18). Crabs already do this (`crate::crab`, `with_child`).
-        let figurine: Handle<WorldAsset> =
-            assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB));
-        let mut unit = commands.spawn((
-                Unit,
-                SquadMember(i),
-                Prey, // crabs may swarm/bite units (nearest-prey targeting)
-                MoveSpeed(beh.squad_move.unit_speed),
-                Velocity(Vec2::ZERO),
-                AimTarget(None), // set by `laser::fire_laser`; drives facing in `unit_facing`
-                FacingOverride(None), // set by `squad_think` when the Researcher wards; wins over aim
-
-                Health::new(sim.combat.unit_hp),
-                Biological, // living flesh Almond Water can heal (Foundation is a flesh faction)
-                Outfit(outfit),
-                // Squad-AI kit: the role brain the unit runs, its dialogue persona, drives, the cached
-                // decision + think throttle, and the autonomous movement goal (see `squad_ai`).
-                (
-                    RoleId::ALL[i],
-                    personas[i].clone(),
-                    Drives::new(),
-                    // Units fear the creatures (THREAT_CRAB / THREAT_ANOMALY), never their own gunfire.
-                    crate::ai::faction::Faction::Foundation,
-                    ActiveBehavior::new(seed),
-                    ThinkTimer::staggered(seed),
-                    DesiredMove::default(),
-                    // On EVERY unit, never a subset: a component present on only some units would split
-                    // the hashed squad archetype and make iteration order run-dependent (see the `Leader`
-                    // note below).
-                    crate::squad_ai::perception::PerceptionLatch::default(),
-                    UtterCooldown::default(),
-                    MemoryStream::default(),
-                    crate::squad_ai::dialogue::SpokenLines::default(),
-                    // Whether this unit can smell the cyanide warning (~1 in 4 can't). On EVERY biological,
-                    // value-only, so it never splits the hashed archetype (see the `PerceptionLatch` note).
-                    crate::health::CyanideSmell::from_seed(seed as u64),
-                ),
-                FigurineSource(figurine.clone()),
-                // The `Unit` carries no mesh of its own (the figurine is a cosmetic child), so nothing
-                // auto-inserted `Visibility` here. Two things needed it and quietly went without:
-                // the cosmetic children logged `B0004: parent without InheritedVisibility` every frame,
-                // and `dialogue::bubble::track_bubbles` — whose owner query is `(&Transform, &Visibility)`
-                // — never matched a unit, so it despawned every speech bubble on the frame it spawned.
-                // Squad dialogue could not render at all. Uniform across all five units, so it does not
-                // split the hashed archetype, and `snapshot_hash` reads only Transform + Health.
-                Visibility::default(),
-                Transform::from_translation(dungeon.cell_center(cell))
-                    .with_scale(Vec3::splat(FIGURINE_SCALE)),
-                // Render-only: smooth this unit's 60 Hz movement across the display refresh (see `lib::run`).
-                // Component + plugin come from avian's `bevy_transform_interpolation` integration.
-                avian3d::prelude::TransformInterpolation,
-            ));
-        // SCP-150 host state: every unit is a parasitizable host with an (initially inert) infestation
-        // slot. Always-present (never a runtime insert/remove) so it can't split the hashed squad
-        // archetype — the same invariant the `PerceptionLatch` note above relies on.
-        unit.insert(crate::parasite::host_infestation_bundle());
-        // The initial `Leader` marker is assigned windowed-only by `ensure_leader` (see `DialoguePlugin`),
-        // not here — putting it on one unit in the headless core would split the hashed archetype.
-        // The figurine body scene, on a cosmetic child: it inherits the unit's position + `FIGURINE_SCALE`,
-        // and the async `Children`/scene-instance churn lands on this child, not the `Unit`. The 180° yaw
-        // aligns VALKYRIE's rig (authored facing local +Z) with the game's forward convention (local −Z —
-        // what `unit_facing`, the muzzle, and the smiley gaze test all use); without it the model renders
-        // backward and the legs cycle in reverse as the unit moves. Purely visual — the muzzle is decoupled
-        // from the model (`MUZZLE_OFFSET` uses the *unit* rotation), and this same yaw is baked into the
-        // `autogib` gib cloud (it accumulates this child's transform), so fragments still fly body-aligned.
-        unit.with_child((
-            FigurineModel,
-            WorldAssetRoot(figurine),
-            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
-        ));
-        // Held item. Combat roles carry NO separate held-item model — VALKYRIE's rifle is part of the body
-        // scene (a rigid mesh slung on the `spine_03` bone), and `autogib::tag_valkyrie_rifle` tags that
-        // `rifle` sub-mesh `GunModel` after the scene streams so the death-fling + bake gate keep working.
-        // The Researcher (the "Scientist" archetype) additionally carries a flashlight and becomes a
-        // light-based crowd-control unit — its beam repels photophobic creatures rather than dealing damage
-        // (see `laser::fire_laser`, which skips it, and `light::apply_dynamic_lights`).
-        // Ref: Björk & Michelsen, FDG 2014 — the flashlight as a vision-limiting, non-lethal deterrent.
-        // Branch on the role *value* (every unit already carries `RoleId`), never a marker component, so
-        // the hashed squad archetype stays uniform across the five members. The flashlight keeps the
-        // `GunModel` marker so it inherits the recolor-skip and the autogib death-fling.
-        if RoleId::ALL[i] == RoleId::Researcher {
-            unit.with_child((
-                GunModel,
-                FlashlightModel,
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FLASHLIGHT_GLB))),
-                Transform::from_translation(FLASHLIGHT_OFFSET)
-                    .with_scale(Vec3::splat(FLASHLIGHT_SCALE))
-                    .with_rotation(Quat::from_rotation_x(FLASHLIGHT_PITCH)),
-            ));
-        }
+        // The normal squad's `SquadMember` and role are the same 0..5 index, so pass `i` for both — the
+        // spawn stays byte-identical to the pre-extraction loop.
+        spawn_unit(
+            &mut commands,
+            &assets,
+            &valk,
+            &sim,
+            &beh,
+            personas[i].clone(),
+            dungeon.cell_center(cell),
+            i,
+            i,
+        );
     }
+}
+
+/// Spawn one squad `Unit` at world `pos` playing role `member_index` (0..5), returning its entity.
+/// Extracted verbatim from [`spawn_squad`]'s loop body so the dev-only Research Room (`FVS_RESEARCH_ROOM`)
+/// can drop a single live unit through the exact same path. The spawn is byte-identical to the original
+/// (same components, order, and per-index `seed = member_index + 1`; the caller passes `pos =
+/// dungeon.cell_center(cell)`), so the deterministic squad archetype/hash is unchanged — the golden
+/// replay gate verifies it. See the original notes there for why the figurine rides a child, why every
+/// component is on *every* unit, and why the flashlight branches on the role value.
+pub(crate) fn spawn_unit(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    valk: &ValkyrieAnim,
+    sim: &SimTuning,
+    beh: &crate::behavior_tuning::BehaviorTuning,
+    persona: crate::squad_ai::persona::Persona,
+    pos: Vec3,
+    role_index: usize,
+    squad_member: usize,
+) -> Entity {
+    let i = role_index;
+    let outfit = OUTFITS[i];
+    // `SquadMember` must stay a UNIQUE, stable per-unit key — `laser::fire`'s `sort_total!` and
+    // `sim_harness::issue_squad_order` sort by it, and a tie panics the total-sort guard. The decision
+    // `seed` likewise decorrelates per-unit draws and seeds `CyanideSmell` (another total-sort tiebreak).
+    // Both derive from `squad_member`, NOT the (possibly repeated) role, so a dev tool spawning several
+    // units of the same role (the Research Room) still gets distinct keys. The normal squad passes
+    // `squad_member == role_index == i`, so its spawn stays byte-identical (golden replay verifies it).
+    let seed = (squad_member as u32).wrapping_add(1);
+    let figurine: Handle<WorldAsset> =
+        assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB));
+    let mut unit = commands.spawn((
+        Unit,
+        SquadMember(squad_member),
+        Prey, // crabs may swarm/bite units (nearest-prey targeting)
+        MoveSpeed(beh.squad_move.unit_speed),
+        Velocity(Vec2::ZERO),
+        AimTarget(None),
+        FacingOverride(None),
+        Health::new(sim.combat.unit_hp),
+        Biological, // living flesh Almond Water can heal (Foundation is a flesh faction)
+        Outfit(outfit),
+        (
+            RoleId::ALL[i],
+            persona,
+            Drives::new(),
+            crate::ai::faction::Faction::Foundation,
+            ActiveBehavior::new(seed),
+            ThinkTimer::staggered(seed),
+            DesiredMove::default(),
+            crate::squad_ai::perception::PerceptionLatch::default(),
+            UtterCooldown::default(),
+            MemoryStream::default(),
+            crate::squad_ai::dialogue::SpokenLines::default(),
+            crate::health::CyanideSmell::from_seed(seed as u64),
+        ),
+        FigurineSource(figurine.clone()),
+        Visibility::default(),
+        Transform::from_translation(pos).with_scale(Vec3::splat(FIGURINE_SCALE)),
+        avian3d::prelude::TransformInterpolation,
+    ));
+    unit.insert(crate::parasite::host_infestation_bundle());
+    unit.with_child((
+        FigurineModel,
+        WorldAssetRoot(figurine),
+        Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        // The child owns the cosmetic animation state: `anim::attach_pose_blenders` wires the
+        // streamed-in `AnimationPlayer` to the nearest `BlendSource` ancestor — this entity — so the
+        // `PoseBlender` lands here beside `LocoSmooth`, never on the hashed `Unit` (issue #18).
+        anim::BlendSource { graph: valk.graph.clone(), slots: valk.slots.clone() },
+        LocoSmooth::default(),
+    ));
+    if RoleId::ALL[i] == RoleId::Researcher {
+        unit.with_child((
+            GunModel,
+            FlashlightModel,
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(FLASHLIGHT_GLB))),
+            Transform::from_translation(FLASHLIGHT_OFFSET)
+                .with_scale(Vec3::splat(FLASHLIGHT_SCALE))
+                .with_rotation(Quat::from_rotation_x(FLASHLIGHT_PITCH)),
+        ));
+    }
+    unit.id()
 }
 
 /// Keep exactly one living unit tagged [`Leader`]. Runs on the initial frame (no leader yet →
@@ -935,5 +1131,69 @@ pub(crate) fn unit_facing(
                 .rotation;
             transform.rotation = transform.rotation.slerp(facing, (beh.squad_move.turn_speed * dt).min(1.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit walking with its rifle up must have BOTH: real weight on a gait clip (its legs keep
+    /// striding) and real weight on the masked aim clip (its upper body holds the rifle). The state
+    /// machine this replaced could not express that at all — firing replaced locomotion outright and
+    /// froze the legs mid-stride for the whole 1.167 s clip.
+    #[test]
+    fn aiming_while_walking_layers_instead_of_replacing() {
+        let forward = 0.0;
+        let w = valkyrie_weights(1.0, forward, true, false);
+        assert!(
+            w[anim::blend::SLOT_WALK] > 0.05,
+            "the legs must keep walking under the aim layer: {w:?}"
+        );
+        assert!(w[SLOT_AIM] > 0.05, "the upper body must take the aim pose: {w:?}");
+        assert_eq!(w[SLOT_FIRE], 0.0, "not firing, so the recoil slot stays silent");
+    }
+
+    #[test]
+    fn firing_takes_the_layer_from_the_aim_pose_and_still_leaves_the_legs_running() {
+        let w = valkyrie_weights(3.0, 0.0, true, true);
+        assert!(w[SLOT_FIRE] > 0.05, "the recoil must own the layer while it plays: {w:?}");
+        assert_eq!(w[SLOT_AIM], 0.0, "the aim pose hands the layer over while firing");
+        assert!(w[anim::blend::SLOT_RUN] > 0.05, "a unit shooting on the move keeps running: {w:?}");
+    }
+
+    /// The layer split only works because the whole vector is a partition of unity: the root blend
+    /// node normalises per bone, so the locomotion clips must carry exactly `1 − α` for the action
+    /// clips' `α` to read as that share of the upper body — and for the lower body, where the action
+    /// clips are masked out, to keep its mixture's internal ratios untouched.
+    #[test]
+    fn the_full_weight_vector_is_a_partition_of_unity() {
+        for si in 0..=40 {
+            let speed = 8.0 * si as f32 / 40.0;
+            for ti in 0..=40 {
+                let theta = -std::f32::consts::TAU + 2.0 * std::f32::consts::TAU * (ti as f32 / 40.0);
+                for aiming in [false, true] {
+                    for firing in [false, true] {
+                        let w = valkyrie_weights(speed, theta, aiming, firing);
+                        let sum: f32 = w.iter().sum();
+                        assert!(
+                            (sum - 1.0).abs() < 1.0e-5,
+                            "speed {speed} theta {theta} aiming {aiming} firing {firing} → {sum}: {w:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `ACTION_ALPHA` must stay short of 1.0. At exactly 1.0 every locomotion weight is bit-zero,
+    /// `animate_targets` skips them all, and the lower body — which the action clips are masked out of
+    /// — falls to the bind pose.
+    #[test]
+    fn the_action_layer_never_starves_the_legs_completely() {
+        assert!(ACTION_ALPHA < 1.0, "ACTION_ALPHA must leave the locomotion clips some weight");
+        let w = valkyrie_weights(3.0, 0.0, true, true);
+        let loco: f32 = w[..anim::blend::LOCO_SLOTS].iter().sum();
+        assert!(loco > 0.0, "the legs would fall to the bind pose: {w:?}");
     }
 }

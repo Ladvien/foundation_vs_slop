@@ -335,6 +335,12 @@ const VITALITY_HALF_SCALE: f32 = 25.0;
 /// breeding-vs-lethality knobs (now including the parasite's brood/gestation) give the search 2-D freedom,
 /// so deadly-yet-teeming and deadly-yet-depleted worlds land in different niches rather than collapsing onto
 /// a diagonal.
+///
+/// Deliberately a FIXED half-scale, not the per-episode peak census (`EpisodeOutcome::peak_population` /
+/// `crab_peak` etc.): normalising an axis by a quantity the same genome moves would fold "how populous"
+/// back out of the axis and re-couple the two dials. The peak fields feed `train probe`'s calibration
+/// report only — if the two ever look contradictory, this comment is the tiebreak: the descriptor is
+/// absolute-by-design, the census is diagnostic.
 pub fn world_descriptor(outcome: &EpisodeOutcome) -> BehaviorDescriptor {
     // Saturating (Holling Type II) map so a wide count range keeps descriptor resolution; see the constant.
     let softsat = |x: u32| x as f32 / (x as f32 + VITALITY_HALF_SCALE);
@@ -994,6 +1000,11 @@ fn propose_world(parent: &WorldGenome, rng: &mut ChaCha8Rng) -> Result<WorldGeno
 
 /// Mean of a non-empty slice. Sorted before summing so the result does not depend on evaluation order —
 /// float addition is not associative, and the whole run must be reproducible from its seed.
+///
+/// Bit order is a CANONICAL order, not a numeric one: negative floats would sort after positives (and
+/// reversed among themselves). That is still a total order — determinism only needs the summation order
+/// to be a fixed function of the multiset — so this stays correct if a fitness ever goes negative; only
+/// the (unspecified anyway) summation sequence would look odd.
 fn mean(xs: &[f32]) -> f32 {
     let mut sorted: Vec<u32> = xs.iter().map(|x| x.to_bits()).collect();
     // SORT-OK: bare f32 bits about to be summed (`mean`) — ties are identical terms.
@@ -1290,7 +1301,7 @@ pub fn swarm_archive_doc(t: &Templates, pop: &Population<SwarmGenome>) -> Result
 /// Every slice `world_genome` encodes must appear here. The rollout scores the whole [`WorldConfig`], so a
 /// slice omitted from this doc is a knob the search optimised and the game can never ship — the elite's
 /// reported fitness would not be reproducible from the config it bakes. (`mold` + `almond` were exactly
-/// that until they were added here: 23 of 102 knobs evaluated, then dropped on write.)
+/// that until they were added here: 23 of the genome's then-102 knobs evaluated, then dropped on write.)
 #[derive(Serialize)]
 pub struct WorldEliteDoc {
     pub cell: (usize, usize),

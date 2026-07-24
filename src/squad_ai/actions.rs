@@ -16,7 +16,7 @@ use crate::gore::Carryable;
 use crate::health::Health;
 use crate::placement::PlacedIn;
 use crate::squad::{MoveOrder, Unit};
-use crate::util::nearest_planar;
+use crate::util::{nearest_planar, nearest_planar_keyed};
 
 use super::dialogue::{ObsEvent, SquadUtterance};
 use super::perception::Examined;
@@ -40,7 +40,7 @@ pub fn unit_actions(
     mut commands: Commands,
     mut utter: MessageWriter<SquadUtterance>,
     furniture: Query<(Entity, &Transform), (With<PlacedIn>, Without<Examined>)>,
-    bodies: Query<(Entity, &Transform), (With<Carryable>, Without<Examined>)>,
+    bodies: Query<(Entity, &Transform, &crate::gore::GibKey), (With<Carryable>, Without<Examined>)>,
     // A player `MoveOrder` is authoritative — an ordered unit is under FULL player control, so it must
     // not auto-examine (permanently marking furniture/bodies `Examined` and denying the Researcher the
     // find), auto-ward, or bark. `Without<MoveOrder>` excludes those units from all action effects.
@@ -58,8 +58,14 @@ pub fn unit_actions(
         // Examine / SecureDoor is a one-shot: mark the subject `Examined` (so it isn't re-offered) and
         // narrate immediately, bypassing the utterance cooldown.
         if matches!(active.mode, Mode::Examine | Mode::SecureDoor) {
-            let body = nearest_planar(pos, bodies.iter().map(|(e, t)| (e, t.translation)))
-                .filter(|(_, _, d)| *d <= beh.squad_move.study_range);
+            // The payload is the ENTITY that gets `Examined` — identity, not interchangeable — so the
+            // body pick is keyed by `GibKey` (minted per chunk precisely because two creatures dying on
+            // one coordinate produce co-located, bit-identical carryables — the G0c scenario). Furniture
+            // stays on the unkeyed ranking: the layout's non-overlap invariant means no two placed pieces
+            // ever hold the same (x, y, z), so its position tiebreak is already total.
+            let body =
+                nearest_planar_keyed(pos, bodies.iter().map(|(e, t, gk)| (gk.0, e, t.translation)))
+                    .filter(|(_, _, d)| *d <= beh.squad_move.study_range);
             let object = nearest_planar(pos, furniture.iter().map(|(e, t)| (e, t.translation)))
                 .filter(|(_, _, d)| *d <= beh.squad_move.study_range);
             // A researcher prefers a corpse; anyone else studies whichever is present (object first).

@@ -7,6 +7,7 @@
 - Do NOT assume design decisions on my behalf. When a design or scope choice is ambiguous (colors, coverage %, approach), stop and ask before implementing. Prefer focused/concrete changes over global post-process filters or over-engineered solutions.
 - When investigating whether an issue is fixed, actually inspect the underlying data/code first before offering explanations; do not assume a file is broken or blame viewport/version.
 - Ensure every feature added is correctly included in the RL/QD systems for evolving.
+- Keep the file /mnt/codex_fs/game_assets/SCP_Characters/BEVY_GAME_INFO.md up to date with game info, to ensure our 3D artists are able to make assets that fit the game well.
 
 ## Testing
 
@@ -22,6 +23,23 @@ Non-negotiables (details in `TESTING.md`): exact-hash only the **physics-off** c
 **liveness** oracles; hold `serial_guard()` in every harness test; new systems go on `FixedUpdate` if they
 touch pinned state (would appear in `snapshot_hash`), else `Update`. Strategy, oracle rules, and the full
 invariant list live in `TESTING.md` (see its "Strategy" and "Invariants & determinism rules" sections).
+
+## Animation
+
+**Read `docs/animation.md` before touching `src/anim/`, squad/crab/manca clip wiring, or a character
+GLB's clips.** It's the engineering guide; `docs/artist_guide.md` §4 holds the per-asset clip tables and
+the authoring contract. The one idea: **no transitions.** Every clip stays resident on the
+`AnimationPlayer` and is never rewound — each frame the shared `anim::PoseBlender` only eases weights and
+advances one shared gait phase. So **never add `AnimationTransitions` to anything the blender drives**
+(its `PostUpdate` pass would stomp the weights).
+
+Non-negotiables (details in `docs/animation.md`): the animation layer is **cosmetic** — `Update` only
+(never `FixedUpdate`), `PoseBlender` rides the **model child** not the sim entity (issue #18), and it is
+the **deliberate exception** to the "wire every feature into RL/QD" rule above — it is invisible to
+`snapshot_hash` by construction, so a genome gene pointed at it would never move the fitness. Cosmetic
+tuning goes in the `src/anim`/`src/squad` constants and `docs/artist_guide.md`, not the evolving systems.
+Gait clips must be authored **in-place** (zero root motion) with an honest per-cycle ground distance;
+`tests/valkyrie_asset.rs` pins the GLB contract.
 
 ## Determinism: ECS query order decides nothing
 

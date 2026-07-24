@@ -25,13 +25,25 @@ pub(crate) fn build_crab_anim(
         assets.load(GltfAssetLabel::Animation(1).from_asset(CRAB_GLB)),
         assets.load(GltfAssetLabel::Animation(2).from_asset(CRAB_GLB)),
     ]);
-    let handle = graphs.add(graph);
-    commands.insert_resource(CrabAnim {
-        graph: handle,
-        attack: nodes[0],
-        idle: nodes[1],
-        walk: nodes[2],
-    });
+    // Slot order is `SLOT_IDLE`/`SLOT_WALK`/`SLOT_ATTACK`, not the glb's clip order. All three are
+    // `Free`: a scuttle and a chomp share no gait, so there is nothing to phase-lock — the crab takes
+    // from `crate::anim` only the part it needs, a cross-fade that never rewinds a clip.
+    let slots: Arc<[crate::anim::Slot]> = Arc::from([
+        crate::anim::Slot::free(nodes[1], 1.0),
+        crate::anim::Slot::free(nodes[2], WALK_ANIM_SPEED),
+        crate::anim::Slot::free(nodes[0], ATTACK_ANIM_SPEED),
+    ]);
+    commands.insert_resource(CrabAnim { graph: graphs.add(graph), slots });
+}
+
+/// Build the shared crab collider + scene handles. One builder so `spawn_crabs` (normal play) and the
+/// dev-only Research Room create byte-identical [`CrabAssets`]: the collider mesh is added before the
+/// scene loads — matching the original inline order — so the deterministic mesh handle IDs are unchanged.
+pub(crate) fn build_crab_assets(meshes: &mut Assets<Mesh>, assets: &AssetServer) -> CrabAssets {
+    CrabAssets {
+        collider: meshes.add(Sphere::new(CRAB_COLLIDER_R)),
+        scene: assets.load(GltfAssetLabel::Scene(0).from_asset(CRAB_GLB)),
+    }
 }
 
 /// Place `CRAB_CLUSTERS` nests in far rooms and fill each with crabs; the first `CRAB_WALL_CLUSTERS`
@@ -41,20 +53,22 @@ pub(crate) fn spawn_crabs(
     dungeon: Res<Dungeon>,
     graph: Res<SurfaceGraph>,
     assets: Res<AssetServer>,
+    anim: Res<CrabAnim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut nest_mats: ResMut<Assets<crate::nest::NestMaterial>>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
 ) {
-    let collider = meshes.add(Sphere::new(CRAB_COLLIDER_R));
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(CRAB_GLB));
+    // Shared handles via the one builder the Research Room also uses. The collider mesh is added before
+    // the scene loads (same order as the old inline construction), so the deterministic handle IDs are
+    // unchanged; the golden replay hashes verify it.
+    let crab_assets = build_crab_assets(&mut meshes, &assets);
+    let collider = crab_assets.collider.clone();
+    let scene = crab_assets.scene.clone();
     let dome = meshes.add(crate::nest::nest_dome_mesh()); // shared unit hemisphere → wall pimple per nest
     // Keep the shared handles so the reproduction system can birth new crabs at runtime.
-    commands.insert_resource(CrabAssets {
-        collider: collider.clone(),
-        scene: scene.clone(),
-    });
+    commands.insert_resource(crab_assets);
 
     // Greedily pick far, spread-apart nest seeds (deterministic, like `enemy::spawn_enemies`).
     let mut seeds: Vec<IVec2> = Vec::new();
@@ -147,7 +161,7 @@ pub(crate) fn spawn_crabs(
             if let Some(patch) = pick_patch(&graph, &dungeon, cell, on_wall) {
                 let s = seq.0 as u32;
                 seq.0 += 1;
-                spawn_crab_on_patch(&mut commands, &graph, patch, &collider, &scene, s, &sim, beh.crab);
+                spawn_crab_on_patch(&mut commands, &graph, patch, &collider, &scene, &anim, s, &sim, beh.crab);
                 spawned += 1;
                 in_cluster += 1;
             }
@@ -186,10 +200,11 @@ pub(crate) fn spawn_crab_on_patch(
     patch: u32,
     collider: &Handle<Mesh>,
     scene: &Handle<WorldAsset>,
+    anim: &CrabAnim,
     rand_seed: u32,
     sim: &SimTuning,
     bc: CrabTuning,
-) {
+) -> Entity {
     let p = graph.patch(patch);
     let pos = p.center;
     let normal = p.normal;
@@ -285,6 +300,10 @@ pub(crate) fn spawn_crab_on_patch(
     // Caste hysteresis timer + the immortal spawn seed, so `re_role_crabs` can flip this crab's role
     // deterministically as the swarm's needs shift (see that system's determinism note).
     ec.insert((Caste { cooldown: 0.0 }, CrabSeed(rand_seed)));
+    // Cosmetic animation wiring data: `anim::attach_pose_blenders` finds this on the root when the
+    // scene's `AnimationPlayer` streams in and puts the `PoseBlender` on the same root the old
+    // `CrabAnimPlayer` link sat on — inserted at spawn, so it never churns the hashed archetype.
+    ec.insert(crate::anim::BlendSource { graph: anim.graph.clone(), slots: anim.slots.clone() });
     // Crabs are photophobic — they steer down the `LightField` gradient toward shadow (see
     // `crab_locomotion` and `light::Photophobic`), so lit rooms become refuges and the swarm pools in the
     // dark. Added at spawn (stable archetype; `re_role_crabs` never touches it), so light response is a
@@ -297,6 +316,7 @@ pub(crate) fn spawn_crab_on_patch(
     if is_scout {
         ec.insert(Scout::new(rand_seed));
     }
+    ec.id()
 }
 
 /// Cell offsets around a nest seed, sorted nearest-first, out to Chebyshev radius 3 (~49 cells) so a

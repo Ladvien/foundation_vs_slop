@@ -101,6 +101,153 @@ fn every_drives_carrier_has_a_faction_throughout_a_live_run() {
     assert!(agents_seen > 5, "expected the squad plus a swarm to exist, saw {agents_seen} agents");
 }
 
+/// The animation blender's net, driven by the real game rather than a synthetic `App`.
+///
+/// `src/anim` unit-tests the ease and the phase directly; what only a live run can check is that the
+/// wiring actually happens — that figurines stream in, get their blend sets, and stay well-formed while
+/// units accelerate, strafe, shoot and stop. The oracle is deliberately structural (finite, summing to
+/// one, phase in range) rather than pixel-exact: this is the physics-inclusive sim, so exact values are
+/// not reproducible (see the module header).
+#[test]
+fn every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run() {
+    use bevy::prelude::IVec2;
+    use foundation_vs_slop::anim::{blend, PoseBlender};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::default();
+    let mut app = build_headless_app(&cfg);
+
+    // Warm up, then haul the squad across the map so it accelerates, turns and stops — and let the
+    // crab swarm reach it, so units aim and fire and the masked upper-body layer takes weight.
+    step(&mut app, &cfg, 1);
+    let floors = floor_cells(&mut app);
+    let stride = (floors.len() / 4).max(1);
+    let goals: Vec<IVec2> = floors.iter().step_by(stride).copied().collect();
+
+    let mut blenders_seen = 0usize;
+    let mut moving_seen = 0usize;
+    for goal in goals {
+        issue_squad_order(&mut app, goal);
+        for _ in 0..6 {
+            step(&mut app, &cfg, 10);
+            let world = app.world_mut();
+            let mut q = world.query::<&PoseBlender>();
+            let mut here = 0usize;
+            for b in q.iter(world) {
+                here += 1;
+                let phase = b.phase();
+                assert!(
+                    (0.0..1.0).contains(&phase),
+                    "gait phase escaped [0,1): {phase} — a non-finite ground speed would do this"
+                );
+                let mut sum = 0.0f32;
+                for slot in 0..b.len() {
+                    let w = b.live_weight(slot);
+                    assert!(w.is_finite() && (0.0..=1.0).contains(&w), "slot {slot} weight is {w}");
+                    sum += w;
+                }
+                // Every driver hands over a partition of unity, and the ease preserves it, so a total
+                // that drifts means a slot table and a driver have fallen out of step.
+                assert!(
+                    (sum - 1.0).abs() < 0.01,
+                    "blend weights sum to {sum}, not 1 — driver and slot table disagree"
+                );
+                // A figurine that is actually locomoting must have weight on a gait clip, not be
+                // standing in idle while its transform slides across the floor.
+                if b.live_weight(blend::SLOT_IDLE) + b.live_weight(blend::SLOT_IDLE_ALERT) < 0.5 {
+                    moving_seen += 1;
+                }
+            }
+            blenders_seen = blenders_seen.max(here);
+        }
+    }
+
+    // Guard against the assertions above passing vacuously: the five figurines and the crab swarm all
+    // carry blenders, and at least some of them were seen mid-stride rather than parked in idle.
+    assert!(
+        blenders_seen >= 5,
+        "expected at least the five squad figurines to be wired, saw {blenders_seen}"
+    );
+    assert!(moving_seen > 0, "no figurine ever left idle — the blend space is never being exercised");
+}
+
+/// The headline behaviour of the animation rework: **shooting no longer stops the legs.**
+///
+/// The state machine this replaced played the fire clip as a full-body override and skipped locomotion
+/// entirely for its 1.167 s, so a unit shot mid-stride froze and then snapped. Now `aim`/`fire` are
+/// masked out of the lower body and layered over the locomotion mixture, and because the action clips
+/// are never pushed for lower-body bones the legs are driven by the locomotion mixture alone — at
+/// whatever common factor it carries.
+///
+/// `src/squad.rs` unit-tests the weight construction; this drives the real engine. The unattended
+/// scenario never brings the squad into contact (measured: no unit acquires an `AimTarget` in 3000
+/// ticks), so a bare hostile is planted in front of each unit — `laser::fire_laser` needs only
+/// `(Hostile, Transform)`, fog visibility and the front arc — and the squad engages for real.
+#[test]
+fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
+    use bevy::prelude::{Transform, Vec3, Visibility, With};
+    use foundation_vs_slop::anim::{blend, PoseBlender};
+    use foundation_vs_slop::enemy::Hostile;
+    use foundation_vs_slop::squad::Unit;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::default();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1);
+
+    // March the squad the length of the level so it is definitely locomoting when contact happens.
+    // The order has to actually take — a squad standing still would make the "gait and action carried
+    // weight together" assertion below fail for the wrong reason.
+    let floors = floor_cells(&mut app);
+    let ordered = floors
+        .iter()
+        .rev()
+        .take(8)
+        .any(|&goal| issue_squad_order(&mut app, goal));
+    assert!(ordered, "no far goal was reachable, so the squad never had to walk anywhere");
+    step(&mut app, &cfg, 40);
+
+    let spots: Vec<Vec3> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&Transform, With<Unit>>();
+        q.iter(world).map(|t| t.translation + t.rotation * (Vec3::NEG_Z * 1.5)).collect()
+    };
+    assert!(!spots.is_empty(), "no units to plant a target in front of");
+    for p in spots {
+        app.world_mut().spawn((Hostile, Transform::from_translation(p), Visibility::default()));
+    }
+
+    const GAIT: [usize; 6] = [
+        blend::SLOT_WALK,
+        blend::SLOT_RUN,
+        blend::SLOT_WALK_BACK,
+        blend::SLOT_RUN_BACK,
+        blend::SLOT_STRAFE_L,
+        blend::SLOT_STRAFE_R,
+    ];
+    let mut best_together = 0.0f32;
+    let mut max_action = 0.0f32;
+    for _ in 0..200 {
+        step(&mut app, &cfg, 1);
+        let world = app.world_mut();
+        let mut q = world.query::<&PoseBlender>();
+        for b in q.iter(world).filter(|b| b.len() == blend::LOCO_SLOTS + 2) {
+            let gait: f32 = GAIT.iter().map(|&i| b.live_weight(i)).sum();
+            let action = b.live_weight(blend::LOCO_SLOTS) + b.live_weight(blend::LOCO_SLOTS + 1);
+            max_action = max_action.max(action);
+            best_together = best_together.max(gait.min(action));
+        }
+    }
+
+    assert!(max_action > 0.5, "the upper-body layer never armed at all (max {max_action:.3}) — the \
+                              squad did not engage, so this test proved nothing");
+    assert!(
+        best_together > 0.05,
+        "the action layer and the gait never carried weight at the same time (best {best_together:.3}) \
+         — firing is overriding locomotion again instead of layering over it"
+    );
+}
+
 /// The regression net for "the squad flees from its own gunfire".
 ///
 /// Unit tests already assert that no faction fears a channel it emits. This drives the whole real

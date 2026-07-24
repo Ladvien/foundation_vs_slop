@@ -17,13 +17,13 @@
 //!
 //! Built on the `crate::crab` template: an unscaled root (invisible laser-hit sphere + `Hostile` +
 //! `Health`) with the scaled `scp-150.glb` scene as a child, surface-manifold locomotion over the shared
-//! [`crate::surface_nav::SurfaceGraph`], and the crab's `AnimationGraph`/`AnimationTransitions` clip
-//! recipe. This module is **Phase 1** (free manca: crawl / stalk / leap + animation); embed, gestation,
-//! and burst arrive in later phases.
+//! [`crate::surface_nav::SurfaceGraph`], and the crab's clip recipe — one shared `AnimationGraph` whose
+//! clips are cross-faded by weight through [`crate::anim::PoseBlender`], never restarted. This module is
+//! **Phase 1** (free manca: crawl / stalk / leap + animation); embed, gestation, and burst arrive in
+//! later phases.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
-use std::time::Duration;
 
 use bevy::prelude::*;
 
@@ -38,7 +38,7 @@ use crate::light::{light_push, LightField, Photophobic};
 use crate::placement::PlacedIn;
 use crate::sim::SimTuning;
 use crate::surface_nav::{clamp_to_patch, project_tangent, surface_orientation, SurfaceGraph};
-use crate::util::{hash01_u32, nearest_planar, unit_is_facing};
+use crate::util::{hash01_u32, nearest_planar_keyed, unit_is_facing};
 use crate::wfc::{E, N, S, W};
 
 /// The SCP-150 asset (skinned glTF, 12 baked clips). Clip indices follow the asset manual's table order:
@@ -85,14 +85,20 @@ const WALL_NORMAL_Y: f32 = 0.7;
 const HOST_BODY_RADIUS: f32 = 0.35;
 // `beh.parasite_swarm.embed_range` → `behavior.parasite_swarm.embed_range` (the embed reach beyond HOST_BODY_RADIUS).
 
-/// Cross-fade between animation clips.
-const CROSSFADE: Duration = Duration::from_millis(150);
 /// Clip playback-rate multipliers (the authored clips are long; play them faster for a lively scuttle).
 const WALK_ANIM_SPEED: f32 = 2.0;
 const CLIMB_ANIM_SPEED: f32 = 2.0;
 const ATTACK_ANIM_SPEED: f32 = 1.6;
 /// The eruption climb-out (BurrowOut) plays slow for a dragged-out, dramatic emergence (one-shot).
 const BURROW_ANIM_SPEED: f32 = 0.8;
+
+/// Blend-set slot indices, matching the order [`build_manca_anim`] wires them in.
+const SLOT_SNUG: usize = 0;
+const SLOT_IDLE: usize = 1;
+const SLOT_WALK: usize = 2;
+const SLOT_CLIMB: usize = 3;
+const SLOT_ATTACK: usize = 4;
+const SLOT_BURROW: usize = 5;
 
 // --- Huddle / dormancy behaviour (isopod collective ecology) ---------------------------------------
 // SCP-150 mancae are gregarious like real terrestrial isopods (the *Cymothoa* body plan's land cousins):
@@ -350,13 +356,9 @@ enum MoodState {
 #[derive(Component, Clone, Copy)]
 pub struct MancaSeed(pub u32);
 
-/// Link from a manca to its (asynchronously-spawned) `AnimationPlayer`, plus which state's clip is
-/// currently playing (so `drive_manca_animation` only re-triggers on a real change).
-#[derive(Component)]
-struct MancaAnimPlayer {
-    player: Entity,
-    playing: Option<MancaAnimState>,
-}
+// The old `MancaAnimPlayer` change-guard is gone: `crate::anim::PoseBlender` now holds the link to the
+// asynchronously-spawned `AnimationPlayer` and cross-fades the clips by weight, so there is no "which
+// clip is playing" to guard — every clip stays resident and is never rewound.
 
 // --- Resources -------------------------------------------------------------------------------------
 
@@ -369,8 +371,8 @@ pub struct MancaSpawnSeq(pub u64);
 /// `crab::CrabAssets`).
 #[derive(Resource)]
 pub struct MancaAssets {
-    collider: Handle<Mesh>,
-    scene: Handle<WorldAsset>,
+    pub(crate) collider: Handle<Mesh>,
+    pub(crate) scene: Handle<WorldAsset>,
 }
 
 /// A persistent chestburster hole on a host — a dark bloody disc parented to the host body (so it rides +
@@ -387,16 +389,12 @@ pub(crate) struct WoundAssets {
     mat: Handle<StandardMaterial>,
 }
 
-/// The one shared animation graph + node handles for the manca clips.
+/// The one shared animation graph + the manca's blend-set slot table (see `crate::anim`).
+/// `pub(crate)` so the Research Room's spawn button can pass it to [`spawn_manca_on_patch`].
 #[derive(Resource)]
-struct MancaAnim {
+pub(crate) struct MancaAnim {
     graph: Handle<AnimationGraph>,
-    snug: AnimationNodeIndex,
-    idle: AnimationNodeIndex,
-    walk: AnimationNodeIndex,
-    climb: AnimationNodeIndex,
-    attack: AnimationNodeIndex,
-    burrow: AnimationNodeIndex,
+    slots: std::sync::Arc<[crate::anim::Slot]>,
 }
 
 // --- Plugin ----------------------------------------------------------------------------------------
@@ -447,8 +445,16 @@ impl Plugin for ParasitePlugin {
                     deposit_manca_dread.before(crate::ai::AiSet::Deposits),
                 ),
             )
-            // Cosmetic: skeletal animation attach/drive stays on `Update` (mirrors the crab).
-            .add_systems(Update, (attach_manca_animation, drive_manca_animation));
+            // Cosmetic: skeletal animation stays on `Update` (mirrors the crab). Attaching is the
+            // shared `anim::attach_pose_blenders` pass (each manca root carries a `BlendSource` from
+            // spawn); `drive` after it (so a manca wired this frame gets its first weights
+            // immediately) and before the shared apply pass in `crate::anim`.
+            .add_systems(
+                Update,
+                drive_manca_animation
+                    .after(crate::anim::PoseAttachSet)
+                    .before(crate::anim::PoseBlendSet),
+            );
     }
 }
 
@@ -516,24 +522,30 @@ fn build_manca_anim(
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
+    // The glb stores its 12 clips ALPHABETICALLY (Attack1, Attack2, BurrowOut, Climb, Forage1,
+    // Forage2, Idle_Alert, Idle_Snug, Leap, Run, Walk1, Walk2) — not in the authoring-tool order the
+    // artist guide originally listed. `tests/creature_clip_contract.rs` pins index → name against the
+    // asset bytes so a re-export that reorders them fails loudly instead of playing the wrong clips.
     let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(0).from_asset(SCP150_GLB)), // Idle_Snug (dormant huddle)
-        assets.load(GltfAssetLabel::Animation(1).from_asset(SCP150_GLB)), // Idle_Alert
-        assets.load(GltfAssetLabel::Animation(2).from_asset(SCP150_GLB)), // Walk1
-        assets.load(GltfAssetLabel::Animation(11).from_asset(SCP150_GLB)), // Climb
-        assets.load(GltfAssetLabel::Animation(7).from_asset(SCP150_GLB)), // Attack2 (pounce-bite)
-        assets.load(GltfAssetLabel::Animation(10).from_asset(SCP150_GLB)), // BurrowOut (one-shot eruption)
+        assets.load(GltfAssetLabel::Animation(7).from_asset(SCP150_GLB)), // Idle_Snug (dormant huddle)
+        assets.load(GltfAssetLabel::Animation(6).from_asset(SCP150_GLB)), // Idle_Alert
+        assets.load(GltfAssetLabel::Animation(10).from_asset(SCP150_GLB)), // Walk1
+        assets.load(GltfAssetLabel::Animation(3).from_asset(SCP150_GLB)), // Climb
+        assets.load(GltfAssetLabel::Animation(1).from_asset(SCP150_GLB)), // Attack2 (pounce-bite)
+        assets.load(GltfAssetLabel::Animation(2).from_asset(SCP150_GLB)), // BurrowOut (one-shot eruption)
     ]);
-    let handle = graphs.add(graph);
-    commands.insert_resource(MancaAnim {
-        graph: handle,
-        snug: nodes[0],
-        idle: nodes[1],
-        walk: nodes[2],
-        climb: nodes[3],
-        attack: nodes[4],
-        burrow: nodes[5],
-    });
+    // Slot order matches the `SLOT_*` constants. Every clip but the eruption is `Free` — a scuttle, a
+    // climb and a chomp share no gait, so there is nothing to phase-lock; the manca takes from
+    // `crate::anim` only the cross-fade that never rewinds a clip. The eruption is the one `OneShot`.
+    let slots: std::sync::Arc<[crate::anim::Slot]> = std::sync::Arc::from([
+        crate::anim::Slot::free(nodes[0], 1.0),
+        crate::anim::Slot::free(nodes[1], 1.0),
+        crate::anim::Slot::free(nodes[2], WALK_ANIM_SPEED),
+        crate::anim::Slot::free(nodes[3], CLIMB_ANIM_SPEED),
+        crate::anim::Slot::free(nodes[4], ATTACK_ANIM_SPEED),
+        crate::anim::Slot::one_shot(nodes[5], BURROW_ANIM_SPEED),
+    ]);
+    commands.insert_resource(MancaAnim { graph: graphs.add(graph), slots });
 }
 
 /// Build the shared wound-disc mesh + dark bloody material once (the chestburster hole stamped onto hosts).
@@ -644,6 +656,16 @@ pub(crate) fn drive_infestation_tell(
     }
 }
 
+/// Build the shared manca collider + scene handles. One builder so `spawn_mancae` (normal play) and the
+/// dev-only Research Room create byte-identical [`MancaAssets`] — the collider mesh is added before the
+/// scene loads, matching the original inline order, so the deterministic handle IDs are unchanged.
+pub(crate) fn build_manca_assets(meshes: &mut Assets<Mesh>, assets: &AssetServer) -> MancaAssets {
+    MancaAssets {
+        collider: meshes.add(Sphere::new(MANCA_COLLIDER_R)),
+        scene: assets.load(GltfAssetLabel::Scene(0).from_asset(SCP150_GLB)),
+    }
+}
+
 /// Seed the initial free mancae into far, spread-apart floor cells (deterministic scan order, like
 /// `crab::spawn_crabs`). Reuses the crab's shared `SurfaceGraph`.
 fn spawn_mancae(
@@ -651,6 +673,7 @@ fn spawn_mancae(
     dungeon: Res<Dungeon>,
     graph: Option<Res<SurfaceGraph>>,
     assets: Res<AssetServer>,
+    manca_anim: Res<MancaAnim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut seq: ResMut<MancaSpawnSeq>,
     sim: Res<SimTuning>,
@@ -663,11 +686,14 @@ fn spawn_mancae(
         return;
     };
 
-    let collider = meshes.add(Sphere::new(MANCA_COLLIDER_R));
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(SCP150_GLB));
+    // Shared handles via the one builder the Research Room also uses (collider mesh added before the
+    // scene loads, matching the original order, so the deterministic handle IDs are unchanged).
+    let manca_assets = build_manca_assets(&mut meshes, &assets);
+    let collider = manca_assets.collider.clone();
+    let scene = manca_assets.scene.clone();
     // Keep the shared handles so `parasite_burst` can birth broods at runtime (always inserted, even if
     // no initial mancae seed, so a burst can still spawn).
-    commands.insert_resource(MancaAssets { collider: collider.clone(), scene: scene.clone() });
+    commands.insert_resource(manca_assets);
 
     let count = sim.parasite.initial_count;
     if count == 0 {
@@ -767,7 +793,7 @@ fn spawn_mancae(
             let Some(patch) = graph.floor_patch_cell(cell) else { continue };
             let s = seq.0 as u32;
             seq.0 += 1;
-            spawn_manca_on_patch(&mut commands, &graph, patch, &collider, &scene, s, &sim.parasite, &beh, home, 0.0, None);
+            spawn_manca_on_patch(&mut commands, &graph, patch, &collider, &scene, &manca_anim, s, &sim.parasite, &beh, home, 0.0, None);
             spawned += 1;
         }
     }
@@ -776,12 +802,13 @@ fn spawn_mancae(
 
 /// Spawn one manca seated on `patch`: an unscaled root (invisible collider + `Hostile` + `Health`) with
 /// the scaled, `−X`-corrected glTF model as a child. Public so a later burst phase can birth a brood.
-pub fn spawn_manca_on_patch(
+pub(crate) fn spawn_manca_on_patch(
     commands: &mut Commands,
     graph: &SurfaceGraph,
     patch: u32,
     collider: &Handle<Mesh>,
     scene: &Handle<WorldAsset>,
+    manca_anim: &MancaAnim,
     rand_seed: u32,
     tuning: &crate::sim::ParasiteTuning,
     beh: &BehaviorTuning,
@@ -790,7 +817,7 @@ pub fn spawn_manca_on_patch(
     // `Some((host, chest_world_pos))` if this manca is erupting from a host chest — it spawns AT the chest in
     // the [`LeapPhase::Emerging`] climb-out; `None` for a normal surface-seated spawn.
     emerging: Option<(Entity, Vec3)>,
-) {
+) -> Entity {
     let p = graph.patch(patch);
     // Small deterministic in-patch jitter from the spawn seed so huddle-mates seeded onto the same cell
     // don't stack on one exact point (short-range separation only acts on a nonzero offset). Seed-derived,
@@ -841,6 +868,13 @@ pub fn spawn_manca_on_patch(
         ),
         Visibility::Inherited,
     ));
+    // Cosmetic animation wiring data: `anim::attach_pose_blenders` finds this on the root when the
+    // scene's `AnimationPlayer` streams in and puts the `PoseBlender` on the same root the old
+    // `MancaAnimPlayer` link sat on — inserted at spawn, so it never churns the hashed archetype.
+    ec.insert(crate::anim::BlendSource {
+        graph: manca_anim.graph.clone(),
+        slots: manca_anim.slots.clone(),
+    });
     // Photophobic + Dormant mood: a fresh manca spawns huddled and passive, steering toward shadow (the
     // light nudge is wired in `manca_huddle`, which reads this marker). Both inserted here at spawn so they
     // never churn the hashed archetype at runtime.
@@ -862,6 +896,7 @@ pub fn spawn_manca_on_patch(
             .with_rotation(Quat::from_rotation_y(MODEL_FACING))
             .with_scale(Vec3::splat(MANCA_RENDER_SCALE)),
     ));
+    ec.id()
 }
 
 /// World-space chest point of a host — where the wound opens and a manca erupts. Units are the tall figurine
@@ -891,7 +926,10 @@ fn manca_hunt(
     dungeon: Res<Dungeon>,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
-    hosts: Query<(&Transform, &Infestation), (With<Parasitizable>, Without<Manca>)>,
+    hosts: Query<
+        (&Transform, &Infestation, &crate::health::CyanideSmell),
+        (With<Parasitizable>, Without<Manca>),
+    >,
     mut mancae: Query<
         (&mut MancaMotion, &mut MancaAnimState, &MancaLeap, &mut MancaMood, &mut Transform),
         With<Manca>,
@@ -902,15 +940,18 @@ fn manca_hunt(
     let Some(graph) = graph else { return };
     let dt = time.delta_secs().min(MAX_FRAME_DT);
 
-    // Per-host: foot position + planar forward (local −Z) — for the blind-side stalk gate. Already-infested
-    // hosts are skipped, so the swarm seeks a FRESH host — the infestation spreads through the group rather
-    // than piling onto a doomed host.
-    let host_data: Vec<(Vec3, Vec3)> = hosts
+    // Per-host: stable id + foot position + planar forward (local −Z) — for the blind-side stalk gate.
+    // Already-infested hosts are skipped, so the swarm seeks a FRESH host — the infestation spreads through
+    // the group rather than piling onto a doomed host. The id is `CyanideSmell::id` (the one spawn-time
+    // identity every Biological carries): the nearest-host pick consumes the PAYLOAD (the forward vector,
+    // via the blind-side gate), and two co-located hosts — routine when crabs clamp against one wall —
+    // differ in facing, so a position-only tiebreak would hand that choice to ECS query order.
+    let host_data: Vec<(u64, Vec3, Vec3)> = hosts
         .iter()
-        .filter(|(_, inf)| !inf.active)
-        .map(|(t, _)| {
+        .filter(|(_, inf, _)| !inf.active)
+        .map(|(t, _, smell)| {
             let fwd = (t.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
-            (t.translation, fwd)
+            (smell.id, t.translation, fwd)
         })
         .collect();
 
@@ -952,8 +993,10 @@ fn manca_hunt(
             continue;
         }
 
-        // Nearest fresh host (shared deterministic ranking; forward vector carried as the payload).
-        let nearest = nearest_planar(motion.pos, host_data.iter().map(|&(hp, fwd)| (fwd, hp)));
+        // Nearest fresh host (shared deterministic ranking; forward vector carried as the payload, so the
+        // pick is KEYED — a co-located pair must resolve by stable id, not query order).
+        let nearest =
+            nearest_planar_keyed(motion.pos, host_data.iter().map(|&(id, hp, fwd)| (id, fwd, hp)));
         let cell = dungeon.world_to_cell(motion.pos);
         let acc = accumulate_boids(&hash, cell, motion.pos, beh.parasite_swarm.huddle_sep_radius);
 
@@ -1341,7 +1384,7 @@ fn manca_leap(
     // `Option<&Unit>` distinguishes the tall figurine host from a crab so an Emerging manca climbs out of the
     // right chest anchor (see `host_chest`).
     hosts: Query<
-        (&Transform, &Infestation, Option<&crate::squad::Unit>),
+        (&Transform, &Infestation, Option<&crate::squad::Unit>, &crate::health::CyanideSmell),
         (With<Parasitizable>, Without<Manca>),
     >,
     mut mancae: Query<
@@ -1352,16 +1395,19 @@ fn manca_leap(
     let Some(graph) = graph else { return };
     let dt = time.delta_secs().min(MAX_FRAME_DT);
 
-    // Host positions + planar forwards (for the blind-side gate at launch); skip already-infested hosts.
-    let host_data: Vec<(Vec3, Vec3)> = hosts
+    // Host id + position + planar forward (for the blind-side gate at launch); skip already-infested
+    // hosts. Keyed by `CyanideSmell::id` for the same reason as `manca_hunt`: the payload (facing) decides
+    // whether a leap commits, so a co-located host pair must resolve by stable id, not query order.
+    let host_data: Vec<(u64, Vec3, Vec3)> = hosts
         .iter()
-        .filter(|(_, inf, _)| !inf.active)
-        .map(|(t, _, _)| {
+        .filter(|(_, inf, _, _)| !inf.active)
+        .map(|(t, _, _, smell)| {
             let fwd = (t.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
-            (t.translation, fwd)
+            (smell.id, t.translation, fwd)
         })
         .collect();
-    let nearest = |from: Vec3| nearest_planar(from, host_data.iter().map(|&(hp, fwd)| (fwd, hp)));
+    let nearest =
+        |from: Vec3| nearest_planar_keyed(from, host_data.iter().map(|&(id, hp, fwd)| (id, fwd, hp)));
 
     for (mut motion, mut anim, mut leap, mood, mut tf) in &mut mancae {
         match leap.phase {
@@ -1432,7 +1478,7 @@ fn manca_leap(
                 leap.timer -= dt;
                 *anim = MancaAnimState::BurrowOut;
                 let host_tf = leap.host.and_then(|h| hosts.get(h).ok());
-                if let Some((htf, _inf, unit)) = host_tf {
+                if let Some((htf, _inf, unit, _smell)) = host_tf {
                     let chest = host_chest(htf, unit.is_some());
                     let out = (htf.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
                     let s = (1.0 - (leap.timer / beh.parasite_swarm.emerge_secs)).clamp(0.0, 1.0);
@@ -1471,7 +1517,7 @@ pub(crate) fn manca_embed(
     beh: Res<BehaviorTuning>,
     mancae: Query<(Entity, &MancaMotion, &MancaLeap, &MancaMood, &MancaSeed, &Health), With<Manca>>,
     mut hosts: Query<
-        (Entity, &Transform, &mut Health, &mut Infestation),
+        (Entity, &Transform, &mut Health, &mut Infestation, &crate::health::CyanideSmell),
         (With<Parasitizable>, Without<Manca>),
     >,
 ) {
@@ -1490,31 +1536,34 @@ pub(crate) fn manca_embed(
     if ready.is_empty() {
         return;
     }
-    // SORT-OK: per-manca spawn seed, unique — total by construction.
-    ready.sort_unstable_by_key(|(seed, _, _)| *seed);
+    // Ordering is load-bearing (the greedy `taken` claim below), so the unique-seed claim is CHECKED, not
+    // prose: `sort_total!` panics naming this site if two mancae ever mint one seed.
+    crate::sort_total!(&mut ready, |r: &(u32, Entity, Vec3)| r.0);
 
-    // Snapshot fresh (un-infested, still-alive) host positions once; `taken` guards against two mancae
-    // claiming one host. `hp.current > 0.0` excludes a host that's about to despawn — without it, a manca
-    // could embed into a dying host and be lost with it (no gestation, no burst) the moment its own
-    // despawn path fires.
-    let fresh: Vec<(Entity, Vec3)> = hosts
+    // Snapshot fresh (un-infested, still-alive) host ids + positions once; `taken` guards against two
+    // mancae claiming one host. `hp.current > 0.0` excludes a host that's about to despawn — without it, a
+    // manca could embed into a dying host and be lost with it (no gestation, no burst) the moment its own
+    // despawn path fires. The `CyanideSmell::id` key matters here more than anywhere: the pick's payload
+    // is the host ENTITY — which creature gets infested — and co-located fresh hosts are routine, so a
+    // position-only tiebreak would let query order decide who carries the brood.
+    let fresh: Vec<(u64, Entity, Vec3)> = hosts
         .iter()
-        .filter(|(_, _, hp, inf)| !inf.active && hp.current > 0.0)
-        .map(|(e, t, _, _)| (e, t.translation))
+        .filter(|(_, _, hp, inf, _)| !inf.active && hp.current > 0.0)
+        .map(|(e, t, _, _, smell)| (smell.id, e, t.translation))
         .collect();
     let reach_sq = (HOST_BODY_RADIUS + beh.parasite_swarm.embed_range).powi(2);
     let mut taken: HashSet<Entity> = HashSet::new();
 
     for (seed, manca_e, mpos) in ready {
-        let best = nearest_planar(
+        let best = nearest_planar_keyed(
             mpos,
-            fresh.iter().filter(|(e, _)| !taken.contains(e)).map(|&(e, p)| (e, p)),
+            fresh.iter().filter(|(_, e, _)| !taken.contains(e)).map(|&(id, e, p)| (id, e, p)),
         );
         let Some((host_e, hpos, _d)) = best else { continue };
         if (hpos.xz() - mpos.xz()).length_squared() > reach_sq {
             continue; // nearest fresh host is out of burrow-in reach
         }
-        if let Ok((_, _, mut hp, mut inf)) = hosts.get_mut(host_e) {
+        if let Ok((_, _, mut hp, mut inf, _)) = hosts.get_mut(host_e) {
             hp.apply_damage(sim.parasite.embed_damage);
             inf.active = true;
             inf.timer = 0.0;
@@ -1577,6 +1626,7 @@ pub(crate) fn parasite_burst(
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
     manca_assets: Option<Res<MancaAssets>>,
+    manca_anim: Option<Res<MancaAnim>>,
     wound_assets: Option<Res<WoundAssets>>,
     mut seq: ResMut<MancaSpawnSeq>,
     mut gore: ResMut<GoreQueue>,
@@ -1587,7 +1637,9 @@ pub(crate) fn parasite_burst(
         With<Parasitizable>,
     >,
 ) {
-    let (Some(graph), Some(manca_assets), Some(wound_assets)) = (graph, manca_assets, wound_assets) else {
+    let (Some(graph), Some(manca_assets), Some(manca_anim), Some(wound_assets)) =
+        (graph, manca_assets, manca_anim, wound_assets)
+    else {
         return;
     };
     let p = &sim.parasite;
@@ -1663,7 +1715,7 @@ pub(crate) fn parasite_burst(
                             seq.0 += 1;
                             spawn_manca_on_patch(
                                 &mut commands, &graph, patch, &manca_assets.collider,
-                                &manca_assets.scene, s, p, &beh, brood_home, beh.parasite_swarm.embed_cooldown, Some((host_e, chest)),
+                                &manca_assets.scene, &manca_anim, s, p, &beh, brood_home, beh.parasite_swarm.embed_cooldown, Some((host_e, chest)),
                             );
                             live += 1;
                         }
@@ -1747,8 +1799,9 @@ fn manca_despawn_dead(
     if dead.is_empty() {
         return;
     }
-    // SORT-OK: per-manca spawn seed, unique — total by construction.
-    dead.sort_unstable_by_key(|(seed, _, _)| *seed);
+    // Ordering is load-bearing (gore free-list / entity-id reuse), so the unique-seed claim is CHECKED:
+    // `sort_total!` panics naming this site if two mancae ever mint one seed.
+    crate::sort_total!(&mut dead, |d: &(u32, Entity, Vec3)| d.0);
     for (_, entity, pos) in dead {
         gore.0.push(GoreEvent {
             pos,
@@ -1761,67 +1814,29 @@ fn manca_despawn_dead(
     }
 }
 
-/// Wire a manca's asynchronously-spawned `AnimationPlayer` to the shared graph (mirrors
-/// `crab::attach_crab_animation`). Skips players that don't belong to a manca.
-fn attach_manca_animation(
-    mut commands: Commands,
-    anim: Option<Res<MancaAnim>>,
-    added: Query<Entity, Added<AnimationPlayer>>,
-    parents: Query<&ChildOf>,
-    mancae: Query<(), With<Manca>>,
-) {
-    let Some(anim) = anim else { return };
-    for player in &added {
-        // Walk up the hierarchy to find the owning manca, if any.
-        let mut cur = player;
-        let owner = loop {
-            if mancae.get(cur).is_ok() {
-                break Some(cur);
-            }
-            match parents.get(cur) {
-                Ok(child_of) => cur = child_of.parent(),
-                Err(_) => break None,
-            }
+/// Point each manca's blend weights at its current state (mirrors `crab::drive_crab_animation`). The
+/// clips stay resident and cross-fade by weight, so a manca that flickers between Idle and Walk on the
+/// edge of a stimulus no longer restarts its scuttle from the first frame each time.
+///
+/// The eruption is the exception, and correctly so: it is a `OneShot`, and `trigger` restarts it from
+/// frame zero — a manca dragging itself out of a chest must always play that climb from the beginning.
+/// It fires on the *edge* into `BurrowOut` (detected from the weight the driver asked for last frame),
+/// so a manca whose emergence outlasts the clip holds the final pose instead of looping the climb.
+fn drive_manca_animation(mut mancae: Query<(&MancaAnimState, &mut crate::anim::PoseBlender)>) {
+    for (state, mut blender) in &mut mancae {
+        let slot = match state {
+            MancaAnimState::Snug => SLOT_SNUG,
+            MancaAnimState::Idle => SLOT_IDLE,
+            MancaAnimState::Walk => SLOT_WALK,
+            MancaAnimState::Climb => SLOT_CLIMB,
+            MancaAnimState::Attack => SLOT_ATTACK,
+            MancaAnimState::BurrowOut => SLOT_BURROW,
         };
-        let Some(owner) = owner else { continue };
-
-        commands
-            .entity(player)
-            .insert((AnimationGraphHandle(anim.graph.clone()), AnimationTransitions::new()));
-        commands.entity(owner).insert(MancaAnimPlayer { player, playing: None });
-    }
-}
-
-/// Cross-fade each manca's clip to match its state; only acts on a real change (mirrors
-/// `crab::drive_crab_animation`).
-fn drive_manca_animation(
-    anim: Option<Res<MancaAnim>>,
-    mut mancae: Query<(&MancaAnimState, &mut MancaAnimPlayer)>,
-    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
-) {
-    let Some(anim) = anim else { return };
-    for (state, mut link) in &mut mancae {
-        if link.playing == Some(*state) {
-            continue;
+        let entering_burrow = slot == SLOT_BURROW && blender.target_weight(SLOT_BURROW) <= 0.0;
+        blender.set_only(slot);
+        if entering_burrow {
+            blender.trigger(SLOT_BURROW);
         }
-        let Ok((mut player, mut transitions)) = players.get_mut(link.player) else {
-            continue; // transitions component not applied yet — retry next frame
-        };
-        let (node, speed) = match state {
-            MancaAnimState::Snug => (anim.snug, 1.0),
-            MancaAnimState::Idle => (anim.idle, 1.0),
-            MancaAnimState::Walk => (anim.walk, WALK_ANIM_SPEED),
-            MancaAnimState::Climb => (anim.climb, CLIMB_ANIM_SPEED),
-            MancaAnimState::Attack => (anim.attack, ATTACK_ANIM_SPEED),
-            MancaAnimState::BurrowOut => (anim.burrow, BURROW_ANIM_SPEED),
-        };
-        let active = transitions.play(&mut player, node, CROSSFADE);
-        // Every clip loops except the one-shot eruption climb-out, which must play through once.
-        if *state != MancaAnimState::BurrowOut {
-            active.repeat();
-        }
-        active.set_speed(speed);
-        link.playing = Some(*state);
     }
 }
 

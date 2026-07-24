@@ -39,10 +39,12 @@ const LASER_HALF: f32 = 0.02;
 /// (so a bolt that strikes the smiley watcher can attribute the hit to its real shooter — the watcher
 /// only ever retaliates against who actually attacked it; see `enemy::LastAttacker`).
 #[derive(Component)]
-struct Laser {
+pub(crate) struct Laser {
     velocity: Vec3,
     life: f32,
-    shooter: Entity,
+    /// `pub(crate)` so the cosmetic squad animation can react to a unit's shot by reading a newly-spawned
+    /// bolt's shooter (`squad::drive_valkyrie_animation`, on `Update`) — it never touches the hashed sim.
+    pub(crate) shooter: Entity,
     /// Stable, monotonic fire order — the key `update_lasers` sorts bolts by. `shooter` cannot serve:
     /// a raw `Entity` id is recycled, and it is exactly that recycling which permutes query order in the
     /// first place. `SquadMember` alone cannot serve either — one unit can have several bolts in flight,

@@ -818,13 +818,14 @@ pub(crate) fn nest_reproduce(
     graph: Option<Res<SurfaceGraph>>,
     dungeon: Res<Dungeon>,
     crab_assets: Option<Res<CrabAssets>>,
+    crab_anim: Option<Res<CrabAnim>>,
     mut nests: Query<(Entity, &mut crate::nest::Nest)>,
     crabs: Query<(), With<Crab>>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
 ) {
-    let (Some(graph), Some(crab_assets)) = (graph, crab_assets) else {
+    let (Some(graph), Some(crab_assets), Some(crab_anim)) = (graph, crab_assets, crab_anim) else {
         return;
     };
     let dt = time.delta_secs();
@@ -879,6 +880,7 @@ pub(crate) fn nest_reproduce(
             patch,
             &crab_assets.collider,
             &crab_assets.scene,
+            &crab_anim,
             s,
             &sim,
             beh.crab,

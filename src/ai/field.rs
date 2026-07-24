@@ -437,7 +437,10 @@ pub const ATTENTION_RATE: f32 = 1.0;
 /// its `forward` comes from `Transform.rotation`, whose glam slerp is not bit-identical across
 /// architectures — folding a rotation-derived channel would re-open the #46 cross-arch hash hazard (the
 /// same reason `LightField::fold_fingerprint` folds `base`, not the moving cone). Deposits go through the
-/// [`StigDeposits`] queue (drained + globally sorted), so batch order can't perturb the field.
+/// [`StigDeposits`] queue, which [`drain_deposits`] applies in RAW ARRIVAL ORDER — there is no global
+/// sort (see `laser.rs`: the batch is applied unsorted, so every PRODUCER must push in a deterministic
+/// order). This producer qualifies because it emits from `dungeon.floor_cells()` — a fixed grid raster,
+/// never an ECS query.
 pub fn deposit_attention(
     dungeon: Res<Dungeon>,
     fog: Res<crate::fog::FogGrid>,

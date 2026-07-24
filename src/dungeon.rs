@@ -1873,33 +1873,98 @@ fn header_wall(c: IVec2, dir: usize) -> Transform {
     base.with_translation(base.translation.with_y(y))
 }
 
-/// Transforms for the two arms of a convex corner: a full-length arm plus a shortened arm
-/// that stops at the full arm's inner face, so the two cuboids meet without overlapping
-/// (no coincident tops → no z-fighting on textured corners). Built as an NE template, then
-/// rotated by `quarter_turns` about the cell centre (NE→NW→SW→SE) — the `(full, short)` pair.
-fn corner_arms(c: IVec2, quarter_turns: u32) -> (Transform, Transform) {
-    let center = Vec3::new(c.x as f32 * TILE_SIZE, 0.0, c.y as f32 * TILE_SIZE);
-    let rot = Quat::from_rotation_y(quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
-    let flush = 0.5 * TILE_SIZE - WALL_HALF_THICKNESS; // arm inset so the outer face is on ±0.5
-    let y = WALL_HEIGHT * 0.5;
-    // Full arm on the east edge; short arm on the north edge (spans x −0.5 → +0.3).
-    let full_local = Vec3::new(flush, y, 0.0);
-    let short_local = Vec3::new(-WALL_HALF_THICKNESS, y, -flush);
-    let full = Transform {
-        translation: center + rot * full_local,
-        rotation: rot,
-        ..default()
-    };
-    let short = Transform {
-        translation: center + rot * short_local,
-        rotation: rot,
-        ..default()
-    };
-    (full, short)
+/// Transform, full box size, and trimmed-end count for the wall slab on edge `dir` of cell `c`, given
+/// which of that cell's four edges are walled. **One rule for every case** — no corner templates, no
+/// greedy pair consumption:
+///
+/// * an **E/W** slab always runs the full tile length along Z;
+/// * an **N/S** slab is **trimmed** by [`WALL_THICKNESS`] at each end whose perpendicular (E/W) edge is
+///   also walled, so it stops exactly at that slab's inner face.
+///
+/// The asymmetry is what makes the set watertight: at a corner the E/W slab owns the shared
+/// `WALL_THICKNESS²` column and the N/S slab yields it. Over all 16 subsets of `walled` the slabs are
+/// pairwise disjoint (no coincident faces → no z-fighting on textured corners) and leave no gap; see
+/// `walls_of_a_cell_never_overlap_and_leave_no_gap`. The predecessor consumed adjacent walled *pairs* as
+/// L-shaped corner arms and left any remaining edge at full length, so every cell with three or four
+/// walled edges — dead-end corridor caps, notched room corners — double-occupied a corner column.
+///
+/// The returned count (0, 1 or 2) is how many ends were removed; it indexes the caller's pre-built mesh
+/// set, so the trim rule lives in exactly one place.
+fn edge_wall(c: IVec2, dir: usize, walled: [bool; 4]) -> (Transform, Vec3, usize) {
+    let base = straight_wall(c, dir);
+    match dir {
+        E | W => (base, Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE), 0),
+        N | S => {
+            let trim_w = if walled[W] { WALL_THICKNESS } else { 0.0 };
+            let trim_e = if walled[E] { WALL_THICKNESS } else { 0.0 };
+            let trims = walled[W] as usize + walled[E] as usize;
+            // The N/S cuboid is rotated a quarter turn, so its long axis is world X: shorten it along Z
+            // (pre-rotation) and slide it in world X toward whichever end was NOT trimmed.
+            let transform = Transform {
+                translation: base.translation + Vec3::X * ((trim_w - trim_e) * 0.5),
+                ..base
+            };
+            (
+                transform,
+                Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE - trim_w - trim_e),
+                trims,
+            )
+        }
+        _ => unreachable!(),
+    }
 }
 
-/// The four convex corners as `(edge_a, edge_b, quarter_turns)`.
-const CORNERS: [(usize, usize, u32); 4] = [(N, E, 0), (N, W, 1), (S, W, 2), (S, E, 3)];
+/// The four cells meeting at a tile vertex, as `(cell offset from the vertex, v_edge, h_edge)`: the vertex
+/// is that cell's corner, `v_edge` is the cell's vertical (E/W) edge there and `h_edge` its horizontal
+/// (N/S) one. Order: NW cell, NE, SW, SE.
+const VERTEX_QUADRANTS: [(IVec2, usize, usize); 4] = [
+    (IVec2::new(0, 0), E, S),
+    (IVec2::new(1, 0), W, S),
+    (IVec2::new(0, 1), E, N),
+    (IVec2::new(1, 1), W, N),
+];
+
+/// The corner post (if any) that closes `quadrant` of the tile vertex whose NW cell is `vertex` — the
+/// `WALL_THICKNESS²` column left where a vertical wall run meets a horizontal one but the floor cell
+/// owning the junction contributes neither slab. Returns `(home cell, centre, outward)`; `home` owns the
+/// post for the fog reveal (always a floor cell, never rock) and `outward` is the diagonal the knee-wall
+/// cutaway squashes along.
+///
+/// The post is **inset exactly like every wall**, never centred on the vertex. A wall's outer face sits on
+/// the tile boundary, so a vertex-centred post pushes half its width straight through that face into the
+/// void and fills only a quarter of the gap it exists to close — the player-reported "the walls build off
+/// origin at one side, but the corners align in the centre … half of the corner pieces poke through the
+/// wall" (debug capture 2026-07-24). Which side each axis insets to follows the cell that owns the
+/// adjacent slab, not which cells are floor; the two disagree at a diagonal pinch.
+///
+/// A corner needs no post when the owning cell walls it itself: an E/W slab spans the full tile length,
+/// and an N/S slab is trimmed only at an end whose perpendicular E/W edge is walled (see [`edge_wall`]),
+/// so *either* of the cell's own edges at the vertex being walled already covers the column.
+fn corner_post(dungeon: &Dungeon, vertex: IVec2, quadrant: usize) -> Option<(IVec2, Vec3, Vec3)> {
+    let (offset, v_edge, h_edge) = VERTEX_QUADRANTS[quadrant];
+    let cell = vertex + offset;
+    if !dungeon.is_floor(cell) || dungeon.walled(cell, v_edge) || dungeon.walled(cell, h_edge) {
+        return None;
+    }
+    // Both runs must actually continue past the vertex, else there is no junction to close: the vertical
+    // run beyond this cell's horizontal edge, and the horizontal run beyond its vertical edge. `walled` is
+    // false off-grid and on rock, so boundary vertices need no special case.
+    if !dungeon.walled(Dungeon::neighbor(cell, h_edge), v_edge)
+        || !dungeon.walled(Dungeon::neighbor(cell, v_edge), h_edge)
+    {
+        return None;
+    }
+    // `v_edge == E` ⇒ the cell lies west of the vertex, so its corner column is the WALL_THICKNESS band
+    // just west of it (centre one half-thickness back), and the rock is east ⇒ outward +X. Likewise for Z.
+    let (dx, out_x) = if v_edge == E { (-WALL_HALF_THICKNESS, 1.0) } else { (WALL_HALF_THICKNESS, -1.0) };
+    let (dz, out_z) = if h_edge == S { (-WALL_HALF_THICKNESS, 1.0) } else { (WALL_HALF_THICKNESS, -1.0) };
+    let centre = Vec3::new(
+        (vertex.x as f32 + 0.5) * TILE_SIZE + dx,
+        WALL_HEIGHT * 0.5,
+        (vertex.y as f32 + 0.5) * TILE_SIZE + dz,
+    );
+    Some((cell, centre, Vec3::new(out_x, 0.0, out_z)))
+}
 
 /// Build a wall cuboid whose wallpaper stands upright on every side face. Bevy's default
 /// `Cuboid` UVs lay the texture on its side on the ±X faces, so straight walls and full corner
@@ -1985,13 +2050,15 @@ fn spawn_tiles(
     });
 
     let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
-    let full_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, TILE_SIZE);
-    let short_size = Vec3::new(TILE_SIZE - WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
+    // One mesh per trimmed length — index by the number of ends [`edge_wall`] removed (0, 1 or 2). An
+    // E/W slab is always index 0; only N/S slabs shorten, and only at a corner.
+    let wall_meshes: [Handle<Mesh>; 3] = std::array::from_fn(|trims| {
+        let len = TILE_SIZE - trims as f32 * WALL_THICKNESS;
+        meshes.add(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len)))
+    });
     // A corner post is a WALL_THICKNESS² column standing the full wall height, filling the vertex gap
     // where two perpendicular wall runs meet (see the post loop after the wall pass).
     let post_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
-    let wall_full = meshes.add(wall_mesh(full_size));
-    let wall_short = meshes.add(wall_mesh(short_size));
     let wall_post = meshes.add(wall_mesh(post_size));
 
     // One static half-space at y=0 catches every gib chunk (the whole floor is at y=0), so we don't
@@ -2091,108 +2158,48 @@ fn spawn_tiles(
                 walled[dir] = dungeon.walled(cell, dir);
             }
 
-            // Greedily consume adjacent walled pairs as clean L-corners (full + short arm)...
-            for (a, b, turns) in CORNERS {
-                if walled[a] && walled[b] {
-                    let (full, short) = corner_arms(cell, turns);
-                    spawn_tile(
-                        cell,
-                        wall_full.clone(),
-                        wall_mat.clone(),
-                        full,
-                        Some(full_size),
-                        Cutaway::Wall,
-                    );
-                    spawn_tile(
-                        cell,
-                        wall_short.clone(),
-                        wall_mat.clone(),
-                        short,
-                        Some(short_size),
-                        Cutaway::Wall,
-                    );
-                    walled[a] = false;
-                    walled[b] = false;
-                }
-            }
-            // ...then straight walls for any remaining single edges.
+            // One slab per walled edge, sized by `edge_wall`'s single trim rule. No corner templates and
+            // no greedy pair consumption, so a cell with three or four walled edges no longer
+            // double-occupies a corner column.
             for dir in [N, E, S, W] {
-                if walled[dir] {
-                    spawn_tile(
-                        cell,
-                        wall_full.clone(),
-                        wall_mat.clone(),
-                        straight_wall(cell, dir),
-                        Some(full_size),
-                        Cutaway::Wall,
-                    );
+                if !walled[dir] {
+                    continue;
                 }
+                let (transform, size, trims) = edge_wall(cell, dir, walled);
+                spawn_tile(
+                    cell,
+                    wall_meshes[trims].clone(),
+                    wall_mat.clone(),
+                    transform,
+                    Some(size),
+                    Cutaway::Wall,
+                );
             }
         }
     }
 
-    // Corner posts: fill the ~WALL_THICKNESS² column left at a tile-corner vertex where two
-    // PERPENDICULAR wall runs meet but no single cell owns the convex corner — a concave corner, or a
-    // junction whose two walls come from different cells. `corner_arms` above already fills single-cell
-    // convex corners with its full arm, so those vertices are skipped to avoid overlapping geometry.
-    // Without this the two 0.14 m-thin inset wall slabs meet at the shared vertex leaving a small empty
-    // post-shaped gap for the full wall height. One post per vertex — the `-1..dim` scan visits each once.
+    // Corner posts: fill the WALL_THICKNESS² column left at a tile-corner vertex where two PERPENDICULAR
+    // wall runs meet but the floor cell owning the junction contributes neither slab — a concave corner,
+    // or a junction whose two walls come from different cells. Without this the two 0.14 m-thin inset
+    // slabs meet at the shared vertex leaving a small empty post-shaped notch for the full wall height.
+    // `corner_post` decides per quadrant (a vertex has four), so a post is inset flush with the walls it
+    // joins instead of straddling the tile boundary. The `-1..dim` scan visits each vertex once.
     for cz in -1..dungeon.height as i32 {
         for cx in -1..dungeon.width as i32 {
-            // The four cells around vertex V at world (cx+0.5, cz+0.5): V is A's SE / B's SW / C's NE /
-            // D's NW corner. `walled` is false for non-floor cells, so boundary vertices work unchanged.
-            let a = IVec2::new(cx, cz);
-            let b = IVec2::new(cx + 1, cz);
-            let c = IVec2::new(cx, cz + 1);
-            let d = IVec2::new(cx + 1, cz + 1);
-
-            // Walled half-edges incident to V (true if the wall exists on either adjacent cell).
-            let north_v = dungeon.walled(a, E) || dungeon.walled(b, W); // vertical edge (cells A|B)
-            let south_v = dungeon.walled(c, E) || dungeon.walled(d, W); // vertical edge (cells C|D)
-            let west_h = dungeon.walled(a, S) || dungeon.walled(c, N); // horizontal edge (cells A|C)
-            let east_h = dungeon.walled(b, S) || dungeon.walled(d, N); // horizontal edge (cells B|D)
-
-            // A post is needed only where a vertical run meets a horizontal run (a real corner/junction).
-            if !((north_v || south_v) && (west_h || east_h)) {
-                continue;
+            let vertex = IVec2::new(cx, cz);
+            for quadrant in 0..VERTEX_QUADRANTS.len() {
+                let Some((home, centre, outward)) = corner_post(&dungeon, vertex, quadrant) else {
+                    continue;
+                };
+                spawn_tile(
+                    home,
+                    wall_post.clone(),
+                    wall_mat.clone(),
+                    Transform::from_translation(centre),
+                    Some(post_size),
+                    Cutaway::Post(outward),
+                );
             }
-            // Skip the convex single-cell corners `corner_arms` already fills (each surrounding cell with
-            // both of its edges-at-V walled matches one CORNERS template), so posts never overlap an arm.
-            let convex_handled = (dungeon.walled(a, S) && dungeon.walled(a, E))
-                || (dungeon.walled(b, S) && dungeon.walled(b, W))
-                || (dungeon.walled(c, N) && dungeon.walled(c, E))
-                || (dungeon.walled(d, N) && dungeon.walled(d, W));
-            if convex_handled {
-                continue;
-            }
-
-            // Outward points from floor into rock on each walled axis so the post squashes together with
-            // its neighbour knee walls under Q/E rotation (`faces_camera` uses only the dot's sign).
-            let west_floor = dungeon.is_floor(a) || dungeon.is_floor(c);
-            let north_floor = dungeon.is_floor(a) || dungeon.is_floor(b);
-            let outward = Vec3::new(
-                if west_floor { 1.0 } else { -1.0 },
-                0.0,
-                if north_floor { 1.0 } else { -1.0 },
-            );
-            // Own the post to a bordering floor cell so the fog reveals it with that room (never rock).
-            let home = [a, b, c, d]
-                .into_iter()
-                .find(|&cc| dungeon.is_floor(cc))
-                .unwrap_or(a);
-            let post_pos = Vec3::new(
-                (cx as f32 + 0.5) * TILE_SIZE,
-                WALL_HEIGHT * 0.5,
-                (cz as f32 + 0.5) * TILE_SIZE,
-            );
-            spawn_tile(
-                home,
-                wall_post.clone(),
-                wall_mat.clone(),
-                Transform::from_translation(post_pos),
-                Some(post_size),
-                Cutaway::Post(outward),
-            );
         }
     }
 
@@ -2233,6 +2240,195 @@ fn spawn_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// World-space AABB of a wall cuboid: `size` is the pre-rotation box, and the only rotations used are
+    /// identity (E/W) or a quarter turn about Y (N/S), which swaps the X and Z extents.
+    fn wall_aabb(t: &Transform, size: Vec3) -> (Vec3, Vec3) {
+        let rotated = (t.rotation * size).abs(); // quarter turns keep it axis-aligned
+        let half = rotated * 0.5;
+        (t.translation - half, t.translation + half)
+    }
+
+    /// Do two AABBs share interior volume? Touching faces (`a.max == b.min`) are fine — that is exactly how
+    /// abutting slabs are meant to meet; only genuine overlap double-occupies a column.
+    fn aabbs_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
+        const EPS: f32 = 1e-4;
+        (0..3).all(|i| a.0[i] + EPS < b.1[i] && b.0[i] + EPS < a.1[i])
+    }
+
+    /// [`edge_wall`]'s single trim rule is watertight for **all 16** wall subsets of a cell: the slabs
+    /// never overlap (no coincident faces → no z-fighting) and together they cover every walled edge band
+    /// including its two corner columns.
+    ///
+    /// This is the regression for the player-reported corner artifact (debug capture 2026-07-24). The
+    /// predecessor consumed adjacent walled *pairs* as L-shaped corner arms and left any third/fourth edge
+    /// at full tile length, so e.g. a cell walled N+E+W double-occupied `x ∈ [−0.50,−0.36] ×
+    /// z ∈ [−0.50,−0.36]`, and a fully-walled cell double-occupied two such columns.
+    #[test]
+    fn walls_of_a_cell_never_overlap_and_leave_no_gap() {
+        let cell = IVec2::new(3, 5);
+        let centre = Vec3::new(cell.x as f32 * TILE_SIZE, 0.0, cell.y as f32 * TILE_SIZE);
+
+        for mask in 0u8..16 {
+            let mut walled = [false; 4];
+            for (dir, w) in walled.iter_mut().enumerate() {
+                *w = mask & (1 << dir) != 0;
+            }
+            let boxes: Vec<(Vec3, Vec3)> = [N, E, S, W]
+                .into_iter()
+                .filter(|&dir| walled[dir])
+                .map(|dir| {
+                    let (t, size, _) = edge_wall(cell, dir, walled);
+                    wall_aabb(&t, size)
+                })
+                .collect();
+
+            // (1) Pairwise disjoint.
+            for i in 0..boxes.len() {
+                for j in (i + 1)..boxes.len() {
+                    assert!(
+                        !aabbs_overlap(boxes[i], boxes[j]),
+                        "walled={walled:?}: slabs {i} and {j} overlap ({:?} vs {:?})",
+                        boxes[i],
+                        boxes[j]
+                    );
+                }
+            }
+
+            // (2) No gap: every walled edge's band — corner columns included — is covered by some slab.
+            // Probe the two corner columns and the middle of each walled edge.
+            for dir in [N, E, S, W] {
+                if !walled[dir] {
+                    continue;
+                }
+                // Sample the slab's centre line at both ends and the middle. The end samples sit at
+                // ±(half tile − half thickness), i.e. strictly *inside* the two corner columns — the
+                // squares an E/W slab must own and an N/S slab must yield. A boundary sample would pass
+                // vacuously; these fail if either column is left bare.
+                let depth = 0.5 * TILE_SIZE - WALL_HALF_THICKNESS; // slab centre-line offset
+                let along = [-depth, 0.0, depth];
+                let probes: Vec<Vec3> = along
+                    .iter()
+                    .map(|&a| match dir {
+                        N => centre + Vec3::new(a, WALL_HEIGHT * 0.5, -depth),
+                        S => centre + Vec3::new(a, WALL_HEIGHT * 0.5, depth),
+                        E => centre + Vec3::new(depth, WALL_HEIGHT * 0.5, a),
+                        _ => centre + Vec3::new(-depth, WALL_HEIGHT * 0.5, a),
+                    })
+                    .collect();
+                for p in probes {
+                    assert!(
+                        boxes.iter().any(|b| (0..3).all(|i| p[i] >= b.0[i] - 1e-4 && p[i] <= b.1[i] + 1e-4)),
+                        "walled={walled:?}: point {p:?} on edge {dir} is not covered by any slab"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`corner_post`] over **all 16** floor/rock arrangements of the four cells around a vertex: every
+    /// post it returns sits flush inside its home floor cell (never straddling the tile boundary, which is
+    /// the "half of the corner pieces poke through the wall" bug), never overlaps a wall slab, and appears
+    /// exactly where a junction is genuinely bare.
+    #[test]
+    fn corner_posts_are_inset_flush_and_never_overlap_a_wall() {
+        // A 4×4 grid whose middle 2×2 (cells (1,1)..(2,2)) is set from the mask; the outer ring stays rock
+        // so the vertex under test is the one between them, at IVec2::new(1, 1).
+        let vertex = IVec2::new(1, 1);
+        let quadrant_cells = [IVec2::new(1, 1), IVec2::new(2, 1), IVec2::new(1, 2), IVec2::new(2, 2)];
+
+        for mask in 0u8..16 {
+            let mut walkable = vec![false; 16];
+            for (bit, c) in quadrant_cells.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    walkable[(c.y * 4 + c.x) as usize] = true;
+                }
+            }
+            let d = Dungeon::from_walkable(4, 4, walkable);
+
+            // Every wall slab in the whole grid, so a post can be checked against all of them.
+            let mut slabs: Vec<(Vec3, Vec3)> = Vec::new();
+            for y in 0..4 {
+                for x in 0..4 {
+                    let cell = IVec2::new(x, y);
+                    if !d.is_floor(cell) {
+                        continue;
+                    }
+                    let mut walled = [false; 4];
+                    for dir in [N, E, S, W] {
+                        walled[dir] = d.walled(cell, dir);
+                    }
+                    for dir in [N, E, S, W] {
+                        if walled[dir] {
+                            let (t, size, _) = edge_wall(cell, dir, walled);
+                            slabs.push(wall_aabb(&t, size));
+                        }
+                    }
+                }
+            }
+
+            let post_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
+            for quadrant in 0..VERTEX_QUADRANTS.len() {
+                let Some((home, centre, outward)) = corner_post(&d, vertex, quadrant) else {
+                    continue;
+                };
+                let post = wall_aabb(&Transform::from_translation(centre), post_size);
+
+                assert!(d.is_floor(home), "mask={mask:#06b} q={quadrant}: post home {home:?} is not floor");
+                // Flush, not straddling: the post lies wholly inside its home cell's tile square.
+                let lo = Vec3::new(
+                    (home.x as f32 - 0.5) * TILE_SIZE,
+                    0.0,
+                    (home.y as f32 - 0.5) * TILE_SIZE,
+                );
+                let hi = Vec3::new(
+                    (home.x as f32 + 0.5) * TILE_SIZE,
+                    WALL_HEIGHT,
+                    (home.y as f32 + 0.5) * TILE_SIZE,
+                );
+                for i in 0..3 {
+                    assert!(
+                        post.0[i] >= lo[i] - 1e-4 && post.1[i] <= hi[i] + 1e-4,
+                        "mask={mask:#06b} q={quadrant}: post {post:?} pokes outside home cell {home:?}"
+                    );
+                }
+                // And it fills the notch rather than double-occupying a slab.
+                for s in &slabs {
+                    assert!(
+                        !aabbs_overlap(post, *s),
+                        "mask={mask:#06b} q={quadrant}: post {post:?} overlaps wall slab {s:?}"
+                    );
+                }
+                // `outward` is the floor→rock diagonal: both components are unit signs.
+                assert_eq!(outward.y, 0.0);
+                assert!(outward.x.abs() == 1.0 && outward.z.abs() == 1.0, "outward {outward:?}");
+            }
+        }
+    }
+
+    /// The concave corner, spelled out: floor at (0,0), (1,0), (0,1) with (1,1) rock leaves a bare
+    /// `0.14²` notch at the (0,0) cell's SE corner — centre `(0.43, 0.43)`, NOT the tile vertex `(0.5,
+    /// 0.5)` the old code used. Exactly one post closes it.
+    #[test]
+    fn concave_corner_post_sits_at_the_notch_not_the_vertex() {
+        let d = Dungeon::from_walkable(3, 3, {
+            let mut w = vec![false; 9];
+            for c in [IVec2::new(0, 0), IVec2::new(1, 0), IVec2::new(0, 1)] {
+                w[(c.y * 3 + c.x) as usize] = true;
+            }
+            w
+        });
+        let posts: Vec<_> = (0..VERTEX_QUADRANTS.len())
+            .filter_map(|q| corner_post(&d, IVec2::new(0, 0), q))
+            .collect();
+        assert_eq!(posts.len(), 1, "one post closes a concave corner, got {posts:?}");
+        let (home, centre, outward) = posts[0];
+        assert_eq!(home, IVec2::new(0, 0));
+        let expect = 0.5 * TILE_SIZE - WALL_HALF_THICKNESS; // 0.43, flush with both slabs' inner faces
+        assert!((centre.x - expect).abs() < 1e-5, "post x {} != {expect}", centre.x);
+        assert!((centre.z - expect).abs() < 1e-5, "post z {} != {expect}", centre.z);
+        assert_eq!(outward, Vec3::new(1.0, 0.0, 1.0), "outward points SE, into the rock cell");
+    }
 
     /// The doorway keep-clear reject (`footprint_clears_openings`): a footprint parked in a doorway's
     /// approach band is rejected; one clear of it is accepted; and a corridor mouth on the +X wall neans

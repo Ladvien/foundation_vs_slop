@@ -169,6 +169,31 @@ pub struct ParasiteTuning {
     pub manip_dark_gain: f32,
 }
 
+/// SCP-999 — the friendly "Tickle Monster" comfort blob (see `crate::scp999`). The only creature that
+/// *lowers* squad anxiety: it oozes to the most-frightened member and, on contact, drains their FEAR and
+/// lifts MORALE (companion-animal social buffering — Beetz et al. 2012). Every dial is evolvable
+/// (`squad_ai::world_genome`) — including `count` — so the ecosystem search can tune both how strongly a
+/// comfort source counteracts fear and how many are present (POET-style world co-evolution).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scp999Tuning {
+    /// Comfort blobs seeded into the level at start.
+    pub count: usize,
+    /// Ooze speed toward the most-anxious member (world units/s).
+    pub move_speed: f32,
+    /// Extra reach beyond the member's body radius at which a touch counts as a tickle.
+    pub contact_radius: f32,
+    /// FEAR drained per second while tickling a member (the anxiety relief).
+    pub calm_rate: f32,
+    /// MORALE lifted per second while tickling a member.
+    pub morale_rate: f32,
+    /// How far from the squad's spawn cell (in tiles) a blob must start — it seeds out in the level like
+    /// the crabs and the Smiley, not at the squad's feet, so relief has to be *found*. This is the lever
+    /// that sets how long the squad carries its fear before the comfort source reaches it, which is why it
+    /// evolves alongside `calm_rate` rather than sitting as a code constant.
+    pub spawn_min_dist: f32,
+}
+
 /// Root simulation-tuning resource. Extend with new sections as later phases need them; keep
 /// [`SimTuning::default`] bit-identical to the shipped consts, guarded by the deterministic-core hash.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -180,6 +205,7 @@ pub struct SimTuning {
     pub breeding: BreedingTuning,
     pub boss: BossTuning,
     pub parasite: ParasiteTuning,
+    pub scp999: Scp999Tuning,
 }
 
 impl Default for SimTuning {
@@ -246,6 +272,14 @@ impl Default for SimTuning {
                 manip_cohesion_drop: 0.05,
                 manip_curiosity_gain: 0.9,
                 manip_dark_gain: 3.0,
+            },
+            scp999: Scp999Tuning {
+                count: 1,
+                move_speed: 2.2,      // a touch faster than the crab crawl (1.8) so it can reach members
+                contact_radius: 0.9,  // reach = UNIT_BODY_RADIUS(0.33) + 0.9 = ~1.23 m; a generous tickle
+                calm_rate: 0.6,       // ~1.6 s of contact to soothe FEAR 1→0 — a gentle sustained comfort
+                morale_rate: 0.4,
+                spawn_min_dist: 18.0, // well past the crabs' 12 — the comfort blob is the far reward
             },
         }
     }
@@ -353,6 +387,14 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     probability("parasite.manip_cohesion_drop", t.parasite.manip_cohesion_drop)?;
     probability("parasite.manip_curiosity_gain", t.parasite.manip_curiosity_gain)?;
     positive("parasite.manip_dark_gain", t.parasite.manip_dark_gain)?;
+
+    // SCP-999 (comfort blob). `count` is a usize (0 = a world with no comfort blob, a valid scenario), so
+    // only the continuous effect/movement dials are range-checked here.
+    positive("scp999.move_speed", t.scp999.move_speed)?;
+    positive("scp999.contact_radius", t.scp999.contact_radius)?;
+    positive("scp999.calm_rate", t.scp999.calm_rate)?;
+    positive("scp999.morale_rate", t.scp999.morale_rate)?;
+    positive("scp999.spawn_min_dist", t.scp999.spawn_min_dist)?;
 
     Ok(())
 }

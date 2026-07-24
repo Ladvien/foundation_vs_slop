@@ -85,14 +85,50 @@ pub fn sync_sim_blocked(
     // this single `SimBlocked` writer (not a second writer of `Time<Virtual>`/`GameSpeed`) so the one
     // pause path holds. Never present in release — the resource is only inserted by the debug tool.
     note_input: Option<Res<crate::NoteInputActive>>,
+    // Per spec, **arming** the region capture (Ctrl/Cmd+P) auto-pauses so the player boxes a *still*
+    // frame — not just while the note box is open afterwards. `DebugCaptureActive` is always compiled and
+    // stays `false` in release (the dev tool that sets it is stripped), so this adds no release behaviour,
+    // and it routes the arm-freeze through this one `SimBlocked` writer exactly like the note box — never a
+    // second writer of `UserPaused`/`Time<Virtual>`.
+    capture: Res<crate::DebugCaptureActive>,
     mut blocked: ResMut<SimBlocked>,
 ) {
-    let want = note_input.is_some()
-        || match app_state.get() {
-            AppState::Boot | AppState::Title | AppState::Warmup => true,
-            AppState::InGame => menu.map(|m| m.get().is_blocking()).unwrap_or(false),
-        };
+    let menu_blocking = menu.map(|m| m.get().is_blocking()).unwrap_or(false);
+    let want = should_freeze(capture.0, note_input.is_some(), app_state.get(), menu_blocking);
     if blocked.0 != want {
         blocked.0 = want;
+    }
+}
+
+/// Pure freeze decision for [`sync_sim_blocked`], split out so the single-writer freeze rule — including
+/// the spec's "arming Cmd+P auto-pauses" — is unit-testable without an `App`. The sim freezes when the
+/// region capture is **armed** (`capture_active`), while the note box is open (`note_open`), during
+/// boot/title/warmup, or while a blocking in-game menu is up.
+fn should_freeze(capture_active: bool, note_open: bool, app_state: &AppState, menu_blocking: bool) -> bool {
+    capture_active
+        || note_open
+        || match app_state {
+            AppState::Boot | AppState::Title | AppState::Warmup => true,
+            AppState::InGame => menu_blocking,
+        }
+}
+
+#[cfg(test)]
+mod freeze_tests {
+    use super::*;
+
+    /// Pins the spec requirement: arming the region capture (Ctrl/Cmd+P) auto-pauses the sim — and the
+    /// release-safety invariant that normal play does not freeze (so a stripped dev tool changes nothing).
+    #[test]
+    fn arming_region_capture_freezes_the_sim() {
+        // The spec: an armed capture freezes the frame so the box is drawn on a still image.
+        assert!(should_freeze(true, false, &AppState::InGame, false), "armed capture must freeze");
+        // Existing behaviour: the note box freezes while typing.
+        assert!(should_freeze(false, true, &AppState::InGame, false), "open note box must freeze");
+        // Release-safe / normal play: nothing armed, no note, in game, no menu → the sim runs.
+        assert!(!should_freeze(false, false, &AppState::InGame, false), "normal play must NOT freeze");
+        // Boot/title/warmup always freeze; a blocking in-game menu freezes.
+        assert!(should_freeze(false, false, &AppState::Title, false));
+        assert!(should_freeze(false, false, &AppState::InGame, true));
     }
 }
