@@ -869,6 +869,14 @@ fn attach_screen_lights(
                 // shadowless room fixtures, this one spotlight casts — one shadow map per TV, affordable
                 // since TVs are rare (one per living room with a media surface).
                 shadow_maps_enabled: true,
+                // Bumped from Bevy's default (1.8) — a TV sits close to a wall in a small room, and the
+                // squad can stand right up against it, so this light's shadow casters are often only a
+                // metre or so out. At that range self-shadowing ("shadow acne") reads as jagged noise on
+                // the receiver, which is what the player-reported artifacts (`debug_screenshots/
+                // region_2026-07-25_16-53-51-436.png`, "Wtf are these shadow artifacts?") most resemble.
+                // The doc on this field: too low → acne, too high → shadows detach from their caster
+                // ("Peter Panning") — this stays modest and on the low side of that failure mode.
+                shadow_normal_bias: 3.0,
                 ..default()
             },
             // At screen height, a touch in front of the face. The furniture forward convention is +Z
@@ -891,7 +899,12 @@ fn flicker_screens(time: Res<Time>, mut lights: Query<(&ScreenLight, &mut SpotLi
         // can't, with a floor so the screen never fully dies.
         let fast = 0.5 + 0.5 * (t * SCREEN_FLICKER_HZ + sl.phase).sin();
         let roll = 0.5 + 0.5 * (t * 2.7 + sl.phase * 1.7).sin();
-        let mult = 0.62 + 0.38 * fast * roll; // ∈ [0.62, 1.0]: mostly lit, restless dips
+        // ∈ [0.80, 1.0]: restless, but shallower than the old [0.62, 1.0]. This is the *only* light in
+        // the game that casts a real shadow map (see `attach_screen_lights`); a hard, unfiltered shadow
+        // edge pulsing through a 38-point intensity swing every frame reads as the shadow itself
+        // flickering, not just the room's brightness. Halving the swing keeps the restless-CRT character
+        // without making its shadow the most visually loud thing in a room it's supposed to be ambient.
+        let mult = 0.80 + 0.20 * fast * roll;
         let next = sl.base_intensity * mult;
         if light.intensity != next {
             light.intensity = next;

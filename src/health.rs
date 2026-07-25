@@ -220,6 +220,22 @@ impl Material for HealthBarMaterial {
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
     }
+    // `AlphaMode::Blend` writes no depth, so Bevy orders bars purely by a painter's-algorithm sort on
+    // `rangefinder.distance(aabb_centre) + depth_bias` (one key per mesh). Every bar floats at the same
+    // fixed `BAR_Y` above its owner, so a tightly clustered squad — exactly the case a health bar most
+    // needs to read clearly — puts several bars' AABB centres within millimetres of each other and the
+    // camera. With `depth_bias` defaulted to 0.0 for every bar, that's a near-tie, and which bar paints
+    // on top is then decided by ECS extraction order — not stable across frames (this project's own
+    // rule: "ECS query order decides nothing"). That reads as flickering, exactly the class of bug
+    // already fixed for `BloodPoolMaterial` in `gore.rs`; here the tiebreak is cheaper: `_pad0` carries
+    // a stable per-bar seed (set once in `attach_health_bars`, never touching the shader, which only
+    // reads `fraction`) instead of a `Transform` jitter, since a bar's own screen position must stay
+    // exact for its fill to read as attached to its owner. `_pad0` is stamped as a clean integer in
+    // `[0, 100_000)` (see `attach_health_bars`), so this divides rather than `.fract()`s it down to
+    // `[0, 1)` — an already-whole-number float has no fractional part for `.fract()` to return.
+    fn depth_bias(&self) -> f32 {
+        (self.settings._pad0 / 100_000.0 - 0.5) * 0.004
+    }
 }
 
 /// Shared quad mesh for every bar.
@@ -250,13 +266,23 @@ fn attach_health_bars(
     mut commands: Commands,
     assets: Res<HealthBarAssets>,
     mut materials: ResMut<Assets<HealthBarMaterial>>,
-    owners: Query<(Entity, &Health), (Without<HasHealthBar>, Without<NoHealthBar>)>,
+    owners: Query<(Entity, &Health, &Transform), (Without<HasHealthBar>, Without<NoHealthBar>)>,
 ) {
-    for (owner, health) in &owners {
+    for (owner, health, tf) in &owners {
+        // Stable per-bar tiebreak seed for `HealthBarMaterial::depth_bias` — the owner's spawn
+        // position, not `owner.to_bits()` (entity ids are spawn-order/allocator-dependent, so which
+        // bar wins a sort tie would vary same-seed run to run; a position is immortal). Same hashing
+        // recipe as `light::attach_fixture_lights`'s flicker seed. Reduced to a small integer
+        // (`% 100_000`) before the `as f32` cast — casting a full `u32` hash straight to `f32` rounds
+        // away its low bits (a `u32` needs 32 mantissa bits, `f32` has 24), which left `_pad0.fract()`
+        // returning ~0.0 for every bar, silently defeating the whole tiebreak.
+        let p = tf.translation;
+        let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
+        let h = seed.wrapping_mul(0x9E37_79B1);
         let material = materials.add(HealthBarMaterial {
             settings: HealthBarUniform {
                 fraction: health.fraction(),
-                _pad0: 0.0,
+                _pad0: (h % 100_000) as f32,
                 _pad1: 0.0,
                 _pad2: 0.0,
             },
