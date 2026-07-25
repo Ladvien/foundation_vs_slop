@@ -1,5 +1,28 @@
 # SCP-1048 ("Builder Bear") — game asset hand-off
 
+## The family
+
+Four bears ship from one parameterised recipe, sharing an **8-bone rig**, a clip vocabulary and a
+canon ~0.33 m size. Clip names are prefixed per variant (`scp1048_*`, `scp1048a_*`, …), so all four
+can be loaded **simultaneously** without animation-name collisions. This document is the base
+contract — the variant docs cover only what differs.
+
+| Asset | What it is | Clips | Tris | Doc |
+|---|---|---|---|---|
+| `scp1048` | the benign original | 5 | ~4.6k | this file |
+| `scp1048a` | **hostile** — a bear built of human ears, no face | 5 | **11.7k** ⚠️ | [`../scp1048a/README.md`](../scp1048a/README.md) |
+| `scp1048b` | **hostile** — an infant arm through a torn seam | 6 | 4.7k | [`../scp1048b/README.md`](../scp1048b/README.md) |
+| `scp1048c` | **hostile** — rusted scrap copy with an arm gun | 8 | 5.2k | [`../scp1048c/README.md`](../scp1048c/README.md) |
+
+Only the original ships `draw_picture`; the three copies drop it as tonally wrong. `rest_idle`,
+`jump_in_place` and `sit_down` are common to all four. **A embeds CC-BY geometry** and carries a
+mandatory `ATTRIBUTION.md`.
+
+Nothing in `src/` loads any of them yet — they are staged for a future `scp1048` module, which
+would most naturally own all four behind one marker plus a variant enum.
+
+---
+
 ## 0. Artist-guide conformance (`docs/artist_guide.md` §3 / §14)
 
 Checked against the shipped `.glb`, not assumed.
