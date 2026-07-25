@@ -1,9 +1,10 @@
 // MYCELIA wall coating — an ExtendedMaterial<StandardMaterial, MoldWallExt> fragment.
 //
 // The mold creeps up the wall out of the floor/wall corner, so it must sample the field where the mold
-// actually POOLED: at the wall's foot, in the room this face looks into. Sampling the wall's own XZ (the
-// previous behaviour) lands on the outermost sliver of the floor cell — exactly the strip that used to be
-// drained dry by the leaking diffusion, so nothing ever appeared to climb.
+// actually POOLED: at the wall's foot, in the room this face looks into. Sampling the wall's own XZ
+// lands close enough to the wall's face to risk the field texel grid's aliasing (see WALL_FOOT_OFFSET
+// below) — nudge just far enough into the room to dodge that, not so far the wall visibly disagrees
+// with the floor at the seam it's supposed to be climbing out of.
 //
 // Unlike the floor this is an OPAQUE material (it is the wall), so instead of blending a coat on top we lerp
 // the wall's own base colour toward the biomass. Only the main-pass fragment is overridden; the prepass
@@ -55,11 +56,17 @@ const FOG_DIM: vec3<f32> = vec3<f32>(0.30, 0.30, 0.38);
 const MOLD_REFLECTANCE: f32 = 0.08;
 
 
-// How far off the wall face to sample, in world units. A slab is 0.14 thick with its outer face flush to
-// the cell boundary, so its inner face sits 0.14 inside the floor cell; pushing one more field texel
-// (0.1875) past that lands the sample squarely on the pooled floor rather than on the slab's own footprint.
-// Geometry, not taste — hence a constant, not a dial.
-const WALL_FOOT_OFFSET: f32 = 0.19;
+// How far off the wall face to sample, in world units. The field texel grid (`field_size` 1024 texels
+// across `WORLD_EXTENT` 192, i.e. `texel_world = 192.0 / 1024.0 = 0.1875`) is NOT aligned to the dungeon
+// cell grid, so sampling exactly at the wall's own face risks landing in whichever texel straddles that
+// boundary — which can be the solid-classified one (biomass forced to 0 there, see `field` in
+// `mycelia_sim.wgsl`). Half a texel of clearance lands unambiguously on the floor side regardless of
+// where the two grids happen to cross, without pushing so far into the room that the wall's climb
+// visibly disagrees with the floor mold directly beneath it at the seam — a full texel of clearance (the
+// previous value here) was more than this aliasing dodge needs and was exactly that disagreement, read
+// by a player as "mold's on the wall but not the floor under it." Geometry, not taste — hence a
+// constant, not a dial.
+const WALL_FOOT_OFFSET: f32 = 0.09375; // texel_world (0.1875) / 2
 
 fn world_to_uv(world_xz: vec2<f32>) -> vec2<f32> {
     return (world_xz - mold.world_origin) / mold.world_extent;
@@ -73,6 +80,19 @@ fn is_explored(a: f32) -> f32 {
 }
 fn is_visible(a: f32) -> f32 {
     return smoothstep(0.85, 0.95, a);
+}
+
+// `field_tex` is the one buffer in this pipeline stored `Rgba16Float` (see `mycelia/mod.rs::DISPLAY_FORMAT`)
+// — every other mold texture this shader reads is a normalized 8-bit format, which cannot hold NaN/Inf by
+// construction. `mycelia_sim.wgsl` clamps U/V to [0,1] every tick, but WGSL's `clamp`/`min`/`max` are not
+// specified to filter a NaN INPUT on every backend (this file already carries one other naga/Metal
+// undefined-behavior workaround, see the `smoothstep` note below), so a transient NaN from the reaction step
+// could in principle survive the sim's own clamp and land here. `x != x` is true only for NaN per IEEE 754
+// and is a direct definitional check, not reliant on `clamp`'s NaN behavior — sanitizing at this last
+// consumption point means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN
+// pixel (which upstream tonemapping/exposure can turn into a solid, screen-filling wrong color).
+fn no_nan(x: f32) -> f32 {
+    return select(x, 0.0, x != x);
 }
 
 @fragment
@@ -91,8 +111,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let inside = f32(uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0);
 
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
-    let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
-    let bio = smoothstep(0.10, 0.35, f.g);
+    let veins = smoothstep(mold.vein_lo, mold.vein_hi, no_nan(f.r));
+    let bio = smoothstep(0.10, 0.35, no_nan(f.g));
     // Domain-warp the reveal/coverage tap so the coat's edge stops snapping to the per-cell control
     // grid (see `mycelia_floor.wgsl` for the why). Warp by the foot world-XZ, the point the wall reads.
     let warp = vec2<f32>(
@@ -100,7 +120,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         fbm4(foot * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
     ) - 0.5;
     let ctrl_uv = uv + warp * mold.reveal_warp_amp;
-    let substrate = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
+    let substrate_warped = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
+    // Clamp against the unwarped direct tap at this face's own foot — see `mycelia_floor.wgsl` for why:
+    // the warp can wander far enough to sample across a single-cell-thick wall into the next room.
+    let substrate_direct = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    let is_floor_direct = step(0.1, substrate_direct);
+    let substrate = substrate_warped * is_floor_direct;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 

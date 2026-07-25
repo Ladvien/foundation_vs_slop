@@ -106,13 +106,26 @@ fn is_visible(a: f32) -> f32 {
     return smoothstep(0.85, 0.95, a);
 }
 
+// `field_tex` is the one buffer in this pipeline stored `Rgba16Float` (see `mycelia/mod.rs::DISPLAY_FORMAT`)
+// — every other mold texture this shader reads is a normalized 8-bit format, which cannot hold NaN/Inf by
+// construction. `mycelia_sim.wgsl` clamps U/V to [0,1] every tick, but WGSL's `clamp`/`min`/`max` are not
+// specified to filter a NaN INPUT on every backend (`mycelia_wall.wgsl` already carries a documented
+// naga/Metal undefined-behavior workaround for a different intrinsic), so a transient NaN from the reaction
+// step could in principle survive the sim's own clamp and land here. `x != x` is true only for NaN per IEEE
+// 754 and is a direct definitional check, not reliant on `clamp`'s NaN behavior — sanitizing at this last
+// consumption point means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN
+// pixel (which upstream tonemapping/exposure can turn into a solid, screen-filling wrong color).
+fn no_nan(x: f32) -> f32 {
+    return select(x, 0.0, x != x);
+}
+
 /// How physically thick the mold is at `uv`, in arbitrary units. Drives the surface normal.
 fn thickness(uv: vec2<f32>) -> f32 {
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
-    let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
-    let bio = smoothstep(0.10, 0.35, f.g);
+    let veins = smoothstep(mold.vein_lo, mold.vein_hi, no_nan(f.r));
+    let bio = smoothstep(0.10, 0.35, no_nan(f.g));
     // Veins are raised cords; biomass is a swollen sheet; mold piles up in the wall corner.
-    return bio + veins * 0.55 + f.b * 0.30;
+    return bio + veins * 0.55 + no_nan(f.b) * 0.30;
 }
 
 @fragment
@@ -124,10 +137,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
 
     let f = textureSampleLevel(field_tex, field_samp, uv, 0.0);
-    let veins = smoothstep(mold.vein_lo, mold.vein_hi, f.r);
-    let sheen = smoothstep(mold.vein_lo * 0.17, mold.vein_lo, f.r);
-    let bio = smoothstep(0.10, 0.35, f.g);
-    let contact = f.b;
+    let f_r = no_nan(f.r);
+    let veins = smoothstep(mold.vein_lo, mold.vein_hi, f_r);
+    let sheen = smoothstep(mold.vein_lo * 0.17, mold.vein_lo, f_r);
+    let bio = smoothstep(0.10, 0.35, no_nan(f.g));
+    let contact = no_nan(f.b);
     // Coverage gates drawing (explored floor only, or the coat traces the map through the fog); `lit` dims
     // the mold to match the fogged floor under it. Both are player-caused and therefore instantaneous.
     // The control texture is one texel per dungeon CELL, so tapping it at the bare `uv` snaps the coat's
@@ -139,7 +153,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         fbm4(world_xz * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
     ) - 0.5;
     let ctrl_uv = uv + warp * mold.reveal_warp_amp;
-    let substrate = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
+    let substrate_warped = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
+    // The warp above can wander ~1 world unit off the bare `uv` — an order of magnitude past
+    // WALL_THICKNESS, easily far enough to hop across a single-cell-thick wall into the next room's
+    // floor texel. Re-sample the UNWARPED tap (the texel this fragment actually sits on) and hard-zero
+    // the warped result whenever that direct tap is void. Void is exactly 0.0 and every floor state is
+    // >= 0.33 (see `control.rs::write_control`), so a 0.1 threshold is a clean binary split. This keeps
+    // the warp free to wander the reveal edge WITHIN a floor cell while making cross-wall bleed
+    // impossible regardless of warp direction.
+    let substrate_direct = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
+    let is_floor_direct = step(0.1, substrate_direct);
+    let substrate = substrate_warped * is_floor_direct;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 

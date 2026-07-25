@@ -1517,8 +1517,29 @@ impl Dungeon {
     /// crosses is floor. Walls only ever sit on floor↔non-floor edges (see [`Self::walled`]), so
     /// a sightline is blocked exactly when it enters a non-floor cell. Uses an integer supercover
     /// (Bresenham-family) walk so the returned visibility is symmetric. Reused by path smoothing
-    /// (`pathfinding`) and the fog-of-war LOS (`fog`).
+    /// (`pathfinding`) and the laser LOS gate — both need the strict "no cutting a diagonal
+    /// corner" rule below, since a diagonal peek there is a real gameplay exploit (skip-pathing or
+    /// aiming through a wall pinch). Fog reveal wants the lenient variant,
+    /// [`Self::line_of_sight_reveal`], instead.
     pub fn line_of_sight(&self, a: IVec2, b: IVec2) -> bool {
+        self.line_of_sight_impl(a, b, true)
+    }
+
+    /// Fog-reveal-only relaxation of [`Self::line_of_sight`]. A 1-wide corridor bordering a room
+    /// makes the strict rule fail constantly: from almost any off-row viewpoint, a Bresenham
+    /// sightline down the corridor takes diagonal steps whose "far" orthogonal neighbour is, by
+    /// construction, the corridor's own bounding wall — so the strict rule reads that as peeking
+    /// through a diagonal slit and blocks it, even though the corridor cell in question is plainly
+    /// visible down the straight run. That produced the "picket fence" bug: every other wall
+    /// segment along a corridor stuck `Unseen` forever (`debug_screenshots/
+    /// region_2026-07-25_12-27-00-608.png`). Here a diagonal step is blocked only when *neither*
+    /// orthogonal neighbour is floor — a true closed diagonal pinch (two walls meeting corner to
+    /// corner) — not merely when one of them happens to be the wall you're walking alongside.
+    pub(crate) fn line_of_sight_reveal(&self, a: IVec2, b: IVec2) -> bool {
+        self.line_of_sight_impl(a, b, false)
+    }
+
+    fn line_of_sight_impl(&self, a: IVec2, b: IVec2, strict_corners: bool) -> bool {
         let (mut x, mut y) = (a.x, a.y);
         let (dx, dy) = ((b.x - a.x).abs(), (b.y - a.y).abs());
         let (sx, sy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
@@ -1526,8 +1547,8 @@ impl Dungeon {
         if !self.is_floor(a) || !self.is_floor(b) {
             return false;
         }
-        // Step cell-by-cell; when the line passes exactly through a corner, require *both*
-        // diagonally-shared cells to be floor (no peeking through a diagonal wall slit).
+        // Step cell-by-cell; when the line passes exactly through a corner, test the two
+        // diagonally-shared cells (no peeking through a diagonal wall slit).
         let mut err = dx - dy;
         while x != b.x || y != b.y {
             let e2 = 2 * err;
@@ -1541,8 +1562,10 @@ impl Dungeon {
                 step_y = true;
             }
             if step_x && step_y {
-                // Diagonal step: both orthogonal neighbours must be floor, else sight is blocked.
-                if !self.is_floor(IVec2::new(x + sx, y)) || !self.is_floor(IVec2::new(x, y + sy)) {
+                let n1 = self.is_floor(IVec2::new(x + sx, y));
+                let n2 = self.is_floor(IVec2::new(x, y + sy));
+                let blocked = if strict_corners { !n1 || !n2 } else { !n1 && !n2 };
+                if blocked {
                     return false;
                 }
                 x += sx;
@@ -3236,5 +3259,61 @@ mod tests {
         let half = Vec2::new(0.4, 0.1); // 0.8 (w) × 0.2 (d)
         assert!(d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, 0.0));
         assert!(!d.footprint_on_floor(Vec3::new(2.0, 0.0, 1.0), half, std::f32::consts::FRAC_PI_2));
+    }
+
+    /// Regression for the player-reported "picket fence" wall bug (debug capture 2026-07-25,
+    /// `region_2026-07-25_12-27-00-608.png`): a unit standing off a 1-wide corridor's own row
+    /// loses strict [`Dungeon::line_of_sight`] to corridor cells past the doorway, because the
+    /// diagonal step's "far" orthogonal neighbour is the corridor's own bounding wall — not a true
+    /// diagonal pinch. [`Dungeon::line_of_sight_reveal`] must see every one of those cells so fog
+    /// reveal doesn't leave alternating wall segments stuck `Unseen`; strict `line_of_sight` must
+    /// keep blocking at least one of them (so pathfinding/laser retain the no-corner-cutting rule).
+    #[test]
+    fn line_of_sight_reveal_sees_down_a_corridor_that_strict_los_partly_blocks() {
+        let w = 24usize;
+        let h = 8usize;
+        let mut mask = vec![false; w * h];
+        let mut set = |x: i32, y: i32| mask[(y as usize) * w + (x as usize)] = true;
+        for x in 0..4 {
+            for y in 4..7 {
+                set(x, y);
+            }
+        }
+        for x in 4..20 {
+            set(x, 5);
+        }
+        let d = Dungeon::from_walkable(w, h, mask);
+        let uc = IVec2::new(1, 4);
+
+        let strict: String = (4..20)
+            .map(|x| if d.line_of_sight(uc, IVec2::new(x, 5)) { 'T' } else { 'F' })
+            .collect();
+        let lenient: String = (4..20)
+            .map(|x| if d.line_of_sight_reveal(uc, IVec2::new(x, 5)) { 'T' } else { 'F' })
+            .collect();
+        println!("uc={uc:?} corridor row y=5, x=4..20: strict={strict} lenient={lenient}");
+
+        // Cells (5,5) and (6,5): strict LOS blocks them purely on the diagonal-corner rule (the
+        // "far" neighbour is this corridor's own bounding wall, not a true diagonal pinch) — the
+        // exact picket-fence signature. `line_of_sight_reveal` must see both.
+        for x in [5, 6] {
+            let c = IVec2::new(x, 5);
+            assert!(!d.line_of_sight(uc, c), "fixture must reproduce strict-LOS blocking at {c:?}");
+            assert!(
+                d.line_of_sight_reveal(uc, c),
+                "line_of_sight_reveal must see {c:?} — strict-only diagonal-corner block, not a \
+                 genuine occlusion (got lenient={lenient})"
+            );
+        }
+        // Deep corridor cells at this shallow an angle can be genuinely occluded — the sightline's
+        // pure-x steps pass through the room/corridor divider (rock at row 4, x >= 4) before the
+        // line's single y-increment ever happens. That's real wall occlusion, not the bug; the
+        // lenient variant must not paper over it.
+        assert!(
+            strict.contains('F') && lenient.contains('F'),
+            "expected some genuinely occluded deep cell under BOTH variants (strict={strict} \
+             lenient={lenient}) — if this now fails, line_of_sight_reveal may have gone too far \
+             and stopped blocking real occlusion"
+        );
     }
 }

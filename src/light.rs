@@ -17,6 +17,8 @@
 //!   exact-hash core never depends on a GPU.
 //! - [`LightField`] (Phase 1) is CPU gameplay state read by creature AI, so it *is* harness-visible.
 
+use std::collections::HashMap;
+
 use bevy::pbr::{ContactShadows, Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -25,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::GameConfig;
 use crate::dungeon::Dungeon;
+use crate::placement::{ir::RegionId, PlacedIn};
 use crate::util::{in_grid, row_major};
 
 /// The `lighting:` slice of `assets/config/config.ron` — every light knob, one source of truth
@@ -77,6 +80,15 @@ pub struct LightingConfig {
     /// Fraction of fixtures that are *failing* tubes — stochastic dropouts / strobe instead of a steady
     /// hum (the classic Backrooms dying-fluorescent). Cosmetic; the gameplay field is unaffected.
     pub flicker_fail_ratio: f32,
+    /// Hard cap on how many fixtures in the same room may be `failing` at once, regardless of how many
+    /// independently roll under `flicker_fail_ratio`. Without this, a dense room (a high `wall_lights_
+    /// per_room` roll, or a naturally notchy/small room with many wall runs) can have several tubes
+    /// strobing at once by sheer chance — the intended "occasional dying tube" ambience reads as chaos
+    /// instead. `1` is the classic single-dying-fluorescent look; `0` disables failing tubes entirely for
+    /// a calmer room without touching `flicker_fail_ratio`'s per-fixture odds. A fixture with no room
+    /// association (nothing outside `placement::furnish` currently emits one) is unaffected — it always
+    /// gets its own independent roll, as if it were alone in a room of one.
+    pub flicker_max_failing_per_room: usize,
 
     // --- The Researcher's flashlight (a moving directional emitter in the LightField) ---
     /// **Gameplay** peak illuminance the flashlight adds at the Researcher's own cell, in the field's own
@@ -182,6 +194,17 @@ pub fn validate_config(c: &LightingConfig) -> Result<(), String> {
         if !(v.is_finite() && v >= 0.0) {
             return Err(format!("lighting.{name} must be finite and >= 0 (got {v})"));
         }
+    }
+    // A typo guard, same spirit as `config::validate_density`'s `MAX_PER_ROOM`: any real room in this
+    // game never exceeds `WALL_LIGHTS`'s evolved ceiling (`squad_ai::level_genome`, 16), so a configured
+    // cap above that is certainly a mistake, not an intentional "never limit" — `usize::MAX` would silently
+    // reproduce the exact pile-up bug this knob exists to prevent.
+    const MAX_FAILING_PER_ROOM: usize = 16;
+    if c.flicker_max_failing_per_room > MAX_FAILING_PER_ROOM {
+        return Err(format!(
+            "lighting.flicker_max_failing_per_room = {} exceeds the {MAX_FAILING_PER_ROOM} ceiling",
+            c.flicker_max_failing_per_room
+        ));
     }
     if !(c.fixture_range.is_finite() && c.fixture_range > 0.0) {
         return Err(format!("lighting.fixture_range must be finite and > 0 (got {})", c.fixture_range));
@@ -882,10 +905,37 @@ fn flicker_screens(time: Res<Time>, mut lights: Query<(&ScreenLight, &mut SpotLi
 /// cheap 4× MSAA edge smoothing (this stylized isometric look leans on clean edges, and the VHS
 /// post-process already stylizes; GTAO's corner-darkening is not worth losing MSAA here). The component
 /// `#[require]`s a depth prepass, which auto-inserts. Kept LDR — no HDR/Bloom (mycelia is LDR-calibrated).
+///
+/// `linear_steps` is bumped from the upstream default (16 → 48); `length`/`thickness` are left at
+/// their defaults so the shadow's reach and softness are unchanged. Bevy's raymarch dithers its ray
+/// start by up to one step's world-space length (`interleaved_gradient_noise` seeded on
+/// `globals.frame_count`, `bevy_pbr::pbr_functions::calculate_contact_shadow`) so the fixed step count
+/// doesn't band — that dither is meant to be averaged out by TAA across frames, which this project
+/// doesn't run, and rendering never stops (not even while the sim is paused — see
+/// `WinitSettings::Continuous` in `lib.rs`), so every render frame showed a different dither pattern:
+/// a large, soft, ever-shifting dark region under geometry that read as z-fighting even at a full
+/// stop (player report, `debug_screenshots/region_2026-07-25_12-25-53-009.png`). Shrinking the
+/// per-step distance (more steps over the same `length`) shrinks the jitter's world-space amplitude
+/// by the same factor, which is what actually suppresses the visible flicker — reducing `length` or
+/// `thickness` instead would just make the shadow itself shorter/thinner without touching the jitter
+/// magnitude. If 48 steps still show visible dither, don't keep raising this — the correct fix at
+/// that point is temporal accumulation (`TemporalAntiAliasing`), which this project has deliberately
+/// not adopted yet (see the MSAA-vs-GTAO tradeoff above); that's a project-wide decision, not a local
+/// tune.
 fn setup_camera_fx(mut commands: Commands, cam: Query<Entity, With<Camera3d>>) {
     for e in &cam {
-        commands.entity(e).insert(ContactShadows::default());
+        commands.entity(e).insert(ContactShadows { linear_steps: 48, ..default() });
     }
+}
+
+/// Groups the per-room failing-tube cap in [`attach_fixture_lights`]: fixtures placed in the same room
+/// share a bucket; a fixture with no [`PlacedIn`] (nothing outside `placement::furnish` currently emits
+/// one, but the query allows it) gets its own `Solo` bucket keyed on its entity, so it's never capped
+/// alongside an unrelated fixture that also happens to lack a room.
+#[derive(PartialEq, Eq, Hash)]
+enum FlickerRoom {
+    Region(RegionId),
+    Solo(Entity),
 }
 
 /// Give each newly-revealed [`LightEmitter`] a real clustered [`PointLight`] child so fixtures actually
@@ -894,29 +944,76 @@ fn setup_camera_fx(mut commands: Commands, cam: Query<Entity, With<Camera3d>>) {
 /// void, the eerie part — see the `world` module doc). Shadowless for now: clustered point lights are
 /// cheap (Bevy 0.19 clusters on the GPU), and shadow-caster culling is a later phase; GTAO + contact
 /// shadows supply the depth cues. "Bake the many, light the few" adapted to raster.
+///
+/// Two passes, not one: every fixture's own `flicker_fail_ratio` roll is computed first, then capped
+/// per room (`flicker_max_failing_per_room`) before any command is issued, so a room that rolls more
+/// failing tubes than its cap allows doesn't have that decided by which fixture happened to be visited
+/// first in this frame's query order (`tests/determinism_lint.rs`'s "query order decides nothing" rule
+/// — the tie-break below is the position hash already used for the roll, a stable total order).
 fn attach_fixture_lights(
     mut commands: Commands,
     config: Res<GameConfig>,
     // A TV (`ScreenEmitter`) is excluded — it gets an eery screen spotlight in `attach_screen_lights`
     // instead of this generic room-fixture point light.
-    fixtures: Query<(Entity, &Transform), (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>)>,
+    fixtures: Query<
+        (Entity, &Transform, Option<&PlacedIn>),
+        (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>),
+    >,
 ) {
     let c = &config.lighting;
     let color = Color::srgb(c.fixture_color[0], c.fixture_color[1], c.fixture_color[2]);
-    for (e, tf) in &fixtures {
-        // Per-fixture flicker seed from the fixture's WORLD POSITION, not its entity id. `e.to_bits()` is
-        // run-dependent (spawn order/allocator), so which tubes flicker/fail and their phase would vary
-        // same-seed run to run — cosmetic only (never touches `LightField`/`snapshot_hash`), but a
-        // position is stable, immortal, and level geometry never shares a cell with itself.
-        let p = tf.translation;
-        let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
-        // A golden-angle phase decorrelates the shimmer; a hash of the seed picks the `flicker_fail_ratio`
-        // fraction that fail.
-        let phase = seed as f32 * 2.399_963; // golden angle (radians)
-        let mut h = seed.wrapping_mul(0x9E37_79B1);
-        h ^= h >> 16;
-        let failing = (h % 1000) as f32 / 1000.0 < c.flicker_fail_ratio;
-        commands.entity(e).insert(FixtureLit).with_child((
+
+    struct Candidate {
+        entity: Entity,
+        phase: f32,
+        hash: u32,
+        wants_to_fail: bool,
+        room: FlickerRoom,
+    }
+    let mut candidates: Vec<Candidate> = fixtures
+        .iter()
+        .map(|(e, tf, placed)| {
+            // Per-fixture flicker seed from the fixture's WORLD POSITION, not its entity id.
+            // `e.to_bits()` is run-dependent (spawn order/allocator), so which tubes flicker/fail and
+            // their phase would vary same-seed run to run — cosmetic only (never touches
+            // `LightField`/`snapshot_hash`), but a position is stable, immortal, and level geometry
+            // never shares a cell with itself.
+            let p = tf.translation;
+            let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
+            // A golden-angle phase decorrelates the shimmer; a hash of the seed picks the
+            // `flicker_fail_ratio` fraction that WANT to fail — subject to the per-room cap below.
+            let phase = seed as f32 * 2.399_963; // golden angle (radians)
+            let mut h = seed.wrapping_mul(0x9E37_79B1);
+            h ^= h >> 16;
+            let wants_to_fail = (h % 1000) as f32 / 1000.0 < c.flicker_fail_ratio;
+            let room = placed.map_or(FlickerRoom::Solo(e), |p| FlickerRoom::Region(p.0));
+            Candidate { entity: e, phase, hash: h, wants_to_fail, room }
+        })
+        .collect();
+
+    // Stable total order over the tie-break (lowest hash wins a room's failing slots first) — the same
+    // determinism-safe pattern as `sort_total!` elsewhere in this project, applied to a `Startup`-only
+    // cosmetic system rather than pinned sim state.
+    candidates.sort_by_key(|cand| cand.hash);
+    let mut slots_used: HashMap<&FlickerRoom, usize> = HashMap::new();
+    let failing: Vec<bool> = candidates
+        .iter()
+        .map(|cand| {
+            if !cand.wants_to_fail {
+                return false;
+            }
+            let used = slots_used.entry(&cand.room).or_insert(0);
+            if *used < c.flicker_max_failing_per_room {
+                *used += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    for (cand, failing) in candidates.into_iter().zip(failing) {
+        commands.entity(cand.entity).insert(FixtureLit).with_child((
             PointLight {
                 color,
                 intensity: c.fixture_intensity,
@@ -927,7 +1024,7 @@ fn attach_fixture_lights(
             // Dropped just below the fixture origin so a ceiling tube pools light onto the floor rather
             // than straight into the ceiling mesh it is flush against.
             Transform::from_xyz(0.0, -0.15, 0.0),
-            FixtureLight { base_intensity: c.fixture_intensity, phase, failing },
+            FixtureLight { base_intensity: c.fixture_intensity, phase: cand.phase, failing },
         ));
     }
 }

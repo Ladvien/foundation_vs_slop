@@ -420,7 +420,19 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // mid-landing and later failed to reproduce. Three fresh concurrent processes under load agree on the
 // value below, which is also the value it held before the bear existed. If you find yourself re-pinning
 // this for a creature that emits nothing, measure again before believing it.
-const GOLDEN_FIELD: u64 = 0x2e884ae0bb33f60c;
+//
+// Re-pinned 2026-07-25 for the fog-of-war "picket fence" fix (`Dungeon::line_of_sight_reveal`,
+// `fog::update_los`). The ACTOR golden (`GOLDEN`) did NOT move — same blind spot as the SCP-999 landing
+// above. `update_los`'s old strict corner rule blocked a diagonal reveal step whenever the "far" neighbour
+// was merely the sightline's OWN corridor wall, not just a true diagonal pinch; the squad's idle spawn-point
+// fog disc — ticking every `FixedUpdate` in this "no-player" core, no order ever issued — reveals a
+// different, larger set of cells under the corrected rule. `seen_by_squad` (crab AI perception,
+// `.after(fog::LosWritten)`) reads that same-tick visibility, so which crabs read as "seen" shifts, which
+// shifts their behaviour and the ALARM/THREAT Stig deposits this oracle folds — without (in this 1800-tick
+// no-order run) relocating any actor far enough to move `GOLDEN`. Attribution measured by isolating the
+// change (dungeon.rs + fog.rs alone, no other file in that landing touched) and confirming this exact value
+// bit-stable across three fresh single-process runs. Was `0x2e884ae0bb33f60c`.
+const GOLDEN_FIELD: u64 = 0x244e3af59ff9d65a;
 
 #[test]
 fn field_passes_are_bit_identical() {

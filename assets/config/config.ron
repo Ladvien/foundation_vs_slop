@@ -819,7 +819,9 @@
         // Feather the mold's reveal/coverage edge so it stops snapping to the per-cell control-texture
         // grid (which read as square "tiles"). Domain-warp the coverage tap with world-space fbm
         // (Lagae et al. 2010 noise survey). 0 amp = the old cell-aligned edge.
-        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams, no cross-wall bleed
+        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams. Big enough to wander
+                                  // across a WALL_THICKNESS-thin wall on its own; no-cross-wall-bleed is
+                                  // enforced by the shaders' unwarped-tap clamp, not by this amplitude.
         reveal_warp_scale: 0.7,   // warp frequency (cycles/world unit); ~cell-scale wander
 
         // ── Fruiting (src/mycelia/fruit.rs). Where the mat has grown thick and eaten its substrate, in the
@@ -1453,6 +1455,7 @@
         mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)
         flicker_hum_depth: 0.06,               // cosmetic fluorescent shimmer depth (fraction)
         flicker_fail_ratio: 0.12,              // ~1 in 8 tubes is a failing/strobing Backrooms fluorescent
+        flicker_max_failing_per_room: 1,       // hard cap: at most this many tubes strobe at once per room, however many roll under flicker_fail_ratio
         // The Researcher's flashlight — a moving directional emitter in the LightField (repels photophobes)
         flashlight_intensity: 3.0,             // gameplay peak illuminance at the beam origin (>fixtures, so it drives crabs off)
         flashlight_range: 8.0,                 // beam reach in dungeon cells (wall-occluded like a fixture)

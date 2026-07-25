@@ -338,6 +338,14 @@ impl MaterialExtension for MoldWallExt {
 /// `depth_stencil.bias.constant` (`pbr_material.rs`), a genuine per-fragment rasterizer bias. At this
 /// magnitude that would shift the overlay's *tested* depth behind the carpet it floats above and cull it.
 /// [`MoldFloorExt::specialize`] zeroes that half back out; only the sort offset survives.
+/// This overlay is a **singleton** entity — it cannot tie against itself in Bevy's `Transparent3d`
+/// painter's-algorithm sort, and its `depth_bias` magnitude is proven (see the tests below) to clear
+/// the world diagonal with room to spare against every *other* transparent mesh. The class of bug
+/// this constant exists to prevent — two coincident/near-coincident transparent decals tying on that
+/// sort key and flickering as ECS extraction order reshuffles frame to frame (this project's own
+/// rule: "ECS query order decides nothing") — showed up for real not here but in the dynamically
+/// recycled `BloodPoolMaterial` decals (`src/gore.rs`, zero `depth_bias`, one instance per pool/
+/// splat); see the stable per-decal jitter fix there.
 const FLOOR_DEPTH_BIAS: f32 = -(WORLD_EXTENT.x + WORLD_EXTENT.y);
 
 /// The `StandardMaterial` under the floor overlay: translucent (the carpet shows through where there is no

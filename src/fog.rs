@@ -165,7 +165,7 @@ fn update_los(
                 // (Mold no longer occludes sight — the mold→LOS "soft cover" coupling was removed; mold
                 // now only dims the light field, never the fog. So a unit always reveals the floor it and
                 // its neighbours stand on, even in thick mold.)
-                if !dungeon.is_floor(c) || !dungeon.line_of_sight(uc, c) {
+                if !dungeon.is_floor(c) || !dungeon.line_of_sight_reveal(uc, c) {
                     continue;
                 }
                 let i = fog.index(c);

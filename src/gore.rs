@@ -779,7 +779,19 @@ fn drain_gore(
         //     same orientation as the selection ring in `selection.rs`). Permanent, but capped.
         // Scale the base pool by the dead thing's mass/size so a crab's mark ≠ the boss's slick.
         let pool_size = pool_size * pool_scale(ev.intensity, ev.gib.as_ref().map(|g| g.scale));
-        let floor_pos = Vec3::new(ev.pos.x, 0.02, ev.pos.z);
+        // Stable per-pool tiebreak. `BloodPoolMaterial` is `AlphaMode::Blend` with no `depth_bias`
+        // override (defaults to 0.0), and pools are continuously despawned/respawned through
+        // `PoolRing`/`cap_blood_pools` below. Two pools stamped at the same or near-identical world
+        // XZ (a camped choke point, repeated hits at one doorway) tie exactly on Bevy's
+        // `Transparent3d` sort key (`rangefinder.distance(centre) + depth_bias`), so which one
+        // blends on top is then decided by ECS extraction order — which this project's own
+        // determinism rule says is NOT stable across frames ("ECS query order decides nothing",
+        // `tests/determinism_lint.rs`). That reads as flicker between overlapping pools, independent
+        // of sim pause. `fseed` is already a stable, unique-per-event value assigned once at spawn
+        // (reused by `pool_uniform` above) — reuse it as a sub-centimetre Y jitter so every pool has
+        // a fixed, reproducible position in the sort order and ties can't happen.
+        const BLOOD_POOL_Y_JITTER: f32 = 0.004; // world units; << the 0.02 anti-z-fight lift below
+        let floor_pos = Vec3::new(ev.pos.x, 0.02 + (fseed.fract() - 0.5) * BLOOD_POOL_Y_JITTER, ev.pos.z);
         // Clip the pool to the surrounding walls so it can't seep through them. `p` spans the quad
         // in [-1,1], so a world clear-distance maps to p-units by dividing by the quad half-size.
         let pool_half = (pool_size * 0.5).max(0.0001);
@@ -1223,13 +1235,17 @@ fn spawn_wall_splatters(
             base: assets.blood_base.clone(),
             normal: assets.blood_normal.clone(),
         });
+        // Stable per-splat push-off tiebreak (same reasoning as the floor pool's Y jitter above):
+        // `h` is already a stable per-splat hash, reused here instead of Y since wall splats are
+        // vertical.
+        let push_off = 0.02 + (h - 0.5) * 0.004;
         let id = commands
             .spawn((
                 Mesh3d(assets.quad.clone()),
                 MeshMaterial3d(material),
                 // `from_rotation_arc(Z, normal)` aims the quad face into the room; nudge off the wall
                 // to avoid z-fighting; taller than wide so it reads as running down.
-                Transform::from_translation(face + Vec3::Y * height + normal * 0.02)
+                Transform::from_translation(face + Vec3::Y * height + normal * push_off)
                     .with_rotation(Quat::from_rotation_arc(Vec3::Z, normal))
                     .with_scale(Vec3::new(w, w * 1.4, w)),
                 BloodPool,
@@ -1302,16 +1318,20 @@ fn stamp_droplet_splat(
     seed: f32,
 ) {
     let size = settings.droplet_splat_size;
+    // Stable per-splat tiebreak, same reasoning as the pool/wall-splat sites above: `seed` is
+    // already a stable per-event value, reused here to jitter the coincident-face push-off so
+    // droplet splats can't sort-key-tie against each other or another blood decal.
+    let jitter = (seed.fract() - 0.5) * 0.004;
     let (transform, clip, clip_diag) = match wall_normal {
         Some(n) => (
-            Transform::from_translation(pos + n * 0.02)
+            Transform::from_translation(pos + n * (0.02 + jitter))
                 .with_rotation(Quat::from_rotation_arc(Vec3::Z, n))
                 .with_scale(Vec3::splat(size)),
             Vec4::splat(9.0),
             Vec4::splat(9.0),
         ),
         None => {
-            let floor = Vec3::new(pos.x, 0.021, pos.z);
+            let floor = Vec3::new(pos.x, 0.021 + jitter, pos.z);
             let half = (size * 0.5).max(0.0001);
             let (ea, ed) = dungeon.open_extents(floor, size * 0.5 + 0.1);
             (
