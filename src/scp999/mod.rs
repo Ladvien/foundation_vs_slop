@@ -86,6 +86,14 @@ pub(crate) struct Scp999Motion {
 #[derive(Resource, Default)]
 pub(crate) struct Scp999Seq(pub(crate) u32);
 
+/// The blob's own copy of its birth seed, carried so every cosmetic decorrelation derives from the SAME
+/// stable number [`Scp999Seq`] promises. The eye layer used to draw its blink phase from a `Local<u32>`
+/// attach counter instead, which orders blobs by *asset-arrival* — a per-run quantity — so which blob
+/// blinked on which phase changed between runs of one seed. Present on every blob (never a subset marker,
+/// so no archetype split) and never read by a gameplay decision.
+#[derive(Component)]
+pub(crate) struct Scp999Seed(pub(crate) u32);
+
 /// The gameplay half: spawn + seek + tickle-calm. Registered in BOTH `lib::run` (windowed) and
 /// `sim_harness::build_headless_app` (headless), because the calm mutates squad `Drives`, which propagates
 /// into the hashed simulation.
@@ -117,10 +125,10 @@ impl Plugin for Scp999VisualsPlugin {
                 Update,
                 (
                     (eyes::attach_scp999_eyes, eyes::update_scp999_eyes).chain(),
-                    // Fog of war hides the blob when it's outside the squad's live line of sight, exactly
-                    // like `enemy::hide_enemies_in_fog` does for creatures (SCP-999 isn't `Hostile`, so it
-                    // needs its own hide pass). Cosmetic — Visibility is render-state; gameplay runs regardless.
-                    hide_scp999_in_fog,
+                    // Fog of war hides the blob when it's outside the squad's live line of sight — the
+                    // one shared `fog::hide_in_fog` pass, keyed on this marker (SCP-999 isn't `Hostile`,
+                    // so it names itself). Cosmetic: Visibility is render state; gameplay runs regardless.
+                    crate::fog::hide_in_fog::<Scp999>,
                 ),
             )
             // Reactive modal jiggle, written onto the gel's morph weights (see `jiggle`). `PostUpdate` so it
@@ -197,6 +205,7 @@ pub fn spawn_scp999_at(commands: &mut Commands, assets: &AssetServer, seed: u32,
     commands
         .spawn((
             Scp999,
+            Scp999Seed(seed),
             Scp999Motion::default(),
             BlobJiggle::new(seed),
             // Root is unscaled (keeps the eye billboard in world units); the gel model child carries the
@@ -214,25 +223,4 @@ pub fn spawn_scp999_at(commands: &mut Commands, assets: &AssetServer, seed: u32,
         .id()
 }
 
-/// Hide the comfort blob when the fog of war covers its cell — the fog-of-war treatment
-/// `enemy::hide_enemies_in_fog` gives creatures, so a blob outside the squad's live line of sight is not
-/// visible through the fog. Hiding the root propagates to the gel model + eye billboard children.
-/// Cosmetic + windowed-only: `Visibility` is render state, so this never touches the blob's pinned
-/// gameplay (it keeps seeking + calming even while fogged out of view).
-fn hide_scp999_in_fog(
-    fog: Res<crate::fog::FogGrid>,
-    dungeon: Res<Dungeon>,
-    mut blobs: Query<(&Transform, &mut Visibility), With<Scp999>>,
-) {
-    for (tf, mut vis) in &mut blobs {
-        let want = if fog.visible_at(dungeon.world_to_cell(tf.translation)) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *vis != want {
-            *vis = want;
-        }
-    }
-}
 

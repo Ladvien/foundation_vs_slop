@@ -62,12 +62,33 @@ impl Spring {
         self.v += impulse;
     }
     fn step(&mut self, dt: f32, substeps: u32) {
-        let h = dt / substeps as f32;
-        for _ in 0..substeps {
-            let a = -(self.omega * self.omega) * self.x - 2.0 * self.zeta * self.omega * self.v;
-            self.v += a * h;
-            self.x += self.v * h;
-        }
+        step_damped(&mut self.x, &mut self.v, 0.0, self.omega, self.zeta, dt, substeps);
+    }
+}
+
+/// One substepped semi-implicit-Euler advance of a damped harmonic oscillator relaxing toward `target`:
+/// `x'' + 2·ζ·ω·(x' ) + ω²·(x − target) = 0`. THE integrator for this feature's springs — [`Spring::step`]
+/// (relaxing to 0) and the eye-bounce springs in [`super::eyes`] (relaxing to the body's bounce, per axis)
+/// are both this function, so a stability or damping fix lands in one place instead of two copies that
+/// silently drift apart.
+///
+/// Semi-implicit Euler is only stable while `ω·h < 2`, so callers must hand it a CLAMPED `dt` (see
+/// `drive_blob_jiggle`'s `step_dt`) — a long frame otherwise amplifies the oscillator instead of decaying
+/// it. Substepping shrinks `h` for a given frame, buying headroom for the stiffer modes.
+pub(super) fn step_damped(
+    x: &mut f32,
+    v: &mut f32,
+    target: f32,
+    omega: f32,
+    zeta: f32,
+    dt: f32,
+    substeps: u32,
+) {
+    let h = dt / substeps as f32;
+    for _ in 0..substeps {
+        let a = -(omega * omega) * (*x - target) - 2.0 * zeta * omega * *v;
+        *v += a * h;
+        *x += *v * h;
     }
 }
 
@@ -104,7 +125,10 @@ impl BlobJiggle {
             pulse: Spring::new(3.1, 0.14),
             prev_pos: None,
             prev_vel: Vec3::ZERO,
-            accel_gain: 0.14,
+            // Per-SECOND gain: `drive_blob_jiggle` multiplies it by the frame's timestep, so the authored
+            // 0.14-per-frame feel is preserved by rescaling to the 60 Hz reference it was tuned at
+            // (0.14 × 60 = 8.4) — same look at 60 Hz, now identical at any other refresh rate.
+            accel_gain: 8.4,
             substeps: 8,
             phase: hash01_u32(seed) * TAU,
             tickle_prev: false,
@@ -133,6 +157,15 @@ pub(crate) fn drive_blob_jiggle(
     if dt <= 0.0 {
         return;
     }
+    // Spring-integration window, clamped like every other per-frame integrator here (`scp999::movement`,
+    // `crab`, `enemy`). `Spring::step` is semi-implicit Euler, which is only stable while `omega·h < 2`:
+    // the stiffest mode (pulse, omega = 2π·3.1 ≈ 19.5 rad/s) at 8 substeps needs a frame under ~0.8 s, so
+    // one hitch (shader compile, window drag, a debugger pause) would AMPLIFY the springs instead of
+    // decaying them and slam the morph weights to their ±WEIGHT_MAX clamp — the blob visibly detonating.
+    // NOTE the raw `dt` is deliberately kept for the velocity/acceleration differencing below: dividing a
+    // hitch's large displacement by the *clamped* dt would manufacture a huge phantom acceleration, which
+    // is the very impulse this clamp exists to prevent.
+    let step_dt = dt.min(super::MAX_FRAME_DT);
     let elapsed = time.elapsed_secs();
     for (root, gxf, motion, mut j) in &mut blobs {
         // Difference the world position twice → acceleration; strike the springs with it so the blob
@@ -146,7 +179,13 @@ pub(crate) fn drive_blob_jiggle(
         j.prev_pos = Some(pos);
         j.prev_vel = vel;
 
-        let g = j.accel_gain;
+        // Acceleration kicks are scaled by the timestep: `kick` adds to VELOCITY, so a continuous
+        // acceleration must contribute `a·g·dt` per frame to inject the same impulse per second at any
+        // frame rate. Unscaled, the per-frame kick was `a·g` while `a` is itself a `Δv/dt` difference, so
+        // the energy handed to the springs scaled with refresh rate — the same shove wobbled the blob
+        // visibly harder on a 144 Hz monitor than on a 60 Hz one. (The discrete TICKLE_KICK below is a
+        // true one-shot impulse on a rising edge, so it is correctly NOT dt-scaled.)
+        let g = j.accel_gain * step_dt;
         j.vertical.kick(-accel.y * g); // (mostly 0 on the ground plane; kept for landings/knocks)
         j.wobble_x.kick(accel.x * g);
         j.wobble_y.kick(accel.z * g);
@@ -160,10 +199,10 @@ pub(crate) fn drive_blob_jiggle(
         j.tickle_prev = motion.tickling;
 
         let substeps = j.substeps;
-        j.vertical.step(dt, substeps);
-        j.wobble_x.step(dt, substeps);
-        j.wobble_y.step(dt, substeps);
-        j.pulse.step(dt, substeps);
+        j.vertical.step(step_dt, substeps);
+        j.wobble_x.step(step_dt, substeps);
+        j.wobble_y.step(step_dt, substeps);
+        j.pulse.step(step_dt, substeps);
 
         // Continuous idle deformation, layered on top of the reactive springs — this is what makes it read
         // as loose slime rather than a stiff body. Uses wall-clock `elapsed` (cosmetic, no determinism tie).

@@ -117,26 +117,10 @@ pub(crate) fn scp999_seek_and_tickle(
     }
 }
 
-/// Steering push that keeps the blob's centre off nearby wall faces, so its wide gel body doesn't sweep
-/// into them. Pure — a function of `pos` and the static dungeon geometry — so it adds no query-order input
-/// and stays deterministic. Sums an inward-normal push per bounding wall of `pos`, growing to `gain` at the
-/// face and fading to 0 at `standoff`; opposite walls in a corridor cancel so the blob still funnels
-/// straight through. A direct copy of `enemy::wall_standoff_push` (the boss faces the identical
-/// wide-visible-body / narrow-collider problem). `standoff <= 0` disables it.
-fn wall_standoff_push(dungeon: &Dungeon, pos: Vec3, standoff: f32, gain: f32) -> Vec2 {
-    if standoff <= 0.0 {
-        return Vec2::ZERO;
-    }
-    let mut push = Vec2::ZERO;
-    for (face, normal) in dungeon.wall_faces_near(pos) {
-        let d = (pos - face).dot(normal); // distance from the wall face into the room
-        if d < standoff {
-            let t = ((standoff - d) / standoff).clamp(0.0, 1.0);
-            push += normal.xz() * (t * gain);
-        }
-    }
-    push
-}
+/// The blob steers off walls by exactly the boss's rule (a wide gel body around a narrow collider — the
+/// identical wide-visible-body problem), so it calls the one implementation rather than keeping a second
+/// copy: [`crate::enemy::wall_standoff_push`], which carries the shared unit test.
+use crate::enemy::wall_standoff_push;
 
 /// Index of the most-anxious member under the **total order** `(FEAR desc, planar-dist asc, SquadMember
 /// asc)`, given `(fear, dist, member)` per candidate. Pure so the determinism-critical pick is unit-tested

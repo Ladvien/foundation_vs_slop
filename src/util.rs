@@ -128,23 +128,11 @@ pub fn nearest_planar<T>(
     // iteration order flips WHICH target is chosen — and that flip cascades into the physics-free replay
     // hash (`deterministic_core_is_bit_identical`). The position fallback (a stable geometric key) makes
     // the pick depend only on geometry. `d.to_bits()` is monotonic in `d` for finite non-negative d.
-    let o = origin.xz();
-    let mut best: Option<(T, Vec3, f32)> = None;
-    for (payload, pos) in candidates {
-        let d = (pos.xz() - o).length();
-        // `.as_ref()` is load-bearing: `T` may be non-`Copy`, so we must not move `best` out to read it.
-        let take = match best.as_ref() {
-            None => true,
-            Some((_, bpos, bd)) => {
-                (d.to_bits(), pos.x.to_bits(), pos.y.to_bits(), pos.z.to_bits())
-                    < (bd.to_bits(), bpos.x.to_bits(), bpos.y.to_bits(), bpos.z.to_bits())
-            }
-        };
-        if take {
-            best = Some((payload, pos, d));
-        }
-    }
-    best
+    //
+    // ONE ranking loop, not two: this is [`nearest_planar_keyed`] with a constant key, which is exactly
+    // the unkeyed semantics. Every candidate carries the same key, so the key comparison never breaks a
+    // tie and the strict `<` keeps the first candidate — bit-identical to a hand-rolled 4-tuple compare.
+    nearest_planar_keyed(origin, candidates.into_iter().map(|(payload, pos)| (0, payload, pos)))
 }
 
 /// [`nearest_planar`] for candidates whose payload is **not** interchangeable: ranks by

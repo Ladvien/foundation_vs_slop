@@ -37,9 +37,16 @@ fn within(uv: vec2<f32>, rect: vec4<f32>) -> vec2<f32> {
 
 // One eye, centred in its [0,1] sub-rect. `side` (+1 / -1) mirrors the single definition into left+right;
 // `m` is the glance target; `joy` dilates the pupil + fattens the catch-light; `blink` sweeps a top lid.
-fn eye(uv_in: vec2<f32>, side: f32, m: vec2<f32>, joy: f32, blink: f32) -> vec4<f32> {
+fn eye(uv_in: vec2<f32>, side: f32, m_in: vec2<f32>, joy: f32, blink: f32) -> vec4<f32> {
     var uv = uv_in - vec2<f32>(0.5);
     uv.x *= side;
+    // The glance must be mirrored INTO the mirrored space, or the two irises swing apart. `side` mirrors
+    // eye-local X so one definition draws both eyes (highlight and lid asymmetries come out handed, which
+    // is what we want), but `m` arrives in unmirrored screen space: applied raw, the left eye's iris lands
+    // at −m.x while the right eye's lands at +m.x — cross-eyed whenever SCP-999 glances sideways at the
+    // member it is comforting. smiley.wgsl's Eye() looks correct only because Smiley() pre-folds with
+    // `uv.x = abs(uv.x)`, so there `side` UN-mirrors; these explicit per-eye rects have no such fold.
+    let m = vec2<f32>(m_in.x * side, m_in.y);
 
     var d = length(uv);
     // Warm sclera (a hair of cream, not clinical white) so it sits kindly on the orange gel.

@@ -25,7 +25,6 @@ use std::sync::Arc;
 use crate::audio::Sfx;
 use crate::dungeon::Dungeon;
 use crate::flowfield::FlowField;
-use crate::fog::FogGrid;
 use crate::gore::{GoreEvent, GoreKind, GoreQueue};
 use crate::health::Health;
 use crate::impact_fx::ImpactQueue;
@@ -414,7 +413,13 @@ impl Plugin for EnemyPlugin {
             // Cosmetic: fog toggle, face uniforms + form swap, and the lightning-beam VFX stay on `Update`.
             .add_systems(
                 Update,
-                (hide_enemies_in_fog, update_smiley_faces, drain_lightning, despawn_lightning),
+                (
+                    // The one shared fog-of-war conceal pass, keyed on the `Hostile` marker.
+                    crate::fog::hide_in_fog::<Hostile>,
+                    update_smiley_faces,
+                    drain_lightning,
+                    despawn_lightning,
+                ),
             );
     }
 }
@@ -494,7 +499,10 @@ fn spawn_enemies(
                     // Flesh: the belief-water heals or poisons the boss too. Seed from its position bits (the
                     // same deterministic per-spawn seed the boss's brain uses).
                     crate::health::Biological,
-                    crate::health::CyanideSmell::from_seed((pos.x.to_bits() ^ pos.z.to_bits()) as u64),
+                    crate::health::CyanideSmell::from_seed_in(
+                        crate::health::smell_seed::BOSS,
+                        (pos.x.to_bits() ^ pos.z.to_bits()) as u64,
+                    ),
                 ),
                 crate::ai::brain::BrainId::Smiley,
                 // Single boss → a stable per-spawn seed from its position bits (the seed just needs to be
@@ -525,7 +533,7 @@ fn spawn_enemies(
                     },
                 ),
                 Transform::from_translation(pos),
-                // Explicit so `hide_enemies_in_fog` can toggle it; Hidden propagates to BOTH face children.
+                // Explicit so the fog conceal pass can toggle it; Hidden propagates to BOTH face children.
                 Visibility::Inherited,
                 // Render-only: smooth the boss's 60 Hz movement across the display refresh (see `lib::run`).
                 // Component + plugin come from avian's `bevy_transform_interpolation` integration.
@@ -614,7 +622,10 @@ fn rebuild_enemy_field(
 /// standoff geometry is unit-testable. Sums an inward-normal push per bounding wall of `pos`'s cell,
 /// growing to `gain` at the face and fading to 0 at `standoff`; opposite walls in a corridor cancel, so
 /// the boss still funnels straight through instead of stalling. `standoff <= 0` disables it.
-fn wall_standoff_push(dungeon: &Dungeon, pos: Vec3, standoff: f32, gain: f32) -> Vec2 {
+/// `pub(crate)` because SCP-999 steers by the identical rule (a wide gel body around a narrow collider,
+/// the same problem the boss has) — one implementation, one unit test, rather than a second copy that
+/// could drift.
+pub(crate) fn wall_standoff_push(dungeon: &Dungeon, pos: Vec3, standoff: f32, gain: f32) -> Vec2 {
     if standoff <= 0.0 {
         return Vec2::ZERO;
     }
@@ -798,30 +809,6 @@ fn enemy_seek(
 // instantly" — a thing that withholds its lethality can't also be chewing your units to death on touch.
 // Its only lethality now is the concealed retaliation (`smiley_zap`). `CONTACT_DPS` survives solely as
 // the "mass" weight for its own death camera-kick (see `despawn_dead`).
-
-/// Hide enemies that aren't in the squad's live line of sight — fog of war conceals them, so the
-/// player only sees slop that's actually in view. Driven every frame (enemies move in and out of LOS
-/// even when the squad's own cell is unchanged, so this can't piggyback on the fog dirty flag).
-/// Hiding the root propagates to the face child. This is the partial-observability that defines an
-/// RTS (Yang, Xie & Peng, "Fuzzy Theory Based Single Belief State Generation for Partially Observable
-/// Real-Time Strategy Games", IEEE Access 2019, DOI 10.1109/access.2019.2923419).
-fn hide_enemies_in_fog(
-    fog: Res<FogGrid>,
-    dungeon: Res<Dungeon>,
-    mut enemies: Query<(&Transform, &mut Visibility), With<Hostile>>,
-) {
-    for (tf, mut vis) in &mut enemies {
-        let cell = dungeon.world_to_cell(tf.translation);
-        let want = if fog.visible_at(cell) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *vis != want {
-            *vis = want;
-        }
-    }
-}
 
 /// Billboard the face quads toward the (fixed) iso camera, glance at the nearest unit, and drive the
 /// mood-appropriate look — including the **flip** between the smiley face and the fractal-sphere "true
