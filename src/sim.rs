@@ -194,6 +194,79 @@ pub struct Scp999Tuning {
     pub spawn_min_dist: f32,
 }
 
+/// SCP-1048 "Builder Bear" — the benign original and its three hostile copies (see `crate::scp1048`).
+///
+/// One slice covers all four variants: they share a rig, a movement model and a strike cadence, and
+/// differ only in *attack expression* (A shrieks, B throws a tantrum, C fires a scrap gun), which is
+/// a code branch rather than a number. The interesting evolvable loop is that the **original builds
+/// the copies**: `scavenge_rate`/`build_cost`/`build_cooldown` set how fast a hostile population
+/// appears, and `max_bears` is the firm cap that keeps it from exploding — exactly the role
+/// `parasite.manca_count_max` plays for the burst→brood→infest loop.
+///
+/// Two mechanics carry academic grounding, cited where they are implemented:
+/// - **Build only while unobserved** — stigmergic construction, where local deposition is amplified
+///   by the state of the structure rather than centrally planned (Khuong et al., "Stigmergic
+///   construction and topochemical information shape ant nest architecture", PNAS 2016,
+///   doi:10.1073/pnas.1509829113).
+/// - **The ear-growth DoT** — damage that accumulates under exposure, is repaired at a constant rate
+///   once exposure ends, and kills only above a threshold: the General Unified Threshold model of
+///   Survival (Jager, Albert, Preuss & Ashauer, Environ. Sci. Technol. 2011, doi:10.1021/es103092a).
+///   `growth_rate` is the accumulation term, `growth_decay` the repair term, `asphyxiate_threshold`
+///   the threshold. A `growth_decay` of 0 is a deliberately reachable world: incurable growths.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scp1048Tuning {
+    /// Benign originals seeded into the level at start. The hostile copies are *built*, not seeded.
+    pub count: usize,
+    /// How far from the squad's spawn cell (in tiles) a bear must start.
+    pub spawn_min_dist: f32,
+    /// Shuffle speed (world units/s) — a 0.33 m plush is slow.
+    pub move_speed: f32,
+    /// Hit points. The original is unshootable (no `Hostile`), but still carries `Health` so the
+    /// deterministic-core snapshot folds it.
+    pub hp: f32,
+    /// How close a hostile copy closes before it can strike.
+    pub approach_range: f32,
+    /// Attack reach.
+    pub strike_range: f32,
+    /// Seconds between strikes; doubles as C's rate of fire.
+    pub strike_cooldown: f32,
+    /// Damage per strike (B's tantrum, C's shot and pistol-whip).
+    pub strike_damage: f32,
+    /// THREAT_ANOMALY deposited per second by a *raging* copy. A wandering copy deposits nothing.
+    pub rage_dread_rate: f32,
+    /// One-shot dread burst stamped when SCP-1048-A screams.
+    pub scream_dread: f32,
+    /// Radius of the scream's pain/dread band (canon: ~10 m of blinding pain).
+    pub pain_radius: f32,
+    /// Radius of the scream's lethal ear-growth band (canon: ~5 m). Smaller than `pain_radius`: the
+    /// shriek terrifies further than it kills.
+    pub growth_radius: f32,
+    /// Ear-growth severity accrued per second inside `growth_radius` (canon: full cover in ~20 s).
+    pub growth_rate: f32,
+    /// Severity shed per second outside it — the GUTS repair term. 0 ⇒ incurable.
+    pub growth_decay: f32,
+    /// HP/s once severity is at or past the threshold (canon: asphyxiation within ~3 min).
+    pub asphyxiate_dps: f32,
+    /// Severity at which the growths start to suffocate.
+    pub asphyxiate_threshold: f32,
+    /// Bear FEAR gain on the THREAT_GUN channel — how badly gunfire panics a bear.
+    pub fear_of_gunfire: f32,
+    /// Scavenged material one copy costs to build.
+    pub build_cost: f32,
+    /// Material accrued per second while the original is building.
+    pub scavenge_rate: f32,
+    /// Seconds after a build before the next may start.
+    pub build_cooldown: f32,
+    /// Firm cap on live bears of all variants — the load-bearing bound on the replication loop.
+    pub max_bears: usize,
+    /// Relative weight of building an A (ear) copy.
+    pub copy_w_a: f32,
+    /// Relative weight of a B (infant-arm) copy; C takes `max(0, 1 - copy_w_a - copy_w_b)`. The
+    /// three always sum to >= 1, so the draw needs no clamp and cannot divide by zero.
+    pub copy_w_b: f32,
+}
+
 /// Root simulation-tuning resource. Extend with new sections as later phases need them; keep
 /// [`SimTuning::default`] bit-identical to the shipped consts, guarded by the deterministic-core hash.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -206,6 +279,7 @@ pub struct SimTuning {
     pub boss: BossTuning,
     pub parasite: ParasiteTuning,
     pub scp999: Scp999Tuning,
+    pub scp1048: Scp1048Tuning,
 }
 
 impl Default for SimTuning {
@@ -280,6 +354,36 @@ impl Default for SimTuning {
                 calm_rate: 0.6,       // ~1.6 s of contact to soothe FEAR 1→0 — a gentle sustained comfort
                 morale_rate: 0.4,
                 spawn_min_dist: 18.0, // well past the crabs' 12 — the comfort blob is the far reward
+            },
+            scp1048: Scp1048Tuning {
+                count: 1,
+                spawn_min_dist: 16.0, // out in the level like the blob; the bear has to be found
+                move_speed: 0.9,      // half the crab crawl (1.8) — a 33 cm plush shuffles
+                hp: 30.0,             // sturdier than a manca (18), far softer than the boss
+                approach_range: 6.0,
+                strike_range: 1.2,       // ~the crab's latch reach
+                strike_cooldown: 1.5,
+                strike_damage: 8.0,      // parity with combat.crab_jump_damage
+                rage_dread_rate: 0.3,    // 3x manca_dread_rate — a raging bear is loud on the field
+                scream_dread: 4.0,       // parity with deposit.alarm_nest: one shriek reads as an alarm
+                pain_radius: 10.0,       // canon: blinding pain at 10 m
+                growth_radius: 5.0,      // canon: ear growths at 5 m
+                growth_rate: 0.05,       // ~20 s inside the band to full cover
+                growth_decay: 0.01,      // leaving the band saves you: 40 s from full back under the
+                                         //   threshold, so a rescued victim suffocates a while, then lives
+                asphyxiate_dps: 0.6,     // ~100 HP over ~170 s — canon's "within 3 minutes"
+                // MUST stay < 1.0. At 1.0 the lethal band is the single point at the top of the
+                // severity range, so `growth_decay` drops a victim under it on the very first tick
+                // after the shriek stops and the suffocation can only ever tick while the bear is
+                // actively screaming — the canon "died within 3 minutes" could never happen.
+                asphyxiate_threshold: 0.6,
+                fear_of_gunfire: 0.2,    // parity with fear.crab_of_gunfire
+                build_cost: 12.0,
+                scavenge_rate: 1.0,      // 12 s of unobserved building per copy
+                build_cooldown: 20.0,
+                max_bears: 6,
+                copy_w_a: 0.34, // the three copies are near-equally likely; C takes the remainder
+                copy_w_b: 0.33,
             },
         }
     }
@@ -395,6 +499,43 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     positive("scp999.calm_rate", t.scp999.calm_rate)?;
     positive("scp999.morale_rate", t.scp999.morale_rate)?;
     positive("scp999.spawn_min_dist", t.scp999.spawn_min_dist)?;
+
+    // SCP-1048 (the Builder Bear family). `count` is a usize (0 = a world with no bear at all, a
+    // valid scenario), but `max_bears` is the cap the replication loop breaks on, so 0 there would
+    // be a world that can never hold the bear it seeded — rejected, exactly as `manca_count_max` is.
+    //
+    // Four knobs are deliberately `non_negative` rather than `positive`, because their genome BOUNDS
+    // floor is 0.0 and a validator stricter than BOUNDS would make mutated-but-in-bounds children
+    // infeasible (which `world_genome::mutation_stays_within_bounds_and_finite` would red):
+    //   - `growth_decay` 0 ⇒ ear growths never heal (an incurable world, reachable on purpose)
+    //   - `rage_dread_rate` / `scream_dread` 0 ⇒ a bear that terrifies nobody
+    //   - `strike_damage` 0 ⇒ copies that menace but cannot kill
+    // No cross-knob constraint ties `growth_radius` to `pain_radius`: a world where the lethal band
+    // out-reaches the pain band is strange but playable, and gating it would reject valid mutants.
+    positive("scp1048.spawn_min_dist", t.scp1048.spawn_min_dist)?;
+    positive("scp1048.move_speed", t.scp1048.move_speed)?;
+    positive("scp1048.hp", t.scp1048.hp)?;
+    positive("scp1048.approach_range", t.scp1048.approach_range)?;
+    positive("scp1048.strike_range", t.scp1048.strike_range)?;
+    positive("scp1048.strike_cooldown", t.scp1048.strike_cooldown)?;
+    non_negative("scp1048.strike_damage", t.scp1048.strike_damage)?;
+    non_negative("scp1048.rage_dread_rate", t.scp1048.rage_dread_rate)?;
+    non_negative("scp1048.scream_dread", t.scp1048.scream_dread)?;
+    positive("scp1048.pain_radius", t.scp1048.pain_radius)?;
+    positive("scp1048.growth_radius", t.scp1048.growth_radius)?;
+    positive("scp1048.growth_rate", t.scp1048.growth_rate)?;
+    non_negative("scp1048.growth_decay", t.scp1048.growth_decay)?;
+    positive("scp1048.asphyxiate_dps", t.scp1048.asphyxiate_dps)?;
+    positive("scp1048.asphyxiate_threshold", t.scp1048.asphyxiate_threshold)?;
+    positive("scp1048.fear_of_gunfire", t.scp1048.fear_of_gunfire)?;
+    positive("scp1048.build_cost", t.scp1048.build_cost)?;
+    positive("scp1048.scavenge_rate", t.scp1048.scavenge_rate)?;
+    positive("scp1048.build_cooldown", t.scp1048.build_cooldown)?;
+    if t.scp1048.max_bears == 0 {
+        return Err("sim tuning: scp1048.max_bears must be >= 1".into());
+    }
+    probability("scp1048.copy_w_a", t.scp1048.copy_w_a)?;
+    probability("scp1048.copy_w_b", t.scp1048.copy_w_b)?;
 
     Ok(())
 }

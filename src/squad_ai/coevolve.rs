@@ -85,6 +85,8 @@ pub struct Templates {
     pub crab: Vec<Behavior>,
     pub scout: Vec<Behavior>,
     pub smiley: Vec<Behavior>,
+    pub bear: Vec<Behavior>,
+    pub bear_copy: Vec<Behavior>,
 }
 
 impl Templates {
@@ -99,6 +101,8 @@ impl Templates {
             crab: creatures.crab.behaviors,
             scout: creatures.scout.behaviors,
             smiley: creatures.smiley.behaviors,
+            bear: creatures.bear.behaviors,
+            bear_copy: creatures.bear_copy.behaviors,
         }
     }
 }
@@ -115,6 +119,12 @@ pub struct SwarmGenome {
     pub crab: Genome,
     pub scout: Genome,
     pub smiley: Genome,
+    /// SCP-1048, the benign original. Carried on the swarm side rather than the world side because it
+    /// is a *repertoire*, not a dial — and because how eagerly the original builds co-adapts with how
+    /// dangerous its copies are, which is the whole point of evolving the two together.
+    pub bear: Genome,
+    /// The shared A/B/C copy repertoire.
+    pub bear_copy: Genome,
 }
 
 impl SquadGenome {
@@ -125,7 +135,13 @@ impl SquadGenome {
 
 impl SwarmGenome {
     pub fn authored(t: &Templates) -> Self {
-        SwarmGenome { crab: encode(&t.crab), scout: encode(&t.scout), smiley: encode(&t.smiley) }
+        SwarmGenome {
+            crab: encode(&t.crab),
+            scout: encode(&t.scout),
+            smiley: encode(&t.smiley),
+            bear: encode(&t.bear),
+            bear_copy: encode(&t.bear_copy),
+        }
     }
 }
 
@@ -149,6 +165,8 @@ pub fn brains_of(
         crab: decode(&t.crab, &swarm.crab)?,
         scout: decode(&t.scout, &swarm.scout)?,
         smiley: decode(&t.smiley, &swarm.smiley)?,
+        bear: decode(&t.bear, &swarm.bear)?,
+        bear_copy: decode(&t.bear_copy, &swarm.bear_copy)?,
     })))
 }
 
@@ -168,6 +186,8 @@ pub fn swarm_feasible(t: &Templates, swarm: &SwarmGenome) -> Result<(), String> 
     is_feasible_creature("crab_brain", &t.crab, &swarm.crab)?;
     is_feasible_creature("scout_brain", &t.scout, &swarm.scout)?;
     is_feasible_creature("smiley_brain", &t.smiley, &swarm.smiley)?;
+    is_feasible_creature("bear_brain", &t.bear, &swarm.bear)?;
+    is_feasible_creature("bear_copy_brain", &t.bear_copy, &swarm.bear_copy)?;
     Ok(())
 }
 
@@ -985,6 +1005,8 @@ fn mutate_swarm(
         crab: mutate(&t.crab, &parent.crab, SIGMA, RANK_SWAP_P, rng)?,
         scout: mutate(&t.scout, &parent.scout, SIGMA, RANK_SWAP_P, rng)?,
         smiley: mutate(&t.smiley, &parent.smiley, SIGMA, RANK_SWAP_P, rng)?,
+        bear: mutate(&t.bear, &parent.bear, SIGMA, RANK_SWAP_P, rng)?,
+        bear_copy: mutate(&t.bear_copy, &parent.bear_copy, SIGMA, RANK_SWAP_P, rng)?,
     })
 }
 

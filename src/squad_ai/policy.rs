@@ -180,8 +180,12 @@ pub struct NeuralPolicy {
 impl NeuralPolicy {
     /// Input width — the observation tensor length.
     pub const IN: usize = Observation::dim();
-    /// Hidden width. Small on purpose: a 25-mode action space over a ~30-D observation does not need a wide
+    /// Hidden width. Small on purpose: a ~30-mode action space over a ~30-D observation does not need a wide
     /// net, and every extra unit enlarges the neuroevolution search space without adding expressible tactics.
+    ///
+    /// Note the output width tracks `MODE_COUNT`, so **adding a `Mode` changes [`Self::WEIGHT_COUNT`] and
+    /// invalidates every committed `elites_policy*.ron`**. `from_weights` rejects the old length loudly
+    /// rather than padding it — a stale archive is a re-train, not a resize.
     pub const HIDDEN: usize = 24;
     /// Output width — one logit per `Mode`.
     pub const OUT: usize = MODE_COUNT;
@@ -280,6 +284,7 @@ mod tests {
             alarm_val: 0.0,
             seen_by_squad: 0.0,
             noise_draw: 0.0,
+            build_ready: 0.0,
             squad: SquadFields { anchor_dist: 0.0, ..SquadFields::neutral() },
             water: crate::ai::utility::WaterObs::default(),
         }

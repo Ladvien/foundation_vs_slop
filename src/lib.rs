@@ -80,6 +80,11 @@ pub mod rng;
 /// away their FEAR (the game's one fear-*lowering* creature). Split gameplay/cosmetic plugins for the
 /// determinism gate; see the module docs.
 pub mod scp999;
+/// SCP-1048 "Builder Bear" — the benign original plus the three hostile copies it assembles from
+/// scavenged material. The one creature that *builds more of itself* mid-episode; the original is
+/// deliberately unshootable, so the counter is to keep it under observation. Split gameplay/cosmetic
+/// plugins for the determinism gate; see the module docs.
+pub mod scp1048;
 pub mod selection;
 pub mod settings;
 /// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
@@ -248,6 +253,10 @@ pub fn run() {
                 // AI → movement → hashed Transform, so the GAMEPLAY half is harness-visible (registered in
                 // `sim_harness` too). The cosmetic half (`Scp999VisualsPlugin`) is windowed-only, below.
                 scp999::Scp999Plugin,
+                // SCP-1048: the bears carry `Health` and move on `FixedUpdate`, and the original
+                // *builds* hostile copies mid-episode — all of it hashed, so the gameplay half is in
+                // `sim_harness` too. The cosmetic half (`Scp1048VisualsPlugin`) is windowed-only, below.
+                scp1048::Scp1048Plugin,
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
@@ -283,6 +292,9 @@ pub fn run() {
                 // Transform + material uniforms), windowed-only — never in `sim_harness`. The gameplay
                 // `Scp999Plugin` (seek + tickle-calm) is in the harness-visible creature tuple above.
                 scp999::Scp999VisualsPlugin,
+                // `Scp1048Plugin` (seeding + the behaviour executor) is in the harness-visible
+                // creature tuple above; this is only the clip driver and fog hiding.
+                scp1048::Scp1048VisualsPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the

@@ -101,6 +101,9 @@ pub enum TargetKind {
     Manca = 2,
     Boss = 3,
     Nest = 4,
+    /// The hostile SCP-1048 copies. The benign original carries no `LaserTarget` at all — it has no
+    /// `Hostile`, so `fire_laser`'s query would never see it anyway.
+    Bear = 5,
 }
 
 /// Build a stable, cross-species-unique [`LaserTarget::id`] from a spawn seed. See [`LaserTarget::id`].

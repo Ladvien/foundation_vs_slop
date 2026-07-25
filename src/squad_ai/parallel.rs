@@ -341,7 +341,13 @@ mod tests {
         // The two wire payloads: a job (driver → worker) and a scored result (worker → driver).
         let job = TripleJob {
             squad: SquadGenome(vec![genome(), genome()]),
-            swarm: SwarmGenome { crab: genome(), scout: genome(), smiley: genome() },
+            swarm: SwarmGenome {
+                crab: genome(),
+                scout: genome(),
+                smiley: genome(),
+                bear: genome(),
+                bear_copy: genome(),
+            },
             world: WorldGenome(v.clone()),
             seed_a: 0x5C0_9191,
             seed_b: 0xA11CE,

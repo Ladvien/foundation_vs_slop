@@ -31,11 +31,23 @@ pub enum Faction {
     Crab,
     /// The watcher.
     Anomaly,
+    /// The SCP-1048 Builder Bear family — the benign original AND the hostile copies it builds.
+    ///
+    /// One faction for both, because a faction is a *perception* partition ("which fields are
+    /// someone else's"), not an allegiance: original and copy alike should panic at gunfire and
+    /// neither should read the family's own dread back as terror. What differs between them is who
+    /// the squad shoots (`Hostile`) and how much dread each deposits — not what they perceive.
+    ///
+    /// Deliberately NOT folded into [`Faction::Anomaly`]: the watcher's drive list is empty on
+    /// purpose ("afraid of nothing"), and hanging a FEAR def there to serve the bears would hand it
+    /// to the Smiley boss too, changing boss behaviour for reasons unrelated to the bear.
+    Bear,
 }
 
 impl Faction {
     /// Every variant, in registry slot order. Extend alongside the enum.
-    pub const ALL: [Faction; 3] = [Faction::Foundation, Faction::Crab, Faction::Anomaly];
+    pub const ALL: [Faction; 4] =
+        [Faction::Foundation, Faction::Crab, Faction::Anomaly, Faction::Bear];
 
     /// Dense index into the per-faction drive registry.
     pub const fn index(self) -> usize {
@@ -43,6 +55,7 @@ impl Faction {
             Faction::Foundation => 0,
             Faction::Crab => 1,
             Faction::Anomaly => 2,
+            Faction::Bear => 3,
         }
     }
 }

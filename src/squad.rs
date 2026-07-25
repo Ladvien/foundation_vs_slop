@@ -714,6 +714,10 @@ pub(crate) fn spawn_unit(
             MemoryStream::default(),
             crate::squad_ai::dialogue::SpokenLines::default(),
             crate::health::CyanideSmell::from_seed_in(crate::health::smell_seed::UNIT, seed as u64),
+            // SCP-1048-A's ear-growth affliction. Always present and inert at 0 — never inserted when
+            // a unit is first screamed at, which would migrate the archetype mid-run (the
+            // `parasite::Infestation` idiom).
+            crate::scp1048::EarGrowth::default(),
         ),
         FigurineSource(figurine.clone()),
         Visibility::default(),

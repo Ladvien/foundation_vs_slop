@@ -232,7 +232,30 @@ fn deterministic_core_is_bit_identical() {
 // `deterministic_core_is_bit_identical_across_many_builds` stay green, and
 // `authored_world_config_override_is_a_noop` measured the SAME new value (world-config seam untouched).
 // Was `0x793366008d9878fb`.
-const GOLDEN: u64 = 0x991b80282f2def20;
+//
+// Re-pinned 2026-07-24 for **SCP-1048, the Builder Bear**. Four things moved the core, and the last is
+// the interesting one:
+//   * a benign original now seeds out in the level carrying `Health` (so it folds into the snapshot) and
+//     moves on `FixedUpdate`;
+//   * the squad gains a `Faction::Bear` neighbour whose brain runs through the same `think`;
+//   * four new `Mode` variants widen the action alphabet the utility `decide` selects among;
+//   * and — unlike every other creature in this sim — **the bear BUILDS more of itself mid-episode.** An
+//     unobserved original scavenges for ~12 s and assembles a hostile copy, so a 1800-tick core no longer
+//     ends with the population it started with. That is a genuine new source of divergence, not just a
+//     re-shuffle, and it is exactly what `scp1048::the_bear_breeds_unattended_with_nothing_forced` pins.
+//
+// Measured, not assumed: three fresh processes run CONCURRENTLY (an idle-box probe proves nothing) all
+// reported this same value; `deterministic_core_is_bit_identical` and
+// `deterministic_core_is_bit_identical_across_many_builds` (24 builds) stayed green — so the sim is still
+// bit-reproducible, just different — and `authored_world_config_override_is_a_noop` measured the SAME new
+// value, proving the world-config seam is untouched.
+//
+// Two intermediate values were measured and discarded during this landing (`0xd9e2765d0f35d881` before
+// replication was reachable, and one before a brain fix that had left the bear unable to start
+// gathering). If you are re-pinning this, take the measurement *after* the behaviour is final, not
+// stage by stage.
+// Was `0x991b80282f2def20`.
+const GOLDEN: u64 = 0xc9c8c93f82ab5857;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -384,6 +407,19 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // here (the calm no-player squad keeps the blob inert — the same reason the actor golden held); the
 // movement is the branch's squad rework + config re-tuning + creature changes. Verified bit-stable across
 // two fresh single-process runs under load. Was `0xdf805ab8088f34ee`.
+//
+// **NOT re-pinned for SCP-1048 (2026-07-24), and that is a measured result, not an oversight.** The bear
+// family moved the ACTOR golden above but leaves this fingerprint bit-identical: in a 1800-tick no-player
+// core the seeded bear is the benign original, which deposits into no stigmergy channel at all (only a
+// *raging copy* emits dread, and no copy is ever built in that scenario), so the field grids never see it.
+// This is the mirror image of the SCP-999 landing recorded above, where the field oracle moved and the
+// actor one did not — together they are decent evidence that the two oracles really are covering
+// different blind spots rather than restating each other.
+//
+// Recorded because it was briefly got wrong: an intermediate re-pin to `0x54d12d1892c5bf6f` was measured
+// mid-landing and later failed to reproduce. Three fresh concurrent processes under load agree on the
+// value below, which is also the value it held before the bear existed. If you find yourself re-pinning
+// this for a creature that emits nothing, measure again before believing it.
 const GOLDEN_FIELD: u64 = 0x2e884ae0bb33f60c;
 
 #[test]

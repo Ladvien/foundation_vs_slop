@@ -99,7 +99,7 @@ const ALPHA: f64 = 0.5;
 /// one it merely passes through does not.
 const MIN_CONTEXT_SAMPLES: u32 = 8;
 
-/// Who is deciding. Eight actors: the five squad roles plus the three creature brains. Kept dense so a
+/// Who is deciding. Ten actors: the five squad roles plus the five creature brains. Kept dense so a
 /// [`Context`] packs into a small integer key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub enum ActorKind {
@@ -107,10 +107,21 @@ pub enum ActorKind {
     Crab,
     Scout,
     Smiley,
+    /// SCP-1048, the benign original.
+    Bear,
+    /// SCP-1048-A/B/C — one actor for all three copies, matching the one shared `BrainId::BearCopy`.
+    BearCopy,
 }
 
-/// Number of distinct actors.
-pub const ACTOR_COUNT: usize = RoleId::ALL.len() + 3;
+/// Every non-role actor, in registry slot order — the creature brains. This is the canonical list;
+/// [`ActorKind::index`] must place each one at `RoleId::ALL.len() + <its position here>`, and
+/// `role_indices_are_dense` holds the two in step. Append only: reordering re-keys every archived
+/// context distribution.
+pub const CREATURE_ACTORS: [ActorKind; 5] =
+    [ActorKind::Crab, ActorKind::Scout, ActorKind::Smiley, ActorKind::Bear, ActorKind::BearCopy];
+
+/// Number of distinct actors. Derived, so adding to [`CREATURE_ACTORS`] cannot leave it stale.
+pub const ACTOR_COUNT: usize = RoleId::ALL.len() + CREATURE_ACTORS.len();
 
 impl ActorKind {
     fn index(self) -> usize {
@@ -123,6 +134,10 @@ impl ActorKind {
             ActorKind::Crab => RoleId::ALL.len(),
             ActorKind::Scout => RoleId::ALL.len() + 1,
             ActorKind::Smiley => RoleId::ALL.len() + 2,
+            // Appended AFTER the existing actors so no established index moves. A reordering here
+            // would silently re-key every archived context distribution.
+            ActorKind::Bear => RoleId::ALL.len() + 3,
+            ActorKind::BearCopy => RoleId::ALL.len() + 4,
         }
     }
 }
@@ -257,6 +272,11 @@ pub fn is_squad_offensive(mode: Mode) -> bool {
 /// so choosing to shoot is not how this game expresses squad intent. Duty is: `SecureDoor` 31–85,
 /// `Examine` 30–65, `Commune` 8, `Overwatch` 8. An offence-only clause rejected the shipped game outright
 /// on one of two worlds.
+/// The clause is a NEGATIVE `matches!`, so any mode added to the alphabet later counts as duty by
+/// default. That is safe for the bear modes (`Rage`/`Strike`/`Build`/`Emote`) for a structural reason,
+/// not a lucky one: this function is called from exactly one site (`trace::record_decisions`, inside
+/// the squad-**role** loop), and creature decisions are recorded through a separate branch that never
+/// reaches it. A role brain cannot emit a bear mode, so no bear mode can ever be counted as squad duty.
 pub fn is_squad_duty(mode: Mode) -> bool {
     !matches!(mode, Mode::Flee | Mode::Regroup | Mode::FollowAnchor | Mode::Wander)
 }
@@ -773,17 +793,24 @@ mod tests {
         for (i, role) in RoleId::ALL.iter().enumerate() {
             assert_eq!(ActorKind::Role(*role).index(), i);
         }
-        assert_eq!(ActorKind::Smiley.index(), ACTOR_COUNT - 1);
+        // Every creature actor, in registry order, immediately after the roles. Checking the whole
+        // run rather than only the last index means adding an actor without giving it a slot is a
+        // failure here, instead of a silent hole that only shows up as a context that never fills.
+        for (offset, actor) in CREATURE_ACTORS.iter().enumerate() {
+            assert_eq!(
+                actor.index(),
+                RoleId::ALL.len() + offset,
+                "{actor:?} is not at its registry slot"
+            );
+        }
+        assert_eq!(RoleId::ALL.len() + CREATURE_ACTORS.len(), ACTOR_COUNT);
     }
 
     #[test]
     fn context_keys_are_dense_and_unique() {
         let mut seen = vec![false; CONTEXT_COUNT];
-        let actors: Vec<ActorKind> = RoleId::ALL
-            .iter()
-            .map(|r| ActorKind::Role(*r))
-            .chain([ActorKind::Crab, ActorKind::Scout, ActorKind::Smiley])
-            .collect();
+        let actors: Vec<ActorKind> =
+            RoleId::ALL.iter().map(|r| ActorKind::Role(*r)).chain(CREATURE_ACTORS).collect();
         for actor in actors {
             for fear in [FearBucket::Calm, FearBucket::Wary, FearBucket::Panicked] {
                 for flags in 0..8u8 {

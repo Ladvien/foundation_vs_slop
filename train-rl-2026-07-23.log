@@ -1,0 +1,5 @@
+>> launching 12 'rl' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_rl_10.ron  (best fitness 0.2117; 12 of 12 islands produced elites)
+   winner copied to assets/config/elites_policy.ron
+   ship it:  FVS_POLICY_ELITE=assets/config/elites_policy.ron

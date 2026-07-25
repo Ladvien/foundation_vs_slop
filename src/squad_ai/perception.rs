@@ -328,6 +328,8 @@ pub fn squad_think(
             seen_by_squad: if fog.visible_at(dungeon.world_to_cell(pos)) { 1.0 } else { 0.0 },
             // Units don't investigate the din (the acoustic Investigate behaviour is crab-only).
             noise_draw: 0.0,
+            // A unit is not a bear and can never become one, so it can never be ready to build.
+            build_ready: 0.0,
             squad,
             water,
         };
@@ -485,7 +487,11 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
         | Mode::Mark
         | Mode::Rally
         | Mode::Muster
-        | Mode::Investigate => None,
+        | Mode::Investigate
+        | Mode::Rage
+        | Mode::Strike
+        | Mode::Build
+        | Mode::Emote => None,
     }
 }
 
@@ -516,6 +522,7 @@ mod tests {
             alarm_val: 0.0,
             seen_by_squad: 0.0,
             noise_draw: 0.0,
+            build_ready: 0.0,
             squad,
             water: crate::ai::utility::WaterObs::default(),
         }

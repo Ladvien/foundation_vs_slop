@@ -19,6 +19,24 @@ cargo test --features test-harness -- --test-threads=1    # + headless replay / 
   visual tests. They open no window and need **no GPU**: the harness sets `RenderPlugin` with
   `backends: None`, so every render type is registered but no adapter/device is ever created.
 
+> ### ⚠️ The harness needs `RUST_MIN_STACK=33554432` — set it locally
+>
+> ```bash
+> export RUST_MIN_STACK=33554432   # 32 MiB; or put it in [env] in your own .cargo/config.toml
+> ```
+>
+> CI sets this in `.github/workflows/ci.yml`. **It cannot be committed for you**: the natural home is
+> `.cargo/config.toml`, which is deliberately gitignored (a hardcoded absolute path in it once broke CI
+> for every commit), so each machine keeps its own.
+>
+> Why it is needed: the harness pins Bevy's IO task pool to **one** thread — that is what makes system
+> order deterministic — and `--test-threads=1` builds ~35 `App`s in a single process, so every asset load
+> in the whole suite funnels through one stack. Bevy's glTF loader nests `block_on` per sub-asset, and
+> once the SCP-1048 family added four more glbs the default 2 MiB ran out: the suite aborts with
+> `thread 'IO Task Pool (0)' has overflowed its stack`, reproducibly, at the same test every run. Bevy
+> 0.19's `TaskPoolOptions` exposes no per-pool `stack_size`, so the environment is the only lever.
+> Trimming the bear assets (see `BACKLOG.md`) is the real fix.
+
 ---
 
 ## Strategy: the two-altitude model (read first)

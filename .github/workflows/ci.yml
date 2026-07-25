@@ -19,6 +19,18 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Thread stack size for every process these jobs launch. The headless harness pins Bevy's IO task pool
+  # to ONE thread (that is what makes system order deterministic), and `--test-threads=1` builds ~35 `App`s
+  # in a single process — so every asset load in the whole suite funnels through one stack. Bevy's glTF
+  # loader nests `block_on` per sub-asset, and once the SCP-1048 family added four more glbs the default
+  # 2 MiB ran out: the harness lane aborted partway through with
+  # `thread 'IO Task Pool (0)' has overflowed its stack`, reproducibly, at the same test every run.
+  #
+  # Bevy 0.19's `TaskPoolOptions` exposes no per-pool `stack_size`, so the environment is the only lever.
+  # It lives HERE rather than in `.cargo/config.toml` because that file is deliberately gitignored (a
+  # hardcoded absolute path in it once broke this very workflow) — so a local dev also needs it set; see
+  # the note in TESTING.md.
+  RUST_MIN_STACK: "33554432"
 
 jobs:
   test:

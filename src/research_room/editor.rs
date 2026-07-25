@@ -36,6 +36,8 @@ pub(super) struct EditorState {
     spawn_count: u32,
     furniture_idx: usize,
     quantity_idx: usize,
+    /// Cycles the four SCP-1048 variants on repeat clicks, so one button reaches the whole family.
+    bear_idx: usize,
 }
 
 impl EditorState {
@@ -69,13 +71,21 @@ const PROPS: &[PropSpec] = &[
     PropSpec { label: "SCP-150 Parasite", glb: "scp150/scp-150.glb", scale: 0.07, yaw: -std::f32::consts::FRAC_PI_2 },
     PropSpec { label: "Flashlight", glb: "low_poly_flashlight/low_poly_flashlight.glb", scale: 1.0, yaw: 0.0 },
     PropSpec { label: "Meat Chunks", glb: "meat_chunks/meatpack.glb", scale: 1.0, yaw: 0.0 },
+    // The SCP-1048 family. All four are authored at canon 0.33 m and face +Z, so they share the
+    // gameplay spawn's scale 1.0 and 180° yaw (`scp1048::RENDER_SCALE`). At canon size they are TINY
+    // next to the 1.82 m Valkyrie — which is the point of having them in the static palette: this is
+    // the fastest way to eyeball whether `RENDER_SCALE` should stay at 1.0.
+    PropSpec { label: "SCP-1048 (bear)", glb: "scp1048/scp-1048.glb", scale: 1.0, yaw: std::f32::consts::PI },
+    PropSpec { label: "SCP-1048-A (ears)", glb: "scp1048a/scp-1048-a.glb", scale: 1.0, yaw: std::f32::consts::PI },
+    PropSpec { label: "SCP-1048-B (infant)", glb: "scp1048b/scp-1048-b.glb", scale: 1.0, yaw: std::f32::consts::PI },
+    PropSpec { label: "SCP-1048-C (scrap)", glb: "scp1048c/scp-1048-c.glb", scale: 1.0, yaw: std::f32::consts::PI },
 ];
 
 /// The prop buttons are spawned by an unrolled `prop_button!` per index (see `spawn_palette`) because a
 /// Bevy observer closure must be non-capturing — it can name the `PROPS` const directly but not a loop
 /// variable — so the count is duplicated at the call site. This fails the build loudly if `PROPS` changes
 /// length without the unrolled calls following.
-const _: () = assert!(PROPS.len() == 5, "update the unrolled prop_button! calls in spawn_palette to match PROPS");
+const _: () = assert!(PROPS.len() == 9, "update the unrolled prop_button! calls in spawn_palette to match PROPS");
 
 /// F6 toggles the palette open/closed, spawning or despawning the panel.
 pub(super) fn toggle_editor(
@@ -239,6 +249,27 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
                     },
                 );
 
+            // SCP-1048 — cycles original → A → B → C on repeat clicks, so one button reaches the whole
+            // family. The original builds copies once it is out of the squad's line of sight.
+            p.spawn(button_visual(theme))
+                .with_children(|b| {
+                    b.spawn(text_colored(theme, fonts, "SCP-1048 (cycles A/B/C)", theme.font_body, theme.text));
+                })
+                .observe(
+                    |_: On<Activate>,
+                     mut c: Commands,
+                     a: Res<AssetServer>,
+                     d: Res<Dungeon>,
+                     sim: Res<crate::sim::SimTuning>,
+                     banim: Res<crate::scp1048::anim::Scp1048Anim>,
+                     mut s: ResMut<EditorState>| {
+                        let q = s.quantity();
+                        for _ in 0..q {
+                            spawn_live_scp1048(&mut c, &a, &banim, &sim, &d, &mut s);
+                        }
+                    },
+                );
+
             // Furniture — cycles through the whole placement manifest on repeat clicks.
             p.spawn(text_colored(theme, fonts, "— FURNITURE —", theme.font_body * 0.85, theme.text_muted));
             p.spawn(button_visual(theme))
@@ -261,13 +292,17 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
 
             // Static GLB props for art / scale inspection (no AI, bind pose). Unrolled one button per
             // `PROPS` index because the observer closure must be non-capturing (const index, not a loop
-            // var); the `PROPS.len() == 5` assert above fails the build if this list drifts.
+            // var); the `PROPS.len() == 9` assert above fails the build if this list drifts.
             p.spawn(text_colored(theme, fonts, "— STATIC (art) —", theme.font_body * 0.85, theme.text_muted));
             prop_button!(p, theme, fonts, PROPS[0]);
             prop_button!(p, theme, fonts, PROPS[1]);
             prop_button!(p, theme, fonts, PROPS[2]);
             prop_button!(p, theme, fonts, PROPS[3]);
             prop_button!(p, theme, fonts, PROPS[4]);
+            prop_button!(p, theme, fonts, PROPS[5]);
+            prop_button!(p, theme, fonts, PROPS[6]);
+            prop_button!(p, theme, fonts, PROPS[7]);
+            prop_button!(p, theme, fonts, PROPS[8]);
 
             // Clear Room — the no-legacy-state reset (despawn every RoomSpawned entity).
             p.spawn(button_visual(theme))
@@ -418,6 +453,7 @@ const RESEARCH_ROOM_SEED_SPAN: u32 = 1_000_000;
 const ROOM_SPECIES_CRAB: u32 = 0;
 const ROOM_SPECIES_MANCA: u32 = 1;
 const ROOM_SPECIES_SCP999: u32 = 2;
+const ROOM_SPECIES_BEAR: u32 = 3;
 
 /// A dev-spawn seed for the Nth F6 click, inside `species`' reserved band. Unique within the band by
 /// construction (`n` is monotonic and click counts never approach the span), and disjoint both from the
@@ -521,6 +557,41 @@ fn spawn_live_scp999(
     let e = crate::scp999::spawn_scp999_at(commands, assets, seed, dungeon.cell_center(cell));
     commands.entity(e).insert(RoomSpawned);
     info!("research_room: spawned live SCP-999 comfort blob at cell {cell:?}");
+}
+
+/// Spawn a live SCP-1048 through the game's real builder (`crate::scp1048::spawn_scp1048_at`), so an
+/// F6-dropped bear is byte-identical to a seeded or a *built* one — same components, same brain, same
+/// animation tables. Repeat clicks cycle the family: original → A → B → C.
+///
+/// The seed comes from the room's own decorrelation namespace, NOT from `Scp1048SpawnSeq`. Two reasons:
+/// the dev tool must not perturb the counter the deterministic replication loop draws from, and every
+/// F6-spawned entity needs a key unique against the natively-spawned ones or the module's `sort_total!`
+/// would hit a tie and panic (the trap the Research Room notes record).
+fn spawn_live_scp1048(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    bear_anim: &crate::scp1048::anim::Scp1048Anim,
+    sim: &crate::sim::SimTuning,
+    dungeon: &Dungeon,
+    state: &mut EditorState,
+) {
+    let n = state.spawn_count;
+    state.spawn_count += 1;
+    let variant = crate::scp1048::Scp1048Variant::ALL[state.bear_idx % 4];
+    state.bear_idx += 1;
+    let cell = fan_cell(dungeon, n);
+    let seed = room_spawn_seed(n, ROOM_SPECIES_BEAR);
+    let e = crate::scp1048::spawn_scp1048_at(
+        commands,
+        assets,
+        bear_anim,
+        sim,
+        seed,
+        dungeon.cell_center(cell),
+        variant,
+    );
+    commands.entity(e).insert(RoomSpawned);
+    info!("research_room: spawned live {variant:?} SCP-1048 at cell {cell:?}");
 }
 
 /// Spawn the next furniture piece from the placement manifest (cycles the whole catalogue on repeat

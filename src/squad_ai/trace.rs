@@ -171,6 +171,11 @@ pub fn record_decisions(
                     ActorKind::Crab
                 }
             }
+            // The three hostile copies share one brain and one actor: they decide identically and
+            // differ only in which attack the executor plays, so splitting them would dilute each
+            // context below `MIN_CONTEXT_SAMPLES` without measuring anything new.
+            BrainId::Bear => ActorKind::Bear,
+            BrainId::BearCopy => ActorKind::BearCopy,
         };
         // A creature is witnessed exactly when the player can see it act.
         let witnessed = fog.visible_at(dungeon.world_to_cell(tf.translation));

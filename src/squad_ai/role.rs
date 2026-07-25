@@ -372,6 +372,7 @@ mod tests {
             alarm_val: 0.0,
             seen_by_squad: 0.0,
             noise_draw: 0.0,
+            build_ready: 0.0,
             // Near the anchor by default so cohesion is quiet unless a test strays it.
             squad: SquadFields { anchor_dist: 0.0, ..SquadFields::neutral() },
             water: crate::ai::utility::WaterObs::default(),

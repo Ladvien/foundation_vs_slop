@@ -30,19 +30,21 @@ use crate::ai::tuning::{AiTuning, ChannelTuning, FieldsTuning, RallyTuning};
 use crate::almond_water::AlmondWaterDynamics;
 use crate::config::WorldConfig;
 use crate::sim::{
-    BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, Scp999Tuning,
-    SimTuning,
+    BossTuning, BreedingTuning, CombatTuning, DepositTuning, FearTuning, ParasiteTuning, Scp1048Tuning,
+    Scp999Tuning, SimTuning,
 };
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 56 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
-/// parasite 14, scp999 6) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy channel is
-/// ATTENTION (observation); the SCP-150 parasite is a host-killing species and SCP-999 is a fear-*lowering*
-/// comfort creature, so both belong in the search that shapes the ecosystem's fear/deaths/lives. (Mold
-/// dropped to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding
-/// dropped to 7 dials when the population cap and local crowding gate were removed — the meat economy is
-/// the swarm's only size lever.)
-pub const N: usize = 107;
+/// + rally × 3) + 79 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
+/// parasite 14, scp999 6, scp1048 23) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy
+/// channel is ATTENTION (observation); the SCP-150 parasite is a host-killing species and SCP-999 is a
+/// fear-*lowering* comfort creature, so both belong in the search that shapes the ecosystem's
+/// fear/deaths/lives. SCP-1048 belongs for a third reason: it is the only creature that *builds more of
+/// itself* mid-episode, so its slice controls how fast a hostile population appears at all. (Mold dropped
+/// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
+/// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
+/// swarm's only size lever.)
+pub const N: usize = 130;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -125,6 +127,43 @@ static BOUNDS: [(f32, f32); N] = [
     // footprint (a blob inside the huddle would make the mechanic free) and capped well inside a small
     // level, so `spawn_scp999`'s far-from-spawn scan always finds a cell and never warns itself empty.
     (4.0, 40.0),
+    // ── SimTuning::scp1048 (the Builder Bear family — the one creature that BUILDS more of itself) ──
+    // Four knobs are floored at exactly 0.0 (strike_damage, rage_dread_rate, scream_dread,
+    // growth_decay). That is deliberate and `sim::validate_tuning` matches it with `non_negative`
+    // rather than `positive` — a validator stricter than these bounds would make in-bounds mutants
+    // infeasible, which `mutation_stays_within_bounds_and_finite` would red.
+    (1.0, 4.0),    // count (usize) — benign originals seeded at start (decode rounds >= 1). The
+                   //   hostile copies are BUILT, so this is only the seed population.
+    (4.0, 40.0),   // spawn_min_dist — tiles from the squad spawn. Same reasoning (and same range) as
+                   //   scp999's above: floored past the squad's own footprint, capped inside a small level.
+    (0.3, 3.0),    // move_speed — floor well under the crab crawl (1.8); a 0.33 m plush shuffles
+    (5.0, 120.0),  // hp — spans manca-soft (18) to well past a crab (25); never boss-tier
+    (1.0, 12.0),   // approach_range — how close a copy closes before it may strike
+    (0.3, 3.0),    // strike_range — attack reach
+    (0.3, 8.0),    // strike_cooldown — seconds between strikes; also C's rate of fire
+    (0.0, 30.0),   // strike_damage — 0 ⇒ copies that menace but cannot kill (a real world)
+    (0.0, 3.0),    // rage_dread_rate — THREAT_ANOMALY/sec from a RAGING copy; 0 ⇒ a silent bear
+    (0.0, 12.0),   // scream_dread — one-shot burst on A's scream; 0 ⇒ a shriek nobody fears
+    (2.0, 20.0),   // pain_radius — the dread band (canon 10 m)
+    (1.0, 16.0),   // growth_radius — the lethal ear-growth band (canon 5 m). NOT constrained against
+                   //   pain_radius: a lethal band that out-reaches the pain band is strange but
+                   //   playable, and gating it would reject in-bounds mutants.
+    (0.01, 1.0),   // growth_rate — GUTS damage accumulation; canon ~20 s to full cover ⇒ 0.05
+    (0.0, 1.0),    // growth_decay — GUTS repair term. Floored at 0 on purpose: an INCURABLE world is
+                   //   a real world the search may reach, not a degenerate one.
+    (0.5, 20.0),   // asphyxiate_dps — floored so a death is reachable inside the 120 s episode, the
+                   //   same reasoning as gestation_seconds' floor above
+    (0.1, 1.0),    // asphyxiate_threshold — severity at which growths start to suffocate
+    (0.01, 1.0),   // fear_of_gunfire — bear FEAR gain on THREAT_GUN (same range as fear.crab_of_gunfire)
+    (1.0, 60.0),   // build_cost — scavenged material one copy costs
+    (0.05, 5.0),   // scavenge_rate — material/sec accrued while unobserved and building
+    (1.0, 60.0),   // build_cooldown — seconds after a build before the next may start
+    (1.0, 16.0),   // max_bears (usize) — FIRM cap on live bears; the load-bearing bound on the build
+                   //   loop, exactly the role manca_count_max plays for burst→brood→infest
+    (0.0, 1.0),    // copy_w_a — relative weight of building an A (ear) copy
+    (0.0, 1.0),    // copy_w_b — ...and a B; C takes max(0, 1 - w_a - w_b). The three provably sum to
+                   //   >= 1 for any w_a,w_b in [0,1], so the draw needs no clamp and cannot divide by
+                   //   zero — a deliberate contrast with brood_max's `.max(brood_min)` clamp above.
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -246,6 +285,30 @@ pub fn encode(
     v.push(sim.scp999.calm_rate);
     v.push(sim.scp999.morale_rate);
     v.push(sim.scp999.spawn_min_dist);
+    // SCP-1048 Builder Bear family.
+    v.push(sim.scp1048.count as f32);
+    v.push(sim.scp1048.spawn_min_dist);
+    v.push(sim.scp1048.move_speed);
+    v.push(sim.scp1048.hp);
+    v.push(sim.scp1048.approach_range);
+    v.push(sim.scp1048.strike_range);
+    v.push(sim.scp1048.strike_cooldown);
+    v.push(sim.scp1048.strike_damage);
+    v.push(sim.scp1048.rage_dread_rate);
+    v.push(sim.scp1048.scream_dread);
+    v.push(sim.scp1048.pain_radius);
+    v.push(sim.scp1048.growth_radius);
+    v.push(sim.scp1048.growth_rate);
+    v.push(sim.scp1048.growth_decay);
+    v.push(sim.scp1048.asphyxiate_dps);
+    v.push(sim.scp1048.asphyxiate_threshold);
+    v.push(sim.scp1048.fear_of_gunfire);
+    v.push(sim.scp1048.build_cost);
+    v.push(sim.scp1048.scavenge_rate);
+    v.push(sim.scp1048.build_cooldown);
+    v.push(sim.scp1048.max_bears as f32);
+    v.push(sim.scp1048.copy_w_a);
+    v.push(sim.scp1048.copy_w_b);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -402,6 +465,35 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             calm_rate: f!(),
             morale_rate: f!(),
             spawn_min_dist: f!(),
+        },
+        // SCP-1048 Builder Bear family. `count` and `max_bears` round to >= 1 (a search world always
+        // has a bear to exercise the mechanic, and a cap of 0 could never hold the one it seeded).
+        // No clamps here: unlike `brood_max`, no bear knob is constrained against another, so every
+        // in-bounds mutant is feasible by construction. The 21 continuous dials read in `encode` order.
+        scp1048: Scp1048Tuning {
+            count: to_usize(f!()),
+            spawn_min_dist: f!(),
+            move_speed: f!(),
+            hp: f!(),
+            approach_range: f!(),
+            strike_range: f!(),
+            strike_cooldown: f!(),
+            strike_damage: f!(),
+            rage_dread_rate: f!(),
+            scream_dread: f!(),
+            pain_radius: f!(),
+            growth_radius: f!(),
+            growth_rate: f!(),
+            growth_decay: f!(),
+            asphyxiate_dps: f!(),
+            asphyxiate_threshold: f!(),
+            fear_of_gunfire: f!(),
+            build_cost: f!(),
+            scavenge_rate: f!(),
+            build_cooldown: f!(),
+            max_bears: to_usize(f!()),
+            copy_w_a: f!(),
+            copy_w_b: f!(),
         },
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.

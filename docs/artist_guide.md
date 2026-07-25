@@ -216,6 +216,47 @@ The parasite embeds inside hosts and later erupts (`BurrowOut` clip, slowed to
 ×0.8 for drama). The burst leaves an open wound that needs its own small skinned
 mesh; the code spawns the same `scp-150.glb` scene scaled down for the wound.
 
+### SCP-1048 "Builder Bear" family — `scp1048/`, `scp1048a/`, `scp1048b/`, `scp1048c/`
+
+Four bears from one parameterised recipe: the benign original plus the three hostile
+copies it builds during play. They share an **8-bone rig** (root `torso`), a canon
+**0.33 m** height, base at `y = 0`, and a clip vocabulary — but **not a clip order**.
+Full per-asset contracts live in each `assets/scp1048*/README.md`; this is what the
+code relies on.
+
+| Property | Value | Code ref |
+|---|---|---|
+| Render scale | **1.0** (authored at canon size — the README sanctions 1.3–1.6 if it reads too small at RTS zoom; it is one constant) | `src/scp1048/mod.rs` (`RENDER_SCALE`) |
+| Authored facing | **+Z** (muzzle/eyes/bow tie); the model child carries a 180° Y rotation to point that at the engine's −Z | `src/scp1048/mod.rs` (`spawn_scp1048_at`) |
+| Root motion | **none** — no clip translates the armature node; vertical travel is keyed on the root *bone* inside the skin, so `Transform` is entirely the game's | all four READMEs §0 |
+| Clip names | variant-prefixed (`scp1048_*`, `scp1048a_*`, …) so all four load **simultaneously** without animation-name collisions | `tests/creature_clip_contract.rs` |
+| Clips — original (5) | 0 rest_idle · 1 dance · 2 jump_in_place · 3 draw_picture · 4 sit_down | `src/scp1048/anim.rs` |
+| Clips — A, ears (5) | 0 rest_idle · 1 jump_in_place · 2 sit_down · 3 **scream** · 4 rage | `src/scp1048/anim.rs` |
+| Clips — B, infant arm (6) | 0 rest_idle · 1 dance · 2 jump_in_place · 3 sit_down · 4 **tantrum** · 5 rage | `src/scp1048/anim.rs` |
+| Clips — C, scrap + gun (8) | 0 rest_idle · 1 dance *(unwired)* · 2 jump_in_place · 3 sit_down · 4 aim_gun · 5 fire_gun · 6 pistol_whip · 7 rage | `src/scp1048/anim.rs` |
+| Triangles | 4.6k / **11.7k (A)** / 4.7k / 5.2k | asset READMEs §1 |
+
+Three things a re-author must not quietly "tidy":
+
+1. **B's `tantrum` loops.** It is the only attack clip in the game that is not a
+   one-shot — it is authored as a sustained fit and is driven as a *state* held for
+   as long as the bear is attacking. Making it a one-shot would strobe it.
+2. **C's `fire_gun` starts and ends in the aim pose** (measured 0.000 mm seam), so
+   shots replay with no cross-fade and the bear simply holds its aim between them.
+   `aim_gun` is played once and holds its last frame; do not re-author either to
+   return to neutral.
+3. **C's `dance` (index 1) is deliberately unwired** — it is legacy motion inherited
+   from the benign original and reads wrong on a violent copy. Its index is still
+   pinned by the contract test, because dropping it would shift all four hostile
+   clips below it.
+
+**SCP-1048-A is the first LOD candidate in the project**: 11.7k triangles (2.6× the
+others) and **four UV sets**, three of which are dead weight in the vertex buffer and
+are most of why the file is 2 MB. Budget an A as if you had spawned two or three
+bears. It also **embeds CC-BY geometry** (`assets/scp1048a/ATTRIBUTION.md`) — that
+notice is a licence condition and must travel with any shipped build; it is carried in
+the repo-root `CREDITS.md`.
+
 ### Smiley boss — **no model file**
 
 The Smiley is a **procedural Shadertoy face** on a camera-facing billboard quad

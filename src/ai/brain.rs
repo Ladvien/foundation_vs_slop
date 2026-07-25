@@ -52,6 +52,8 @@ pub struct AiBrains {
     pub smiley: Brain,
     pub crab: Brain,
     pub scout: Brain,
+    pub bear: Brain,
+    pub bear_copy: Brain,
 }
 
 /// Which brain an agent uses.
@@ -62,6 +64,13 @@ pub enum BrainId {
     Crab,
     /// Attached to the ~20% of crabs that are scouts (roam/report recon).
     Scout,
+    /// SCP-1048, the benign original: wander, emote when watched, build when not.
+    Bear,
+    /// SCP-1048-A/B/C, the hostile copies. **One brain for all three**, because they differ only in
+    /// which attack the executor plays for `Mode::Strike` — their ranks, gates and targets are
+    /// identical. Three brains would triple the swarm genome's width (and the `ActorKind` dilution)
+    /// to encode a distinction the decision layer never makes.
+    BearCopy,
 }
 
 /// The current decision, written by `think`, read by the locomotion systems each frame.
@@ -172,6 +181,8 @@ pub fn think(
     fog: Res<crate::fog::FogGrid>,
     // The `audio:` slice — used to gate + scale the acoustic-din draw that latches `Mode::Investigate`.
     audio: Res<crate::audio_tuning::AudioTuning>,
+    // The `sim:` slice — `scp1048.build_cost` is the threshold `Fact::BuildReady` reads against.
+    sim: Res<crate::sim::SimTuning>,
     units: Query<&Transform, With<Unit>>,
     // Prey = units + the smiley boss. Crabs hunt any prey (nearest wins); the boss hunts only units
     // (it is Prey itself, so scanning Prey would make it target its own position).
@@ -186,12 +197,13 @@ pub fn think(
             &mut ThinkTimer,
             Option<&crate::crab::CrabCarry>,
             Option<&crate::crab::Scout>,
+            Option<&crate::scp1048::Scp1048Build>,
         ),
         Without<Unit>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (tf, brain_id, drives, health, mut active, mut timer, carry, scout) in &mut agents {
+    for (tf, brain_id, drives, health, mut active, mut timer, carry, scout, build) in &mut agents {
         timer.0 -= dt;
         if timer.0 > 0.0 {
             continue;
@@ -207,7 +219,10 @@ pub fn think(
             BrainId::Crab | BrainId::Scout => {
                 crate::util::nearest_planar(pos, prey.iter().map(|t| ((), t.translation)))
             }
-            BrainId::Smiley => {
+            // The boss and the bears both scan UNITS only, never `Prey`. For the boss that is because
+            // it is `Prey` itself; for a bear it is so a copy never stalks the watcher or one of its
+            // own siblings — the family's quarrel is with the Foundation.
+            BrainId::Smiley | BrainId::Bear | BrainId::BearCopy => {
                 crate::util::nearest_planar(pos, units.iter().map(|t| ((), t.translation)))
             }
         };
@@ -265,6 +280,13 @@ pub fn think(
                     0.0
                 }
             },
+            // Can this bear assemble a copy right now? `None` for every non-bear agent, which reads as
+            // 0.0 — the same shape as `carrying`/`prey_spotted` above. Gates `Mode::Build`, together
+            // with the inverse of `seen_by_squad`: material banked, cooldown clear, and nobody looking.
+            build_ready: match build {
+                Some(b) if b.ready(sim.scp1048.build_cost) => 1.0,
+                _ => 0.0,
+            },
             // Crabs and the boss have no squad context — neutral unit fields (the squad brains never
             // run here; `think` is `Without<Unit>`).
             squad: SquadFields::neutral(),
@@ -275,6 +297,8 @@ pub fn think(
             BrainId::Smiley => &brains.smiley,
             BrainId::Crab => &brains.crab,
             BrainId::Scout => &brains.scout,
+            BrainId::Bear => &brains.bear,
+            BrainId::BearCopy => &brains.bear_copy,
         };
         let idx = decide(&brain.behaviors, &perc, &mut active.rng);
         let chosen = &brain.behaviors[idx];
@@ -305,7 +329,15 @@ pub fn think(
 /// reference brain whose realised mode distribution becomes the player's baseline expectation
 /// (`squad_ai::surprise::ModePrior`).
 pub fn authored_brains() -> AiBrains {
-    AiBrains { smiley: smiley_brain(), crab: crab_brain(), scout: scout_brain() }
+    AiBrains {
+        smiley: smiley_brain(),
+        crab: crab_brain(),
+        scout: scout_brain(),
+        // The bear repertoires live in `crate::scp1048::brain` rather than here: this file is already
+        // long, and the two literals are meaningless without the module's variant/build vocabulary.
+        bear: crate::scp1048::brain::bear_brain(),
+        bear_copy: crate::scp1048::brain::bear_copy_brain(),
+    }
 }
 
 /// Where a repertoire comes from. **Always present** (`AiPlugin` `init_resource`s the `Authored`
@@ -335,6 +367,8 @@ pub struct CandidateBrains {
     pub crab: Vec<Behavior>,
     pub scout: Vec<Behavior>,
     pub smiley: Vec<Behavior>,
+    pub bear: Vec<Behavior>,
+    pub bear_copy: Vec<Behavior>,
 }
 
 /// Insert the creature brain registry (the developer's behaviour catalogue), or the candidate under
@@ -357,6 +391,8 @@ pub enum CreatureId {
     Smiley,
     Crab,
     Scout,
+    Bear,
+    BearCopy,
 }
 
 /// One creature's overridden repertoire (mirrors `squad_ai::role::RoleDef`). `Behavior` is already
@@ -383,6 +419,8 @@ fn load_creature_brains(source: &BrainSource) -> Result<AiBrains, String> {
             smiley: Brain { behaviors: candidate.smiley.clone() },
             crab: Brain { behaviors: candidate.crab.clone() },
             scout: Brain { behaviors: candidate.scout.clone() },
+            bear: Brain { behaviors: candidate.bear.clone() },
+            bear_copy: Brain { behaviors: candidate.bear_copy.clone() },
         });
     }
 
@@ -396,6 +434,8 @@ fn load_creature_brains(source: &BrainSource) -> Result<AiBrains, String> {
                     CreatureId::Smiley => &mut brains.smiley,
                     CreatureId::Crab => &mut brains.crab,
                     CreatureId::Scout => &mut brains.scout,
+                    CreatureId::Bear => &mut brains.bear,
+                    CreatureId::BearCopy => &mut brains.bear_copy,
                 };
                 *slot = Brain { behaviors: def.behaviors };
             }
@@ -415,6 +455,8 @@ fn validated_creatures(brains: AiBrains) -> Result<AiBrains, String> {
         ("smiley_brain", &brains.smiley),
         ("crab_brain", &brains.crab),
         ("scout_brain", &brains.scout),
+        ("bear_brain", &brains.bear),
+        ("bear_copy_brain", &brains.bear_copy),
     ] {
         crate::ai::utility::validate_unconditional_default(&brain.behaviors, who)?;
     }

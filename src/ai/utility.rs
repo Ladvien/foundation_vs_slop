@@ -72,6 +72,30 @@ pub enum Mode {
     Regroup,
     /// Any role: loosely follow the moving squad anchor (default in-formation drift).
     FollowAnchor,
+
+    // --- SCP-1048 Builder Bear actions (bears only). Executed by `scp1048::behavior`.
+    //
+    // Appended at the END rather than grouped with the creature modes at the top, deliberately: the
+    // discriminant IS the index into every mode distribution (`Mode::index`), so inserting a variant
+    // mid-enum would renumber every mode after it and silently invalidate `baseline_prior.ron` and
+    // every archived policy keyed on those indices. Appending only *widens* the alphabet.
+    /// Bear: the hostile threat display — a hunched, flailing loom held while closing on a target.
+    /// Distinct from `Chase`: a raging bear is escalating a display, not just pathing at someone.
+    /// (Escalation from low-intensity posturing to contact is the shape animal-contest work reports —
+    /// Bubak et al., "Assessment strategies and fighting patterns in animal contests", Current
+    /// Zoology 2016, doi:10.1093/cz/zow040.)
+    Rage,
+    /// Bear: attack. ONE mode for all three copies — A shrieks, B throws a tantrum, C fires its scrap
+    /// gun — because which of those happens is read from the variant by the executor, not decided by
+    /// the brain. Three separate modes could never co-occur in a single repertoire, so they would be
+    /// dead alphabet width and a worse `ModePrior` estimator.
+    Strike,
+    /// Bear (the benign original only): assemble a copy of itself from scavenged material. Gated on
+    /// NOT being observed — the canon copies were never built in front of staff.
+    Build,
+    /// Bear (the benign original only): the endearing display — dance, or sit down and draw a
+    /// picture. Canon behaviour, and the tell that the player is being watched back.
+    Emote,
 }
 
 impl Mode {
@@ -79,7 +103,7 @@ impl Mode {
     /// (`squad_ai::surprise` indexes mode distributions by `Mode::index`). Pinned by
     /// `mode_all_is_dense_and_in_discriminant_order`, so adding a variant without listing it here is a
     /// loud test failure rather than a silently truncated distribution.
-    pub const ALL: [Mode; 25] = [
+    pub const ALL: [Mode; 29] = [
         Mode::Forage,
         Mode::Latch,
         Mode::Flee,
@@ -105,6 +129,10 @@ impl Mode {
         Mode::DeploySensor,
         Mode::Regroup,
         Mode::FollowAnchor,
+        Mode::Rage,
+        Mode::Strike,
+        Mode::Build,
+        Mode::Emote,
     ];
 
     /// Dense index into [`Mode::ALL`]. Every variant is fieldless, so the discriminant *is* the index.
@@ -172,6 +200,12 @@ pub enum Fact {
     /// (hysteretic — see `SquadFields::photophobe_bearing_known`). Gates the Researcher's `Mode::Ward`, so
     /// it turns its flashlight onto the crab/manca to herd it off (the beam repels it via the `LightField`).
     PhotophobeBearingKnown,
+
+    // --- SCP-1048 Builder Bear facts. Neutral (0) for every other agent. ---
+    /// 1.0 while this bear has banked enough material AND is off build cooldown — i.e. a copy could be
+    /// assembled right now. Gates `Mode::Build`, alongside the *inverse* of [`Fact::SeenBySquad`]: the
+    /// bear builds only what nobody is watching it build.
+    BuildReady,
 }
 
 /// What a consideration reads. Extensible: a drive, a field sample at self, or a perception fact.
@@ -301,6 +335,9 @@ pub struct Perception {
     /// `think`. 0.0 unless the audio search turned the investigate behaviour on — so it is the single
     /// config-tuned knob that decides whether the swarm converges on the sound of a firefight.
     pub noise_draw: f32,
+    /// 1.0 while this bear can build a copy right now (see [`Fact::BuildReady`]). 0.0 for every
+    /// non-bear agent, and for a bear that is still scavenging or on cooldown.
+    pub build_ready: f32,
 
     /// Squad-unit perception (built by `squad_ai::perception`). Crab/boss `think` splats one neutral
     /// value: `squad: SquadFields::neutral()`.
@@ -409,6 +446,7 @@ impl Perception {
             Input::Perc(Fact::AnomalyResidueNearby) => self.squad.anomaly_residue,
             Input::Perc(Fact::PastLeash) => self.squad.past_leash,
             Input::Perc(Fact::PhotophobeBearingKnown) => self.squad.photophobe_bearing_known,
+            Input::Perc(Fact::BuildReady) => self.build_ready,
         }
     }
 }
@@ -553,6 +591,7 @@ mod tests {
             alarm_val: 0.0,
             seen_by_squad: 0.0,
             noise_draw: 0.0,
+            build_ready: 0.0,
             squad: SquadFields::neutral(),
             water: WaterObs::default(),
         }

@@ -169,6 +169,9 @@ fn init_fields(
 const FOUNDATION_FEAR_CHANNELS: [FieldId; 2] = [FieldId::THREAT_CRAB, FieldId::THREAT_ANOMALY];
 const CRAB_FEAR_CHANNELS: [FieldId; 1] = [FieldId::THREAT_GUN];
 
+/// The bears fear the same thing the swarm does: being shot at.
+const BEAR_FEAR_CHANNELS: [FieldId; 1] = [FieldId::THREAT_GUN];
+
 /// Build the active drive set, **keyed by faction**. This is the drive extension point — add a `DriveDef`
 /// literal to the relevant faction. Numeric knobs (fear gains, the hunger rate) come from the `sim:`
 /// config slice (`SimTuning`); channel identity stays in code.
@@ -217,6 +220,23 @@ fn init_drives(mut commands: Commands, sim: Res<SimTuning>, audio: Res<AudioTuni
     // is steered by distance, line-of-sight, and the SCENT field.
     by_faction[Faction::Anomaly.index()] = Vec::new();
 
+    // The bears (SCP-1048 and its copies): fear the squad's gunfire, exactly as the swarm does, with the
+    // squad's audible din added on top. The benign original bolting from a firefight is the canon
+    // behaviour ("the whereabouts of SCP-1048 are currently unknown"), and a copy that flees at low
+    // health rather than dying in place is what makes the family persistent rather than disposable.
+    //
+    // The din gain is **shared with the crabs** (`crab_fear_of_din`) rather than given its own knob: it
+    // models one thing — a non-Foundation creature hearing a firefight — and the acoustic search should
+    // move both together. Bears emit THREAT_ANOMALY and fear neither it nor NOISE_SWARM, so nothing here
+    // makes the family afraid of itself (`no_faction_fears_a_channel_it_emits` holds that line).
+    by_faction[Faction::Bear.index()] = vec![DriveDef {
+        id: DriveId::FEAR,
+        rule: DriveRule::TrackMaxPlusDin {
+            threats: vec![(BEAR_FEAR_CHANNELS[0], sim.scp1048.fear_of_gunfire)],
+            din: vec![(FieldId::NOISE_SQUAD, audio.perception.crab_fear_of_din)],
+        },
+    }];
+
     commands.insert_resource(DriveRegistry { by_faction });
 }
 
@@ -246,6 +266,10 @@ mod tests {
             // `enemy::deposit_anomaly_aura` (the watcher's standing aura) + `parasite::deposit_manca_dread`
             // (a roused SCP-150 brood) — two emitters, one channel.
             Faction::Anomaly => &[FieldId::THREAT_ANOMALY],
+            // `scp1048::effects` — a RAGING copy's standing dread and SCP-1048-A's scream burst. Same
+            // channel as the watcher and the manca brood: a third emitter of the same anomalous dread.
+            // The benign original emits nothing at all (its deposit amount is zero by variant).
+            Faction::Bear => &[FieldId::THREAT_ANOMALY],
         }
     }
 
@@ -267,6 +291,10 @@ mod tests {
                 (FieldId::NOISE_SQUAD, perc.crab_fear_of_din),
             ],
             Faction::Anomaly => vec![],
+            Faction::Bear => vec![
+                (BEAR_FEAR_CHANNELS[0], SimTuning::default().scp1048.fear_of_gunfire),
+                (FieldId::NOISE_SQUAD, perc.crab_fear_of_din),
+            ],
         }
     }
 
@@ -296,7 +324,7 @@ mod tests {
             .map(|&(f, _)| f)
             .filter(|&f| !is_acoustic(f))
             .collect();
-        for hostile in [Faction::Crab, Faction::Anomaly] {
+        for hostile in [Faction::Crab, Faction::Anomaly, Faction::Bear] {
             for channel in emits(hostile).iter().filter(|&&f| !is_acoustic(f)) {
                 assert!(feared.contains(channel), "units ignore {hostile:?}'s threat channel");
             }

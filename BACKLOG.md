@@ -5,6 +5,41 @@ up cold. Remove an item when it lands (reference the PR).
 
 ---
 
+## Re-train the RL policy archives for the widened `Mode` alphabet
+
+**Origin:** the SCP-1048 landing (2026-07-24), which appended `Rage`/`Strike`/`Build`/`Emote` and took
+`MODE_COUNT` 25 → 29.
+
+`NeuralPolicy::OUT == MODE_COUNT` (`src/squad_ai/policy.rs`), so `WEIGHT_COUNT` changed and any
+`assets/config/elites_policy*.ron` sitting in a working tree is stale. `from_weights` rejects the old
+length loudly rather than padding it, and the archives are reachable only through the **opt-in**
+`FVS_POLICY_ELITE` overlay — so the shipped game is unaffected and **nothing in the repository is
+broken**: every `elites_*.ron` and `baseline_prior.ron` is gitignored machine-generated output. The cost
+is to whatever local training state a developer has.
+
+`baseline_prior.ron` had the same shape problem (rows are `[u32; MODE_COUNT]`, row count is
+`CONTEXT_COUNT`, which also moved 192 → 240 when `ActorKind` gained `Bear`/`BearCopy`) and **is already
+regenerated** — 240 × 29, swept 2026-07-24. Note it was swept before replication was reachable, so it
+models a bear-free game; the re-sweep below supersedes it.
+
+**To do:** `cargo train rl` (12 islands, multi-hour), then `cargo train prior` again afterwards. Deferred
+deliberately rather than run mid-landing: the policy trains against the world *as shipped*, so training
+before the bears existed would have produced an immediately-stale archive and burned the run.
+
+## Strip SCP-1048-A's three dead UV sets
+
+**Origin:** the SCP-1048 asset hand-off (`assets/scp1048a/README.md`), reconfirmed when the family landed.
+
+`scp-1048-a.glb` is 2 MB and 11,680 triangles — 2.6× its siblings — and carries `TEXCOORD_0..3` where
+only `TEXCOORD_0` is used. The three dead sets are most of the file size. It is the cheapest asset win
+available and the project's first real LOD candidate; budget an A today as if you had spawned two or
+three bears.
+
+This also has a **test-suite cost**, which is the reason it is worth doing: the harness loads all four
+bear glbs per `App`, `--test-threads=1` builds ~35 `App`s, and the replay suite got materially slower
+when the family landed. Fixing the asset is the cleanest lever on that. (The same growth is what
+exhausted the IO thread's default 2 MiB stack — see the `RUST_MIN_STACK` note in `.cargo/config.toml`.)
+
 ## Split `src/dungeon.rs` (~3040 lines) into a `dungeon/` submodule
 
 **Origin:** 2026-07-19 code review, "large files" finding. Its sibling — splitting `crab.rs` (2643 L) into

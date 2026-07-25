@@ -418,6 +418,9 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // feeds Think → movement → hashed Transform, so the determinism gate must cover it. Its cosmetic
             // half (`Scp999VisualsPlugin`: eyes + jiggle) is windowed-only and never registered here.
             crate::scp999::Scp999Plugin,
+            // SCP-1048's gameplay half. The cosmetic half (`Scp1048VisualsPlugin`: the clip driver +
+            // fog) is windowed-only and never registered here.
+            crate::scp1048::Scp1048Plugin,
         ),
         crate::laser::LaserPlugin,
         crate::impact_fx::ImpactFxPlugin,

@@ -553,6 +553,38 @@
             morale_rate: 0.4,       // MORALE lifted/sec while tickling
             spawn_min_dist: 18.0,   // tiles from the squad spawn — relief is found, not handed over
         ),
+        // SCP-1048 "Builder Bear" (see src/scp1048/). One slice for all four variants: the benign
+        // original plus the three HOSTILE copies it builds (A ears, B infant arm, C rusted scrap).
+        // The evolvable loop is the replication itself — how fast the original breeds a hostile
+        // population, and how hard the cap bites. All dials evolve (squad_ai::world_genome).
+        scp1048: (
+            count: 1,                  // benign originals seeded at start; the copies are BUILT
+            spawn_min_dist: 16.0,      // tiles from the squad spawn — the bear is found, not handed over
+            move_speed: 0.9,           // half the crab crawl (1.8) — a 33 cm plush shuffles
+            hp: 30.0,                  // sturdier than a manca (18), far softer than the boss
+            approach_range: 6.0,       // how close a copy closes before it can strike
+            strike_range: 1.2,         // attack reach (~the crab's latch range)
+            strike_cooldown: 1.5,      // seconds between strikes; also C's rate of fire
+            strike_damage: 8.0,        // parity with combat.crab_jump_damage
+            rage_dread_rate: 0.3,      // THREAT_ANOMALY/sec from a RAGING copy (0 while wandering)
+            scream_dread: 4.0,         // one-shot dread burst on A's scream (parity with alarm_nest)
+            pain_radius: 10.0,         // canon: blinding pain out to 10 m
+            growth_radius: 5.0,        // canon: lethal ear growths only within 5 m
+            growth_rate: 0.05,         // severity/sec inside the band — ~20 s to full cover
+            growth_decay: 0.01,        // severity/sec shed outside it (0 would mean incurable)
+            asphyxiate_dps: 0.6,       // HP/sec once past the threshold — ~100 HP over ~170 s
+            asphyxiate_threshold: 0.6, // severity at which the growths start to suffocate. MUST be
+                                       //   < 1.0: at 1.0 the lethal band is a single point and decay
+                                       //   clears it in one tick, so victims could only ever suffocate
+                                       //   while the bear is still actively screaming.
+            fear_of_gunfire: 0.2,      // bear FEAR gain on THREAT_GUN (parity with crab_of_gunfire)
+            build_cost: 12.0,          // scavenged material one copy costs
+            scavenge_rate: 1.0,        // material/sec while unobserved and building (12 s per copy)
+            build_cooldown: 20.0,      // seconds after a build before the next may start
+            max_bears: 6,              // FIRM cap on live bears — the bound on the replication loop
+            copy_w_a: 0.34,            // relative weight of building an A (ear) copy
+            copy_w_b: 0.33,            // ...and a B; C takes max(0, 1 - copy_w_a - copy_w_b)
+        ),
     ),
 
     // =============================================================================================

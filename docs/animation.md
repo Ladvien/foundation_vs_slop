@@ -305,5 +305,6 @@ The design is drawn from work in the `home-still` corpus, cited inline where it'
 | `src/squad.rs` | Squad 2D blend space + masked action layer; `build_valkyrie_anim`, `drive_valkyrie_animation`, `valkyrie_weights` |
 | `src/crab/movement.rs`, `src/crab/setup.rs` | Crab: three `Free` clips, one-hot driver |
 | `src/parasite.rs` | Manca: five `Free` + one `OneShot` (BurrowOut) |
+| `src/scp1048/anim.rs` | SCP-1048 family: **four** graphs from one per-variant `ClipSpec` table. The bears share a rig but not a clip order, so instead of a shared `SLOT_*` const block each variant's table is the single source of truth for slot index, glTF index and one-shot-ness. Note B's `tantrum` is `Free` — the only *looping* attack in the game — and C's `fire_gun` is re-triggered per shot because it starts and ends in the aim pose |
 | `docs/artist_guide.md` §4 | Per-asset clip tables, authoring contract, "animations we still need" |
 | `tests/valkyrie_asset.rs` | The GLB asset contract |
