@@ -136,6 +136,63 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-L-1 — Containment HUD** · M · ✅ **LANDED 2026-07-25**
   *Shipped:* `src/ui/containment_hud.rs` — progress, the hold timer, and **one line per rule clause** marked met/unmet with the current field reading. 3 unit tests over the pure line-formatting function.
   **The acceptance was "players can read *why* it is progressing/breaking", so each line is an instruction, not a status:** an unmet `AtLeast` clause reads `[! ] RAISE OBSERVATION >= 0.50 (now 0.10)`, an unmet `AtMost` reads `LOWER GUNFIRE`. That is the payoff for keeping polarity in the data (`Sign`) and for the rule being a conjunction with no OR — an "either route" rule would leave this readout unable to say which route the player is on. The boundary is inclusive on both signs, matching `FieldCondition::is_met`, so a player sitting exactly on the threshold never sees "not met" while the capture ticks. A test asserts every shipped channel has a player-facing name, so a new channel cannot reach the HUD as "UNKNOWN". · *Deps:* B-3 · *Reading:* [STIG]
+- **FVS-B-8 — `ExtractContained`, the run phase, and the PLAYER'S VERBS (NEW, 2026-07-26)** · L · ✅ **LANDED 2026-07-26**
+  **The gap this closed, and it was larger than the backlog admitted.** Push 2's goal says "swap A-3's
+  placeholder for *extract one contained anomaly*" — that never landed: `WinCondition` still had exactly
+  one variant, `SurviveTicks(18000)`, so the game was won by surviving five minutes rather than by
+  containing anything. And **all three archetypes had no player input path whatsoever**: nothing in
+  `src/` ever spawned a `ContainmentDevice`, spawned a `Quarantine`, or inserted `Capped`. They existed
+  only in tests. The one live capture (C-2's SCP-999) was satisfied *implicitly* by squad behaviour,
+  since there was no hold-fire verb either. M1 had shipped a substrate, not a verb.
+  *Shipped:* `WinCondition::ExtractContained { count }` (contain N **and** return the surviving squad to
+  the insertion cell), `session::RunFacts`, `phase_for` finally driving `RunPhase`,
+  `containment::extraction` (the zone, at `Dungeon::spawn`), `containment::verbs`
+  (`ArmedTool`/`DeviceSupply`/`QuarantineSupply`/`TargetId`/`pick_target`), four input systems in
+  `selection`, `laser::WeaponsTight`, `ui::verb_bar`, `sim::ContainmentTuning`, 8 harness readers/drivers,
+  and 7 new harness tests + 12 new unit tests.
+  **Decisions worth keeping:**
+  * **The extraction point is `Dungeon::spawn`** — you leave the way you came in. No new worldgen, no new
+    placement rule, legible without a marker, and it is exactly where FVS-G-5's ASYNC door will stand, so
+    the door becomes this zone *with a body* rather than a replacement for it.
+  * **The win counts live `Contained` anomalies, NOT `Specimen`.** `Specimen` is deliberately not
+    `run_scoped()` (it is the roguelite boundary), so counting it would hand expedition 2 a free victory
+    on expedition 1's captures.
+  * **The phase is DERIVED, not ratcheted.** A capture destroyed before extraction walks the phase back
+    on its own; there is no un-advance path to get wrong. Recorded in `RunPhase`'s doc: **nothing in the
+    pinned core may `run_if(in_state(RunPhase::..))`**, because `NextState` applies in `StateTransition`
+    (before `RunFixedMainLoop`) and a catch-up frame observes only the last write — gating pinned
+    gameplay on it would make the simulation depend on frame pacing.
+  * **Hold fire gates the BOLT, not the system.** `fire_laser` also refreshes `AimTarget`, which drives
+    facing, so a `run_if` would freeze the squad's gaze. Checked rather than assumed that this does not
+    endanger C-2's `ATTENTION` clause: `deposit_attention` reads `fog::FogGrid`, which is radius-based
+    with **no facing cone**, so holding fire starves `THREAT_GUN` while observation keeps accruing.
+  * **`WeaponsTight` is a resource, not a per-unit component** — Push 8 measured resources hash-neutral
+    while `MemberOf` (an archetype change) moved the goldens, and `spawn_unit`'s bundle is already at
+    Bevy's 15-element tuple cap.
+  * **`TargetId` is its own component, not a field on `Containment`** — nests are targetable but carry no
+    `Containment`. No uniform aim key existed (999 has `Scp999Seed`, 1048-A/B have `CyanideSmell::id`,
+    nests had nothing), and `nearest_planar_keyed` needs one that is never derived from the tied quantity.
+  * **Logistics live in `sim::ContainmentTuning` on `SimTuning`, not the `containment:` slice.** That
+    slice holds the RULES (what capturing *means*, so not evolvable); these are difficulty, which is what
+    the world genome is for. Living on `SimTuning` collapsed the genome wiring from four sites to two —
+    `WorldEliteDoc` already carries `sim` and `apply_dim` already assigns it. `world_genome::N` 130 → 136.
+  * **`to_u32_count` is deliberately not `to_usize`** (which floors at 1): a device supply of **zero** is a
+    real, harder world, so flooring would make the authored `0.0` bound unreachable.
+  **Keybindings are constrained, not chosen.** `Digit0`–`Digit9` are the time-control rungs, `Q`/`E`/`WASD`
+  the camera, `Escape` the pause menu, and `H`/`T`/`P`/`Space`/`F3`/`F4`/`F6`/`F10` are taken. The verbs
+  are **C** device · **Z** quarantine · **X** cap · **F** hold fire; right-click or re-press disarms.
+  **A trap that cost three confidently-wrong test failures:** `spawn_squad` clusters the operatives around
+  `Dungeon::spawn`, and the extraction zone sits on that same cell — so **a fresh run begins already
+  extracted**, and a test that captures before moving wins instantly while proving nothing about the
+  walk-out. `tests/session.rs::walk_squad_off_the_pad` exists for exactly that, and the lesson is FVS-M-4's
+  verbatim: a reproduction that has not been sanity-checked against its own geometry is not evidence.
+  **The goldens did NOT move** — measured, not assumed. Adding `advance_run_phase` to `FixedUpdate` was
+  expected to permute the linearisation (Push 8's standing caveat), and it did not, because the new node
+  is `.chain()`ed into the existing `.after(HealthDamage)` group rather than left floating. The extraction
+  zone carries a `Transform` but **no `Health`**, so it contributes no `snapshot_hash` row, and it spawns
+  on `OnEnter` rather than `FixedUpdate`. · *Deps:* B-1..B-7 · *Reading:* **[SDT-13]** (meaningful choice
+  vs controlling reward contingencies — why a verb bar and not a multiplier), **[STIG]**, Heylighen 2016
+  (negative-feedback quantitative stigmergy — why an `AtMost` clause is a verb)
 - **FVS-J-2 — Sort audit / determinism lint for new systems** · M · ✅ **AUDITED 2026-07-25 — no sorts needed**
   Every system added by M0 and Push 2 was audited against the three contracts. **None required a sort**, and that is a design result rather than an omission: each is a *per-entity* update that is a pure function of that entity's own components plus shared read-only state — no pick, no shared counter, no budget, no clamped accumulate, no RNG draw. `session::resolve_run` (an `any()` over a predicate), `containment::tick_containment` (each anomaly reads the field at its own cell and writes only itself), `device::deploy_devices` (each device resolves only its named target), `area::tick_quarantine` (an `any()` over regions), `area::track_secured_sites` (a count). The reasoning is recorded at each site, per the "every sort declares its contract" rule.
   `tests/determinism_lint.rs` passes. **Known limitation, stated rather than papered over:** the lint scans for *sorts*, so it cannot catch an order-dependent system that has none — a `.iter().next()` pick, or a shared counter advanced in query order. It would not have caught the very bug FVS-N-8 records. Extending it to flag those shapes is worth doing and is not in this item's scope. · *Deps:* B-3 · *Reading:* **[TEST-OW]**, [ABM], [TEST-NT]
@@ -287,6 +344,12 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* the hook receives policy updates from a driver; documented advisory until J-5. · *Deps:* H-1 · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
 - **FVS-H-1 — Retrain stale RL policy archive (PREREQUISITE)** · L · *determinism: offline; harness-gated*
   Archives are stale/rejected because MODE_COUNT grew 25→29 (SCP-1048); a multi-hour retrain is required before any live selection is trustworthy.
+  ⚠️ **Escalated 2026-07-26 by FVS-B-8.** The synthetic player in `evaluate::run_episode` now performs a
+  containment beat, which changes **every rollout trajectory** — so `sweep_prior` must be recomputed and
+  every baked world/policy/level archive is stale for a *second*, independent reason. This was accepted
+  deliberately (the alternative was a feature the offline search cannot see, which CLAUDE.md forbids and
+  TESTING.md invariant 11 explains the cost of), but it means H-1 is now a **prerequisite for any further
+  QD work**, not a backlog item that can wait. Re-bake before trusting any elite overlay.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* — (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
 - **FVS-H-2 — Make CMA-MAE emitter reachable (ideally)** · M · *determinism: offline*
   CMA-MAE is implemented + unit-tested but unreachable from any `train` subcommand (dead code). Expose it so the director samples a stronger archive; if skipped, the director is built on the weaker emitter — say so explicitly.
