@@ -1,0 +1,123 @@
+// =================================================================================================
+// SITE-67 — the hand-authored hub (FVS-G-4). Design: docs/2026-07-26-site-hub-and-operative-knowledge.md
+//
+// HAND-AUTHORED ON PURPOSE. A hub returned to after every expedition has to be LEARNABLE — you should
+// know where the specimen cells are without reading a sign — and procedural generation actively fights
+// that. This file is also deliberately NOT part of `config.ron`: it is level data, and the offline
+// search must never evolve it, for the same reason `session:`'s win condition is excluded.
+//
+// COORDINATES. Cells are 1 m (`dungeon::TILE_SIZE`). `origin` places cell (0,0) in world space; walls
+// and floor are on integer cells for greybox readability, props and cells are in metres so they need
+// not sit on the grid.
+//
+// LAYOUT — a spine corridor at z=12..14 with the six areas hanging off it:
+//
+//        z=30  +----------------------------------[ BRIEFING ]---+
+//        z=22  |  [ RECORDS ]  [  RESEARCH  ]  [REQ]  \_connector_/
+//        z=14  |
+//        z=12  +======================= SPINE ========================+
+//        z=2   |  [ ASYNC DOOR HALL ]        [   CONTAINMENT WING   ] |
+//              x=0                                                 x=34
+//
+// The operatives idle in the briefing room, so reaching the door is a walk THROUGH the Site — past the
+// cells holding what you already caught. That is the loop made spatial, and it is why the briefing room
+// is the far end rather than beside the door.
+// =================================================================================================
+(
+    // Far outside any dungeon extent. The Site's isolation from fog, the knee-wall cutaway, the light
+    // field, mould and almond water is achieved by DISTANCE — all of those are dungeon-grid indexed and
+    // simply never reach out here. One mechanism, rather than a Visibility toggle on every Site entity
+    // at every state change. `layout::tests` pins the clearance.
+    origin: (1024.0, 0.0, 1024.0),
+
+    areas: [
+        ( id: AsyncDoor,   label: "ASYNC APERTURE",  rect: (x:  0, z:  2, w: 12, h: 10) ),
+        ( id: Containment, label: "CONTAINMENT",     rect: (x: 14, z:  2, w: 16, h: 10) ),
+        ( id: Corridor,    label: "SPINE",           rect: (x:  0, z: 12, w: 34, h:  2) ),
+        ( id: Records,     label: "RECORDS",         rect: (x:  0, z: 14, w:  8, h:  8) ),
+        ( id: Research,    label: "RESEARCH",        rect: (x: 10, z: 14, w: 12, h: 10) ),
+        ( id: Requisition, label: "REQUISITION",     rect: (x: 24, z: 14, w:  8, h:  6) ),
+        ( id: Briefing,    label: "BRIEFING",        rect: (x: 24, z: 22, w: 10, h:  8) ),
+    ],
+
+    // Rect RUNS, not per-cell: a 16x10 wing is one row instead of 160, and `site::nav`'s walkable mask
+    // falls out of this for free. Every area rect appears here; the extra entry is the short connector
+    // that joins requisition to the briefing room (floor that belongs to no area is fine).
+    floor: [
+        (x:  0, z:  2, w: 12, h: 10),   // async door hall
+        (x: 14, z:  2, w: 16, h: 10),   // containment wing
+        (x:  0, z: 12, w: 34, h:  2),   // the spine
+        (x:  0, z: 14, w:  8, h:  8),   // records office
+        (x: 10, z: 14, w: 12, h: 10),   // research wing
+        (x: 24, z: 14, w:  8, h:  6),   // requisition
+        (x: 26, z: 20, w:  2, h:  2),   // connector: requisition -> briefing
+        (x: 24, z: 22, w: 10, h:  8),   // briefing room
+    ],
+
+    // A representative wall pass, not a finished one. Walls must sit OFF floor (the validator rejects a
+    // wall standing on a walkable cell — it would be an invisible pillar operatives clip through), so
+    // these run along the outer boundary. Yaw is degrees about +Y.
+    // The kit is a 1 m module only 1 m TALL; `site::pieces` applies the 2.4 m scale, not this file.
+    walls: [
+        ( piece: WallCorner, cell: (-1,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 2,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 4,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 8,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: (10,  1), yaw:   0.0 ),
+        ( piece: WallCorner, cell: (12,  1), yaw:  90.0 ),
+        ( piece: Wall,       cell: (16,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: (20,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: (24,  1), yaw:   0.0 ),
+        ( piece: WallCorner, cell: (30,  1), yaw:  90.0 ),
+        ( piece: Column,     cell: (12, 13), yaw:   0.0 ),
+        ( piece: Column,     cell: (22, 13), yaw:   0.0 ),
+    ],
+
+    // Dressing. Positions are metres from `origin`.
+    props: [
+        ( piece: Crate,      pos: (25.5, 15.5), yaw:   0.0 ),
+        ( piece: Crate,      pos: (26.5, 15.5), yaw:  30.0 ),
+        ( piece: Crate,      pos: (25.5, 16.5), yaw:  75.0 ),
+        ( piece: Crate,      pos: (29.5, 17.5), yaw:  10.0 ),
+        ( piece: Pipe,       pos: ( 3.0, 12.5), yaw:  90.0 ),
+        ( piece: Pipe,       pos: (17.0, 12.5), yaw:  90.0 ),
+        ( piece: PipeCorner, pos: (31.0, 12.5), yaw:  90.0 ),
+        // Threshold pads: the door's mouth, marked diegetically rather than with a HUD prompt.
+        ( piece: FloorButton, pos: ( 5.5,  3.5), yaw:  0.0 ),
+        ( piece: FloorButton, pos: ( 6.5,  3.5), yaw:  0.0 ),
+        ( piece: FloorButton, pos: ( 7.5,  3.5), yaw:  0.0 ),
+        // Wayfinding toward the aperture, read from the spine.
+        ( piece: ArrowDecal, pos: ( 6.5, 11.5), yaw: 180.0 ),
+        // Wing colour-codes — THIS is what makes the hub learnable without signage (design doc §2.1).
+        ( piece: AreaDecal,  pos: ( 3.5, 17.5), yaw:   0.0 ),   // records
+        ( piece: AreaDecal,  pos: (15.5, 18.5), yaw:   0.0 ),   // research
+        ( piece: AreaDecal,  pos: (27.5, 16.5), yaw:   0.0 ),   // requisition
+        ( piece: AreaDecal,  pos: (28.5, 25.5), yaw:   0.0 ),   // briefing
+    ],
+
+    // Containment cells (FVS-D-4). Indices must be dense from 0 — specimens fill them in
+    // `Specimen::captured_tick` order, so "cell 0 holds the first thing you ever caught" is stable.
+    // Six is the first pass; overflow is a `warn!` and no body, never a silently dropped record.
+    cells: [
+        ( index: 0, pos: (15.5,  4.0), yaw: 180.0 ),
+        ( index: 1, pos: (18.5,  4.0), yaw: 180.0 ),
+        ( index: 2, pos: (21.5,  4.0), yaw: 180.0 ),
+        ( index: 3, pos: (24.5,  4.0), yaw: 180.0 ),
+        ( index: 4, pos: (27.5,  4.0), yaw: 180.0 ),
+        ( index: 5, pos: (28.5,  9.0), yaw: 270.0 ),
+    ],
+
+    // The ASYNC door. Walking an avatar into the trigger calls `NextState::set(RunState::Active)` —
+    // FVS-A-5 already implements that transition end to end, so the door needs NO new state machinery.
+    door: ( pos: (6.5, 2.5), yaw: 0.0, trigger_half_extents: (1.6, 1.2, 0.7) ),
+
+    // Operatives idle in the briefing room — the far end, so leaving means walking the length of the
+    // Site past the cells.
+    spawns: [
+        (27.5, 26.5),
+        (29.0, 26.5),
+        (30.5, 26.5),
+        (28.0, 27.5),
+        (29.8, 27.5),
+    ],
+)

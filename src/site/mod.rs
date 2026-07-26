@@ -3,8 +3,8 @@
 //! Design: `docs/2026-07-26-site-hub-and-operative-knowledge.md` §2. Read it before adding to this
 //! module; several of the shapes here are deliberate reversals of the obvious approach.
 //!
-//! **Status: greybox kit only.** [`pieces`] is landed; the layout, navigation, door, aperture shader
-//! and specimen cells are not. What follows is the contract the rest must honour, recorded now so it
+//! **Status: kit + layout.** [`pieces`] and [`layout`] are landed; navigation, the door trigger, the
+//! aperture shader and the specimen cell bodies are not. What follows is the contract the rest must honour, recorded now so it
 //! is not re-derived.
 //!
 //! ## Why the Site persists for free
@@ -43,8 +43,10 @@
 //! presentation half (geometry, avatars, the aperture material) is windowed-only `SiteVisualsPlugin`,
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
+pub mod layout;
 pub mod pieces;
 
+pub use layout::{AreaId, SiteLayout};
 pub use pieces::SitePiece;
 
 use bevy::prelude::*;
