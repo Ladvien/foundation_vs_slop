@@ -219,6 +219,18 @@ pub fn run() {
         // dungeon/placement/ai/gore/impact_fx/vhs plugins each read at build time to pull their slice.
         // DungeonPlugin in turn precedes FogPlugin: it inserts the `Dungeon` resource in its `build`,
         // which FogPlugin reads at build time to size the fog grid.
+        // NOT YET `AutoStartFirstRun(false)`, and the reason is a measured blocker rather than caution.
+        //
+        // The windowed game is *meant* to open in Site-67 rather than an expedition, and the seam for
+        // that exists (`session::AutoStartFirstRun`). But flipping it makes `RunState::Idle` a state the
+        // game genuinely SITS IN, and `Dungeon` does not exist then. Measured: boot panics immediately in
+        // `selection::command_input` — "Parameter `Res<Dungeon>` failed validation: Resource does not
+        // exist". In Bevy 0.19 a missing `Res<T>` panics; it does not skip the system.
+        //
+        // There are **90 such sites across 20 files**, many on `FixedUpdate` in the pinned core, so
+        // gating them is a real audit with golden risk attached — not something to smuggle in alongside
+        // the Site's geometry. Tracked as FVS-G-6. Until it lands, boot keeps auto-starting a run and
+        // the windowed game behaves exactly as it does today.
         .add_plugins((
             config::ConfigPlugin,
             // `LightFieldPlugin` (the CPU illuminance grid creatures read) is grouped with dungeon+placement

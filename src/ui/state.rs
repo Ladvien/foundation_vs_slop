@@ -36,8 +36,16 @@ pub enum AppState {
     Victory,
     /// The run was lost. Same one-way mirror as [`AppState::Victory`].
     GameOver,
-    /// Post-run summary, reachable from both terminal screens; returns to [`AppState::Title`].
+    /// Post-run summary, reachable from both terminal screens; returns to [`AppState::Site`].
     Debrief,
+    /// **Standing in Site-67** between expeditions (FVS-G-4). The persistent hub: operatives walk it,
+    /// specimens are visibly held in the containment wing, and the ASYNC door is the only way out.
+    ///
+    /// The run state while here is `RunState::Idle`, so no expedition world exists — the Site is simply
+    /// what is on screen when there is no run. Entering an expedition is walking an avatar into the
+    /// door, which calls `NextState::set(RunState::Active)`; FVS-A-5 already implements that end to end,
+    /// so the hub needs no state machinery of its own.
+    Site,
 }
 
 /// In-game overlay stack. Only exists while [`AppState::InGame`] (a Bevy substate).
@@ -117,6 +125,11 @@ fn should_freeze(capture_active: bool, note_open: bool, app_state: &AppState, me
         || note_open
         || match app_state {
             AppState::Boot | AppState::Title | AppState::Warmup => true,
+            // The Site must NOT freeze. Freezing sets `SimBlocked`, which gates `camera::drive_camera`
+            // and the Site's own avatar mover — the hub would render as a still photograph you cannot
+            // walk around in. There is no expedition running to freeze anyway: `RunState` is `Idle`
+            // here, so nothing pinned is ticking that we would want stopped.
+            AppState::Site => false,
             // The run is over: freeze the world behind the terminal screens so the last frame the
             // player saw is the one they read the verdict over. The sim would otherwise keep ticking
             // under the Debrief (crabs still walking around a dead squad).
@@ -141,6 +154,12 @@ mod freeze_tests {
         assert!(!should_freeze(false, false, &AppState::InGame, false), "normal play must NOT freeze");
         // Boot/title/warmup always freeze; a blocking in-game menu freezes.
         assert!(should_freeze(false, false, &AppState::Title, false));
+        // The Site is the one non-playing state that must stay LIVE: freezing sets `SimBlocked`, which
+        // gates the camera and the avatar mover, and a hub you cannot walk around in is a photograph.
+        assert!(
+            !should_freeze(false, false, &AppState::Site, false),
+            "Site-67 must not freeze — the player walks around in it"
+        );
         assert!(should_freeze(false, false, &AppState::InGame, true));
     }
 }

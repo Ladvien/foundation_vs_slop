@@ -247,7 +247,8 @@ impl Plugin for SessionPlugin {
         // The FIRST run uses the configured seed verbatim, so the shipped world — and every golden and
         // `SimConfig::dungeon_seed` override that rides the same `GameConfig` seam — is unchanged.
         let seed = RunSeed(gc.dungeon.seed);
-        app.init_state::<RunState>()
+        app.init_resource::<AutoStartFirstRun>()
+            .init_state::<RunState>()
             .insert_resource(seed)
             .add_sub_state::<RunPhase>()
             .insert_resource(win)
@@ -292,10 +293,40 @@ pub fn run_scoped() -> DespawnOnExit<RunState> {
     DespawnOnExit(RunState::Active)
 }
 
+/// Should boot drop straight into an expedition?
+///
+/// **`true` for the harness, `false` for the windowed game — and the split is load-bearing.**
+///
+/// Every headless test and the whole offline search assume a world exists after `step(app, 1)`:
+/// `tests/replay.rs`, `tests/session.rs`, `tests/containment.rs` and every golden are written against
+/// that. So the harness must keep booting straight into `Active`, byte-identically.
+///
+/// The windowed game must not, because it now opens in **Site-67** (`AppState::Site`), and building an
+/// expedition world nobody asked for would both waste the work and advance nothing meaningful — the
+/// player enters a run by walking into the ASYNC door.
+///
+/// A resource rather than `#[cfg(feature = "test-harness")]`: a cfg would make the shipped binary and
+/// the tested binary structurally different plugin graphs, which is exactly what `sim_harness`'s
+/// "identical plugin graph" discipline exists to prevent. Push 8 measured resources hash-neutral, so
+/// defaulting it `true` and overriding it in `lib::run` leaves every golden untouched.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoStartFirstRun(pub bool);
+
+impl Default for AutoStartFirstRun {
+    fn default() -> Self {
+        // Harness-shaped by default, so a bare `App` behaves the way every existing test expects.
+        Self(true)
+    }
+}
+
 /// Leave [`RunState::Idle`] once `Startup` has produced the asset handles the world build depends on.
 /// `PostStartup` runs after every `Startup` system, and the frame's `StateTransition` then fires
 /// `OnEnter(Active)` before `RunFixedMainLoop` — so the world exists before the first fixed tick.
-fn begin_first_run(mut next: ResMut<NextState<RunState>>) {
+fn begin_first_run(auto: Res<AutoStartFirstRun>, mut next: ResMut<NextState<RunState>>) {
+    if !auto.0 {
+        // The windowed game opens at Site-67 and enters a run through the ASYNC door instead.
+        return;
+    }
     next.set(RunState::Active);
 }
 

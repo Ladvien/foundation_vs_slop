@@ -44,9 +44,11 @@
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
 pub mod layout;
+pub mod nav;
 pub mod pieces;
 
 pub use layout::{AreaId, SiteLayout};
+pub use nav::SiteNav;
 pub use pieces::SitePiece;
 
 use bevy::prelude::*;

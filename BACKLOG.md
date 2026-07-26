@@ -296,6 +296,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-G-5 — The ASYNC door** · M · *design doc §2.2, §2.3*
   The portal onto the Backrooms, and the only way out. **No new state machinery** — it is a trigger volume that calls `NextState::set(RunState::Active)`, which FVS-A-5 already implements end-to-end. The *model* exists (`SM_DoorFrame_Double` — in `Pack_SciFi_A_002_V1.0`, **not** the B series as previously written; all 11 door meshes live there); what does not is the **aperture shader** — the volume inside the frame that visibly is-not-a-room. That is the game's signature image and squarely what this project already does well (17 authored `.wgsl`, the shared noise library, psi-vision/VHS).
   *Done when:* walking into the door starts an expedition; returning lands back at the Site; the aperture reads as anomalous-but-contained. · *Deps:* G-4 · *Touches:* `src/site/`, `assets/shaders/` · *Reading:* [UV-REV] (why generated space should read as *wrong*)
+- **FVS-G-6 — `Res<Dungeon>` audit: make `RunState::Idle` a state the game can SIT IN (NEW, 2026-07-26)** · M · *determinism: touches the pinned core*
+  **The blocker between the Site existing and the Site being where the game opens.** Today `Idle` is a
+  one-frame blip at boot: `session::begin_first_run` leaves it on `PostStartup`, so nothing ever observes
+  a world-less frame. Site-67 requires the opposite — the player stands in `Idle` for minutes.
+  *Measured 2026-07-26:* flipping `session::AutoStartFirstRun(false)` panics on the first frame —
+  `Parameter Res<Dungeon> failed validation: Resource does not exist`, in `selection::command_input`. In
+  Bevy 0.19 a missing `Res<T>` **panics**; it does not skip the system.
+  **Scope: 90 `Res<Dungeon>` sites across 20 files**, including `fog`, `squad`, `laser`, `enemy`,
+  `parasite`, `light`, `mold`, `almond_water` and the whole `ai` tree — many on `FixedUpdate` in the
+  pinned core, so this carries **golden risk** and must be measured, not assumed.
+  Two shapes to decide between, and it is a real design choice:
+  * **Gate on `in_state(RunState::Active)`** — semantically right (none of it means anything without an
+    expedition) and one mechanism, but it is a run condition added to pinned systems.
+  * **Gate on `resource_exists::<Dungeon>`** — narrower and states the actual precondition, but it is a
+    second way of expressing "there is a run", which is the two-mechanisms shape this repo rejects.
+  Also worth settling here: the **stale** case. After `RETURN TO SITE` the `Dungeon` resource is not
+  removed, it just describes a despawned world — so `resource_exists` is *true* and gating on it would
+  not help, while `in_state` would. That asymmetry probably decides the choice.
+  *Done when:* `AutoStartFirstRun(false)` boots to a stable world-less frame with no panic, the goldens
+  are measured (moved or not, deliberately), and the harness path is byte-identical. · *Deps:* — (blocks
+  the Site becoming the boot destination) · *Touches:* `src/lib.rs`, ~20 modules · *Reading:* [ECS]
 - **FVS-D-4 — Site↔specimen relationship + visible cells** · M
   Link the Site to each captured specimen with a Bevy relationship (the repo's third — see `squad::SquadRoster` and `containment::Holding` for the `Option<&Target>` gotcha), and **show it**: each specimen occupies a containment cell in the wing. `containment::Specimen` already exists and is already exempt from run teardown.
   *Done when:* the Site enumerates its specimens; each captured anomaly is visibly held in a cell; they survive teardown. · *Deps:* G-1, G-4 · *Touches:* `src/site/`, `src/containment/` · *Reading:* [ECS]
