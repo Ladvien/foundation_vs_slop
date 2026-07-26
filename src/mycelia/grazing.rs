@@ -49,7 +49,17 @@ use super::perceptual::VEIL_RUPTURE_T;
 //   mat_meat_rate   — scent a thick MAT sheds into MEAT per second per unit biomass (below fruit_meat_rate,
 //     so a fruit body always out-draws bare mat, yet a dense corridor still dens the swarm — coupled terrain).
 
-pub(super) fn build(app: &mut App) {
+/// Crabs eating fruit bodies.
+///
+/// **The one part of the mycelia module that touches pinned state** — it steers crab hunger and the
+/// `MEAT` field on `FixedUpdate`. That is exactly why it deserves a named plugin instead of a nested
+/// `build(app)`: the determinism boundary should be visible at the registration site. It is safe only
+/// because this whole module tree is windowed-only and never reaches `sim_harness`; registering it
+/// anywhere the harness can see would put GPU-driven mold state into the deterministic core.
+pub struct GrazingPlugin;
+
+impl Plugin for GrazingPlugin {
+    fn build(&self, app: &mut App) {
     app.add_systems(
         FixedUpdate,
         (
@@ -60,6 +70,7 @@ pub(super) fn build(app: &mut App) {
             crabs_graze_fruit_bodies.after(AiSet::Think),
         ),
     );
+}
 }
 
 /// A mature cap standing in an unwatched room smells like food.
