@@ -153,6 +153,59 @@ fn decal_tiebreak01(counter: u32) -> f32 {
     counter.wrapping_mul(0x9E37_79B9) as f32 / u32::MAX as f32
 }
 
+/// Scatter seed for one gore event — **a pure function of that death**, not of history.
+///
+/// **FVS-N-8's third cause.** This used to be `seed: Local<u32>` on [`drain_gore`], incremented once
+/// per drained event, with every chunk's launch direction, speed and spin derived from it. That made a
+/// death's scatter a function of *how many gore events the App had ever drained*, so a single
+/// difference in cumulative event count — anywhere, ever — permanently desynchronised every subsequent
+/// death, with no re-convergence. It is also why the two earlier N-8 fixes did not help: both corrected
+/// ordering **within** a tick, and this was an accumulator **across** ticks.
+///
+/// Measured before the fix, two same-seed builds after a five-unit wipe: identical chunk counts
+/// (175/175) with `gib_hash` differing on the very first tick, cascading to the field by tick 2 and to
+/// actors by tick 30 (via `crab::assign_meat_targets`, exactly the cascade N-8 predicted).
+///
+/// `index_in_tick` is the tiebreak, and it is safe **because the queue is canonically sorted
+/// immediately before draining** — so the index is a pure function of this tick's event multiset, not
+/// of push order. Two byte-identical co-located deaths still get different seeds (so their gibs do not
+/// perfectly overlap), and which one gets which merely permutes two identical chunk sets, which is the
+/// interchangeability the drain sort already argues for.
+///
+/// The `AssetId` in `GibSource` is deliberately left out: it has no stable bit representation to fold,
+/// and two events differing only by source already mint different fragment sets from different bakes.
+/// The index keeps them distinct regardless.
+fn scatter_seed(ev: &GoreEvent, index_in_tick: u32) -> u32 {
+    /// FNV-1a, hand-rolled for the same reason `tests/wfc_pin.rs` does: `DefaultHasher` is not stable
+    /// across toolchains or processes, and this value must reproduce exactly.
+    fn fold(h: &mut u32, x: u32) {
+        *h ^= x;
+        *h = h.wrapping_mul(0x0100_0193);
+    }
+    let mut h: u32 = 0x811c_9dc5;
+    fold(&mut h, index_in_tick);
+    fold(&mut h, ev.pos.x.to_bits());
+    fold(&mut h, ev.pos.y.to_bits());
+    fold(&mut h, ev.pos.z.to_bits());
+    fold(
+        &mut h,
+        match ev.kind {
+            GoreKind::FleshHit => 0,
+            GoreKind::UnitCrunch => 1,
+            GoreKind::EnemySplat => 2,
+            GoreKind::Viscera => 3,
+        },
+    );
+    if let Some(g) = ev.gib.as_ref() {
+        fold(&mut h, g.origin.x.to_bits());
+        fold(&mut h, g.origin.y.to_bits());
+        fold(&mut h, g.origin.z.to_bits());
+        fold(&mut h, g.scale.to_bits());
+    }
+    fold(&mut h, ev.intensity.to_bits());
+    h
+}
+
 /// World gore requests to service this frame (drained by [`drain_gore`]).
 #[derive(Resource, Default)]
 pub struct GoreQueue(pub Vec<GoreEvent>);
@@ -655,7 +708,6 @@ fn drain_gore(
     ),
     camera: Single<&GlobalTransform, With<Camera3d>>,
     mut gib_seq: ResMut<GibSeq>,
-    mut seed: Local<u32>,
 ) {
     if queue.0.is_empty() {
         return;
@@ -717,9 +769,10 @@ fn drain_gore(
     let cam_rot = camera.rotation();
     let cam_pos = camera.translation();
 
-    for ev in queue.0.drain(..) {
-        *seed = seed.wrapping_add(1);
-        let fseed = *seed as f32 * 0.618;
+    for (index_in_tick, ev) in queue.0.drain(..).enumerate() {
+        // Derived from THIS death (see `scatter_seed`), never from a running counter.
+        let seed = scatter_seed(&ev, index_in_tick as u32);
+        let fseed = seed as f32 * 0.618;
 
         // Cosmetic viscera burst (the SCP-150 chestburster eruption): a few non-economy flesh chunks fly out
         // and NOTHING else — no meat/fragments, no blood spray/pool/shake here (the eruption sprays blood via
@@ -748,7 +801,7 @@ fn drain_gore(
                     g.origin,
                     g.scale,
                     ev.tint,
-                    *seed,
+                    seed,
                     {
                         gib_seq.0 += 1;
                         gib_seq.0
@@ -767,7 +820,7 @@ fn drain_gore(
                 &mut gib_ring,
                 &volumes,
                 ev.pos,
-                *seed,
+                seed,
                 gib_seq.0,
             );
         }
@@ -811,7 +864,7 @@ fn drain_gore(
 
         // --- Airborne blood droplets: real ballistic drops that arc out and splat on contact (the
         //     primary airborne read; the billboard spray below is just a quick muzzle flash now).
-        spawn_droplets(&mut commands, &assets, &settings, ev.pos, droplet_count, now, *seed);
+        spawn_droplets(&mut commands, &assets, &settings, ev.pos, droplet_count, now, seed);
 
         // --- Airborne blood spray (camera-facing billboard). Nudge toward the camera so it isn't
         //     clipped by the wall/floor it landed against, exactly like `impact_fx::drain_impacts`.
@@ -847,7 +900,7 @@ fn drain_gore(
         // and the swing stays under the pool↔droplet separation it must not disturb.
         let floor_pos = Vec3::new(
             ev.pos.x,
-            POOL_FLOOR_Y + (decal_tiebreak01(*seed) - 0.5) * BLOOD_DECAL_Y_JITTER,
+            POOL_FLOOR_Y + (decal_tiebreak01(seed) - 0.5) * BLOOD_DECAL_Y_JITTER,
             ev.pos.z,
         );
         // Clip the pool to the surrounding walls so it can't seep through them. `p` spans the quad
@@ -884,7 +937,7 @@ fn drain_gore(
                 &mut ring,
                 ev.pos,
                 now,
-                *seed,
+                seed,
             );
         }
     }
