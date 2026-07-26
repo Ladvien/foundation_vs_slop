@@ -35,8 +35,8 @@ use crate::sim::{
 };
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 79 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
-/// parasite 14, scp999 6, scp1048 23) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy
+/// + rally × 3) + 85 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
+/// parasite 14, scp999 6, scp1048 23, containment 6) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy
 /// channel is ATTENTION (observation); the SCP-150 parasite is a host-killing species and SCP-999 is a
 /// fear-*lowering* comfort creature, so both belong in the search that shapes the ecosystem's
 /// fear/deaths/lives. SCP-1048 belongs for a third reason: it is the only creature that *builds more of
@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 130;
+pub const N: usize = 136;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -164,6 +164,26 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 1.0),    // copy_w_b — ...and a B; C takes max(0, 1 - w_a - w_b). The three provably sum to
                    //   >= 1 for any w_a,w_b in [0,1], so the draw needs no clamp and cannot divide by
                    //   zero — a deliberate contrast with brood_max's `.max(brood_min)` clamp above.
+    // ── SimTuning::containment (capture LOGISTICS — how much capability an expedition carries) ──
+    // The RULES are deliberately not here: `containment::ContainmentConfig` sits outside `WorldConfig`
+    // because a rule defines what capturing MEANS, and a search free to retune the objective is moving
+    // the ruler rather than solving the problem. These six are difficulty, which is exactly what this
+    // table is for. Upper bounds are kept tight on purpose — an elite handed 20 canisters with a
+    // cross-room reach would trivialise the verb and the archive would fill with worlds where
+    // containment is free.
+    (0.0, 6.0),    // device_supply (u32, decode rounds) — floored at 0 on purpose: an expedition with
+                   //   NO capture device is a real, harder world (quarantine and capping still work),
+                   //   not a degenerate one. Same reasoning as growth_decay's 0 floor above.
+    (1.0, 5.0),    // device_reach — 1 tile (touch) to 5 (a long lob). Capped well under a room width
+                   //   so a throw is always an approach.
+    (0.0, 3.0),    // quarantine_supply (u32, decode rounds) — a separate pool from device_supply, so
+                   //   the archetypes stay distinct verbs rather than one fungible charge.
+    (1.5, 6.0),    // quarantine_radius — floored above a unit's own footprint (a region smaller than
+                   //   the thing standing in it is unreadable), capped inside a small room.
+    (0.8, 4.0),    // cap_reach — arm's length to a short walk-up
+    (1.5, 6.0),    // extraction_radius — floored so five units fit without shoving each other back
+                   //   out (which would make the win flicker), capped so "get to the exit" stays a
+                   //   real traversal rather than a formality
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -309,6 +329,12 @@ pub fn encode(
     v.push(sim.scp1048.max_bears as f32);
     v.push(sim.scp1048.copy_w_a);
     v.push(sim.scp1048.copy_w_b);
+    v.push(sim.containment.device_supply as f32);
+    v.push(sim.containment.device_reach);
+    v.push(sim.containment.quarantine_supply as f32);
+    v.push(sim.containment.quarantine_radius);
+    v.push(sim.containment.cap_reach);
+    v.push(sim.containment.extraction_radius);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -343,6 +369,17 @@ pub fn encode(
 /// Round a genome float back to a positive integer knob (population cap / cull count). `>= 1`, saturating.
 fn to_usize(x: f32) -> usize {
     x.round().max(1.0) as usize
+}
+
+/// Round a genome scalar to a **count that may legitimately be zero**.
+///
+/// Deliberately not [`to_usize`], which floors at 1 because every knob it serves names a population
+/// that must exist for its mechanic to mean anything (you cannot have zero bears and still have a
+/// builder-bear mechanic). A supply of zero is different: an expedition issued no capture devices is a
+/// harder world the search may legitimately reach, not a broken one — the other two archetypes still
+/// work. Flooring it at 1 here would silently make `device_supply`'s authored `0.0` bound unreachable.
+fn to_u32_count(x: f32) -> u32 {
+    x.round().max(0.0) as u32
 }
 
 /// Rebuild a `WorldConfig` from the flat vector. `Err` on wrong length — one path, no padding/truncation.
@@ -494,6 +531,14 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             max_bears: to_usize(f!()),
             copy_w_a: f!(),
             copy_w_b: f!(),
+        },
+        containment: crate::sim::ContainmentTuning {
+            device_supply: to_u32_count(f!()),
+            device_reach: f!(),
+            quarantine_supply: to_u32_count(f!()),
+            quarantine_radius: f!(),
+            cap_reach: f!(),
+            extraction_radius: f!(),
         },
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.

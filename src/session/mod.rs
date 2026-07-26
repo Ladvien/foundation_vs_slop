@@ -175,6 +175,17 @@ pub struct RunClock {
 pub enum WinCondition {
     /// Hold the site for this many **fixed ticks** (60 = 1 s at the pinned 60 Hz).
     SurviveTicks(u64),
+    /// **The real win (FVS-B-3).** Contain `count` anomalies *and* get the surviving squad back to the
+    /// extraction point. Both halves are required: a capture you cannot walk out with is not a secure.
+    ///
+    /// The extraction point is the cell the squad inserted at (`Dungeon::spawn`), which is why this
+    /// needs no new worldgen — you leave the way you came in. When Site-67 lands (FVS-G-5) the ASYNC
+    /// door is the thing standing on that cell, and *this rule does not change*: the door is the
+    /// extraction zone with a body.
+    ExtractContained {
+        /// How many anomalies must be held when the squad reaches the exit.
+        count: u32,
+    },
 }
 
 /// The `session:` config slice.
@@ -190,6 +201,25 @@ pub enum WinCondition {
 pub struct SessionConfig {
     /// The win rule installed at startup as the [`WinCondition`] resource.
     pub win: WinCondition,
+}
+
+impl SessionConfig {
+    /// Reject a malformed authored win rule at load — **one path, no fallback**. A win condition that
+    /// can never be met, or that is met on tick zero, is a content bug and must fail at the door rather
+    /// than produce a run nobody can win (or one that wins itself).
+    ///
+    /// Called from `config::load_game_config`, the single validation seam — not from a plugin `build`.
+    pub fn validate(&self) -> Result<(), String> {
+        match self.win {
+            WinCondition::SurviveTicks(0) => {
+                Err("win: SurviveTicks(0) resolves to Victory on the first tick".into())
+            }
+            WinCondition::ExtractContained { count: 0 } => {
+                Err("win: ExtractContained(count: 0) is won by walking to the exit".into())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Dev-only request to end the run in victory, so the Victory/Debrief screens are reachable without
@@ -238,7 +268,7 @@ impl Plugin for SessionPlugin {
             // can never be overwritten.
             .add_systems(
                 FixedUpdate,
-                (tick_run_clock, resolve_run)
+                (tick_run_clock, resolve_run, advance_run_phase)
                     .chain()
                     .after(crate::health::HealthDamage)
                     // Two conditions, two distinct facts — not one invariant guarded twice. `Idle` means
@@ -299,26 +329,64 @@ fn tick_run_clock(mut clock: ResMut<RunClock>) {
     clock.ticks = clock.ticks.saturating_add(1);
 }
 
+/// Everything [`decide`] reads, gathered so the rule stays a pure function of named facts rather than a
+/// growing positional argument list. Built once per tick by [`resolve_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunFacts {
+    /// Fixed ticks elapsed this run.
+    pub ticks: u64,
+    /// Any `Unit` with `current > 0.0`.
+    pub squad_alive: bool,
+    /// Has a living squad ever been observed this run? Guards FVS-A-5's build gap.
+    pub squad_seen: bool,
+    /// Anomalies currently carrying [`crate::containment::Contained`] — **live entities, not
+    /// `Specimen` records.** `Specimen` deliberately outlives the run (it is the roguelite boundary),
+    /// so counting it would hand expedition 2 a free win on expedition 1's captures.
+    pub contained: u32,
+    /// Every living unit is inside an extraction zone.
+    pub squad_extracted: bool,
+    /// The debug-only F10 request.
+    pub forced_victory: bool,
+}
+
 /// Pure win/lose decision, split out of [`resolve_run`] so the rule is unit-testable without an `App`
 /// (the same shape as `ui::state::should_freeze`). Returns `None` while the run is still going.
 ///
 /// Precedence: **a real defeat beats a forced victory.** The dev trigger exists to reach a screen, not
 /// to rewrite what happened.
-fn decide(
-    win: WinCondition,
-    ticks: u64,
-    squad_alive: bool,
-    squad_seen: bool,
-    forced_victory: bool,
-) -> Option<RunOutcome> {
-    if squad_seen && !squad_alive {
+fn decide(win: WinCondition, f: RunFacts) -> Option<RunOutcome> {
+    if f.squad_seen && !f.squad_alive {
         return Some(RunOutcome::Defeat(DefeatCause::SquadWipe));
     }
     match win {
-        WinCondition::SurviveTicks(n) if ticks >= n => return Some(RunOutcome::Victory),
+        WinCondition::SurviveTicks(n) if f.ticks >= n => return Some(RunOutcome::Victory),
         WinCondition::SurviveTicks(_) => {}
+        // Both halves, every tick. Deliberately NOT ratcheted: an anomaly destroyed after capture drops
+        // `contained` and un-arms the win, which is the coherent reading ("there is nothing left to
+        // extract") and costs no un-ratchet code.
+        WinCondition::ExtractContained { count }
+            if f.contained >= count && f.squad_extracted =>
+        {
+            return Some(RunOutcome::Victory);
+        }
+        WinCondition::ExtractContained { .. } => {}
     }
-    forced_victory.then_some(RunOutcome::Victory)
+    f.forced_victory.then_some(RunOutcome::Victory)
+}
+
+/// Which phase the run is in, derived from live state rather than ratcheted forward.
+///
+/// Pure, for the same reason [`decide`] is. Deriving rather than latching means a lost capture walks the
+/// phase back on its own — there is no "un-advance" path to get wrong.
+///
+/// `required` is `None` for win conditions that have no containment target ([`WinCondition::SurviveTicks`]),
+/// which holds the phase at `Locating`/`Containing` rather than parking it in `Extracting` forever.
+fn phase_for(in_progress: bool, contained: u32, required: Option<u32>) -> RunPhase {
+    match required {
+        Some(n) if contained >= n => RunPhase::Extracting,
+        _ if in_progress || contained > 0 => RunPhase::Containing,
+        _ => RunPhase::Locating,
+    }
 }
 
 /// The single writer of [`RunOutcome`]. Reads the world and applies [`decide`]. It writes **only** that
@@ -329,21 +397,62 @@ fn resolve_run(
     mut outcome: ResMut<RunOutcome>,
     mut seen: ResMut<SquadSeen>,
     mut forced: MessageReader<ForceVictory>,
-    units: Query<&crate::health::Health, With<crate::squad::Unit>>,
+    units: Query<(&crate::health::Health, &Transform), With<crate::squad::Unit>>,
+    contained: Query<(), With<crate::containment::Contained>>,
+    zones: Query<(&crate::containment::ExtractionZone, &Transform)>,
 ) {
-    // Order-independent: `any`/`all` over a predicate is commutative, so no canonical sort is needed
-    // here (contrast every site that *picks* from a query — see `tests/determinism_lint.rs`).
+    // Order-independent throughout: `any`/`all`/`count` over a predicate are commutative, so no
+    // canonical sort is needed here (contrast every site that *picks* from a query — see
+    // `tests/determinism_lint.rs`).
     // Health, not entity existence — see the module docs on why an ordering edge was the wrong tool.
-    let squad_alive = units.iter().any(|hp| hp.current > 0.0);
+    let squad_alive = units.iter().any(|(hp, _)| hp.current > 0.0);
     if squad_alive {
         seen.0 = true;
     }
-    let forced_victory = forced.read().next().is_some();
 
-    let Some(decided) = decide(*win, clock.ticks, squad_alive, seen.0, forced_victory) else {
+    // EVERY living unit must be in a zone. "All" rather than "any" is the deliberate exfil reading:
+    // leaving a member behind should cost the run, not be free. Vacuously true with no living units,
+    // which is harmless — the wipe branch above already decided that case.
+    let squad_extracted = units.iter().filter(|(hp, _)| hp.current > 0.0).all(|(_, tf)| {
+        zones.iter().any(|(zone, ztf)| zone.contains(ztf.translation, tf.translation))
+    });
+
+    let facts = RunFacts {
+        ticks: clock.ticks,
+        squad_alive,
+        squad_seen: seen.0,
+        // Live `Contained` anomalies, which are run-scoped and therefore reset themselves each run.
+        contained: contained.iter().count() as u32,
+        squad_extracted,
+        forced_victory: forced.read().next().is_some(),
+    };
+
+    let Some(decided) = decide(*win, facts) else {
         return;
     };
     *outcome = decided;
+}
+
+/// The single writer of [`NextState<RunPhase>`]. A sibling of [`resolve_run`], not a part of it: two
+/// facts, two single writers.
+fn advance_run_phase(
+    win: Res<WinCondition>,
+    phase: Res<State<RunPhase>>,
+    mut next: ResMut<NextState<RunPhase>>,
+    attempts: Query<&crate::containment::Containment>,
+    contained: Query<(), With<crate::containment::Contained>>,
+) {
+    let required = match *win {
+        WinCondition::ExtractContained { count } => Some(count),
+        WinCondition::SurviveTicks(_) => None,
+    };
+    let in_progress =
+        attempts.iter().any(|c| c.phase() == crate::containment::Phase::BeingContained);
+    let want = phase_for(in_progress, contained.iter().count() as u32, required);
+    // `set_if_neq` so an unchanged phase writes nothing and cannot fire a same-state `OnEnter`.
+    if *phase.get() != want {
+        next.set(want);
+    }
 }
 
 #[cfg(test)]
@@ -351,39 +460,130 @@ mod tests {
     use super::*;
 
     const WIN: WinCondition = WinCondition::SurviveTicks(100);
+    const EXTRACT: WinCondition = WinCondition::ExtractContained { count: 1 };
+
+    /// A live, unremarkable run: squad up, nothing contained, nobody at the exit.
+    fn facts(ticks: u64, squad_alive: bool, squad_seen: bool, forced_victory: bool) -> RunFacts {
+        RunFacts {
+            ticks,
+            squad_alive,
+            squad_seen,
+            contained: 0,
+            squad_extracted: false,
+            forced_victory,
+        }
+    }
 
     #[test]
     fn a_run_with_a_living_squad_and_time_left_is_undecided() {
-        assert_eq!(decide(WIN, 0, true, true, false), None);
-        assert_eq!(decide(WIN, 99, true, true, false), None);
+        assert_eq!(decide(WIN, facts(0, true, true, false)), None);
+        assert_eq!(decide(WIN, facts(99, true, true, false)), None);
     }
 
     #[test]
     fn a_dead_squad_is_only_a_wipe_once_a_squad_has_existed() {
         // Before spawn: nothing alive is "not populated yet", not a defeat. This is the predicate that
         // keeps FVS-A-5's run-scoped construction from resolving the run on its first tick.
-        assert_eq!(decide(WIN, 0, false, false, false), None);
+        assert_eq!(decide(WIN, facts(0, false, false, false)), None);
         assert_eq!(
-            decide(WIN, 0, false, true, false),
+            decide(WIN, facts(0, false, true, false)),
             Some(RunOutcome::Defeat(DefeatCause::SquadWipe))
         );
     }
 
     #[test]
     fn the_timer_wins_at_and_after_the_threshold() {
-        assert_eq!(decide(WIN, 100, true, true, false), Some(RunOutcome::Victory));
-        assert_eq!(decide(WIN, 101, true, true, false), Some(RunOutcome::Victory));
+        assert_eq!(decide(WIN, facts(100, true, true, false)), Some(RunOutcome::Victory));
+        assert_eq!(decide(WIN, facts(101, true, true, false)), Some(RunOutcome::Victory));
     }
 
     #[test]
     fn a_dev_forced_victory_cannot_launder_a_real_defeat() {
         // Forced victory on a live run: allowed (that is the tool's whole purpose).
-        assert_eq!(decide(WIN, 10, true, true, true), Some(RunOutcome::Victory));
+        assert_eq!(decide(WIN, facts(10, true, true, true)), Some(RunOutcome::Victory));
         // Forced victory on a wiped squad: the real rule still wins.
         assert_eq!(
-            decide(WIN, 10, false, true, true),
+            decide(WIN, facts(10, false, true, true)),
             Some(RunOutcome::Defeat(DefeatCause::SquadWipe))
         );
+    }
+
+    #[test]
+    fn extraction_requires_both_a_capture_and_a_return() {
+        let held = RunFacts { contained: 1, ..facts(500, true, true, false) };
+        let at_exit = RunFacts { squad_extracted: true, ..facts(500, true, true, false) };
+        // A capture with nobody at the exit is not a win — this is the assertion that makes the rule
+        // "extract", not merely "contain".
+        assert_eq!(decide(EXTRACT, held), None);
+        // And standing at the exit empty-handed is not a win either.
+        assert_eq!(decide(EXTRACT, at_exit), None);
+        // Both halves.
+        assert_eq!(
+            decide(EXTRACT, RunFacts { squad_extracted: true, ..held }),
+            Some(RunOutcome::Victory)
+        );
+    }
+
+    #[test]
+    fn extraction_ignores_the_clock_entirely() {
+        // No deadline in this variant: a patient player is not punished by the win rule. (Losing to a
+        // timer would be a DEFEAT rule, and there isn't one.)
+        let won = RunFacts { contained: 1, squad_extracted: true, ..facts(0, true, true, false) };
+        assert_eq!(decide(EXTRACT, won), Some(RunOutcome::Victory));
+        assert_eq!(decide(EXTRACT, RunFacts { ticks: 10_000_000, ..won }), Some(RunOutcome::Victory));
+    }
+
+    #[test]
+    fn losing_the_specimen_un_arms_the_win() {
+        // `contained` counts LIVE anomalies, so destroying one after capture drops the count and the
+        // squad standing at the exit no longer wins. Coherent — there is nothing left to extract — and
+        // it falls out of deriving rather than ratcheting.
+        let won = RunFacts { contained: 1, squad_extracted: true, ..facts(500, true, true, false) };
+        assert_eq!(decide(EXTRACT, won), Some(RunOutcome::Victory));
+        assert_eq!(decide(EXTRACT, RunFacts { contained: 0, ..won }), None);
+    }
+
+    #[test]
+    fn a_wipe_still_beats_a_completed_extraction() {
+        // Precedence is unchanged by the new variant: dying on the extraction pad is still a defeat.
+        let wiped = RunFacts {
+            contained: 1,
+            squad_extracted: true,
+            ..facts(500, false, true, false)
+        };
+        assert_eq!(decide(EXTRACT, wiped), Some(RunOutcome::Defeat(DefeatCause::SquadWipe)));
+    }
+
+    #[test]
+    fn the_phase_is_derived_not_ratcheted() {
+        let req = Some(1);
+        // Nothing happening yet.
+        assert_eq!(phase_for(false, 0, req), RunPhase::Locating);
+        // An attempt under way, or any banked capture, reads as Containing.
+        assert_eq!(phase_for(true, 0, req), RunPhase::Containing);
+        assert_eq!(phase_for(false, 1, Some(2)), RunPhase::Containing);
+        // Quota met.
+        assert_eq!(phase_for(false, 1, req), RunPhase::Extracting);
+        // ...and it walks BACK when the capture is lost. Deriving is what makes this free.
+        assert_eq!(phase_for(false, 0, req), RunPhase::Locating);
+    }
+
+    #[test]
+    fn a_win_condition_with_no_containment_target_never_reaches_extracting() {
+        // `SurviveTicks` has no quota, so parking the phase in `Extracting` forever would be a lie.
+        assert_eq!(phase_for(false, 0, None), RunPhase::Locating);
+        assert_eq!(phase_for(false, 9, None), RunPhase::Containing);
+        assert_eq!(phase_for(true, 0, None), RunPhase::Containing);
+    }
+
+    #[test]
+    fn a_win_condition_that_wins_itself_is_rejected_at_the_door() {
+        assert!(SessionConfig { win: WinCondition::SurviveTicks(0) }.validate().is_err());
+        assert!(SessionConfig { win: WinCondition::ExtractContained { count: 0 } }
+            .validate()
+            .is_err());
+        assert!(SessionConfig { win: EXTRACT }.validate().is_ok());
+        assert!(SessionConfig { win: WIN }.validate().is_ok());
     }
 
     #[test]

@@ -252,10 +252,11 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
                      a: Res<AssetServer>,
                      d: Res<Dungeon>,
                      rules: Res<crate::containment::ContainmentRules>,
+                     mut targets: ResMut<crate::containment::TargetSeq>,
                      mut s: ResMut<EditorState>| {
                         let q = s.quantity();
                         for _ in 0..q {
-                            spawn_live_scp999(&mut c, &a, &d, &mut s, &rules);
+                            spawn_live_scp999(&mut c, &a, &d, &mut s, &rules, &mut targets);
                         }
                     },
                 );
@@ -563,12 +564,20 @@ fn spawn_live_scp999(
     dungeon: &Dungeon,
     state: &mut EditorState,
     rules: &crate::containment::ContainmentRules,
+    targets: &mut crate::containment::TargetSeq,
 ) {
     let n = state.spawn_count;
     state.spawn_count += 1;
     let cell = fan_cell(dungeon, n);
     let seed = room_spawn_seed(n, ROOM_SPECIES_SCP999);
-    let e = crate::scp999::spawn_scp999_at(commands, assets, seed, dungeon.cell_center(cell), rules.0.scp999.clone());
+    let e = crate::scp999::spawn_scp999_at(
+        commands,
+        assets,
+        seed,
+        dungeon.cell_center(cell),
+        rules.0.scp999.clone(),
+        targets,
+    );
     commands.entity(e).insert(RoomSpawned);
     info!("research_room: spawned live SCP-999 comfort blob at cell {cell:?}");
 }

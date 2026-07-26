@@ -21,10 +21,14 @@ use bevy::prelude::*;
 
 pub mod area;
 pub mod device;
+pub mod extraction;
 pub mod rule;
 pub mod state;
+pub mod verbs;
 
 pub use area::{Capped, Quarantinable, Quarantine, SiteSecured};
+pub use extraction::ExtractionZone;
+pub use verbs::{ArmedTool, DeviceSupply, QuarantineSupply, TargetId, TargetSeq};
 
 /// The `containment:` config slice — one authored [`ContainmentRule`] per capturable anomaly.
 ///
@@ -67,8 +71,11 @@ impl Plugin for ContainmentPlugin {
         // evaporation already settled — the same "read settled state" edge `squad::unit_movement` uses
         // against `AiSet::Think`. Without it the rule would evaluate against a half-updated grid whose
         // contents depend on schedule accident.
+        // Already validated by `config::load_game_config` — the single validation seam. This used to
+        // validate-and-panic here instead, which was a second path: a malformed rule would be rejected
+        // in the windowed build's plugin build but sail past any consumer that loaded the config
+        // without adding this plugin. Validation belongs at the door, once.
         let rules = app.world().resource::<crate::config::GameConfig>().containment.clone();
-        rules.validate().unwrap_or_else(|e| panic!("containment config: {e}"));
         app.insert_resource(ContainmentRules(rules));
         app.add_systems(
             FixedUpdate,
@@ -83,6 +90,26 @@ impl Plugin for ContainmentPlugin {
                 .chain(),
         )
         .init_resource::<area::SiteSecured>()
-        .add_systems(FixedUpdate, area::track_secured_sites);
+        .add_systems(FixedUpdate, area::track_secured_sites)
+        // The extraction point, placed on the insertion cell. `RunBuild::Populate` because it reads
+        // `Dungeon`, which only exists after `RunBuild::World`. Not a `FixedUpdate` node, so it cannot
+        // permute the pinned schedule's linearisation.
+        .add_systems(
+            OnEnter(crate::session::RunState::Active),
+            extraction::spawn_extraction_zone.in_set(crate::session::RunBuild::Populate),
+        )
+        // The player's verbs. Data and supplies live here (harness-visible, because `deploy_devices`
+        // and `tick_quarantine` are pinned and the harness must be able to drive them); the mouse
+        // handling lives in `crate::selection`, which is windowed-only by construction.
+        .init_resource::<verbs::ArmedTool>()
+        .init_resource::<verbs::DeviceSupply>()
+        .init_resource::<verbs::QuarantineSupply>()
+        .init_resource::<verbs::TargetSeq>()
+        // Before the world is built, like `session::reset_run` — a fresh expedition starts with a full
+        // pouch, nothing armed, and weapons free.
+        .add_systems(
+            OnEnter(crate::session::RunState::Active),
+            verbs::reset_verbs.before(crate::session::RunBuild::World),
+        );
     }
 }

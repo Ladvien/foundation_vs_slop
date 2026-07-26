@@ -585,6 +585,20 @@
             copy_w_a: 0.34,            // relative weight of building an A (ear) copy
             copy_w_b: 0.33,            // ...and a B; C takes max(0, 1 - copy_w_a - copy_w_b)
         ),
+
+        // Containment LOGISTICS — how much capture capability an expedition carries, and how far each
+        // verb reaches. Deliberately here in `sim:` (evolvable) rather than in the `containment:` slice
+        // (not evolvable): that slice holds the RULES, which define what capturing means, while these
+        // define how HARD it is. Difficulty is exactly what the world genome exists to explore; the
+        // objective is not. See `sim::ContainmentTuning`.
+        containment: (
+            device_supply: 3,          // enough to miss twice and still make the tutorial capture
+            device_reach: 2.5,         // a deliberate approach, not a cross-room snipe
+            quarantine_supply: 1,      // the area verb is the scarce one - it bounds a whole region
+            quarantine_radius: 3.0,
+            cap_reach: 1.5,            // parity with the crab latch reach: sealed at arm's length
+            extraction_radius: 2.5,    // five units fit without shoving each other back out
+        ),
     ),
 
     // =============================================================================================
@@ -1599,11 +1613,20 @@
     // cannot itself be an objective. Every other tunable in this file is fair game; this one is the
     // reasoned exception to the "every feature must evolve" rule.
     //
-    // `SurviveTicks` counts FIXED ticks at the pinned 60 Hz, not wall seconds, so the timer is
-    // identical at any frame rate and at any headless `speed`. 18000 = 5 minutes — the placeholder
-    // win that exists only until Push 2 lands `ExtractContained`.
+    // `ExtractContained` is the REAL win and replaces the `SurviveTicks(18000)` placeholder that
+    // shipped until now: contain `count` anomalies, then walk the surviving squad back to the cell it
+    // inserted at. Both halves are required — a capture you cannot walk out with is not a secure, and
+    // that walk back through a level you have already stirred up is where the tension lives.
+    //
+    // `count: 1` because SCP-999 is the only capturable anomaly wired today (FVS-C-2) and it is
+    // deliberately the tutorial: you contain the comfort blob by befriending it. Raise this as the
+    // roster grows.
+    //
+    // `SurviveTicks` is kept as a variant (not deleted) because the harness still drives it directly
+    // to exercise the resolve -> screens -> teardown spine without needing a capture. It counts FIXED
+    // ticks at the pinned 60 Hz, so it is identical at any frame rate and any headless `speed`.
     // =============================================================================================
     session: (
-        win: SurviveTicks(18000),
+        win: ExtractContained(count: 1),
     ),
 )

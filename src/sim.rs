@@ -280,6 +280,44 @@ pub struct SimTuning {
     pub parasite: ParasiteTuning,
     pub scp999: Scp999Tuning,
     pub scp1048: Scp1048Tuning,
+    pub containment: ContainmentTuning,
+}
+
+/// **Containment LOGISTICS** — how many devices the squad carries, how far each verb reaches, how big
+/// the extraction zone is.
+///
+/// Deliberately here, on `SimTuning`, and *not* in the `containment:` config slice, because the two
+/// answer different questions and only one of them may evolve:
+///
+/// * The `containment:` slice holds the **rules** — what containing an anomaly *means*. A search free
+///   to retune a rule would be moving the objective rather than solving it, which is the same reasoned
+///   exception `session::SessionConfig` documents for the win condition.
+/// * These are **difficulty**. How many canisters an expedition gets is exactly the kind of knob the
+///   world genome exists to explore, so it belongs on the evolvable side.
+///
+/// Living on `SimTuning` is also what keeps the wiring cheap: `coevolve::artifacts::WorldEliteDoc`
+/// already carries `pub sim: SimTuning` and `elite_overlay::apply_dim`'s `Dim::World` arm already does
+/// `gc.sim = e.sim`, so only `world_genome`'s BOUNDS/encode/decode need to learn these. That is the
+/// payoff `config::WorldConfig`'s doc warns about missing — a new top-level slice would have had to be
+/// threaded through all four sites, and the doc records that mould and almond water were once exactly
+/// that mistake for 23 of 102 knobs.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainmentTuning {
+    /// Capture devices the squad carries into an expedition. A miss spends one.
+    pub device_supply: u32,
+    /// How far from the thrower a device may connect with its named target (world units).
+    pub device_reach: f32,
+    /// Quarantine regions the squad may deploy. Deliberately a *separate* pool from `device_supply`:
+    /// the three archetypes are genuinely distinct verbs, and making their charges fungible would let
+    /// the player collapse them back into one.
+    pub quarantine_supply: u32,
+    /// Radius of a deployed quarantine region (world units).
+    pub quarantine_radius: f32,
+    /// How close a unit must be to a nest to cap it (world units).
+    pub cap_reach: f32,
+    /// Radius of the run's extraction zone at the insertion cell (world units).
+    pub extraction_radius: f32,
 }
 
 impl Default for SimTuning {
@@ -384,6 +422,14 @@ impl Default for SimTuning {
                 max_bears: 6,
                 copy_w_a: 0.34, // the three copies are near-equally likely; C takes the remainder
                 copy_w_b: 0.33,
+            },
+            containment: ContainmentTuning {
+                device_supply: 3,     // enough to miss twice and still make the tutorial capture
+                device_reach: 2.5,    // ~2.5 tiles: a deliberate approach, not a cross-room snipe
+                quarantine_supply: 1, // the area verb is the scarce one — it bounds a whole region
+                quarantine_radius: 3.0,
+                cap_reach: 1.5,       // parity with the crab latch reach: you seal a nest at arm's length
+                extraction_radius: 2.5, // wide enough that five units fit without shoving each other out
             },
         }
     }
@@ -536,6 +582,15 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     }
     probability("scp1048.copy_w_a", t.scp1048.copy_w_a)?;
     probability("scp1048.copy_w_b", t.scp1048.copy_w_b)?;
+
+    // Containment logistics. Reaches and radii are positive distances; the two supplies may be zero
+    // (an expedition authored without a given verb is a legitimate difficulty setting, unlike a rule
+    // with no clauses — which `ContainmentRule::validate` rejects, because THAT would be an anomaly
+    // that captures itself).
+    positive("containment.device_reach", t.containment.device_reach)?;
+    positive("containment.quarantine_radius", t.containment.quarantine_radius)?;
+    positive("containment.cap_reach", t.containment.cap_reach)?;
+    positive("containment.extraction_radius", t.containment.extraction_radius)?;
 
     Ok(())
 }

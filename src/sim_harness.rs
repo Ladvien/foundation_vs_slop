@@ -831,6 +831,111 @@ pub fn run_ticks(app: &mut App) -> u64 {
     app.world().resource::<crate::session::RunClock>().ticks
 }
 
+/// The run's current phase (`Locating` / `Containing` / `Extracting`). Read-only.
+///
+/// Remember `NextState` applies in `StateTransition`, which runs *before* `RunFixedMainLoop` — so a
+/// phase decided on fixed tick N is not observable here until the following frame. Step twice.
+pub fn run_phase(app: &mut App) -> crate::session::RunPhase {
+    *app.world().resource::<State<crate::session::RunPhase>>().get()
+}
+
+/// How many anomalies currently carry `containment::Contained` — the count the win condition reads.
+///
+/// Deliberately distinct from [`specimen_count`]: `Contained` rides run-scoped anomalies and therefore
+/// resets each expedition, while `Specimen` is the roguelite record and accumulates forever.
+pub fn contained_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(), With<crate::containment::Contained>>();
+    q.iter(world).count()
+}
+
+/// How many `Specimen` records exist — meta-progress banked across every expedition so far.
+pub fn specimen_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query::<&crate::containment::Specimen>();
+    q.iter(world).count()
+}
+
+/// The cell of the run's extraction zone, so a test can order the squad to it.
+pub fn extraction_zone_cell(app: &mut App) -> Option<IVec2> {
+    let world = app.world_mut();
+    let pos = {
+        let mut q = world.query_filtered::<&Transform, With<crate::containment::ExtractionZone>>();
+        q.iter(world).next().map(|tf| tf.translation)?
+    };
+    Some(world.resource::<crate::dungeon::Dungeon>().world_to_cell(pos))
+}
+
+/// Every anomaly the player could aim a verb at, **sorted by `TargetId`** so a test's choice of target
+/// is a stable function of the world rather than of query order.
+pub fn containable_targets(app: &mut App) -> Vec<(crate::containment::TargetId, Entity)> {
+    let world = app.world_mut();
+    let mut q = world
+        .query_filtered::<(&crate::containment::TargetId, Entity), With<crate::containment::Containment>>();
+    let mut out: Vec<_> = q.iter(world).map(|(id, e)| (*id, e)).collect();
+    // SORT-OK: `TargetId` is minted once per targetable spawn and never reused — total by construction.
+    out.sort_unstable_by_key(|(id, _)| *id);
+    out
+}
+
+/// Throw a capture device at a **named** target, spending a charge. Returns `false` if the pouch is
+/// empty.
+///
+/// The windowed path (`selection::throw_device_input`) resolves the target from the cursor, which is a
+/// pick; this names it outright, so **there is no pick on the harness path and no sort is needed**. The
+/// mirror of `issue_squad_order`'s canonical-order note, inverted: stating why there is no order here.
+pub fn throw_containment_device(app: &mut App, target: Entity, from: Vec3) -> bool {
+    let world = app.world_mut();
+    if world.resource::<crate::containment::DeviceSupply>().0 == 0 {
+        return false;
+    }
+    let reach = world.resource::<crate::sim::SimTuning>().containment.device_reach;
+    world.resource_mut::<crate::containment::DeviceSupply>().0 -= 1;
+    world.spawn((
+        crate::session::run_scoped(),
+        crate::containment::ContainmentDevice { target, reach },
+        Transform::from_translation(from),
+    ));
+    true
+}
+
+/// Place a quarantine region on `cell`, spending a charge. Returns `false` if none are left.
+pub fn place_quarantine(app: &mut App, cell: IVec2) -> bool {
+    let world = app.world_mut();
+    if world.resource::<crate::containment::QuarantineSupply>().0 == 0 {
+        return false;
+    }
+    let radius = world.resource::<crate::sim::SimTuning>().containment.quarantine_radius;
+    let pos = world.resource::<crate::dungeon::Dungeon>().cell_center(cell);
+    world.resource_mut::<crate::containment::QuarantineSupply>().0 -= 1;
+    world.spawn((
+        crate::session::run_scoped(),
+        crate::containment::Quarantine { radius },
+        Transform::from_translation(pos),
+    ));
+    true
+}
+
+/// Cap a **named** nest. No pick, so no sort. Grants nothing — that is archetype 3's whole point.
+pub fn cap_nest(app: &mut App, nest: Entity) {
+    app.world_mut().entity_mut(nest).insert(crate::containment::Capped);
+}
+
+/// Order the squad to hold fire (or release it). See `laser::WeaponsTight`.
+pub fn set_weapons_tight(app: &mut App, tight: bool) {
+    app.world_mut().resource_mut::<crate::laser::WeaponsTight>().0 = tight;
+}
+
+/// Sample a stigmergy channel at a world position — used to assert that holding fire actually starves
+/// the `THREAT_GUN` channel SCP-999's rule reads.
+pub fn field_at(app: &mut App, channel: usize, pos: Vec3) -> f32 {
+    let world = app.world_mut();
+    let dungeon = world.resource::<crate::dungeon::Dungeon>().clone();
+    world
+        .resource::<crate::ai::field::Stig>()
+        .sample(crate::ai::field::FieldId(channel), &dungeon, pos)
+}
+
 /// Whether every squad unit's fracture set has finished baking (`autogib::bake_autogib`).
 ///
 /// A **precondition probe**, not a driver. `bake_autogib` self-gates on the figurine's sub-meshes being

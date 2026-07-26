@@ -157,6 +157,7 @@ fn spawn_scp999(
     rules: Res<crate::containment::ContainmentRules>,
     assets: Res<AssetServer>,
     mut seq: ResMut<Scp999Seq>,
+    mut targets: ResMut<crate::containment::TargetSeq>,
 ) {
     if sim.scp999.count == 0 {
         return;
@@ -195,7 +196,14 @@ fn spawn_scp999(
     for cell in &chosen {
         let s = seq.0;
         seq.0 += 1;
-        spawn_scp999_at(&mut commands, &assets, s, dungeon.cell_center(*cell), rules.0.scp999.clone());
+        spawn_scp999_at(
+            &mut commands,
+            &assets,
+            s,
+            dungeon.cell_center(*cell),
+            rules.0.scp999.clone(),
+            &mut targets,
+        );
     }
     info!("scp999: spawned {} comfort blob(s) out in the level", chosen.len());
 }
@@ -208,11 +216,15 @@ pub fn spawn_scp999_at(
     seed: u32,
     pos: Vec3,
     rule: crate::containment::ContainmentRule,
+    seq: &mut crate::containment::TargetSeq,
 ) -> Entity {
     commands
         .spawn((
             crate::session::run_scoped(),
             Scp999,
+            // The uniform key the player's aim resolves by. Minted here, in the SHARED builder, so an
+            // F6-dropped blob is byte-identical to a seeded one in this respect too.
+            seq.next(),
             // **The tutorial capture** (FVS-C-2). The blob is contained by *befriending* it — holster
             // (let `THREAT_GUN` decay at its cell) and stay with it (keep `ATTENTION` on it) — not by
             // trapping it. Both clauses are things the player does by choosing NOT to fight, which

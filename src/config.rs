@@ -196,6 +196,11 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     crate::mold::validate_config(&cfg.mold)?;
     model::validate_script(&cfg.dialogue)?;
     audio_tuning::validate_tuning(&cfg.audio)?;
+    // The containment rules and the win condition. Both used to be checked elsewhere (or not at all):
+    // `ContainmentPlugin::build` validated-and-panicked, which meant a malformed rule was rejected only
+    // if that plugin happened to be added. Validation belongs at the door, once — one path.
+    cfg.containment.validate()?;
+    cfg.session.validate()?;
     Ok(cfg)
 }
 
