@@ -276,20 +276,28 @@ redistributing the pack itself does not — fine for shipping inside a game.
 | Need | Have | Where |
 |---|---|---|
 | **Site interior kit** | `Floor_Plain`, `Floor_Grate`, `Ceiling_Corner_In/Out`, `Ceiling_Slope`, `Railing`, `Barrier_02/03`, `Double_Block`, + 69 wall/panel meshes | **HS series** is effectively a containment-facility kit; A series is structural/corridor |
-| **Containment cells** | `Cellule`, `Cellule_Compact`, `Cryogenic_Stasis_Chamber`, `Botanical_SpecimenChamber_Tall`, `Aquatic_GrowthPod`, `MedPod_Treatment_Bed` | HS + D/F series |
+| **Containment cells** | ⚠️ **`Cellule` / `Cellule_Compact` are NOT rooms** — measured 2026-07-26 at 0.30 × 0.30 × 0.50 m and 0.37 × 0.30 × 0.65 m. French *cellule* here is a battery/power cell. The rest of this row is unverified and must be re-measured before a containment wing is built on it; `Cryogenic_Stasis_Chamber` (E series) is the plausible survivor. | HS + D/F series |
 | **Research wing** | `Analysis_Tube_Rack`, `Medical_Vial`, `Medical_Injector`, `Medical_Roling_Cart`, `MedCabinet`, `Medical_Storage_Shelf`, `Botanical_HydroponicStation` | D/F series |
 | **Records office** | `Control_Pannel`, `Data_Unit`, `Medical_Data_Tablet`, + 24 desk/console/terminal/screen meshes | F series (furniture/interior) |
 | **Requisition** | `Medical_Storage_Crate`, `Caisse`, + 18 crate/locker/shelf/cabinet meshes | D/HS series |
 | **Lighting** | `Floor_Light_01/02/03` + 12 light/emissive meshes | **E series** is lighting/emissives |
-| **Door frames** | `Door_Single_V1–V3`, `Door_Double_V1–V3 L/R`, `DoorFrame_Single/Double`, `DoorSign_Room` | B series |
+| **Door frames** | `Door_Single_V1–V3`, `Door_Double_V1–V3 L/R`, `DoorFrame_Single/Double`, `DoorSign_Room` | **`Pack_SciFi_A_002_V1.0`** — corrected 2026-07-26; all 11 door meshes are there, not in the B series |
 
 ### Still needed — in order
 
-1. **An FBX/OBJ → GLB conversion pipeline. This is the blocker for everything above.** The library ships
-   `.fbx` + `.obj` + `.blend` and **zero `.glb`**; all 194 `.glb` on the share are mushrooms and SCP
-   characters. `docs/artist_guide.md` §3 is a hard requirement — glTF 2.0 binary only, no FBX. Blender is
-   available on this host with a working headless pipeline, so this is a scripted batch job, not manual
-   work. Nothing else on this list matters until it exists.
+1. ~~**An FBX/OBJ → GLB conversion pipeline. This is the blocker for everything above.**~~
+   ⚠️ **Corrected 2026-07-26 — it is not a blocker.** True of the *share*: it ships `.fbx` + `.obj` +
+   `.blend` and zero `.glb`, and `docs/artist_guide.md` §3 is a hard requirement (glTF 2.0 binary only).
+   But this audit looked only at the share and missed what is already **in the repo**:
+   `assets/kenney_prototype-kit/Models/GLB format/` holds **145 licensed `.glb`** — walls, wall-corners,
+   four doorway variants, sliding doors, floors, columns, stairs, crates, indicators, floor buttons and
+   signage numerals. That is enough to **greybox all six areas today**.
+   Greyboxing first is the right order regardless: a hub has to be *learnable*, so the layout wants
+   iteration before it wants art, and converting after the layout settles means converting only the
+   meshes the Site actually uses instead of all 411. So N-10 moves from prerequisite to **art upgrade**.
+   (One caveat for whoever does the greybox: the Kenney kit is a 1 m module that is only **1 m tall** —
+   `wall.glb` measures 0.2 × 1.0 × 1.0 and `floor-square.glb` is a zero-thickness plane — so walls need
+   `scale (1, 2.4, 1)` to reach `WALL_HEIGHT`.)
 2. **The ASYNC door effect** — and the good news is this is a **shader**, not a model. The heavy frame
    already exists (`DoorFrame_Double`); what does not exist is the *aperture*: the volume inside the
    frame that visibly is-not-a-room. That is exactly the kind of thing this project already does well
