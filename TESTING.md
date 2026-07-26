@@ -92,29 +92,85 @@ These are the hard-won constraints. Violating any one either flakes the suite or
    resource (see `LaserRng`).
 4. **One App at a time.** Two headless Apps in one process share Bevy's global task pool (and, when a
    backend exists, the GPU device) and interfere. Every harness test takes `let _serial = serial_guard();` first and holds it for the App's
-   lifetime. (`--test-threads=1` in CI is belt-and-suspenders; `serial_guard` alone is sufficient.)
-5. **Single-threaded.** `build_headless_app` forces the compute pool *and* rayon to one thread before any
-   plugin initializes. Multithreading, rayon work-stealing, and concurrent Apps each break determinism —
-   that's why all three are pinned.
+   lifetime.
+   **`--test-threads=1` is NOT belt-and-suspenders, and `serial_guard` alone is NOT sufficient across
+   binaries.** `--test-threads=1` limits threads *within* one test binary; cargo still runs different
+   test **targets in parallel**, and `serial_guard` is a process-local `static`, so two harness `App`s
+   from different targets overlap freely. Found 2026-07-26: a batched
+   `cargo test --test containment --test nav --test session --test squad` failed
+   `session::both_terminal_paths_are_bit_reproducible`, which then passed cleanly when run alone.
+   **Re-run a suspicious harness failure as a single target before believing it.** The real fix is a
+   cross-process lock (an advisory file lock inside `serial_guard`).
+5. **Single-threaded — and pinned in exactly ONE place.** `build_headless_app_unfinished` forces the
+   global `ComputeTaskPool` *and* rayon to one thread before any plugin initializes, and **asserts it won
+   the init race** (both are process-global `OnceLock`s, so losing the race would silently restore a
+   multi-worker pool with no code change). Multithreading, rayon work-stealing, and concurrent Apps each
+   break determinism — that's why all three are pinned.
+   **Do not add `Schedule::set_executor(SingleThreadedExecutor::new())`.** It would be a *second* mechanism
+   for the one guarantee the pool pinning already provides — two paths to the same invariant, which is
+   precisely the shape that makes a determinism regression untraceable (which mechanism lapsed?). The pool
+   pinning is the single path; it is asserted, and the goldens that depend on it are the evidence.
+   **The windowed build is deliberately NOT pinned.** Reproducibility is a property of the *harness*, which
+   is the determinism oracle; forcing the shipped game single-threaded would cost frame time to guarantee
+   something nothing reads. A windowed session is not a golden and never will be.
+   This mirrors the discipline the offline search already documents (`src/squad_ai/parallel.rs`): a rollout
+   cannot be parallelised *within* a process, so the only axis of parallelism is **processes** — the same
+   split as krABMaga, which parallelises across independent fixed-seed replicates rather than inside one
+   seeded trajectory (Antelmi et al. 2024, *Reliable and Efficient Agent-Based Modeling and Simulation*,
+   DOI 10.18564/jasss.5300, §2.34).
 6. **Fixed dt.** The pinned simulation runs on **`FixedUpdate`** at 60 Hz (`lib.rs`:
    `Time::<Fixed>::from_hz(60.0)`; `AiSet` and field diffusion are registered on `FixedUpdate` in
    `ai/mod.rs`). The harness drives real time by exactly `fixed_dt` per `step` (`TimeUpdateStrategy`), matched
    to the `Time<Fixed>` timestep, so the sim never sees variable pacing — even though `field.rs` still
    integrates by `time.delta_secs()`, that delta is now fixed.
-7. **Test only compiled code.** The crate is a **lib + bin split** — domain modules are declared in
+   **`step(n)` advances the fixed schedule `n - 1` times on a fresh `App`, not `n`.** The first
+   `app.update()` runs **no** fixed tick: `TimeUpdateStrategy::ManualDuration` routes through
+   `Time::<Real>::update_with_duration` → `update_with_instant`, and on the first call `last_update` is
+   `None`, so it seeds the clock and returns *without advancing*. Every later update advances by exactly
+   `fixed_dt`. This is structural, not a race. Do **not** "fix" `step` — every committed golden is defined
+   in terms of `step(n)` (`deterministic_core_is_bit_identical` steps 180 for 179 ticks), so a literal `n`
+   would move all of them for no gameplay reason. Any test that asserts on elapsed sim time must account
+   for the offset; `session::a_fresh_app_runs_one_fewer_fixed_tick_than_harness_steps` pins it so a Bevy
+   upgrade cannot move the ruler silently.
+7. **The world is built PER RUN, not at `Startup` (FVS-A-5).** `Dungeon::generate` no longer runs at
+   plugin-build time and creatures no longer spawn on `Startup`; both happen on
+   `OnEnter(session::RunState::Active)`, ordered by the `RunBuild::{World, Grids, Populate, PostPopulate}`
+   chain. Consequences for tests:
+   * `build_headless_app` + the first `step` still gives you a populated world — `PostStartup` leaves
+     `RunState::Idle`, and the frame's own `StateTransition` (which sits *before* `RunFixedMainLoop`)
+     builds it ahead of the first fixed tick. Nothing in an existing test had to change.
+   * A system that reads the `Dungeon`, `Stig`, `FogGrid`, `LightField`, `MoldField` or `AlmondWater`
+     must be registered in a `RunBuild` phase, **not** `Startup` — those resources do not exist yet when
+     `Startup` runs, and Bevy reports it as `Parameter Res<'_, X> failed validation`, not as a missing
+     registration.
+   * Anything a test spawns that should not survive a run needs `session::run_scoped()`.
+   * `session::leaving_and_re_entering_a_run_builds_a_fresh_different_world` is the acceptance test: the
+     old world is despawned, a new one is built, and the `RunSeed` has advanced so it is a *different* map.
+8. **Test only compiled code.** The crate is a **lib + bin split** — domain modules are declared in
    `src/lib.rs`. `src/combat.rs` and `src/enemies.rs` are shelved (not declared) — do not write tests
    against them. The live enemy path is `enemy.rs` + `crab.rs`.
-8. **A determinism probe on an IDLE box proves nothing.** Order-dependence bugs are races: with G0 *live*,
+9. **A determinism probe on an IDLE box proves nothing.** Order-dependence bugs are races: with G0 *live*,
    an idle machine produced 12/12 identical rollouts in one process and 5/5 across fresh processes, and
    only split under CPU load. Any test asserting same-seed reproducibility of a *long, combat-carrying*
    run must generate background load — see `search_rollouts_are_reproducible_under_load`. Without it the
    test is decoration. (The short physics-off goldens don't need this: they're a fixed 180/1800-tick
    trajectory that never enters the racy paths.)
-9. **Exercise the code you mean to pin.** G0 lived in `laser::fire_laser` and survived for months *behind*
+10. **Killing units early races the async fracture bake — settle it, at a FIXED tick.** `autogib::bake_autogib`
+   self-gates on the figurine's sub-meshes being present in `Assets<Mesh>`, i.e. on GLB streaming, and its
+   own doc states the premise it relies on: *"combat can't start before scenes load, so the bake is a
+   completed prerequisite of any death."* True in play; false in a test that kills the squad a second in.
+   Measured on adjacent loaded reps of one seed: **45 gib chunks vs 160**, with `gib_hash` splitting one
+   tick after the kill while the actor and field hashes still agreed — exactly the silent cascade
+   `gib_hash`'s own docs predict (a different `Carryable` then steers `crab::assign_meat_targets`, and the
+   bisect lands on the crab, not the cause). Use `sim_harness::step_until_autogib_ready`, **then advance to
+   a fixed absolute tick before killing**: waiting alone is not enough, because the wait itself is a
+   variable number of ticks, so gating on it and killing immediately compares two different sims (that
+   mistake turned 2 distinct results into 5). `session::app_at_stable_kill_point` is the worked example.
+11. **Exercise the code you mean to pin.** G0 lived in `laser::fire_laser` and survived for months *behind*
    a 24-build determinism gate, because that gate runs 180 ticks with no synthetic player — the squad idles
    at spawn and never fires. Coverage of a *system* is not coverage of its *contended* path. When a guard
    is meant to pin ordering, check that the scenario actually produces >1 concurrent actor in that code.
-10. **Every sort declares its determinism contract — enforced, not commented.** ECS query order is not
+12. **Every sort declares its determinism contract — enforced, not commented.** ECS query order is not
     stable across `App` instances, so a sort whose key ties falls through to it and the sim stops being
     reproducible. Pick one, explicitly: **`sort_total!(&mut v, |x| key)`** when order is load-bearing (a
     greedy loop, a `take(n)` budget, a shared RNG draw or counter, a clamped accumulate, a lethal pick) — it
@@ -128,7 +184,7 @@ These are the hard-won constraints. Violating any one either flakes the suite or
     bug** — `(pos)` when the element is `(pos, payload)`, so coincident actors tie and the payload decides
     something. Crabs `clamp_to_patch`-ed against a wall hold *bit-identical* coordinates, so this is routine,
     not theoretical (measured: 6 fully-tied pairs at one tick).
-11. **An exoneration is only as strong as the condition it was measured under.** Corollary of 8, and the
+13. **An exoneration is only as strong as the condition it was measured under.** Corollary of 9, and the
     rule that keeps a ruled-out list honest. "I removed the suspect and it still diverged" does **not** clear
     the suspect — with several order-dependencies live, removing one leaves divergence (the aim-scatter A/B
     was read as REFUTED this way, and it was the actual root cause). "It didn't reproduce over N runs" does
@@ -246,7 +302,7 @@ order. `util::sort_total_by_key_at` named it in **one second**, on the first har
 up, with the file, the line, and the duplicated key.
 
 Four sites documented the exact trap they then fell into (ORCA, `almond_water_effect`, `smiley_defense`,
-`GibKey`). That is why invariant 10 is enforcement and not advice. The two recurring shapes:
+`GibKey`). That is why invariant 12 is enforcement and not advice. The two recurring shapes:
 
 1. **A key that is a PREFIX of the value** — `(pos)` where the element is `(pos, payload)`. Coincident actors
    tie and the payload decides something. Crabs `clamp_to_patch`-ed against a wall hold *bit-identical*
@@ -330,6 +386,15 @@ For physics-on behaviour, assert `liveness_violations(&mut app).is_empty()` at c
 ### Debugging a harness panic
 A Bevy "Resource does not exist / Parameter failed validation" with hidden system names? The `test-harness`
 feature already enables `bevy/debug`, which prints the real system + resource name.
+
+### Debugging a *link* error that looks like a code bug
+**Killing a background cargo process can corrupt `target/`.** Found 2026-07-26: a mass kill of background
+builds left ~16 GB of stale artifacts that produced an **undefined-symbol linker error** reading exactly
+like a genuine code defect. `cargo clean -p foundation_vs_slop` fixed it.
+
+**The tell is that `cargo check` passes while the link fails.** `check` never links, so a mismatch between
+the two is evidence about `target/`, not about the source. Reach for `cargo clean -p` before bisecting a
+"regression" that appeared right after you interrupted a build.
 
 ---
 

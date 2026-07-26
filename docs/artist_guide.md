@@ -571,9 +571,14 @@ walls.
   `fixture_range = 7.0 m`, cool-white colour `(0.92, 1.0, 0.94)` with a faint
   green cast (low-CRI halophosphate). Emissive mesh glow at
   `fixture_emissive = 2.2` (LDR).
-- **Flicker:** ~1 in 8 tubes is a "failing" Backrooms fluorescent
-  (`flicker_fail_ratio = 0.12`); the rest shimmer at
-  `flicker_hum_depth = 0.06`.
+- **Flicker:** each tube independently rolls a 1-in-8 chance of being a
+  "failing" Backrooms fluorescent (`flicker_fail_ratio = 0.12`); the rest
+  shimmer at `flicker_hum_depth = 0.06`. **A per-room cap overrides that
+  ratio:** `flicker_max_failing_per_room = 1` lets at most one tube per room
+  strobe at a time, however many roll under the ratio. So in any room with more
+  than ~8 emitters the realized rate is 1-per-room, not 1-in-8 — raising
+  `flicker_fail_ratio` alone changes nothing in a dense room until the cap goes
+  up with it.
 - **TV screens:** `SCREEN_COLOR = (0.40, 0.78, 0.92)` cool cyan, 90,000
   lumens, 6.5 m range, wide cone (0.75 rad half-angle), faster irregular
   flicker (11 Hz).
