@@ -478,77 +478,44 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **The failure is upstream of the animation entirely:** `aimed = 0/5` — with 43 hostiles alive, *no unit ever acquires a target*. Three decoy placements were tried and all read 0: 1.5 m straight ahead (can land inside a wall slab, where fog never marks it visible), on the unit's own cell (degenerate aim direction — `(enemy - unit)` normalised fails the front-arc gate), and a scanned visible floor cell at a 1–3 tile standoff. Since real crabs are also present and also never engaged over 1200 ticks, the decoys are probably not the variable at all — the marching squad simply never closes with anything in this seed.
   *Improvements kept regardless:* the decoy placement now picks a visible floor cell at a real standoff (both prior placements were latent bugs), and the measurement loop breaks as soon as the property is observed instead of always burning a fixed 200 ticks.
   *Done when:* the scenario reliably produces an engagement — most likely by driving the squad *at* a known hostile cluster rather than marching it across the map and hoping — and the test passes 10/10 under load with `#[ignore]` removed. · *Deps:* — · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
-- **FVS-N-8 — Gib SPAWN positions are order-dependent (FOUND 2026-07-25)** · M · *determinism: real, latent*
-  **Reproducer:** `tests/session.rs::zz_repro_gib_spawn_positions_diverge_under_load` (`#[ignore]`d, run with `-- --ignored`). Kill the five squad members simultaneously — after the fracture bake has settled — and **one fixed tick later** two same-seed runs already disagree, under CPU load.
-  The fingerprint is narrow and rules most things out: **actors and fields are bit-identical** (so nothing decided differently), the chunk **count** matches, the **`GibKey`s** match and the **`GibRing` order** matches (so the same chunks were minted from the same deaths in the same order) — and only the chunk **positions** differ, by tens of ULPs. Same gore, placed a hair apart. It is not haul drift (one tick; the carriers have not moved) and not the camera (that feeds only the blood-spray billboard, not the chunks).
-  **Where to look first:** `gore::drain_gore`'s canonical drain. Its comment claims *"the key is the WHOLE event, so a tie means two byte-identical deaths at one spot"* — but the key is a **prefix**: it folds `e.gib.is_some()`, a bool, while `GibSource` carries `{ source, origin, scale }`. That is precisely the shape CLAUDE.md names as the most common form of this bug ("a key that is a PREFIX of the value"), and four sites in this repo have already documented the exact trap they then fell into. A tie there hands two events different values of the shared per-event `seed` counter, which is what scatters the fragments.
-  Passed before FVS-A-5; A-5 changed the crab/unit archetypes and the build schedule, which **exposed** it rather than creating it. No actor/field impact today, but gib positions steer `crab::assign_meat_targets`, so it can cascade.
-  **Two real order-dependencies found and FIXED while chasing this (2026-07-26) — neither was the cause.** Both are kept: each was a genuine latent defect of exactly the class this repo keeps getting bitten by.
-  1. **`gore::drain_gore`'s canonical key was a prefix of the value.** It folded `e.gib.is_some()` — a *bool* — while `GibSource` carries `{ source, origin, scale }`, every field of which changes the chunks minted. The comment directly above it claimed "the key is the WHOLE event". Now keyed on the whole `GibSource` (`AssetId` is `Ord`; origin/scale fold by bits).
-  2. **The autogib bake assembled its vertex soup in async-load order.** `bake_autogib` walked `Children` — whose order for a glTF scene is however the async instantiation happened to add nodes — and appended meshes during the walk. `fracture` then sums fragment centroids over that soup, and float addition is not associative, so `Fragment::center_local` came out ULPs apart between runs; every chunk spawns at `origin + center_local * scale`. Now collected first and appended in a canonical `(mesh AssetId, world-matrix bits)` order (deliberately **not** `Entity` id — id allocation order is the instability being erased).
-  **⚠️ ESCALATED 2026-07-26 — it now breaks a green test, and there is a 5-second deterministic reproducer.**
-  Registering `site::SitePlugin` (which spawns exactly ONE bodiless entity on `Startup`) makes
-  `session::both_terminal_paths_are_bit_reproducible` fail on its **defeat** half — two same-seed builds
-  disagree on `snapshot_hash` after `kill_squad`. Isolated by removing only that plugin and re-running:
-  passes without it, fails with it, in 5.5 s, with **no CPU load required**.
-  Three things this changes:
-  * **It is an ACTOR divergence, not just cosmetic chunk placement.** N-8's recorded fingerprint was
-    "actors and fields stay bit-identical; only chunk positions differ". That is no longer the ceiling —
-    which is exactly the cascade this entry predicted ("gib positions steer `crab::assign_meat_targets`,
-    so it can cascade"). The cascade has now been observed.
-  * **Push 8's "adding a resource is hash-neutral ⇒ no gameplay path keys off entity ids" is FALSE for
-    the gib path.** That inference was drawn from the victory/timer path, which never spawns a gib. One
-    extra `Startup` entity shifts every later id by one and the defeat path notices.
-  * **The `#[ignore]`d load-dependent reproducer is no longer the best one.** Prefer the plugin toggle:
-    it is deterministic, needs no load, and runs in seconds.
-  **THE THIRD CAUSE, located 2026-07-26 — `gore.rs`'s scatter seed is a `Local<u32>`.**
-  Measured with the new reproducer, comparing all three hashes at increasing ticks after the kill:
-  ```
-  after= 1  snapshot SAME  field SAME  gib DIFF   chunks 175/175
-  after= 2  snapshot SAME  field DIFF  gib DIFF   chunks 175/175
-  after=30  snapshot DIFF  field DIFF  gib DIFF   chunks 175/175
-  ```
-  Identical chunk COUNTS, gib diverging on the very first tick, then cascading to the field and finally
-  to actors — the fingerprint this entry always described, now pinned to a mechanism.
-  `drain_gore` takes `mut seed: Local<u32>` (`src/gore.rs:658`), increments it once per drained event
-  (`:721`), and every chunk's launch direction, speed and spin derives from it (`:1004`,
-  `base = seed.wrapping_mul(..)`). **So a death's scatter is a function of how many gore events the
-  App has EVER drained, not of that death.** Two consequences the earlier write-up missed:
-  * It is not merely a tie-break hazard. A *single* difference in cumulative event count anywhere,
-    ever, permanently desynchronises the scatter of every subsequent death. There is no re-convergence.
-  * It explains why the two earlier fixes did not help: both corrected *ordering within a tick*, and
-    this is an accumulator *across* ticks. Sorting the drain cannot fix a counter that carries history.
-  **Fix direction (not yet implemented):** derive the scatter seed from the *event itself* — the
-  `GibSource`'s stable content (origin bits, scale) folded with the victim's stable per-spawn key — so
-  each death's scatter is a pure function of that death and immune to history. That is the same
-  discipline `Scp999Seed`/`CrabSeed`/`CyanideSmell::id` already use, and it would let the `Local` go.
-  Expect a golden re-pin: every gib position changes.
-  **The `Local<u32>` was FIXED 2026-07-26 — and the symptom SURVIVED it.** `scatter_seed` now derives
-  each death's seed from that event's own content (position bits, kind, gib origin/scale, intensity)
-  plus its index within the canonically-sorted drain, so scatter is a pure function of the death and
-  carries no history. That is a real defect removed and it should stay removed — but it is **not** the
-  cause of the position divergence, and the measurement says why:
-  ```
-  pre-kill snapshot: SAME      gib ring order: SAME      chunk count: 175 vs 175
-  rows differing:    115 of 175
-  first differing row  a=[key 226509435914900895, 1117717245, 1060802977, 1121924049, ...]
-                       b=[key 226509435914900895, 1117705771, 1068355886, 1121937070, ...]
-  ```
-  **The GibKey is identical and only the position words differ.** The sim is bit-identical right up to
-  the kill, the same chunks are minted from the same deaths in the same order, and then two thirds of
-  them land somewhere else.
-  **Next suspect, and it is now a narrow one: the BAKE.** A chunk spawns at
-  `origin + center_local * scale`. `origin` is the unit's `Transform` (proven identical — the pre-kill
-  snapshot matches), and `scale` comes from `GibSource`. That leaves `Fragment::center_local`, produced
-  by `autogib::bake_autogib` and cached in `AutogibCache`. N-8 fix #2 canonicalised the *append order*
-  of the vertex soup, but nothing has ever asserted the bake's **output** is reproducible.
-  *The test to write next* (30 minutes, no load needed): hash `AutogibCache`'s fragment centroids
-  directly across two same-seed builds, with no death at all. If that differs, the bug is entirely in
-  the bake and the gore path is exonerated. Note `gib_rows` is read one tick after the kill, so it
-  folds in one tick of motion — worth also sampling at tick 0 to separate spawn position from velocity.
-  **Still open**, but much narrower: one accumulator removed, the drain and the keys exonerated by
-  measurement, and the remaining suspect isolated to the bake. Ruled out so far: the drain order, the bake order, the death `origin` (it is the unit's own `Transform`, which is hashed and identical), the camera (it feeds only the blood-spray billboard), and haul drift (the split shows at the very first tick). Worth checking next: whether the diverging chunk belongs to a **crab** death rather than a unit death — crab gibs come from `meat_chunks` on a different path — and whether `Assets<Mesh>` insertion order reaches `append_mesh` anywhere else.
-  **Scope note:** actors and fields remain bit-identical throughout, so the *simulation* is reproducible; only cosmetic chunk placement drifts. It matters because gib positions steer `crab::assign_meat_targets`, so it can cascade — but it is not corrupting the pinned core today. · *Deps:* — · *Touches:* `src/gore.rs`, `src/autogib.rs` · *Reading:* [TEST-NT], [ABM]
+- **FVS-N-8 — Gib spawn positions were order-dependent** · M · ✅ **FIXED 2026-07-26 — the cause was one line**
+  **`autogib::seed_from` hashed the `AssetId` of the character GLB to seed the fracture.** An `AssetId`
+  is a **slot index in the asset arena**, assigned by async load order — so the same mesh got a
+  different id run to run, hashed to a different seed, and `fracture` sliced the body along
+  **completely different planes**. Measured before the fix: **23 of 23 fragments differing**, in
+  `half_extents` as well as `center_local` — the mesh was being *partitioned* differently, not merely
+  rounded differently. Every symptom this item ever described followed from that: identical chunk
+  counts and keys with positions differing by tens of ULPs, the cascade into
+  `crab::assign_meat_targets`, and the load-dependence that made it read as a race.
+  Its own doc comment said *"deterministic **within a run**"*, which was true and was the tell — nothing
+  compared two runs' bakes until one was written.
+  *Shipped:* `seed_from_path`, seeding from the asset **path** (authored, not allocated, identical
+  across runs, processes and machines), hashed with a hand-rolled FNV-1a because `DefaultHasher` is not
+  guaranteed stable across toolchains and so has no business seeding anything compared between builds.
+  A figurine handle with no asset path is **not baked at all** (loud `error!`) rather than silently
+  seeded from something unstable — one path, no fallback.
+  *Pinned by:* `tests/autogib_determinism.rs` (its own fast target — **1.5 s, no load**, asserting
+  centroids *and* half-extents), and `session::gib_spawn_positions_stay_identical_under_load`, which is
+  the old `#[ignore]`d reproducer **un-ignored and now green** (five simultaneous deaths under CPU load).
+  **Three fixes preceded this one and none of them was the cause. They were all still correct**, and the
+  pattern is the lesson worth keeping:
+  1. `gore::drain_gore`'s canonical key was a **prefix of its value** (folded `gib.is_some()`, a bool,
+     while `GibSource` carries `{source, origin, scale}`).
+  2. The autogib bake assembled its **vertex soup in async-load order**, and float addition is not
+     associative.
+  3. `drain_gore`'s scatter seed was a **`Local<u32>` accumulator** — a death's scatter was a function
+     of how many gore events the App had *ever* drained, so one difference anywhere desynchronised
+     everything after it, permanently. (This is also why 1 and 2 could not have helped: both corrected
+     ordering *within* a tick; that one was an accumulator *across* ticks.)
+  **The diagnostic lesson**, paid for over three sessions: *identical counts + identical keys +
+  identical ring order + positions differing in the last bits points at the **geometry source**, not at
+  the ordering of the code that consumes it.* Two sessions were spent auditing consumers. The question
+  that ended it was "is the bake output reproducible?" — a 30-line test with no death in it at all.
+  **Corrects a standing claim in Push 8:** *"adding a resource is hash-neutral ⇒ no gameplay path keys
+  off entity ids"* was inferred from the victory/timer path, which never spawns a gib. Registering
+  `site::SitePlugin` (one bodiless `Startup` entity) was enough to perturb load timing and turn this
+  latent bug into a hard failure of `both_terminal_paths_are_bit_reproducible` — which is how it was
+  finally caught. · *Touches:* `src/autogib.rs`, `src/gore.rs` · *Reading:* [TEST-NT], [ABM]
 - **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
   Not currently a shipped bug (nothing kills a unit in the first second of a real run), and it is **not** worth forcing the bake synchronous. What is worth deciding: whether the offline search — which runs thousands of rollouts on evolved worlds where an early death is plausible — should gate its rollouts on `sim_harness::autogib_ready` the way `tests/session.rs` now does.

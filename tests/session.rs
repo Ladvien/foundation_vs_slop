@@ -266,31 +266,31 @@ fn the_wipe_paths_actors_and_fields_are_reproducible_under_load() {
     );
 }
 
-/// **Reproducer for FVS-N-8 — still open.** `#[ignore]`d so the suite stays honest-green while the bug
-/// is filed rather than hidden; run with `cargo test --features test-harness -- --ignored`.
+/// **FVS-N-8's regression gate — the bug is FIXED (2026-07-26) and this is what keeps it fixed.**
 ///
-/// Two real order-dependencies were found and fixed while chasing this, and **neither was the cause** —
-/// both are worth keeping regardless (see BACKLOG.md N-8 for the ruled-out list). The surviving symptom
-/// is unchanged in shape: identical chunk counts, `GibKey`s and ring order; positions differing in the
-/// last few bits. Actors and fields stay bit-identical throughout, so the *simulation* is reproducible
-/// and only cosmetic chunk placement drifts.
+/// Was `#[ignore]`d for two sessions as a filed-not-hidden reproducer. It is the hardest form of the
+/// bug: five squad members killed simultaneously (after the fracture bake has settled — see
+/// [`app_at_stable_kill_point`]) with the box under CPU load, comparing actors, fields and gibs across
+/// same-seed runs.
 ///
-/// Five squad members are killed simultaneously (after the fracture bake has settled — see
-/// [`app_at_stable_kill_point`]), and **one fixed tick later** the gib chunks already differ between two
-/// same-seed runs. The fingerprint is specific and rules most things out:
+/// **The cause, for anyone who sees this go red again.** `autogib::seed_from` hashed the **`AssetId`**
+/// of the character GLB to seed the fracture. An `AssetId` is a slot index in the asset arena, assigned
+/// by async load order — so the same mesh got a different id run to run and `fracture` sliced the body
+/// along completely different planes. Measured: 23 of 23 fragments differing in both centroid and
+/// half-extents. Every symptom this test was written to describe followed from that one line.
 ///
-/// * actors and fields are **identical**, so no crab or unit decided anything differently;
-/// * the chunk **count** matches, the **`GibKey`s** match, and the **`GibRing` order** matches — so the
-///   same chunks were minted from the same deaths in the same order;
-/// * only the chunk **positions** differ, by tens of ULPs.
+/// **Two earlier fixes did not help, and it is worth knowing why they were still right:** a drain key
+/// that was a prefix of its value, and a vertex soup assembled in async-load order. Both were genuine
+/// latent defects of the same family; neither was this. A third — the scatter seed being a
+/// `Local<u32>` accumulator carrying history across ticks — was also found and removed, and also was
+/// not this. The lesson the previous sessions paid for: *this fingerprint (identical counts, identical
+/// keys, identical ring order, positions differing in the last bits) points at the GEOMETRY SOURCE, not
+/// at the ordering of the code that consumes it.*
 ///
-/// So the same gore is produced and placed a hair apart. It cannot be haul drift (one tick, and the
-/// carriers have not moved), and it is not the camera (that feeds only the blood-spray billboard, not
-/// the chunks). It passed before FVS-A-5, which changed the crab/unit archetypes and the build schedule
-/// — so this is a **latent** order-dependence in the gib spawn that A-5 exposed, not one it created.
+/// If this reddens, run `tests/autogib_determinism.rs` first — it isolates the bake in 1.5 s with no
+/// load, and it will tell you in one line whether the fracture or the gore path regressed.
 #[test]
-#[ignore = "known-divergent: gib spawn positions, see FVS-N-8 in BACKLOG.md"]
-fn gib_spawn_positions_diverge_under_load() {
+fn gib_spawn_positions_stay_identical_under_load() {
     let (results, details) = wipe_trials();
     let distinct = dedup(results.iter().map(|r| (r.actors, r.fields, r.gibs)));
     if distinct.len() > 1 {
