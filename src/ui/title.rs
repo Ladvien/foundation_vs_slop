@@ -71,11 +71,33 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                 .observe(
                     |_: On<Activate>,
                      mut next: ResMut<NextState<AppState>>,
+                     cur_run: Res<State<crate::session::RunState>>,
                      mut run: ResMut<NextState<crate::session::RunState>>| {
                         // Start a fresh expedition. `RunState::Idle → Active` rebuilds the world from the
                         // advanced `RunSeed`, so this button now means what it says (FVS-A-5); before, the
                         // world was built once at `Startup` and NEW RUN resumed the used one.
-                        run.set(crate::session::RunState::Active);
+                        // Guard against a SAME-STATE transition, and note this compares the CURRENT
+                        // state — not the pending one.
+                        //
+                        // Boot already leaves `Idle` for `Active` (`session::begin_first_run`), so at
+                        // the title the run state is ALREADY `Active`. A plain `set` to the state we
+                        // are in fires `OnExit(Active)` + `OnEnter(Active)`, tearing down and rebuilding
+                        // the entire world for nothing — the trap BACKLOG §2 names ("`DespawnOnExit`/
+                        // `DespawnOnEnter` fire on same-state transitions"). It is how the windowed
+                        // build crashed on 2026-07-26: the redundant rebuild ran `setup_mycelia` a
+                        // second time and `gate_coarse_readback` then found two `CoarseReadback`
+                        // entities.
+                        //
+                        // `NextState::set_if_neq` is the WRONG tool here even fully qualified (see
+                        // `ui::debrief`'s note on the `DetectChangesMut` shadowing): it compares the
+                        // *pending* value, and a fresh `NextState` is `Unchanged`, so it would happily
+                        // queue the same-state transition anyway.
+                        //
+                        // After `QUIT TO TITLE` the state really is `Idle`, so a genuine new expedition
+                        // still transitions and still advances the `RunSeed` (FVS-A-5).
+                        if *cur_run.get() != crate::session::RunState::Active {
+                            run.set(crate::session::RunState::Active);
+                        }
                         next.set(AppState::Warmup);
                     },
                 );

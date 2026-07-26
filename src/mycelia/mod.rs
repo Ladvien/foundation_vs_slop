@@ -1095,8 +1095,18 @@ fn setup_mycelia(
     // The mold's single GPU→CPU edge; `fruit.rs` observes `ReadbackComplete` on this entity. Cosmetic-only,
     // `Update`-only — see the module header. The `Readback` component itself is owned by
     // `gate_coarse_readback`, which holds it only on sim-tick frames.
+    // `run_scoped()` is LOAD-BEARING, not hygiene. `setup_mycelia` runs on every
+    // `OnEnter(RunState::Active)` (FVS-A-5 made the whole chain per-run because `setup_habitat` reads
+    // the `Dungeon`), so an untagged entity here accumulates one per expedition — and
+    // `gate_coarse_readback` reads this as a single entity, so the SECOND run panicked the game with
+    // "Multiple entities fit the query". Found by running the windowed build 2026-07-26; no headless
+    // test could have caught it, because mycelia is deliberately never registered in `sim_harness`.
     commands
-        .spawn((Name::new("mycelia_coarse_readback"), fruit::CoarseReadback))
+        .spawn((
+            crate::session::run_scoped(),
+            Name::new("mycelia_coarse_readback"),
+            fruit::CoarseReadback,
+        ))
         .observe(fruit::receive_coarse);
     commands.insert_resource(MoldParams {
         world_origin: WORLD_ORIGIN,
