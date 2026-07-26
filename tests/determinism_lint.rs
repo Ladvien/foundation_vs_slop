@@ -121,10 +121,46 @@ fn every_sort_declares_its_determinism_contract() {
 /// True when a `#[cfg(...)]` attribute line enables the `test` cfg — matching `#[cfg(test)]`,
 /// `#[cfg(any(test, ...))]`, `#[cfg(all(test, ...))]`, and spaced variants (`#[cfg( test )]`), so a test
 /// module written any of those ways is exempted (its inputs are hand-built, not ECS queries). A cheap
-/// whole-token scan: `test` must appear as a complete cfg token, so `#[cfg(feature = "test_util")]` (token
-/// `test_util`) does NOT match. Stays allocation-light, matching the rest of this line-scanning lint.
+/// whole-token scan: `test` must appear as a complete cfg token. Stays allocation-light, matching the
+/// rest of this line-scanning lint.
+///
+/// **String literals are stripped before tokenizing, and that is the whole point.** A feature NAME is not
+/// a cfg predicate, and `-` is a token separator here, so `#[cfg(feature = "test-harness")]` tokenized raw
+/// yields `test` + `harness` and matched — silently marking the rest of the file a test module and
+/// skipping every sort below it. That is not hypothetical: `src/light.rs` carries that attribute at line
+/// 457, which blinded this lint to the whole back half of the file (an unannotated `sort_by_key` deciding
+/// a scarce per-room resource sailed through), and it does the same in every other file that gates an item
+/// on the `test-harness` feature. A lint that silently stops looking is worse than no lint.
 fn cfg_enables_test(attr_line: &str) -> bool {
-    attr_line
+    let mut outside_strings = String::with_capacity(attr_line.len());
+    let mut in_string = false;
+    for ch in attr_line.chars() {
+        if ch == '"' {
+            in_string = !in_string;
+        } else if !in_string {
+            outside_strings.push(ch);
+        }
+    }
+    outside_strings
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .any(|tok| tok == "test")
+}
+
+/// Pins [`cfg_enables_test`] on both sides. The false-positive half is the one that actually bit: a
+/// `feature = "test-harness"` gate anywhere in a file used to switch this lint off for everything below
+/// it, so the gate silently stopped gating.
+#[test]
+fn cfg_test_detection_ignores_feature_names() {
+    // Real test modules — must still be exempted.
+    assert!(cfg_enables_test("#[cfg(test)]"));
+    assert!(cfg_enables_test("#[cfg( test )]"));
+    assert!(cfg_enables_test("#[cfg(any(test, feature = \"x\"))]"));
+    assert!(cfg_enables_test("#[cfg(all(test, unix))]"));
+    // Feature names are not cfg predicates: none of these may exempt anything.
+    assert!(!cfg_enables_test("#[cfg(feature = \"test-harness\")]"));
+    assert!(!cfg_enables_test("#[cfg(feature = \"test_util\")]"));
+    assert!(!cfg_enables_test("#[cfg(not(feature = \"test-harness\"))]"));
+    assert!(!cfg_enables_test("#[cfg(feature = \"harness-test\")]"));
+    // A genuine `test` predicate still counts when a feature string rides alongside it.
+    assert!(cfg_enables_test("#[cfg(any(test, feature = \"test-harness\"))]"));
 }

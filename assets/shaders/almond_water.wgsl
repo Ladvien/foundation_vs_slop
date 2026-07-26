@@ -19,6 +19,10 @@
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{globals, view}
+// The noise chain lives in ONE place (FVS-N-6). These are this shader's exact former
+// definitions, moved verbatim into the shared library — same constants, same lacunarity —
+// so the puddle margins are pixel-identical.
+#import foundation::noise::{hash13, vnoise13, fbm3_organic}
 
 struct AlmondParams {
     bounds: vec4<f32>,   // (world_origin.xy, world_extent.xy)
@@ -35,36 +39,6 @@ struct AlmondParams {
 
 // Hoskins hash13: a 2D point (+ a scalar) → a reproducible pseudo-random scalar in [0,1). No trig, no
 // texture — "Hash without Sine".
-fn hash13(p3in: vec3<f32>) -> f32 {
-    var p3 = fract(p3in * 0.1031);
-    p3 = p3 + dot(p3, p3.zyx + 31.32);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-// Smooth 2D value noise + 3-octave fBm from the same hash — used to perturb the pool boundary so the
-// per-cell (bilinear) water field breaks into an organic puddle margin instead of tile-aligned diamonds.
-fn vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f); // smoothstep interpolation
-    let a = hash13(vec3<f32>(i + vec2<f32>(0.0, 0.0), 0.0));
-    let b = hash13(vec3<f32>(i + vec2<f32>(1.0, 0.0), 0.0));
-    let c = hash13(vec3<f32>(i + vec2<f32>(0.0, 1.0), 0.0));
-    let d = hash13(vec3<f32>(i + vec2<f32>(1.0, 1.0), 0.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var amp = 0.5;
-    var q = p;
-    for (var i: i32 = 0; i < 3; i = i + 1) {
-        v = v + amp * vnoise(q);
-        q = q * 2.03;
-        amp = amp * 0.5;
-    }
-    return v; // ~[0, 0.875], mean ~0.4375
-}
-
 // Layer A — bubble-up blooms in cell UV. A handful of blobs per neighbourhood, each with a hashed position
 // and phase, growing and fading on a staggered cycle so the field wells continuously. Amplitude is small and
 // gated by `wet` outside, so a dry cell shows nothing.
@@ -108,7 +82,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Centred (mean ~0.4375) so it neither grows nor shrinks the pool on average — it just breaks the line.
     let edge_feather = mat.params4.x;
     let feather_scale = mat.params4.y;
-    let fn_ = fbm(in.world_position.xz * feather_scale) - 0.4375;
+    let fn_ = fbm3_organic(in.world_position.xz * feather_scale) - 0.4375;
     let level = clamp(field.r + fn_ * edge_feather, 0.0, 1.0);
     let min_vis = mat.params0.y;
     if (level <= min_vis) {

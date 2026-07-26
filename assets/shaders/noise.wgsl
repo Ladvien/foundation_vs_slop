@@ -56,3 +56,45 @@ fn rand_dir(i: f32, seed: f32, r0: f32, r1: f32) -> vec2<f32> {
     let radius = r0 + r1 * hash21(vec2<f32>(i + 11.0, seed + 3.0));
     return vec2<f32>(cos(angle), sin(angle)) * radius;
 }
+
+// ── The 3-D-hashed variant (the Almond Water chain) ──────────────────────────────────────────────
+//
+// A SECOND hash, kept deliberately rather than unified with `hash21` above: the constants differ
+// (`p3.zyx + 31.32` vs `p3.yzx + 33.33`) and so does the fbm lacunarity (2.03 vs 2.0), so folding them
+// together would change the puddle margins on screen. FVS-N-6's acceptance is "single noise source;
+// SSIM unchanged" — the goal is one *home* for noise, not one algorithm. This is that home; the shape
+// mirrors `fbm4`/`fbm5`, where the caller-varying knob is a named entry point rather than a per-shader
+// copy of the whole chain.
+
+// Dave-Hoskins 3D→1D hash. Used with `z = 0` for 2D lookups so the lattice matches the 2D callers.
+fn hash13(p3in: vec3<f32>) -> f32 {
+    var p3 = fract(p3in * 0.1031);
+    p3 = p3 + dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Value noise on the `hash13` lattice.
+fn vnoise13(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f); // smoothstep interpolation
+    let a = hash13(vec3<f32>(i + vec2<f32>(0.0, 0.0), 0.0));
+    let b = hash13(vec3<f32>(i + vec2<f32>(1.0, 0.0), 0.0));
+    let c = hash13(vec3<f32>(i + vec2<f32>(0.0, 1.0), 0.0));
+    let d = hash13(vec3<f32>(i + vec2<f32>(1.0, 1.0), 0.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 3-octave fBm with a slightly irrational lacunarity (2.03), which breaks the axis-aligned banding a
+// clean ×2 leaves — that is why the water margin uses it. Range ~[0, 0.875], mean ~0.4375.
+fn fbm3_organic(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        v = v + amp * vnoise13(q);
+        q = q * 2.03;
+        amp = amp * 0.5;
+    }
+    return v;
+}

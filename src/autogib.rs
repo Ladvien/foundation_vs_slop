@@ -752,20 +752,33 @@ fn bake_autogib(
             let m = transforms.get(child).map(|t| t.to_matrix()).unwrap_or(Mat4::IDENTITY);
             stack.push((child, m, is_gun.get(child).is_ok()));
         }
+        // Collect the meshes first, then append them in a CANONICAL order (FVS-N-8).
+        //
+        // Appending during the walk was a real determinism bug, and a subtle one because it never
+        // reached `snapshot_hash`. `Children` order for a glTF scene is the order the async
+        // instantiation happened to add nodes, which is wall-clock dependent — so the vertex soup was
+        // assembled in a different order between two same-seed runs. `fracture` then computes fragment
+        // centroids as float sums over that soup, and float addition is not associative, so
+        // `Fragment::center_local` came out a few ULPs apart. Every chunk spawns at
+        // `origin + center_local * scale` (`gore::spawn_fragments`), so the *positions* of an otherwise
+        // identical gib set diverged: same count, same `GibKey`s, same `GibRing` order, coordinates off
+        // in the last few bits. That is exactly the fingerprint FVS-N-8 recorded.
+        //
+        // The key is `(mesh AssetId, world-matrix bits)`: the asset id is stable across same-seed runs
+        // (measured) and `AssetId` is `Ord`; the matrix disambiguates two entities that share one mesh
+        // datablock at different transforms. Deliberately NOT the `Entity` id — id allocation order is
+        // the instability being erased here.
+        let mut parts: Vec<(bevy::asset::AssetId<Mesh>, [u32; 16], Mat4, bool, Entity)> = Vec::new();
         while let Some((e, mat, in_gun)) = stack.pop() {
             if let Ok(mesh3d) = mesh_q.get(e) {
-                match meshes.get(&mesh3d.0) {
-                    Some(m) => {
-                        if in_gun {
-                            append_mesh(&mut gun, m, mat, false);
-                            if gun_material.is_none() {
-                                gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
-                            }
-                        } else {
-                            append_mesh(&mut body, m, mat, false);
-                        }
+                if meshes.get(&mesh3d.0).is_some() {
+                    let mut bits = [0u32; 16];
+                    for (i, v) in mat.to_cols_array().iter().enumerate() {
+                        bits[i] = v.to_bits();
                     }
-                    None => all_loaded = false, // sub-mesh still streaming
+                    parts.push((mesh3d.0.id(), bits, mat, in_gun, e));
+                } else {
+                    all_loaded = false; // sub-mesh still streaming
                 }
             }
             if let Ok(ch) = children_q.get(e) {
@@ -774,6 +787,18 @@ fn bake_autogib(
                     let child_gun = in_gun || is_gun.get(child).is_ok();
                     stack.push((child, mat * ct, child_gun));
                 }
+            }
+        }
+        crate::sort_total!(&mut parts, |p: &(bevy::asset::AssetId<Mesh>, [u32; 16], Mat4, bool, Entity)| (p.0, p.1));
+        for (mesh_id, _, mat, in_gun, e) in parts {
+            let Some(m) = meshes.get(mesh_id) else { continue };
+            if in_gun {
+                append_mesh(&mut gun, m, mat, false);
+                if gun_material.is_none() {
+                    gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
+                }
+            } else {
+                append_mesh(&mut body, m, mat, false);
             }
         }
 
