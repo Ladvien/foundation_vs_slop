@@ -501,7 +501,29 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
     extra `Startup` entity shifts every later id by one and the defeat path notices.
   * **The `#[ignore]`d load-dependent reproducer is no longer the best one.** Prefer the plugin toggle:
     it is deterministic, needs no load, and runs in seconds.
-  **Still open.** The symptom survives both earlier fixes, unchanged in shape, so there is at least a third cause. Ruled out so far: the drain order, the bake order, the death `origin` (it is the unit's own `Transform`, which is hashed and identical), the camera (it feeds only the blood-spray billboard), and haul drift (the split shows at the very first tick). Worth checking next: whether the diverging chunk belongs to a **crab** death rather than a unit death — crab gibs come from `meat_chunks` on a different path — and whether `Assets<Mesh>` insertion order reaches `append_mesh` anywhere else.
+  **THE THIRD CAUSE, located 2026-07-26 — `gore.rs`'s scatter seed is a `Local<u32>`.**
+  Measured with the new reproducer, comparing all three hashes at increasing ticks after the kill:
+  ```
+  after= 1  snapshot SAME  field SAME  gib DIFF   chunks 175/175
+  after= 2  snapshot SAME  field DIFF  gib DIFF   chunks 175/175
+  after=30  snapshot DIFF  field DIFF  gib DIFF   chunks 175/175
+  ```
+  Identical chunk COUNTS, gib diverging on the very first tick, then cascading to the field and finally
+  to actors — the fingerprint this entry always described, now pinned to a mechanism.
+  `drain_gore` takes `mut seed: Local<u32>` (`src/gore.rs:658`), increments it once per drained event
+  (`:721`), and every chunk's launch direction, speed and spin derives from it (`:1004`,
+  `base = seed.wrapping_mul(..)`). **So a death's scatter is a function of how many gore events the
+  App has EVER drained, not of that death.** Two consequences the earlier write-up missed:
+  * It is not merely a tie-break hazard. A *single* difference in cumulative event count anywhere,
+    ever, permanently desynchronises the scatter of every subsequent death. There is no re-convergence.
+  * It explains why the two earlier fixes did not help: both corrected *ordering within a tick*, and
+    this is an accumulator *across* ticks. Sorting the drain cannot fix a counter that carries history.
+  **Fix direction (not yet implemented):** derive the scatter seed from the *event itself* — the
+  `GibSource`'s stable content (origin bits, scale) folded with the victim's stable per-spawn key — so
+  each death's scatter is a pure function of that death and immune to history. That is the same
+  discipline `Scp999Seed`/`CrabSeed`/`CyanideSmell::id` already use, and it would let the `Local` go.
+  Expect a golden re-pin: every gib position changes.
+  **Still open**, but no longer blind: the mechanism is identified and the reproducer is deterministic. Ruled out so far: the drain order, the bake order, the death `origin` (it is the unit's own `Transform`, which is hashed and identical), the camera (it feeds only the blood-spray billboard), and haul drift (the split shows at the very first tick). Worth checking next: whether the diverging chunk belongs to a **crab** death rather than a unit death — crab gibs come from `meat_chunks` on a different path — and whether `Assets<Mesh>` insertion order reaches `append_mesh` anywhere else.
   **Scope note:** actors and fields remain bit-identical throughout, so the *simulation* is reproducible; only cosmetic chunk placement drifts. It matters because gib positions steer `crab::assign_meat_targets`, so it can cascade — but it is not corrupting the pinned core today. · *Deps:* — · *Touches:* `src/gore.rs`, `src/autogib.rs` · *Reading:* [TEST-NT], [ABM]
 - **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
