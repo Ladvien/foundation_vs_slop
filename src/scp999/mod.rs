@@ -102,7 +102,7 @@ pub struct Scp999Plugin;
 impl Plugin for Scp999Plugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Scp999Seq>()
-            .add_systems(Startup, spawn_scp999)
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_scp999.in_set(crate::session::RunBuild::Populate))
             // Move + calm after the brain has chosen this tick's modes (the calm writes FEAR/MORALE, which
             // next tick's Think reads). Pinned sim on `FixedUpdate`, like every creature system.
             .add_systems(
@@ -154,6 +154,7 @@ fn spawn_scp999(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
     sim: Res<SimTuning>,
+    rules: Res<crate::containment::ContainmentRules>,
     assets: Res<AssetServer>,
     mut seq: ResMut<Scp999Seq>,
 ) {
@@ -194,17 +195,31 @@ fn spawn_scp999(
     for cell in &chosen {
         let s = seq.0;
         seq.0 += 1;
-        spawn_scp999_at(&mut commands, &assets, s, dungeon.cell_center(*cell));
+        spawn_scp999_at(&mut commands, &assets, s, dungeon.cell_center(*cell), rules.0.scp999.clone());
     }
     info!("scp999: spawned {} comfort blob(s) out in the level", chosen.len());
 }
 
 /// Spawn one SCP-999 at `pos` with decorrelation seed `seed`. The single builder both the Startup spawner
 /// and the Research Room dev-tool use, so an F6-dropped blob is byte-identical to a natural one.
-pub fn spawn_scp999_at(commands: &mut Commands, assets: &AssetServer, seed: u32, pos: Vec3) -> Entity {
+pub fn spawn_scp999_at(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    seed: u32,
+    pos: Vec3,
+    rule: crate::containment::ContainmentRule,
+) -> Entity {
     commands
         .spawn((
+            crate::session::run_scoped(),
             Scp999,
+            // **The tutorial capture** (FVS-C-2). The blob is contained by *befriending* it — holster
+            // (let `THREAT_GUN` decay at its cell) and stay with it (keep `ATTENTION` on it) — not by
+            // trapping it. Both clauses are things the player does by choosing NOT to fight, which
+            // states the whole win-by-containing pivot in one creature. The rule is authored in the
+            // `containment:` config slice; the state component rides here so a dev-spawned blob
+            // (Research Room F6) is byte-identical to a naturally seeded one.
+            crate::containment::Containment::new(rule),
             Scp999Seed(seed),
             Scp999Motion::default(),
             BlobJiggle::new(seed),

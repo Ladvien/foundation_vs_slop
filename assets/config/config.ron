@@ -819,9 +819,11 @@
         // Feather the mold's reveal/coverage edge so it stops snapping to the per-cell control-texture
         // grid (which read as square "tiles"). Domain-warp the coverage tap with world-space fbm
         // (Lagae et al. 2010 noise survey). 0 amp = the old cell-aligned edge.
-        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams. Big enough to wander
-                                  // across a WALL_THICKNESS-thin wall on its own; no-cross-wall-bleed is
-                                  // enforced by the shaders' unwarped-tap clamp, not by this amplitude.
+        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams. Big enough to wander across
+                                  // a WALL_THICKNESS-thin wall on its own, so the shaders fence the warped
+                                  // tap inside its own control texel (`warped_tap`); that fence, not this
+                                  // amplitude, is what makes cross-wall bleed impossible. Raising this past
+                                  // one texel therefore widens the wander but never the leak.
         reveal_warp_scale: 0.7,   // warp frequency (cycles/world unit); ~cell-scale wander
 
         // ── Fruiting (src/mycelia/fruit.rs). Where the mat has grown thick and eaten its substrate, in the
@@ -1454,8 +1456,13 @@
         mushroom_light_size_bonus: 0.5,        // death caps grow up to +50% bigger under a lamp (photomorphogenesis)
         mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)
         flicker_hum_depth: 0.06,               // cosmetic fluorescent shimmer depth (fraction)
-        flicker_fail_ratio: 0.12,              // ~1 in 8 tubes is a failing/strobing Backrooms fluorescent
-        flicker_max_failing_per_room: 1,       // hard cap: at most this many tubes strobe at once per room, however many roll under flicker_fail_ratio
+        flicker_fail_ratio: 0.12,              // per-tube odds of being a failing/strobing Backrooms fluorescent
+                                               // (~1 in 8) — but see the cap below, which overrides this in any
+                                               // room with more than ~8 emitters
+        flicker_max_failing_per_room: 1,       // hard cap: at most this many tubes strobe at once per room, however
+                                               // many roll under flicker_fail_ratio. Binds in dense rooms, so it —
+                                               // not the ratio — sets the realized rate there. docs/artist_guide.md
+                                               // documents the pair together; keep them in step.
         // The Researcher's flashlight — a moving directional emitter in the LightField (repels photophobes)
         flashlight_intensity: 3.0,             // gameplay peak illuminance at the beam origin (>fixtures, so it drives crabs off)
         flashlight_range: 8.0,                 // beam reach in dungeon cells (wall-occluded like a fixture)
@@ -1552,5 +1559,51 @@
             crab_draw_to_din: 0.20777673,
             investigate_threshold: 0.22598898,
         ),
+    ),
+
+    // =============================================================================================
+    // containment — what it takes to CAPTURE each anomaly (see `ContainmentConfig` in
+    // src/containment/mod.rs). Every condition must hold simultaneously, for `hold_secs` of simulated
+    // time, sampled at the anomaly's own cell against the live stigmergy field.
+    //
+    // NOT evolvable, like `session:` — a containment rule defines what capturing that anomaly *means*,
+    // so a search free to retune it would be moving the objective rather than solving it.
+    //
+    // `sign` is the polarity: AtLeast = drive the channel UP, AtMost = starve it. The same channel read
+    // with opposite signs is how two anomalies get opposite containment procedures (see ATTENTION in
+    // src/ai/field.rs).
+    // =============================================================================================
+    containment: (
+        // SCP-999 — the TUTORIAL capture, and deliberately the gentlest verb in the game: you contain
+        // the comfort blob by *befriending* it, not by trapping it. Holster (let THREAT_GUN decay at its
+        // cell) and stay with it (keep ATTENTION on it). Both clauses are things the player does by
+        // choosing NOT to fight, which is the whole pivot stated in one creature.
+        //
+        // Thresholds are deliberately forgiving — this is the first capture anyone performs.
+        scp999: (
+            requires: [
+                (channel: 1, sign: AtMost,  threshold: 0.05),  // THREAT_GUN — stop shooting near it
+                (channel: 9, sign: AtLeast, threshold: 0.25),  // ATTENTION  — keep eyes on it
+            ],
+            hold_secs: 4.0,
+            break_on_fail: Keep,   // cumulative: a nervous trigger finger costs progress, not the run
+        ),
+    ),
+
+    // =============================================================================================
+    // session — how a run ends (see `SessionConfig` in src/session/mod.rs).
+    //
+    // NOT evolvable: this slice is deliberately absent from `WorldConfig`, so the offline search
+    // cannot touch it. The win condition defines what winning MEANS, and a search allowed to shorten
+    // the timer would "solve" every level by making it shorter — the knob that sets the objective
+    // cannot itself be an objective. Every other tunable in this file is fair game; this one is the
+    // reasoned exception to the "every feature must evolve" rule.
+    //
+    // `SurviveTicks` counts FIXED ticks at the pinned 60 Hz, not wall seconds, so the timer is
+    // identical at any frame rate and at any headless `speed`. 18000 = 5 minutes — the placeholder
+    // win that exists only until Push 2 lands `ExtractContained`.
+    // =============================================================================================
+    session: (
+        win: SurviveTicks(18000),
     ),
 )

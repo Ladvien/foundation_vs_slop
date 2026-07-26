@@ -127,6 +127,13 @@ pub struct GameConfig {
     pub mold: crate::mold::MoldConfig,
     pub dialogue: DialogueScript,
     pub audio: AudioTuning,
+    /// Per-anomaly containment rules. Like `session`, deliberately **not** a member of [`WorldConfig`]
+    /// — see `containment::ContainmentConfig` for why the rule that defines a capture may not itself be
+    /// an evolved objective.
+    pub containment: crate::containment::ContainmentConfig,
+    /// How a run ends. Deliberately **not** a member of [`WorldConfig`] — see the type's docs for why
+    /// the win condition is the one knob the offline search may not evolve.
+    pub session: crate::session::SessionConfig,
 }
 
 /// The evolvable **world-dynamics** surface, as one value: field propagation (`ai`), simulation dynamics
