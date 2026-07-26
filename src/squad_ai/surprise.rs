@@ -609,6 +609,36 @@ pub struct EpisodeOutcome {
     pub boss_alive: u32,
     /// Peak boss count (0 or 1).
     pub boss_peak: u32,
+
+    // ── Containment yield (FVS-B-3) — the pivot's own metrics ───────────────────────────────────────
+    // Reported here, NOT yet scored into `surprise = W·S·L`. That is deliberate and it is FVS-I-1's
+    // job: `surprise` today actively rewards spectacular *kills*, and bolting a capture term onto it
+    // without I-1's documented decomposition would leave two objectives pulling opposite ways with no
+    // stated resolution — which is exactly the top design risk BACKLOG §7 records. Measuring first is
+    // also the precedent: the per-species vitality census above landed as reported-only before it
+    // became `world_descriptor`'s axes.
+    //
+    // FVS-P-1 wants these same terms for the O5 performance review, deliberately: one source of truth
+    // for "how did that expedition go", surfaced once to the search and once to the player.
+    /// Anomalies driven all the way to `Contained` this episode.
+    pub captures_completed: u32,
+    /// Attempts that *began* (a device connected, or an anomaly entered a quarantine region). Together
+    /// with `captures_completed` this is the capture success rate — an attempt that never starts and an
+    /// attempt that breaks are very different worlds, and a single "captures" count cannot tell them
+    /// apart.
+    pub captures_attempted: u32,
+    /// Attempts that started and then broke (the anomaly left the basin, or the hold lapsed under
+    /// `OnBreak::Reset`).
+    pub captures_broken: u32,
+    /// Anomalies still held at episode end — what the squad would actually extract.
+    pub contained_at_end: u32,
+    /// Did the surviving squad reach the extraction zone? The second half of `ExtractContained`.
+    pub extracted: bool,
+    /// Ticks spent under `laser::WeaponsTight`. A behavioural signal with no equivalent anywhere else
+    /// in the outcome: it is the one measure of the squad choosing *not* to shoot, which is the whole
+    /// pivot. A world where captures only happen at high `weapons_tight_ticks` is a world where the
+    /// containment rule is doing real work rather than being satisfied by accident.
+    pub weapons_tight_ticks: u32,
 }
 
 impl EpisodeOutcome {

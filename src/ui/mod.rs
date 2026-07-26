@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 pub mod boot;
 pub mod containment_hud;
+pub mod verb_bar;
 pub mod debrief;
 pub mod hud;
 pub mod pause;
@@ -52,6 +53,7 @@ impl Plugin for UiPlugin {
                 debrief::DebriefPlugin,
                 // Reads *why* a containment is progressing or breaking (FVS-L-1).
                 containment_hud::ContainmentHudPlugin,
+                verb_bar::VerbBarPlugin,
             ))
             // `state::sync_sim_blocked` reads `DebugCaptureActive` non-optionally (it is documented as
             // "always compiled … stays false in release"), so the plugin that registers the reader is what

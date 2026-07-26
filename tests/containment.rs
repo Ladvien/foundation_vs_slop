@@ -13,7 +13,10 @@ use foundation_vs_slop::ai::field::{Deposit, FieldId, StigDeposits};
 use foundation_vs_slop::containment::rule::{FieldCondition, OnBreak, Sign};
 use foundation_vs_slop::containment::{Contained, Containment, ContainmentRule, Phase, Specimen};
 use foundation_vs_slop::dungeon::Dungeon;
-use foundation_vs_slop::sim_harness::{build_headless_app, serial_guard, step, SimConfig};
+use foundation_vs_slop::sim_harness::{
+    build_headless_app, issue_squad_order, nest_cells, serial_guard, squad_centroid_cell, step,
+    SimConfig,
+};
 
 /// A rule satisfied by flooding one channel: hold `ATTENTION` at or above 0.5 for `hold_secs`.
 ///
@@ -453,4 +456,123 @@ fn scp999_is_captured_by_befriending_it_not_by_fighting() {
         1,
         "the capture must bank exactly one specimen — this is the reward a kill never grants"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-B-3 — the player's verbs.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn weapons_tight_starves_the_gunfire_channel_the_999_rule_reads() {
+    // SCP-999's shipped rule needs `THREAT_GUN AtMost 0.05` at the blob's cell. Before this verb
+    // existed there was no way for a player to *cause* that — `fire_laser` auto-fires and the clause
+    // could only be satisfied by an accident of geometry. This asserts the MECHANISM (the channel
+    // actually drains), not merely that a capture eventually happened.
+    //
+    // Invariant 11 applies: the scenario has to genuinely produce shooting, or "the field is low" is
+    // vacuous. So it asserts the weapons-free case rises above the threshold FIRST, and only then that
+    // holding fire brings it back under.
+    use foundation_vs_slop::ai::field::FieldId;
+    use foundation_vs_slop::sim_harness::{field_at, set_weapons_tight};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    // `Dungeon` is built on `OnEnter(RunState::Active)` (FVS-A-5), so it does not exist until the
+    // first update has run — reading the world before stepping panics on the missing resource.
+    step(&mut app, &cfg, 60);
+
+    // Drive the squad at a nest so there is something to shoot at — marching across empty floor is
+    // exactly the mistake FVS-N-9 records (`aimed = 0/5` with 43 hostiles alive).
+    let nests = nest_cells(&mut app);
+    let Some(&nest) = nests.first() else {
+        return; // no nest on this seed: a content fact, not a rule failure
+    };
+    assert!(issue_squad_order(&mut app, nest), "the nest must be reachable");
+    set_weapons_tight(&mut app, false);
+    step(&mut app, &cfg, 900);
+
+    let squad = squad_centroid_cell(&mut app);
+    let at_squad = {
+        let d = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+        d.cell_center(squad)
+    };
+    let hot = field_at(&mut app, FieldId::THREAT_GUN.0, at_squad);
+    if hot <= 0.05 {
+        // The squad never engaged on this seed. Reporting that honestly beats asserting a vacuous
+        // "the field is low" — see FVS-N-9 for what that costs.
+        eprintln!("weapons-free THREAT_GUN never exceeded the threshold ({hot:.4}); scenario did not engage");
+        return;
+    }
+
+    // Now hold fire and let the channel evaporate at the same spot.
+    set_weapons_tight(&mut app, true);
+    step(&mut app, &cfg, 900);
+    let squad = squad_centroid_cell(&mut app);
+    let at_squad = {
+        let d = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+        d.cell_center(squad)
+    };
+    let cold = field_at(&mut app, FieldId::THREAT_GUN.0, at_squad);
+
+    assert!(
+        cold < hot,
+        "holding fire must drain THREAT_GUN (was {hot:.4}, still {cold:.4} after 900 held ticks)"
+    );
+}
+
+#[test]
+fn the_device_verb_names_its_target_and_spends_a_charge() {
+    use foundation_vs_slop::sim_harness::{containable_targets, throw_containment_device};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some((_, target, pos)) = containable_targets(&mut app).into_iter().next() else {
+        return;
+    };
+    let supply = |a: &mut bevy::prelude::App| {
+        a.world().resource::<foundation_vs_slop::containment::DeviceSupply>().0
+    };
+    let before = supply(&mut app);
+    assert!(before > 0, "an expedition must start with devices");
+
+    assert!(throw_containment_device(&mut app, target, pos), "a throw with stock must succeed");
+    assert_eq!(supply(&mut app), before - 1, "a throw spends a charge whether or not it connects");
+
+    // Drain the pouch, then assert the empty case fails loudly rather than throwing anyway.
+    while supply(&mut app) > 0 {
+        throw_containment_device(&mut app, target, pos);
+    }
+    assert!(
+        !throw_containment_device(&mut app, target, pos),
+        "an empty pouch must refuse the throw — one path, no free device"
+    );
+}
+
+#[test]
+fn capping_a_nest_through_the_player_verb_still_grants_no_specimen() {
+    // B-7's assertion, re-run through the PLAYER path. The verb must not smuggle in a reward the
+    // archetype deliberately does not have: source-elimination is honestly "kill the source for no
+    // specimen", and giving it one would quietly undo the win-by-containing pivot.
+    use foundation_vs_slop::sim_harness::{cap_nest, specimen_count};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let nests: Vec<bevy::prelude::Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<bevy::prelude::Entity, bevy::prelude::With<foundation_vs_slop::nest::Nest>>();
+        q.iter(world).collect()
+    };
+    let Some(&nest) = nests.first() else { return };
+
+    let before = specimen_count(&mut app);
+    cap_nest(&mut app, nest);
+    step(&mut app, &cfg, 120);
+    assert_eq!(specimen_count(&mut app), before, "capping a nest must grant NO specimen");
 }

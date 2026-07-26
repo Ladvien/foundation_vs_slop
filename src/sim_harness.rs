@@ -866,16 +866,66 @@ pub fn extraction_zone_cell(app: &mut App) -> Option<IVec2> {
     Some(world.resource::<crate::dungeon::Dungeon>().world_to_cell(pos))
 }
 
-/// Every anomaly the player could aim a verb at, **sorted by `TargetId`** so a test's choice of target
-/// is a stable function of the world rather than of query order.
-pub fn containable_targets(app: &mut App) -> Vec<(crate::containment::TargetId, Entity)> {
+/// Every anomaly the player could aim a verb at, **sorted by `TargetId`** so a caller's choice of
+/// target is a stable function of the world rather than of query order.
+///
+/// The sort is load-bearing for the offline search, not just for tests: `evaluate::run_episode`'s
+/// synthetic player picks from this list, and an unsorted pick would launder ECS iteration order — which
+/// is not stable across `App` instances — into which creature every rollout tries to capture.
+pub fn containable_targets(app: &mut App) -> Vec<(crate::containment::TargetId, Entity, Vec3)> {
     let world = app.world_mut();
-    let mut q = world
-        .query_filtered::<(&crate::containment::TargetId, Entity), With<crate::containment::Containment>>();
-    let mut out: Vec<_> = q.iter(world).map(|(id, e)| (*id, e)).collect();
+    let mut q = world.query_filtered::<
+        (&crate::containment::TargetId, Entity, &Transform),
+        (With<crate::containment::Containment>, Without<crate::containment::Contained>),
+    >();
+    let mut out: Vec<_> = q.iter(world).map(|(id, e, tf)| (*id, e, tf.translation)).collect();
     // SORT-OK: `TargetId` is minted once per targetable spawn and never reused — total by construction.
-    out.sort_unstable_by_key(|(id, _)| *id);
+    out.sort_unstable_by_key(|(id, ..)| *id);
     out
+}
+
+/// World positions of every living squad unit, **sorted by `SquadMember`** for the same reason.
+pub fn living_unit_positions(app: &mut App) -> Vec<Vec3> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (&crate::squad::SquadMember, &Transform, &crate::health::Health),
+        With<crate::squad::Unit>,
+    >();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .filter(|(_, _, hp)| hp.current > 0.0)
+        .map(|(m, tf, _)| (m.0, tf.translation))
+        .collect();
+    // SORT-OK: `SquadMember` is the stable spawn index, unique per unit — total by construction.
+    out.sort_unstable_by_key(|(m, _)| *m);
+    out.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The configured device reach, so a caller can decide whether a throw would connect before spending
+/// a charge.
+pub fn device_reach(app: &mut App) -> f32 {
+    app.world().resource::<crate::sim::SimTuning>().containment.device_reach
+}
+
+/// Is every living unit inside an extraction zone — i.e. the second half of `ExtractContained`?
+///
+/// Mirrors `session::resolve_run`'s predicate exactly, and exists because a test that wants to assert
+/// "a capture ALONE does not win" has to first establish the squad is genuinely off the pad. That is
+/// not a formality: the squad *spawns clustered around* `Dungeon::spawn`, which is where the extraction
+/// zone is, so at tick 0 this is already `true` and a capture there wins on the spot.
+pub fn squad_is_extracted(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let zones: Vec<(f32, Vec3)> = {
+        let mut q =
+            world.query::<(&crate::containment::ExtractionZone, &Transform)>();
+        q.iter(world).map(|(z, tf)| (z.radius, tf.translation)).collect()
+    };
+    let mut q = world
+        .query_filtered::<(&Transform, &crate::health::Health), With<crate::squad::Unit>>();
+    // `all` over a predicate — commutative, so no canonical order is needed.
+    q.iter(world).filter(|(_, hp)| hp.current > 0.0).all(|(tf, _)| {
+        zones.iter().any(|(r, c)| (tf.translation.xz() - c.xz()).length() <= *r)
+    })
 }
 
 /// Throw a capture device at a **named** target, spending a charge. Returns `false` if the pouch is
@@ -929,11 +979,11 @@ pub fn set_weapons_tight(app: &mut App, tight: bool) {
 /// Sample a stigmergy channel at a world position — used to assert that holding fire actually starves
 /// the `THREAT_GUN` channel SCP-999's rule reads.
 pub fn field_at(app: &mut App, channel: usize, pos: Vec3) -> f32 {
-    let world = app.world_mut();
-    let dungeon = world.resource::<crate::dungeon::Dungeon>().clone();
+    let world = app.world();
+    let dungeon = world.resource::<crate::dungeon::Dungeon>();
     world
         .resource::<crate::ai::field::Stig>()
-        .sample(crate::ai::field::FieldId(channel), &dungeon, pos)
+        .sample(crate::ai::field::FieldId(channel), dungeon, pos)
 }
 
 /// Whether every squad unit's fracture set has finished baking (`autogib::bake_autogib`).

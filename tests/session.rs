@@ -16,8 +16,10 @@
 
 use foundation_vs_slop::session::{DefeatCause, RunOutcome, RunSeed, RunState, WinCondition};
 use foundation_vs_slop::sim_harness::{
-    build_headless_app, field_hash, gib_hash, gib_rows, kill_squad, run_outcome, run_ticks, serial_guard,
-    snapshot_hash, step, step_until_autogib_ready, SimConfig,
+    build_headless_app, contained_count, containable_targets, extraction_zone_cell, field_hash,
+    floor_cells, gib_hash, gib_rows, issue_squad_order, kill_squad, run_outcome, run_ticks,
+    squad_is_extracted,
+    serial_guard, snapshot_hash, step, step_until_autogib_ready, SimConfig,
 };
 
 /// Read the coarse run state. Kept local to the test: `RunState` is a Bevy `States`, and reaching it
@@ -384,4 +386,176 @@ fn wipe_trials() -> (Vec<WipeResult>, Vec<(Vec<[u64; 6]>, Vec<u64>)>) {
         let _ = t.join();
     }
     (results, details)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-B-3 — `ExtractContained`: the real win.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Force an anomaly to `Contained` through the same one-way marker the game uses.
+///
+/// Deliberately the marker and not a config tweak: `Contained` is what carries the `on_add` hook that
+/// grants a `Specimen`, so a test that inserts it exercises the real reward path. Driving SCP-999's
+/// befriend rule for real is `tests/containment.rs`'s job (`scp999_is_captured_by_befriending_it`);
+/// these tests are about the WIN rule, and re-deriving a capture in each of them would make them fail
+/// for reasons that have nothing to do with extraction.
+fn force_contained(app: &mut bevy::prelude::App, anomaly: bevy::prelude::Entity) {
+    app.world_mut().entity_mut(anomaly).insert(foundation_vs_slop::containment::Contained);
+}
+
+/// The reachable floor cell farthest from `from` — somewhere the squad is unambiguously NOT extracting.
+fn farthest_floor_from(app: &mut bevy::prelude::App, from: bevy::prelude::IVec2) -> bevy::prelude::IVec2 {
+    let mut cells = floor_cells(app);
+    // SORT-OK: cells are unique grid coordinates, so `(distance, cell)` is a total order and the pick
+    // cannot depend on the order `floor_cells` happened to yield.
+    cells.sort_unstable_by_key(|c| {
+        let d = *c - from;
+        (std::cmp::Reverse(d.x * d.x + d.y * d.y), c.x, c.y)
+    });
+    cells.first().copied().unwrap_or(from)
+}
+
+/// March the squad off the extraction pad and confirm it actually left.
+///
+/// **Load-bearing, not ceremony.** `spawn_squad` clusters the five operatives around `Dungeon::spawn`,
+/// and the extraction zone is placed on that same cell — so a fresh run begins with the squad already
+/// extracted. A test that captures something without moving first therefore wins instantly and proves
+/// nothing about the walk-out. (This cost three confidently-wrong failures before it was noticed, which
+/// is the same lesson FVS-M-4 records: a reproduction that has not been sanity-checked against its own
+/// geometry is not evidence.)
+fn walk_squad_off_the_pad(app: &mut bevy::prelude::App, cfg: &SimConfig) -> bool {
+    let Some(exit) = extraction_zone_cell(app) else { return false };
+    let far = farthest_floor_from(app, exit);
+    if !issue_squad_order(app, far) {
+        return false;
+    }
+    for _ in 0..40 {
+        step(app, cfg, 30);
+        if !squad_is_extracted(app) {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn a_capture_alone_does_not_win_the_run() {
+    // THE test that proves the win rule is "extract", not merely "contain". If this ever passes with
+    // the squad parked far from the exit, `ExtractContained` has quietly degenerated into a capture
+    // counter and the walk-out — where the tension lives — has stopped existing.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    app.world_mut().insert_resource(WinCondition::ExtractContained { count: 1 });
+    step(&mut app, &cfg, 60);
+
+    let Some(target) = containable_targets(&mut app).into_iter().next() else {
+        // No capturable anomaly on this seed is a content fact, not a failure of this rule.
+        return;
+    };
+    // OFF THE PAD FIRST. The squad spawns on the extraction cell, so capturing before moving wins
+    // immediately and would make this assertion vacuous.
+    if !walk_squad_off_the_pad(&mut app, &cfg) {
+        return;
+    }
+    force_contained(&mut app, target.1);
+    step(&mut app, &cfg, 5);
+    assert_eq!(contained_count(&mut app), 1, "precondition: an anomaly is held");
+    assert!(!squad_is_extracted(&mut app), "precondition: the squad is off the pad");
+
+    assert_eq!(
+        run_outcome(&mut app),
+        RunOutcome::Undecided,
+        "a capture with the squad nowhere near the exit must NOT win the run"
+    );
+}
+
+#[test]
+fn extracting_a_contained_anomaly_wins_the_run() {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    app.world_mut().insert_resource(WinCondition::ExtractContained { count: 1 });
+    step(&mut app, &cfg, 60);
+
+    let Some(target) = containable_targets(&mut app).into_iter().next() else {
+        return;
+    };
+    if !walk_squad_off_the_pad(&mut app, &cfg) {
+        return;
+    }
+    force_contained(&mut app, target.1);
+    step(&mut app, &cfg, 5);
+    assert_eq!(
+        run_outcome(&mut app),
+        RunOutcome::Undecided,
+        "holding it out in the level is not yet winning"
+    );
+
+    let exit = extraction_zone_cell(&mut app).expect("every run places an extraction zone");
+    assert!(issue_squad_order(&mut app, exit), "the exit must be reachable");
+    step(&mut app, &cfg, 900);
+
+    assert_eq!(
+        run_outcome(&mut app),
+        RunOutcome::Victory,
+        "a held anomaly plus a squad at the exit is the win"
+    );
+}
+
+#[test]
+fn losing_the_specimen_before_the_exit_un_arms_the_win() {
+    // The derived-not-ratcheted property, end to end: destroying the captured anomaly drops the live
+    // `Contained` count and the squad standing on the pad no longer wins.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    app.world_mut().insert_resource(WinCondition::ExtractContained { count: 1 });
+    step(&mut app, &cfg, 60);
+
+    let Some(target) = containable_targets(&mut app).into_iter().next() else {
+        return;
+    };
+    if !walk_squad_off_the_pad(&mut app, &cfg) {
+        return;
+    }
+    force_contained(&mut app, target.1);
+    step(&mut app, &cfg, 5);
+    // Destroy it before the walk-out.
+    app.world_mut().entity_mut(target.1).despawn();
+    step(&mut app, &cfg, 5);
+    assert_eq!(contained_count(&mut app), 0, "precondition: nothing left to extract");
+
+    let exit = extraction_zone_cell(&mut app).expect("every run places an extraction zone");
+    assert!(issue_squad_order(&mut app, exit));
+    step(&mut app, &cfg, 600);
+
+    assert_eq!(
+        run_outcome(&mut app),
+        RunOutcome::Undecided,
+        "there is nothing to extract, so reaching the exit must not win"
+    );
+}
+
+#[test]
+fn an_extraction_run_is_bit_reproducible() {
+    // Same seed, same scripted actions, same hash — the property every other assertion here rests on.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+
+    let run_once = || {
+        let mut app = build_headless_app(&cfg);
+        app.world_mut().insert_resource(WinCondition::ExtractContained { count: 1 });
+        step(&mut app, &cfg, 60);
+        if let Some(t) = containable_targets(&mut app).into_iter().next() {
+            force_contained(&mut app, t.1);
+        }
+        if let Some(exit) = extraction_zone_cell(&mut app) {
+            issue_squad_order(&mut app, exit);
+        }
+        step(&mut app, &cfg, 300);
+        (run_outcome(&mut app), snapshot_hash(&mut app), field_hash(&mut app))
+    };
+
+    assert_eq!(run_once(), run_once(), "an extraction run must be bit-reproducible");
 }
