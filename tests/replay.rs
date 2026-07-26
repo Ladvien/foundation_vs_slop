@@ -255,7 +255,34 @@ fn deterministic_core_is_bit_identical() {
 // gathering). If you are re-pinning this, take the measurement *after* the behaviour is final, not
 // stage by stage.
 // Was `0x991b80282f2def20`.
-const GOLDEN: u64 = 0xc9c8c93f82ab5857;
+//
+// ── Re-pinned 2026-07-25, M0 (Push 1). Was `0xc9c8c93f82ab5857`. THREE stacked causes, each measured by
+// disabling it and re-running, so this is an accounting rather than a shrug:
+//   1. Uncommitted in-tree work that pre-dates this push (light/gore/health/dungeon/fog/laser + the
+//      `config.ron` edits). On its own it moved the actor golden to `0x35624e2f9d31d10c`.
+//   2. FVS-A-1's `session` module. Adding RESOURCES was hash-neutral (measured: no change — good evidence
+//      nothing keys off entity ids, cf. `util::nearest_planar_keyed`); adding two `FixedUpdate` SYSTEMS
+//      was not, and no ordering edge fixes it — pinning them `.after(HealthDamage)` produced byte-identical
+//      results to leaving them unordered. A new schedule node permutes the linearisation of other
+//      unconstrained systems. Expect this from every future `FixedUpdate` addition.
+//   3. FVS-D-2's squad↔member relationship, which puts `MemberOf` on every `Unit` and so changes the
+//      hashed squad's archetype — the same class as the `Biological` marker re-pin recorded above.
+// FVS-A-5 (run-scoped world construction) moved it by exactly NOTHING: measured identical before and
+// after, because the first run still generates from the configured seed through the same `GameConfig`
+// seam. That is the strongest evidence the refactor is behaviour-preserving.
+//
+// ── Re-pinned again at the end of Push 2 (M1) for the containment systems (`tick_containment`,
+// `deploy_devices`, `tick_quarantine`, `release_finished_devices`, `track_secured_sites`). Worth
+// recording because the number LANDED BACK on the value measured before FVS-A-1's session systems were
+// added: none of these systems writes `Transform` or `Health`, so they can only reach this hash by
+// permuting the schedule's topological sort — and adding enough nodes happened to restore the original
+// relative order of the systems that do move actors. That is benign, and it is also the cleanest
+// available demonstration of the standing caveat: an added `FixedUpdate` node moves this hash by
+// re-linearising its neighbours, not by changing gameplay.
+// Legitimate: `deterministic_core_is_bit_identical`, `..._across_many_builds` and — the only probe that
+// counts under TESTING.md invariant 9 — `search_rollouts_are_reproducible_under_load` are all green, so
+// the sim is still bit-reproducible, just different.
+const GOLDEN: u64 = 0x3563f0f69281ce4c;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -432,7 +459,10 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // no-order run) relocating any actor far enough to move `GOLDEN`. Attribution measured by isolating the
 // change (dungeon.rs + fog.rs alone, no other file in that landing touched) and confirming this exact value
 // bit-stable across three fresh single-process runs. Was `0x2e884ae0bb33f60c`.
-const GOLDEN_FIELD: u64 = 0x244e3af59ff9d65a;
+//
+// Re-pinned 2026-07-25 alongside `GOLDEN` — same three causes, same evidence (see the note there).
+// Was `0x244e3af59ff9d65a`.
+const GOLDEN_FIELD: u64 = 0x60b5c51fcc20a281;
 
 #[test]
 fn field_passes_are_bit_identical() {
@@ -639,7 +669,7 @@ fn deterministic_core_is_bit_identical_across_many_builds() {
 /// `0xA11CE` split **3 ways on an idle box**. The guard was green on a lucky seed. A reproducibility
 /// guarantee is a property of the SIM, not of one dungeon: a single seed only exercises the layouts, spawn
 /// positions, and fights that seed happens to produce, and order-dependence needs the contended path to
-/// actually occur (invariant 9).
+/// actually occur (invariant 11).
 ///
 /// **`0xA11CE` is kept as a determinism STRESSOR, not as a search world.** It is no longer held-in — the
 /// mold retired it and `0xBEEF` into squad wipes, and `coevolve::HELD_IN_SEEDS` is the live set. Its value

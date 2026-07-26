@@ -121,6 +121,38 @@ const POOL_SCALE_MIN: f32 = 0.35;
 const POOL_SCALE_MAX: f32 = 2.0;
 const POOL_GIB_SCALE_WEIGHT: f32 = 0.5;
 
+/// Floor heights of the two blood-decal families, and the jitter that breaks their sort ties.
+///
+/// The 1 mm gap between the two is **load-bearing, not slack**: both families use `BloodPoolMaterial`
+/// (`AlphaMode::Blend`, `depth_bias` 0), so their compositing order is decided purely by the painter's
+/// sort on camera distance, and under this near-overhead camera that is set by Y. Droplet splats sit
+/// above pools so a fine speckle always composites ON TOP of the pool it landed in.
+///
+/// Hence the invariant asserted below: the tie-breaking jitter must be **smaller than the separation it
+/// is protecting**. A jitter wider than the gap overlaps the two families' Y ranges, and then roughly
+/// half of all pool/droplet pairs sort the wrong way round — the pool paints over the speckle, washing
+/// out the detail, and the order flips arbitrarily from one kill to the next. That is the same visible
+/// inconsistency the jitter exists to remove, just relocated. (Marschner & Shirley §3.4: `Over` is
+/// order-dependent, so an ordering key has to be chosen against the separation it must preserve.)
+const POOL_FLOOR_Y: f32 = 0.020;
+const DROPLET_FLOOR_Y: f32 = 0.021;
+/// Peak-to-peak, i.e. each decal moves by at most ±`BLOOD_DECAL_Y_JITTER / 2`.
+const BLOOD_DECAL_Y_JITTER: f32 = 0.0004;
+const _: () = assert!(BLOOD_DECAL_Y_JITTER < DROPLET_FLOOR_Y - POOL_FLOOR_Y);
+
+/// A stable `[0, 1)` tiebreak value for gore event `n`, taken in **integer** space.
+///
+/// Never `(counter as f32 * k).fract()`. That was the previous form and it silently switches itself off:
+/// the drain counter grows without bound, f32 carries only a 24-bit significand, so the product's ULP
+/// passes 0.25 near 4.2e6 and reaches 1.0 near 1.7e7 — the fractional part first collapses to a handful
+/// of distinct levels and then to exactly 0.0 for every subsequent event. Every decal would go coplanar
+/// again part-way through a long session or an RL training run, with no code change and nothing to
+/// reproduce from a fresh start. A wrapping multiply by 2³²·φ⁻¹ is a bijection on `u32`, so consecutive
+/// events stay maximally spread for the counter's whole range.
+fn decal_tiebreak01(counter: u32) -> f32 {
+    counter.wrapping_mul(0x9E37_79B9) as f32 / u32::MAX as f32
+}
+
 /// World gore requests to service this frame (drained by [`drain_gore`]).
 #[derive(Resource, Default)]
 pub struct GoreQueue(pub Vec<GoreEvent>);
@@ -635,9 +667,23 @@ fn drain_gore(
     // enforcement-by-prose that failed everywhere else in this sim. One sort at the single consumer cannot
     // be forgotten by a new producer.
     //
-    // Value-canonical, not total: the key is the WHOLE event, so a tie means two byte-identical deaths at
-    // one spot. Those are interchangeable — each mints the same chunks at the same places with the same
-    // weights, and only their `GibSeq` values swap, which permutes two identical chunk sets.
+    // Value-canonical: the key must be the WHOLE event, so that a tie means two byte-identical deaths at
+    // one spot — those genuinely are interchangeable (each mints the same chunks at the same places with
+    // the same weights, and only their `GibSeq` values swap, permuting two identical chunk sets).
+    //
+    // **FVS-N-8.** That claim used to be false. The key folded `e.gib.is_some()` — a *bool* — while
+    // `GibSource` carries `{ source, origin, scale }`, every field of which changes the chunks that get
+    // minted. So the key was a **prefix of the value**, which `CLAUDE.md` names as the single most common
+    // shape of this bug and which four sites in this repo had already fallen into. Two `UnitCrunch`
+    // events agreeing on position, kind, tint and intensity but differing in `GibSource` tied here, and
+    // the tie fell through to `GoreQueue` push order — handing them different values of the per-event
+    // `seed` counter below, which is what scatters the fragments. Measured symptom: identical chunk
+    // counts, identical `GibKey`s, identical `GibRing` order, and chunk **positions** differing by tens
+    // of ULPs one tick after a simultaneous five-unit death, under CPU load.
+    //
+    // `AssetId` is `Ord`, so the source can go in the key directly; `origin` and `scale` fold by bits
+    // like every other float here. A `None` gib sorts before any `Some` (the `Option` ordering), which is
+    // stable and arbitrary — exactly what is wanted for two events that differ only in *having* gibs.
     crate::util::sort_value_canonical(&mut queue.0, |e| {
         let t = e.tint.to_linear();
         (
@@ -650,7 +696,16 @@ fn drain_gore(
                 GoreKind::EnemySplat => 2,
                 GoreKind::Viscera => 3,
             },
-            e.gib.is_some(),
+            // The WHOLE `GibSource`, not merely whether one is present.
+            e.gib.as_ref().map(|g| {
+                (
+                    g.source,
+                    g.origin.x.to_bits(),
+                    g.origin.y.to_bits(),
+                    g.origin.z.to_bits(),
+                    g.scale.to_bits(),
+                )
+            }),
             t.red.to_bits(),
             t.green.to_bits(),
             t.blue.to_bits(),
@@ -787,11 +842,14 @@ fn drain_gore(
         // blends on top is then decided by ECS extraction order — which this project's own
         // determinism rule says is NOT stable across frames ("ECS query order decides nothing",
         // `tests/determinism_lint.rs`). That reads as flicker between overlapping pools, independent
-        // of sim pause. `fseed` is already a stable, unique-per-event value assigned once at spawn
-        // (reused by `pool_uniform` above) — reuse it as a sub-centimetre Y jitter so every pool has
-        // a fixed, reproducible position in the sort order and ties can't happen.
-        const BLOOD_POOL_Y_JITTER: f32 = 0.004; // world units; << the 0.02 anti-z-fight lift below
-        let floor_pos = Vec3::new(ev.pos.x, 0.02 + (fseed.fract() - 0.5) * BLOOD_POOL_Y_JITTER, ev.pos.z);
+        // of sim pause. `decal_tiebreak01` turns the drain counter into a stable, non-degrading [0, 1)
+        // so every pool has a fixed, reproducible place in the sort order and ties can't happen —
+        // and the swing stays under the pool↔droplet separation it must not disturb.
+        let floor_pos = Vec3::new(
+            ev.pos.x,
+            POOL_FLOOR_Y + (decal_tiebreak01(*seed) - 0.5) * BLOOD_DECAL_Y_JITTER,
+            ev.pos.z,
+        );
         // Clip the pool to the surrounding walls so it can't seep through them. `p` spans the quad
         // in [-1,1], so a world clear-distance maps to p-units by dividing by the quad half-size.
         let pool_half = (pool_size * 0.5).max(0.0001);
@@ -1315,13 +1373,15 @@ fn stamp_droplet_splat(
     pos: Vec3,
     wall_normal: Option<Vec3>,
     now: f32,
-    seed: f32,
+    // The raw drain counter, not a float seed: both the appearance seed and the sort tiebreak are
+    // derived from it here, so the two can never drift apart at a call site.
+    counter: u32,
 ) {
     let size = settings.droplet_splat_size;
-    // Stable per-splat tiebreak, same reasoning as the pool/wall-splat sites above: `seed` is
-    // already a stable per-event value, reused here to jitter the coincident-face push-off so
-    // droplet splats can't sort-key-tie against each other or another blood decal.
-    let jitter = (seed.fract() - 0.5) * 0.004;
+    let seed = counter as f32 * 0.618;
+    // Stable per-splat tiebreak, same reasoning as the pool/wall-splat sites above — but taken through
+    // `decal_tiebreak01`, since `seed` grows without bound and its `.fract()` decays to a constant.
+    let jitter = (decal_tiebreak01(counter) - 0.5) * BLOOD_DECAL_Y_JITTER;
     let (transform, clip, clip_diag) = match wall_normal {
         Some(n) => (
             Transform::from_translation(pos + n * (0.02 + jitter))
@@ -1331,7 +1391,7 @@ fn stamp_droplet_splat(
             Vec4::splat(9.0),
         ),
         None => {
-            let floor = Vec3::new(pos.x, 0.021 + jitter, pos.z);
+            let floor = Vec3::new(pos.x, DROPLET_FLOOR_Y + jitter, pos.z);
             let half = (size * 0.5).max(0.0001);
             let (ea, ed) = dungeon.open_extents(floor, size * 0.5 + 0.1);
             (
@@ -1403,7 +1463,7 @@ fn update_droplets(
                     Vec3::new(tf.translation.x, 0.0, tf.translation.z),
                     None,
                     now,
-                    *seed as f32 * 0.618,
+                    *seed,
                 );
             }
             commands.entity(entity).despawn();
@@ -1435,7 +1495,7 @@ fn update_droplets(
                         at,
                         Some(normal),
                         now,
-                        *seed as f32 * 0.618,
+                        *seed,
                     );
                 }
                 commands.entity(entity).despawn();

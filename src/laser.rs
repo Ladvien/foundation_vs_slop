@@ -265,8 +265,21 @@ pub(crate) fn fire_laser(
             if smiley.is_some_and(|s| !s.is_angry()) {
                 continue;
             }
-            if !fog.visible_at(dungeon.world_to_cell(enemy.translation)) {
+            let enemy_cell = dungeon.world_to_cell(enemy.translation);
+            if !fog.visible_at(enemy_cell) {
                 continue; // can't shoot what the squad can't see
+            }
+            // `FogGrid` is filled by `fog::update_los` using `line_of_sight_reveal` — the LENIENT
+            // corner rule, which exists so a corridor's own bounding wall doesn't leave picket-fence
+            // gaps in the *reveal*. Targeting must not inherit that: a diagonal corner-peek is a real
+            // exploit here. Without this gate a unit locks onto a crab it can only see through a wall
+            // pinch, turns to face it (pulling its aim off whatever is actually in front of it), and
+            // fires every cooldown into the corner — `resolve_move`'s wall sweep stops the bolt, so
+            // the squad burns its fire rate on an unhittable target. Test strict LOS from the
+            // shooter's own cell rather than depending on whichever rule the fog happens to use;
+            // `Dungeon::line_of_sight` is symmetric, so shooter↔target order is immaterial.
+            if !dungeon.line_of_sight(dungeon.world_to_cell(unit.translation), enemy_cell) {
+                continue;
             }
             // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
             // by itself; a teammate whose front arc covers it can still pick it off).
