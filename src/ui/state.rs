@@ -30,6 +30,14 @@ pub enum AppState {
     Warmup,
     /// Playing. Overlays are tracked by [`MenuState`].
     InGame,
+    /// The run was won. Entered by `ui::debrief::mirror_run_outcome` when the sim's
+    /// [`crate::session::RunOutcome`] resolves — never set directly by gameplay, which cannot see
+    /// `AppState` at all (see the module note above and `crate::session`).
+    Victory,
+    /// The run was lost. Same one-way mirror as [`AppState::Victory`].
+    GameOver,
+    /// Post-run summary, reachable from both terminal screens; returns to [`AppState::Title`].
+    Debrief,
 }
 
 /// In-game overlay stack. Only exists while [`AppState::InGame`] (a Bevy substate).
@@ -109,6 +117,10 @@ fn should_freeze(capture_active: bool, note_open: bool, app_state: &AppState, me
         || note_open
         || match app_state {
             AppState::Boot | AppState::Title | AppState::Warmup => true,
+            // The run is over: freeze the world behind the terminal screens so the last frame the
+            // player saw is the one they read the verdict over. The sim would otherwise keep ticking
+            // under the Debrief (crabs still walking around a dead squad).
+            AppState::Victory | AppState::GameOver | AppState::Debrief => true,
             AppState::InGame => menu_blocking,
         }
 }

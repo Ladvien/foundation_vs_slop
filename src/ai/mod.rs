@@ -97,11 +97,18 @@ impl Plugin for AiPlugin {
             // registry + brains from it.
             // `validate_factions` runs last, after every `Startup` spawner has tagged its agents, so an
             // untagged `Drives` carrier fails the launch instead of silently never feeling fear.
+            // `init_drives`/`init_brains` are pure data (config → resources) and stay on `Startup`.
+            // `init_fields` sizes the stigmergy grids from the `Dungeon`, so it is per-run (FVS-A-5).
+            .add_systems(Startup, (init_drives, brain::init_brains).chain())
             .add_systems(
-                Startup,
-                (init_fields, init_drives, brain::init_brains).chain(),
+                OnEnter(crate::session::RunState::Active),
+                (
+                    init_fields.in_set(crate::session::RunBuild::Grids),
+                    // Validates that every spawned drives-carrier has a faction, so it must see the
+                    // populace — the per-run home of what used to be a `PostStartup` pass.
+                    faction::validate_factions.in_set(crate::session::RunBuild::PostPopulate),
+                ),
             )
-            .add_systems(PostStartup, faction::validate_factions)
             // Pinned AI simulation on `FixedUpdate`.
             .add_systems(
                 FixedUpdate,

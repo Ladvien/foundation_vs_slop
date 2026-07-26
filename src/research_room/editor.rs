@@ -205,10 +205,20 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
                      d: Res<Dungeon>,
                      sim: Res<crate::sim::SimTuning>,
                      beh: Res<crate::behavior_tuning::BehaviorTuning>,
+                     squads: Query<Entity, With<crate::squad::Squad>>,
                      mut s: ResMut<EditorState>| {
+                        // Every unit carries `MemberOf`, so a dev-spawned one needs the roster node too
+                        // — otherwise it would sit in a different archetype from the native squad and
+                        // make ECS iteration order depend on which kind of unit was spawned. The node is
+                        // created by `spawn_squad` at startup, so this is present in any real session;
+                        // a missing one is a wiring bug, not a case to paper over.
+                        let Ok(squad) = squads.single() else {
+                            warn!("research room: no Squad roster node — cannot spawn a live unit");
+                            return;
+                        };
                         let q = s.quantity();
                         for _ in 0..q {
-                            spawn_live_unit(&mut c, &a, &valk, &d, &sim, &beh, &mut s);
+                            spawn_live_unit(&mut c, &a, &valk, &d, &sim, &beh, &mut s, squad);
                         }
                     },
                 );
@@ -241,10 +251,11 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
                      mut c: Commands,
                      a: Res<AssetServer>,
                      d: Res<Dungeon>,
+                     rules: Res<crate::containment::ContainmentRules>,
                      mut s: ResMut<EditorState>| {
                         let q = s.quantity();
                         for _ in 0..q {
-                            spawn_live_scp999(&mut c, &a, &d, &mut s);
+                            spawn_live_scp999(&mut c, &a, &d, &mut s, &rules);
                         }
                     },
                 );
@@ -471,6 +482,7 @@ fn spawn_live_unit(
     sim: &crate::sim::SimTuning,
     beh: &crate::behavior_tuning::BehaviorTuning,
     state: &mut EditorState,
+    squad: Entity,
 ) {
     let n = state.spawn_count;
     state.spawn_count += 1;
@@ -492,6 +504,7 @@ fn spawn_live_unit(
                 dungeon.cell_center(cell),
                 role,
                 RESEARCH_ROOM_MEMBER_BASE + n as usize,
+                squad,
             );
             commands.entity(e).insert(RoomSpawned);
             info!("research_room: spawned live squad unit (role {role}) at cell {cell:?}");
@@ -549,12 +562,13 @@ fn spawn_live_scp999(
     assets: &AssetServer,
     dungeon: &Dungeon,
     state: &mut EditorState,
+    rules: &crate::containment::ContainmentRules,
 ) {
     let n = state.spawn_count;
     state.spawn_count += 1;
     let cell = fan_cell(dungeon, n);
     let seed = room_spawn_seed(n, ROOM_SPECIES_SCP999);
-    let e = crate::scp999::spawn_scp999_at(commands, assets, seed, dungeon.cell_center(cell));
+    let e = crate::scp999::spawn_scp999_at(commands, assets, seed, dungeon.cell_center(cell), rules.0.scp999.clone());
     commands.entity(e).insert(RoomSpawned);
     info!("research_room: spawned live SCP-999 comfort blob at cell {cell:?}");
 }

@@ -300,7 +300,9 @@ pub struct Scp1048Plugin;
 impl Plugin for Scp1048Plugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Scp1048SpawnSeq>()
-            .add_systems(Startup, (anim::build_scp1048_anim, spawn_scp1048).chain())
+            // Anim tables are assets (`Startup`); the bears populate the world (per-run, FVS-A-5).
+            .add_systems(Startup, anim::build_scp1048_anim)
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_scp1048.in_set(crate::session::RunBuild::Populate))
             // Act after Think, so the executor works from this tick's decision — the same ordering
             // every other creature's movement system uses. Effects then read the `strike_landed` flag
             // Act just set, and the dread must reach the grid before it is drained/evaporated.
@@ -341,27 +343,38 @@ impl Plugin for Scp1048Plugin {
                     .after(crate::laser::fire_laser)
                     .after(Scp1048Set::Act)
                     .in_set(crate::health::HealthDamage),
+            )
+            // The clip driver lives HERE, not in the windowed `Scp1048VisualsPlugin`, even though it is
+            // cosmetic (`Update`, writes only blend weights). It has to: `spawn_scp1048` puts an
+            // `anim::BlendSource` on the bear root, and `anim::attach_pose_blenders` — which IS in the
+            // harness — then wires the streamed-in `AnimationPlayer` with **every slot at zero weight**.
+            // If the only system that ever sets those targets were windowed-only, a bear headless would
+            // hold a permanently undriven blender (weights summing to 0), which is what
+            // `liveness::every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run` catches
+            // — it fired the moment the bear's GLB finished streaming, so it presented as a flake.
+            // Squad, crab and manca all register their clip drivers in their harness-visible creature
+            // plugins for the same reason; this was the lone outlier.
+            .add_systems(
+                Update,
+                anim::drive_scp1048_animation
+                    .after(crate::anim::PoseAttachSet)
+                    .before(crate::anim::PoseBlendSet),
             );
     }
 }
 
-/// The cosmetic half: the clip driver and fog hiding. Windowed-only — registered in `lib::run` and
-/// **never** in `sim_harness`. It writes animation weights and `Visibility`, neither of which is
-/// `(Transform, Health)` on a hashed entity, so it cannot perturb `snapshot_hash`.
+/// The cosmetic half: fog hiding. Windowed-only — registered in `lib::run` and **never** in
+/// `sim_harness`. It writes `Visibility`, which is not `(Transform, Health)` on a hashed entity, so it
+/// cannot perturb `snapshot_hash`.
 pub struct Scp1048VisualsPlugin;
 
 impl Plugin for Scp1048VisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (
-                anim::drive_scp1048_animation
-                    .after(crate::anim::PoseAttachSet)
-                    .before(crate::anim::PoseBlendSet),
-                // The hostile copies are already hidden by the shared `hide_in_fog::<Hostile>` pass,
-                // so only the benign original names itself here — one fog writer per entity.
-                crate::fog::hide_in_fog::<Scp1048Benign>,
-            ),
+            // The hostile copies are already hidden by the shared `hide_in_fog::<Hostile>` pass,
+            // so only the benign original names itself here — one fog writer per entity.
+            crate::fog::hide_in_fog::<Scp1048Benign>,
         );
     }
 }
@@ -447,6 +460,7 @@ pub fn spawn_scp1048_at(
 ) -> Entity {
     let table = bear_anim.get(variant);
     let mut ec = commands.spawn((
+        crate::session::run_scoped(),
         Scp1048 { variant },
         Scp1048Seed(seed),
         Scp1048State::new(),

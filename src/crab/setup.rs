@@ -226,7 +226,8 @@ pub(crate) fn spawn_crab_on_patch(
     };
 
     let mut ec = commands.spawn((
-            Crab,
+            // Grouped to stay under Bevy's 15-element tuple cap.
+            (crate::session::run_scoped(), Crab),
             Hostile,
             Health::new(sim.combat.crab_hp),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)

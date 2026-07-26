@@ -69,7 +69,13 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                     b.spawn(text(&theme, &fonts, "NEW RUN", theme.font_body));
                 })
                 .observe(
-                    |_: On<Activate>, mut next: ResMut<NextState<AppState>>| {
+                    |_: On<Activate>,
+                     mut next: ResMut<NextState<AppState>>,
+                     mut run: ResMut<NextState<crate::session::RunState>>| {
+                        // Start a fresh expedition. `RunState::Idle → Active` rebuilds the world from the
+                        // advanced `RunSeed`, so this button now means what it says (FVS-A-5); before, the
+                        // world was built once at `Startup` and NEW RUN resumed the used one.
+                        run.set(crate::session::RunState::Active);
                         next.set(AppState::Warmup);
                     },
                 );

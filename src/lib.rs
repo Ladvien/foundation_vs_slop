@@ -18,6 +18,8 @@
 /// Cosmetic pose blending — the shared clip-weight/gait-phase driver every skinned model goes
 /// through (squad figurine, crab, manca). Never touches hashed sim state; see its module docs.
 pub mod anim;
+/// Config-bake machinery (RON splicing + golden re-pinning) shared with the `train` binary.
+pub mod bake;
 pub mod audio;
 /// Data-driven acoustic-stimulus + audio tuning — the `audio:` config slice. The propagation/salience
 /// of the acoustic stigmergy channels (`ai::field::NOISE_*`) and the per-faction perception gains that
@@ -32,6 +34,7 @@ pub mod ai_overlay;
 pub mod almond_water;
 pub mod camera;
 pub mod config;
+pub mod containment;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
@@ -86,6 +89,7 @@ pub mod scp999;
 /// plugins for the determinism gate; see the module docs.
 pub mod scp1048;
 pub mod selection;
+pub mod session;
 pub mod settings;
 /// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
 /// config slice. Mirrors `ai::tuning`; together they form the `WorldConfig` the offline search evolves.
@@ -242,7 +246,12 @@ pub fn run() {
             (anim::PoseBlendPlugin, squad::SquadPlugin, squad_ai::SquadAiPlugin),
             selection::SelectionPlugin,
             fog::FogPlugin,
-            health::HealthPlugin,
+            // `SessionPlugin` (run outcome: win/lose/still-going) is nested with `HealthPlugin` rather
+            // than taking its own slot — the top-level tuple is at Bevy's 15-element cap — and the
+            // pairing is honest: health is what kills the squad, and the wipe is what the session
+            // resolves on. It is registered in the headless harness too (see `sim_harness`), which is
+            // the whole point: the terminal states are inside the deterministic core, not the UI.
+            (health::HealthPlugin, session::SessionPlugin, containment::ContainmentPlugin),
             (
                 ai::AiPlugin,
                 enemy::EnemyPlugin,
@@ -292,8 +301,10 @@ pub fn run() {
                 // Transform + material uniforms), windowed-only — never in `sim_harness`. The gameplay
                 // `Scp999Plugin` (seek + tickle-calm) is in the harness-visible creature tuple above.
                 scp999::Scp999VisualsPlugin,
-                // `Scp1048Plugin` (seeding + the behaviour executor) is in the harness-visible
-                // creature tuple above; this is only the clip driver and fog hiding.
+                // `Scp1048Plugin` (seeding, the behaviour executor, AND the clip driver) is in the
+                // harness-visible creature tuple above; this is only the fog hiding. The clip driver
+                // moved out of here because the harness wires the bear's blender but would then never
+                // drive it — see the note at its registration in `scp1048::Scp1048Plugin`.
                 scp1048::Scp1048VisualsPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
@@ -354,12 +365,6 @@ pub fn run() {
     // `Update`, never in the headless harness — outside the deterministic core and the shipped binary.
     #[cfg(debug_assertions)]
     app.add_plugins(research_room::ResearchRoomPlugin);
-
-    // The watcher's "is the player looking at it?" gaze — WINDOWED-ONLY. It reads the live camera (which
-    // eases over wall-clock time), so registering it only here keeps it out of the headless deterministic
-    // harness: `enemy::smiley_reflex` there reads a stable `WatchedByPlayer(false)` and stays
-    // bit-reproducible. See `enemy::snapshot_player_gaze`.
-    app.add_systems(Update, enemy::snapshot_player_gaze);
 
     // The gestation "twitching lump" tell — WINDOWED-ONLY cosmetic (spawns child meshes on infested hosts),
     // so the headless deterministic core spawns nothing and its goldens are untouched. See

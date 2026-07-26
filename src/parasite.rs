@@ -407,7 +407,7 @@ impl Plugin for ParasitePlugin {
             .add_systems(Startup, (build_manca_anim, build_wound_assets, build_lump_assets))
             // Spawn in `PostStartup` so the crab's `SurfaceGraph` (built in its `Startup`) already exists —
             // mancae ride the same surface manifold and must never build a second graph.
-            .add_systems(PostStartup, spawn_mancae)
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_mancae.in_set(crate::session::RunBuild::PostPopulate))
             // Pinned manca simulation on `FixedUpdate`: rouse (flip mood) → huddle (dormant aggregation) →
             // hunt/leap (roused locomotion) → embed (flips a host's Infestation + despawns the manca) →
             // gestation clock → burst. All change pinned state, so ordering is explicit and the whole chain
@@ -838,6 +838,7 @@ pub(crate) fn spawn_manca_on_patch(
     };
 
     let mut ec = commands.spawn((
+        crate::session::run_scoped(),
         Manca,
         Hostile,
         Health::new(tuning.manca_hp),

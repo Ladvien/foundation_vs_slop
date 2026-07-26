@@ -1,8 +1,9 @@
 //! Game system UI — windowed-only, one plugin per surface.
 //!
-//! [`UiPlugin`] owns the whole UI stack: the [`state`] machine (`Boot → Title → Warmup → InGame` +
-//! in-game overlay substates), the CRT [`theme`], reusable [`widgets`], and one plugin per screen
-//! ([`boot`], [`title`], [`warmup`], [`pause`], [`hud`]).
+//! [`UiPlugin`] owns the whole UI stack: the [`state`] machine (`Boot → Title → Warmup → InGame`,
+//! plus the terminal `Victory`/`GameOver`/`Debrief` screens + in-game overlay substates), the CRT
+//! [`theme`], reusable [`widgets`], and one plugin per screen ([`boot`], [`title`], [`warmup`],
+//! [`pause`], [`hud`], [`debrief`]).
 //!
 //! **Registered only in `lib::run` — never in the headless harness.** Consequences that keep the
 //! deterministic core intact:
@@ -17,6 +18,8 @@
 use bevy::prelude::*;
 
 pub mod boot;
+pub mod containment_hud;
+pub mod debrief;
 pub mod hud;
 pub mod pause;
 pub mod settings_menu;
@@ -44,6 +47,11 @@ impl Plugin for UiPlugin {
                 pause::PauseMenuPlugin,
                 settings_menu::SettingsMenuPlugin,
                 hud::HudPlugin,
+                // Terminal screens. Presentation only — the win/lose decision is `crate::session`,
+                // inside the deterministic core; this plugin mirrors it one-way onto `AppState`.
+                debrief::DebriefPlugin,
+                // Reads *why* a containment is progressing or breaking (FVS-L-1).
+                containment_hud::ContainmentHudPlugin,
             ))
             // `state::sync_sim_blocked` reads `DebugCaptureActive` non-optionally (it is documented as
             // "always compiled … stays false in release"), so the plugin that registers the reader is what

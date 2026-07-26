@@ -405,7 +405,19 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         (crate::anim::PoseBlendPlugin, crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,
-        crate::health::HealthPlugin,
+        // `SessionPlugin` is harness-visible ON PURPOSE — it is the reason the module exists. The
+        // win/lose decision runs on `FixedUpdate` inside the pinned core, so `tests/session.rs` can
+        // drive a fixed seed to Victory and to Defeat and hash the result. The *screens* that show it
+        // (`ui::debrief`) are windowed-only and never registered here, exactly like every other UI
+        // surface (`ui_never_leaks_into_deterministic_core`). Nested with health for the same reason
+        // as production `lib::run`.
+        (
+            crate::health::HealthPlugin,
+            crate::session::SessionPlugin,
+            // Containment is the capture verb — pinned gameplay on `FixedUpdate`, so the exact-hash gate
+            // must cover it (FVS-B-3).
+            crate::containment::ContainmentPlugin,
+        ),
         (
             crate::ai::AiPlugin,
             crate::enemy::EnemyPlugin,
@@ -806,6 +818,109 @@ pub fn squad_health(app: &mut App) -> (f32, f32) {
     curs.sort_by(f32::total_cmp);
     maxs.sort_by(f32::total_cmp);
     (curs.iter().sum(), maxs.iter().sum())
+}
+
+/// How the run has resolved — `Undecided` while it is still going. The headless read of the sim's
+/// terminal state; `tests/session.rs` asserts on it. Read-only.
+pub fn run_outcome(app: &mut App) -> crate::session::RunOutcome {
+    *app.world().resource::<crate::session::RunOutcome>()
+}
+
+/// Fixed ticks elapsed in the current run (see [`crate::session::RunClock`]). Read-only.
+pub fn run_ticks(app: &mut App) -> u64 {
+    app.world().resource::<crate::session::RunClock>().ticks
+}
+
+/// Whether every squad unit's fracture set has finished baking (`autogib::bake_autogib`).
+///
+/// A **precondition probe**, not a driver. `bake_autogib` self-gates on the figurine's sub-meshes being
+/// present in `Assets<Mesh>` — async GLB streaming — so *whether the bake has happened yet* is wall-clock
+/// dependent. Production never notices, and `bake_autogib`'s own doc says why: "combat can't start before
+/// scenes load, so the bake is a completed prerequisite of any death." A **test** that kills units a
+/// second into the run breaks that premise, and an unbaked death produces a completely different gib
+/// population — measured at 45 chunks vs 160 for the same seed, under CPU load, on adjacent reps.
+///
+/// So: any test that kills units early must [`step_until_autogib_ready`] first. Skipping it does not make
+/// the test flaky at the margin — it makes it assert on asset-load timing.
+pub fn autogib_ready(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let sources: Vec<bevy::asset::AssetId<bevy::prelude::WorldAsset>> = {
+        let mut q =
+            world.query_filtered::<&crate::squad::FigurineSource, With<crate::squad::Unit>>();
+        q.iter(world).map(|f| f.0.id()).collect()
+    };
+    if sources.is_empty() {
+        return false;
+    }
+    let cache = world.resource::<crate::autogib::AutogibCache>();
+    sources.iter().all(|s| cache.fragments(*s).is_some())
+}
+
+/// Step until [`autogib_ready`], up to `max_ticks`. Returns the ticks spent, or `None` if the bake never
+/// completed — a `None` is a real failure (the asset never streamed in), never something to step past.
+pub fn step_until_autogib_ready(app: &mut App, cfg: &SimConfig, max_ticks: u32) -> Option<u32> {
+    for t in 0..max_ticks {
+        if autogib_ready(app) {
+            return Some(t);
+        }
+        step(app, cfg, 1);
+    }
+    autogib_ready(app).then_some(max_ticks)
+}
+
+/// Whether every squad unit's figurine has streamed in and been wired to a [`crate::anim::PoseBlender`].
+///
+/// A **precondition probe**, like [`autogib_ready`] and for the same reason: the figurine is an async GLB,
+/// so *whether a unit has a blender yet* is wall-clock dependent. A test that measures blend weights
+/// before the wiring lands reads zero from an empty query and reports "the squad never engaged" — which
+/// is a statement about asset-load timing wearing the costume of a gameplay assertion.
+pub fn squad_blenders_ready(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let units = world
+        .query_filtered::<(), With<crate::squad::Unit>>()
+        .iter(world)
+        .count();
+    if units == 0 {
+        return false;
+    }
+    let blenders = world
+        .query::<&crate::anim::PoseBlender>()
+        .iter(world)
+        .count();
+    blenders >= units
+}
+
+/// Step until [`squad_blenders_ready`], up to `max_ticks`. `None` means the figurines never wired — a
+/// real failure (the asset never streamed in), never something to step past.
+pub fn step_until_squad_blenders_ready(app: &mut App, cfg: &SimConfig, max_ticks: u32) -> Option<u32> {
+    for t in 0..max_ticks {
+        if squad_blenders_ready(app) {
+            return Some(t);
+        }
+        step(app, cfg, 1);
+    }
+    squad_blenders_ready(app).then_some(max_ticks)
+}
+
+/// Kill every squad member outright, returning how many were struck.
+///
+/// A **test driver**, in the same category as [`issue_squad_order`] / [`clear_squad_orders`]: it drives
+/// the real game path (zero the `Health` the sim already reads) rather than short-circuiting it, so the
+/// wipe still flows through `squad::despawn_dead_units` → gore/din deposits → `session::resolve_run`
+/// exactly as a wipe earned in play would. It exists because reaching a genuine wipe from the shipped
+/// seed takes thousands of ticks of combat, which would make the terminal-state test a slow, indirect
+/// assertion about crab balance instead of a fast, direct one about the session rule.
+pub fn kill_squad(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&mut crate::health::Health, With<crate::squad::Unit>>();
+    let mut struck = 0usize;
+    // Order-independent: every unit gets the same write, so no canonical order is needed (contrast a
+    // *lethal pick*, which `tests/determinism_lint.rs` requires a total sort for).
+    for mut hp in q.iter_mut(world) {
+        hp.current = 0.0;
+        struck += 1;
+    }
+    struck
 }
 
 /// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see

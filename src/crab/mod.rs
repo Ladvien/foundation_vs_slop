@@ -259,7 +259,10 @@ impl Plugin for CrabPlugin {
         app.init_resource::<CrabField>()
             .init_resource::<CrabSpawnSeq>()
             // Graph and anim resources must exist before crabs are spawned/snapped to patches.
-            .add_systems(Startup, (build_surface_graph, build_crab_anim, spawn_crabs).chain())
+            // `build_crab_anim` is asset loading (`Startup`); the surface graph is derived from the
+            // dungeon and the crabs populate it, so both are per-run (FVS-A-5).
+            .add_systems(Startup, build_crab_anim)
+            .add_systems(OnEnter(crate::session::RunState::Active), (build_surface_graph, spawn_crabs).chain().in_set(crate::session::RunBuild::Populate))
             // Pinned crab simulation on `FixedUpdate` — locomotion, jumping, carry economy, combat,
             // deposits, and reproduction. All the `.after(AiSet::…)` / inter-system orderings stay valid
             // because `AiSet` and every one of these systems now live on `FixedUpdate` together.

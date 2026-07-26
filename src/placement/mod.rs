@@ -86,7 +86,7 @@ impl Plugin for PlacementPlugin {
         app.insert_resource(furnish::Density(density));
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
-        app.add_systems(Startup, furnish::furnish_regions);
+        app.add_systems(OnEnter(crate::session::RunState::Active), furnish::furnish_regions.in_set(crate::session::RunBuild::Populate));
         // Reveal each room's furniture the first time a squad unit walks into it, and keep it revealed
         // thereafter (remembered, per-room — see `furniture_room_visibility`).
         app.init_resource::<furnish::RevealedRooms>();
