@@ -314,9 +314,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   Also worth settling here: the **stale** case. After `RETURN TO SITE` the `Dungeon` resource is not
   removed, it just describes a despawned world — so `resource_exists` is *true* and gating on it would
   not help, while `in_state` would. That asymmetry probably decides the choice.
+  **⚠️ RE-SCOPED 2026-07-26 — this is polish, NOT a blocker. Do not do it before the Site ships.**
+  Verified: **`Dungeon` is never removed** (`grep remove_resource::<Dungeon>` → 0 hits). It is inserted
+  at `RunBuild::World` and persists for the process lifetime, stale-but-present, after every run ends.
+  So the world-less window exists **only before the first expedition** — and the fix is a staging
+  decision, not a refactor:
+  > **Boot → Title → NEW RUN → expedition → debrief → RETURN TO SITE → Site → ASYNC door → next
+  > expedition.** The Site is the *between-runs* hub, which is what it is for. `Dungeon` exists from the
+  > first `RunBuild::World` onward, so nothing panics, and **zero of the 90 sites need gating**.
+  That order is arguably better than opening at the Site anyway: you are dropped in the field, and the
+  Site is somewhere you come *back* to — which is what makes the containment wing mean anything, since
+  on the first visit it already holds what you just caught.
+  What remains for G-6 is only the cosmetic case of making the Site the **boot** destination (a cold
+  start with no expedition behind you). Worth doing eventually; worth nothing until the hub renders.
   *Done when:* `AutoStartFirstRun(false)` boots to a stable world-less frame with no panic, the goldens
-  are measured (moved or not, deliberately), and the harness path is byte-identical. · *Deps:* — (blocks
-  the Site becoming the boot destination) · *Touches:* `src/lib.rs`, ~20 modules · *Reading:* [ECS]
+  are measured (moved or not, deliberately), and the harness path is byte-identical. · *Deps:* — (does
+  NOT block the Site) · *Touches:* `src/lib.rs`, ~25 modules, ~50 registration sites · *Reading:* [ECS]
 - **FVS-D-4 — Site↔specimen relationship + visible cells** · M
   Link the Site to each captured specimen with a Bevy relationship (the repo's third — see `squad::SquadRoster` and `containment::Holding` for the `Option<&Target>` gotcha), and **show it**: each specimen occupies a containment cell in the wing. `containment::Specimen` already exists and is already exempt from run teardown.
   *Done when:* the Site enumerates its specimens; each captured anomaly is visibly held in a cell; they survive teardown. · *Deps:* G-1, G-4 · *Touches:* `src/site/`, `src/containment/` · *Reading:* [ECS]
