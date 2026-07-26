@@ -46,3 +46,97 @@
 pub mod pieces;
 
 pub use pieces::SitePiece;
+
+use bevy::prelude::*;
+
+/// The Site itself — a **bodiless** record, exactly like `squad::Squad`.
+///
+/// No `Transform` and no `Health`, so it contributes no row to `sim_harness::snapshot_hash` and no actor
+/// to `liveness_violations`. That is what lets the gameplay half be harness-visible without touching the
+/// pinned core, and it is a property of the *entity shape*, not of where the plugin is registered — so it
+/// survives someone later moving this code.
+#[derive(Component, Debug)]
+pub struct Site;
+
+/// Handle to the one Site entity, so the `Contained` hook can link a specimen without a query.
+///
+/// A resource rather than a `Query<Entity, With<Site>>` because the reader is a **component hook**
+/// running in `DeferredWorld`, where a query would be both awkward and a pick. Push 8 measured resources
+/// hash-neutral, so this costs nothing.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct SiteRoot(pub Entity);
+
+/// Specimen → Site. The repo's **third** Bevy relationship, after `squad::MemberOf`/`SquadRoster` and
+/// `containment::Holding`/`HeldBy`.
+#[derive(Component, Debug)]
+#[relationship(relationship_target = SiteSpecimens)]
+pub struct HeldAt(pub Entity);
+
+/// Site → its specimens.
+///
+/// **Both gotchas the other two pairs document apply here, and they bite in different places:**
+///
+/// 1. **Bevy expresses an empty target by REMOVING the component**, so a Site holding nothing matches
+///    *nothing* on a bare `Query<&SiteSpecimens>` — which reads as "no Site" rather than "no specimens".
+///    Always `Option<&SiteSpecimens>`. This is the first expedition's state, so it is the common case,
+///    not an edge case.
+/// 2. **Its order is attach order, not a total order.** Anything that picks — assigning specimens to
+///    containment cells, choosing one to research — must sort by a stable key first. That key is
+///    `Specimen::captured_tick`, which exists for this reason; `(captured_tick, captured)` is total even
+///    for a same-tick double capture.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = HeldAt)]
+pub struct SiteSpecimens(Vec<Entity>);
+
+/// The **gameplay** half of Site-67: the persistent root and the specimen relationship. Registered in
+/// BOTH `lib::run` and `sim_harness`.
+///
+/// Harness-visible deliberately. FVS-D-4's acceptance is "specimens accumulate across expeditions", and
+/// a windowed-only relationship would make the single most important thing about the roguelite boundary
+/// the one thing no test could reach — precisely the mistake `src/session/` records about putting the
+/// win/lose decision in `AppState`.
+///
+/// **`Startup`, not `OnEnter(RunState::Idle)`.** `Idle` is the default state and Bevy runs the initial
+/// `StateTransition` *before* `PreStartup` (the same trap `RunState`'s doc records for `Active`), so
+/// `OnEnter` would fire before any asset handle existed — and again on every `RETURN TO SITE`,
+/// duplicating the Site unless guarded by a bool, which is the two-mechanisms-for-one-invariant shape
+/// this codebase rejects. `Startup` runs exactly once per process and needs no guard.
+pub struct SitePlugin;
+
+impl Plugin for SitePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_site);
+    }
+}
+
+/// Create the Site and publish its handle. Note the absence of `session::run_scoped()` — that *is* the
+/// persistence mechanism (FVS-A-4's surviving half), not an oversight.
+fn spawn_site(mut commands: Commands) {
+    let site = commands.spawn(Site).id();
+    commands.insert_resource(SiteRoot(site));
+}
+
+/// The Site's specimens, **ordered by capture time** — the total order `SiteSpecimens` does not provide.
+///
+/// Every consumer that assigns cells, picks a research subject, or renders the roster should go through
+/// this rather than walking the relationship directly.
+pub fn specimens_in_capture_order(
+    specimens: &Query<(Entity, &crate::containment::Specimen)>,
+    roster: Option<&SiteSpecimens>,
+) -> Vec<Entity> {
+    let Some(roster) = roster else {
+        // Not an error: Bevy removes the target component when the Site holds nothing, which is exactly
+        // the state of a first expedition.
+        return Vec::new();
+    };
+    let mut out: Vec<(u64, Entity, Entity)> = roster
+        .0
+        .iter()
+        .filter_map(|&e| specimens.get(e).ok().map(|(e, s)| (s.captured_tick, s.captured, e)))
+        .collect();
+    // SORT-OK: `(captured_tick, captured)` is total — two specimens banked on the same tick still differ
+    // by which anomaly they came from, and one anomaly cannot be captured twice (`Contained` is inserted
+    // once and never removed).
+    out.sort_unstable_by_key(|(tick, captured, _)| (*tick, *captured));
+    out.into_iter().map(|(_, _, e)| e).collect()
+}

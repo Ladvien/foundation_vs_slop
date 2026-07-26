@@ -252,7 +252,7 @@ pub fn run() {
             // pairing is honest: health is what kills the squad, and the wipe is what the session
             // resolves on. It is registered in the headless harness too (see `sim_harness`), which is
             // the whole point: the terminal states are inside the deterministic core, not the UI.
-            (health::HealthPlugin, session::SessionPlugin, containment::ContainmentPlugin),
+            (health::HealthPlugin, session::SessionPlugin, containment::ContainmentPlugin, site::SitePlugin),
             (
                 ai::AiPlugin,
                 enemy::EnemyPlugin,

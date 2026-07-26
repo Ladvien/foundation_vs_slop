@@ -151,6 +151,16 @@ pub struct Specimen {
     /// The entity that was captured, as it was at capture time. Recorded for the research posterior
     /// (FVS-E-1) to key on; the anomaly itself may be despawned once extraction lands.
     pub captured: Entity,
+    /// The run tick the capture completed on.
+    ///
+    /// **A stable ordering key, and that is its job.** `SiteSpecimens` (FVS-D-4) is a Bevy relationship
+    /// target whose order is *attach* order, not a total order, so anything that assigns specimens to
+    /// containment cells is a pick and needs a key that does not come from ECS iteration. This is that
+    /// key: it is a pure function of when the capture happened, and `(captured_tick, captured)` breaks
+    /// even a same-tick double capture.
+    ///
+    /// It is also the timestamp the records office (FVS-O-4) will want, so it earns its place twice.
+    pub captured_tick: u64,
 }
 
 /// The reward. **The only path from containment to a specimen**, and a component hook rather than a
@@ -161,8 +171,28 @@ pub struct Specimen {
 /// the `On<Add, C>` form. The hook is used here — not an observer — because this is an *invariant*, and
 /// the backlog's engine baseline is explicit that hooks are the stable path for invariants while
 /// observers are for softer fan-out (FX, telemetry).
+/// Attaching the specimen to the Site happens **here, in the hook**, rather than in a system that sweeps
+/// up unparented specimens afterwards. Two reasons, both load-bearing:
+/// * A system would be a new `FixedUpdate` node, which permutes the schedule's linearisation and moves
+///   the goldens for nothing. A hook adds no node at all.
+/// * It preserves the property the module docs argue for — the hook is the *only* path from containment
+///   to a specimen, so there is no second place where a specimen can come into existence unlinked.
+///
+/// The Site may legitimately not exist: bare-`App` unit tests never build one. That is not a fallback
+/// path (the specimen is granted identically either way) — it is one optional *link*, and the
+/// relationship's own hooks handle removal, so nothing has to clean up after a despawned Site.
 fn grant_specimen(mut world: bevy::ecs::world::DeferredWorld, ctx: bevy::ecs::lifecycle::HookContext) {
-    world.commands().spawn(Specimen { captured: ctx.entity });
+    let tick = world.resource::<crate::session::RunClock>().ticks;
+    let site = world.get_resource::<crate::site::SiteRoot>().map(|s| s.0);
+    let specimen = Specimen { captured: ctx.entity, captured_tick: tick };
+    match site {
+        Some(site) => {
+            world.commands().spawn((specimen, crate::site::HeldAt(site)));
+        }
+        None => {
+            world.commands().spawn(specimen);
+        }
+    }
 }
 
 /// Run every in-progress containment against the live stigmergy field.

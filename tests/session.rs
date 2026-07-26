@@ -18,7 +18,7 @@ use foundation_vs_slop::session::{DefeatCause, RunOutcome, RunSeed, RunState, Wi
 use foundation_vs_slop::sim_harness::{
     build_headless_app, contained_count, containable_targets, extraction_zone_cell, field_hash,
     floor_cells, gib_hash, gib_rows, issue_squad_order, kill_squad, run_outcome, run_ticks,
-    squad_is_extracted,
+    site_root, site_specimens, squad_is_extracted,
     serial_guard, snapshot_hash, step, step_until_autogib_ready, SimConfig,
 };
 
@@ -558,4 +558,123 @@ fn an_extraction_run_is_bit_reproducible() {
     };
 
     assert_eq!(run_once(), run_once(), "an extraction run must be bit-reproducible");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-G-1 / D-4 — the persistent Site, and the roguelite boundary.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The run's extraction-zone entity — a run-scoped control, to contrast against the persistent Site.
+fn extraction_zone_entity(app: &mut bevy::prelude::App) -> Option<bevy::prelude::Entity> {
+    let world = app.world_mut();
+    let mut q = world
+        .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<foundation_vs_slop::containment::ExtractionZone>>();
+    q.iter(world).next()
+}
+
+/// Leave the current run and start a fresh one, the way `RETURN TO SITE` -> `NEW RUN` does.
+fn re_enter_a_run(app: &mut bevy::prelude::App, cfg: &SimConfig) {
+    use bevy::prelude::NextState;
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    step(app, cfg, 2);
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Active);
+    step(app, cfg, 60);
+}
+
+#[test]
+fn the_site_survives_run_teardown_and_is_never_rebuilt() {
+    // FVS-G-1's literal acceptance. The Site persists by NOT carrying `session::run_scoped()` — there is
+    // no exempt-list, which is why this is worth pinning: a future spawner that copy-pastes
+    // `run_scoped()` onto a Site entity would silently reintroduce the bug A-4 was written for.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let before = site_root(&mut app).expect("the Site is built at Startup");
+    let zone_before = extraction_zone_entity(&mut app);
+    re_enter_a_run(&mut app, &cfg);
+    let after = site_root(&mut app).expect("the Site must outlive a run");
+    let zone_after = extraction_zone_entity(&mut app);
+
+    assert_eq!(before, after, "the Site must be the SAME entity across a run boundary, not rebuilt");
+    // …while a RUN-SCOPED entity really was torn down and rebuilt, or the assertion above is vacuous.
+    // Contrasting the two directly is the point: the Site persists by *not* carrying `run_scoped()`,
+    // so the test has to show that the tag is what makes the difference.
+    assert_ne!(
+        zone_before, zone_after,
+        "the extraction zone is run-scoped, so re-entering must rebuild it as a NEW entity"
+    );
+}
+
+#[test]
+fn specimens_accumulate_across_expeditions_and_stay_held_at_the_site() {
+    // FVS-D-4 plus the roguelite boundary in one test: capture in run 1, leave, capture in run 2, and
+    // assert BOTH are still on the Site's roster. This is the property `Specimen` gives up run-scoping
+    // for, and nothing else asserts it.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(first) = containable_targets(&mut app).into_iter().next() else {
+        return;
+    };
+    force_contained(&mut app, first.1);
+    step(&mut app, &cfg, 5);
+    assert_eq!(site_specimens(&mut app).len(), 1, "run 1 banks one specimen");
+
+    re_enter_a_run(&mut app, &cfg);
+    // The run-scoped world is gone and rebuilt, so this is a genuinely different anomaly entity.
+    let Some(second) = containable_targets(&mut app).into_iter().next() else {
+        return;
+    };
+    force_contained(&mut app, second.1);
+    step(&mut app, &cfg, 5);
+
+    let held = site_specimens(&mut app);
+    assert_eq!(held.len(), 2, "specimens must ACCUMULATE across expeditions, not reset with the world");
+
+    // Every one of them is linked to the Site, not merely alive.
+    let site = site_root(&mut app).expect("Site exists");
+    for s in held {
+        let link = app.world().get::<foundation_vs_slop::site::HeldAt>(s);
+        assert_eq!(link.map(|h| h.0), Some(site), "every specimen must be HeldAt the Site");
+    }
+}
+
+#[test]
+fn a_specimen_record_never_carries_a_transform_or_health() {
+    // THE hash-property assertion, and the one that catches a future "just put the cell body on the
+    // Specimen" shortcut. `snapshot_hash` folds `(Transform, Health)` pairs, so a specimen that gained
+    // both would start contributing rows to the pinned hash — from an entity that deliberately outlives
+    // the run, which would make the golden depend on how many expeditions had been played.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(t) = containable_targets(&mut app).into_iter().next() else { return };
+    force_contained(&mut app, t.1);
+    step(&mut app, &cfg, 5);
+
+    for s in site_specimens(&mut app) {
+        let e = app.world().entity(s);
+        assert!(e.get::<bevy::prelude::Transform>().is_none(), "a Specimen must stay bodiless");
+        assert!(e.get::<foundation_vs_slop::health::Health>().is_none(), "…and carry no Health");
+    }
+}
+
+#[test]
+fn an_empty_site_reads_as_no_specimens_rather_than_no_site() {
+    // The relationship gotcha, pinned. Bevy REMOVES `SiteSpecimens` when it empties, so a bare
+    // `Query<&SiteSpecimens>` matches nothing on a fresh save — which reads as "there is no Site".
+    // Every consumer must treat absence as "holds nothing".
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    assert!(site_root(&mut app).is_some(), "the Site exists…");
+    assert!(site_specimens(&mut app).is_empty(), "…and simply holds nothing yet");
 }

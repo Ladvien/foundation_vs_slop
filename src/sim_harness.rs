@@ -417,6 +417,11 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // Containment is the capture verb — pinned gameplay on `FixedUpdate`, so the exact-hash gate
             // must cover it (FVS-B-3).
             crate::containment::ContainmentPlugin,
+            // The Site's GAMEPLAY half only (the persistent root + the specimen relationship).
+            // Harness-visible because FVS-D-4's acceptance is "specimens accumulate across
+            // expeditions" — windowed-only would make the roguelite boundary untestable. It adds no
+            // `FixedUpdate` node and its entity is bodiless, so it cannot reach `snapshot_hash`.
+            crate::site::SitePlugin,
         ),
         (
             crate::ai::AiPlugin,
@@ -905,6 +910,40 @@ pub fn living_unit_positions(app: &mut App) -> Vec<Vec3> {
 /// a charge.
 pub fn device_reach(app: &mut App) -> f32 {
     app.world().resource::<crate::sim::SimTuning>().containment.device_reach
+}
+
+/// The Site's specimens in **capture order** — the total order the relationship itself does not provide.
+///
+/// Returns empty when the Site holds nothing, which is not an error state: Bevy removes a relationship
+/// target component when it empties, so a first expedition legitimately has no `SiteSpecimens` at all.
+pub fn site_specimens(app: &mut App) -> Vec<Entity> {
+    let world = app.world_mut();
+    let Some(site) = world.get_resource::<crate::site::SiteRoot>().map(|s| s.0) else {
+        return Vec::new();
+    };
+    let roster: Vec<Entity> = {
+        let Some(r) = world.get::<crate::site::SiteSpecimens>(site) else {
+            return Vec::new();
+        };
+        // Snapshot the ids so the sort below can borrow the specimen query independently.
+        r.iter().collect()
+    };
+    let mut rows: Vec<(u64, Entity, Entity)> = {
+        let mut q = world.query::<(Entity, &crate::containment::Specimen)>();
+        roster
+            .iter()
+            .filter_map(|&e| q.get(world, e).ok().map(|(e, s)| (s.captured_tick, s.captured, e)))
+            .collect()
+    };
+    // SORT-OK: `(captured_tick, captured)` is total — an anomaly cannot be captured twice, since
+    // `Contained` is inserted once and never removed.
+    rows.sort_unstable_by_key(|(tick, captured, _)| (*tick, *captured));
+    rows.into_iter().map(|(_, _, e)| e).collect()
+}
+
+/// The Site entity, if one exists.
+pub fn site_root(app: &mut App) -> Option<Entity> {
+    app.world().get_resource::<crate::site::SiteRoot>().map(|s| s.0)
 }
 
 /// Is every living unit inside an extraction zone — i.e. the second half of `ExtractContained`?
