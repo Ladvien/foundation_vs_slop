@@ -33,7 +33,12 @@ const MAX_STEP: f32 = WALL_THICKNESS * 0.5;
 pub const WALL_HEIGHT: f32 = 2.4;
 /// Clear height of a doorway opening (top of the door / bottom of the lintel). Below the ~2.05 m door
 /// so the door tucks under the header with no gap; the wall runs continuous above it (`WALL_HEIGHT`).
-const DOORWAY_HEIGHT: f32 = 2.0;
+///
+/// `pub` because it is already part of the **published authoring contract** — `docs/artist_guide.md` §1
+/// lists it beside `TILE_SIZE` and `WALL_HEIGHT` as a number art must build to — and `site::pieces` now
+/// scales the greybox doorway kit to it. A private constant with a public doc entry is one source of
+/// truth pretending to be two.
+pub const DOORWAY_HEIGHT: f32 = 2.0;
 
 /// Camera-facing (SE/SW — i.e. the E and S edge) walls render at this fraction of `WALL_HEIGHT`: a low
 /// knee wall you always see over into every room, regardless of where the squad is. Their doors and

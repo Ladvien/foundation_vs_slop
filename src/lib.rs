@@ -90,6 +90,7 @@ pub mod scp999;
 pub mod scp1048;
 pub mod selection;
 pub mod session;
+pub mod site;
 pub mod settings;
 /// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
 /// config slice. Mirrors `ai::tuning`; together they form the `WorldConfig` the offline search evolves.
