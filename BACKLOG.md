@@ -325,7 +325,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]
 - **FVS-K-6 — SCP-1048 clip driver was invisible to the harness (FIXED 2026-07-25)** · S · ✅ **LANDED**
   `Scp1048Plugin` (harness-visible) spawns bears **with an `anim::BlendSource`**, and `anim::attach_pose_blenders` — also harness-visible — then wired their `AnimationPlayer` with **every slot at zero weight**. But `anim::drive_scp1048_animation`, the only system that ever sets those targets, lived in the windowed-only `Scp1048VisualsPlugin`. So headless, a bear held a permanently undriven blender, and `liveness::every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run` failed the moment the bear's GLB finished streaming — presenting as a flake, since load timing decided whether it fired. Squad, crab and manca all register their clip drivers in their *harness-visible* creature plugins; 1048 was the lone outlier (introduced by `2ab526b`). Fixed by moving the driver into `Scp1048Plugin`; `Scp1048VisualsPlugin` keeps only the fog hiding. · *Touches:* `src/scp1048/mod.rs`, `src/lib.rs`
-- **FVS-K-2 — SCP-1048-A triangle fix** · S · ⚠️ **MEASURED 2026-07-27 — the premise conflates two separate facts, and neither is what the item claims**
+- **FVS-K-2 — SCP-1048-A triangle fix** · S · ✅ **CLOSED 2026-07-27 — premise measured, UV strip declined with a reason**
   The item said "2.6× triangles **from** 3 dead UV sets — cheapest asset win + a test-suite slowdown".
   Measured directly out of the GLB headers:
   | asset | verts | tris | UV sets |
@@ -349,9 +349,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `tests/creature_clip_contract.rs` pins — which is a real risk to a rigged character for a 9.2% saving
   on one file (~1.5% of `assets/`). A surgical strip needs `gltf-transform`/`gltfpack` (neither
   installed), and that is a five-minute job the day one of them is.
-  *Done when:* **either** a surgical tool strips TEXCOORD_1..3 (189 KiB, clip contract untouched), **or**
-  this is split into a real decimation item with an SSIM bar and the UV strip is closed as "not worth a
-  round-trip". · *Deps:* — · *Touches:* `assets/scp1048a/` · *Reading:* — (no corpus resource)
+  ✅ **CLOSED 2026-07-27 on the second branch, which this item wrote for itself.**
+  Checked the host: **no `gltf-transform`, no `gltfpack`, no `node`/`npm`.** The only glTF tooling here
+  is Blender, and an import/export round-trip re-encodes meshes, materials, skinning and the animation
+  clips `tests/creature_clip_contract.rs` pins — a real risk to a rigged character for **9.2% of one
+  file (~1.5% of `assets/`)** that the item already measured as buying **no** suite time. Writing the
+  strip by hand in Python is worse: removing the attribute references without repacking the buffer saves
+  zero bytes, and repacking a rigged, animated GLB by hand is precisely the surgery being avoided.
+  So: **the UV strip is closed as not worth a round-trip.** It becomes a five-minute job the day one of
+  those tools is installed, and the measurement above is what makes that call rather than a guess.
+  **The decimation is a different item and is NOT filed**, deliberately — 1048-A's ~2.5× triangle count
+  is a *denser mesh*, unrelated to the UV sets, and reducing it has visual consequences that need an
+  SSIM bar and an artist's eye. File it when the frame budget actually asks for it; there is no
+  measurement today saying it does.
+  *Done when:* ~~**either** a surgical tool strips TEXCOORD_1..3 (189 KiB, clip contract untouched),~~
+  **or** this is split into a real decimation item with an SSIM bar and the UV strip is closed as "not
+  worth a round-trip". · *Deps:* — · *Touches:* `assets/scp1048a/` · *Reading:* — (no corpus resource)
 - **FVS-M-2 / M-3 — DECISION: crab "numbers-kill" and pounce gates** · ✅ **DECIDED 2026-07-25 (user) — claim rejected, docs corrected**
   **Decision: there is no threshold. The code was right; the README was wrong.** `crab_damage_exponent` already makes a pile-on super-linear, so one or two crabs barely register and a swarm shreds — density is the threat without a cliff. A hard "zero damage under N" gate was rejected on feel: a crab that does *literally nothing* reads as broken, not as tactical. M-3 follows M-2 (the user chose "match whatever M-2 decides"), so pounce damage stays on the same curve — one rule for contact and leap, which is the single explainable mechanic the README was reaching for.
   *Landed:* `README.md` §Crabs — both bullets rewritten to describe the shipped curve and to state the *absence* of a threshold as deliberate, so nobody re-adds it from the old text. **Zero gameplay change, zero golden movement** — this was a documentation defect, and the cheapest correct outcome was to fix the document.
@@ -838,7 +851,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[QD-PCG]**, [QD], [ME], [QD-OEE], [LPM]
 **Done when:** the retrained archive loads at MODE_COUNT 29; I-1's ablation shows capture-favoring seeds are selectable; successive expeditions receive archive-sampled challenges tuned toward intermediate difficulty, reproducibly.
 
-- **FVS-I-1 — Containment/yield fitness terms + kill-vs-capture conflict resolution** · XL · *determinism: offline; mirrors B-4*
+- **FVS-I-1 — Containment/yield fitness terms + kill-vs-capture conflict resolution** · XL · *determinism: offline; mirrors B-4* · ✅ **DESIGN + BOTH CODE STEPS LANDED 2026-07-27 — only H-1's bake remains**
   `surprise = W·S·L` has no containment/yield term and actively rewards spectacular **kills**. Add capture-quality/yield terms and resolve the conflict — Constrained Surprise Search (surprise as a *constrained* QD objective) is the direct precedent.
   > **📐 DECOMPOSITION DECIDED 2026-07-27 — containment is a CONSTRAINT and an ARCHIVE AXIS, and `W·S·L` is left alone.**
   > The item offers "separate capture-quality archive dimension **vs** scalarized term". It is the first,
@@ -929,9 +942,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > What this **does** invalidate is every baked archive and `sweep_prior` — which H-1 already declares
   > stale for two independent reasons, and this is now the third.
   >
-  > *Next:* step 2, the `minimal_criterion` feasibility constraint. Step 3 (H-1's 12–20 h bake) is
-  > deliberately **not** started — run `cargo train bench` for this box's projection before committing
-  > a night to it.
+  > ### ✅ STEP 2 LANDED 2026-07-27 — the constraint, in `minimal_criterion`
+  >
+  > `captures_attempted == 0` is now **infeasible**. The decomposition the item asked for is therefore
+  > settled in code: containment is a **constraint and an archive axis**, and `W·S·L` is left alone.
+  >
+  > **Why `attempted` and not `completed`** — a world where the squad reached a capturable anomaly and
+  > *failed* is exactly the interesting one; it is a containment problem the search should be free to
+  > make harder. Gating on completion would select for worlds where capture is **easy**, which inverts
+  > the item. Pinned by `a_failed_capture_attempt_is_still_feasible`.
+  >
+  > It preserves `Fitness::score`'s multiplicative-veto property — a fourth factor would make *every*
+  > elite require a completed capture, emptying the archive rather than shaping it — and it lands in
+  > `minimal_criterion`, which already takes `&EpisodeOutcome`, so `fitness()`'s signature is unchanged
+  > across all five call sites.
+  >
+  > *Remaining:* step 3, H-1's bake. Deliberately **not** started — run `cargo train bench` for this
+  > box's projection before committing a night to it. **I-1 is otherwise closed**, and H-3 is unblocked
+  > the moment the archive exists.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
 - **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI* · ✅ **LANDED 2026-07-27 (marked 2026-07-27 — it shipped with L-3 and was never ticked)**
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
@@ -966,7 +994,32 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
-- **FVS-H-2 — Make CMA-MAE emitter reachable (ideally)** · M · *determinism: offline*
+- **FVS-H-2 — Make CMA-MAE emitter reachable** · M · *determinism: offline* · ✅ **LANDED 2026-07-27**
+  *Shipped:* `rl_search::Emitter` (`Isotropic` / `CmaMe` / `CmaMae`) replacing the `use_cma` boolean,
+  `cma_mae_alpha` threaded through `RlSearchConfig`, and `train rl --emitter cma-mae [--alpha X]`.
+  **A boolean cannot name three emitters, and that is why CMA-MAE stayed dead** — the code was
+  implemented, unit-tested and correct, with nowhere to put the third choice. The enum is that place.
+  **`--cma` still works and still means CMA-ME**, and the two flags are `conflicts_with` rather than
+  ranked by a precedence rule. Deliberate: a silent winner between two flags that both name an emitter
+  is how a **12–20 h bake** ends up searching a landscape nobody chose, discovered only when the archive
+  turns out incomparable. `the_emitter_shorthand_and_the_flag_agree` and
+  `cma_and_emitter_cannot_both_be_given` pin both halves.
+  **The worker forward is the subtle part.** Island children were launched with `--cma`; a child
+  launched with `--cma` while the parent ran `--emitter cma-mae` would search a *different* landscape,
+  which is precisely what `search_parallel`'s bit-for-bit archive comparison exists to catch. The
+  emitter choice is now forwarded, `--alpha` with it.
+  `min_f` is **`0.0`**, not a tuned constant: policy fitness is `W·S·L`, a product of three non-negative
+  factors, so zero is the true infimum and an empty cell's threshold starts where "nothing archived
+  here yet" actually is.
+  **`train all` is unchanged** — it still drives the `rl` phase through `--cma`. Making CMA-MAE the
+  pipeline default is a decision for whoever commits the night to H-1, not a side effect of making it
+  reachable.
+  ⚠️ **Scope, re-measured and unchanged:** `rl_search` is the **only** consumer of any CMA emitter —
+  `levels`/`audio`/`behavior`/`evolve3` all use isotropic `map_elites_loop` — so this improves the
+  **policy** archive alone unless that wiring is widened.
+  *Superseded note:* the old "otherwise the director is built on the weaker emitter" overstated it. The
+  status quo was CMA-**ME**, used in anger (the 2026-07-23 island run) and already what `train all`
+  passes. This widens the choice rather than fixing a weakness.
   CMA-MAE (`map_elites::map_elites_cma_mae_loop`, Fontaine & Nikolaidis 2023) is implemented and unit-tested but `pub(crate)` and referenced **only by its own two tests** — confirmed dead 2026-07-27.
   ⚠️ **Correction (2026-07-27): the old "otherwise the director is built on the weaker emitter" overstates it.** CMA-**ME** (`map_elites_cma_loop`) *is* reachable via `train rl --cma`, has been used in anger (the 2026-07-23 island run), and is what `train all` already passes for the `rl` phase. So the status quo is CMA-ME, not the isotropic emitter. Also worth knowing before scoping: `rl_search` is the **only** consumer of any CMA emitter — `levels`/`audio`/`behavior`/`evolve3` all use isotropic `map_elites_loop` — so this improves the *policy* archive only unless the wiring is widened.
   Mechanically it means turning `RlSearchConfig`'s boolean `use_cma` into a 3-way emitter enum and threading CMA-MAE's `alpha` (annealing rate) through `SearchArgs`.
@@ -1395,7 +1448,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   concurrent harness `App`s has been wrong before.
   *Done when:* either reproduced and diagnosed, or a documented decision that the sweep shape is the
   cause and the sweep changes. · *Deps:* — · *Touches:* `tests/session.rs` · *Reading:* [TEST-NT]
-- **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
+- **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent* · ✅ **CLOSED 2026-07-27 — the decision below IS the deliverable**
+  No code ships for this, and that is the outcome rather than a deferral: the decision was *do not gate the search*, and the alternative it names (an assertion in `evaluate::rollout`) is explicitly conditional on the hazard ever being observed. It has not been. Writing the assertion now would be a guard against a condition with no evidence, and the three reasons below are why gating would have been actively worse. Re-open only if `search_rollouts_are_reproducible_under_load` goes red with a gib-count divergence.
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
   Not currently a shipped bug (nothing kills a unit in the first second of a real run), and it is **not** worth forcing the bake synchronous. What is worth deciding: whether the offline search — which runs thousands of rollouts on evolved worlds where an early death is plausible — should gate its rollouts on `sim_harness::autogib_ready` the way `tests/session.rs` now does.
   ✅ **DECIDED 2026-07-27: do NOT gate the search. Assert instead, if it ever bites.**
