@@ -14,6 +14,8 @@
 
 use bevy::prelude::*;
 
+use crate::ai::field::FieldId;
+
 use super::{
     anim::Scp1048Anim, Scp1048, Scp1048Build, Scp1048Seed, Scp1048SpawnSeq, Scp1048Variant,
 };
@@ -63,18 +65,37 @@ pub(crate) fn copy_variant(seed: u32, builds_done: u32, w_a: f32, w_b: f32) -> S
 pub(crate) fn scp1048_scavenge(
     time: Res<Time>,
     sim: Res<SimTuning>,
-    mut bears: Query<(&ActiveBehavior, &mut Scp1048Build)>,
+    stig: Res<crate::ai::field::Stig>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+    mut bears: Query<(&ActiveBehavior, &Transform, &mut Scp1048Build)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
     let t = &sim.scp1048;
-    for (active, mut build) in &mut bears {
+    let watch = sim.containment.out_watch_threshold;
+    for (active, tf, mut build) in &mut bears {
         build.cooldown = (build.cooldown - dt).max(0.0);
-        if active.mode == Mode::Build {
-            build.materials = (build.materials + t.scavenge_rate * dt).min(t.build_cost);
+        if active.mode != Mode::Build {
+            continue;
         }
+        // **FVS-C-3 — the out-watch mechanic.** Canon is explicit that 1048 assembles its copies
+        // UNOBSERVED, and this is where that becomes a rule the player can act on: hold the ambient
+        // ATTENTION field over the bear's cell and it cannot scavenge.
+        //
+        // The AMBIENT field, deliberately, not `enemy::ObservedBySquad`. That per-entity primitive
+        // exists (FVS-M-1 added it for 173/096) and using it here would be the easy thing — but it is a
+        // boolean you either have or do not, whereas the field is a decaying, diffusing quantity you
+        // must *maintain*. Observation as a place you hold rather than a flag you set is the whole
+        // difference between this creature and a line-of-sight puzzle, and it is why the capture rule
+        // reads the same channel: suppressing the build and completing the capture are one action.
+        //
+        // Same threshold for both, from one knob, so the player never has to learn two numbers.
+        if stig.sample(FieldId::ATTENTION, &dungeon, tf.translation) >= watch {
+            continue;
+        }
+        build.materials = (build.materials + t.scavenge_rate * dt).min(t.build_cost);
     }
 }
 
@@ -103,6 +124,8 @@ pub(crate) fn scp1048_replicate(
     mut seq: ResMut<Scp1048SpawnSeq>,
     all_bears: Query<(), With<Scp1048>>,
     mut builders: Query<(&Scp1048, &Scp1048Seed, &Transform, &mut Scp1048Build)>,
+    rules: Res<crate::containment::ContainmentRules>,
+    mut targets: ResMut<crate::containment::TargetSeq>,
 ) {
     let t = &sim.scp1048;
     let mut live = all_bears.iter().count();
@@ -154,6 +177,8 @@ pub(crate) fn scp1048_replicate(
             child_seed,
             spawn,
             variant,
+            rules.0.scp1048.clone(),
+            &mut targets,
         );
         built.push(parent_seed);
         live += 1;

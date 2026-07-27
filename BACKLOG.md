@@ -213,9 +213,33 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **The rule, and why it is the right tutorial:** `THREAT_GUN AtMost 0.05` **and** `ATTENTION AtLeast 0.25`, held 4 s, `OnBreak::Keep`. Both clauses are satisfied by choosing *not* to fight — holster, and stay with it. That states the whole win-by-containing pivot in one creature, and it reads through the L-1 HUD as `LOWER GUNFIRE` / `RAISE OBSERVATION`. `Keep` (cumulative) rather than `Reset`: a nervous trigger finger should cost progress, not the run, on the first capture anyone performs.
   **The blob moves, and the rule samples its *current* cell** — 999 oozes toward the most-anxious squad member, so befriending it means keeping attention on it *as it moves*. The test tracks it for exactly that reason; flooding its spawn point drops the clause the moment it sets off. That is a mechanic, not a test artefact.
   *Config placement:* the `containment:` slice sits outside `WorldConfig` like `session:` — a rule that defines what capturing an anomaly *means* must not be an evolved objective. There is also a mechanical blocker worth stating so nobody "fixes" it by accident: `WorldConfig` is `Copy` and a rule owns a `Vec<FieldCondition>`. Evolving rule *thresholds* as a difficulty axis is defensible later, but it needs that constraint addressed, not a silent `Clone`. · *Deps:* B-5 · *Reading:* [STIG], [GOAP]
-- **FVS-C-3 — SCP-1048 out-watch capture** · M · *determinism: FixedUpdate; ATTENTION deposit/diffuse/decay in the deterministic field*
-  1048 builds hostile copies while **unobserved**; its rule = keep the **ambient** `ATTENTION` field over its cell above threshold (out-watch), then device-capture. Uses the ambient decaying/diffusing scalar — **not** a per-entity watch boolean.
-  *Done when:* sustained attention suppresses copy-building and enables capture; letting attention decay resumes building. · *Deps:* B-5 · *Touches:* `src/scp1048/`, `src/ai/field.rs` (ATTENTION), containment module · *Reading:* **[STIG]**
+- **FVS-C-3 — SCP-1048 out-watch capture** · M · ✅ **LANDED 2026-07-26 — the second real capture**
+  *Shipped:* a `scp1048:` rule in the `containment:` slice, `Containment` + `TargetId` attached at
+  `spawn_scp1048_at` (the shared builder, so an F6 bear is byte-identical to a seeded one), and the
+  mechanic itself in `replicate::scp1048_scavenge`: a bear standing in ambient `ATTENTION` at or above
+  the threshold **cannot scavenge**.
+  **The exact inverse of SCP-999, and that is the design.** 999 is contained by *not* looking down the
+  sights; 1048 by refusing to look away. `THREAT_GUN AtMost` versus `ATTENTION AtLeast` — one rule
+  model, two opposite verbs, which is the payoff for `Sign` being data rather than two evaluators.
+  **The AMBIENT field, deliberately — not `enemy::ObservedBySquad`.** That per-entity boolean exists
+  (M-1 built it for C-6) and using it here would have been easier. But a boolean is a flag you set,
+  whereas the decaying, diffusing field is a place you **maintain** — and that difference is the whole
+  creature. It is also why the *same* channel gates the build and completes the capture: suppressing
+  the copies and containing the bear are one action, not two things the player must learn separately.
+  **One knob, two consumers.** `sim.containment.out_watch_threshold` (0.45) feeds both the scavenge gate
+  and the authored rule, so they cannot drift apart. Evolvable, bounded `(0.15, 0.85)`: floored above
+  ambient field noise (a squad merely present must not passively suppress the build, or the mechanic is
+  free) and capped below saturation (an unreachable bar makes the bear uncontainable *and* the copies
+  unstoppable — degenerate either way). `world_genome::N` 136 → 137.
+  *Harder than 999 on purpose,* being the second capture anyone performs: 0.45 vs 0.25, twice the hold,
+  and `OnBreak::Reset` rather than `Keep` — look away and you start over.
+  *Pinned by:* `containment::watching_scp1048_suppresses_its_building_and_looking_away_resumes_it`,
+  which asserts **both** directions and bails out loudly rather than passing vacuously if the bear never
+  entered `Build` (FVS-N-9's lesson); and
+  `the_1048_rule_reads_the_ambient_field_not_a_per_entity_watch_flag`, which pins the ambient-vs-boolean
+  distinction as data so a later "simplification" onto `ObservedBySquad` fails the suite.
+  *Golden:* **unmoved**, measured. The 1048 spawn gained components and `scp1048_scavenge` gained an
+  access set, either of which could have permuted the schedule; neither did. · *Deps:* B-5 · *Reading:* **[STIG]**
 - **FVS-C-4 — SCP-150 parasite cure/extract** · M · *determinism: FixedUpdate*
   150 infects squad **and** crabs (rare three-body web); containment = cure/extract hosts via the host relationship (D-1) + single-target device.
   *Done when:* curing an infected host extracts the parasite as a specimen; untreated hosts stay infected. · *Deps:* B-5, D-1 · *Touches:* `src/parasite.rs`, containment module · *Reading:* [STIG-AD], [STIG], [ECS]

@@ -318,6 +318,12 @@ pub struct ContainmentTuning {
     pub cap_reach: f32,
     /// Radius of the run's extraction zone at the insertion cell (world units).
     pub extraction_radius: f32,
+    /// Ambient `ATTENTION` at which an anomaly counts as **out-watched** (FVS-C-3).
+    ///
+    /// One knob feeding two places on purpose: it gates SCP-1048's scavenging *and* is the threshold
+    /// its authored containment rule uses. Suppressing the build and completing the capture are then
+    /// literally the same action, and the player never has to learn two numbers.
+    pub out_watch_threshold: f32,
 }
 
 impl Default for SimTuning {
@@ -430,6 +436,7 @@ impl Default for SimTuning {
                 quarantine_radius: 3.0,
                 cap_reach: 1.5,       // parity with the crab latch reach: you seal a nest at arm's length
                 extraction_radius: 2.5, // wide enough that five units fit without shoving each other out
+                out_watch_threshold: 0.45, // matches the authored scp1048 rule in config.ron
             },
         }
     }
@@ -591,6 +598,7 @@ pub fn validate_tuning(t: &SimTuning) -> Result<(), String> {
     positive("containment.quarantine_radius", t.containment.quarantine_radius)?;
     positive("containment.cap_reach", t.containment.cap_reach)?;
     positive("containment.extraction_radius", t.containment.extraction_radius)?;
+    probability("containment.out_watch_threshold", t.containment.out_watch_threshold)?;
 
     Ok(())
 }

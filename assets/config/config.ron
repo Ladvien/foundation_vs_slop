@@ -598,6 +598,9 @@
             quarantine_radius: 3.0,
             cap_reach: 1.5,            // parity with the crab latch reach: sealed at arm's length
             extraction_radius: 2.5,    // five units fit without shoving each other back out
+            out_watch_threshold: 0.45, // ambient ATTENTION at which SCP-1048 counts as watched; the
+                                       // SAME number its authored capture rule uses, so suppressing
+                                       // the build and completing the capture are one action
         ),
     ),
 
@@ -1601,6 +1604,28 @@
             ],
             hold_secs: 4.0,
             break_on_fail: Keep,   // cumulative: a nervous trigger finger costs progress, not the run
+        ),
+
+        // SCP-1048 — the OUT-WATCH capture (FVS-C-3), and the exact inverse of 999's.
+        //
+        // The bear builds hostile copies of itself out of scavenged material, and canon is explicit
+        // that it does so UNOBSERVED. So containing it is refusing to look away: hold the ambient
+        // ATTENTION field over its cell and it can neither build nor slip the net.
+        //
+        // Note this is the AMBIENT decaying/diffusing scalar, not a per-entity watch boolean — that
+        // distinction is the whole of C-3, and `enemy::ObservedBySquad` (the per-entity primitive
+        // FVS-M-1 added for 173/096) is deliberately NOT what this reads. An ambient field means
+        // observation is a place you maintain, not a flag you set.
+        //
+        // Harder than 999 on both axes, because it is the second capture anyone performs: a higher
+        // ATTENTION bar (0.45 vs 0.25), twice the hold, and `Reset` rather than `Keep` — look away and
+        // you start over. That is the mechanic stating itself.
+        scp1048: (
+            requires: [
+                (channel: 9, sign: AtLeast, threshold: 0.45),  // ATTENTION — do not look away
+            ],
+            hold_secs: 8.0,
+            break_on_fail: Reset,
         ),
     ),
 

@@ -46,12 +46,15 @@ pub use verbs::{ArmedTool, DeviceSupply, QuarantineSupply, TargetId, TargetSeq};
 pub struct ContainmentConfig {
     /// SCP-999's befriend basin (FVS-C-2).
     pub scp999: ContainmentRule,
+    /// SCP-1048's out-watch basin (FVS-C-3).
+    pub scp1048: ContainmentRule,
 }
 
 impl ContainmentConfig {
     /// Reject malformed authored rules at load — one path, no fallback.
     pub fn validate(&self) -> Result<(), String> {
-        self.scp999.validate().map_err(|e| format!("containment.scp999: {e}"))
+        self.scp999.validate().map_err(|e| format!("containment.scp999: {e}"))?;
+        self.scp1048.validate().map_err(|e| format!("containment.scp1048: {e}"))
     }
 }
 pub use device::{ContainmentDevice, HeldBy, Holding};

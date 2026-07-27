@@ -274,10 +274,12 @@ fn spawn_palette(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets) {
                      d: Res<Dungeon>,
                      sim: Res<crate::sim::SimTuning>,
                      banim: Res<crate::scp1048::anim::Scp1048Anim>,
+                     rules: Res<crate::containment::ContainmentRules>,
+                     mut targets: ResMut<crate::containment::TargetSeq>,
                      mut s: ResMut<EditorState>| {
                         let q = s.quantity();
                         for _ in 0..q {
-                            spawn_live_scp1048(&mut c, &a, &banim, &sim, &d, &mut s);
+                            spawn_live_scp1048(&mut c, &a, &banim, &sim, &d, &mut s, &rules, &mut targets);
                         }
                     },
                 );
@@ -597,6 +599,8 @@ fn spawn_live_scp1048(
     sim: &crate::sim::SimTuning,
     dungeon: &Dungeon,
     state: &mut EditorState,
+    rules: &crate::containment::ContainmentRules,
+    targets: &mut crate::containment::TargetSeq,
 ) {
     let n = state.spawn_count;
     state.spawn_count += 1;
@@ -612,6 +616,8 @@ fn spawn_live_scp1048(
         seed,
         dungeon.cell_center(cell),
         variant,
+        rules.0.scp1048.clone(),
+        targets,
     );
     commands.entity(e).insert(RoomSpawned);
     info!("research_room: spawned live {variant:?} SCP-1048 at cell {cell:?}");

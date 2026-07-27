@@ -396,6 +396,8 @@ fn spawn_scp1048(
     assets: Res<AssetServer>,
     bear_anim: Res<anim::Scp1048Anim>,
     mut seq: ResMut<Scp1048SpawnSeq>,
+    rules: Res<crate::containment::ContainmentRules>,
+    mut targets: ResMut<crate::containment::TargetSeq>,
 ) {
     if sim.scp1048.count == 0 {
         return;
@@ -439,6 +441,8 @@ fn spawn_scp1048(
             s,
             dungeon.cell_center(*cell),
             Scp1048Variant::Original,
+            rules.0.scp1048.clone(),
+            &mut targets,
         );
     }
     info!("scp1048: seeded {} Builder Bear(s) out in the level", chosen.len());
@@ -457,6 +461,8 @@ pub fn spawn_scp1048_at(
     seed: u32,
     pos: Vec3,
     variant: Scp1048Variant,
+    rule: crate::containment::ContainmentRule,
+    targets: &mut crate::containment::TargetSeq,
 ) -> Entity {
     let table = bear_anim.get(variant);
     let mut ec = commands.spawn((
@@ -488,6 +494,16 @@ pub fn spawn_scp1048_at(
         // Render-only: smooth the bear's 60 Hz movement across the display refresh.
         avian3d::prelude::TransformInterpolation,
     ));
+    // FVS-C-3: the out-watch capture, plus the uniform aim key the player's throw resolves by.
+    //
+    // A SECOND `insert` rather than more tuple elements: the spawn above is already at Bevy's
+    // 15-element cap. This is the same idiom `squad::spawn_unit` uses for
+    // `parasite::host_infestation_bundle()`, and it reads better anyway — "and it is also containable"
+    // is a separate statement about the bear.
+    //
+    // Both are attached in the SHARED builder, so a Research-Room F6 bear is byte-identical to a
+    // seeded one, and both are value fields present from spawn, so the hashed archetype never churns.
+    ec.insert((crate::containment::Containment::new(rule), targets.next()));
     // Cosmetic animation wiring: `anim::attach_pose_blenders` finds this on the root when the scene's
     // `AnimationPlayer` streams in. Inserted at spawn, so it never churns the hashed archetype.
     ec.insert(crate::anim::BlendSource {

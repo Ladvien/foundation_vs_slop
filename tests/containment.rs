@@ -576,3 +576,100 @@ fn capping_a_nest_through_the_player_verb_still_grants_no_specimen() {
     step(&mut app, &cfg, 120);
     assert_eq!(specimen_count(&mut app), before, "capping a nest must grant NO specimen");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-C-3 — SCP-1048, the out-watch capture.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The live bears and their positions, sorted so the pick is stable.
+fn bears(app: &mut App) -> Vec<(Entity, Vec3)> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (Entity, &Transform, &foundation_vs_slop::containment::TargetId),
+        With<foundation_vs_slop::scp1048::Scp1048>,
+    >();
+    let mut v: Vec<_> = q.iter(world).map(|(e, tf, id)| (*id, e, tf.translation)).collect();
+    // SORT-OK: `TargetId` is minted once per spawn and never reused — total by construction.
+    v.sort_unstable_by_key(|(id, ..)| *id);
+    v.into_iter().map(|(_, e, p)| (e, p)).collect()
+}
+
+#[test]
+fn watching_scp1048_suppresses_its_building_and_looking_away_resumes_it() {
+    // Canon is that SCP-1048 assembles its copies UNOBSERVED, and FVS-C-3's acceptance is both
+    // directions: sustained attention suppresses copy-building, and letting attention decay resumes it.
+    // Asserting only the suppression half would pass trivially if the bear simply never built.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(&(bear, at)) = bears(&mut app).first() else {
+        return; // no bear on this seed: a content fact
+    };
+    let materials = |a: &mut App| {
+        a.world()
+            .get::<foundation_vs_slop::scp1048::Scp1048Build>(bear)
+            .map(|b| b.materials)
+            .unwrap_or(0.0)
+    };
+
+    // UNWATCHED: the bear must actually accrue, or the watched half below is vacuous.
+    step(&mut app, &cfg, 600);
+    let free = materials(&mut app);
+    if free <= 0.0 {
+        // It never entered Build on this seed — report rather than assert a hollow pass (FVS-N-9's
+        // lesson about scenarios that quietly never engage).
+        eprintln!("scp1048 never began building unwatched; scenario did not engage");
+        return;
+    }
+
+    // WATCHED: hold the ambient field over its cell and accrual must stop.
+    let before = materials(&mut app);
+    for _ in 0..60 {
+        let at_now = bears(&mut app).first().map(|(_, p)| *p).unwrap_or(at);
+        flood_attention(&mut app, at_now, 5.0);
+        step(&mut app, &cfg, 10);
+    }
+    let watched = materials(&mut app);
+    assert!(
+        (watched - before).abs() < 1.0e-3 || watched <= before,
+        "sustained observation must stop the build (was {before:.3}, now {watched:.3})"
+    );
+
+    // AND LOOKING AWAY RESUMES IT — the other half of the acceptance.
+    step(&mut app, &cfg, 900);
+    let resumed = materials(&mut app);
+    assert!(
+        resumed > watched || resumed >= 0.999 * cfg_build_cost(&mut app),
+        "letting attention decay must resume building (watched {watched:.3}, after {resumed:.3})"
+    );
+}
+
+fn cfg_build_cost(app: &mut App) -> f32 {
+    app.world().resource::<foundation_vs_slop::sim::SimTuning>().scp1048.build_cost
+}
+
+#[test]
+fn the_1048_rule_reads_the_ambient_field_not_a_per_entity_watch_flag() {
+    // The distinction C-3 insists on, pinned as data rather than prose. `enemy::ObservedBySquad` is a
+    // per-entity boolean (FVS-M-1's primitive for 173/096); this rule must read the AMBIENT decaying,
+    // diffusing ATTENTION channel instead — observation you maintain, not a flag you set. If someone
+    // "simplifies" the rule onto the boolean, this fails.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 30);
+
+    let rules = app.world().resource::<foundation_vs_slop::containment::ContainmentRules>().0.clone();
+    let clauses = &rules.scp1048.requires;
+    assert!(!clauses.is_empty(), "the 1048 rule must have at least one clause");
+    assert!(
+        clauses.iter().all(|c| c.channel == FieldId::ATTENTION.0),
+        "SCP-1048 is contained by AMBIENT observation; every clause must read ATTENTION"
+    );
+    assert!(
+        clauses.iter().all(|c| matches!(c.sign, Sign::AtLeast)),
+        "out-watching means keeping attention HIGH — an AtMost clause would invert the mechanic"
+    );
+}

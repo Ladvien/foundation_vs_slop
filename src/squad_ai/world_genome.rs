@@ -35,8 +35,8 @@ use crate::sim::{
 };
 
 /// Number of knobs: 27 field-propagation (`AiTuning`: 8 channels × {evaporate, diffuse, deposit_radius}
-/// + rally × 3) + 85 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
-/// parasite 14, scp999 6, scp1048 23, containment 6) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy
+/// + rally × 3) + 86 simulation-dynamics (`SimTuning`: fear 3, deposit 10, combat 9, breeding 7, boss 7,
+/// parasite 14, scp999 6, scp1048 23, containment 7) + 6 mold + 16 almond-water + 2 gameplay lighting. The 8th stigmergy
 /// channel is ATTENTION (observation); the SCP-150 parasite is a host-killing species and SCP-999 is a
 /// fear-*lowering* comfort creature, so both belong in the search that shapes the ecosystem's
 /// fear/deaths/lives. SCP-1048 belongs for a third reason: it is the only creature that *builds more of
@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 136;
+pub const N: usize = 137;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -184,6 +184,11 @@ static BOUNDS: [(f32, f32); N] = [
     (1.5, 6.0),    // extraction_radius — floored so five units fit without shoving each other back
                    //   out (which would make the win flicker), capped so "get to the exit" stays a
                    //   real traversal rather than a formality
+    (0.15, 0.85),  // out_watch_threshold — ambient ATTENTION at which SCP-1048 counts as watched.
+                   //   Floored above the field's ambient noise (a squad merely present must not
+                   //   passively suppress the build, or the mechanic is free), and capped below
+                   //   saturation (an unreachable bar would make the bear uncontainable and the
+                   //   copies unstoppable — degenerate either way).
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -335,6 +340,7 @@ pub fn encode(
     v.push(sim.containment.quarantine_radius);
     v.push(sim.containment.cap_reach);
     v.push(sim.containment.extraction_radius);
+    v.push(sim.containment.out_watch_threshold);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -539,6 +545,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             quarantine_radius: f!(),
             cap_reach: f!(),
             extraction_radius: f!(),
+            out_watch_threshold: f!(),
         },
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
