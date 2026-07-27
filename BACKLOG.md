@@ -343,9 +343,34 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   because scoring raw answer entropy would make a coin-flip test look maximally informative; and the
   ranking is **total** (ties break on authored index) so the top suggestion cannot flicker under the
   player's cursor between frames. · *Deps:* E-1 · *Reading:* **[PROB-ML]**, [BAYESOPT], + arXiv:2006.12638
-- **FVS-E-3 — Reveal pacing (front-load resolvable surprise)** · M
-  Pace the reveal so value tracks the **rate** of uncertainty reduction — front-load, don't drip.
-  *Done when:* a completed arc reveals more early, tapering; tunable; test asserts monotone-decreasing default reveal rate. · *Deps:* E-1, E-2 · *Touches:* research module, UI · *Reading:* **[GRIP]**, [LPM]
+- **FVS-E-3 — Reveal pacing (front-load resolvable surprise)** · M · ✅ **LANDED 2026-07-26 — and the premise was wrong twice**
+  *Shipped:* `research::pacing` — `reveal_schedule`, `schedule_is_front_loaded`, `felt_value`, and
+  `ExperimentFatigue` (the tunable the item asked for).
+  **The interesting part is what the tests refuted.** The obvious reading is that greedy information
+  gain must already front-load: it always picks the least-predictable question, so surely the first bite
+  is the biggest. **It is not**, for two independent reasons, both found by measurement:
+  1. **A reveal threshold is not a learning event.** Measuring the schedule with `total_entropy`
+     (which filters out revealed parameters) makes the observation that *crosses* `REVEAL_AT` appear to
+     be worth that parameter's entire remaining uncertainty. Measured: `[0.28 ×4, 0.72 ×4]` — rising.
+     Fixed by adding `belief_entropy` (all parameters, revealed or not) and pacing on that. The two
+     metrics answer different questions — *"how much is left to do"* versus *"how much do we know"* —
+     and conflating them is a visible bug, so both now exist with the distinction written down.
+  2. **Binary entropy is concave.** Moving a belief 0.5 → 0.8 resolves 0.28 bits; 0.8 → 0.94 resolves
+     0.40. Uncertainty falls slowly near the middle and fast near the extremes, so equal-strength
+     observations resolve an *increasing* amount each time. Still rising: `[0.28 ×4, 0.40 ×4]`.
+  So front-loading genuinely has to be authored, exactly as this item said. `ExperimentFatigue` is the
+  mechanism and it is diegetic rather than a curve bolted on: **each repeat test on a parameter is
+  weaker than the last** — the obvious experiments get run first, then you are down to marginal ones
+  arguing over a specimen that has already told you most of what it will.
+  **A third bug the floor exists for:** at `decay = 0.55` a 0.8 test drops to 0.44, and **below 0.5 a
+  test does not weaken, it LIES** — a Bayesian update at `r < 0.5` moves the belief *away* from the
+  observed result. `USELESS_BELOW` stops fatigue decaying through it, and an exhausted test is not
+  offered rather than offered-and-inert.
+  *Also corrected, in the test:* a leading **plateau** is right, not a failure. Four independent
+  parameters equally unknown means the first test on each is worth the same; there is no reason the
+  second *question* should reveal less than the first. What must fall is the arc across **rounds**.
+  `felt_value` scores bits resolved *this step*, per [GRIP]: the felt quality is in the movement toward
+  grip, not in holding it. · *Deps:* E-1, E-2 · *Reading:* **[GRIP]**, [LPM]
 - **FVS-E-4 — `Researched` marker + unlock hook** · S · *determinism: hook deterministic*
   When uncertainty crosses completion, add `Researched`; its `on_add` fires the unlock.
   *Done when:* completing research adds `Researched` and triggers exactly one unlock; idempotent. · *Deps:* E-1, F-1 · *Touches:* research module, tech-tree · *Reading:* [SDT-00], [ECS]

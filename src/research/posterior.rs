@@ -129,6 +129,25 @@ impl ResearchPosterior {
             .sum()
     }
 
+    /// Total uncertainty across **every** parameter, revealed or not, in bits.
+    ///
+    /// The distinction from [`Self::total_entropy`] is not pedantry — it is the difference between two
+    /// questions that look identical and are not:
+    ///
+    /// * `total_entropy` asks **"how much is left to do?"** and treats a revealed parameter as done, so
+    ///   it drops to zero the moment a belief crosses [`REVEAL_AT`]. That is the right completion metric.
+    /// * `belief_entropy` asks **"how much do we actually know?"** and keeps measuring a belief after it
+    ///   has been written up, because crossing a *display* threshold is not the same event as learning
+    ///   something.
+    ///
+    /// Conflating them produces a real, visible bug: FVS-E-3's reveal schedule measured with
+    /// `total_entropy` **rises** rather than tapering — each parameter's final observation appears to be
+    /// worth its entire remaining entropy, because that is when the filter stops counting it. Measured:
+    /// `[0.28, 0.28, 0.28, 0.28, 0.72, 0.72, 0.72, 0.72]`. Pacing must use this one.
+    pub fn belief_entropy(&self) -> f32 {
+        HiddenParam::ALL.iter().map(|p| self.entropy(*p)).sum()
+    }
+
     /// Is every parameter resolved?
     pub fn is_complete(&self) -> bool {
         HiddenParam::ALL.iter().all(|p| self.is_revealed(*p))
