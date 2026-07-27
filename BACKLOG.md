@@ -903,7 +903,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **Ruled out, each by measurement:** the figurines are streamed and wired (all 5 blenders present at `LOCO_SLOTS + 2`; a `step_until_squad_blenders_ready` settle was added to `sim_harness` and did not help); fog works (91 visible cells); the weight cap allows the assertion (`ACTION_ALPHA = 0.9` vs a `> 0.5` threshold); and the window is not too short (extended 200 → 1200 ticks, still `max_action = 0.000`).
   **The failure is upstream of the animation entirely:** `aimed = 0/5` — with 43 hostiles alive, *no unit ever acquires a target*. Three decoy placements were tried and all read 0: 1.5 m straight ahead (can land inside a wall slab, where fog never marks it visible), on the unit's own cell (degenerate aim direction — `(enemy - unit)` normalised fails the front-arc gate), and a scanned visible floor cell at a 1–3 tile standoff. Since real crabs are also present and also never engaged over 1200 ticks, the decoys are probably not the variable at all — the marching squad simply never closes with anything in this seed.
   *Improvements kept regardless:* the decoy placement now picks a visible floor cell at a real standoff (both prior placements were latent bugs), and the measurement loop breaks as soon as the property is observed instead of always burning a fixed 200 ticks.
-  *Done when:* the scenario reliably produces an engagement — most likely by driving the squad *at* a known hostile cluster rather than marching it across the map and hoping — and the test passes 10/10 under load with `#[ignore]` removed. · *Deps:* — · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
+  ⚠️ **Scenario FIXED 2026-07-27; the diagnosis is now much narrower and the test stays `#[ignore]`d.**
+  The prescribed fix landed — the squad is now driven **through** the densest hostile neighbourhood
+  (goal = the farthest reachable floor cell *within* it, so the path routes through the crabs and the
+  squad is still locomoting when shot at). Two intermediate attempts are recorded in the test because
+  each was wrong in an instructive way: ordering the squad *to* the cluster makes them arrive and stop,
+  so they fire from a standstill and a layering assertion can never be satisfied; and extrapolating a
+  straight line past the cluster walks into walls (measured: nothing reachable beyond `IVec2(45,16)`).
+  **Result: `max_action` moved from 0.000 over 1200 ticks — the squad never fired at all — to 0.169,
+  reproducibly.** Contact now happens. The assertion's `> 0.5` still does not.
+  **The remaining gap is NOT the blend.** `squad.rs` sets `alpha = ACTION_ALPHA (0.9)` whenever a unit is
+  `firing || aiming`, and weights ease to target in ~3·`FADE_TAU` ≈ 0.24 s — a unit *holding* an aim
+  would sit at 0.9. Reaching ~19% of that says the **aim state is flickering**: units acquire a target,
+  lose it, and the ease never converges. That is `fire_laser`'s front-arc gate and `AimTarget`'s
+  lifetime — a target-acquisition investigation, and a different one from what this test exists to pin.
+  **Deliberately not relaxed to a threshold the design happens to produce.** A test tuned until it
+  passes stops being evidence.
+  *Done when:* the aim state holds long enough for the action layer to converge, and the test passes
+  10/10 under load with `#[ignore]` removed. · *Deps:* — · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
 - **FVS-N-8 — Gib spawn positions were order-dependent** · M · ✅ **THE RESIDUAL'S CAUSE FIXED 2026-07-27 — see the audit + fix at the end of this entry**
   **`autogib::seed_from` hashed the `AssetId` of the character GLB to seed the fracture.** An `AssetId`
   is a **slot index in the asset arena**, assigned by async load order — so the same mesh got a

@@ -16,6 +16,11 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # 03:00 UTC daily, for `search-parallel-nightly` below. `workflow_dispatch` so it can also be run on
+  # demand — which is what you want after touching the search or the sim, rather than waiting a day.
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -102,7 +107,19 @@ jobs:
           key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (harness — replay + liveness + search-calibration, single-threaded)
         # Serial: headless Apps must not overlap (serial_guard + --test-threads=1).
-        run: cargo test --features test-harness -- --test-threads=1
+        #
+        # `search_parallel`'s two tests are SKIPPED here and run in the nightly job below. Measured
+        # 2026-07-27: they take **3754 s (62 min)** — longer than the whole rest of the lane — because
+        # `parallel_search_reproduces_the_inline_archives_bit_for_bit` runs a full inline search AND a
+        # worker-process search and compares the archives bit for bit. That guard is load-bearing (it
+        # is what makes `--jobs N` trustworthy, and it was red for months), so it is moved rather than
+        # cut: a per-PR lane that takes 100 minutes is one nobody waits for, and FVS-J-5 wants this
+        # lane promoted to a hard merge gate. `--skip` filters by test NAME, so the target still
+        # compiles here and a build break in it still fails this job.
+        run: |
+          cargo test --features test-harness -- --test-threads=1 \
+            --skip parallel_search_reproduces_the_inline_archives_bit_for_bit \
+            --skip batch_emitter_scales_past_opponents_deterministically
 
   # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
   # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,
@@ -134,3 +151,32 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core, release profile)
         run: cargo test --release
+
+  # The parallel-search equivalence guard, split out of the per-PR lane purely on runtime (see the skip
+  # note above). It answers one question — does `--jobs N` produce byte-identical archives to `--jobs 1`
+  # — and the answer changes only when the search or the sim changes, so nightly is the right cadence.
+  #
+  # Kept a HARD job (no continue-on-error): when this goes red, every baked elite since the last green
+  # run is suspect, which is exactly the state `docs/rl/2026-07-16-search-rollout-nondeterminism.md`
+  # describes as "the offline search is scoring against a wobbling objective".
+  search-parallel-nightly:
+    name: parallel search equivalence (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test (search_parallel only, single-threaded)
+        run: cargo test --features test-harness --test search_parallel -- --test-threads=1

@@ -7,8 +7,8 @@
 
 use bevy::math::IVec2;
 use foundation_vs_slop::sim_harness::{
-    build_headless_app, floor_cells, issue_squad_order, liveness_violations, serial_guard, step,
-    step_until_squad_blenders_ready, unit_cells, SimConfig,
+    build_headless_app, floor_cells, issue_squad_order, liveness_violations, serial_guard,
+    squad_centroid_cell, step, step_until_squad_blenders_ready, unit_cells, SimConfig,
 };
 use std::collections::HashSet;
 
@@ -183,85 +183,155 @@ fn every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run() {
 /// scenario never brings the squad into contact (measured: no unit acquires an `AimTarget` in 3000
 /// ticks), so a bare hostile is planted in front of each unit — `laser::fire_laser` needs only
 /// `(Hostile, Transform)`, fog visibility and the front arc — and the squad engages for real.
-/// **`#[ignore]`d — the SCENARIO does not reliably produce an engagement (FVS-N-9).** The property it
-/// checks (the upper-body action layer *layers over* locomotion rather than replacing it) is real and
-/// worth pinning; the setup around it is not yet reliable. See BACKLOG.md N-9 for the ruled-out list.
+/// **Firing layers OVER locomotion — it does not replace it** (FVS-N-9).
 ///
-/// The game is **not** broken: `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world`
-/// passes, so squads do engage and fire across every held-in world.
+/// The property: a unit shooting while it moves must carry gait weight *and* upper-body action weight
+/// at the same time. If the action layer ever replaced locomotion, the squad would slide into contact
+/// with dead legs.
+///
+/// # The scenario used to be the unreliable part, and this is what fixed it
+///
+/// It was `#[ignore]`d for a day because it *marched the squad the length of the level and hoped* it ran
+/// into something. Measured while diagnosing: 43 hostiles alive, 91 visible cells, and `aimed = 0/5`
+/// over 1200 ticks — the squad simply never closed with anything on that seed. Three decoy placements
+/// were tried and all read zero, so the decoys were never the variable either.
+///
+/// The fix is the one FVS-N-9 prescribed: **drive the squad THROUGH a known hostile cluster** rather
+/// than across the map hoping. The target is the densest hostile neighbourhood, and the goal is the
+/// farthest reachable floor cell *within* that neighbourhood — so the path routes through the crabs and
+/// the squad is still locomoting when it is shot at. Ordering them *to* the cluster is not enough: they
+/// arrive, stop, and fire from a standstill, which can never satisfy a layering assertion.
+///
+/// # Still `#[ignore]`d, and the reason is now much narrower
+///
+/// That scenario work moved `max_action` from **0.000 over 1200 ticks** (the squad never fired at all)
+/// to **0.169**, reproducibly. So contact happens now. What does not happen is the assertion's `> 0.5`.
+///
+/// `squad.rs` sets `alpha = ACTION_ALPHA (0.9)` whenever a unit is `firing || aiming`, and weights ease
+/// to target in ~3·`FADE_TAU` ≈ 0.24 s — so a unit that *held* an aim would sit at 0.9, comfortably over
+/// the bar. Reaching only ~19% of `ACTION_ALPHA` therefore says the **aim state is flickering** rather
+/// than the blend being wrong: units acquire a target, lose it, and the ease never converges.
+///
+/// That is a target-acquisition question (`fire_laser`'s front-arc gate and `AimTarget`'s lifetime),
+/// not an animation one, and it is a different investigation from the one this test is for. Left
+/// `#[ignore]`d rather than relaxed to a threshold the design happens to produce — a test tuned until it
+/// passes stops being evidence.
+///
+/// Two other things kept from the diagnosis, because each was its own false failure:
+/// * **Wait for the figurines** before measuring, or the loop finds no `PoseBlender`, `max_action`
+///   stays 0.0, and the test fails claiming "the squad did not engage" — a statement about GLB load
+///   timing dressed as one about gameplay (TESTING.md invariant 9).
+/// * **Wait for the engagement, then measure**, rather than measuring for a fixed window. Conflating
+///   "did a firefight start in N ticks" with "does the blend layer" is what made a combat-pacing
+///   accident report itself as an animation regression.
 #[test]
-#[ignore = "scenario does not reliably engage; the property is fine — see FVS-N-9"]
+#[ignore = "scenario now engages, but the aim state flickers — see FVS-N-9 for the narrowed diagnosis"]
 fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
     use bevy::prelude::{Transform, Vec3, With};
     use foundation_vs_slop::anim::{blend, PoseBlender};
-    use foundation_vs_slop::squad::Unit;
+    use foundation_vs_slop::crab::Crab;
+    use foundation_vs_slop::dungeon::Dungeon;
 
     let _serial = serial_guard();
     let cfg = SimConfig::default();
     let mut app = build_headless_app(&cfg);
     step(&mut app, &cfg, 1);
-    // Wait for the figurines to stream in and wire up. Without this the measurement loop below finds no
-    // `PoseBlender` at all, `max_action` stays 0.0, and the test fails claiming "the squad did not
-    // engage" — a statement about GLB load timing dressed up as one about gameplay. It flaked in 3 of 4
-    // full-suite runs on a loaded box for exactly this reason. Same discipline as
-    // `step_until_autogib_ready` (TESTING.md invariant 9).
     assert!(
         step_until_squad_blenders_ready(&mut app, &cfg, 600).is_some(),
         "the squad figurines never streamed in and wired to pose blenders"
     );
 
-    // March the squad the length of the level so it is definitely locomoting when contact happens.
-    // The order has to actually take — a squad standing still would make the "gait and action carried
-    // weight together" assertion below fail for the wrong reason.
-    let floors = floor_cells(&mut app);
-    let ordered = floors
-        .iter()
-        .rev()
-        .take(8)
-        .any(|&goal| issue_squad_order(&mut app, goal));
-    assert!(ordered, "no far goal was reachable, so the squad never had to walk anywhere");
-    step(&mut app, &cfg, 40);
-
-    // Plant a target on a **visible floor cell a couple of tiles from each unit**.
+    // The densest live-hostile NEIGHBOURHOOD, and it must be a real cluster: a lone wanderer can die or
+    // drift away before the squad arrives, which is how "drive at the enemy" quietly degenerates back
+    // into "march and hope".
     //
-    // Two constraints, and missing either is what made this test intermittent:
-    //   * `fire_laser` only targets enemies the squad can currently SEE (`fog::FogGrid` — RTS partial
-    //     observability), and fog marks *floor* cells. The original "1.5 m straight ahead" could land
-    //     inside a wall slab, where a decoy is permanently invisible. Measured while diagnosing: 43
-    //     hostiles alive, 91 visible cells, `aimed = 0/5`.
-    //   * ...but it cannot be placed *on* the unit either: aim direction is `(enemy - unit)` normalised,
-    //     so a coincident target is degenerate and fails the front-arc gate. Also measured at `0/5`.
-    // So: pick a real floor cell, visible, at a sane standoff.
-    let spots: Vec<Vec3> = {
-        use foundation_vs_slop::dungeon::Dungeon;
-        use foundation_vs_slop::fog::FogGrid;
+    // A neighbourhood rather than a single cell, because measured at spawn the crabs sit roughly one per
+    // cell — the first version of this asked for 3 in one cell and correctly refused to run. `CLUSTER_R`
+    // is a couple of tiles, which is "the squad will be shot at on arrival" rather than a precise claim.
+    const CLUSTER_R: i32 = 3;
+    const MIN_CLUSTER: usize = 3;
+    let target: IVec2 = {
         let world = app.world_mut();
-        let unit_positions: Vec<Vec3> = {
-            let mut q = world.query_filtered::<&Transform, With<Unit>>();
+        let positions: Vec<Vec3> = {
+            let mut q = world.query_filtered::<&Transform, With<Crab>>();
             q.iter(world).map(|t| t.translation).collect()
         };
         let dungeon = world.resource::<Dungeon>();
-        let fog = world.resource::<FogGrid>();
-        unit_positions
-            .iter()
-            .filter_map(|p| {
-                let home = dungeon.world_to_cell(*p);
-                // Nearest visible floor cell at a 1–3 tile standoff, scanned in a fixed order so the
-                // choice is reproducible.
-                (1..=3)
-                    .flat_map(|r| {
-                        (-r..=r).flat_map(move |dx| (-r..=r).map(move |dy| IVec2::new(dx, dy)))
-                    })
-                    .map(|d| home + d)
-                    .find(|c| *c != home && dungeon.is_floor(*c) && fog.visible_at(*c))
-                    .map(|c| dungeon.cell_center(c))
+        // A `BTreeMap` so the walk order is CELL order rather than hash order — the same discipline
+        // every canonical pick in this repo uses, and it matters here because the chosen goal steers
+        // the whole rest of the test.
+        let mut counts: std::collections::BTreeMap<(i32, i32), usize> = Default::default();
+        for p in &positions {
+            let c = dungeon.world_to_cell(*p);
+            if dungeon.is_floor(c) {
+                *counts.entry((c.x, c.y)).or_default() += 1;
+            }
+        }
+        let best = counts
+            .keys()
+            .map(|&(x, y)| {
+                let near: usize = counts
+                    .iter()
+                    .filter(|((ox, oy), _)| (ox - x).abs() <= CLUSTER_R && (oy - y).abs() <= CLUSTER_R)
+                    .map(|(_, n)| *n)
+                    .sum();
+                (near, -x, -y)
             })
-            .collect()
+            .max();
+        let Some((n, nx, ny)) = best else {
+            panic!("no live hostile stands on a floor cell — the scenario cannot produce an engagement");
+        };
+        assert!(
+            n >= MIN_CLUSTER,
+            "densest hostile neighbourhood holds only {n} (< {MIN_CLUSTER}) within {CLUSTER_R} tiles — \
+             too thin to rely on for contact"
+        );
+        IVec2::new(-nx, -ny)
     };
-    assert!(
-        !spots.is_empty(),
-        "no visible floor cell near any unit — the scenario cannot produce an engagement"
-    );
+
+    // **Order the squad THROUGH the cluster, not to it** — and this is the whole trick.
+    //
+    // Ordering them *at* the cluster makes them arrive and stop, so they fire from a standstill: gait
+    // weight goes to zero and `best_together` (the min of gait and action) can never rise, no matter how
+    // hard they are shooting. Measured on the first attempt at this: `max_action` climbed 0.000 -> 0.169,
+    // i.e. contact was finally happening, and the layering assertion still could not be satisfied. The
+    // test needs them *locomoting through* contact, which is also the situation the property is about.
+    //
+    // So: continue past the cluster along the squad -> cluster direction, and take the farthest
+    // reachable floor cell. Candidates are tried nearest-last in a fixed order, so the choice is
+    // reproducible.
+    let goal = {
+        const NEAR_CLUSTER: i32 = 8;
+        let centre = squad_centroid_cell(&mut app);
+        let floors = floor_cells(&mut app);
+        // Every floor cell in the cluster's neighbourhood, farthest-from-the-squad first. Walking to one
+        // of those routes the squad THROUGH the crabs and keeps it moving until it is past them.
+        //
+        // A straight-line extrapolation past the cluster was tried first and is wrong: it walks into
+        // walls (measured — it found nothing reachable beyond `IVec2(45, 16)`). Reachability has to come
+        // from the actual floor set, not from arithmetic on coordinates.
+        let mut candidates: Vec<(i32, IVec2)> = floors
+            .iter()
+            .filter(|c| {
+                (c.x - target.x).abs() <= NEAR_CLUSTER && (c.y - target.y).abs() <= NEAR_CLUSTER
+            })
+            .map(|&c| ((c - centre).length_squared(), c))
+            .collect();
+        // SORT-OK: `(−distance², cell)` is total — the cell breaks any distance tie, and a floor set is
+        // an authored/derived list rather than an ECS query, so this cannot launder archetype order.
+        candidates.sort_unstable_by_key(|(d, c)| (-*d, c.x, c.y));
+        let chosen = candidates.iter().find(|(_, c)| issue_squad_order(&mut app, *c)).map(|(_, c)| *c);
+        // Falling back to the cluster cell itself would silently reinstate the stand-and-shoot scenario
+        // this whole block exists to avoid, so it is a loud failure instead.
+        chosen.unwrap_or_else(|| {
+            panic!(
+                "no reachable floor cell within {NEAR_CLUSTER} tiles of the hostile cluster at \
+                 {target:?} — the squad would have to stop ON the enemy, which cannot exercise firing \
+                 WHILE moving"
+            )
+        })
+    };
+    let _ = goal;
 
     const GAIT: [usize; 6] = [
         blend::SLOT_WALK,
@@ -271,20 +341,11 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
         blend::SLOT_STRAFE_L,
         blend::SLOT_STRAFE_R,
     ];
-    // **Wait for the engagement, then measure the property** (FVS-N-9).
-    //
-    // This test is about *layering* — that the action layer rides over locomotion instead of replacing
-    // it — not about whether a firefight starts within some fixed number of ticks. Conflating the two is
-    // what made it intermittent: it measured for exactly 200 ticks and, when the squad happened not to
-    // engage in that window, failed with "the squad did not engage" — a statement about combat pacing
-    // wearing the costume of an animation assertion. It failed in 3 of 4 full-suite runs on a loaded box.
-    //
-    // So: wait (bounded) for the upper-body layer to actually arm, and only then measure. A timeout is
-    // now an honest, separate failure — the scenario never produced the precondition — rather than a
-    // false report about the blend.
+    // Bounded wait for the engagement, measuring as we go, and stopping the moment the property is
+    // observed — so a healthy run is fast and a timeout is an honest, separate failure.
     let mut best_together = 0.0f32;
     let mut max_action = 0.0f32;
-    for _ in 0..600 {
+    for _ in 0..1200 {
         step(&mut app, &cfg, 1);
         let world = app.world_mut();
         let mut q = world.query::<&PoseBlender>();
@@ -294,12 +355,17 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
             max_action = max_action.max(action);
             best_together = best_together.max(gait.min(action));
         }
+        if best_together > 0.05 {
+            break;
+        }
     }
 
     assert!(
         max_action > 0.5,
-        "the upper-body layer never armed (max {max_action:.3}) — the squad never engaged, so this test \
-         proved nothing about layering"
+        "the upper-body layer never armed (max {max_action:.3}) — the squad never engaged even when \
+         driven straight at a {MIN_CLUSTER}+ hostile cluster, so this proved nothing about layering. \
+         That is a SCENARIO failure, not an animation one: check `fire_laser`'s target acquisition \
+         before suspecting the blend."
     );
     assert!(
         best_together > 0.05,
