@@ -415,6 +415,14 @@ CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves 
 
 ## Constraints & "not yet automated"
 
+- **⚠️ `assets/` is read at RUNTIME, so editing it mid-run invalidates the run.** `config::load_game_config`
+  reads `assets/config/config.ron` from disk when each test `App` boots, and `GameConfig` is
+  `#[serde(deny_unknown_fields)]`. Add a slice while the suite is in flight and every *later* test panics
+  with `Unexpected field named 'x' in GameConfig` — against binaries compiled before the field existed.
+  Measured 2026-07-27: 5 failures in `tests/replay.rs` that read exactly like determinism regressions and
+  were entirely self-inflicted. **Treat `assets/` as frozen while a suite runs** (same for `site67.ron`,
+  the `.wgsl` files, and the elite overlays). Editing `src/` is safe once the *build* has finished, since
+  the test binaries are already linked — but not during it.
 - **The harness no longer needs a GPU.** It runs with `RenderPlugin { backends: None }` (see "What's in
   the box" §2). The *windowed* game obviously still needs a real backend; only `build_headless_app` omits it.
 - **`devshot` can't run inside the harness** — `Screenshot::primary_window()` needs a window, and the
