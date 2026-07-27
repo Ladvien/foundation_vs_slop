@@ -394,9 +394,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   walks the table and fails on any label containing `%` or `+`. Every entry reads as something you can
   *do* — "DEPLOY REMOTE OBSERVER", not "+15% observation". If a new capability can only be described as
   a percentage, that test is where it gets caught. · *Deps:* — · *Reading:* [LPM], **[SDT-00]**
-- **FVS-L-2 — Research/EIG HUD** · M · *determinism: render*
-  Present candidate experiments ranked by EIG and the reveal as it front-loads.
-  *Done when:* experiment list shows information value; reveals animate per the pacing curve. · *Deps:* E-2, E-3 · *Touches:* UI, research module · *Reading:* [PROB-ML], [GRIP]
+- **FVS-L-2 — Research/EIG HUD** · M · ✅ **LANDED 2026-07-26**
+  *Shipped:* `src/ui/research_hud.rs` — the stat sheet (one line per hidden parameter, with reveal
+  state) and the ranked experiment offers, **each stating the bits it would buy**.
+  **Printing the reason is the requirement, not decoration.** L-1 set the pattern for containment: an
+  unmet clause reads as an instruction rather than a status, because the acceptance was "players can
+  read *why*". A bare ranked list is a black box that happens to be sorted — the player cannot tell a
+  good ordering from a broken one. So every offer carries `+0.28 bits`, in **bits** rather than a
+  percentage of nothing-in-particular.
+  *Three wording decisions the tests pin:*
+  * An **unresolved** parameter reads `UNRESOLVED (68%)`, never `68% LETHAL`. The second invites the
+    player to act on a guess as though it were a finding, which defeats the point of a fog-of-war sheet.
+  * A **resolved** one states a verdict in *both* directions — `RULED OUT` as well as `CONFIRMED` —
+    because certainty of absence is a finding, and a specimen proven harmless must not read as blank.
+  * The offer list is **bounded to 3**. An unbounded list buries the top suggestion, which is the one
+    thing the ranking exists to surface.
+  Two empty states are distinguished rather than both rendering as nothing: `RESEARCH COMPLETE` (the arc
+  paid out) versus `NO INFORMATIVE TEST REMAINS` (everything resolved, not yet marked complete). An
+  empty panel reads as a bug. · *Deps:* E-2, E-3 · *Reading:* [PROB-ML], [GRIP]
 
 ---
 
