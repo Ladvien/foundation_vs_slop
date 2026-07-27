@@ -1627,6 +1627,23 @@
             hold_secs: 8.0,
             break_on_fail: Reset,
         ),
+
+        // SCP-150 — the CURE capture (FVS-C-4), and the one that is not about pressure at all.
+        //
+        // The tongue-eating louse is contained by treating the person it is inside, not by driving it
+        // into a basin: `parasite::cure_infested_hosts` extracts it directly. So this rule is carried
+        // for the SPECIMEN rather than consulted as a gate — the research layer needs a rule to read,
+        // and `unmet()` needs something to render if the HUD ever surfaces one.
+        //
+        // Authored as "keep the host calm" because that is what the fiction says treatment needs, and
+        // because a rule that can never be satisfied would be a lie in the records.
+        scp150: (
+            requires: [
+                (channel: 1, sign: AtMost, threshold: 0.10),  // THREAT_GUN — you cannot operate under fire
+            ],
+            hold_secs: 3.0,
+            break_on_fail: Keep,
+        ),
     ),
 
     // =============================================================================================

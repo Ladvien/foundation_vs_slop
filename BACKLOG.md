@@ -240,15 +240,42 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   distinction as data so a later "simplification" onto `ObservedBySquad` fails the suite.
   *Golden:* **unmoved**, measured. The 1048 spawn gained components and `scp1048_scavenge` gained an
   access set, either of which could have permuted the schedule; neither did. · *Deps:* B-5 · *Reading:* **[STIG]**
-- **FVS-C-4 — SCP-150 parasite cure/extract** · M · *determinism: FixedUpdate*
-  150 infects squad **and** crabs (rare three-body web); containment = cure/extract hosts via the host relationship (D-1) + single-target device.
-  *Done when:* curing an infected host extracts the parasite as a specimen; untreated hosts stay infected. · *Deps:* B-5, D-1 · *Touches:* `src/parasite.rs`, containment module · *Reading:* [STIG-AD], [STIG], [ECS]
+- **FVS-C-4 — SCP-150 parasite cure/extract** · M · ✅ **LANDED 2026-07-26 — the third capture, and the only one that is an act of care**
+  *Shipped:* `parasite::cure_infested_hosts` + a `CureRequest` marker, and a `scp150:` rule in the
+  `containment:` slice. Curing a host clears its `Infestation` and hands the **parasite entity** to the
+  one-way `Contained` door, which is what grants the specimen.
+  **Why this grants a specimen where nest-capping does not** — the distinction is the pivot in
+  miniature. Capping a nest (B-7) destroys a structure and yields nothing: it is honestly
+  kill-the-source. Curing a host *recovers the anomaly intact*, and that is only possible because D-1
+  keeps the parasite alive and linked at embed instead of despawning it.
+  *Ordering that is a design decision, not tidiness:* `cure_infested_hosts` runs **before**
+  `gestation_tick`, so a cure requested on the tick a burst would land still saves the host. Treating
+  someone at the last second working is the whole tension of the verb.
+  *A `CureRequest` component rather than direct mutation*, so there is one writer — the same discipline
+  `session::ForceVictory` uses for the dev hotkey.
+  *Pinned by three tests, because the interesting failures are the negative ones:* curing extracts a
+  specimen and marks **the parasite itself** (not a proxy) `Contained`; an untreated host stays infested
+  and yields nothing; and curing a *clean* host is a no-op — the failure mode a cure verb invites is
+  spamming it on healthy operatives to mint specimens. · *Deps:* B-5, D-1 · *Reading:* [STIG-AD], [ECS]
 - **FVS-C-5 — Crab-nest source-elimination integration** · M · *determinism: FixedUpdate; swarm cadence deterministic*
   Connect nest-capping (B-7) to `src/nest.rs` breeding and the 40→5000 swarm.
   *Done when:* capping halts breeding; swarm attrition follows; secured flag set. · *Deps:* B-7 · *Touches:* `src/nest.rs` · *Reading:* [STIG-AD], [STIG]
-- **FVS-D-1 — Parasite↔host relationship** · M
-  Replace ad-hoc coupling with a custom `InfectedBy`/`Hosting` relationship pair.
-  *Done when:* infecting sets the relationship; curing removes it; reverse traversal enumerates hosts. · *Deps:* — · *Touches:* `src/parasite.rs` · *Reading:* [ECS], [STIG-AD]
+- **FVS-D-1 — Parasite↔host relationship** · M · ✅ **LANDED 2026-07-26**
+  *Shipped:* `InfectedBy` / `Hosting` — the repo's **fourth** Bevy relationship, after
+  `squad::MemberOf`/`SquadRoster`, `containment::Holding`/`HeldBy` and `site::HeldAt`/`SiteSpecimens`.
+  **Why a relationship when `Infestation.active` already existed.** The bool answers "is this host
+  infested"; it cannot answer "**which** parasite, and where is it". C-4 needs the second question,
+  because extracting a specimen requires the parasite to be a *thing* rather than a flag.
+  **The bool stays and is not redundant** — it is a value field on a component present from spawn, so
+  hot per-tick systems read it with no archetype churn on the hashed host, whereas the relationship
+  inserts and removes a component. State in fields, links in relationships.
+  **`manca_embed` no longer despawns the manca**; it strips `Manca`, `MancaMotion`, `Transform` and
+  `Visibility` and inserts `InfectedBy(host)`. Dropping `Manca` is what keeps this **census-neutral**
+  (an embedded parasite must not count toward `EpisodeOutcome::manca_alive`) and dropping `Transform`
+  keeps it out of `snapshot_hash`, which folds `(Transform, Health)` — so the entity contributes exactly
+  what it did when it was despawned outright: nothing. **Golden measured unmoved.**
+  Despawn hygiene needs no code: Bevy's own relationship hooks drop the link when either end despawns,
+  so a cured or dead host can never leave a dangling `Entity`. · *Deps:* — · *Reading:* [ECS], [STIG-AD]
 - **FVS-K-1 — SCP-610 content/FX pass** · M · *determinism: render = SSIM*
   Audio/FX/flavor for wired 610, incl. color-language luminosity (color doc). Read it as an SCP-9191 "slop" instance.
   *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]

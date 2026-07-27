@@ -48,13 +48,20 @@ pub struct ContainmentConfig {
     pub scp999: ContainmentRule,
     /// SCP-1048's out-watch basin (FVS-C-3).
     pub scp1048: ContainmentRule,
+    /// SCP-150's rule (FVS-C-4).
+    ///
+    /// Carried for the *specimen*, not for a basin: the parasite is extracted by curing its host
+    /// (`parasite::cure_infested_hosts`), not by driving a field. It still needs a rule so the research
+    /// layer has one to read, and so `unmet()` has something to render if the HUD ever shows it.
+    pub scp150: ContainmentRule,
 }
 
 impl ContainmentConfig {
     /// Reject malformed authored rules at load — one path, no fallback.
     pub fn validate(&self) -> Result<(), String> {
         self.scp999.validate().map_err(|e| format!("containment.scp999: {e}"))?;
-        self.scp1048.validate().map_err(|e| format!("containment.scp1048: {e}"))
+        self.scp1048.validate().map_err(|e| format!("containment.scp1048: {e}"))?;
+        self.scp150.validate().map_err(|e| format!("containment.scp150: {e}"))
     }
 }
 pub use device::{ContainmentDevice, HeldBy, Holding};

@@ -673,3 +673,110 @@ fn the_1048_rule_reads_the_ambient_field_not_a_per_entity_watch_flag() {
         "out-watching means keeping attention HIGH — an AtMost clause would invert the mechanic"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-C-4 / D-1 — SCP-150: the cure capture, and the host relationship.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Infest a host the way `manca_embed` does, including the FVS-D-1 link.
+fn infest(app: &mut App, host: Entity) -> Entity {
+    use foundation_vs_slop::parasite::{InfectedBy, Infestation};
+    let parasite = app.world_mut().spawn(InfectedBy(host)).id();
+    let mut inf = app.world_mut().get_mut::<Infestation>(host).expect("hosts carry Infestation");
+    inf.active = true;
+    inf.timer = 0.0;
+    parasite
+}
+
+fn a_unit(app: &mut App) -> Option<Entity> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (Entity, &foundation_vs_slop::squad::SquadMember),
+        With<foundation_vs_slop::squad::Unit>,
+    >();
+    let mut v: Vec<_> = q.iter(world).map(|(e, m)| (m.0, e)).collect();
+    // SORT-OK: `SquadMember` is the stable spawn index, unique per unit.
+    v.sort_unstable_by_key(|(m, _)| *m);
+    v.first().map(|(_, e)| *e)
+}
+
+#[test]
+fn curing_an_infested_host_extracts_the_parasite_as_a_specimen() {
+    // FVS-C-4's acceptance, and the distinction that makes it worth having: capping a nest destroys a
+    // structure and yields nothing (B-7), while curing a host RECOVERS the anomaly intact. That is only
+    // possible because D-1 keeps the parasite alive and linked at embed instead of despawning it.
+    use foundation_vs_slop::parasite::{CureRequest, Infestation};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(host) = a_unit(&mut app) else { return };
+    let parasite = infest(&mut app, host);
+    let before = specimen_count(&mut app);
+
+    // Reverse traversal works — that is the half `Infestation.active` could never answer.
+    let hosting = app.world().get::<foundation_vs_slop::parasite::Hosting>(parasite);
+    assert!(hosting.is_none(), "the parasite is the RELATIONSHIP source; the host holds the target");
+
+    app.world_mut().entity_mut(host).insert(CureRequest);
+    step(&mut app, &cfg, 3);
+
+    assert!(
+        !app.world().get::<Infestation>(host).expect("host").active,
+        "curing must clear the infestation"
+    );
+    assert_eq!(
+        specimen_count(&mut app),
+        before + 1,
+        "curing a host must EXTRACT the parasite as a specimen — that is the capture"
+    );
+    assert!(
+        app.world().get::<Contained>(parasite).is_some(),
+        "the parasite itself must be the thing marked Contained, not a fresh proxy entity"
+    );
+}
+
+#[test]
+fn an_untreated_host_stays_infested_and_yields_nothing() {
+    // The other half of C-4's acceptance. Without it the test above would pass on a system that
+    // extracted a specimen from every host unconditionally.
+    use foundation_vs_slop::parasite::Infestation;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(host) = a_unit(&mut app) else { return };
+    let _parasite = infest(&mut app, host);
+    let before = specimen_count(&mut app);
+
+    step(&mut app, &cfg, 120);
+
+    assert!(
+        app.world().get::<Infestation>(host).expect("host").active,
+        "an untreated host must stay infested"
+    );
+    assert_eq!(specimen_count(&mut app), before, "and must yield no specimen");
+}
+
+#[test]
+fn curing_a_clean_host_is_a_no_op_rather_than_a_free_specimen() {
+    // The failure mode a cure verb invites: spamming it on healthy operatives to mint specimens.
+    use foundation_vs_slop::parasite::CureRequest;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(host) = a_unit(&mut app) else { return };
+    let before = specimen_count(&mut app);
+    for _ in 0..5 {
+        app.world_mut().entity_mut(host).insert(CureRequest);
+        step(&mut app, &cfg, 2);
+    }
+    assert_eq!(specimen_count(&mut app), before, "curing a clean host must grant nothing");
+}
