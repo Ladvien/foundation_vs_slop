@@ -34,8 +34,10 @@
 //! `a_zero_gain_din_is_a_bit_exact_no_op` established.
 
 pub mod coupling;
+pub mod gossip;
 pub mod roster;
 
+pub use gossip::{RecentTellings, Telling};
 pub use roster::{RosterPlugin, SquadKnowledge};
 
 use serde::{Deserialize, Serialize};
@@ -374,9 +376,18 @@ pub struct KnowledgePlugin;
 impl bevy::prelude::Plugin for KnowledgePlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
         use bevy::prelude::*;
-        app.add_systems(
+        app.init_resource::<gossip::RecentTellings>().add_systems(
             FixedUpdate,
-            coupling::apply_belief_fear.after(crate::ai::AiSet::Drives).before(crate::ai::AiSet::Think),
+            (
+                // Propagation first, then the coupling that reads what beliefs say: a rumour heard this
+                // tick should scare you this tick, not next. Chained rather than left floating, so the
+                // pair adds ONE ordering constraint to the linearisation instead of two free nodes.
+                gossip::spread_beliefs_by_conversation,
+                coupling::apply_belief_fear,
+            )
+                .chain()
+                .after(crate::ai::AiSet::Drives)
+                .before(crate::ai::AiSet::Think),
         );
     }
 }

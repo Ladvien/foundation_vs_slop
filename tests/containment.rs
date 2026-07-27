@@ -844,3 +844,70 @@ fn capping_every_nest_stops_the_swarm_replenishing() {
         "a fully-capped site must not replenish its swarm (was {before}, now {after})"
     );
 }
+
+/// **A belief spreads squad-wide through conversation, and the retelling is weaker** (FVS-O-3).
+///
+/// The item's acceptance, driven through the real `App`: one operative is given a firsthand belief, the
+/// squad is left to talk, and the belief must reach someone else at *strictly lower* confidence. The
+/// second half is the part that matters — a propagation that copied confidence would make hearsay as
+/// good as experience and collapse the whole provenance model FVS-O-5 depends on.
+#[test]
+fn a_belief_spreads_through_the_squad_and_weakens_as_it_goes() {
+    use foundation_vs_slop::knowledge::gossip::TELL_INTERVAL;
+    use foundation_vs_slop::knowledge::{Claim, Knowledge, Provenance, Subject};
+    use foundation_vs_slop::squad::{SquadMember, Unit};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1);
+
+    // Seed ONE operative with firsthand experience. Everyone else starts with nothing — which is a
+    // distinct state from "unsure" and is what makes the spread measurable at all.
+    let seeded = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(bevy::prelude::Entity, &SquadMember), With<Unit>>();
+        let mut members: Vec<(usize, bevy::prelude::Entity)> =
+            q.iter(world).map(|(e, m)| (m.0, e)).collect();
+        members.sort_unstable();
+        let (_, e) = *members.first().expect("the squad must exist");
+        let mut k = world.get_mut::<Knowledge>(e).expect("operatives carry Knowledge");
+        k.learn(Subject::BearCopies, Claim::Lethal, Provenance::Firsthand, 0);
+        e
+    };
+    let firsthand = app
+        .world()
+        .get::<Knowledge>(seeded)
+        .and_then(|k| k.of(Subject::BearCopies, Claim::Lethal))
+        .expect("the seed must take")
+        .confidence;
+
+    // The squad spawns clustered around `Dungeon::spawn`, so they are already within EARSHOT. Several
+    // intervals, because propagation is deliberately throttled — a rumour takes time to cross a squad.
+    step(&mut app, &cfg, (TELL_INTERVAL * 4) as u32);
+
+    let heard: Vec<(usize, f32, Provenance)> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(&SquadMember, &Knowledge), With<Unit>>();
+        q.iter(world)
+            .filter_map(|(m, k)| {
+                k.of(Subject::BearCopies, Claim::Lethal).map(|b| (m.0, b.confidence, b.provenance))
+            })
+            .collect()
+    };
+    assert!(
+        heard.len() > 1,
+        "the belief never left the operative who had it — {heard:?} (EARSHOT/TELL_INTERVAL wiring?)"
+    );
+    for (member, confidence, provenance) in &heard {
+        if *provenance == Provenance::Firsthand {
+            continue;
+        }
+        assert_eq!(*provenance, Provenance::Told, "member {member} heard it some other way");
+        assert!(
+            *confidence < firsthand,
+            "member {member} heard it at {confidence}, which is not below the firsthand {firsthand} — \
+             a retelling that loses nothing makes hearsay as good as experience"
+        );
+    }
+}

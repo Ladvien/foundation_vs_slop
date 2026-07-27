@@ -238,7 +238,7 @@ impl Plugin for RosterPlugin {
             .add_systems(
                 Update,
                 toggle_roster
-                    .run_if(in_state(AppState::InGame).or(in_state(AppState::Site))),
+                    .run_if(in_state(AppState::InGame).or_else(in_state(AppState::Site))),
             );
     }
 }

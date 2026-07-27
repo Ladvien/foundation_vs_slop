@@ -1216,7 +1216,37 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **Cost:** with the subject in perception, a high-confidence `Lethal` belief raises that operative's FEAR gain — a frightened operative flees sooner, aims worse, breaks a containment hold. **Benefit:** knowledge is what makes containment *legible* — an operative with a `CapturableBy` belief can read that anomaly's rule clauses in the containment HUD (L-1 already renders per-clause state); without it they show as unknown.
   **The asymmetry is the thesis:** understanding a thing is what makes it frightening, and also the only way to contain it. Same trade the research economy encodes (Push 4), pushed down onto the individual.
   *Done when:* a knowing operative measurably fears the subject more, and can read its rule; an ignorant one does neither. · *Deps:* O-1, L-1 (done) · *Touches:* `src/knowledge/`, `src/ai/drives.rs`, `src/ui/containment_hud.rs` · *Reading:* [SDT-00], [GRIP]
-- **FVS-O-3 — Propagation by conversation (`Told`)** · M · *determinism: a pick — needs a total sort*
+- **FVS-O-3 — Propagation by conversation (`Told`)** · M · ✅ **LANDED 2026-07-27**
+  *Shipped:* `src/knowledge/gossip.rs` — operatives within `EARSHOT` swap what they know on a fixed
+  cadence, and `dialogue::bark_belief_tellings` voices it as a speech balloon. **That is the job
+  `src/dialogue/` did not have**: a rumour crossing the squad is now something the player *watches*,
+  which is what will make FVS-O-5's false rumour noticeable rather than a number on a screen.
+  **Retelling degrades, and that is the design.** `Provenance::Told`'s flat 0.45 could not express a
+  *chain*, so `Knowledge::hear` scales the **teller's own** confidence by `RETELL_DECAY` instead of
+  stamping a constant: 0.85 → 0.60 → 0.42 → … until it falls under `WORTH_SAYING` and dies out. So a
+  rumour fades along its path instead of saturating the squad with certainty nobody earned — and the
+  *shape* of it is legible on L-5's roster, where a 0.42 `Told` belief is visibly three people from
+  whoever saw the thing.
+  **Grounded in [MISPERCEPT], which gave two things the item did not have:**
+  * *"To be influenced by another's characteristics and behaviors, one must know of them. Without that
+    knowledge social influence is stifled."* → propagation requires **contact**, never a squad-wide
+    broadcast. That is what `EARSHOT` is for, and why a lone scout comes home holding what nobody else
+    learned.
+  * *"Some are the result of secrets. Some are the result of mere error. **Intentionality**
+    differentiates the gap that results from a secret from the gap that results from an error."* →
+    this module is the **error** kind; FVS-O-5's seeding will be the **secret** kind. The distinction is
+    load-bearing because the counter-play differs: you *verify* against a degraded rumour and you
+    *curate* against a planted one.
+  **Hearsay never overwrites experience**, including a contradicting claim — you cannot talk an
+  operative out of what they saw. That asymmetry is precisely what O-5 has to attack.
+  *Determinism:* it is a pick over a query on `FixedUpdate`, so the roster is `sort_total!`ed by
+  `SquadMember` **and** every transfer is decided from a snapshot taken before any write — so a belief
+  cannot hop twice in one tick and the result cannot depend on the order writes land. **Goldens
+  measured unmoved** despite the new node (chained into the existing `AiSet` ordering).
+  *Pinned by:* `containment::a_belief_spreads_through_the_squad_and_weakens_as_it_goes`, which drives
+  the real `App` and asserts **both** halves of the acceptance. · *Deps:* O-1 (~~K-3~~ — it rides the
+  existing `Bark` surface; the authored-conversation buildout is still K-3's own item) · *Reading:*
+  **[MISPERCEPT]**, [ECS]
   One operative tells another in the field; confidence decays with each retelling. **Rides the existing dialogue system** (`src/dialogue/`, `squad_ai::dialogue::MemoryStream`, already grounded in Park et al.). That is the point: the dialogue layer currently has **one authored conversation on a dev hotkey** (K-3) and no reason to exist — this gives it one, so authoring conversations becomes gameplay-load-bearing rather than decoration.
   **Determinism:** "A tells B" over a query is a *pick*, so it needs a stable total key — `SquadMember` is the one every other site uses (`tests/determinism_lint.rs`).
   *Done when:* a belief measurably spreads squad-wide through conversation; retold confidence is strictly lower than firsthand. · *Deps:* O-1, K-3 · *Touches:* `src/knowledge/`, `src/dialogue/` · *Reading:* **[MISPERCEPT]**, [ECS]
