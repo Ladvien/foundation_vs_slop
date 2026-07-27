@@ -49,6 +49,10 @@ use crate::site::{HeldAt, SiteRoot};
 
 /// Bumped whenever the saved shape changes. A mismatch is refused, never migrated — see the module docs.
 ///
+/// `4` (2026-07-27): `conversations_played` (FVS-K-3). The authored beats are *first time* scenes —
+/// the first capture, the first specimen carried home, the first operative lost — and a first that
+/// repeats every launch is not a first. Meta-progress in exactly FVS-G-3's sense.
+///
 /// `3` (2026-07-27): the O5 economy joined the save (`o5`, `requisitioned`). FVS-P-3 shipped the
 /// review, the allowance and the requisition panel but never added them here, so its own *Done when* —
 /// "the budget round-trips through save/load" — was unmet: every restart handed the Director a zeroed
@@ -57,7 +61,7 @@ use crate::site::{HeldAt, SiteRoot};
 /// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
 /// captured but not *what* they were, and the research battery and unlock payout are both keyed on
 /// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
-pub const SAVE_VERSION: u32 = 3;
+pub const SAVE_VERSION: u32 = 4;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +112,8 @@ pub struct SaveGame {
     /// Saved *with* the budget rather than separately, because they are one quantity in two states.
     /// Persisting the budget alone would make a restart a way to lose the thing you spent it on.
     pub requisitioned: crate::site::Requisitioned,
+    /// Which one-shot conversations this campaign has already played (FVS-K-3).
+    pub conversations_played: crate::dialogue::triggers::ConversationsPlayed,
 }
 
 impl SaveGame {
@@ -183,6 +189,10 @@ pub fn capture_save(world: &mut World) -> SaveGame {
     let o5 = world.get_resource::<crate::site::O5Standing>().copied().unwrap_or_default();
     let requisitioned =
         world.get_resource::<crate::site::Requisitioned>().copied().unwrap_or_default();
+    let conversations_played = world
+        .get_resource::<crate::dialogue::triggers::ConversationsPlayed>()
+        .cloned()
+        .unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
@@ -190,6 +200,7 @@ pub fn capture_save(world: &mut World) -> SaveGame {
         records,
         o5,
         requisitioned,
+        conversations_played,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -230,6 +241,11 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
     }
     if let Some(mut r) = world.get_resource_mut::<crate::site::Requisitioned>() {
         *r = save.requisitioned;
+    }
+    if let Some(mut c) =
+        world.get_resource_mut::<crate::dialogue::triggers::ConversationsPlayed>()
+    {
+        *c = save.conversations_played.clone();
     }
 
     let site = world.get_resource::<SiteRoot>().map(|s| s.0);
@@ -307,6 +323,9 @@ mod tests {
                 expeditions: 3,
             },
             requisitioned: crate::site::Requisitioned { devices: 2, quarantines: 1, medkits: 4 },
+            conversations_played: crate::dialogue::triggers::ConversationsPlayed(
+                ["intro".to_string(), "first_capture".to_string()].into_iter().collect(),
+            ),
             specimens: vec![
                 SavedSpecimen {
                     captured_tick: 120,

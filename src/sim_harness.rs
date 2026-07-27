@@ -894,6 +894,53 @@ pub fn containable_targets(app: &mut App) -> Vec<(crate::containment::TargetId, 
     out
 }
 
+/// The cell of the **nearest containable anomaly** to the squad, or `None` when there is nothing left
+/// to contain.
+///
+/// # Why the offline tour needs this (FVS-I-1, step 1)
+///
+/// FVS-B-8 gave `evaluate::run_episode` a containment beat, but it only fired on an anomaly the squad
+/// had *coincidentally* walked within `device_reach` of while touring crab nests. Measured 2026-07-27
+/// against the held-in set, that is almost never:
+///
+/// | world | containment |
+/// |---|---|
+/// | `0x5C09191` | 0 completed / 0 attempted |
+/// | `0x1CE5` | 1 completed / 2 attempted |
+/// | `0xFEED` | 0 completed / 0 attempted |
+///
+/// Two of the three **shipped baseline** worlds never attempted a capture at all, so the pivot this
+/// whole backlog is organised around was invisible to the search: a feasibility constraint on
+/// `captures_attempted > 0` (FVS-I-1's actual deliverable) would have rejected two thirds of the
+/// baseline before the search generated anything — the archive-emptying failure that item's own risk
+/// note predicted. The blocker was never the constraint's design; it was that the synthetic player
+/// could not find a capturable anomaly. This is what lets it go and look.
+///
+/// # Determinism
+///
+/// The pick is keyed on `(quantised distance², TargetId)`, which is **total by construction** —
+/// `TargetId` is minted once per targetable spawn and never reused, so no two candidates share one.
+/// That matters more than it looks: 999 and 1048 are sparse and often near-equidistant from the squad
+/// centroid, so the distance alone ties routinely, and a stable sort would then leak query order —
+/// which is not stable across `App` instances — into the tour. That is the exact trap `nest_cells`
+/// documents, and the reason its `(c.y, c.x)` suffix exists.
+///
+/// The centroid comes from [`squad_centroid_cell`], which already canonicalises its summation order.
+pub fn containable_goal_cell(app: &mut App) -> Option<IVec2> {
+    let from = squad_centroid_cell(app).as_vec2();
+    let targets = containable_targets(app);
+    let world = app.world_mut();
+    // `get_resource`, not `resource`: a world-less frame is a legal state (`RunState::Idle`), and "there
+    // is nowhere to walk to" is the honest answer there rather than a panic.
+    let dungeon = world.get_resource::<crate::dungeon::Dungeon>()?;
+    targets
+        .into_iter()
+        .map(|(id, _, pos)| (dungeon.world_to_cell(pos), id))
+        // Quantise exactly as the hub tour does, so "nearest" means the same thing in both schedules.
+        .min_by_key(|(cell, id)| (((cell.as_vec2().distance_squared(from)) * 100.0) as i64, *id))
+        .map(|(cell, _)| cell)
+}
+
 /// World positions of every living squad unit, **sorted by `SquadMember`** for the same reason.
 pub fn living_unit_positions(app: &mut App) -> Vec<Vec3> {
     let world = app.world_mut();

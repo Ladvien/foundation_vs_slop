@@ -448,15 +448,43 @@ fn run_episode_probed(
 
     while elapsed < ticks {
         let hub = hubs.get(hub_idx % hubs.len().max(1)).copied();
-        // ── dwell-advance: drive the squad onto the crab hub over several unbroken windows ──
+        // ── the tour ALTERNATES: crab nest, then nearest containable anomaly, then the next nest ──
+        //
+        // FVS-I-1 step 1. Before this, the containment beat below could only fire on an anomaly the
+        // squad had *coincidentally* walked within `device_reach` of, and measured across the held-in
+        // set that was almost never: `0x5C09191` and `0xFEED` recorded **0 captures attempted**, so a
+        // feasibility constraint on `captures_attempted > 0` would have rejected two of the three
+        // shipped baseline worlds before the search generated anything. The synthetic player has to be
+        // able to *go to* a capturable thing before containment can be scored at all.
+        //
+        // **Alternating rather than replacing**, and that is the whole design of this change. Always
+        // seeking the anomaly would starve the crab-nest tour, and the nest tour is what produces the
+        // firefights whose `NOISE_SQUAD` din is the swarm's stimulus — i.e. the search's main signal.
+        // Always touring nests is the status quo that cannot see containment. Alternating on `hub_idx`
+        // keeps both beats, costs no exploration ticks (the schedule's shape and the episode's length
+        // are unchanged), and is a pure function of the sim state rather than of anything sampled.
+        //
+        // Recomputed **inside** the dwell loop rather than once per hub, because 999 oozes toward the
+        // most-anxious operative and 1048 walks — a goal fixed at the top of the tour would send the
+        // squad to where the anomaly used to be. That costs nothing: `issue_squad_order` already runs
+        // every advance window.
+        let seek_anomaly = hub_idx % 2 == 1;
+        // ── dwell-advance: drive the squad onto that goal over several unbroken windows ──
         for _ in 0..DWELL_ADVANCES {
             if elapsed >= ticks {
                 break;
             }
-            // An unreachable hub is skipped, not retried (a bad flow-field returns false): the schedule is
+            // An unreachable goal is skipped, not retried (a bad flow-field returns false): the schedule is
             // fixed, and stalling on one hub would make episode length depend on the dungeon.
-            if let Some(hub) = hub {
-                issue_squad_order(&mut app, hub);
+            // `containable_goal_cell` is `None` once everything is contained, which falls back to the nest
+            // tour — the right end state, not a fallback path: there is nothing left to seek.
+            let goal = if seek_anomaly {
+                crate::sim_harness::containable_goal_cell(&mut app).or(hub)
+            } else {
+                hub
+            };
+            if let Some(goal) = goal {
+                issue_squad_order(&mut app, goal);
             }
             let stepped = ADVANCE_TICKS.min(ticks - elapsed);
             elapsed += run(

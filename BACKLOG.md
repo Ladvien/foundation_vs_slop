@@ -890,6 +890,48 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > worlds, re-probing until it does; (2) **then** the constraint, which will by then reject genuinely
   > capture-hostile worlds rather than the baseline; (3) **then** H-1's retrain. Step 1 is now
   > measurable, which it was not before.
+  >
+  > ### ✅ STEP 1 LANDED 2026-07-27 — 3 of 3, not merely a majority
+  >
+  > `sim_harness::containable_goal_cell` + an **alternating** tour in `evaluate::run_episode`. The
+  > containment beat could previously only fire on an anomaly the squad had *coincidentally* walked
+  > within `device_reach` of while touring crab nests; it can now go and look.
+  >
+  > | world | before | after |
+  > |---|---|---|
+  > | `0x5C09191` | **0 completed / 0 attempted** | **2 completed / 3 attempted** |
+  > | `0x1CE5` | 1 completed / 2 attempted | 1 completed / 1 attempted |
+  > | `0xFEED` | **0 completed / 0 attempted** | **1 completed / 2 attempted** |
+  >
+  > All three now *complete* a capture, and all three still `PASS` the criterion — so a feasibility
+  > constraint on `captures_attempted > 0` would now admit the whole shipped baseline rather than
+  > rejecting two thirds of it. **The blocker under step 2 is cleared.**
+  >
+  > **Alternating rather than replacing, and that is the design.** Always seeking the anomaly would
+  > starve the crab-nest tour, and the nest tour is what produces the firefights whose `NOISE_SQUAD` din
+  > is the swarm's stimulus — i.e. the search's main signal. Always touring nests is the status quo that
+  > cannot see containment. Alternating on `hub_idx` keeps both beats and costs **no exploration
+  > ticks**: the schedule's shape and the episode's length are unchanged.
+  >
+  > The goal is recomputed **inside** the dwell loop rather than once per hub, because 999 oozes toward
+  > the most-anxious operative and 1048 walks — a goal fixed at the top of the tour would send the squad
+  > to where the anomaly used to be. That costs nothing; `issue_squad_order` already runs every window.
+  >
+  > *Determinism:* the pick is keyed on `(quantised distance², TargetId)`, **total by construction**
+  > since `TargetId` is minted once per targetable spawn and never reused. That matters more than it
+  > looks — 999 and 1048 are sparse and often near-equidistant from the squad centroid, so distance
+  > alone ties routinely, and a stable sort would then leak query order (not stable across `App`
+  > instances) into the tour. It is the exact trap `nest_cells` documents and the reason its `(c.y, c.x)`
+  > suffix exists.
+  >
+  > **The goldens did not move, and here the reason is structural rather than lucky:** the golden replay
+  > runs the pinned core with *no synthetic player at all*, so `run_episode`'s tour is not in that path.
+  > What this **does** invalidate is every baked archive and `sweep_prior` — which H-1 already declares
+  > stale for two independent reasons, and this is now the third.
+  >
+  > *Next:* step 2, the `minimal_criterion` feasibility constraint. Step 3 (H-1's 12–20 h bake) is
+  > deliberately **not** started — run `cargo train bench` for this box's projection before committing
+  > a night to it.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
 - **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI* · ✅ **LANDED 2026-07-27 (marked 2026-07-27 — it shipped with L-3 and was never ticked)**
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
@@ -946,7 +988,36 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL
   Author the SCP-9191 arc: research cashes out as "restoring curation/quality against an out-of-control generator," culminating in a confrontation with SCP-9191. Deprecate semiotic-decay/2521/Gat-Hayes (optional flavor only if non-contradictory). Consider mining the canon "alarm switch ON/OFF" locker detail for the confrontation trigger.
   *Done when:* endgame trigger fires after a curriculum threshold; confrontation derives from the generator theme; no shipped copy references deprecated theming as canon. · *Deps:* F-3, K-3 · *Touches:* narrative, tech-tree, `lib.rs` lore refs · *Reading:* **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG]
-- **FVS-K-3 — Dialogue content buildout** · L · ⚠️ **PARTIALLY LANDED 2026-07-27 — the module has a JOB now**
+- **FVS-K-3 — Dialogue content buildout** · L · ✅ **LANDED 2026-07-27 — 14 conversations, all event-triggered, hotkey deleted**
+  *Shipped:* `src/dialogue/triggers.rs` + 13 new authored conversations in the `dialogue:` config slice
+  (**14 total**, against the item's bar of ≥12, fixed at scoping time).
+  * **Loop beats (7):** expedition start, first capture, first research completion, a capability
+    unlock, arriving home carrying a specimen, an operative lost, the squad-wipe debrief.
+  * **First contact (4):** SCP-999, SCP-1048, SCP-150, crab nest.
+  * **SCP-9191 foreshadowing (3):** the first bear *copy* (something that was **made**), the second
+    capability (the defect is a signature, not a species trait), and an unattributed report on the
+    shelf. Written now so **FVS-K-4 only has to choose the moment** — the same staging O-5 used when it
+    shipped the seeding mechanism behind a `Message` rather than blocking on a boss that does not exist.
+  **The `T` demo hotkey is deleted, and that is load-bearing rather than tidiness.** A hotkey is a
+  trigger that reaches *everything*, so leaving it would make `every_authored_conversation_has_a_trigger`
+  vacuous. Two tests hold both directions: a trigger naming an id `config.ron` does not define is a beat
+  that silently never plays, and an authored conversation nothing can start is the exact state K-3 was
+  filed about — a corpus rots back into decoration one unreferenced entry at a time.
+  **The beats are one-shot and PERSISTED** (`SAVE_VERSION` 3 → **4**, `conversations_played`). A "first
+  capture" line that fires on every launch is not a first, and re-reading it is the specific annoyance
+  that makes players skip dialogue. Meta-progress in exactly FVS-G-3's sense.
+  **A blocked beat is not consumed:** `play()` refuses while a conversation is running *without* marking
+  it played. Marking-then-dropping would lose the scene forever and present as "that never happened"
+  with nothing to debug.
+  **The Watcher deliberately has no contact scene** — its whole character is that it does not announce
+  itself, and a balloon on sighting would undo the one thing it does. Pinned, because it reads as an
+  omission.
+  *Determinism:* structurally windowed-only — `DialoguePlugin` is never registered in the headless
+  harness, every system is on `Update`, and none writes sim state. Cannot reach `snapshot_hash`.
+  *Role voice*, as the item asked: speaker 0 team lead (procedural), 1 xenobiologist (curious past the
+  point of comfort), 2 research analyst (cites the document), 3 security (blunt), 4 medic (says the
+  human thing). A line goes to whoever it costs something.
+  *Original filing, kept because its diagnosis was right:*
   The item's real complaint was that `src/dialogue/` had "exactly **one** authored conversation on a dev
   hotkey" — i.e. no reason to exist. FVS-O-3 fixed that half: `dialogue::bark_belief_tellings` voices
   every belief that crosses the squad, from an 18-line authored table (`gossip::line_for`) covering every

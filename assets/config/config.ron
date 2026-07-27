@@ -1415,6 +1415,427 @@
     // =============================================================================================
     dialogue: (
         conversations: {
+            // ── THE LOOP, once each ────────────────────────────────────────────────────────────
+            // Speaker roles are consistent across the corpus and are the "role voice" FVS-K-3 asks
+            // for: 0 team lead (procedural, terse), 1 xenobiologist (curious past the point of
+            // comfort), 2 research analyst (cites the document), 3 security (blunt), 4 medic (the
+            // one who says the human thing). A line is assigned to whoever it costs something.
+            "first_capture": (
+                start: "held",
+                nodes: {
+                    "held": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Surprise,
+                        text: "Containment confirmed. It's... in the field. It's actually in the field.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Joy,
+                        text: "Do you understand what we just did? We didn't kill it. We UNDERSTOOD it, and it stopped.",
+                        next: Some("lead"),
+                    ),
+                    "lead": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Log it and keep your eyes up. Understanding one of them is not understanding the rest.",
+                        next: Some("dread"),
+                    ),
+                    "dread": Line(
+                        speaker: 3,
+                        kind: Thought,
+                        emotion: Fear,
+                        text: "Killing it, I'd know what I did. This thing is alive in a box and it's coming home with us.",
+                        next: None,
+                    ),
+                },
+            ),
+            "first_research": (
+                start: "done",
+                nodes: {
+                    "done": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Battery complete. The posterior's resolved — we can write it down as a fact now, not a guess.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "A fact the Foundation didn't have this morning. That's the whole job, and nobody will ever read it.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 0,
+                        prompt: "What does it buy us?",
+                        options: [
+                            (text: "Something we can use in the field.", next: "use"),
+                            (text: "Something we can tell the next squad.", next: "tell"),
+                        ],
+                    ),
+                    "use": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Thaumiel doctrine — one anomaly's property becomes the tool that holds the next one. Check the tree.",
+                        next: None,
+                    ),
+                    "tell": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "It goes in the write-up. Every operative after us gets to start where we finished.",
+                        next: None,
+                    ),
+                },
+            ),
+            "capability_unlock": (
+                start: "grant",
+                nodes: {
+                    "grant": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Surprise,
+                        text: "Site's cleared a new procedure. Derived straight off what we learned from the specimen.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Joy,
+                        text: "Thaumiel. We use the anomalies to hold the anomalies. There's a joke in there and I'm too tired to find it.",
+                        next: Some("lead"),
+                    ),
+                    "lead": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Then we can reach something we couldn't reach yesterday. That's the only kind of progress this job has.",
+                        next: None,
+                    ),
+                },
+            ),
+            "home_with_specimen": (
+                start: "arrive",
+                nodes: {
+                    "arrive": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Site-67. Hand it off to containment and go get some sleep.",
+                        next: Some("med"),
+                    ),
+                    "med": Line(
+                        speaker: 4,
+                        kind: Thought,
+                        emotion: Sadness,
+                        text: "Everyone came back. I keep waiting to stop counting, and I don't think I will.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "It's in a cell now. Behind glass, where I can look at it properly. That's the best day I've had here.",
+                        next: None,
+                    ),
+                },
+            ),
+            "operative_lost": (
+                start: "call",
+                nodes: {
+                    "call": Line(
+                        speaker: 4,
+                        kind: Speech,
+                        emotion: Sadness,
+                        text: "I've got nothing. They're gone.",
+                        next: Some("lead"),
+                    ),
+                    "lead": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Anger,
+                        text: "Mark the position. We are not leaving them here, but we are not dying beside them either. Move.",
+                        next: Some("loss"),
+                    ),
+                    "loss": Line(
+                        speaker: 2,
+                        kind: Thought,
+                        emotion: Sadness,
+                        text: "Everything they'd learned out here went with them. None of it was ever written down.",
+                        next: None,
+                    ),
+                },
+            ),
+            "squad_wipe": (
+                start: "room",
+                nodes: {
+                    "room": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Sadness,
+                        text: "The Council will want the report before the bodies are logged. They always do.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 2,
+                        prompt: "How do we write it?",
+                        options: [
+                            (text: "Exactly what happened. All of it.", next: "honest"),
+                            (text: "What they need to send the next squad.", next: "useful"),
+                        ],
+                    ),
+                    "honest": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Then it goes in the archive unedited. Someone reads it in six months and doesn't make our mistake.",
+                        next: None,
+                    ),
+                    "useful": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "Careful. A write-up that's only useful is how a thing that isn't true ends up on the shelf forever.",
+                        next: None,
+                    ),
+                },
+            ),
+
+            // ── FIRST CONTACT, one per anomaly the roster actually ships ───────────────────────
+            "contact_comfort_blob": (
+                start: "see",
+                nodes: {
+                    "see": Line(
+                        speaker: 4,
+                        kind: Speech,
+                        emotion: Surprise,
+                        text: "There's something orange in the corridor and it is... coming toward me. Slowly. Cheerfully.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Joy,
+                        text: "SCP-999. Do NOT shoot it. It has never hurt anything — it goes to whoever's most frightened.",
+                        next: Some("lead"),
+                    ),
+                    "lead": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Weapons down, then. It settles when you keep your attention on it. Just... stand there and let it.",
+                        next: None,
+                    ),
+                },
+            ),
+            "contact_builder_bear": (
+                start: "see",
+                nodes: {
+                    "see": Line(
+                        speaker: 3,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Contact. It's a teddy bear. It's a teddy bear and it's building something.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "SCP-1048. The original is harmless — genuinely, provably harmless. Watch it and it stops working.",
+                        next: Some("warn"),
+                    ),
+                    "warn": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "What it BUILDS is the problem. If you find a second bear, it is not this bear.",
+                        next: None,
+                    ),
+                },
+            ),
+            "contact_parasite": (
+                start: "see",
+                nodes: {
+                    "see": Line(
+                        speaker: 4,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "Host down — no, host standing. Something's inside them and it's steering.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "SCP-150. It replaces a part and wears the rest. The host is still in there until it isn't.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 0,
+                        prompt: "Call it.",
+                        options: [
+                            (text: "We treat the host.", next: "cure"),
+                            (text: "We put them down.", next: "kill"),
+                        ],
+                    ),
+                    "cure": Line(
+                        speaker: 4,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Then hold it still and give me hands. This is the only containment on the roster that's also medicine.",
+                        next: None,
+                    ),
+                    "kill": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Sadness,
+                        text: "And we learn nothing, and the host dies, and the next one arrives exactly as ignorant. Your call, sir.",
+                        next: None,
+                    ),
+                },
+            ),
+            "contact_crabs": (
+                start: "see",
+                nodes: {
+                    "see": Line(
+                        speaker: 3,
+                        kind: Speech,
+                        emotion: Anger,
+                        text: "Nest. Big one. They're coming out faster than I can drop them.",
+                        next: Some("analyst"),
+                    ),
+                    "analyst": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Don't count them, cap the source. One at a time they're nothing — it's the density that kills.",
+                        next: Some("cost"),
+                    ),
+                    "cost": Line(
+                        speaker: 1,
+                        kind: Thought,
+                        emotion: Sadness,
+                        text: "Sealing it means no specimen. We destroy the only copy and write down what we saw. That's the trade.",
+                        next: None,
+                    ),
+                },
+            ),
+
+            // ── SCP-9191, seeded early so FVS-K-4 only has to choose the moment ────────────────
+            "slop_first_sign": (
+                start: "wrong",
+                nodes: {
+                    "wrong": Line(
+                        speaker: 3,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "That's the second bear. It's got the same face. It has the SAME FACE and the proportions are wrong.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "It's a copy. Something looked at 1048 and made another one without understanding what it was looking at.",
+                        next: Some("analyst"),
+                    ),
+                    "analyst": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "That's a generator, not an anomaly. The original is a thing. This is an OUTPUT.",
+                        next: Some("lead"),
+                    ),
+                    "lead": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Anger,
+                        text: "Then somewhere there's a source, and it doesn't know what it's doing. Kill this one. Flag it.",
+                        next: None,
+                    ),
+                },
+            ),
+            "slop_pattern": (
+                start: "count",
+                nodes: {
+                    "count": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Two procedures derived, two write-ups filed, and I've found the same defect in both specimens.",
+                        next: Some("what"),
+                    ),
+                    "what": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Surprise,
+                        text: "Define defect.",
+                        next: Some("explain"),
+                    ),
+                    "explain": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "Detail in the wrong places. Enormous care spent on things that don't matter, and none on the things that do.",
+                        next: Some("bio2"),
+                    ),
+                    "bio2": Line(
+                        speaker: 1,
+                        kind: Thought,
+                        emotion: Fear,
+                        text: "That isn't a species trait. That's a signature. Something is producing these, and it's producing them badly.",
+                        next: None,
+                    ),
+                },
+            ),
+            "slop_signature": (
+                start: "shelf",
+                nodes: {
+                    "shelf": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Surprise,
+                        text: "There's a report on the shelf I didn't file. Nobody filed it. The author field is empty.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 0,
+                        prompt: "Is it wrong?",
+                        options: [
+                            (text: "Pull it. We don't archive what we can't source.", next: "purge"),
+                            (text: "Leave it. Check it against a specimen first.", next: "verify"),
+                        ],
+                    ),
+                    "purge": Line(
+                        speaker: 2,
+                        kind: Speech,
+                        emotion: Calm,
+                        text: "Purging it. An unsourced claim in the archive gets briefed to every squad after us as if it were earned.",
+                        next: Some("close"),
+                    ),
+                    "verify": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Then we go and look at the thing itself. Firsthand beats a document — that's the only rule that always holds.",
+                        next: Some("close"),
+                    ),
+                    "close": Line(
+                        speaker: 1,
+                        kind: Thought,
+                        emotion: Fear,
+                        text: "It didn't just make the monsters. It's writing to us now. It wants to be believed.",
+                        next: None,
+                    ),
+                },
+            ),
             "intro": (
                 start: "open",
                 nodes: {
