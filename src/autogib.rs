@@ -802,11 +802,32 @@ fn bake_autogib(
         // identical gib set diverged: same count, same `GibKey`s, same `GibRing` order, coordinates off
         // in the last few bits. That is exactly the fingerprint FVS-N-8 recorded.
         //
-        // The key is `(mesh AssetId, world-matrix bits)`: the asset id is stable across same-seed runs
-        // (measured) and `AssetId` is `Ord`; the matrix disambiguates two entities that share one mesh
-        // datablock at different transforms. Deliberately NOT the `Entity` id — id allocation order is
-        // the instability being erased here.
-        let mut parts: Vec<(bevy::asset::AssetId<Mesh>, [u32; 16], Mat4, bool, Entity)> = Vec::new();
+        // The key is `(mesh asset PATH, world-matrix bits)`; the matrix disambiguates two entities that
+        // share one mesh datablock at different transforms. Deliberately NOT the `Entity` id — id
+        // allocation order is the instability being erased here.
+        //
+        // **It used to be the mesh's `AssetId`, and that was the same bug as FVS-N-8's root cause, ninety
+        // lines above.** The comment here even stated the assumption — "the asset id is stable across
+        // same-seed runs (measured)" — and an `AssetId` is an *arena slot assigned by async load order
+        // and slot recycling*, which is precisely what `seed_from` was condemned for hashing. The
+        // measurement behind that claim was taken idle; N-8's residual only reproduces under heavy load,
+        // and TESTING.md invariant 13 is explicit that an exoneration is only as strong as the condition
+        // it was measured under.
+        //
+        // The consequence chain is already written above: soup order -> `Soup::centroid`'s
+        // non-associative float sum -> cut planes shift by ULPs -> a vertex crosses a plane ->
+        // `Fragment::center_local`/`half_extents` move -> every chunk's spawn `Transform` and
+        // `Carryable.weight` move. Identical counts, identical `GibKey`s, identical ring order, positions
+        // differing in the last bits: N-8's recorded fingerprint exactly.
+        //
+        // Note `sort_total!` proves the key is *unique*, which is not the same as **stable** — a unique
+        // key drawn from a load-order-dependent allocator still permutes the list. Uniqueness was never
+        // the property this needed.
+        //
+        // A path is authored rather than allocated, so it is identical across runs, processes and
+        // machines. glTF sub-meshes are path-backed (`characters/valkyrie.glb#Mesh0/Primitive0`).
+        let mut parts: Vec<(String, [u32; 16], Mat4, bool, Entity, Handle<Mesh>)> = Vec::new();
+        let mut unpathed_mesh = false;
         while let Some((e, mat, in_gun)) = stack.pop() {
             if let Ok(mesh3d) = mesh_q.get(e) {
                 if meshes.get(&mesh3d.0).is_some() {
@@ -814,7 +835,15 @@ fn bake_autogib(
                     for (i, v) in mat.to_cols_array().iter().enumerate() {
                         bits[i] = v.to_bits();
                     }
-                    parts.push((mesh3d.0.id(), bits, mat, in_gun, e));
+                    match mesh3d.0.path() {
+                        Some(path) => {
+                            parts.push((path.to_string(), bits, mat, in_gun, e, mesh3d.0.clone()))
+                        }
+                        // One path, no fallback. Falling back to the `AssetId` for this one mesh would
+                        // reintroduce exactly the instability this key exists to remove, on a subset of
+                        // the soup — which is worse than not baking, because it would be intermittent.
+                        None => unpathed_mesh = true,
+                    }
                 } else {
                     all_loaded = false; // sub-mesh still streaming
                 }
@@ -827,9 +856,19 @@ fn bake_autogib(
                 }
             }
         }
-        crate::sort_total!(&mut parts, |p: &(bevy::asset::AssetId<Mesh>, [u32; 16], Mat4, bool, Entity)| (p.0, p.1));
-        for (mesh_id, _, mat, in_gun, e) in parts {
-            let Some(m) = meshes.get(mesh_id) else { continue };
+        if unpathed_mesh {
+            error!(
+                "autogib: a sub-mesh of {asset_path} has no asset path — refusing to assemble a vertex \
+                 soup whose order would depend on asset load order (FVS-N-8). No gibs for this source."
+            );
+            continue;
+        }
+        crate::sort_total!(
+            &mut parts,
+            |p: &(String, [u32; 16], Mat4, bool, Entity, Handle<Mesh>)| (p.0.clone(), p.1)
+        );
+        for (_, _, mat, in_gun, e, mesh_handle) in parts {
+            let Some(m) = meshes.get(&mesh_handle) else { continue };
             if in_gun {
                 append_mesh(&mut gun, m, mat, false);
                 if gun_material.is_none() {

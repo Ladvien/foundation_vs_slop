@@ -672,6 +672,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 
 - **FVS-I-1 — Containment/yield fitness terms + kill-vs-capture conflict resolution** · XL · *determinism: offline; mirrors B-4*
   `surprise = W·S·L` has no containment/yield term and actively rewards spectacular **kills**. Add capture-quality/yield terms and resolve the conflict — Constrained Surprise Search (surprise as a *constrained* QD objective) is the direct precedent.
+  > **📐 DECOMPOSITION DECIDED 2026-07-27 — containment is a CONSTRAINT and an ARCHIVE AXIS, and `W·S·L` is left alone.**
+  > The item offers "separate capture-quality archive dimension **vs** scalarized term". It is the first,
+  > and three independent lines of the existing design already point there:
+  > * **[QD-PCG]'s Constrained Surprise Search is literally this shape** — surprise stays the objective,
+  >   feasibility is a *constraint*. Bolting a capture bonus onto the objective is the other thing.
+  > * **Skalse et al. (arXiv:2209.13085), already cited by `minimal_criterion`: restrict the policy set,
+  >   do not subtract a penalty.** A capture term inside `W·S·L` is a bonus on the objective, which is
+  >   exactly the shape that paper warns produces reward hacking.
+  > * **`coevolve/descriptors.rs` already says it**: *"Fitness stays `W·S·L` — these axes carry
+  >   diversity, not quality."* A capture axis **is** diversity. It lets the archive hold capture-hostile
+  >   *and* capture-friendly worlds side by side, and FVS-H-3's director then samples the region it
+  >   wants. That is also the literal reading of this item's own acceptance: "capture-favoring seeds are
+  >   **selectable**" is an archive property, not a fitness property.
+  >
+  > It also preserves the multiplicative-veto property `Fitness::score` is built on — a fourth factor
+  > would make *every* elite require a completed capture, which risks emptying the archive rather than
+  > shaping it. And it is far less invasive: the constraint lands in `minimal_criterion`, which already
+  > takes `&EpisodeOutcome`, so `fitness()`'s signature does not have to change across five call sites.
+  >
+  > **The counters already exist and are write-only** — FVS-B-8 added `captures_completed/attempted/
+  > broken`, `contained_at_end`, `extracted`, `weapons_tight_ticks` to `EpisodeOutcome`.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
 - **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI*
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
@@ -833,7 +854,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **The failure is upstream of the animation entirely:** `aimed = 0/5` — with 43 hostiles alive, *no unit ever acquires a target*. Three decoy placements were tried and all read 0: 1.5 m straight ahead (can land inside a wall slab, where fog never marks it visible), on the unit's own cell (degenerate aim direction — `(enemy - unit)` normalised fails the front-arc gate), and a scanned visible floor cell at a 1–3 tile standoff. Since real crabs are also present and also never engaged over 1200 ticks, the decoys are probably not the variable at all — the marching squad simply never closes with anything in this seed.
   *Improvements kept regardless:* the decoy placement now picks a visible floor cell at a real standoff (both prior placements were latent bugs), and the measurement loop breaks as soon as the property is observed instead of always burning a fixed 200 ticks.
   *Done when:* the scenario reliably produces an engagement — most likely by driving the squad *at* a known hostile cluster rather than marching it across the map and hoping — and the test passes 10/10 under load with `#[ignore]` removed. · *Deps:* — · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
-- **FVS-N-8 — Gib spawn positions were order-dependent** · M · ⚠️ **MOSTLY FIXED 2026-07-26 — a RESIDUAL survives under heavy load**
+- **FVS-N-8 — Gib spawn positions were order-dependent** · M · ✅ **THE RESIDUAL'S CAUSE FIXED 2026-07-27 — see the audit + fix at the end of this entry**
   **`autogib::seed_from` hashed the `AssetId` of the character GLB to seed the fracture.** An `AssetId`
   is a **slot index in the asset arena**, assigned by async load order — so the same mesh got a
   different id run to run, hashed to a different seed, and `fracture` sliced the body along
@@ -934,6 +955,41 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   * **Generating the load:** background subshells are **not** captured by `kill $(jobs -p)` in a
     non-interactive shell. A previous session left 12 busy-loops at 99% for ~4 minutes and killed an
     unrelated 54-minute replay job. Track the PIDs explicitly and verify they are gone.
+
+  **🔧 FIXED 2026-07-27 — the soup key is now the mesh's authored PATH, not its `AssetId`.**
+  `bake_autogib` sorted its vertex soup by `(AssetId<Mesh>, world-matrix bits)`. An `AssetId` is an
+  **arena slot assigned by async load order and slot recycling** — the same class of value `seed_from`
+  was condemned for hashing, ninety lines earlier in the same file. The comment beside it even stated
+  the assumption out loud: *"the asset id is stable across same-seed runs (measured)"*. That
+  measurement was taken idle, and N-8's residual only reproduces under heavy load — TESTING.md
+  invariant 13 exactly, and the same mistake in the same file twice.
+  `sort_total!` proved the key was **unique**, which is not the same as **stable**: a unique key drawn
+  from a load-order-dependent allocator still permutes the list. Uniqueness was never the property this
+  needed, and that is the generalisable lesson — *a total-order check does not check reproducibility.*
+  *Shipped:* the key is now `(mesh asset path, world-matrix bits)`. glTF sub-meshes are path-backed
+  (`characters/valkyrie.glb#Mesh0/Primitive0`), so it is authored rather than allocated and identical
+  across runs, processes and machines. A sub-mesh with **no** path refuses the whole bake loudly rather
+  than falling back to its `AssetId` for that one entry — a partial fallback would reintroduce the
+  instability intermittently, which is worse than not baking.
+  **Also removed:** nothing. `GibSeq`'s cross-tick accumulation is a real latent amplifier of exactly the
+  shape already fixed once for the scatter seed, but the code shows **no mechanism that makes its count
+  differ** between two same-seed runs, and changing it would move gib positions for no measured reason.
+  Left documented rather than "fixed" on suspicion.
+  *Measured, and stated precisely because the last claim here had to be retracted:* the documented
+  reproducer (`cargo test >/dev/null` then the full `session` target under `--test-threads=1`) was run
+  **five times**. **The gib-split assertion did not fire once** — it previously fired roughly once per
+  run — and `tests/autogib_determinism.rs` stayed green throughout. That is the specific failure this
+  item records, reproduced clean five times under the condition that used to break it.
+  **It is not a clean sweep, and the difference matters.** Run 4 of 5 failed a *different* test
+  (`a_squad_wipe_resolves_the_run_to_defeat`) on a *different* mechanism: `step_until_autogib_ready`
+  gave up — "the fracture bake never completed" — which is the settle timing out, not gib state
+  diverging. **That is FVS-N-11, now reproduced and diagnosed**; see its entry. The two were plausibly
+  always one family of symptom and two causes, which is why N-11 was filed next to this.
+  Ruled out while diagnosing: the new path-keyed lookup is not the cause of that timeout — the
+  `has no asset path` refusal never fires, and four of five runs completed bakes normally.
+  **Leave this entry open until it has survived several full harness runs.** If a gib split recurs, the
+  next places to look are `GibSeq`'s cumulative counter and `drain_gore`'s `g.source` key (an
+  `AssetId<WorldAsset>`, harmless only while all five operatives share one figurine GLB).
   **The claim to distrust is my own:** the commit that fixed the seed said N-8 was closed on the
   strength of a clean 48-minute replay and a green un-ignored reproducer. Both were true, and both were
   measured under a *lighter* load than the one that still breaks it — TESTING.md invariant 13 exactly.
@@ -942,7 +998,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `site::SitePlugin` (one bodiless `Startup` entity) was enough to perturb load timing and turn this
   latent bug into a hard failure of `both_terminal_paths_are_bit_reproducible` — which is how it was
   finally caught. · *Touches:* `src/autogib.rs`, `src/gore.rs` · *Reading:* [TEST-NT], [ABM]
-- **FVS-N-11 — One unexplained `tests/session.rs` failure, not reproduced (FOUND 2026-07-26)** · S · *determinism: unknown*
+- **FVS-N-11 — `tests/session.rs`'s bake settle times out under load** · S · ✅ **REPRODUCED AND DIAGNOSED 2026-07-27**
+  **It is not a gib-determinism bug and never was.** Reproduced on the 4th of 5 runs of FVS-N-8's
+  reproducer: `a_squad_wipe_resolves_the_run_to_defeat` panicked at `app_at_stable_kill_point` with
+  *"the fracture bake never completed — the figurine asset never streamed in"*. The failure is
+  `step_until_autogib_ready` exhausting its budget, i.e. the async GLB not finishing inside 600 fixed
+  ticks — a **precondition timeout**, not an assertion about the simulation. That is why it presented as
+  "some test in `session` failed" with no pattern: it lands on whichever test happens to build an `App`
+  while the box is most contended.
+  **Why ticks buy wall-clock at all:** the harness pins Bevy's IO task pool to one thread (that is what
+  makes system order deterministic), so under CPU saturation that thread is starved and the GLB streams
+  fewer bytes per tick. More ticks is the only lever the test has.
+  *Shipped:* `KILL_TICK` 600 → 1200 in `tests/session.rs`, which is both the settle budget and the kill
+  point — deliberately **one** constant, because they are coupled by `now <= KILL_TICK` and splitting
+  them would let someone raise the settle and silently create a kill point the bake can outlast.
+  *Done when:* the reproducer survives several consecutive full-suite runs at the new budget. If it
+  recurs at 1200, the honest next step is FVS-N-7's open question — whether the harness should block on
+  asset readiness rather than spending sim ticks on it. · *Touches:* `tests/session.rs` · *Reading:* [TEST-NT]
+  *Original filing, kept because its reasoning was right:*
   **Recorded because it happened, not because it is understood.** During a sequential sweep of the fast
   harness targets, `session` reported `16 passed; 1 failed`. The grep in use did not capture which test,
   which is the first lesson: **always capture the failing test NAME**, not just the counts.

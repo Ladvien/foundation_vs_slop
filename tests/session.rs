@@ -38,7 +38,22 @@ fn run_state(app: &mut bevy::prelude::App) -> RunState {
 /// the kill happens at the same point of the same trajectory every time.
 fn app_at_stable_kill_point(cfg: &SimConfig) -> bevy::prelude::App {
     /// Comfortably past the bake even under heavy CPU load, and cheap at physics-off speeds.
-    const KILL_TICK: u64 = 600;
+    ///
+    /// **Raised 600 → 1200 on 2026-07-27, because 600 was measured not to be comfortable enough.** The
+    /// documented FVS-N-8 reproducer (a full `cargo test` immediately followed by this target) failed
+    /// 1 run in 5 on `the fracture bake never completed` — the settle giving up, *not* a gib divergence.
+    ///
+    /// Why more ticks help at all, since `step()` advances a fixed dt regardless of wall clock: the
+    /// harness pins Bevy's IO task pool to **one** thread (that is what makes system order
+    /// deterministic), so under CPU saturation that single thread is starved and the GLB streams in
+    /// *fewer bytes per tick*. More ticks is more wall-clock for it, which is the only lever the test
+    /// has.
+    ///
+    /// The settle budget and the kill point are deliberately the **same** constant. They are coupled by
+    /// `now <= KILL_TICK` below — the kill must land after the bake — so splitting them into two knobs
+    /// would let someone raise the settle and silently produce a kill point the bake can outlast, which
+    /// is the exact failure this whole helper exists to prevent.
+    const KILL_TICK: u64 = 1200;
     let mut app = build_headless_app(cfg);
     assert!(
         step_until_autogib_ready(&mut app, cfg, KILL_TICK as u32).is_some(),
