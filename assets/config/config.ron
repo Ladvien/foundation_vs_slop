@@ -1596,6 +1596,14 @@
     // src/ai/field.rs).
     // =============================================================================================
     containment: (
+        // FVS-O-2's benefit half, SHIPPED OFF. `true` makes the containment HUD refuse to show an
+        // anomaly's rule clauses until some operative holds a `Containable` belief about it —
+        // which is the design doc's claim ("knowledge is the only thing that makes containment
+        // legible") taken literally. It is off because turning it on makes the FIRST encounter
+        // with every anomaly blind, which is a real pacing decision. Research grants the belief
+        // (`brief_the_squad_on_completed_research`), so the loop is closed either way.
+        require_knowledge_for_rules: false,
+
         // SCP-999 — the TUTORIAL capture, and deliberately the gentlest verb in the game: you contain
         // the comfort blob by *befriending* it, not by trapping it. Holster (let THREAT_GUN decay at its
         // cell) and stay with it (keep ATTENTION on it). Both clauses are things the player does by

@@ -105,7 +105,7 @@ fn experiment_line(rank: usize, name: &str, bits: f32) -> String {
 
 /// Player-facing name of a specimen's species. A test pins that every one is named, so a new
 /// `Subject` cannot reach the panel as a debug string.
-fn subject_name(s: crate::knowledge::Subject) -> &'static str {
+pub fn subject_name(s: crate::knowledge::Subject) -> &'static str {
     use crate::knowledge::Subject;
     match s {
         Subject::Crabs => "DIMENSIONAL CRABS",

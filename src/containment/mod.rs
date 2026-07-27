@@ -54,6 +54,18 @@ pub struct ContainmentConfig {
     /// (`parasite::cure_infested_hosts`), not by driving a field. It still needs a rule so the research
     /// layer has one to read, and so `unmet()` has something to render if the HUD ever shows it.
     pub scp150: ContainmentRule,
+    /// **Does an operative have to KNOW a procedure before the HUD will show it?** (FVS-O-2's benefit
+    /// half.)
+    ///
+    /// Ships `false`. The design doc's claim is that knowledge "is the only thing that makes
+    /// containment legible", and this is the switch that makes that literal — but turning it on makes
+    /// the *first* encounter with every anomaly a blind one, which is a real difficulty and pacing
+    /// decision rather than a wiring detail. So it is wired, inert, and one edit away.
+    ///
+    /// It belongs in this slice rather than `sim:` because it changes what containment *means* to the
+    /// player, not how hard it is — the same line `ContainmentConfig` already draws.
+    #[serde(default)]
+    pub require_knowledge_for_rules: bool,
 }
 
 impl ContainmentConfig {

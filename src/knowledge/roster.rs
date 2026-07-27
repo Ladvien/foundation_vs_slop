@@ -215,6 +215,15 @@ pub struct RosterPlugin;
 impl Plugin for RosterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SquadKnowledge>()
+            // The research briefing (FVS-O-2's benefit half) lives HERE rather than in
+            // `ResearchPlugin`, because it writes the resource this plugin owns. `ResearchPlugin` is
+            // harness-visible; this one is not, and a system that writes windowed-only meta-progress
+            // must be registered where that resource is guaranteed to exist.
+            .add_systems(
+                Update,
+                crate::research::unlock::brief_the_squad_on_completed_research
+                    .after(crate::research::unlock::finish_completed_research),
+            )
             .add_systems(
                 OnEnter(crate::session::RunState::Active),
                 restore_squad_knowledge.in_set(crate::session::RunBuild::PostPopulate),

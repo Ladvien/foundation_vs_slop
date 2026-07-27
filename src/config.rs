@@ -169,7 +169,42 @@ pub struct WorldConfig {
 /// failure is an `Err` the caller (`ConfigPlugin::build`) surfaces loudly — there is no default config.
 /// Validation reuses each subsystem's own validator so the invariants are identical to the pre-merge
 /// per-file loads (dungeon generation invariants, the WFC Tiled-prototype cap, the gore autogib range).
+/// Fingerprint of `config.ron` as this process first saw it.
+///
+/// **Why this exists.** The config is read from disk every time an `App` boots, so editing it while a
+/// test suite is in flight makes every *later* `App` in that run parse a file the compiled binary does
+/// not match. What you get is `Unexpected field named 'x' in GameConfig` from tests that have nothing
+/// to do with the edit — five of them in `tests/replay.rs` on 2026-07-27, which read exactly like
+/// determinism regressions and cost a full re-measure. Then it happened a second time, in the same
+/// session, to the person who had just written the warning down.
+///
+/// So the diagnosis is mechanical now rather than remembered: the first load records the file's
+/// modification time, and a later load that sees a different one fails with *the actual problem*
+/// instead of a serde error about a field name.
+static CONFIG_FINGERPRINT: std::sync::OnceLock<Option<std::time::SystemTime>> =
+    std::sync::OnceLock::new();
+
+/// The config file's mtime, or `None` if the filesystem will not say.
+fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(GAME_CONFIG_PATH).ok().and_then(|m| m.modified().ok())
+}
+
 pub fn load_game_config() -> Result<GameConfig, String> {
+    // One path: record on first load, compare on every later one. `None` (no mtime available) simply
+    // never trips — this is a diagnostic guard, and a filesystem that cannot report mtimes must not
+    // become a reason the game refuses to start.
+    let now = config_mtime();
+    let first = CONFIG_FINGERPRINT.get_or_init(|| now);
+    if let (Some(a), Some(b)) = (first, now) {
+        if a != &b {
+            return Err(format!(
+                "{GAME_CONFIG_PATH} CHANGED WHILE THIS PROCESS WAS RUNNING. Every `App` built after \
+                 the edit parses a file this binary was not compiled against, so any result from this \
+                 run — pass or fail — is meaningless. Re-run the suite. (If you are editing config \
+                 during a test run: don't; see TESTING.md, 'assets/ is read at RUNTIME'.)"
+            ));
+        }
+    }
     let text = std::fs::read_to_string(GAME_CONFIG_PATH)
         .map_err(|e| format!("cannot read {GAME_CONFIG_PATH}: {e}"))?;
     let mut cfg: GameConfig =

@@ -20,6 +20,7 @@ use bevy::prelude::*;
 pub mod boot;
 pub mod containment_hud;
 pub mod research_hud;
+pub mod site_hud;
 pub mod verb_bar;
 pub mod debrief;
 pub mod hud;
@@ -56,6 +57,7 @@ impl Plugin for UiPlugin {
                 containment_hud::ContainmentHudPlugin,
                 verb_bar::VerbBarPlugin,
                 research_hud::ResearchHudPlugin,
+            site_hud::SiteHudPlugin,
             ))
             // `state::sync_sim_blocked` reads `DebugCaptureActive` non-optionally (it is documented as
             // "always compiled … stays false in release"), so the plugin that registers the reader is what

@@ -167,6 +167,44 @@ pub fn finish_completed_research(
     }
 }
 
+/// Completing a specimen's research teaches the whole squad that its subject **can be contained**.
+///
+/// FVS-O-2's benefit half needs an acquisition path, or gating the containment HUD on `can_read_rule`
+/// would simply blank it forever — nothing else grants a `Containable` belief. Research is the right
+/// channel and the thematically exact one: the procedure is in the write-up, so the provenance is
+/// [`Provenance::Read`], the same one FVS-O-4's records office will use.
+///
+/// It writes `knowledge::SquadKnowledge` — the meta table — rather than live operatives, so it works
+/// at the Site with no expedition in progress, and it reaches the next squad through the same restore
+/// path everything else does. `Update`, windowed, no pinned node.
+pub fn brief_the_squad_on_completed_research(
+    curriculum: Option<Res<super::curriculum::Curriculum>>,
+    clock: Option<Res<crate::session::RunClock>>,
+    mut table: ResMut<crate::knowledge::SquadKnowledge>,
+    finished: Query<&crate::containment::Specimen, With<Researched>>,
+) {
+    let Some(curriculum) = curriculum else { return };
+    let tick = clock.map(|c| c.ticks).unwrap_or(0);
+    for specimen in &finished {
+        // Only for subjects the curriculum actually describes — a specimen with no authored research
+        // teaches nothing, which is the same content-gap branch the payout takes.
+        if curriculum.entry(specimen.subject).is_none() {
+            continue;
+        }
+        for member in table.members.iter_mut() {
+            // `learn` is idempotent at equal provenance apart from a bounded reinforcement, and a
+            // stronger firsthand belief already held is never overwritten — so re-running this every
+            // frame is safe by the model's own rule rather than by a guard here.
+            member.learn(
+                specimen.subject,
+                crate::knowledge::Claim::Containable,
+                crate::knowledge::Provenance::Read,
+                tick,
+            );
+        }
+    }
+}
+
 pub struct ResearchPlugin;
 
 impl Plugin for ResearchPlugin {
@@ -178,6 +216,10 @@ impl Plugin for ResearchPlugin {
         app.insert_resource(super::curriculum::Curriculum(curriculum))
             .init_resource::<TechTree>()
             .add_systems(Update, finish_completed_research);
+        // `brief_the_squad_on_completed_research` is deliberately NOT registered here. It writes
+        // `knowledge::SquadKnowledge`, which is meta-progress only the Site reads — so it belongs with
+        // `knowledge::RosterPlugin`, which owns that resource and is windowed-only. Registering it in
+        // this plugin (which the harness DOES add) panicked every headless `App` on a missing resource.
     }
 }
 

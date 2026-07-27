@@ -111,6 +111,8 @@ fn clause_line(name: &str, sign: Sign, threshold: f32, actual: f32) -> String {
 fn update_readout(
     stig: Option<Res<Stig>>,
     dungeon: Option<Res<Dungeon>>,
+    rules: Option<Res<crate::containment::ContainmentRules>>,
+    squad: Query<&crate::knowledge::Knowledge, With<crate::squad::Unit>>,
     anomalies: Query<(&Containment, &Transform)>,
     mut readout: Query<&mut Text, With<ContainmentReadout>>,
 ) {
@@ -137,10 +139,24 @@ fn update_readout(
         containment.held_secs(),
         containment.rule.hold_secs,
     )];
-    for clause in &containment.rule.requires {
-        let Some(field) = clause.field() else { continue };
-        let actual = stig.sample(field, &dungeon, pos);
-        lines.push(clause_line(channel_name(field), clause.sign, clause.threshold, actual));
+    // FVS-O-2's **benefit** half: knowledge is what makes a containment procedure legible. Gated behind
+    // `containment.require_knowledge_for_rules`, which ships `false` — see that field for why turning it
+    // on is a pacing decision rather than a wiring one.
+    //
+    // "Any operative present knows" rather than "the selected one": this panel is the player's view of
+    // the *squad*, and a squad that contains someone who has read the write-up would say so out loud.
+    let gated = rules.map(|r| r.0.require_knowledge_for_rules).unwrap_or(false);
+    let legible = !gated || squad.iter().any(|k| k.can_read_rule(containment.subject));
+    if legible {
+        for clause in &containment.rule.requires {
+            let Some(field) = clause.field() else { continue };
+            let actual = stig.sample(field, &dungeon, pos);
+            lines.push(clause_line(channel_name(field), clause.sign, clause.threshold, actual));
+        }
+    } else {
+        // Not a blank panel: an empty list reads as a bug, and the player needs to know that the
+        // missing information is *obtainable* rather than absent. Same rule as every other readout here.
+        lines.push("PROCEDURE UNKNOWN — NO OPERATIVE HAS STUDIED THIS ANOMALY".into());
     }
     text.0 = lines.join("\n");
 }

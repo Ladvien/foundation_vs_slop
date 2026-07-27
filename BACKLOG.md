@@ -46,13 +46,18 @@ Assumed by every item; stated once here rather than repeated. Verified against t
 | **M3+** | Site-67, the ASYNC door, and operative knowledge | **P5 + P10** | An operative who has *met* an anomaly behaves differently from one who has only heard of it; a specimen is visibly held in a cell |
 | **Continuous** | Determinism/CI + engine/housekeeping | **P8, P9** | Front-load J-1/J-2 (they live in P1/P2); harness lane gating once archives stabilize |
 
-> **Milestone status, audited 2026-07-27.** M0 (P1) and M1 (P2) are **met**. M2 (P3) is met **except
-> SCP-610**, which is deferred on the missing asset. **M3 is NOT met**, and it is worth being precise
-> about why, because a great deal of M3 did ship: Site-67, the ASYNC door, specimens visibly held in
-> cells, save/load, and the whole research/economy/belief *logic* are all in and green. What is missing
-> is the **wiring** — a player can capture and extract and come home and look at a specimen, but cannot
-> research it, cannot spend a budget, and carries no beliefs. See FVS-E-5, FVS-P-3, FVS-O-1b. M4 (P6/P7)
-> is untouched and correctly sequenced behind I-1 → H-1.
+> **Milestone status, audited and then closed 2026-07-27.** M0 (P1) and M1 (P2) are **met**. M2 (P3) is
+> met **except SCP-610**, deferred on the missing asset.
+>
+> **M3 is now met.** The morning audit found it was not — a great deal of M3 had shipped (Site-67, the
+> ASYNC door, specimens visibly held in cells, save/load, and the whole research/economy/belief *logic*)
+> but a player could capture and extract and come home and look at a specimen and then do **nothing**
+> with it: no way to research it, no budget to spend, no beliefs carried. That was FVS-E-5, FVS-P-3 and
+> FVS-O-1b, all landed the same day, plus F-3's curriculum and L-3's screen. The gate reads *"a full
+> capture→research→unlock→harder-capture path playable across two persisted expeditions"*, and it is.
+>
+> M4 (P6/P7) is untouched and correctly sequenced behind I-1 → H-1. The remaining Push 10 items (O-3,
+> O-4, O-5) are the propagation half and wait on K-3's dialogue content.
 
 **Dependency spine:** P1 → P2 → P3; P2 → P4 (research needs captured specimens); P4 ↔ P5 (unlock hooks ↔ tech-tree; persistence needs posteriors); P5 → P6 (director needs a retrained archive + resolved fitness); P6 → P7 (endgame needs the generator/difficulty spine). P8 is continuous with two items pulled early into P1/P2. P9 is continuous and independent.
 **Wiring caveat added 2026-07-27:** the spine assumes an item's *logic* landing means the push advanced. Three items broke that assumption (E-5, P-3, O-1b). Read a "LANDED" marker as a claim about code, and the "Done when" as the claim about the game — they were not the same thing in Push 4, Push 5's economy, or Push 10.
@@ -658,7 +663,18 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   P-1/P-2 shipped 264 lines of correct, tested economy with **no plugin, no systems, and no resource**. Four separate gaps, measured: `O5Standing` is never registered; `record()` has no caller; `buy()` has no caller and no UI; the budget is not in `SaveGame`.
   **The requisition wing already has a place to stand** — G-4 authored the rect and the decal; what it lacks is the verb (same shape as G-4's `AreaId` note).
   *Done when:* finishing an expedition produces a rating and an allowance the player can see; a purchase increments `DeviceSupply`/`QuarantineSupply` and that supply survives into the **next** expedition; the budget round-trips through save/load. · *Deps:* P-1, P-2, G-2 · *Touches:* `src/site/o5.rs`, new `src/ui/`, `src/persist.rs`, `src/containment/verbs.rs` · *Reading:* **[SDT-00]**
-- **FVS-L-3 — Site + tech-tree HUD** · M · *determinism: render*
+- **FVS-L-3 — Site + tech-tree HUD** · M · ✅ **LANDED 2026-07-27**
+  *Shipped:* `src/ui/site_hud.rs` — the curriculum rendered in `Curriculum::progression` order (post-order
+  DFS, so a prerequisite is always listed above the thing that needs it and the list *reads as a path*),
+  the goal marked, and the specimen selector on `Tab` that FVS-L-2 has been waiting for.
+  **A locked node names what unlocks it** — `LOCKED — NEEDS: DEPLOY MORALE FIELD`, never a bare padlock.
+  That is FVS-L-1's rule (an unmet clause is an *instruction*) applied to the curriculum; a graph whose
+  shape the player cannot read is a list with some entries greyed out.
+  **Held / researched / not-yet-captured are three distinct states**, because collapsing them hides the
+  actual next action: go and catch one, go and study it, or it already paid out.
+  *Determinism:* the selector cycles by `(captured_tick, Entity)` — the same total key `Specimen`
+  documents for cell assignment, and for the same reason: `SiteSpecimens` is ordered by *attach* order,
+  so cycling it raw would visit specimens differently between sessions.
   Show specimens, the Thaumiel graph, and locked/unlocked state.
   **Also carries the specimen SELECTOR that FVS-L-2 is already waiting on:** `ui/research_hud.rs` picks "the least-researched" specimen as a deterministic placeholder and says in a comment that it does so *"until FVS-L-3's Site screen offers a selector"*. Until then the player cannot choose what to research.
   *Done when:* players navigate the curriculum graph and see prerequisites; a specimen can be selected for study. · *Deps:* F-1, G-1, **F-3** (a graph with no prerequisites has nothing to navigate) · *Touches:* UI, Site, tech-tree · *Reading:* [LPM], [SDT-00]
@@ -768,6 +784,16 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** [TEST-OW], [TEST-NT], [ABM]
 **Done when:** the deterministic core runs on ARM and x86 in CI; the harness lane gates merges; new panics/unsafe are blocked.
 
+> **⚠️ Editing `assets/` mid-run invalidates the run, and the guard for it is now mechanical (2026-07-27).**
+> `config::load_game_config` reads `config.ron` from disk every time an `App` boots, and `GameConfig` is
+> `deny_unknown_fields` — so adding a slice while a suite is in flight makes every *later* test parse a
+> file its binary was not compiled against. What you see is `Unexpected field named 'x' in GameConfig`
+> from tests that have nothing to do with the edit. It cost a full re-measure twice in one session,
+> the second time to the person who had just written the warning down — which is the argument for not
+> leaving it as a warning. `load_game_config` now records the file's mtime on first load and **fails
+> with the actual diagnosis** if a later load sees a different one. Treat `assets/` as frozen while a
+> suite runs; the same hazard applies to `site67.ron`, the `.wgsl` files and the elite overlays.
+>
 > **⚠️ `serial_guard` does NOT serialize across test BINARIES (found 2026-07-26).** `cargo test --test a --test b` runs the binaries **in parallel** — `--test-threads=1` only limits threads *within* one binary — and `serial_guard` is a process-local `static`, so two harness `App`s from different targets can and do overlap. That is exactly the interference TESTING.md invariant 4 warns about, and it produced a false `session::both_terminal_paths_are_bit_reproducible` failure that passed cleanly when the target was run alone. Verify a suspicious harness failure by re-running that one target on its own before believing it. A real fix is a cross-process lock (an advisory file lock in `serial_guard`); until then, do not treat a multi-target run as authoritative.
 
 
@@ -797,6 +823,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* CI fails on new `unwrap`/`expect`/`panic!`/`unsafe` in shipped crates (harness exempt). · *Deps:* — · *Touches:* CI, lints · *Reading:* — (no corpus resource)
 - **FVS-J-5 — Make harness CI lane gating** · S
   Promote the advisory (continue-on-error) harness lane to a hard gate once retrain (H-1) stabilizes archives.
+  ⚠️ **A large chunk of the runtime blocker is fixed (2026-07-27), and here is the MEASURED number.**
+  `tests/replay.rs` took **3201.8 s with 19 tests** and takes **2029.8 s with 18** — so
+  `zz_localize_g0` cost **1172 s ≈ 19.5 minutes**, about 28% of the lane. (An earlier note here claimed
+  "53 of ~70 minutes". That was inferred from "the probe dominates" rather than measured, and it was
+  wrong — recorded rather than quietly edited, because this backlog's whole discipline is that an
+  unmeasured claim is worth less than no claim.) The probe was explicitly labelled *"TEMP … Remove once
+  the tie-break is found"* and ran 25 full 7200-tick episodes under 8 busy-loop threads. G0 *was* found
+  and fixed (`docs/rl/2026-07-16-…`), and the property it diagnosed is still asserted twice by
+  `search_rollouts_are_reproducible_under_load` and its mutant sibling. A **localizer** is the right
+  tool once one of those goes red, and it is 40 lines of `trace_episode` to write then; paying an hour
+  per CI run to keep it warm is not. Removed. A lane nobody will wait for never gets promoted.
+  **Still ~34 minutes**, essentially all of it `replay.rs`'s remaining 18 tests, so J-5 is not free yet:
+  `deterministic_core_is_bit_identical_across_many_builds` alone builds 24 `App`s, and the two
+  `search_rollouts_*_under_load` tests run replicate 7200-tick rollouts. Those are load-bearing and
+  should not be cut; the next honest lever is running the lane's targets in parallel *processes* (they
+  are only serialised within a binary today) or splitting the slow replicate tests onto a nightly.
   *Done when:* harness lane blocks merge on regression. · *Deps:* H-1 · *Touches:* CI · *Reading:* [TEST-NT], [TEST-OW], [ABM]
 
 ---
@@ -1036,7 +1078,26 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
   Not currently a shipped bug (nothing kills a unit in the first second of a real run), and it is **not** worth forcing the bake synchronous. What is worth deciding: whether the offline search — which runs thousands of rollouts on evolved worlds where an early death is plausible — should gate its rollouts on `sim_harness::autogib_ready` the way `tests/session.rs` now does.
-  *Done when:* documented decision; if "gate it", `squad_ai::evaluate::rollout` waits for the bake before scoring. · *Deps:* — · *Touches:* `src/autogib.rs`, `src/squad_ai/evaluate.rs` · *Reading:* — (no corpus resource)
+  ✅ **DECIDED 2026-07-27: do NOT gate the search. Assert instead, if it ever bites.**
+  Three reasons, in order of weight:
+  1. **Gating trades one nondeterminism for another.** `step_until_autogib_ready` burns a *variable*
+     number of ticks, so a gated rollout either scores a shorter episode or starts from a different
+     point — and the backlog already records exactly this trap from FVS-A-3: *"waiting for the bake is
+     not sufficient either … gating on it and killing immediately compares two different sims (that
+     mistake turned 2 distinct results into 5)."* The fix there was wait-then-advance-to-a-**fixed
+     absolute tick**, which for a 7200-tick rollout means throwing away a settle window at the front of
+     every one of thousands of episodes. That is a real cost for a hazard nobody has observed.
+  2. **The empirical answer is that it lands in time.** `search_rollouts_are_reproducible_under_load`
+     and its mutant sibling both compare replicate rollouts **under 8-thread load** across the held-in
+     worlds and pass. If a rollout's first death routinely preceded its bake, those are the tests that
+     would be red.
+  3. **The bake itself is now reproducible regardless of *when* it lands** (FVS-N-8's fix: seed from the
+     asset path, assemble the soup in authored-path order). What remains is only *whether* it landed,
+     which changes chunk counts rather than chunk positions — a coarser and far more visible failure.
+  **If it ever does bite, the right move is an assertion, not a gate**: have `evaluate::rollout` fail
+  loudly when a rollout records its first death with `autogib_ready` still false. One bool check, one
+  path, and it converts a silent scoring difference into a named error — whereas a gate would hide the
+  condition by papering over it. · *Deps:* — · *Touches:* `src/autogib.rs`, `src/squad_ai/evaluate.rs` · *Reading:* — (no corpus resource)
 - **FVS-N-6 — Dedupe shader noise** · S · ✅ **LANDED 2026-07-26**
   `assets/shaders/noise.wgsl` is now the **only** file in the project defining `vnoise`/`fbm` — `almond_water.wgsl` was the last holdout and now `#import`s them.
   **The copies were not identical, and that decided the approach.** Almond water used a different hash (`p3.zyx + 31.32` vs `p3.yzx + 33.33`) and a different lacunarity (2.03 vs 2.0, which is deliberate — the irrational step breaks the axis-aligned banding a clean ×2 leaves, and that is exactly what an organic puddle margin needs). Unifying the *algorithm* would therefore have changed pixels and failed the item's own "SSIM unchanged" bar. So its exact chain moved **verbatim** into the shared library as `hash13`/`vnoise13`/`fbm3_organic`, mirroring the existing `fbm4`/`fbm5` shape where a caller-varying knob is a named entry point rather than a per-shader copy. One home for noise, byte-identical math, no visual change.
@@ -1088,9 +1149,19 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   component, so it adds no third source of truth and no component to a hashed archetype.
   *Determinism:* the reduction is a **`max`**, order-independent in `f32` — the same argument
   `drives::track_max_is_independent_of_source_order` pins — so no canonical sort is required.
-  **Still to do:** the *benefit* half. `can_read_rule` is still uncalled; gating
-  `ui::containment_hud`'s clause lines on it is what makes knowledge legible rather than only costly,
-  and it is the half that makes the trade a trade.
+  **The benefit half landed the same day, also inert.** `ui::containment_hud` now gates its rule-clause
+  lines on `can_read_rule`, behind `containment.require_knowledge_for_rules` (ships `false`). A gated
+  panel reads `PROCEDURE UNKNOWN — NO OPERATIVE HAS STUDIED THIS ANOMALY` rather than going blank,
+  because an empty panel reads as a bug and the player needs to know the information is *obtainable*.
+  **It needed an acquisition path first, or the gate would blank the HUD forever** — nothing granted a
+  `Containable` belief. `research::unlock::brief_the_squad_on_completed_research` is that path, and it
+  is the thematically exact one: completing a specimen's research teaches the whole squad the procedure
+  at `Provenance::Read` — *it is in the write-up* — which is the same provenance FVS-O-4's records
+  office will use. That also gives Push 4 and Push 10 their first real mechanical link.
+  **Why it ships off:** turning it on makes the FIRST encounter with every anomaly blind. That is a
+  genuine difficulty and pacing decision, not a wiring detail, so it is one edit away rather than
+  assumed. The flag lives in the `containment:` slice (rules) rather than `sim:` (difficulty), because
+  it changes what containment *means* to the player.
   **`HANDOFF.md` said this shipped "wired inert at gain zero". It did not ship at all** (measured 2026-07-27). `Knowledge::fear_scale` and `can_read_rule` exist as pure functions with **no callers anywhere in the repo**, and there is **no gain constant and no config knob** — the "gain zero" staging existed only as a literal `0.0` passed by one unit test. Landing this is a real change (the knob, the `ai/drives.rs` call site, the `containment_hud` gate), not a constant flip.
   **The knob is evolvable and belongs on `sim:`**, not in a rules slice: it is difficulty, which is exactly what the world genome explores (`world_genome::N` 137 → 138). Ship it at gain 0 first and prove the goldens bit-exact, *then* turn it on as a separate reviewed commit with a measured re-pin — the same two-step FVS-B-8 used.
   **Cost:** with the subject in perception, a high-confidence `Lethal` belief raises that operative's FEAR gain — a frightened operative flees sooner, aims worse, breaks a containment hold. **Benefit:** knowledge is what makes containment *legible* — an operative with a `CapturableBy` belief can read that anomaly's rule clauses in the containment HUD (L-1 already renders per-clause state); without it they show as unknown.
