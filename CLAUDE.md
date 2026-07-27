@@ -2,7 +2,6 @@
 - Do not use unwrap() or anything that'd lead to a panic.  Code safe.  Handle errors.
 - Leave academic paper references in comments, if a paper was used in writing the code.
 - Rember compilation cost time; try to bunch changes and use `cargo check` to spot issues
-- Add under a ## Testing section (create one if absent).
 - This is a Rust game project (ECS-based). Always run the full test suite (including determinism and headless behavioral tests) after modifying gameplay/simulation code, and verify determinism before shipping.
 - Do NOT assume design decisions on my behalf. When a design or scope choice is ambiguous (colors, coverage %, approach), stop and ask before implementing. Prefer focused/concrete changes over global post-process filters or over-engineered solutions.
 - When investigating whether an issue is fixed, actually inspect the underlying data/code first before offering explanations; do not assume a file is broken or blame viewport/version.
@@ -57,21 +56,10 @@ A determinism probe on an idle box proves nothing: run it under load.
 ## Additional Game Assets
 - Additional games assets are cataloged at /mnt/codex_fs/game_assets/CATALOG.md, feel free to use any of these.
 
-## Taking screenshots (do NOT use the macOS `screencapture` tool)
+## Screenshots
 
-The game screenshots **itself** from inside the render pipeline via the `devshot` dev module
-(`src/devshot.rs`) — no macOS screen-recording permission, no window/Space juggling. To grab a frame
-while the game is running (working dir = project root):
+To capture a frame from the running game, use the **`screenshots` skill** — the game screenshots
+itself from inside the render pipeline (`src/devshot.rs`); never reach for the macOS `screencapture`
+tool.
 
-```bash
-touch screenshot.request      # sentinel; devshot consumes it next frame
-sleep 1.5                      # give it a frame or two to render + write
-# then Read screenshot.png
-```
-
-- Output is `screenshot.png` in the project root (gitignored, overwritten each time).
-- Mechanism: `Screenshot::primary_window()` + `save_to_disk` (bevy 0.19), triggered by the sentinel file so it can be driven headlessly from the shell.
-- **Caveat:** a *fully hidden/occluded* macOS window releases its Metal drawable, so a capture then comes back **black** (~57 KB PNG). A real frame is >150 KB. If you get black, the game window is hidden — retry once it's visible (even unfocused is fine; `WinitSettings` renders continuously).
-- Keystroke injection into the window is blocked this environment, so to verify input-driven behavior (movement, selection, fog reveal) drive it with a **temporary** auto-input/self-test system, screenshot, then revert the temp code.
-- `devshot` is dev-only; strip the module + its plugin registration for release builds.
 - **Player region captures live in `debug_screenshots/`.** When the player runs the game and presses **Ctrl+P**, they drag a box and release to save *just that region* to `debug_screenshots/region_<timestamp>.png` — a deliberate "look here" pointer at whatever they're asking about. If the player references something visual, **check `debug_screenshots/` (newest first) and read `debug_screenshots/CLAUDE.md`.** Produced by `src/region_capture.rs` (dev-only, stripped from release).
