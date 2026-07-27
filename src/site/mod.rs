@@ -43,6 +43,7 @@
 //! presentation half (geometry, avatars, the aperture material) is windowed-only `SiteVisualsPlugin`,
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
+pub mod aperture;
 pub mod layout;
 pub mod nav;
 pub mod pieces;

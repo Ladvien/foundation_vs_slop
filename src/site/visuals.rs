@@ -25,6 +25,7 @@ use bevy::prelude::*;
 
 use super::layout::SiteLayout;
 use super::nav::SiteNav;
+use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::pieces::SitePiece;
 use crate::ui::state::AppState;
 
@@ -92,9 +93,11 @@ impl Plugin for SiteVisualsPlugin {
             }
         };
         let nav = SiteNav::bake(&layout);
-        app.insert_resource(nav)
+        app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
+            .insert_resource(nav)
             .insert_resource(SiteLayoutRes(layout))
             .add_systems(Startup, spawn_site_geometry)
+            .add_systems(Update, super::aperture::drive_aperture_charge)
             .add_systems(OnEnter(AppState::Site), focus_camera_on_site)
             .add_systems(
                 Update,
@@ -128,7 +131,13 @@ fn place(commands: &mut Commands, assets: &AssetServer, piece: SitePiece, at: Ve
         .with_child((WorldAssetRoot(scene), Transform::default()));
 }
 
-fn spawn_site_geometry(mut commands: Commands, assets: Res<AssetServer>, layout: Res<SiteLayoutRes>) {
+fn spawn_site_geometry(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    layout: Res<SiteLayoutRes>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
+) {
     let l = &layout.0;
     for r in &l.floor {
         for c in r.cells() {
@@ -151,6 +160,21 @@ fn spawn_site_geometry(mut commands: Commands, assets: Res<AssetServer>, layout:
         SiteVisual,
         AsyncDoor { half_extents: Vec3::new(hx, hy, hz) },
         Transform::from_translation(door_at),
+    ));
+    // The aperture itself: a quad standing in the frame's opening, recessed a couple of centimetres so
+    // the frame geometry crops its edges rather than the two z-fighting. Sized to `DOORWAY_HEIGHT` so
+    // it fills the opening the kit actually leaves.
+    let opening_w = hx * 2.0;
+    let opening_h = crate::dungeon::DOORWAY_HEIGHT;
+    let quad = meshes.add(Rectangle::new(opening_w, opening_h));
+    let mat = aperture_mats.add(AsyncApertureMaterial { settings: ApertureUniform::default() });
+    commands.spawn((
+        SiteVisual,
+        ApertureQuad,
+        Mesh3d(quad),
+        MeshMaterial3d(mat),
+        Transform::from_translation(door_at + Vec3::new(0.0, opening_h * 0.5, 0.02))
+            .with_rotation(Quat::from_rotation_y(l.door.yaw.to_radians())),
     ));
 
     // Containment cells: the glazed front, and an empty marker the specimen body will fill.
