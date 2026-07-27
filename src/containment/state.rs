@@ -185,12 +185,16 @@ fn grant_specimen(mut world: bevy::ecs::world::DeferredWorld, ctx: bevy::ecs::li
     let tick = world.resource::<crate::session::RunClock>().ticks;
     let site = world.get_resource::<crate::site::SiteRoot>().map(|s| s.0);
     let specimen = Specimen { captured: ctx.entity, captured_tick: tick };
+    // FVS-E-1: the posterior is created **with** the specimen, at maximum entropy. Attaching it here
+    // rather than in a later "initialise research" pass means there is no window in which a banked
+    // specimen exists without a record — and no second place that could create one differently.
+    let posterior = crate::research::ResearchPosterior::unknown();
     match site {
         Some(site) => {
-            world.commands().spawn((specimen, crate::site::HeldAt(site)));
+            world.commands().spawn((specimen, posterior, crate::site::HeldAt(site)));
         }
         None => {
-            world.commands().spawn(specimen);
+            world.commands().spawn((specimen, posterior));
         }
     }
 }

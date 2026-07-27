@@ -678,3 +678,31 @@ fn an_empty_site_reads_as_no_specimens_rather_than_no_site() {
     assert!(site_root(&mut app).is_some(), "the Site exists…");
     assert!(site_specimens(&mut app).is_empty(), "…and simply holds nothing yet");
 }
+
+#[test]
+fn every_banked_specimen_arrives_with_an_open_research_posterior() {
+    // FVS-E-1. The posterior is created WITH the specimen, so there is never a window in which a
+    // capture is banked but unresearchable — and no second code path that could create one differently.
+    use foundation_vs_slop::research::{HiddenParam, ResearchPosterior};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(t) = containable_targets(&mut app).into_iter().next() else { return };
+    force_contained(&mut app, t.1);
+    step(&mut app, &cfg, 5);
+
+    let held = site_specimens(&mut app);
+    assert_eq!(held.len(), 1, "precondition: one capture banked");
+    let p = app
+        .world()
+        .get::<ResearchPosterior>(held[0])
+        .copied()
+        .expect("a banked specimen must carry a research posterior");
+    assert!(!p.is_complete(), "a fresh capture must have everything left to learn");
+    for q in HiddenParam::ALL {
+        assert_eq!(p.belief(q), 0.5, "and must start at maximum entropy on every parameter");
+    }
+}

@@ -308,12 +308,41 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[PROB-ML]**, [BAYESOPT], **[GRIP]**, [LPM], [SDT-00]
 **Done when:** a captured anomaly's stat-sheet fog lifts through experiments ordered by expected information gain, front-loading resolvable reveals, and completing a posterior fires exactly one unlock.
 
-- **FVS-E-1 — `ResearchPosterior` component** · M · *determinism: seeded if in-sim*
-  Belief over hidden params + a fog-of-war reveal bitset per specimen. "Research = epistemic action reducing uncertainty."
-  *Done when:* posterior initializes at capture; reveal bitset starts empty; serializable (P5). · *Deps:* B-4, D-4 · *Touches:* research module, Site · *Reading:* **[PROB-ML]**, [GRIP]
-- **FVS-E-2 — Experiment model + EIG selection** · L · *determinism: seeded*
-  Rank experiments by Expected Information Gain (information-gain acquisition / posterior-entropy reduction) so the most informative is surfaced.
-  *Done when:* per-experiment EIG computed and ordered; a test shows EIG picks the max-uncertainty-reduction experiment. · *Deps:* E-1 · *Touches:* research module · *Reading:* **[PROB-ML]**, [BAYESOPT]
+- **FVS-E-1 — `ResearchPosterior` component** · M · ✅ **LANDED 2026-07-26**
+  *Shipped:* `src/research/posterior.rs` — a Bernoulli belief per [`HiddenParam`] (Lethality, Contagion,
+  CaptureBasin, Proliferation) plus a reveal bitset, attached to the `Specimen` **inside the
+  `grant_specimen` hook**. Creating it with the specimen means there is never a window in which a
+  capture is banked but unresearchable, and no second code path that could initialise one differently.
+  **A Bernoulli per parameter, not something richer** — because every parameter here is a question the
+  player asks in words, and "68% lethal" is a sentence while a Dirichlet is a diagram. When a parameter
+  needs more than two answers the right move is to **split it into more parameters**, which gives the
+  player two things to research and the HUD two things to state.
+  **Deliberately NOT `knowledge::Belief` (Push 10).** A posterior is institutional and converges on the
+  truth; a belief is personal, transmissible and can be *wrong*. Collapsing them would lose O-5 entirely,
+  where false hearsay is the antagonist's weapon. Also why this needs no `Option`: a specimen on the slab
+  always has a posterior, whereas an operative may never have heard of the thing ([EPISTEMIC]).
+  **The numerical trap it is built around:** at reliability 1.0 a single observation drives the belief to
+  exactly 0 or 1, and the next contradicting result divides by zero — one anomalous reading would poison
+  a record forever. `observe` clamps below 1.0, so a posterior can always be argued with. Pinned by
+  `contradicting_evidence_can_still_move_a_confident_belief`.
+  Also pinned: a *negative* result resolves as well as a positive one (certainty of absence is still
+  certainty — otherwise a fully-researched harmless specimen looks permanently unfinished), and
+  `total_entropy` **sums** rather than averages, so adding a parameter makes research take longer instead
+  of diluting the average into looking nearly done. · *Deps:* B-4, D-4 · *Reading:* **[PROB-ML]**, [GRIP], [EPISTEMIC]
+- **FVS-E-2 — Experiment model + EIG selection** · L · ✅ **LANDED 2026-07-26**
+  *Shipped:* `research::Experiment` + `rank_by_information_gain`.
+  **The algorithm is the paper's, not an approximation of it.** Tiwari, Radhakrishna, Gulwani & Perelman
+  (*Information-theoretic User Interaction*, DOI 10.48550/arXiv.2006.12638) give the chain-rule identity
+  `En(Pr(bb | q)) = En(Pr(bb)) − En(Pr(q))`, from which the greedily-best question is `argmax_q En(Pr(q))`
+  — *"to greedily seek knowledge, we should ask the question about which we know the least."* So EIG is
+  the entropy of the experiment's **answer** distribution, which is both provably equal to the expected
+  posterior-entropy reduction and the cheap one to compute — and the legible one, since "how unsure am I
+  what this test will say" is something L-2 can put in words.
+  *Three decisions the tests pin:* a **resolved** parameter scores exactly 0, not merely low (offering a
+  question the player can already see the answer to reads as broken); **reliability scales the gain**,
+  because scoring raw answer entropy would make a coin-flip test look maximally informative; and the
+  ranking is **total** (ties break on authored index) so the top suggestion cannot flicker under the
+  player's cursor between frames. · *Deps:* E-1 · *Reading:* **[PROB-ML]**, [BAYESOPT], + arXiv:2006.12638
 - **FVS-E-3 — Reveal pacing (front-load resolvable surprise)** · M
   Pace the reveal so value tracks the **rate** of uncertainty reduction — front-load, don't drip.
   *Done when:* a completed arc reveals more early, tapering; tunable; test asserts monotone-decreasing default reveal rate. · *Deps:* E-1, E-2 · *Touches:* research module, UI · *Reading:* **[GRIP]**, [LPM]

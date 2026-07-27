@@ -89,6 +89,7 @@ pub mod scp999;
 /// plugins for the determinism gate; see the module docs.
 pub mod scp1048;
 pub mod selection;
+pub mod research;
 pub mod session;
 pub mod site;
 pub mod settings;
