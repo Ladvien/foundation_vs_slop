@@ -282,7 +282,35 @@ fn deterministic_core_is_bit_identical() {
 // Legitimate: `deterministic_core_is_bit_identical`, `..._across_many_builds` and — the only probe that
 // counts under TESTING.md invariant 9 — `search_rollouts_are_reproducible_under_load` are all green, so
 // the sim is still bit-reproducible, just different.
+/// **Goldens are PER-PLATFORM** (decision 2026-07-27, FVS-J-3 / BACKLOG §7).
+///
+/// The determinism model was an open question: `f32` gameplay math is not guaranteed identical across
+/// instruction sets, so one hash cannot hold on both x86-64 and aarch64. Three options were on the
+/// table — fixed-point the core, one golden with an epsilon tolerance, or a golden per platform. The
+/// last was chosen:
+///
+/// * **A tolerance was rejected** because exact-hash discipline is what has caught every determinism
+///   bug this project has found, including two on the day of this decision. Comparing with an epsilon
+///   would blind precisely the oracle that works.
+/// * **Fixed-point was rejected for now** as a large invasive change to movement/fields/ORCA. It stays
+///   the only option that makes a replay portable *between* machines, so it is the right answer if
+///   cross-platform replay ever becomes a requirement — see §7.
+///
+/// What this buys: each platform stays held to **bit-exact** reproducibility against itself, which is
+/// the property every golden here actually relies on. What it costs, stated plainly: a replay or
+/// campaign captured on one architecture is **not** verifiable on another, and `sim_harness` results
+/// cannot be compared across a heterogeneous fleet.
+///
+/// aarch64 is deliberately left **unpinned** rather than guessed. The `determinism-arm` CI lane exists
+/// to measure it; once it reports a stable value, fill it in here and that lane can stop being
+/// advisory. A `todo!()` would fail at runtime with no explanation, so the arm below explains itself.
+#[cfg(target_arch = "x86_64")]
 const GOLDEN: u64 = 0x3563f0f69281ce4c;
+
+/// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
+/// message says exactly what to do.
+#[cfg(not(target_arch = "x86_64"))]
+const GOLDEN: u64 = 0;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -290,9 +318,15 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
     step(&mut app, &cfg, 1800);
+    let got = snapshot_hash(&mut app);
+    assert_ne!(
+        GOLDEN, 0,
+        "no golden is pinned for this architecture yet (goldens are PER-PLATFORM — see the GOLDEN doc). \
+         This run measured {got:#018x}; if the `determinism-arm` lane reproduces it across builds, pin \
+         it in the `cfg(not(target_arch = \"x86_64\"))` arm and drop that lane's continue-on-error."
+    );
     assert_eq!(
-        snapshot_hash(&mut app),
-        GOLDEN,
+        got, GOLDEN,
         "deterministic-core hash drifted from the pre-migration golden — the const→config promotion \
          changed a gameplay value (or the shipped `sim:` slice differs from SimTuning::default())"
     );
@@ -462,7 +496,12 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 //
 // Re-pinned 2026-07-25 alongside `GOLDEN` — same three causes, same evidence (see the note there).
 // Was `0x244e3af59ff9d65a`.
+#[cfg(target_arch = "x86_64")]
 const GOLDEN_FIELD: u64 = 0x60b5c51fcc20a281;
+
+/// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
+#[cfg(not(target_arch = "x86_64"))]
+const GOLDEN_FIELD: u64 = 0;
 
 #[test]
 fn field_passes_are_bit_identical() {
@@ -470,9 +509,14 @@ fn field_passes_are_bit_identical() {
     let cfg = SimConfig::deterministic_core();
     let mut app = build_headless_app(&cfg);
     step(&mut app, &cfg, 1800);
+    let got = field_hash(&mut app);
+    assert_ne!(
+        GOLDEN_FIELD, 0,
+        "no field golden is pinned for this architecture yet (goldens are PER-PLATFORM). This run \
+         measured {got:#018x}."
+    );
     assert_eq!(
-        field_hash(&mut app),
-        GOLDEN_FIELD,
+        got, GOLDEN_FIELD,
         "stigmergy field grids drifted from the golden — the evaporate/diffuse/hotspot floor-cell \
          iteration is no longer bit-identical to the full-grid scan"
     );

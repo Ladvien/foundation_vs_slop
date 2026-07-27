@@ -1410,7 +1410,24 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 ## 7. Risks, decisions, and things to re-verify
 
 - **Top design risk — kill-vs-capture fitness conflict (I-1).** The live QD objective rewards spectacular kills; making captures valuable pulls the opposite way. Unresolved, the director (H-3) surfaces anti-loop content. A weighting/decomposition decision is required, not optional — and I-1 gates H-3.
-- **Determinism model is an unforced decision.** The known ARM↔x86 f32 divergence forces a choice (fixed-point core vs per-platform golden hashing) that C-6 (facing) and B-3/B-6 (field ops) make urgent. J-3's ARM lane is only meaningful once this is decided. Do not ship C-6 on divergent floats.
+- ~~**Determinism model is an unforced decision.**~~ ✅ **DECIDED 2026-07-27 (Director): PER-PLATFORM GOLDENS.**
+  `f32` gameplay math is not guaranteed identical across instruction sets, so one hash cannot hold on
+  both x86-64 and aarch64. Of the three options:
+  * **A tolerance was rejected** — exact-hash discipline is what has caught *every* determinism bug this
+    project has found, two of them on the day of the decision. An epsilon would blind the one oracle
+    that works.
+  * **Fixed-point was rejected for now** as a large invasive change to movement/fields/ORCA. It remains
+    the only option that makes a replay portable *between machines*, so it is the right answer if
+    cross-platform replay ever becomes a requirement.
+  * **Per-platform goldens** keep each architecture held to **bit-exact** reproducibility against
+    itself, which is the property every golden actually relies on.
+  *Shipped:* `GOLDEN`/`GOLDEN_FIELD` are `cfg(target_arch)`-selected. aarch64 is deliberately left
+  **unpinned** rather than guessed — it fails loudly, prints the hash it measured, and says to pin it
+  once the `determinism-arm` lane reproduces it across builds.
+  **The cost, stated plainly:** a replay or campaign captured on one architecture is **not** verifiable
+  on another, and harness results cannot be compared across a heterogeneous fleet.
+  **This unblocks FVS-C-6** — the standing "do not ship C-6 on divergent floats" instruction is
+  satisfied by each platform having its own pin, so 173/096's facing math is no longer gated on it.
 - **GOAP vs utility for squad orders is open.** Secure→Contain→Extract is naturally a GOAP precondition/effect plan ([GOAP]); creatures already run utility AI. Decide whether squad *orders* get a GOAP layer or stay utility considerations — affects P2, P3, P7.
 - **Bevy 0.19 spellings to re-confirm on docs.rs:** observer trigger `On<Add, C>` (not `Trigger<OnAdd, C>`); lifecycle `Replace`→`Discard` (derive attribute `on_replace`→`on_discard`, though the trait *getter* may still read `on_replace`); `NextState::set_if_neq()`; `bevy_world_serialization` renames. Component hooks are the stable path for the reward invariant (B-4).
 - **SCP canon to re-verify before shipping as copy:** the SCP-9191 origin line could not be re-confirmed verbatim in a full fetch (the article page returned mostly navigation chrome); the "alarm switch ON/OFF locker" containment detail *is* confirmed. Re-verify the 9191 origin against the live article.
