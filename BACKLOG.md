@@ -733,6 +733,35 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   >
   > **The counters already exist and are write-only** — FVS-B-8 added `captures_completed/attempted/
   > broken`, `contained_at_end`, `extracted`, `weapons_tight_ticks` to `EpisodeOutcome`.
+  >
+  > ### ⛔ MEASURED 2026-07-27 — the constraint CANNOT ship yet, and the blocker is UPSTREAM of it
+  >
+  > Before shipping the constraint I added a `containment:` line to `train probe`'s report — those
+  > counters had never been printed, so the pivot this whole backlog is organised around was
+  > **invisible to the calibration diagnostic**. Against the held-in set:
+  >
+  > | world | containment |
+  > |---|---|
+  > | `0x5C09191` | **0 completed / 0 attempted** |
+  > | `0x1CE5` | 1 completed / 2 attempted, 1 broken, 1 held at end |
+  > | `0xFEED` | **0 completed / 0 attempted** |
+  >
+  > **Two of the three authored baseline worlds never attempt a capture at all.** A feasibility
+  > constraint on `captures_attempted > 0` would therefore reject two thirds of the *shipped* baseline
+  > before the search generated anything — the archive-emptying failure this item's own risk note
+  > predicted, now measured rather than feared.
+  >
+  > **So the blocker is not the constraint's design; it is that the synthetic player almost never gets
+  > near a capturable anomaly.** `evaluate`'s containment beat targets the lowest `TargetId` within
+  > `device_reach` during the existing ENGAGE window, and 999/1048/150 are sparse while crabs are not
+  > capturable at all. Fixing that is the prerequisite, and it carries its own risk: making the
+  > synthetic player *seek* a capture target changes every rollout trajectory again — the same cost
+  > FVS-B-8 already paid once.
+  >
+  > *Order of work:* (1) make the synthetic player reach a capturable anomaly on a majority of held-in
+  > worlds, re-probing until it does; (2) **then** the constraint, which will by then reject genuinely
+  > capture-hostile worlds rather than the baseline; (3) **then** H-1's retrain. Step 1 is now
+  > measurable, which it was not before.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
 - **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI*
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
