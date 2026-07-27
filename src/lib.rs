@@ -319,6 +319,11 @@ pub fn run() {
                 // moved out of here because the harness wires the bear's blender but would then never
                 // drive it — see the note at its registration in `scp1048::Scp1048Plugin`.
                 scp1048::Scp1048VisualsPlugin,
+                // Site-67's presentation: geometry, avatars, the ASYNC door, specimen cells. Windowed
+                // ONLY — it spawns ~150 GLB scenes and nothing it creates carries `Health`, so it can
+                // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and
+                // IS harness-visible.
+                site::SiteVisualsPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the

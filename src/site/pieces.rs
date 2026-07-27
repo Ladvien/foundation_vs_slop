@@ -60,6 +60,13 @@ pub enum SitePiece {
     AreaDecal,
     /// Directional wayfinding on the floor.
     ArrowDecal,
+    /// Stands in for a held specimen inside a containment cell (FVS-D-4).
+    ///
+    /// A neutral shape on purpose: `Specimen` records only `captured: Entity`, and that entity is
+    /// despawned with the expedition — so the Site genuinely does not know what species it is holding.
+    /// Recording the species is FVS-E-1's job (the research posterior needs it anyway); until then a
+    /// stand-in is honest and a guessed model would not be.
+    SpecimenStandin,
 }
 
 impl SitePiece {
@@ -81,6 +88,7 @@ impl SitePiece {
             FloorButton => "kenney_prototype-kit/Models/GLB format/button-floor-square.glb",
             AreaDecal => "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb",
             ArrowDecal => "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb",
+            SpecimenStandin => "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb",
         }
     }
 
@@ -102,7 +110,8 @@ impl SitePiece {
             // Waist-high: a 0.5 m Kenney low wall -> ~0.9 m counter.
             WallLow => 1.8,
             // Native height is the intent.
-            Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal => 1.0,
+            Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal
+            | SpecimenStandin => 1.0,
         }
     }
 
@@ -122,6 +131,7 @@ impl SitePiece {
         SitePiece::FloorButton,
         SitePiece::AreaDecal,
         SitePiece::ArrowDecal,
+        SitePiece::SpecimenStandin,
     ];
 }
 

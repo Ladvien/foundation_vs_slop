@@ -192,7 +192,15 @@ fn spawn_debrief(
                         // The debrief is read OVER the finished world (the run stays `Active` through
                         // resolution), so leaving it is what tears that world down — see `session::RunState`.
                         run.set(crate::session::RunState::Idle);
-                        next.set(AppState::Title);
+                        // …and you land in SITE-67, not on a title card. This is the loop closing: the
+                        // specimen you just extracted is already in a cell when you walk in, which is
+                        // the whole reason the hub is a place rather than a menu (FVS-G-4/D-4).
+                        //
+                        // Note it is reachable from here and NOT from boot, deliberately: `Dungeon` is
+                        // never removed, so once one expedition has run it exists (stale) for the rest
+                        // of the process and nothing panics. Opening at the Site on a COLD start is the
+                        // remaining case, and it is FVS-G-6.
+                        next.set(AppState::Site);
                     },
                 );
         });

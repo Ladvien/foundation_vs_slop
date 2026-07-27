@@ -46,9 +46,11 @@
 pub mod layout;
 pub mod nav;
 pub mod pieces;
+pub mod visuals;
 
 pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
+pub use visuals::SiteVisualsPlugin;
 pub use pieces::SitePiece;
 
 use bevy::prelude::*;

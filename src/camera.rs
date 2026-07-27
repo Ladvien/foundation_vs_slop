@@ -49,10 +49,18 @@ pub const SCREEN_FORWARD: Vec3 = Vec3::new(-1.0, 0.0, -1.0);
 /// Screen-aligned "right" on the ground plane — perpendicular to [`SCREEN_FORWARD`].
 pub const SCREEN_RIGHT: Vec3 = Vec3::new(1.0, 0.0, -1.0);
 
-/// The camera's target point and zoom.
+/// Where the camera is looking and from how far.
+///
+/// `pub` because Site-67 legitimately needs to aim the camera too, and it cannot do so through
+/// `focus_camera_on_spawn`: that reads `Res<Dungeon>` and is keyed to a run, whereas the Site is what
+/// exists when there is no run. A second place needing the same seam is the point at which a private
+/// field becomes a hidden API — see `dungeon::DOORWAY_HEIGHT` for the same call.
+///
+/// Set `focus` and the per-frame `drive_camera` eases to it; to jump instantly, also write the camera
+/// `Transform` (what [`snap_camera_to`] does).
 #[derive(Resource)]
-struct CameraRig {
-    focus: Vec3,
+pub struct CameraRig {
+    pub focus: Vec3,
     height: f32,
     /// Current camera yaw (radians) about the focus — eases toward `target_yaw` each frame.
     yaw: f32,
@@ -140,15 +148,21 @@ fn setup_camera(mut commands: Commands, rig: Res<CameraRig>, mut view: ResMut<Ca
 
 /// Aim the persistent camera at this run's squad spawn, so a new expedition opens on its own map with
 /// no lurch — the half of the old `setup_camera` that depends on the world.
+/// Point the camera at `focus` immediately, without easing. For entering a *different place* (the Site,
+/// a run) rather than for per-frame motion.
+pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, With<Camera3d>>) {
+    rig.focus = focus;
+    for mut t in cams.iter_mut() {
+        *t = Transform::from_translation(focus + ISO_OFFSET).looking_at(focus, Vec3::Y);
+    }
+}
+
 fn focus_camera_on_spawn(
     dungeon: Res<Dungeon>,
     mut rig: ResMut<CameraRig>,
     mut cams: Query<&mut Transform, With<Camera3d>>,
 ) {
-    rig.focus = dungeon.spawn_world();
-    for mut t in &mut cams {
-        *t = Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y);
-    }
+    snap_camera_to(dungeon.spawn_world(), &mut rig, &mut cams);
 }
 
 fn drive_camera(
