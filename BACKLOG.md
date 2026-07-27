@@ -703,6 +703,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `site::SitePlugin` (one bodiless `Startup` entity) was enough to perturb load timing and turn this
   latent bug into a hard failure of `both_terminal_paths_are_bit_reproducible` — which is how it was
   finally caught. · *Touches:* `src/autogib.rs`, `src/gore.rs` · *Reading:* [TEST-NT], [ABM]
+- **FVS-N-11 — One unexplained `tests/session.rs` failure, not reproduced (FOUND 2026-07-26)** · S · *determinism: unknown*
+  **Recorded because it happened, not because it is understood.** During a sequential sweep of the fast
+  harness targets, `session` reported `16 passed; 1 failed`. The grep in use did not capture which test,
+  which is the first lesson: **always capture the failing test NAME**, not just the counts.
+  *Not reproduced in four subsequent runs*, including one under **12 busy-loop threads** (114 s versus
+  69 s idle, so the load was real and the box was genuinely contended). All 17 passed each time.
+  Per TESTING.md invariant 13 — *an exoneration is only as strong as the condition it was measured
+  under* — four runs is a weak exoneration for something seen once, so this stays open rather than
+  being written off as a flake.
+  **The one condition not yet reproduced:** the failing run came immediately after a full rebuild, so
+  the test binary started while the box was still settling from a saturating `cargo` build. That is a
+  different load *shape* from a steady busy-loop — bursty and I/O-heavy rather than pure CPU — and it is
+  the next thing to try.
+  Also worth suspecting before anything else: the sweep ran five targets back-to-back in one shell loop.
+  That is sequential and should be safe, but invariant 4 exists because "should be safe" about
+  concurrent harness `App`s has been wrong before.
+  *Done when:* either reproduced and diagnosed, or a documented decision that the sweep shape is the
+  cause and the sweep changes. · *Deps:* — · *Touches:* `tests/session.rs` · *Reading:* [TEST-NT]
 - **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
   Not currently a shipped bug (nothing kills a unit in the first second of a real run), and it is **not** worth forcing the bake synchronous. What is worth deciding: whether the offline search — which runs thousands of rollouts on evolved worlds where an early death is plausible — should gate its rollouts on `sim_harness::autogib_ready` the way `tests/session.rs` now does.
