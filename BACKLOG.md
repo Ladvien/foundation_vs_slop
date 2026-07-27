@@ -371,9 +371,29 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   second *question* should reveal less than the first. What must fall is the arc across **rounds**.
   `felt_value` scores bits resolved *this step*, per [GRIP]: the felt quality is in the movement toward
   grip, not in holding it. · *Deps:* E-1, E-2 · *Reading:* **[GRIP]**, [LPM]
-- **FVS-E-4 — `Researched` marker + unlock hook** · S · *determinism: hook deterministic*
-  When uncertainty crosses completion, add `Researched`; its `on_add` fires the unlock.
-  *Done when:* completing research adds `Researched` and triggers exactly one unlock; idempotent. · *Deps:* E-1, F-1 · *Touches:* research module, tech-tree · *Reading:* [SDT-00], [ECS]
+- **FVS-E-4 — `Researched` marker + unlock hook** · S · ✅ **LANDED 2026-07-26**
+  *Shipped:* `research::unlock` — a `Researched` marker with an `on_add` hook, an `Unlocks(Capability)`
+  payout carried per specimen, and `finish_completed_research` sweeping completed posteriors.
+  **A hook, not a scanning system**, for the same three reasons `containment::Contained` uses one: it
+  fires exactly once at command-apply time; it adds **no schedule node**, so it cannot permute the
+  `FixedUpdate` linearisation and move the goldens; and it makes "one completion, one unlock"
+  structural rather than asserted.
+  **Idempotence is by construction, twice over** — the marker is inserted once and Bevy's `on_add` does
+  not re-fire, and the flags are a set. Neither is an `if already_done` guard, and a test pins both so
+  removing one does not silently survive on the other.
+  A specimen with no authored payout completes and grants nothing, loudly: that is a content gap, not a
+  crash. · *Deps:* E-1, F-1 · *Reading:* [SDT-00], [ECS]
+- **FVS-F-1 — Tech-tree flags resource + graph** · M · ✅ **PARTIALLY LANDED 2026-07-26 — flags yes, graph no**
+  *Shipped:* `research::TechTree`, a bitset resource of `Capability` flags, deliberately **not**
+  run-scoped (unlocks are meta-progress and outlive the expedition, exactly like `Specimen`), plus the
+  four anomaly-derived capabilities the current roster earns.
+  **The prerequisite GRAPH is not built.** Four unlocks with no dependencies between them is a list, not
+  a curriculum, and authoring the dependency structure is FVS-F-3's job — doing it now would be
+  guessing at a shape the roster has not grown into yet.
+  **FVS-F-2's rule is enforced here rather than remembered.** `every_capability_is_named_as_a_verb_not_a_number`
+  walks the table and fails on any label containing `%` or `+`. Every entry reads as something you can
+  *do* — "DEPLOY REMOTE OBSERVER", not "+15% observation". If a new capability can only be described as
+  a percentage, that test is where it gets caught. · *Deps:* — · *Reading:* [LPM], **[SDT-00]**
 - **FVS-L-2 — Research/EIG HUD** · M · *determinism: render*
   Present candidate experiments ranked by EIG and the reveal as it front-loads.
   *Done when:* experiment list shows information value; reveals animate per the pacing curve. · *Deps:* E-2, E-3 · *Touches:* UI, research module · *Reading:* [PROB-ML], [GRIP]

@@ -422,6 +422,10 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // expeditions" — windowed-only would make the roguelite boundary untestable. It adds no
             // `FixedUpdate` node and its entity is bodiless, so it cannot reach `snapshot_hash`.
             crate::site::SitePlugin,
+            // Harness-visible for the same reason `SitePlugin` is: FVS-E-4's acceptance is that a
+            // completed posterior grants exactly one unlock, and meta-progress that no test can
+            // reach is the thing most worth pinning.
+            crate::research::ResearchPlugin,
         ),
         (
             crate::ai::AiPlugin,

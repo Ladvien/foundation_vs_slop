@@ -34,9 +34,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod pacing;
 pub mod posterior;
+pub mod unlock;
 
 pub use pacing::{felt_value, reveal_schedule, schedule_is_front_loaded, ExperimentFatigue};
 pub use posterior::{HiddenParam, ResearchPosterior, PARAM_COUNT};
+pub use unlock::{Capability, ResearchPlugin, Researched, TechTree, Unlocks};
 
 /// A test the researchers can run on a held specimen.
 ///
