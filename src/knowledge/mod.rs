@@ -33,6 +33,11 @@
 //! bit-exact no-op until deliberately enabled — the same staging `ai::drives`'
 //! `a_zero_gain_din_is_a_bit_exact_no_op` established.
 
+pub mod coupling;
+pub mod roster;
+
+pub use roster::{RosterPlugin, SquadKnowledge};
+
 use serde::{Deserialize, Serialize};
 
 /// What a belief is *about*.
@@ -69,6 +74,12 @@ impl Subject {
         Subject::BearCopies,
         Subject::Watcher,
     ];
+
+    /// Dense index into [`Self::ALL`]. **Append-only**, like [`crate::research::HiddenParam::as_index`]
+    /// — it keys saved beliefs and seeds the research draw, so reordering the enum reinterprets both.
+    pub fn as_index(self) -> usize {
+        self.index()
+    }
 
     fn index(self) -> usize {
         match self {
@@ -350,5 +361,22 @@ mod tests {
         for s in Subject::ALL {
             assert!(k.knows(s), "{s:?} shares a slot with another subject");
         }
+    }
+}
+
+/// The knowledge layer's ECS half (FVS-O-1b / O-2).
+///
+/// Registered in **both** `lib::run` and `sim_harness`: beliefs modulate FEAR, which feeds Think →
+/// movement → hashed `Transform`, so this is pinned simulation state and the exact-hash gate must
+/// cover it. It ships at `belief_fear_gain = 0.0`, which makes the coupling a bit-exact no-op.
+pub struct KnowledgePlugin;
+
+impl bevy::prelude::Plugin for KnowledgePlugin {
+    fn build(&self, app: &mut bevy::prelude::App) {
+        use bevy::prelude::*;
+        app.add_systems(
+            FixedUpdate,
+            coupling::apply_belief_fear.after(crate::ai::AiSet::Drives).before(crate::ai::AiSet::Think),
+        );
     }
 }

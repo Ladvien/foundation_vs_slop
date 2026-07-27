@@ -200,7 +200,11 @@ pub(crate) fn scp1048_asphyxiate(
 pub(crate) fn scp1048_strike_damage(
     sim: Res<SimTuning>,
     bears: Query<(&Scp1048, &Scp1048State, &Scp1048Seed, &Transform)>,
-    mut units: Query<(&Transform, &SquadMember, &mut Health), With<Unit>>,
+    clock: Res<crate::session::RunClock>,
+    mut units: Query<
+        (&Transform, &SquadMember, &mut Health, Option<&mut crate::knowledge::Knowledge>),
+        With<Unit>,
+    >,
 ) {
     let t = &sim.scp1048;
     if t.strike_damage <= 0.0 {
@@ -220,7 +224,7 @@ pub(crate) fn scp1048_strike_damage(
     }
     let reach_sq = t.strike_range * t.strike_range;
 
-    for (tf, _member, mut health) in &mut units {
+    for (tf, _member, mut health, mut knowledge) in &mut units {
         let mut hits: Vec<u32> = strikers
             .iter()
             .filter(|(_, bpos)| (bpos.xz() - tf.translation.xz()).length_squared() <= reach_sq)
@@ -233,8 +237,22 @@ pub(crate) fn scp1048_strike_damage(
         // the damage amount is the same for every striker, so the seed IS the whole distinguishing
         // value here, not a prefix of it.
         hits.sort_unstable();
-        for _ in hits {
+        for _ in &hits {
             health.apply_damage(t.strike_damage);
+        }
+        // FVS-O-1b — firsthand acquisition. Being struck is how an operative learns that 1048's copies
+        // are lethal, and it is deliberately scoped to the one who was hit: a bystander watching it
+        // happen would acquire a `Witnessed` belief, which is FVS-O-3's job, not this system's.
+        //
+        // `Option<&mut Knowledge>` because a bare-`App` unit test may spawn a unit without one; every
+        // operative `spawn_unit` builds carries it. Writing only this entity's own component keeps the
+        // system order-independent, so it still needs no canonical sort.
+        if let Some(k) = knowledge.as_mut() {
+            crate::knowledge::coupling::learn_from_a_blow(
+                k,
+                crate::knowledge::Subject::BearCopies,
+                clock.ticks,
+            );
         }
     }
 }

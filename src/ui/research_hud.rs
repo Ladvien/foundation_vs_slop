@@ -44,7 +44,10 @@ impl Plugin for ResearchHudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::Site), spawn_panel)
             .add_systems(OnExit(AppState::Site), despawn_scoped::<ResearchHudRoot>)
-            .add_systems(Update, update_readout.run_if(in_state(AppState::Site)));
+            .add_systems(
+                Update,
+                (request_experiment, update_readout).run_if(in_state(AppState::Site)),
+            );
     }
 }
 
@@ -100,16 +103,43 @@ fn experiment_line(rank: usize, name: &str, bits: f32) -> String {
     format!("{}. {name}  (+{bits:.2} bits)", rank + 1)
 }
 
+/// Player-facing name of a specimen's species. A test pins that every one is named, so a new
+/// `Subject` cannot reach the panel as a debug string.
+fn subject_name(s: crate::knowledge::Subject) -> &'static str {
+    use crate::knowledge::Subject;
+    match s {
+        Subject::Crabs => "DIMENSIONAL CRABS",
+        Subject::Parasite => "SCP-150",
+        Subject::ComfortBlob => "SCP-999",
+        Subject::BuilderBear => "SCP-1048",
+        Subject::BearCopies => "SCP-1048-A",
+        Subject::Watcher => "THE WATCHER",
+    }
+}
+
 /// The whole panel.
 fn readout(
+    subject: crate::knowledge::Subject,
     posterior: &ResearchPosterior,
     experiments: &[Experiment],
     finished: bool,
+    unmet: &[crate::research::Capability],
 ) -> String {
-    let mut out = String::from("RESEARCH — SPECIMEN\n");
+    let mut out = format!("RESEARCH — {}\n", subject_name(subject));
     for p in HiddenParam::ALL {
         out.push_str(&param_line(p, posterior.belief(p), posterior.is_revealed(p)));
         out.push('\n');
+    }
+    // The prerequisite gate, stated as an instruction rather than a refusal — the same rule FVS-L-1
+    // set for containment clauses ("RAISE OBSERVATION", not "unmet"). A bare "unavailable" leaves the
+    // player with nothing to do about it.
+    if let Some(first) = unmet.first() {
+        out.push_str("\nAWAITING PRIOR RESEARCH:\n");
+        for c in unmet {
+            out.push_str(&format!("  - {}\n", c.label()));
+        }
+        let _ = first;
+        return out;
     }
     if finished {
         // The payout is the point of the arc, so say so rather than leaving an empty list that reads
@@ -118,6 +148,7 @@ fn readout(
         return out;
     }
     out.push_str(&format!("\nREMAINING UNCERTAINTY: {:.2} bits\n", posterior.total_entropy()));
+    out.push_str("[R] RUN THE TOP TEST\n");
     let ranked = rank_by_information_gain(experiments, posterior);
     let mut offered = 0;
     for &i in &ranked {
@@ -135,26 +166,42 @@ fn readout(
     out
 }
 
+/// Ask the bench to run the top-ranked test on the studied specimen.
+///
+/// Only *asks* — `research::lab::run_experiments` decides and is the single writer, the same discipline
+/// `session::ForceVictory` and `parasite::CureRequest` use. `R` is free: the digits are the time-control
+/// rungs, `Q`/`E`/`WASD` the camera, and `C`/`Z`/`X`/`F` the containment verbs.
+fn request_experiment(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut out: MessageWriter<crate::research::RunExperiment>,
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        out.write(crate::research::RunExperiment);
+    }
+}
+
 fn update_readout(
-    specimens: Query<(&ResearchPosterior, Option<&Researched>)>,
-    experiments: Option<Res<AuthoredExperiments>>,
+    specimens: Query<(&crate::containment::Specimen, &ResearchPosterior, Option<&Researched>)>,
+    studied: Res<crate::research::StudySubject>,
+    curriculum: Res<crate::research::Curriculum>,
+    tree: Res<crate::research::TechTree>,
     mut text_q: Query<&mut Text, With<ResearchReadout>>,
 ) {
-    let Some(experiments) = experiments else { return };
-    // The specimen under study. One at a time until FVS-L-3's Site screen offers a selector; picking
-    // "the least-researched" is a deterministic choice and the useful default — it is the one with work
-    // left to do.
-    let mut best: Option<(&ResearchPosterior, bool)> = None;
-    let mut most = -1.0f32;
-    for (p, done) in &specimens {
-        let e = p.total_entropy();
-        if e > most {
-            most = e;
-            best = Some((p, done.is_some()));
+    // The experiment battery is read from the authored curriculum, keyed on what the specimen actually
+    // IS. It used to come from an `AuthoredExperiments` resource that nothing ever inserted, so this
+    // panel rendered an empty node for a whole session while its unit tests stayed green — the reason
+    // FVS-E-5 exists. One source of truth now: the `research:` config slice.
+    let line = match studied.0.and_then(|e| specimens.get(e).ok()) {
+        Some((specimen, posterior, done)) => {
+            let unmet = curriculum.unmet_prerequisites(specimen.subject, &tree);
+            readout(
+                specimen.subject,
+                posterior,
+                curriculum.experiments(specimen.subject),
+                done.is_some(),
+                &unmet,
+            )
         }
-    }
-    let line = match best {
-        Some((p, done)) => readout(p, &experiments.0, done),
         None => "RESEARCH — NO SPECIMENS HELD".into(),
     };
     for mut t in &mut text_q {
@@ -163,10 +210,6 @@ fn update_readout(
         }
     }
 }
-
-/// The authored experiment battery.
-#[derive(Resource, Debug, Clone, Default)]
-pub struct AuthoredExperiments(pub Vec<Experiment>);
 
 #[cfg(test)]
 mod tests {
@@ -177,6 +220,42 @@ mod tests {
             .iter()
             .map(|p| Experiment { name: format!("{p:?} ASSAY"), param: *p, reliability: 0.8 })
             .collect()
+    }
+
+    /// The panel for a specimen with no unmet prerequisites — the case every wording test below is
+    /// about. The gated case has its own test rather than an argument threaded through all of them.
+    fn ungated(p: &ResearchPosterior, exps: &[Experiment], finished: bool) -> String {
+        readout(crate::knowledge::Subject::ComfortBlob, p, exps, finished, &[])
+    }
+
+    #[test]
+    fn a_gated_specimen_names_the_research_it_is_waiting_on() {
+        // FVS-L-1's rule applied to the curriculum: say WHY, and say it as something the player can act
+        // on. "Unavailable" with no name is a dead end.
+        let out = readout(
+            crate::knowledge::Subject::Parasite,
+            &ResearchPosterior::unknown(),
+            &battery(),
+            false,
+            &[crate::research::Capability::MoraleField],
+        );
+        assert!(out.contains("AWAITING PRIOR RESEARCH"), "{out}");
+        assert!(
+            out.contains(crate::research::Capability::MoraleField.label()),
+            "the gate must NAME the prerequisite: {out}"
+        );
+        assert!(!out.contains("bits)"), "a gated specimen must offer no tests: {out}");
+    }
+
+    #[test]
+    fn every_subject_has_a_player_facing_name() {
+        // The same guard `containment_hud` puts on field channels: a new `Subject` must not reach the
+        // panel as a debug string.
+        for s in crate::knowledge::Subject::ALL {
+            let n = subject_name(s);
+            assert!(!n.is_empty(), "{s:?} has no player-facing name");
+            assert_eq!(n, n.to_uppercase(), "{s:?} should match the HUD's voice");
+        }
     }
 
     #[test]
@@ -201,7 +280,7 @@ mod tests {
         for _ in 0..4 {
             p.observe(HiddenParam::Lethality, true, 0.85);
         }
-        let out = readout(&p, &battery(), false);
+        let out = ungated(&p, &battery(), false);
         let first = out.lines().find(|l| l.starts_with("1.")).expect("an offer");
         assert!(
             !first.contains("Lethality"),
@@ -219,7 +298,7 @@ mod tests {
                 reliability: 0.8,
             })
             .collect();
-        let out = readout(&ResearchPosterior::unknown(), &many, false);
+        let out = ungated(&ResearchPosterior::unknown(), &many, false);
         let offers = out.lines().filter(|l| l.contains("bits)")).count();
         assert_eq!(offers, OFFERED, "an unbounded list buries the ranking's whole point");
     }
@@ -230,7 +309,7 @@ mod tests {
         for q in HiddenParam::ALL {
             p.reveal(q);
         }
-        let out = readout(&p, &battery(), true);
+        let out = ungated(&p, &battery(), true);
         assert!(out.contains("RESEARCH COMPLETE"), "{out}");
         assert!(!out.contains("bits)"), "a finished arc must offer nothing: {out}");
     }
@@ -243,7 +322,7 @@ mod tests {
         for q in HiddenParam::ALL {
             p.reveal(q);
         }
-        let out = readout(&p, &battery(), false);
+        let out = ungated(&p, &battery(), false);
         assert!(out.contains("NO INFORMATIVE TEST REMAINS"), "{out}");
     }
 }

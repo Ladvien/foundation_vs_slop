@@ -231,7 +231,7 @@ pub fn spawn_scp999_at(
             // states the whole win-by-containing pivot in one creature. The rule is authored in the
             // `containment:` config slice; the state component rides here so a dev-spawned blob
             // (Research Room F6) is byte-identical to a naturally seeded one.
-            crate::containment::Containment::new(rule),
+            crate::containment::Containment::new(rule, crate::knowledge::Subject::ComfortBlob),
             Scp999Seed(seed),
             Scp999Motion::default(),
             BlobJiggle::new(seed),

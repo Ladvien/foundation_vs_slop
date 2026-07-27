@@ -591,6 +591,11 @@
         // (not evolvable): that slice holds the RULES, which define what capturing means, while these
         // define how HARD it is. Difficulty is exactly what the world genome exists to explore; the
         // objective is not. See `sim::ContainmentTuning`.
+        // FVS-O-2 — how hard an operative's beliefs bite. SHIPPED AT ZERO, which makes
+        // `knowledge::coupling::apply_belief_fear` a bit-exact no-op, so the goldens do not move
+        // for a mechanic nobody enabled. Evolvable (bounds 0.0..1.0): what a belief MEANS is not
+        // an evolvable objective, but how much it COSTS you is exactly difficulty.
+        belief_fear_gain: 0.0,
         containment: (
             device_supply: 3,          // enough to miss twice and still make the tutorial capture
             device_reach: 2.5,         // a deliberate approach, not a cross-room snipe
@@ -1670,5 +1675,120 @@
     // =============================================================================================
     session: (
         win: ExtractContained(count: 1),
+    ),
+
+    // =============================================================================================
+    // research — the THAUMIEL CURRICULUM (FVS-E-5 / F-1's graph / F-3's mapping).
+    //
+    // What a captured specimen can be asked, what completing it is worth, and what must be understood
+    // first. See `src/research/curriculum.rs` for the model and its grounding.
+    //
+    // NOT evolvable, like `containment:` and `session:`. These define what research is WORTH; a search
+    // free to retune the payouts would be moving the objective rather than solving it.
+    //
+    // The order of `subjects` is load-bearing: it is the tiebreak for the derived progression, so
+    // reordering this list reorders the curriculum the player is shown.
+    //
+    // THE SHAPE, AND WHY IT IS AUTHORED BACKWARDS. Wang et al. 2019 ("Goal-based Progression Synthesis",
+    // FDG '19, 10.1145/3337722.3337745) found that a good progression is GOAL-DRIVEN rather than merely
+    // gradual — engagement comes from reaching a hard thing, which is why games have boss levels — and
+    // that a post-order DFS over a "harder than" graph yields an order that is topologically sound AND
+    // front-loads the small wins. So this is authored as a chain toward SCP-150, and the presentation
+    // order is DERIVED (`Curriculum::progression`), never hand-sequenced.
+    //
+    // `requires` gates STUDYING a specimen, not capturing it. You may bank an anomaly you cannot yet
+    // make sense of; the readout then names the prior research it is waiting on. Gating the payout
+    // instead would dead-end a player who researched out of order — the work spent, the capability gone.
+    //
+    // ⚠️ OPEN CONTENT GAP: `RemoteCapping` is granted by nothing here, so it is currently unearnable.
+    // That is not an oversight in this file — it is FVS-B-7's design landing where it has to: capping a
+    // nest deliberately yields NO specimen (rewarding source-elimination would undo the whole
+    // win-by-containing pivot), so there is no crab specimen for its capability to come from. Either the
+    // crab line needs a capture that is not capping, or `RemoteCapping` needs a different parent. That
+    // is a design decision, not a config edit — see BACKLOG.md FVS-F-3.
+    // =============================================================================================
+    research: (
+        subjects: [
+            // ── 1. SCP-999, the comfort blob — THE ENTRY POINT ────────────────────────────────────
+            // No prerequisites: it is the tutorial capture, so it must be studiable from a cold start
+            // or the campaign can never begin (pinned by `an_entry_point_is_available_from_a_cold_start`).
+            // Its reliabilities are the highest in the file for the same reason its containment
+            // thresholds are the most forgiving — the first research anyone performs should resolve
+            // visibly rather than teach them that research is slow.
+            (
+                subject: ComfortBlob,
+                // Every answer is justified by a SHIPPED mechanic, not invented: 999 has no attack path
+                // in `src/scp999/`, makes no copies of itself, and its authored rule's positive clause
+                // is ATTENTION AtLeast — a channel you MAINTAIN. It is harmless in every direction,
+                // which is exactly right for the tutorial: the first thing you research turns out to be
+                // safe, and the second one does not.
+                truth: (lethality: false, contagion: false, capture_basin: true, proliferation: false),
+                unlocks: [MoraleField],
+                requires: [],
+                experiments: [
+                    (name: "AFFECT ASSAY",            param: Lethality,     reliability: 0.89),
+                    (name: "CONTACT TRIAL",           param: Contagion,     reliability: 0.88),
+                    (name: "ATTENTION BASIN MAPPING", param: CaptureBasin,  reliability: 0.87),
+                    (name: "VOLUME SURVEY",           param: Proliferation, reliability: 0.86),
+                ],
+            ),
+
+            // ── 2. SCP-1048, the builder bear ─────────────────────────────────────────────────────
+            // Gated on the 999-derived morale field: out-watching the bear means standing still and
+            // looking at it while its copies are abroad, which is not a thing you send operatives to do
+            // until you can calm what comes at them. Harder than 999 in containment (0.45 vs 0.25, twice
+            // the hold, OnBreak::Reset) and harder here too — lower reliabilities mean more repeats, and
+            // E-3's fatigue makes each repeat weaker.
+            (
+                subject: BuilderBear,
+                // The BENIGN original: it never attacks, so `lethality: false` — and that is the
+                // finding that matters, because the copies it builds are the lethal ones and an
+                // operative who conflates them is the FVS-O-5 misinformation case waiting to happen.
+                // `contagion` and `proliferation` are both true and both earned: `scp1048_scavenge`
+                // builds 1048-A copies from scavenged material if it is left unwatched.
+                // `capture_basin: true` — ATTENTION AtLeast 0.45, a channel you maintain.
+                truth: (lethality: false, contagion: true, capture_basin: true, proliferation: true),
+                // TWO capabilities, and this is where `RemoteCapping` finally gets a parent.
+                // FVS-B-7 makes capping a nest yield NO specimen on purpose, so there is no crab
+                // specimen to derive a sealing charge from — and a capability nothing can grant
+                // reads as broken in the tech-tree HUD. Studying how the bear SOURCES and
+                // ASSEMBLES material is how you learn to seal a structure, so the bear teaches
+                // both. Better than inventing a crab capture (which would change every offline
+                // rollout) and better than leaving a dead node in the graph.
+                unlocks: [RemoteObserver, RemoteCapping],
+                requires: [MoraleField],
+                experiments: [
+                    (name: "ANIMATION THRESHOLD TEST", param: Lethality,     reliability: 0.86),
+                    (name: "MATERIAL SOURCING AUDIT",  param: Proliferation, reliability: 0.85),
+                    (name: "OBSERVER GAZE TRIAL",      param: CaptureBasin,  reliability: 0.84),
+                    (name: "COPY LINEAGE SCREEN",      param: Contagion,     reliability: 0.83),
+                ],
+            ),
+
+            // ── 3. SCP-150, the parasite — THE GOAL ───────────────────────────────────────────────
+            // The sink of the graph, so `Curriculum::goals` names it and the progression builds toward
+            // it. Gated on the 1048-derived remote observer, which is the Thaumiel step that makes the
+            // cure practical: the observer holds ATTENTION on the host's cell without an operative
+            // standing there, which is what frees a pair of hands to actually administer treatment.
+            // The lowest reliabilities in the file — this is the boss, and it should feel like one.
+            (
+                subject: Parasite,
+                // The only lethal one on the roster: `gestation_tick` kills its host outright if the
+                // burst is not interrupted. `contagion` and `proliferation` both true — a burst seeds
+                // new manca, which embed in new hosts. `capture_basin: FALSE`, and it is the one
+                // false here: SCP-150 is not driven into a field basin at all, it is extracted BY HAND
+                // (`cure_infested_hosts`). Resolving that parameter is the moment the player learns
+                // this anomaly does not play by the rule the other two taught them.
+                truth: (lethality: true, contagion: true, capture_basin: false, proliferation: true),
+                unlocks: [FieldCure],
+                requires: [RemoteObserver],
+                experiments: [
+                    (name: "HOST NECROSIS PANEL",     param: Lethality,     reliability: 0.85),
+                    (name: "VECTOR TRANSMISSION RUN", param: Contagion,     reliability: 0.84),
+                    (name: "EXCISION REHEARSAL",      param: CaptureBasin,  reliability: 0.82),
+                    (name: "BROOD COUNT",             param: Proliferation, reliability: 0.82),
+                ],
+            ),
+        ],
     ),
 )

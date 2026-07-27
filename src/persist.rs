@@ -40,7 +40,11 @@ use crate::research::{Capability, ResearchPosterior, Researched, TechTree, Unloc
 use crate::site::{HeldAt, SiteRoot};
 
 /// Bumped whenever the saved shape changes. A mismatch is refused, never migrated — see the module docs.
-pub const SAVE_VERSION: u32 = 1;
+///
+/// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
+/// captured but not *what* they were, and the research battery and unlock payout are both keyed on
+/// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
+pub const SAVE_VERSION: u32 = 2;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,12 +52,23 @@ pub const SAVE_VERSION: u32 = 1;
 pub struct SavedSpecimen {
     /// The run tick the capture completed on — the stable ordering key (see `containment::Specimen`).
     pub captured_tick: u64,
+    /// **What it is.** Saved rather than re-derived, because the anomaly it came from stopped existing
+    /// when that expedition ended — and both the research battery and the unlock payout are keyed on it.
+    pub subject: crate::knowledge::Subject,
     /// What the Foundation knows about it.
     pub posterior: ResearchPosterior,
+    /// How many times each parameter has already been tested — FVS-E-3's fatigue state.
+    ///
+    /// Saved because without it a reload would hand the player a fresh battery of full-strength tests
+    /// on a specimen they had already exhausted, which is a free reset of the whole research economy.
+    /// `#[serde(default)]` so a specimen banked before the bench existed loads as untested.
+    #[serde(default)]
+    pub experiments: crate::research::ExperimentLog,
     /// Whether its research arc has already paid out.
     pub researched: bool,
-    /// Which capability completing it grants, if one is authored.
-    pub unlocks: Option<Capability>,
+    /// Which capabilities completing it grants. Empty when nothing is authored for its species.
+    #[serde(default)]
+    pub unlocks: Vec<Capability>,
 }
 
 /// The whole save.
@@ -68,6 +83,13 @@ pub struct SaveGame {
     pub tech_tree: u32,
     /// Every banked specimen, **in capture order**.
     pub specimens: Vec<SavedSpecimen>,
+    /// What each operative believes (FVS-G-3 / L-5).
+    ///
+    /// Keyed by `SquadMember` index rather than by entity, because operatives are `run_scoped()` and
+    /// rebuilt every expedition — "operatives persist" means their *beliefs* do. `#[serde(default)]`
+    /// so a campaign saved before the knowledge layer existed loads with an inexperienced squad.
+    #[serde(default)]
+    pub squad_knowledge: crate::knowledge::SquadKnowledge,
 }
 
 impl SaveGame {
@@ -108,16 +130,22 @@ pub fn capture_save(world: &mut World) -> SaveGame {
             &ResearchPosterior,
             Option<&Researched>,
             Option<&Unlocks>,
+            Option<&crate::research::ExperimentLog>,
         )>();
         q.iter(world)
-            .map(|(s, p, done, unlock)| {
+            .map(|(s, p, done, unlock, log)| {
                 (
                     s.captured_tick,
                     SavedSpecimen {
                         captured_tick: s.captured_tick,
+                        subject: s.subject,
+                        // `Option` because the log is attached at the bench, not at capture — a
+                        // specimen banked this expedition and saved on arrival has not been to the
+                        // slab yet. Untested is the honest default there, not a missing record.
+                        experiments: log.copied().unwrap_or_default(),
                         posterior: *p,
                         researched: done.is_some(),
-                        unlocks: unlock.map(|u| u.0),
+                        unlocks: unlock.map(|u| u.0.clone()).unwrap_or_default(),
                     },
                 )
             })
@@ -128,9 +156,12 @@ pub fn capture_save(world: &mut World) -> SaveGame {
     // which sort stably by value below. `sort_by` is stable, so equal ticks keep their relative order.
     rows.sort_by_key(|(tick, _)| *tick);
 
+    let squad_knowledge =
+        world.get_resource::<crate::knowledge::SquadKnowledge>().copied().unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
+        squad_knowledge,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -158,6 +189,11 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
     if let Some(mut tree) = world.get_resource_mut::<TechTree>() {
         *tree = TechTree::from_bits(save.tech_tree);
     }
+    if let Some(mut k) = world.get_resource_mut::<crate::knowledge::SquadKnowledge>() {
+        // Replacement, not a merge — the same rule the specimen list follows. Merging two squads'
+        // beliefs would compound a campaign every time it was loaded.
+        *k = save.squad_knowledge;
+    }
 
     let site = world.get_resource::<SiteRoot>().map(|s| s.0);
     for row in &save.specimens {
@@ -167,15 +203,19 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
         // that might resolve to some unrelated entity.
         let mut ec = world.spawn(row.posterior);
         let id = ec.id();
-        ec.insert(crate::containment::Specimen {
-            captured: id,
-            captured_tick: row.captured_tick,
-        });
+        ec.insert((
+            crate::containment::Specimen {
+                captured: id,
+                captured_tick: row.captured_tick,
+                subject: row.subject,
+            },
+            row.experiments,
+        ));
         if row.researched {
             ec.insert(Researched);
         }
-        if let Some(c) = row.unlocks {
-            ec.insert(Unlocks(c));
+        if !row.unlocks.is_empty() {
+            ec.insert(Unlocks(row.unlocks.clone()));
         }
         if let Some(site) = site {
             ec.insert(HeldAt(site));
@@ -220,18 +260,23 @@ mod tests {
             version: SAVE_VERSION,
             run_seed: 0xDEAD_BEEF,
             tech_tree: 0b0101,
+            squad_knowledge: crate::knowledge::SquadKnowledge::default(),
             specimens: vec![
                 SavedSpecimen {
                     captured_tick: 120,
+                    subject: crate::knowledge::Subject::ComfortBlob,
+                    experiments: crate::research::ExperimentLog { runs: [2, 0, 1, 0] },
                     posterior: p,
                     researched: false,
-                    unlocks: Some(Capability::MoraleField),
+                    unlocks: vec![Capability::MoraleField],
                 },
                 SavedSpecimen {
                     captured_tick: 900,
+                    subject: crate::knowledge::Subject::Parasite,
+                    experiments: crate::research::ExperimentLog::default(),
                     posterior: ResearchPosterior::unknown(),
                     researched: true,
-                    unlocks: None,
+                    unlocks: Vec::new(),
                 },
             ],
         }

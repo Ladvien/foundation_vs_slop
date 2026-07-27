@@ -46,7 +46,10 @@ fn spawn_target(app: &mut App, rule: ContainmentRule) -> (Entity, Vec3) {
     };
     let e = app
         .world_mut()
-        .spawn((Containment::new(rule), Transform::from_translation(pos)))
+        .spawn((
+            Containment::new(rule, foundation_vs_slop::knowledge::Subject::ComfortBlob),
+            Transform::from_translation(pos),
+        ))
         .id();
     (e, pos)
 }

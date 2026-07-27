@@ -61,12 +61,24 @@ pub struct Containment {
     held_secs: f32,
     /// What it takes to capture this anomaly.
     pub rule: ContainmentRule,
+    /// **What kind of thing this is** — the identity a capture banks (FVS-E-5).
+    ///
+    /// It lives here rather than in its own component so that carrying a subject is not optional: every
+    /// path to [`Contained`] constructs a `Containment` first, so making it a constructor argument makes
+    /// "a specimen whose species is unknown" a compile error at each of the three spawn sites rather
+    /// than a runtime surprise at the hook. Present from spawn and never mutated, so the hashed
+    /// archetype does not move.
+    ///
+    /// Reuses [`crate::knowledge::Subject`] rather than minting a second species enum: the *kind* a
+    /// specimen is and the *kind* an operative holds beliefs about must be the same key, or FVS-O-4's
+    /// records office would have to translate between two vocabularies that can drift apart.
+    pub subject: crate::knowledge::Subject,
 }
 
 impl Containment {
-    /// A fresh, uncontained anomaly carrying `rule`.
-    pub fn new(rule: ContainmentRule) -> Self {
-        Self { phase: Phase::Uncontained, held_secs: 0.0, rule }
+    /// A fresh, uncontained anomaly of `subject`, carrying `rule`.
+    pub fn new(rule: ContainmentRule, subject: crate::knowledge::Subject) -> Self {
+        Self { phase: Phase::Uncontained, held_secs: 0.0, rule, subject }
     }
 
     /// The current phase.
@@ -161,6 +173,13 @@ pub struct Specimen {
     ///
     /// It is also the timestamp the records office (FVS-O-4) will want, so it earns its place twice.
     pub captured_tick: u64,
+    /// **What was captured** (FVS-E-5), copied off the anomaly's [`Containment`] at the moment of capture.
+    ///
+    /// Recorded rather than derived, because by the time anything reads a specimen the anomaly it came
+    /// from is usually despawned — and `captured` is an `Entity`, which is a process-local arena index
+    /// that persistence deliberately drops. Without this a banked specimen is anonymous, which is why
+    /// the research payout table, the containment-cell model and the records office all needed it.
+    pub subject: crate::knowledge::Subject,
 }
 
 /// The reward. **The only path from containment to a specimen**, and a component hook rather than a
@@ -184,18 +203,42 @@ pub struct Specimen {
 fn grant_specimen(mut world: bevy::ecs::world::DeferredWorld, ctx: bevy::ecs::lifecycle::HookContext) {
     let tick = world.resource::<crate::session::RunClock>().ticks;
     let site = world.get_resource::<crate::site::SiteRoot>().map(|s| s.0);
-    let specimen = Specimen { captured: ctx.entity, captured_tick: tick };
+    // The species comes off the anomaly's own `Containment`, which every path to `Contained`
+    // constructs first. If it is somehow absent the capture is **dropped loudly** rather than banked
+    // under a guessed subject: an anonymous specimen would pick up the wrong research battery and the
+    // wrong payout, and a wrong record is worse than a missing one. One path, no fallback.
+    let Some(subject) = world.get::<Containment>(ctx.entity).map(|c| c.subject) else {
+        error!(
+            "containment: {:?} became Contained with no Containment component, so its species is \
+             unknown — no specimen banked. Every capture path must construct Containment first.",
+            ctx.entity
+        );
+        return;
+    };
+    let specimen = Specimen { captured: ctx.entity, captured_tick: tick, subject };
     // FVS-E-1: the posterior is created **with** the specimen, at maximum entropy. Attaching it here
     // rather than in a later "initialise research" pass means there is no window in which a banked
     // specimen exists without a record — and no second place that could create one differently.
     let posterior = crate::research::ResearchPosterior::unknown();
-    match site {
-        Some(site) => {
-            world.commands().spawn((specimen, posterior, crate::site::HeldAt(site)));
-        }
-        None => {
-            world.commands().spawn((specimen, posterior));
-        }
+    // FVS-E-5: and the same argument for the payout. The authored curriculum is the one source of
+    // truth for what a species is worth; carrying the answer on the specimen is a projection of it
+    // taken at capture time, so a save records what the payout *was* for a campaign in progress.
+    // Resolved here, in the same hook, so a banked specimen is never briefly worth nothing.
+    let payout: Vec<crate::research::Capability> = world
+        .get_resource::<crate::research::Curriculum>()
+        .map(|c| c.payouts(subject).to_vec())
+        .unwrap_or_default();
+    let mut commands = world.commands();
+    let mut ec = commands.spawn((specimen, posterior));
+    // The Site may legitimately not exist (bare-`App` unit tests never build one), and neither may the
+    // curriculum. Both are optional *links* rather than alternative paths: the specimen itself is
+    // granted identically either way, and a species with no authored research is the content gap
+    // `research::unlock` already warns about rather than a degraded second route.
+    if let Some(site) = site {
+        ec.insert(crate::site::HeldAt(site));
+    }
+    if !payout.is_empty() {
+        ec.insert(crate::research::Unlocks(payout));
     }
 }
 
@@ -230,6 +273,11 @@ mod tests {
     use super::*;
     use crate::containment::rule::{FieldCondition, Sign};
 
+    /// An arbitrary species for the state-machine tests. Nothing here reads it — these cover the hold
+    /// timer and the break policy, which are the same for every anomaly — so naming one concrete
+    /// subject keeps the cases readable without implying the phase machine varies by species.
+    const SUBJ: crate::knowledge::Subject = crate::knowledge::Subject::ComfortBlob;
+
     fn rule(hold: f32, on_break: OnBreak) -> ContainmentRule {
         ContainmentRule {
             requires: vec![FieldCondition { channel: 0, sign: Sign::AtLeast, threshold: 0.5 }],
@@ -242,7 +290,7 @@ mod tests {
     fn an_uncontained_anomaly_never_accumulates() {
         // No device applied ⇒ standing in a satisfying field does nothing. Capture is an *action*, not
         // an ambient consequence of the world being in a certain state.
-        let mut c = Containment::new(rule(1.0, OnBreak::Reset));
+        let mut c = Containment::new(rule(1.0, OnBreak::Reset), SUBJ);
         assert!(!c.advance(0.5, true));
         assert_eq!(c.held_secs(), 0.0);
         assert_eq!(c.phase(), Phase::Uncontained);
@@ -250,7 +298,7 @@ mod tests {
 
     #[test]
     fn holding_the_basin_for_the_full_duration_captures() {
-        let mut c = Containment::new(rule(1.0, OnBreak::Reset));
+        let mut c = Containment::new(rule(1.0, OnBreak::Reset), SUBJ);
         c.begin();
         assert!(!c.advance(0.6, true), "not yet");
         assert_eq!(c.phase(), Phase::BeingContained);
@@ -262,7 +310,7 @@ mod tests {
     fn completion_is_reported_exactly_once() {
         // The hook must fire once, so `advance` may only return true on the crossing tick — a second
         // true would insert `Contained` twice and grant two specimens for one capture.
-        let mut c = Containment::new(rule(1.0, OnBreak::Reset));
+        let mut c = Containment::new(rule(1.0, OnBreak::Reset), SUBJ);
         c.begin();
         assert!(c.advance(1.0, true));
         assert!(!c.advance(1.0, true), "a completed capture must not re-complete");
@@ -271,13 +319,13 @@ mod tests {
 
     #[test]
     fn a_lapse_resets_or_banks_according_to_the_policy() {
-        let mut reset = Containment::new(rule(1.0, OnBreak::Reset));
+        let mut reset = Containment::new(rule(1.0, OnBreak::Reset), SUBJ);
         reset.begin();
         reset.advance(0.6, true);
         reset.advance(0.1, false);
         assert_eq!(reset.held_secs(), 0.0, "Reset makes containment a SUSTAINED task");
 
-        let mut keep = Containment::new(rule(1.0, OnBreak::Keep));
+        let mut keep = Containment::new(rule(1.0, OnBreak::Keep), SUBJ);
         keep.begin();
         keep.advance(0.6, true);
         keep.advance(0.1, false);
@@ -287,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_capture_cannot_be_re_opened_and_progress_is_readable() {
-        let mut c = Containment::new(rule(2.0, OnBreak::Reset));
+        let mut c = Containment::new(rule(2.0, OnBreak::Reset), SUBJ);
         c.begin();
         c.advance(1.0, true);
         assert!((c.progress() - 0.5).abs() < 1e-6, "half-held reads as half progress");
@@ -301,14 +349,14 @@ mod tests {
 
     #[test]
     fn cancelling_an_attempt_discards_progress_but_a_capture_survives() {
-        let mut c = Containment::new(rule(2.0, OnBreak::Keep));
+        let mut c = Containment::new(rule(2.0, OnBreak::Keep), SUBJ);
         c.begin();
         c.advance(1.0, true);
         c.cancel();
         assert_eq!(c.phase(), Phase::Uncontained);
         assert_eq!(c.held_secs(), 0.0, "cancelling is the attempt ending, not a mid-hold lapse");
 
-        let mut done = Containment::new(rule(1.0, OnBreak::Reset));
+        let mut done = Containment::new(rule(1.0, OnBreak::Reset), SUBJ);
         done.begin();
         done.advance(1.0, true);
         done.cancel();

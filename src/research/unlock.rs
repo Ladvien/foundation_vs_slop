@@ -115,25 +115,40 @@ pub struct Researched;
 
 /// The specimen's payout — which capability completing *this* research unlocks.
 ///
-/// Carried on the specimen rather than looked up from a table keyed on species, because the species is
-/// not recorded (see `site::pieces::SitePiece::SpecimenStandin` for why) and because an authored payout
-/// is what makes FVS-F-3's curriculum a thing a designer writes rather than a thing that emerges.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Unlocks(pub Capability);
+/// **A projection, not a second source of truth.** The payout is authored per species in the
+/// `research:` slice ([`super::curriculum`]); `containment::state::grant_specimen` resolves it once, at
+/// capture, and stores the answer here. Carrying it on the specimen is what lets a save record what a
+/// campaign-in-progress was promised, and it keeps this hook a pure read with no table lookup on the
+/// pinned path. Re-deriving it from `Specimen::subject` would give the same answer today; the stored
+/// copy is deliberate so that re-authoring the curriculum cannot silently change what an already-banked
+/// specimen is worth.
+///
+/// A **list**: one anomaly may teach more than one thing (see `curriculum::SubjectResearch::unlocks`).
+#[derive(Component, Debug, Clone, Default)]
+pub struct Unlocks(pub Vec<Capability>);
 
 /// The reward. **The only path from research to a capability.**
 fn grant_capability(
     mut world: bevy::ecs::world::DeferredWorld,
     ctx: bevy::ecs::lifecycle::HookContext,
 ) {
-    let Some(&Unlocks(cap)) = world.get::<Unlocks>(ctx.entity) else {
-        // A specimen with no authored payout completes its research and grants nothing. Loud, because
-        // it is a content gap — every capturable anomaly should be worth something — but not fatal.
-        warn!("research: a specimen completed with no `Unlocks` payout authored; nothing granted");
-        return;
+    let caps: Vec<Capability> = match world.get::<Unlocks>(ctx.entity) {
+        Some(u) if !u.0.is_empty() => u.0.clone(),
+        _ => {
+            // A specimen with no authored payout completes its research and grants nothing. Loud,
+            // because it is a content gap — every capturable anomaly should be worth something — but
+            // not fatal. `ResearchConfig::validate` now rejects this at the door for anything the
+            // curriculum knows about, so reaching here means a specimen with no curriculum entry.
+            warn!(
+                "research: a specimen completed with no `Unlocks` payout authored; nothing granted"
+            );
+            return;
+        }
     };
     if let Some(mut tree) = world.get_resource_mut::<TechTree>() {
-        tree.grant(cap);
+        for cap in caps {
+            tree.grant(cap);
+        }
     }
 }
 
@@ -156,7 +171,12 @@ pub struct ResearchPlugin;
 
 impl Plugin for ResearchPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TechTree>()
+        // Already validated by `config::load_game_config` — the single validation seam, same as
+        // `ContainmentPlugin` and for the same reason: a malformed curriculum must be rejected at the
+        // door once, not in whichever plugin happens to be added.
+        let curriculum = app.world().resource::<crate::config::GameConfig>().research.clone();
+        app.insert_resource(super::curriculum::Curriculum(curriculum))
+            .init_resource::<TechTree>()
             .add_systems(Update, finish_completed_research);
     }
 }
@@ -166,12 +186,16 @@ mod tests {
     use super::super::HiddenParam;
     use super::*;
 
+    /// The unlock layer, wired without [`ResearchPlugin`] — deliberately. These cases are about the
+    /// hook and the flag set, and the plugin additionally pulls in the authored curriculum (and so a
+    /// whole `GameConfig`). Registering the two pieces directly keeps the failure surface here to the
+    /// thing under test.
     fn app_with(posterior: ResearchPosterior, payout: Option<Capability>) -> (App, Entity) {
         let mut app = App::new();
-        app.add_plugins(ResearchPlugin);
+        app.init_resource::<TechTree>().add_systems(Update, finish_completed_research);
         let mut e = app.world_mut().spawn(posterior);
         if let Some(c) = payout {
-            e.insert(Unlocks(c));
+            e.insert(Unlocks(vec![c]));
         }
         let id = e.id();
         (app, id)

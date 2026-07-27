@@ -281,6 +281,14 @@ pub struct SimTuning {
     pub scp999: Scp999Tuning,
     pub scp1048: Scp1048Tuning,
     pub containment: ContainmentTuning,
+    /// **How hard an operative's beliefs bite** (FVS-O-2). Scales the FEAR of an operative who is near
+    /// a subject they hold a confident `Lethal` belief about; `0.0` disables the coupling entirely and
+    /// is a *bit-exact* no-op, which is how it ships (see `knowledge::coupling`).
+    ///
+    /// Evolvable, and it belongs here rather than in a rules slice for the reason
+    /// `ContainmentTuning` records: this is **difficulty**, which is exactly what the world genome
+    /// exists to explore. What a belief *means* is not evolvable; how much it costs you is.
+    pub belief_fear_gain: f32,
 }
 
 /// **Containment LOGISTICS** — how many devices the squad carries, how far each verb reaches, how big
@@ -329,6 +337,10 @@ pub struct ContainmentTuning {
 impl Default for SimTuning {
     fn default() -> Self {
         Self {
+            // FVS-O-2 ships OFF. `0.0` makes `knowledge::coupling::apply_belief_fear` a bit-exact
+            // no-op, so the goldens do not move for a mechanic nobody enabled; turning it on is a
+            // deliberate act that earns its own measured re-pin.
+            belief_fear_gain: 0.0,
             fear: FearTuning {
                 per_crab: 0.08,
                 of_anomaly: 0.9,

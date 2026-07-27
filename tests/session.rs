@@ -730,7 +730,7 @@ fn a_campaign_survives_a_full_world_round_trip() {
     assert_eq!(banked.len(), 1, "precondition: one capture banked");
 
     // Give it a payout and some research, so the round trip has something to lose.
-    app.world_mut().entity_mut(banked[0]).insert(Unlocks(Capability::MoraleField));
+    app.world_mut().entity_mut(banked[0]).insert(Unlocks(vec![Capability::MoraleField]));
     if let Some(mut p) = app.world_mut().get_mut::<ResearchPosterior>(banked[0]) {
         p.observe(foundation_vs_slop::research::HiddenParam::Lethality, true, 0.85);
     }
@@ -739,7 +739,7 @@ fn a_campaign_survives_a_full_world_round_trip() {
 
     let save = capture_save(app.world_mut());
     assert_eq!(save.specimens.len(), 1);
-    assert!(save.specimens[0].unlocks.is_some(), "the payout must be saved");
+    assert!(!save.specimens[0].unlocks.is_empty(), "the payout must be saved");
 
     // Simulate a restart: every specimen gone, the tree cleared, the seed clobbered.
     for e in site_specimens(&mut app) {

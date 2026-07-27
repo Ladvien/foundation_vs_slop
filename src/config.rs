@@ -134,6 +134,10 @@ pub struct GameConfig {
     /// How a run ends. Deliberately **not** a member of [`WorldConfig`] — see the type's docs for why
     /// the win condition is the one knob the offline search may not evolve.
     pub session: crate::session::SessionConfig,
+    /// The Thaumiel curriculum: per-anomaly experiment batteries, unlock payouts, and the prerequisite
+    /// graph. Like `containment` and `session`, deliberately **not** a member of [`WorldConfig`] — it
+    /// defines what research is worth, which is an objective rather than a difficulty.
+    pub research: crate::research::ResearchConfig,
 }
 
 /// The evolvable **world-dynamics** surface, as one value: field propagation (`ai`), simulation dynamics
@@ -201,6 +205,10 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     // if that plugin happened to be added. Validation belongs at the door, once — one path.
     cfg.containment.validate()?;
     cfg.session.validate()?;
+    // The curriculum. Its checks are all about failures that would otherwise be *silent*: a duplicate
+    // battery, a prerequisite nothing grants (a soft-locked campaign), or a cycle. Each would present
+    // to a player as "research just does nothing".
+    cfg.research.validate()?;
     Ok(cfg)
 }
 

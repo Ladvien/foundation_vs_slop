@@ -274,6 +274,9 @@ pub fn run() {
                 site::SitePlugin,
                 // The research economy's ECS half: the tech-tree flags and the completion sweep.
                 research::ResearchPlugin,
+                // Operative beliefs (FVS-O-1b/O-2). Harness-visible: beliefs modulate FEAR, which feeds
+                // Think -> movement -> hashed Transform, so the exact-hash gate must cover it.
+                knowledge::KnowledgePlugin,
             ),
             (
                 ai::AiPlugin,
@@ -349,6 +352,17 @@ pub fn run() {
                 // Save/load is windowed-only: it keys off `AppState::Site`, which the harness never
                 // registers, and a headless rollout must never touch the player's campaign file.
                 persist::PersistPlugin,
+                // The research BENCH (FVS-E-5) — the verb that actually moves a posterior. Windowed
+                // for exactly the same reason as save/load above: it is gated on `AppState::Site`,
+                // which the harness never registers, so research cannot reach the pinned core.
+                research::ResearchLabPlugin,
+                // The O5 review + requisition (FVS-P-3). Windowed for the same reason: the review
+                // fires on `AppState::Debrief` and the shop lives at `AppState::Site`, neither of
+                // which the harness registers.
+                site::O5Plugin,
+                // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
+                // the screen is UI, and the carry writes `Knowledge` only at world construction.
+                knowledge::RosterPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,

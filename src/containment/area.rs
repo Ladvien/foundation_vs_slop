@@ -154,7 +154,7 @@ mod tests {
         let a = app
             .world_mut()
             .spawn((
-                Containment::new(rule()),
+                Containment::new(rule(), crate::knowledge::Subject::ComfortBlob),
                 Quarantinable,
                 Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
             ))
@@ -174,7 +174,7 @@ mod tests {
         let a = app
             .world_mut()
             .spawn((
-                Containment::new(rule()),
+                Containment::new(rule(), crate::knowledge::Subject::ComfortBlob),
                 Quarantinable,
                 Transform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
             ))
@@ -195,7 +195,7 @@ mod tests {
         app.world_mut().spawn((Quarantine { radius: 3.0 }, Transform::default()));
         let a = app
             .world_mut()
-            .spawn((Containment::new(rule()), Quarantinable, Transform::default()))
+            .spawn((Containment::new(rule(), crate::knowledge::Subject::ComfortBlob), Quarantinable, Transform::default()))
             .id();
         app.update();
 
@@ -228,7 +228,7 @@ mod tests {
         ));
         let a = app
             .world_mut()
-            .spawn((Containment::new(rule()), Quarantinable, Transform::default()))
+            .spawn((Containment::new(rule(), crate::knowledge::Subject::ComfortBlob), Quarantinable, Transform::default()))
             .id();
         app.update();
         {

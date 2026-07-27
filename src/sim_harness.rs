@@ -426,6 +426,7 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // completed posterior grants exactly one unlock, and meta-progress that no test can
             // reach is the thing most worth pinning.
             crate::research::ResearchPlugin,
+            crate::knowledge::KnowledgePlugin,
         ),
         (
             crate::ai::AiPlugin,

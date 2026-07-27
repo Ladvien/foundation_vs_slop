@@ -148,7 +148,7 @@ mod tests {
 
     fn spawn_target(app: &mut App, at: Vec3) -> Entity {
         app.world_mut()
-            .spawn((Containment::new(rule()), Transform::from_translation(at)))
+            .spawn((Containment::new(rule(), crate::knowledge::Subject::ComfortBlob), Transform::from_translation(at)))
             .id()
     }
 

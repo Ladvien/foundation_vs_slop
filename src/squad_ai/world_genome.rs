@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 137;
+pub const N: usize = 138;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -189,6 +189,10 @@ static BOUNDS: [(f32, f32); N] = [
                    //   passively suppress the build, or the mechanic is free), and capped below
                    //   saturation (an unreachable bar would make the bear uncontainable and the
                    //   copies unstoppable — degenerate either way).
+    (0.0, 1.0),    // belief_fear_gain — FVS-O-2. Floored at 0 because that is the SHIPPED value and a
+                   //   bit-exact no-op, so the search may legitimately choose "this mechanic is off";
+                   //   capped at 1.0, where a confident firsthand Lethal belief nearly doubles fear,
+                   //   which is already enough to break a containment hold.
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -341,6 +345,7 @@ pub fn encode(
     v.push(sim.containment.cap_reach);
     v.push(sim.containment.extraction_radius);
     v.push(sim.containment.out_watch_threshold);
+    v.push(sim.belief_fear_gain);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -547,6 +552,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             extraction_radius: f!(),
             out_watch_threshold: f!(),
         },
+        belief_fear_gain: f!(),
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
     let mold = crate::mold::MoldConfig {

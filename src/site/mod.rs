@@ -47,12 +47,14 @@ pub mod aperture;
 pub mod layout;
 pub mod nav;
 pub mod o5;
+pub mod review;
 pub mod pieces;
 pub mod visuals;
 
 pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
+pub use review::{ExpeditionTally, O5Plugin, Requisitioned};
 pub use visuals::SiteVisualsPlugin;
 pub use pieces::SitePiece;
 

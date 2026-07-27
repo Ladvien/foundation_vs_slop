@@ -789,6 +789,11 @@ pub(crate) fn spawn_unit(
         avian3d::prelude::TransformInterpolation,
     ));
     unit.insert(crate::parasite::host_infestation_bundle());
+    // FVS-O-1b: what this operative knows. A SECOND `insert` because the bundle above is already at
+    // Bevy's 15-element tuple cap — the same idiom the infestation bundle uses. A **value field present
+    // from spawn**, never a marker toggled on acquisition, so learning something cannot split the
+    // hashed archetype (`scp1048`'s rule).
+    unit.insert(crate::knowledge::Knowledge::default());
     unit.with_child((
         FigurineModel,
         WorldAssetRoot(figurine),

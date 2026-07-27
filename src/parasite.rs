@@ -1705,7 +1705,10 @@ pub(crate) fn cure_infested_hosts(
             // research layer can read; `Contained` is what actually fires the grant.
             commands
                 .entity(parasite)
-                .insert(crate::containment::Containment::new(rules.0.scp150.clone()))
+                .insert(crate::containment::Containment::new(
+                    rules.0.scp150.clone(),
+                    crate::knowledge::Subject::Parasite,
+                ))
                 .insert(crate::containment::Contained)
                 .remove::<InfectedBy>();
         }

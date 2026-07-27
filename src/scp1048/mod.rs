@@ -503,7 +503,13 @@ pub fn spawn_scp1048_at(
     //
     // Both are attached in the SHARED builder, so a Research-Room F6 bear is byte-identical to a
     // seeded one, and both are value fields present from spawn, so the hashed archetype never churns.
-    ec.insert((crate::containment::Containment::new(rule), targets.next()));
+    // `BuilderBear`, not `BearCopies`: this is the benign original. The hostile copies it builds are a
+    // different subject entirely — an operative can rationally believe one is harmless and the other
+    // lethal, and that distinction is the whole reason `knowledge::Subject` separates them.
+    ec.insert((
+        crate::containment::Containment::new(rule, crate::knowledge::Subject::BuilderBear),
+        targets.next(),
+    ));
     // Cosmetic animation wiring: `anim::attach_pose_blenders` finds this on the root when the scene's
     // `AnimationPlayer` streams in. Inserted at spawn, so it never churns the hashed archetype.
     ec.insert(crate::anim::BlendSource {

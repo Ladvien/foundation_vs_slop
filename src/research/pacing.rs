@@ -53,7 +53,7 @@ use super::{Experiment, HiddenParam, ResearchPosterior};
 /// The `k`-th test on a parameter runs at `reliability · decay^k`. Because binary entropy is concave,
 /// the decay has to beat that concavity for the arc to taper — which is why the default is well below
 /// 1.0 and why [`schedule_is_front_loaded`] is worth running after any retune.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[derive(bevy::prelude::Resource, Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentFatigue {
     /// Multiplier applied per prior test on the same parameter. `1.0` disables fatigue — and produces
@@ -71,13 +71,28 @@ pub const USELESS_BELOW: f32 = 0.5;
 
 impl Default for ExperimentFatigue {
     fn default() -> Self {
-        // Measured, not guessed: 0.55 is the largest round value at which a four-parameter battery of
-        // 0.8-reliability tests still tapers monotonically. Raising it re-introduces the rise.
         // Measured, not guessed. It has to beat binary entropy's concavity (or the arc rises) while
         // staying above `USELESS_BELOW` for at least a second test (or the arc is one round long and
-        // there is nothing to taper). 0.8 gives a 0.8-reliability battery the sequence 0.80 -> 0.64,
-        // resolving 0.28 then 0.19 bits.
-        Self { decay: 0.8 }
+        // there is nothing to taper).
+        //
+        // **Re-measured 2026-07-27 (FVS-E-6), and the old 0.8 was unshippable.** It satisfied the
+        // front-loading constraint and violated a second one nobody had checked, because until the
+        // research verb existed nothing ever ran the arc to completion: `0.8` with `USELESS_BELOW`
+        // allows only THREE tests on a parameter (`0.8 → 0.64 → 0.512 → 0.41`), whose likelihood ratios
+        // multiply to ~7.5 — a belief of **0.882** against a `REVEAL_AT` of **0.9**. No parameter could
+        // ever resolve, so no specimen could complete and no capability could ever be unlocked.
+        //
+        // 0.88 is the value that satisfies both. Computed, then confirmed by the tests below:
+        // * Four tests survive the floor (`0.8 → 0.704 → 0.620 → 0.545`), LR product ≈ 18.6, and the
+        //   belief crosses `REVEAL_AT` on the **second** test at p ≈ 0.905.
+        // * The arc still tapers: 0.278 bits then 0.271. Narrow, and that is the point — raising decay
+        //   further wins back reliability headroom but loses the taper (at 0.9 the sequence rises,
+        //   0.278 → 0.287, because binary entropy's concavity beats the weakened test).
+        //
+        // The usable authoring band for `Experiment::reliability` is therefore about **[0.77, 0.89]**:
+        // below it a parameter never resolves, at 0.90 a single test resolves it outright.
+        // `ResearchConfig::check_resolvable` enforces the lower edge at load.
+        Self { decay: 0.88 }
     }
 }
 
