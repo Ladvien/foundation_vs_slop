@@ -787,7 +787,16 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL
   Author the SCP-9191 arc: research cashes out as "restoring curation/quality against an out-of-control generator," culminating in a confrontation with SCP-9191. Deprecate semiotic-decay/2521/Gat-Hayes (optional flavor only if non-contradictory). Consider mining the canon "alarm switch ON/OFF" locker detail for the confrontation trigger.
   *Done when:* endgame trigger fires after a curriculum threshold; confrontation derives from the generator theme; no shipped copy references deprecated theming as canon. · *Deps:* F-3, K-3 · *Touches:* narrative, tech-tree, `lib.rs` lore refs · *Reading:* **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG]
-- **FVS-K-3 — Dialogue content buildout** · L
+- **FVS-K-3 — Dialogue content buildout** · L · ⚠️ **PARTIALLY LANDED 2026-07-27 — the module has a JOB now**
+  The item's real complaint was that `src/dialogue/` had "exactly **one** authored conversation on a dev
+  hotkey" — i.e. no reason to exist. FVS-O-3 fixed that half: `dialogue::bark_belief_tellings` voices
+  every belief that crosses the squad, from an 18-line authored table (`gossip::line_for`) covering every
+  `Subject` × `Claim` pairing, with a test that a new one cannot reach a speech balloon as a debug
+  string. Dialogue is now **gameplay-load-bearing** rather than decoration, which was the point.
+  **What remains is the authored conversations themselves** — capture/research/Site beats with
+  researcher and xenobiologist role voice, triggered from real events. The `StartConversation` message
+  and the RON graph are both ready; this is content work, not wiring.
+  *Done when:* ≥N authored conversations trigger from real game events, not a hotkey. · *Deps:* F-3
   `src/dialogue/` (world-space bubbles + RON graph) has exactly **one** authored conversation on a dev hotkey. Author capture/research/Site conversations incl. researcher/xenobiologist role voice.
   *Done when:* ≥N authored conversations trigger from real game events, not a hotkey. · *Deps:* F-3 · *Touches:* `src/dialogue/`, RON · *Reading:* — (no corpus resource; only relevant if you go generative)
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
@@ -1250,10 +1259,48 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   One operative tells another in the field; confidence decays with each retelling. **Rides the existing dialogue system** (`src/dialogue/`, `squad_ai::dialogue::MemoryStream`, already grounded in Park et al.). That is the point: the dialogue layer currently has **one authored conversation on a dev hotkey** (K-3) and no reason to exist — this gives it one, so authoring conversations becomes gameplay-load-bearing rather than decoration.
   **Determinism:** "A tells B" over a query is a *pick*, so it needs a stable total key — `SquadMember` is the one every other site uses (`tests/determinism_lint.rs`).
   *Done when:* a belief measurably spreads squad-wide through conversation; retold confidence is strictly lower than firsthand. · *Deps:* O-1, K-3 · *Touches:* `src/knowledge/`, `src/dialogue/` · *Reading:* **[MISPERCEPT]**, [ECS]
-- **FVS-O-4 — Reports: written and read at the Site (`Read`)** · L
+- **FVS-O-4 — Reports: written and read at the Site (`Read`)** · L · ✅ **LANDED 2026-07-27**
+  *Shipped:* `src/knowledge/records.rs` — the archive (`Records`, saved), the `K` verb at the Site that
+  writes up what the squad knows, and `brief_from_records` handing it to the next squad at
+  `RunBuild::PostPopulate` as `Provenance::Read`.
+  **Only FIRSTHAND findings are filed, and it is the most important rule in the module.** A report is a
+  primary source; letting an operative write up something they were merely *told* would launder hearsay
+  into the archive — and since `Read` beliefs are then briefed to every later squad, a false belief
+  could circulate **forever** by having been written down, outliving the decay in O-3 that is supposed
+  to kill it.
+  **`Read` is the weakest provenance, below `Told`, and that is the point.** The archive *preserves*
+  knowledge without *replacing* experience: a squad rebuilt entirely from reports is measurably more
+  tentative than the veterans it replaced, which is the right consequence of having lost them.
+  **The cost of filing is exposure, not currency.** Charging O5 budget would couple the two economies
+  FVS-P-2 keeps disjoint by kind. The real price is that a filed report is an **attack surface** — which
+  is exactly what O-5 needed.
+  *Also:* filing dedupes on `(subject, claim)`, so two operatives filing one observation is one fact
+  rather than manufactured corroboration. · *Deps:* O-3, G-2, G-4
   The cross-run channel. An operative who dies takes their firsthand knowledge with them — but a filed report survives for the next squad. Since operatives **persist** (G-3), a report is *insurance*: a voluntary hedge against your own death, which makes the records office a **choice** ("spend the time writing it up?") rather than mandatory bookkeeping.
   *Done when:* a report written in run N is readable in run N+1 and confers a `Read`-provenance belief; needs save/load. · *Deps:* O-3, G-2, G-4 · *Touches:* `src/knowledge/`, `src/site/` · *Reading:* [MISPERCEPT]
-- **FVS-O-5 — False belief as SCP-9191's attack surface** · L · **the payoff**
+- **FVS-O-5 — False belief as SCP-9191's attack surface** · L · ✅ **MECHANISM LANDED 2026-07-27 — the trigger is K-4's**
+  *Shipped:* `SeedMisinformation`, `records::seed_misinformation`, the `PHANTOM_AUTHOR` signature, and
+  both counter-plays. Pinned end to end by
+  `containment::a_planted_lie_reaches_the_squad_and_firsthand_experience_undoes_it`, which exercises all
+  four verbs the item names — seeded, spread, acted on, corrected.
+  **[MISPERCEPT] gave the distinction the item was missing:** *"Some are the result of secrets. Some are
+  the result of mere error. **Intentionality** differentiates the gap that results from a secret from
+  the gap that results from an error."* O-3's degrading rumour is the **error**; a planted report is the
+  **secret**. They are different objects with different counter-play, and the code now says so:
+  * **Verify firsthand** — experience *displaces* a contradicting rumour outright rather than sitting
+    beside it. You cannot be talked out of what you saw.
+  * **Curate the archive** — `Records::purge` pulls every report making a claim and reports the count,
+    so the office can say what happened rather than silently succeeding.
+  **Intent is visible, deliberately.** A planted report carries `PHANTOM_AUTHOR`, outside the roster, and
+  the records screen renders it `?? UNATTRIBUTED ??` rather than printing a nonsense index. Curation you
+  cannot perform is not counter-play, so the tell has to be findable.
+  **Seeding a TRUE claim is refused**, validated against the `research:` curriculum's `HiddenTruth` —
+  the same table the research economy converges on, so a planted lie is false in exactly the sense the
+  player can *disprove* by studying the specimen. An antagonist that accidentally supplied accurate
+  intelligence would make the whole detection loop meaningless.
+  **Still to come:** *when* 9191 seeds. That is FVS-K-4's decision, and shipping the mechanism behind a
+  `Message` means the endgame only has to choose the moment — and means this is fully tested now rather
+  than blocked on a boss that does not exist. · *Deps:* O-4, K-4 (trigger only)
   Hearsay can be **wrong** and propagates anyway. [MISPERCEPT] supplies the mechanism — pluralistic ignorance, where a false belief survives because everyone assumes everyone else knows better.
   **This is what the antagonist is for.** Slop is not only ugly monsters, it is **plausible garbage** — which is exactly what a false report is. Giving SCP-9191 a way to seed misinformation into the squad's belief network makes the endgame theme ("restoring curation/quality against an out-of-control generator", K-4) a *mechanic the player fights* rather than a narrative frame around unrelated combat. The counter-play is Foundation-shaped: **verify firsthand, and curate the records.**
   *Done when:* a false belief can be seeded, spread, acted on, and corrected by firsthand verification or by purging a report. · *Deps:* O-4, K-4 · *Touches:* `src/knowledge/`, narrative · *Reading:* **[MISPERCEPT]**, [UV-REV]

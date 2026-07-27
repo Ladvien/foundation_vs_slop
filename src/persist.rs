@@ -90,6 +90,10 @@ pub struct SaveGame {
     /// so a campaign saved before the knowledge layer existed loads with an inexperienced squad.
     #[serde(default)]
     pub squad_knowledge: crate::knowledge::SquadKnowledge,
+    /// The Site's filed reports (FVS-O-4) — the only knowledge channel that outlives an operative, so
+    /// losing it on a restart would undo the whole reason a report is worth writing.
+    #[serde(default)]
+    pub records: crate::knowledge::Records,
 }
 
 impl SaveGame {
@@ -158,10 +162,12 @@ pub fn capture_save(world: &mut World) -> SaveGame {
 
     let squad_knowledge =
         world.get_resource::<crate::knowledge::SquadKnowledge>().copied().unwrap_or_default();
+    let records = world.get_resource::<crate::knowledge::Records>().cloned().unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
         squad_knowledge,
+        records,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -188,6 +194,9 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
     }
     if let Some(mut tree) = world.get_resource_mut::<TechTree>() {
         *tree = TechTree::from_bits(save.tech_tree);
+    }
+    if let Some(mut r) = world.get_resource_mut::<crate::knowledge::Records>() {
+        *r = save.records.clone();
     }
     if let Some(mut k) = world.get_resource_mut::<crate::knowledge::SquadKnowledge>() {
         // Replacement, not a merge — the same rule the specimen list follows. Merging two squads'
@@ -261,6 +270,7 @@ mod tests {
             run_seed: 0xDEAD_BEEF,
             tech_tree: 0b0101,
             squad_knowledge: crate::knowledge::SquadKnowledge::default(),
+            records: crate::knowledge::Records::default(),
             specimens: vec![
                 SavedSpecimen {
                     captured_tick: 120,

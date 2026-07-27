@@ -911,3 +911,87 @@ fn a_belief_spreads_through_the_squad_and_weakens_as_it_goes() {
         );
     }
 }
+
+/// **A false belief can be seeded, spread, acted on, and corrected** (FVS-O-5) — end to end.
+///
+/// The payoff of Push 10, and the one test that exercises all four verbs the item names. Driven through
+/// the real `App`, because every previous "shipped" claim in this area turned out to be a pure function
+/// nothing called.
+#[test]
+fn a_planted_lie_reaches_the_squad_and_firsthand_experience_undoes_it() {
+    use foundation_vs_slop::knowledge::records::{
+        seed_misinformation, Records, SeedMisinformation, PHANTOM_AUTHOR,
+    };
+    use foundation_vs_slop::knowledge::{Claim, Knowledge, Provenance, Subject};
+    use foundation_vs_slop::squad::Unit;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 1);
+    app.init_resource::<Records>()
+        .add_message::<SeedMisinformation>()
+        .add_systems(bevy::prelude::Update, seed_misinformation);
+
+    // SCP-150 IS lethal (config.ron's authored truth), so "harmless" is a genuine lie the player could
+    // disprove by studying the specimen — the same table the research economy converges on.
+    app.world_mut()
+        .write_message(SeedMisinformation { subject: Subject::Parasite, claim: Claim::Harmless });
+    app.update();
+
+    let planted = app.world().resource::<Records>().filed.clone();
+    assert_eq!(planted.len(), 1, "the lie must reach the shelf: {planted:?}");
+    assert_eq!(planted[0].author, PHANTOM_AUTHOR, "and carry a signature nobody recognises");
+
+    // A true claim must be REFUSED — an antagonist that accidentally supplies accurate intelligence
+    // would make the whole detection loop meaningless.
+    app.world_mut()
+        .write_message(SeedMisinformation { subject: Subject::Parasite, claim: Claim::Lethal });
+    app.update();
+    assert_eq!(
+        app.world().resource::<Records>().filed.len(),
+        1,
+        "seeding something TRUE must be refused, not filed"
+    );
+
+    // It briefs onto an operative as the weakest provenance...
+    let victim = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<bevy::prelude::Entity, With<Unit>>();
+        q.iter(world).next().expect("the squad must exist")
+    };
+    {
+        let records = app.world().resource::<Records>().clone();
+        let mut k = app.world_mut().get_mut::<Knowledge>(victim).expect("Knowledge");
+        for r in &records.filed {
+            k.learn(r.subject, r.claim, Provenance::Read, 0);
+        }
+    }
+    assert_eq!(
+        app.world().get::<Knowledge>(victim).and_then(|k| k.of(Subject::Parasite, Claim::Harmless))
+            .expect("the lie took").provenance,
+        Provenance::Read,
+        "a planted report must arrive as hearsay, never as experience"
+    );
+
+    // ...and firsthand contact undoes it. This is the counter-play the whole antagonist theme rests on:
+    // verify it yourself.
+    {
+        let mut k = app.world_mut().get_mut::<Knowledge>(victim).expect("Knowledge");
+        k.learn(Subject::Parasite, Claim::Lethal, Provenance::Firsthand, 1);
+    }
+    let k = app.world().get::<Knowledge>(victim).expect("Knowledge");
+    assert!(
+        k.of(Subject::Parasite, Claim::Harmless).is_none(),
+        "seeing it for yourself must DISPLACE the lie, not sit beside it"
+    );
+    assert_eq!(
+        k.of(Subject::Parasite, Claim::Lethal).expect("learned").provenance,
+        Provenance::Firsthand
+    );
+
+    // The other route: curate the archive so it never briefs anyone again.
+    let pulled = app.world_mut().resource_mut::<Records>().purge(Subject::Parasite, Claim::Harmless);
+    assert_eq!(pulled, 1, "purging must report what it pulled");
+    assert!(app.world().resource::<Records>().filed.is_empty());
+}

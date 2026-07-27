@@ -35,9 +35,11 @@
 
 pub mod coupling;
 pub mod gossip;
+pub mod records;
 pub mod roster;
 
 pub use gossip::{RecentTellings, Telling};
+pub use records::{Records, RecordsPlugin, Report};
 pub use roster::{RosterPlugin, SquadKnowledge};
 
 use serde::{Deserialize, Serialize};
