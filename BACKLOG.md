@@ -939,7 +939,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **Do not bulk-copy into `assets/`.** The share is the *library*; `assets/` holds only what the game loads, converted and named for its use (`docs/artist_guide.md` §2).
   *License:* commercial use and modification permitted; redistributing the pack itself is not — fine for shipping inside a game.
   *Done when:* a repeatable script converts a named pack subset to `.glb` meeting the artist-guide contract, and one converted prop loads in-game. · *Deps:* — · *Touches:* new `scripts/`, `assets/site/` · *Reading:* — (no corpus resource)
-- **FVS-N-9 — `a_unit_shooting_on_the_move_keeps_its_legs_running` is intermittent (FOUND 2026-07-25)** · S · *determinism: test-only*
+- **FVS-N-9 — `a_unit_shooting_on_the_move_keeps_its_legs_running` is intermittent (FOUND 2026-07-25)** · S · ✅ **CLOSED 2026-07-27 — `#[ignore]` removed, 10/10 under load**
+  **There was never an animation bug, and there was never an aim flicker either.** Three scenario
+  defects, each of which produced a confident wrong conclusion until it was measured:
+  1. **The squad marched and hoped.** Fixed by driving it *through* a hostile cluster.
+  2. **The cluster was 94 world units away.** Targeting the *densest* neighbourhood anywhere was the
+     long march again in a different costume. Sampled every 50 ticks: **zero** crabs were ever
+     fog-visible, and the squad had closed only to 9.5 units after 1200 ticks. Fixed by targeting the
+     **nearest** qualifying cluster.
+  3. **The loop exited before the property could form.** It broke on `best_together` and then asserted
+     `max_action` — but the overlap appears the instant the action layer starts easing, while
+     `max_action` needs ~3·`FADE_TAU` to reach 0.9. It stopped at 0.169 and then failed a `> 0.5` check
+     against a number it had just refused to let grow.
+  **The retracted hypothesis is worth keeping.** From `max_action = 0.169` I concluded "the aim state
+  must be flickering — a target-acquisition bug in `fire_laser`'s front-arc gate", wrote it into this
+  entry, and shipped it. A 30-line diagnostic refuted it outright: units aim on **8 of 1200 ticks**, in
+  one unbroken run, and on contact the action layer reaches **0.730**. 0.169 *looked* like a mechanism
+  and was an artefact of the harness around it. **Measure the gate; do not infer it from the symptom** —
+  which is the same lesson FVS-N-8 cost three sessions to learn.
+  *Verified:* 10/10 under 8 busy-loop threads with `#[ignore]` removed, and the load generators were
+  tracked by PID and confirmed dead afterwards. · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
+  *Original filing, kept because its ruled-out list saved time:*
   `#[ignore]`d in `tests/liveness.rs` rather than left red. It failed in 3 of 4 full-suite runs on a loaded box, across code states that both pre-date and post-date FVS-A-5, so it is **not** an A-5 regression.
   What was ruled out by instrumenting it: the figurines *are* streamed and wired (all 5 squad `PoseBlender`s present — a `step_until_squad_blenders_ready` settle was added to `sim_harness` and did not fix it), the squad *is* engaging (`AimTarget` set on 4 units, 43 hostiles alive), and the slot filter *does* match (5 blenders at `LOCO_SLOTS + 2`). So the failure is real: the upper-body action layer takes **no weight at all** over 200 ticks in the failing runs.
   The action layer arms only on the frames a **bolt actually spawns** (`drive_valkyrie_animation` reads newly-added bolts, and `fire_laser` only spawns on the cooldown-wrap tick), so the likely cause is that no bolt is emitted in the window — aiming is not firing. The test's own message ("the squad did not engage") is therefore misleading and should be re-worded once the cause is known.
