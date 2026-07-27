@@ -351,17 +351,24 @@ fn mold_dim_light(mut light: ResMut<LightField>, mold: Res<MoldField>, config: R
 /// Owns the gameplay [`MoldField`]. Registered in BOTH the windowed game and the headless harness (like
 /// [`crate::light::LightFieldPlugin`]) because the field is CPU gameplay state the replay gate must cover.
 /// Requires `Dungeon` at build (DungeonPlugin precedes it).
+/// Size this run's mold field to its dungeon.
+fn size_mold_field(mut commands: Commands, dungeon: Res<Dungeon>) {
+    commands.insert_resource(MoldField::new(dungeon.width, dungeon.height));
+}
+
 pub struct MoldPlugin;
 
 impl Plugin for MoldPlugin {
     fn build(&self, app: &mut App) {
-        let dungeon = app
-            .world()
-            .get_resource::<Dungeon>()
-            .expect("MoldPlugin requires DungeonPlugin to be registered first");
-        let field = MoldField::new(dungeon.width, dungeon.height);
-        app.insert_resource(field)
-            .add_systems(Startup, bake_mold)
+        // Sized and baked per run — see the note in `fog::FogPlugin` (FVS-A-5). The bake seeds the
+        // colony into the field, so it belongs in `Populate`, after `Grids` has created it.
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            (
+                size_mold_field.in_set(crate::session::RunBuild::Grids),
+                bake_mold.in_set(crate::session::RunBuild::Populate),
+            ),
+        )
             .add_systems(
                 FixedUpdate,
                 (

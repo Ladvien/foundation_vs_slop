@@ -100,24 +100,17 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 // It does NOT hunt the squad to kill (see the removed `enemy_contact_damage`): it wants to keep you
 // around to watch. It drifts toward the nearest unit but stops at the `boss.observe_dist` standoff (tiles)
 // to stare rather than pinning — a lonely observer, not a predator on contact. Lifted to `behavior.boss`.
-/// Observation is the PLAYER's gaze, not an NPC's: the watcher performs its uncanny "friendly" visage for
-/// whoever is actually watching it — the human at the camera. [`WatchedByPlayer`] (set windowed-only by
-/// [`snapshot_player_gaze`] from the live camera; always `false` in the headless deterministic core) gates
-/// the mood ([`next_mood`]): hit WHILE the player is looking at it → Scared (it conceals under a believed
-/// gaze); hit while the player's attention is elsewhere → Unleashing. The audience effect keys on *believed
-/// direct gaze* (Hamilton & Cañigueral, "The Role of Eye Gaze During Natural Social Interactions", Front.
-/// Psychol. 2019, DOI 10.3389/fpsyg.2019.00560). The OLD gaze keyed on whichever squad figurine's auto-aim
-/// cone happened to point at it — invisible and arbitrary to the player; keying on the camera makes "if I
-/// watch it, it hides" literally true and player-controlled.
+/// Observation is the **squad's line of sight** (FVS-M-1): the watcher conceals itself from anyone who
+/// can actually see it. [`ObservedBySquad`] — per-entity, written on `FixedUpdate` from the same
+/// `fog::FogGrid` that gates laser targeting — drives the mood ([`next_mood`]): hit WHILE seen → Scared
+/// (it conceals under a believed gaze); hit while unseen → Unleashing. The audience effect keys on
+/// *believed direct gaze* (Hamilton & Cañigueral, "The Role of Eye Gaze During Natural Social
+/// Interactions", Front. Psychol. 2019, DOI 10.3389/fpsyg.2019.00560), and a squad that can see it is the
+/// in-world bearer of that gaze.
 ///
-/// PROVOKE: a squad bolt that STRIKES a Watching watcher now hits it (it is no longer intangible — see
-/// [`crate::laser::update_lasers`]), recording the shooter as its [`LastAttacker`]. So a stray/missed shot
-/// that lands on it while the player is NOT watching wakes it → it Unleashes and the instakill takes the
-/// unit that fired the errant bolt. `fire_laser` still never AIMS at a Watching watcher (the squad won't
-/// shoot it on purpose), so any hit is an accident the player pays for: watch it while fighting near it, or
-/// a missed shot gets someone killed. A crab bite (`crab::crab_contact_damage`) still provokes it too.
-/// Range (cells) the watcher's retaliation reaches — the SAME radius the squad can see (single source of
-/// truth: `fog::VISION_RADIUS`), so it can only smite what is within the squad's vision.
+/// This replaced a windowed-only camera-gaze resource. That version keyed on the human at the keyboard,
+/// which read well but put the creature's defining mechanic outside the deterministic core entirely —
+/// and SCP-173/096 (FVS-C-6) need a *per-entity* observation state that a global bool cannot provide.
 const LOOK_RANGE: f32 = crate::fog::VISION_RADIUS as f32;
 // Seconds after a hit the watcher stays "attacked" (`boss.hit_memory`), so the reaction persists past the
 // single damage tick. Short — this is a reflex, not a mood. Lifted to `behavior.boss`.
@@ -373,10 +366,17 @@ impl Plugin for EnemyPlugin {
             .init_resource::<EnemyField>()
             .init_resource::<LightningQueue>()
             // The player-gaze fact the reflex reads. Inited here (harness + windowed) so `smiley_reflex`
-            // always has it; the WRITER (`snapshot_player_gaze`) is registered windowed-only in `lib::run`,
-            // so the deterministic core reads a stable `WatchedByPlayer(false)`.
-            .init_resource::<WatchedByPlayer>()
-            .add_systems(Startup, (spawn_enemies, setup_lightning_assets))
+
+            .add_systems(Startup, setup_lightning_assets)
+            // Observation is now SQUAD line of sight, inside the pinned core (FVS-M-1). After
+            // `fog::LosWritten` so it reads this tick's visibility, and before the reflex that consumes it.
+            .add_systems(
+                FixedUpdate,
+                update_observation
+                    .after(crate::fog::LosWritten)
+                    .before(smiley_reflex),
+            )
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_enemies.in_set(crate::session::RunBuild::Populate))
             // Pinned sim (movement/reflex/AI-driven) on `FixedUpdate`; the `.after(AiSet::Think)` ordering
             // stays valid because `AiSet` is configured on `FixedUpdate` too.
             .add_systems(
@@ -484,10 +484,16 @@ fn spawn_enemies(
         let attack_material = attack_materials.add(AttackSphereMaterial {});
         commands
             .spawn((
-                Enemy,
+                // Grouped to stay under Bevy's 15-element tuple cap.
+                (crate::session::run_scoped(), Enemy),
                 Hostile,
                 crate::squad::Prey, // crabs swarm the boss too (nearest-prey targeting)
-                SmileyState::new(sim.boss.start_hp, beh.boss.hit_memory),
+                // Grouped to stay under Bevy's 15-element tuple cap. Inserted at spawn and never
+                // toggled — only its value flips — so it cannot churn the hashed archetype (FVS-M-1).
+                (
+                    SmileyState::new(sim.boss.start_hp, beh.boss.hit_memory),
+                    ObservedBySquad::default(),
+                ),
                 LastAttacker::default(), // who last hit it (written by the laser + crab damage sites)
                 Health::new(sim.boss.start_hp),
                 // Grouped so the spawn tuple stays within Bevy's 15-element Bundle limit.
@@ -972,67 +978,48 @@ fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     (a.xz() - b.xz()).length()
 }
 
-/// Whether the PLAYER is currently looking at the watcher — the diegetic "human observer" it performs its
-/// uncanny-friendly visage for. Set once per frame by [`snapshot_player_gaze`] (windowed-only, from the
-/// live camera) and read by the pinned [`smiley_reflex`]. Defaults `false`; the deterministic harness never
-/// registers the snapshot system (no player, and the windowed camera eases over WALL-CLOCK time, which is
-/// not reproducible), so the core always reads a stable `false` — the watcher there is permanently
-/// "unobserved", which keeps its reflex bit-reproducible.
-#[derive(Resource, Default)]
-pub struct WatchedByPlayer(pub bool);
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObservedBySquad(pub bool);
 
 // Cosine of the half-angle of the camera-view cone within which the watcher counts as "looked at": the
 // player must roughly CENTRE it in view (deliberate attention), not merely have it at the screen edge.
 // cos(22°) ≈ 0.927. Windowed-only tuning. Lifted to `behavior.boss.gaze_cos` (src/behavior_tuning.rs).
 
-/// Pure: is `watcher` within the camera's central view cone (a dot-product proxy for "near screen
-/// centre")? Split out so the gaze geometry is unit-testable without a live camera.
-fn is_watcher_centered(cam_pos: Vec3, cam_fwd: Vec3, watcher: Vec3, cos: f32) -> bool {
-    (watcher - cam_pos).normalize_or_zero().dot(cam_fwd) >= cos
-}
 
-/// Windowed-only: is the player centring the watcher in the camera view this frame? Writes
-/// [`WatchedByPlayer`] for the pinned [`smiley_reflex`] to read. NEVER registered in the headless harness
-/// (determinism depends on the core reading a fixed `false` — see [`WatchedByPlayer`]). Uses the camera's
-/// view axis as a dot-product cone, so it needs neither the cursor nor the viewport size — just the live
-/// camera transform and the watcher positions.
-pub fn snapshot_player_gaze(
-    mut watched: ResMut<WatchedByPlayer>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
-    smileys: Query<&Transform, With<Enemy>>,
-    beh: Res<crate::behavior_tuning::BehaviorTuning>,
+/// Write [`ObservedBySquad`] for every watcher from the squad's line-of-sight grid.
+///
+/// Runs on `FixedUpdate` after `fog::LosWritten`, so it reads *this* tick's visibility rather than
+/// racing it — the same edge `ai::brain::think` uses against the same grid.
+pub fn update_observation(
+    fog: Res<crate::fog::FogGrid>,
+    dungeon: Res<crate::dungeon::Dungeon>,
+    mut watchers: Query<(&Transform, &mut ObservedBySquad)>,
 ) {
-    // A single game camera in the windowed app; take the first (windowed-only, so iteration order is
-    // irrelevant — nothing here is hashed).
-    let Some(cam_tf) = camera.iter().next() else {
-        watched.0 = false;
-        return;
-    };
-    let cam_pos = cam_tf.translation();
-    let cam_fwd = cam_tf.forward();
-    watched.0 = smileys
-        .iter()
-        .any(|stf| is_watcher_centered(cam_pos, *cam_fwd, stf.translation, beh.boss.gaze_cos));
+    // Order-independent: each watcher reads the shared grid at its own cell and writes only its own
+    // component — no pick, no shared counter, so no canonical sort is needed.
+    for (tf, mut observed) in &mut watchers {
+        let seen = fog.visible_at(dungeon.world_to_cell(tf.translation));
+        if observed.0 != seen {
+            observed.0 = seen;
+        }
+    }
 }
 
-/// The watcher's reflex: detect being attacked, read whether the PLAYER is watching it, and set the mood
+/// The watcher's reflex: detect being attacked, read whether the SQUAD can see it, and set the mood
 /// (`Watching`/`Scared`/`Unleashing`). The whole mechanic — concealment under observation —
 /// lives here (audience effect: Hamilton & Cañigueral, Front. Psychol. 2019, DOI 10.3389/fpsyg.2019.00560).
 fn smiley_reflex(
     time: Res<Time>,
-    watched: Res<WatchedByPlayer>,
-    mut smileys: Query<(&Health, &mut SmileyState, &mut LastAttacker), With<Enemy>>,
+    mut smileys: Query<(&Health, &mut SmileyState, &mut LastAttacker, &ObservedBySquad), With<Enemy>>,
     sim: Res<SimTuning>,
     beh: Res<crate::behavior_tuning::BehaviorTuning>,
 ) {
     let dt = time.delta_secs();
     let hit_memory = beh.boss.hit_memory;
-    // "Looked at" is now the PLAYER's gaze — a single global fact this tick, set windowed-only by
-    // `snapshot_player_gaze` and a stable `false` in the headless core (so the reflex stays
-    // bit-reproducible). The watcher performs its friendly mask for the human at the camera, not for
-    // whichever figurine's auto-aim happened to point at it.
-    let looked_at = watched.0;
-    for (hp, mut state, mut attacker) in &mut smileys {
+    for (hp, mut state, mut attacker, observed) in &mut smileys {
+        // "Looked at" is the SQUAD's line of sight (FVS-M-1) — per-entity and inside the pinned core, so
+        // the concealment mechanic is finally something a golden can pin. See `ObservedBySquad`.
+        let looked_at = observed.0;
         // Tick down the "true form" flash from the last strike (set by `smiley_zap`).
         state.flash_timer = (state.flash_timer - dt).max(0.0);
         // Age the last-attacker working-memory fact; forget it once stale so a long-gone attacker is never
@@ -1271,15 +1258,6 @@ mod tests {
     // `laser.rs`). Locks the concealment mechanic: identical stimulus, opposite response, gated on gaze.
     use super::*;
 
-    // Gaze is now the PLAYER's camera (see `snapshot_player_gaze` / `is_watcher_centered`), not a unit body
-    // cone. These pin the new camera-cone geometry; `next_mood` still gates on the resulting `looked_at`
-    // bool, and the concealment invariant below is unchanged: identical stimulus, opposite response.
-    #[test]
-    fn gaze_watcher_dead_ahead_is_looked_at() {
-        // Camera at origin looking down −Z; a watcher straight ahead is centred in view.
-        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
-        assert!(is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, -5.0), gaze_cos));
-    }
 
     /// `wall_standoff_push` steers the boss away from a wall on one side, and cancels to ~zero when
     /// walls bracket it on opposite sides (a corridor) so it still funnels through.
@@ -1315,18 +1293,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gaze_watcher_off_axis_is_not_looked_at() {
-        // 45° off the view axis (dot = 0.707) is outside the ~22° central cone (cos ≈ 0.927).
-        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
-        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(-5.0, 0.0, -5.0), gaze_cos));
-    }
 
-    #[test]
-    fn gaze_watcher_behind_camera_is_not_looked_at() {
-        let gaze_cos = crate::behavior_tuning::BehaviorTuning::default().boss.gaze_cos;
-        assert!(!is_watcher_centered(Vec3::ZERO, Vec3::NEG_Z, Vec3::new(0.0, 0.0, 5.0), gaze_cos));
-    }
 
     #[test]
     fn watched_and_hit_cowers_never_unleashes() {

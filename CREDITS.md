@@ -29,7 +29,7 @@ things came from is the decent thing to do.
 | "Curly Teddy Natural" fabric normal map | Poly Haven | SCP-1048's plush surface |
 | "rust_coarse_01" normal map | Poly Haven | SCP-1048-C's corroded scrap |
 | `leather_white` / `leather_red_02` normal maps | Poly Haven | SCP-1048-B's skin and torn seam |
-| Blaster kit, prototype kit | Kenney | `assets/kenney_*` |
+| Prototype kit | Kenney | `assets/kenney_prototype-kit` |
 
 ## Setting and fiction
 

@@ -87,12 +87,32 @@ fn is_visible(a: f32) -> f32 {
 // construction. `mycelia_sim.wgsl` clamps U/V to [0,1] every tick, but WGSL's `clamp`/`min`/`max` are not
 // specified to filter a NaN INPUT on every backend (this file already carries one other naga/Metal
 // undefined-behavior workaround, see the `smoothstep` note below), so a transient NaN from the reaction step
-// could in principle survive the sim's own clamp and land here. `x != x` is true only for NaN per IEEE 754
-// and is a direct definitional check, not reliant on `clamp`'s NaN behavior — sanitizing at this last
-// consumption point means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN
-// pixel (which upstream tonemapping/exposure can turn into a solid, screen-filling wrong color).
+// could in principle survive the sim's own clamp and land here. Sanitizing at this last consumption point
+// means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN pixel (which upstream
+// tonemapping/exposure can turn into a solid, screen-filling wrong color).
+//
+// Bit-pattern test, not `x != x` — see `mycelia_floor.wgsl` for the full reasoning: naga lowers a WGSL float
+// `!=` to the ORDERED SPIR-V `OpFOrdNotEqual`, which is false when either operand is NaN, so the textbook
+// check folds to the identity here. An all-ones exponent is NaN or Inf by definition; both are fatal
+// downstream of tonemapping and both are caught.
 fn no_nan(x: f32) -> f32 {
-    return select(x, 0.0, x != x);
+    return select(x, 0.0, (bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u);
+}
+
+// One control texel is exactly one dungeon cell (`CONTROL_SIZE` 192 == `WORLD_EXTENT` 192 at `TILE_SIZE`
+// 1.0). Fence the domain-warped reveal tap inside the cell the wall's foot stands in: `reveal_warp_amp`
+// reaches ~1.15 world units, far enough to cross a single-cell wall and drive this face's coverage from a
+// room the squad has never entered. Bilinear reconstruction inside a texel mixes only that texel and its
+// immediate neighbours, so the far side of a wall carries zero weight regardless of warp direction.
+//
+// This is the guard that has to do the work on the wall. A threshold on the UNWARPED tap (what the floor
+// uses to keep the coat off rock) cannot: `foot` is pushed WALL_THICKNESS + WALL_FOOT_OFFSET = 0.234 units
+// into the room, so the wall's own tap is always inside its room's floor cell and such a guard could never
+// return 0 on any fragment this material shades.
+fn warped_tap(uv: vec2<f32>, warp: vec2<f32>) -> vec2<f32> {
+    let dims = vec2<f32>(textureDimensions(control_tex, 0));
+    let lo = floor(uv * dims) / dims;
+    return clamp(uv + warp * mold.reveal_warp_amp, lo, lo + 1.0 / dims);
 }
 
 @fragment
@@ -119,13 +139,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         fbm4(foot * mold.reveal_warp_scale),
         fbm4(foot * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
     ) - 0.5;
-    let ctrl_uv = uv + warp * mold.reveal_warp_amp;
-    let substrate_warped = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
-    // Clamp against the unwarped direct tap at this face's own foot — see `mycelia_floor.wgsl` for why:
-    // the warp can wander far enough to sample across a single-cell-thick wall into the next room.
-    let substrate_direct = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
-    let is_floor_direct = step(0.1, substrate_direct);
-    let substrate = substrate_warped * is_floor_direct;
+    let substrate = textureSampleLevel(control_tex, control_samp, warped_tap(uv, warp), 0.0).a;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));
 

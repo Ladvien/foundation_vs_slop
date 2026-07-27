@@ -710,12 +710,40 @@ fn bake_gun(gun: &Soup, material: Option<Handle<StandardMaterial>>, meshes: &mut
     Some(GunChunk { mesh, material, center_local: frag.center_local, half_extents: frag.half_extents })
 }
 
-/// Derive a stable per-source fracture seed (deterministic within a run).
-fn seed_from(id: AssetId<WorldAsset>) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    id.hash(&mut h);
-    h.finish() as u32
+/// Derive the per-source fracture seed from the asset's **path**.
+///
+/// **FVS-N-8's actual root cause, found 2026-07-26.** This used to hash the `AssetId`:
+///
+/// ```ignore
+/// fn seed_from(id: AssetId<WorldAsset>) -> u32 {
+///     let mut h = DefaultHasher::new();
+///     id.hash(&mut h);
+///     h.finish() as u32
+/// }
+/// ```
+///
+/// An `AssetId` is a **slot index in the asset arena**, assigned by async load order — so the same GLB
+/// gets a different id run to run, hashes to a different seed, and `fracture` slices the body along
+/// **completely different planes**. Measured: two same-seed builds produced **23 of 23 fragments
+/// differing**, in `half_extents` as well as `center_local` — the mesh was being partitioned
+/// differently, not merely rounded differently. That is the whole of N-8: every downstream symptom
+/// (chunk positions differing by ULPs, the `crab::assign_meat_targets` cascade, the load-dependence)
+/// follows from the fracture planes moving.
+///
+/// The old doc comment said "deterministic **within a run**", which was true and was the tell — nothing
+/// compared two runs' bakes until now.
+///
+/// The asset **path** is the stable identity: it is authored, not allocated, and identical across runs,
+/// processes and machines. Hashed with a hand-rolled FNV-1a for the reason `TESTING.md` gives about
+/// goldens — `DefaultHasher` is not guaranteed stable across toolchains, so it has no business seeding
+/// anything whose output is compared between builds.
+fn seed_from_path(path: &bevy::asset::AssetPath) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in path.to_string().as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 /// Once a unit's whole body scene has streamed in, bake its fracture set (and its gun chunk) exactly
@@ -740,6 +768,16 @@ fn bake_autogib(
         if cache.baked.contains(&source) {
             continue;
         }
+        // The fracture seed comes from the asset PATH, never the `AssetId` — see `seed_from_path`.
+        // One path, no fallback: a figurine handle with no asset path cannot be baked reproducibly, so
+        // it is not baked at all. `spawn_fragments` already handles an absent bake with a loud warn.
+        let Some(asset_path) = figurine.0.path().map(|p| p.clone_owned()) else {
+            error!(
+                "autogib: figurine handle has no asset path — refusing to bake a fracture whose seed \
+                 would depend on asset load order (FVS-N-8). No gibs for this source."
+            );
+            continue;
+        };
 
         let mut body = Soup::default();
         let mut gun = Soup::default();
@@ -752,20 +790,62 @@ fn bake_autogib(
             let m = transforms.get(child).map(|t| t.to_matrix()).unwrap_or(Mat4::IDENTITY);
             stack.push((child, m, is_gun.get(child).is_ok()));
         }
+        // Collect the meshes first, then append them in a CANONICAL order (FVS-N-8).
+        //
+        // Appending during the walk was a real determinism bug, and a subtle one because it never
+        // reached `snapshot_hash`. `Children` order for a glTF scene is the order the async
+        // instantiation happened to add nodes, which is wall-clock dependent — so the vertex soup was
+        // assembled in a different order between two same-seed runs. `fracture` then computes fragment
+        // centroids as float sums over that soup, and float addition is not associative, so
+        // `Fragment::center_local` came out a few ULPs apart. Every chunk spawns at
+        // `origin + center_local * scale` (`gore::spawn_fragments`), so the *positions* of an otherwise
+        // identical gib set diverged: same count, same `GibKey`s, same `GibRing` order, coordinates off
+        // in the last few bits. That is exactly the fingerprint FVS-N-8 recorded.
+        //
+        // The key is `(mesh asset PATH, world-matrix bits)`; the matrix disambiguates two entities that
+        // share one mesh datablock at different transforms. Deliberately NOT the `Entity` id — id
+        // allocation order is the instability being erased here.
+        //
+        // **It used to be the mesh's `AssetId`, and that was the same bug as FVS-N-8's root cause, ninety
+        // lines above.** The comment here even stated the assumption — "the asset id is stable across
+        // same-seed runs (measured)" — and an `AssetId` is an *arena slot assigned by async load order
+        // and slot recycling*, which is precisely what `seed_from` was condemned for hashing. The
+        // measurement behind that claim was taken idle; N-8's residual only reproduces under heavy load,
+        // and TESTING.md invariant 13 is explicit that an exoneration is only as strong as the condition
+        // it was measured under.
+        //
+        // The consequence chain is already written above: soup order -> `Soup::centroid`'s
+        // non-associative float sum -> cut planes shift by ULPs -> a vertex crosses a plane ->
+        // `Fragment::center_local`/`half_extents` move -> every chunk's spawn `Transform` and
+        // `Carryable.weight` move. Identical counts, identical `GibKey`s, identical ring order, positions
+        // differing in the last bits: N-8's recorded fingerprint exactly.
+        //
+        // Note `sort_total!` proves the key is *unique*, which is not the same as **stable** — a unique
+        // key drawn from a load-order-dependent allocator still permutes the list. Uniqueness was never
+        // the property this needed.
+        //
+        // A path is authored rather than allocated, so it is identical across runs, processes and
+        // machines. glTF sub-meshes are path-backed (`characters/valkyrie.glb#Mesh0/Primitive0`).
+        let mut parts: Vec<(String, [u32; 16], Mat4, bool, Entity, Handle<Mesh>)> = Vec::new();
+        let mut unpathed_mesh = false;
         while let Some((e, mat, in_gun)) = stack.pop() {
             if let Ok(mesh3d) = mesh_q.get(e) {
-                match meshes.get(&mesh3d.0) {
-                    Some(m) => {
-                        if in_gun {
-                            append_mesh(&mut gun, m, mat, false);
-                            if gun_material.is_none() {
-                                gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
-                            }
-                        } else {
-                            append_mesh(&mut body, m, mat, false);
-                        }
+                if meshes.get(&mesh3d.0).is_some() {
+                    let mut bits = [0u32; 16];
+                    for (i, v) in mat.to_cols_array().iter().enumerate() {
+                        bits[i] = v.to_bits();
                     }
-                    None => all_loaded = false, // sub-mesh still streaming
+                    match mesh3d.0.path() {
+                        Some(path) => {
+                            parts.push((path.to_string(), bits, mat, in_gun, e, mesh3d.0.clone()))
+                        }
+                        // One path, no fallback. Falling back to the `AssetId` for this one mesh would
+                        // reintroduce exactly the instability this key exists to remove, on a subset of
+                        // the soup — which is worse than not baking, because it would be intermittent.
+                        None => unpathed_mesh = true,
+                    }
+                } else {
+                    all_loaded = false; // sub-mesh still streaming
                 }
             }
             if let Ok(ch) = children_q.get(e) {
@@ -774,6 +854,28 @@ fn bake_autogib(
                     let child_gun = in_gun || is_gun.get(child).is_ok();
                     stack.push((child, mat * ct, child_gun));
                 }
+            }
+        }
+        if unpathed_mesh {
+            error!(
+                "autogib: a sub-mesh of {asset_path} has no asset path — refusing to assemble a vertex \
+                 soup whose order would depend on asset load order (FVS-N-8). No gibs for this source."
+            );
+            continue;
+        }
+        crate::sort_total!(
+            &mut parts,
+            |p: &(String, [u32; 16], Mat4, bool, Entity, Handle<Mesh>)| (p.0.clone(), p.1)
+        );
+        for (_, _, mat, in_gun, e, mesh_handle) in parts {
+            let Some(m) = meshes.get(&mesh_handle) else { continue };
+            if in_gun {
+                append_mesh(&mut gun, m, mat, false);
+                if gun_material.is_none() {
+                    gun_material = mat_q.get(e).ok().map(|mm| mm.0.clone());
+                }
+            } else {
+                append_mesh(&mut body, m, mat, false);
             }
         }
 
@@ -819,7 +921,7 @@ fn bake_autogib(
         let target = raw.clamp(settings.autogib_min_pieces, settings.autogib_max_pieces).max(1) as usize;
         let min_extent = ext * settings.autogib_min_fraction;
 
-        let soups = fracture(body, target, min_extent, seed_from(source), None);
+        let soups = fracture(body, target, min_extent, seed_from_path(&asset_path), None);
         let frags: Vec<Fragment> = soups.iter().filter_map(|s| build_fragment(s, &mut meshes)).collect();
         info!("autogib: baked {} fragments for a character source", frags.len());
         cache.body.insert(source, frags);

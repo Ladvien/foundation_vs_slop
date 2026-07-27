@@ -15,7 +15,7 @@
 //! threads. [`serial_guard`] is held for each `App`'s lifetime regardless, so a single-process driver is
 //! correct too, just serial.
 
-use bevy::math::IVec2;
+use bevy::math::{IVec2, Vec3Swizzles};
 use bevy::prelude::App;
 
 use crate::ai::brain::BrainSource;
@@ -441,6 +441,10 @@ fn run_episode_probed(
     // Ticks in which at least one unit was under a player order — reported so an evaluation that has
     // silently reverted to "the player drives everything" is visible rather than assumed away.
     let mut ordered_ticks = 0u32;
+    // Containment yield, accumulated across the hub tour (FVS-B-3). Reported, not yet scored — see
+    // `EpisodeOutcome`'s note on why bolting a capture term onto `surprise = W·S·L` is FVS-I-1's job.
+    let mut captures_attempted = 0u32;
+    let mut weapons_tight_ticks = 0u32;
 
     while elapsed < ticks {
         let hub = hubs.get(hub_idx % hubs.len().max(1)).copied();
@@ -474,12 +478,53 @@ fn run_episode_probed(
             break;
         }
 
+        // ── contain: spend a device on anything the squad has walked within reach of ──
+        //
+        // FOLDED INTO the engage window rather than given one of its own, deliberately: the hub tour's
+        // cadence and the episode's length are unchanged in shape, so this beat costs the search no
+        // exploration ticks. `ENGAGE_TICKS` (300) already exceeds SCP-999's authored `hold_secs` of 4 s
+        // (240 ticks), so a hold that starts here can actually complete inside it.
+        //
+        // Why this must exist at all: without it the offline search cannot see the containment verb.
+        // The whole subsystem would be dead code from the search's point of view, and TESTING.md
+        // invariant 11 is explicit that coverage of a *system* is not coverage of its contended path —
+        // the blind spot that hid G0 in `fire_laser` for months. This is the same class of miss.
+        //
+        // Determinism: the target is the lowest `TargetId` within reach (`containable_targets` is
+        // sorted), the reach test is planar distance to a `SquadMember`-sorted unit list, and nothing
+        // here draws RNG or reads the clock. Like the hub tour, it is part of the ENVIRONMENT, not the
+        // candidate — byte-identical for the baseline prior sweep and for every candidate.
+        let threw = {
+            let reach = crate::sim_harness::device_reach(&mut app);
+            let units = crate::sim_harness::living_unit_positions(&mut app);
+            let target = crate::sim_harness::containable_targets(&mut app).into_iter().find(
+                |(_, _, pos)| {
+                    units.iter().any(|u| (u.xz() - pos.xz()).length() <= reach)
+                },
+            );
+            match target {
+                Some((_, entity, pos)) => {
+                    // Thrown from the target's own cell: the reach test above already established a
+                    // unit is within `reach`, and this keeps the throw from failing on a rounding edge
+                    // between "in reach to decide" and "in reach to connect".
+                    crate::sim_harness::throw_containment_device(&mut app, entity, pos)
+                }
+                None => false,
+            }
+        };
+        // Weapons tight only while a capture is actually under way. Unconditionally holstering would
+        // change every episode's combat, and the search would be scoring a squad that never shoots.
+        if threw {
+            crate::sim_harness::set_weapons_tight(&mut app, true);
+        }
+
         // ── engage: hand the squad back to its brain to fight the crabs now within reach ──
         clear_squad_orders(&mut app);
+        let engage = ENGAGE_TICKS.min(ticks - elapsed);
         elapsed += run(
             &mut app,
             cfg,
-            ENGAGE_TICKS.min(ticks - elapsed),
+            engage,
             &mut violations,
             &mut peak_field,
             &mut field_flatness,
@@ -487,11 +532,30 @@ fn run_episode_probed(
             start_max_health,
             probe,
         );
+        if threw {
+            crate::sim_harness::set_weapons_tight(&mut app, false);
+            weapons_tight_ticks += engage;
+            captures_attempted += 1;
+        }
         hub_idx += 1;
     }
 
+    // Did the squad end the episode standing on the extraction zone? The second half of
+    // `WinCondition::ExtractContained`, reported so the fitness can see it once FVS-I-1 scores it.
+    let extracted = crate::sim_harness::run_outcome(&mut app) == crate::session::RunOutcome::Victory;
+    let contained_at_end = crate::sim_harness::contained_count(&mut app) as u32;
+    let captures_completed = crate::sim_harness::specimen_count(&mut app) as u32;
+
     let mut rollout = finish_recording(&mut app, violations, peak_field, field_flatness, belief);
     rollout.outcome.ordered_ticks = ordered_ticks.min(ticks);
+    rollout.outcome.captures_attempted = captures_attempted;
+    rollout.outcome.captures_completed = captures_completed;
+    // An attempt that started and did not finish. Saturating because a capture can complete and the
+    // anomaly then be destroyed, which would otherwise underflow.
+    rollout.outcome.captures_broken = captures_attempted.saturating_sub(captures_completed);
+    rollout.outcome.contained_at_end = contained_at_end;
+    rollout.outcome.extracted = extracted;
+    rollout.outcome.weapons_tight_ticks = weapons_tight_ticks.min(ticks);
     rollout
 }
 

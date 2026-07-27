@@ -99,12 +99,12 @@ pub struct FogPlugin;
 
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
-        let dungeon = app
-            .world()
-            .get_resource::<Dungeon>()
-            .expect("FogPlugin requires DungeonPlugin to be registered first");
-        let fog = FogGrid::new(dungeon.width, dungeon.height);
-        app.insert_resource(fog)
+        // Sized per run, not at plugin build: the `Dungeon` is now generated on
+        // `OnEnter(RunState::Active)` (FVS-A-5), so this grid is rebuilt for each expedition's map.
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            size_fog_grid.in_set(crate::session::RunBuild::Grids),
+        )
             // `update_los` is PINNED gameplay: the visibility grid it writes gates laser targeting and
             // the crabs' `seen_by_squad` perception, so it must advance on the fixed timestep (and at the
             // same rate as the systems that read it, or fast-forward would change what's visible when).
@@ -112,6 +112,11 @@ impl Plugin for FogPlugin {
             // `apply_floor_fog` only tints floor tiles from that grid — cosmetic, so it stays on `Update`.
             .add_systems(Update, apply_floor_fog);
     }
+}
+
+/// Size this run's fog grid to its dungeon.
+fn size_fog_grid(mut commands: Commands, dungeon: Res<Dungeon>) {
+    commands.insert_resource(FogGrid::new(dungeon.width, dungeon.height));
 }
 
 /// Recompute the visible set from every unit's LOS disc when the squad has moved between cells.
@@ -165,6 +170,14 @@ fn update_los(
                 // (Mold no longer occludes sight — the mold→LOS "soft cover" coupling was removed; mold
                 // now only dims the light field, never the fog. So a unit always reveals the floor it and
                 // its neighbours stand on, even in thick mold.)
+                // NOTE: this grid is not reveal-only. `FogGrid` is also read by `laser::fire_laser`
+                // and by the `seen_by_squad` input to `ai::brain` (see the `LosWritten` doc above),
+                // so the lenient rule chosen here for the *reveal* reaches them too. `fire_laser`
+                // therefore carries its own explicit `Dungeon::line_of_sight` test — targeting needs
+                // the strict corner rule even though the reveal must not have it. `seen_by_squad`
+                // deliberately stays on this grid: "the squad can see me" is exactly the reveal
+                // relation, so leniency is correct there. Anything else added downstream of this
+                // grid must make the same choice consciously.
                 if !dungeon.is_floor(c) || !dungeon.line_of_sight_reveal(uc, c) {
                     continue;
                 }

@@ -231,6 +231,35 @@ impl Infestation {
     }
 }
 
+/// **Host → the parasite gestating in it** (FVS-D-1). The repo's **fourth** Bevy relationship, after
+/// `squad::MemberOf`/`SquadRoster`, `containment::Holding`/`HeldBy` and `site::HeldAt`/`SiteSpecimens`.
+///
+/// ## Why a relationship when `Infestation.active` already exists
+///
+/// The bool answers "is this host infested"; it cannot answer "**which** parasite, and where is it".
+/// FVS-C-4 needs the second question — curing a host must *extract the parasite as a specimen*, and a
+/// specimen has to be a thing, not a flag. Reverse traversal ([`Hosting`]) is what lets the Site
+/// enumerate what it pulled out of whom.
+///
+/// The bool stays, and is **not** redundant: it is a value field on a component present from spawn, so
+/// reading it costs no archetype churn on the hashed host — whereas this relationship inserts and
+/// removes a component. That is exactly why the marker discipline puts *state* in fields and *links*
+/// in relationships, and why `Infestation.active` remains the thing hot per-tick systems read.
+///
+/// **Despawn hygiene is free**: Bevy's own relationship hooks drop the link when either end despawns,
+/// so a cured or dead host can never leave a dangling `Entity` behind.
+#[derive(Component, Debug)]
+#[relationship(relationship_target = Hosting)]
+pub struct InfectedBy(pub Entity);
+
+/// Parasite → the host it is embedded in. The reverse side of [`InfectedBy`].
+///
+/// **Same gotcha as every other pair in this repo: Bevy REMOVES this component when it empties**, so a
+/// parasite with no host matches nothing on a bare `Query<&Hosting>`. Read it as `Option<&Hosting>`.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = InfectedBy)]
+pub struct Hosting(Vec<Entity>);
+
 /// The host-eruption sub-state (a field on [`Infestation`]). `Idle` = gestating or clean; `Convulse` = the
 /// wind-up shudder while pressure builds; `Bleed` = the wound streams after eruption, then the host is
 /// released from infestation. The `Erupt` moment (⅓-HP damage + wound + brood + blood gush) is the one-shot
@@ -407,7 +436,7 @@ impl Plugin for ParasitePlugin {
             .add_systems(Startup, (build_manca_anim, build_wound_assets, build_lump_assets))
             // Spawn in `PostStartup` so the crab's `SurfaceGraph` (built in its `Startup`) already exists —
             // mancae ride the same surface manifold and must never build a second graph.
-            .add_systems(PostStartup, spawn_mancae)
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_mancae.in_set(crate::session::RunBuild::PostPopulate))
             // Pinned manca simulation on `FixedUpdate`: rouse (flip mood) → huddle (dormant aggregation) →
             // hunt/leap (roused locomotion) → embed (flips a host's Infestation + despawns the manca) →
             // gestation clock → burst. All change pinned state, so ordering is explicit and the whole chain
@@ -428,7 +457,11 @@ impl Plugin for ParasitePlugin {
                         .after(manca_leap)
                         .after(crate::crab::crab_contact_damage)
                         .in_set(crate::health::HealthDamage),
-                    gestation_tick.after(manca_embed),
+                    // FVS-C-4: cure BEFORE the gestation clock advances, so a cure requested this tick
+                    // beats a burst that would otherwise land on the same tick. Treating a host at the
+                    // last second should save them — that is the whole tension of the verb.
+                    cure_infested_hosts.after(manca_embed),
+                    gestation_tick.after(cure_infested_hosts),
                     // The eruption driver: convulse → erupt (⅓-HP damage + wound + chest-spawned brood + gush)
                     // → bleed. Still ordered before the crab despawn owner (harmless now the burst no longer
                     // zeroes HP) and after the gestation clock that arms it.
@@ -838,6 +871,7 @@ pub(crate) fn spawn_manca_on_patch(
     };
 
     let mut ec = commands.spawn((
+        crate::session::run_scoped(),
         Manca,
         Hostile,
         Health::new(tuning.manca_hp),
@@ -1573,7 +1607,20 @@ pub(crate) fn manca_embed(
             inf.seed = seed; // the embedding manca's seed salts the brood RNG at burst
         }
         taken.insert(host_e);
-        commands.entity(manca_e).despawn();
+        // FVS-D-1: the manca does not vanish into a bool — it becomes the embedded parasite, linked to
+        // its host. Stripped of the components that made it a free-crawling creature (it is inside
+        // something now) but kept alive as an entity, because FVS-C-4 has to be able to EXTRACT it.
+        //
+        // `Manca` goes too, and that is what keeps this hash- and census-neutral rather than merely
+        // hopeful: an embedded parasite is not a free manca, so it must not be counted as one by
+        // `EpisodeOutcome::manca_alive` or by anything querying `With<Manca>`. Dropping `Transform`
+        // additionally takes it out of `snapshot_hash`, which folds `(Transform, Health)` — so the
+        // entity contributes exactly what it did before this change, when it was despawned outright:
+        // nothing.
+        commands
+            .entity(manca_e)
+            .remove::<(Manca, MancaMotion, Transform, Visibility)>()
+            .insert(InfectedBy(host_e));
     }
 }
 
@@ -1621,6 +1668,61 @@ fn brood_size(seed: u32, min: u32, max: u32) -> u32 {
 /// erupt, how many mancae, and the entity-id order are reproducible. The wound/blood/shake are cosmetic
 /// (gore/juice on `Update`), invisible to `snapshot_hash`.
 #[allow(clippy::type_complexity)]
+/// **FVS-C-4 — cure a host, and the parasite comes out as a specimen.**
+///
+/// The third capture verb's payload, and the one that is *not* about driving a creature into a field
+/// basin: SCP-150 is contained by treating the person it is inside. That makes it the first anomaly
+/// whose containment is an act of care rather than of pressure, which is the roster's whole point.
+///
+/// **Why this grants a specimen where nest-capping does not.** Capping a nest destroys a structure and
+/// yields nothing (FVS-B-7) — it is honestly kill-the-source. Curing a host *recovers the anomaly
+/// intact*: the parasite entity already exists (FVS-D-1 keeps it alive and linked rather than despawning
+/// it at embed), so there is a real thing to extract. The distinction is the pivot in miniature.
+///
+/// Inserting `Contained` is the ONLY path to a specimen (`containment::state`'s hook), so this does not
+/// grant one itself — it hands the parasite to the same one-way door every other capture goes through.
+///
+/// **Determinism:** a per-host update that is a pure function of its own components. No pick, no shared
+/// counter, no RNG — so no canonical sort is needed, and the reasoning is recorded here per the "every
+/// sort declares its contract" rule inverted.
+pub(crate) fn cure_infested_hosts(
+    mut commands: Commands,
+    rules: Res<crate::containment::ContainmentRules>,
+    mut hosts: Query<(Entity, &mut Infestation, Option<&Hosting>), With<CureRequest>>,
+) {
+    for (host, mut inf, hosting) in &mut hosts {
+        commands.entity(host).remove::<CureRequest>();
+        if !inf.active {
+            continue; // nothing to extract; a cure on a clean host is a no-op, not an error
+        }
+        // Clear every field, including the burst sub-state: a cure interrupts an eruption already in
+        // wind-up, which is exactly the last-second save the ordering above exists to allow.
+        *inf = Infestation::default();
+        // `Option`, always: Bevy REMOVES a relationship target when it empties.
+        let Some(hosting) = hosting else { continue };
+        for parasite in hosting.iter() {
+            // Hand it to the one-way door. `Containment` first so the specimen carries a rule the
+            // research layer can read; `Contained` is what actually fires the grant.
+            commands
+                .entity(parasite)
+                .insert(crate::containment::Containment::new(
+                    rules.0.scp150.clone(),
+                    crate::knowledge::Subject::Parasite,
+                ))
+                .insert(crate::containment::Contained)
+                .remove::<InfectedBy>();
+        }
+    }
+}
+
+/// Request that a host be cured this tick. Inserted by the player verb (or a test); consumed by
+/// [`cure_infested_hosts`], which removes it.
+///
+/// A request component rather than a direct mutation so there is **one writer** of the cure — the same
+/// discipline `session::ForceVictory` uses for the dev victory hotkey.
+#[derive(Component, Debug)]
+pub struct CureRequest;
+
 pub(crate) fn parasite_burst(
     mut commands: Commands,
     time: Res<Time>,

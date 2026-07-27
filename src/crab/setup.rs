@@ -56,6 +56,7 @@ pub(crate) fn spawn_crabs(
     anim: Res<CrabAnim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut nest_mats: ResMut<Assets<crate::nest::NestMaterial>>,
+    mut targets: ResMut<crate::containment::TargetSeq>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
@@ -131,6 +132,7 @@ pub(crate) fn spawn_crabs(
                             normal,
                             center,
                             &dungeon,
+                            &mut targets,
                         )
                         .is_some()
                         {
@@ -226,7 +228,8 @@ pub(crate) fn spawn_crab_on_patch(
     };
 
     let mut ec = commands.spawn((
-            Crab,
+            // Grouped to stay under Bevy's 15-element tuple cap.
+            (crate::session::run_scoped(), Crab),
             Hostile,
             Health::new(sim.combat.crab_hp),
             NoHealthBar, // swarm chaff: no floating bar (40 would bury the screen)

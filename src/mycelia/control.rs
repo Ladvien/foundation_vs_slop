@@ -58,6 +58,24 @@ use super::{field, perceptual, MyceliaConfig, CONTROL_SIZE};
 // (`BehaviorTuning::mycelia_coupling`, read via `Res<BehaviorTuning>` in `write_control`):
 // nest_radius_cells / unit_radius_cells / blood_min_radius_cells / meat_radius_cells / gaze_seen.
 
+/// The mold **control texture** — the CPU-authored mask the GPU simulation reads to know where mold may
+/// grow (habitat, light, moisture).
+///
+/// Its own plugin because it is a genuine seam: the simulation consumes a texture, and *how* that
+/// texture is authored is replaceable without the compute pipeline knowing. `MoldControlImage` is the
+/// public interface.
+pub struct MoldControlPlugin;
+
+impl Plugin for MoldControlPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            setup_control.in_set(crate::session::RunBuild::Populate),
+        )
+        .add_systems(Update, write_control);
+    }
+}
+
 /// The control texture handles, extracted so the render world can bind them.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct MoldControlImage {

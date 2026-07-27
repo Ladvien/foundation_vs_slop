@@ -18,6 +18,8 @@
 /// Cosmetic pose blending — the shared clip-weight/gait-phase driver every skinned model goes
 /// through (squad figurine, crab, manca). Never touches hashed sim state; see its module docs.
 pub mod anim;
+/// Config-bake machinery (RON splicing + golden re-pinning) shared with the `train` binary.
+pub mod bake;
 pub mod audio;
 /// Data-driven acoustic-stimulus + audio tuning — the `audio:` config slice. The propagation/salience
 /// of the acoustic stigmergy channels (`ai::field::NOISE_*`) and the per-faction perception gains that
@@ -32,6 +34,7 @@ pub mod ai_overlay;
 pub mod almond_water;
 pub mod camera;
 pub mod config;
+pub mod containment;
 pub mod crab;
 #[cfg(debug_assertions)]
 pub mod devshot;
@@ -86,6 +89,11 @@ pub mod scp999;
 /// plugins for the determinism gate; see the module docs.
 pub mod scp1048;
 pub mod selection;
+pub mod knowledge;
+pub mod persist;
+pub mod research;
+pub mod session;
+pub mod site;
 pub mod settings;
 /// Data-driven simulation-dynamics tuning (combat, swarm economy, deposits, fear, boss) — the `sim:`
 /// config slice. Mirrors `ai::tuning`; together they form the `WorldConfig` the offline search evolves.
@@ -214,6 +222,18 @@ pub fn run() {
         // dungeon/placement/ai/gore/impact_fx/vhs plugins each read at build time to pull their slice.
         // DungeonPlugin in turn precedes FogPlugin: it inserts the `Dungeon` resource in its `build`,
         // which FogPlugin reads at build time to size the fog grid.
+        // NOT YET `AutoStartFirstRun(false)`, and the reason is a measured blocker rather than caution.
+        //
+        // The windowed game is *meant* to open in Site-67 rather than an expedition, and the seam for
+        // that exists (`session::AutoStartFirstRun`). But flipping it makes `RunState::Idle` a state the
+        // game genuinely SITS IN, and `Dungeon` does not exist then. Measured: boot panics immediately in
+        // `selection::command_input` — "Parameter `Res<Dungeon>` failed validation: Resource does not
+        // exist". In Bevy 0.19 a missing `Res<T>` panics; it does not skip the system.
+        //
+        // There are **90 such sites across 20 files**, many on `FixedUpdate` in the pinned core, so
+        // gating them is a real audit with golden risk attached — not something to smuggle in alongside
+        // the Site's geometry. Tracked as FVS-G-6. Until it lands, boot keeps auto-starting a run and
+        // the windowed game behaves exactly as it does today.
         .add_plugins((
             config::ConfigPlugin,
             // `LightFieldPlugin` (the CPU illuminance grid creatures read) is grouped with dungeon+placement
@@ -242,7 +262,22 @@ pub fn run() {
             (anim::PoseBlendPlugin, squad::SquadPlugin, squad_ai::SquadAiPlugin),
             selection::SelectionPlugin,
             fog::FogPlugin,
-            health::HealthPlugin,
+            // `SessionPlugin` (run outcome: win/lose/still-going) is nested with `HealthPlugin` rather
+            // than taking its own slot — the top-level tuple is at Bevy's 15-element cap — and the
+            // pairing is honest: health is what kills the squad, and the wipe is what the session
+            // resolves on. It is registered in the headless harness too (see `sim_harness`), which is
+            // the whole point: the terminal states are inside the deterministic core, not the UI.
+            (
+                health::HealthPlugin,
+                session::SessionPlugin,
+                containment::ContainmentPlugin,
+                site::SitePlugin,
+                // The research economy's ECS half: the tech-tree flags and the completion sweep.
+                research::ResearchPlugin,
+                // Operative beliefs (FVS-O-1b/O-2). Harness-visible: beliefs modulate FEAR, which feeds
+                // Think -> movement -> hashed Transform, so the exact-hash gate must cover it.
+                knowledge::KnowledgePlugin,
+            ),
             (
                 ai::AiPlugin,
                 enemy::EnemyPlugin,
@@ -292,9 +327,16 @@ pub fn run() {
                 // Transform + material uniforms), windowed-only — never in `sim_harness`. The gameplay
                 // `Scp999Plugin` (seek + tickle-calm) is in the harness-visible creature tuple above.
                 scp999::Scp999VisualsPlugin,
-                // `Scp1048Plugin` (seeding + the behaviour executor) is in the harness-visible
-                // creature tuple above; this is only the clip driver and fog hiding.
+                // `Scp1048Plugin` (seeding, the behaviour executor, AND the clip driver) is in the
+                // harness-visible creature tuple above; this is only the fog hiding. The clip driver
+                // moved out of here because the harness wires the bear's blender but would then never
+                // drive it — see the note at its registration in `scp1048::Scp1048Plugin`.
                 scp1048::Scp1048VisualsPlugin,
+                // Site-67's presentation: geometry, avatars, the ASYNC door, specimen cells. Windowed
+                // ONLY — it spawns ~150 GLB scenes and nothing it creates carries `Health`, so it can
+                // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and
+                // IS harness-visible.
+                site::SiteVisualsPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
@@ -307,6 +349,20 @@ pub fn run() {
             // never registers. Grouped in a nested tuple to stay under Bevy's 16-element plugin limit.
             (
                 ui::UiPlugin,
+                // Save/load is windowed-only: it keys off `AppState::Site`, which the harness never
+                // registers, and a headless rollout must never touch the player's campaign file.
+                persist::PersistPlugin,
+                // The research BENCH (FVS-E-5) — the verb that actually moves a posterior. Windowed
+                // for exactly the same reason as save/load above: it is gated on `AppState::Site`,
+                // which the harness never registers, so research cannot reach the pinned core.
+                research::ResearchLabPlugin,
+                // The O5 review + requisition (FVS-P-3). Windowed for the same reason: the review
+                // fires on `AppState::Debrief` and the shop lives at `AppState::Site`, neither of
+                // which the harness registers.
+                site::O5Plugin,
+                // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
+                // the screen is UI, and the carry writes `Knowledge` only at world construction.
+                knowledge::RosterPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,
@@ -354,12 +410,6 @@ pub fn run() {
     // `Update`, never in the headless harness — outside the deterministic core and the shipped binary.
     #[cfg(debug_assertions)]
     app.add_plugins(research_room::ResearchRoomPlugin);
-
-    // The watcher's "is the player looking at it?" gaze — WINDOWED-ONLY. It reads the live camera (which
-    // eases over wall-clock time), so registering it only here keeps it out of the headless deterministic
-    // harness: `enemy::smiley_reflex` there reads a stable `WatchedByPlayer(false)` and stays
-    // bit-reproducible. See `enemy::snapshot_player_gaze`.
-    app.add_systems(Update, enemy::snapshot_player_gaze);
 
     // The gestation "twitching lump" tell — WINDOWED-ONLY cosmetic (spawns child meshes on infested hosts),
     // so the headless deterministic core spawns nothing and its goldens are untouched. See

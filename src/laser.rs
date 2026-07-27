@@ -140,6 +140,20 @@ pub struct LaserTarget {
     pub id: u64,
 }
 
+/// **Weapons tight** — a squad-wide order to hold fire (FVS-B-3's fourth player verb).
+///
+/// A *resource*, not a per-unit component, for two reasons worth stating so nobody "improves" it into
+/// one. First, determinism economics: BACKLOG Push 8's measurement table records that adding a resource
+/// is hash-neutral, while `MemberOf` on every `Unit` — an archetype change — moved the goldens. Second,
+/// it is genuinely squad-wide: `crate::selection` keeps the entire squad permanently selected, so "hold
+/// fire" is an order to the *unit of command*, not to an individual. If per-operative stances are ever
+/// wanted (an FVS-F-2 unlock, say), that is a new verb with its own value field — not a retrofit of
+/// this one, whose meaning would quietly change.
+///
+/// Read by [`fire_laser`], which gates the bolt spawn rather than the system; see the note there.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeaponsTight(pub bool);
+
 pub struct LaserPlugin;
 
 impl Plugin for LaserPlugin {
@@ -158,6 +172,7 @@ impl Plugin for LaserPlugin {
         )))
         .init_resource::<LaserRng>()
         .init_resource::<BoltSeq>()
+        .init_resource::<WeaponsTight>()
         .add_systems(Startup, setup_laser_assets)
         // Pinned sim: firing + bolt motion/hits advance on the fixed timestep (deterministic, frame-rate
         // independent — the CPU raycast and `LaserRng` make this reproducible). `fire_laser` gates on the
@@ -223,12 +238,28 @@ pub(crate) fn fire_laser(
     sim: Res<SimTuning>,
     audio: Res<AudioTuning>,
     beh: Res<BehaviorTuning>,
+    tight: Res<WeaponsTight>,
 ) {
     // Auto-fire: units shoot on their own at the fixed fire rate — no key to hold. Target selection runs
     // EVERY tick (so each unit's `AimTarget` — hence its facing, `squad::unit_movement` — stays fresh and
     // it visibly looks at what it shoots), but a bolt only *spawns* on the cooldown wrap tick.
     cooldown.0.tick(time.delta());
-    let firing = cooldown.0.just_finished();
+    // WEAPONS TIGHT gates the *bolt*, not the system, and the distinction is load-bearing twice over.
+    // Mechanically: this system also refreshes every unit's `AimTarget`, which drives facing in
+    // `squad::unit_movement`, so a `run_if` on the whole system would freeze the squad's gaze — they
+    // would stop visibly tracking the thing they are standing next to. And thematically: holding fire
+    // is supposed to mean *watch it without shooting it*, which is precisely SCP-999's shipped rule
+    // (`THREAT_GUN AtMost 0.05` decays while `ATTENTION AtLeast 0.25` keeps accruing from line of
+    // sight — see `ai::field::deposit_attention`, which reads `fog::FogGrid` and has no facing cone).
+    //
+    // Suppressing a trace is itself a stigmergic act, not an absence of one: Heylighen 2016
+    // (*Stigmergy as a universal coordination mechanism*, DOI 10.1016/j.cogsys.2015.12.007) notes that
+    // quantitative stigmergy "is also exemplified by negative feedback, where a stronger trace leads to
+    // less activity" — a containment rule with an `AtMost` clause is that mechanism turned into a verb.
+    //
+    // The cooldown still ticks and `LaserRng`/`BoltSeq` are still untouched on a held tick, so lifting
+    // the order does not hand the squad a stockpiled volley.
+    let firing = cooldown.0.just_finished() && !tight.0;
 
     // Auto-aim: each unit locks the nearest enemy it can currently SEE (fog-hidden enemies aren't
     // targeted — RTS partial observability) and fires from its muzzle toward it, scattered by a cone
@@ -265,8 +296,21 @@ pub(crate) fn fire_laser(
             if smiley.is_some_and(|s| !s.is_angry()) {
                 continue;
             }
-            if !fog.visible_at(dungeon.world_to_cell(enemy.translation)) {
+            let enemy_cell = dungeon.world_to_cell(enemy.translation);
+            if !fog.visible_at(enemy_cell) {
                 continue; // can't shoot what the squad can't see
+            }
+            // `FogGrid` is filled by `fog::update_los` using `line_of_sight_reveal` — the LENIENT
+            // corner rule, which exists so a corridor's own bounding wall doesn't leave picket-fence
+            // gaps in the *reveal*. Targeting must not inherit that: a diagonal corner-peek is a real
+            // exploit here. Without this gate a unit locks onto a crab it can only see through a wall
+            // pinch, turns to face it (pulling its aim off whatever is actually in front of it), and
+            // fires every cooldown into the corner — `resolve_move`'s wall sweep stops the bolt, so
+            // the squad burns its fire rate on an unhittable target. Test strict LOS from the
+            // shooter's own cell rather than depending on whichever rule the fog happens to use;
+            // `Dungeon::line_of_sight` is symmetric, so shooter↔target order is immaterial.
+            if !dungeon.line_of_sight(dungeon.world_to_cell(unit.translation), enemy_cell) {
+                continue;
             }
             // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
             // by itself; a teammate whose front arc covers it can still pick it off).

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use bevy::pbr::{ContactShadows, Material, MaterialPlugin};
+use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -603,16 +603,21 @@ pub(crate) fn apply_dynamic_lights(
 /// Owns the gameplay [`LightField`]. Registered in BOTH the windowed game and the headless harness
 /// (unlike [`LightingPlugin`]) because the field is CPU gameplay state creature AI reads — so the
 /// deterministic replay gate must cover its bake. Requires `Dungeon` at build (DungeonPlugin precedes it).
+/// Size this run's illuminance grid to its dungeon.
+fn size_light_field(mut commands: Commands, dungeon: Res<Dungeon>) {
+    commands.insert_resource(LightField::new(dungeon.width, dungeon.height));
+}
+
 pub struct LightFieldPlugin;
 
 impl Plugin for LightFieldPlugin {
     fn build(&self, app: &mut App) {
-        let dungeon = app
-            .world()
-            .get_resource::<Dungeon>()
-            .expect("LightFieldPlugin requires DungeonPlugin to be registered first");
-        let field = LightField::new(dungeon.width, dungeon.height);
-        app.insert_resource(field).add_systems(
+        // Sized per run — see the note in `fog::FogPlugin` (FVS-A-5).
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            size_light_field.in_set(crate::session::RunBuild::Grids),
+        )
+        .add_systems(
             FixedUpdate,
             // Static base first, then the moving cones layered on top — one field, one query interface.
             // Ordered AFTER `squad::unit_facing` so the cone reads settled, current-tick unit facing/position:
@@ -641,6 +646,25 @@ struct FixtureGlowing;
 /// Stylised mains-hum shimmer rate. A real ballast flickers at ~100–120 Hz — invisible at 60 fps — so
 /// this is a slower, perceptible shimmer for effect.
 const FLICKER_HUM_HZ: f32 = 7.0;
+
+/// A decorrelated flicker phase in `[0, τ)` derived from `seed`, for every emitter that shimmers.
+///
+/// **Wrapping into one turn is not tidiness — it is the difference between a shimmer and a step
+/// function.** The previous form, `seed as f32 * 2.399_963` (the golden angle in radians), lands around
+/// 1e9–1e10 for a real seed, and f32's ULP up there is 128 radians or more — some twenty whole sine
+/// periods. `(t * hz + phase)` is then *bit-identical* for seconds of wall-clock at a time and, when it
+/// finally ticks, jumps to a value uncorrelated with the one before: measured for a fixture at
+/// (12.5, 2.7, 30.25), phase = 1.58e9 and `t * 7.0 + phase` does not move until t ≈ 9 s. So a fluorescent
+/// held one fixed brightness for ~18 s at a stretch, and a failing tube latched into its near-off branch
+/// for 20 s+ instead of strobing — the flicker was quantized out of existence by the phase's own
+/// magnitude. Perceptually this is the whole ballgame: flicker visibility is a function of temporal
+/// frequency against the spatio-temporal CSF, and a ~0.05 Hz staircase is not the ~7 Hz shimmer intended.
+///
+/// The golden-angle rotation only ever needed the FRACTIONAL turn, so take it in u32 space
+/// (`0x9E37_79B9` ≈ 2³²·φ⁻¹ — exact, no rounding) and convert once, into a range where f32's ULP is ~1e-7.
+fn flicker_phase(seed: u32) -> f32 {
+    seed.wrapping_mul(0x9E37_79B9) as f32 / u32::MAX as f32 * std::f32::consts::TAU
+}
 
 /// Per-fixture flicker state, carried on the real point-light child (cosmetic, windowed-only).
 /// `base_intensity` is the unflickered lumens; `phase` decorrelates the hum so tubes don't shimmer in
@@ -782,16 +806,22 @@ pub fn phototropic_scale(base: f32, current: f32, light01: f32, bonus: f32, max_
     (current + (target - current).clamp(-max_step, max_step)).max(0.0)
 }
 
-/// Windowed-game lighting: real fixture lights + camera screen-space FX. **Never** registered in the
-/// headless harness (GPU/cosmetic only — the deterministic core must not depend on it). The SSAO and
-/// contact-shadow *plugins* already ship inside Bevy's default `PbrPlugin`, so we only attach their
-/// camera *components* here.
+/// Windowed-game lighting: real fixture lights. **Never** registered in the headless harness
+/// (GPU/cosmetic only — the deterministic core must not depend on it).
+///
+/// No camera screen-space FX component is attached. Bevy's `ContactShadows` used to be inserted here and
+/// was pure cost: the raymarch is gated per-light on `contact_shadows_enabled`, which defaults `false` and
+/// is set nowhere in this project (`bevy_pbr::render::light` checks it before emitting any contact-shadow
+/// work), so no ray was ever marched — while the component's `#[require]`d depth prepass ran every frame
+/// and quietly falsified `MoldFruitExt`'s documented "no camera carries a `DepthPrepass`/`NormalPrepass`"
+/// invariant. Enabling contact shadows for real is a per-light opt-in and a look change, so it is the
+/// user's call, not a silent side effect of a camera component.
 pub struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<TvStaticMaterial>::default());
-        app.add_systems(PostStartup, setup_camera_fx).add_systems(
+        app.add_systems(
             Update,
             (
                 attach_fixture_lights,
@@ -857,7 +887,9 @@ fn attach_screen_lights(
 ) {
     let color = Color::srgb(SCREEN_COLOR[0], SCREEN_COLOR[1], SCREEN_COLOR[2]);
     for e in &screens {
-        let phase = e.to_bits() as f32 * 2.399_963; // golden-angle decorrelation between TVs
+        // Golden-angle decorrelation between TVs, wrapped into [0, τ) — see `flicker_phase` for why the
+        // unwrapped form froze this shimmer into a multi-second staircase.
+        let phase = flicker_phase(e.to_bits() as u32);
         commands.entity(e).insert(ScreenLit).with_child((
             SpotLight {
                 color,
@@ -869,14 +901,18 @@ fn attach_screen_lights(
                 // shadowless room fixtures, this one spotlight casts — one shadow map per TV, affordable
                 // since TVs are rare (one per living room with a media surface).
                 shadow_maps_enabled: true,
-                // Bumped from Bevy's default (1.8) — a TV sits close to a wall in a small room, and the
-                // squad can stand right up against it, so this light's shadow casters are often only a
-                // metre or so out. At that range self-shadowing ("shadow acne") reads as jagged noise on
-                // the receiver, which is what the player-reported artifacts (`debug_screenshots/
-                // region_2026-07-25_16-53-51-436.png`, "Wtf are these shadow artifacts?") most resemble.
-                // The doc on this field: too low → acne, too high → shadows detach from their caster
-                // ("Peter Panning") — this stays modest and on the low side of that failure mode.
-                shadow_normal_bias: 3.0,
+                // `shadow_normal_bias` is deliberately left at Bevy's default. It was briefly raised to 3.0
+                // against the player-reported artifacts (`debug_screenshots/region_2026-07-25_16-53-51-436`,
+                // "Wtf are these shadow artifacts?"); that could not have worked, and the arithmetic says
+                // why. Depth/normal bias is the remedy for *self-shadowing acne* — an error along the light
+                // ray (Williams 1978, "Casting curved shadows on curved surfaces"). A jagged, staircased
+                // shadow edge is the orthogonal error: LATERAL quantization of the shadow map's texel grid,
+                // which no offset along Z can resample away (Scherzer et al. 2011, "A Survey of Real-Time
+                // Hard Shadow Mapping Methods", §3.1 separates the two). Measured for this spot:
+                // texel_size = 2·tan(outer_angle)/2048 = 9.10e-4, so the world offset moves from 0.0151 to
+                // 0.0251 units at the 6.5 range — far too small to have been fixing anything visible, and
+                // equally far from Peter-Panning. If the staircase needs to go, the levers are the shadow
+                // map resolution and the filter (`ShadowFilteringMethod`), not this number.
                 ..default()
             },
             // At screen height, a touch in front of the face. The furniture forward convention is +Z
@@ -899,12 +935,22 @@ fn flicker_screens(time: Res<Time>, mut lights: Query<(&ScreenLight, &mut SpotLi
         // can't, with a floor so the screen never fully dies.
         let fast = 0.5 + 0.5 * (t * SCREEN_FLICKER_HZ + sl.phase).sin();
         let roll = 0.5 + 0.5 * (t * 2.7 + sl.phase * 1.7).sin();
-        // ∈ [0.80, 1.0]: restless, but shallower than the old [0.62, 1.0]. This is the *only* light in
-        // the game that casts a real shadow map (see `attach_screen_lights`); a hard, unfiltered shadow
+        // ∈ [0.665, 0.865]: restless, but a swing half the old [0.62, 1.0] one. This is the *only* light
+        // in the game that casts a real shadow map (see `attach_screen_lights`); a hard, unfiltered shadow
         // edge pulsing through a 38-point intensity swing every frame reads as the shadow itself
         // flickering, not just the room's brightness. Halving the swing keeps the restless-CRT character
         // without making its shadow the most visually loud thing in a room it's supposed to be ambient.
-        let mult = 0.80 + 0.20 * fast * roll;
+        //
+        // The floor is 0.665, NOT 0.80, so that narrowing the swing does not silently BRIGHTEN the room.
+        // `fast` and `roll` are independent half-rectified sines, each with mean 0.5, so E[fast·roll] =
+        // 0.25 and the time-average multiplier is `floor + 0.25·swing`. The old pair averaged
+        // 0.62 + 0.38·0.25 = 0.715; a 0.80 floor would average 0.85, a ~19% rise in mean output with
+        // `SCREEN_INTENSITY` unchanged. That matters twice over: by the Talbot-Plateau law the perceived
+        // brightness of a flickering source *is* its time-average luminance, so the eery cyan wash would
+        // have got brighter, and by Ferry-Porter the critical flicker-fusion frequency rises with log
+        // luminance — a brighter lamp makes the residual 11 Hz modulation MORE visible, the opposite of
+        // the intent. 0.665 + 0.25·0.20 = 0.715 holds the mean exactly where it was.
+        let mult = 0.665 + 0.20 * fast * roll;
         let next = sl.base_intensity * mult;
         if light.intensity != next {
             light.intensity = next;
@@ -912,40 +958,11 @@ fn flicker_screens(time: Res<Time>, mut lights: Query<(&ScreenLight, &mut SpotLi
     }
 }
 
-/// Attach contact shadows to the camera. Runs once at `PostStartup` (after `camera::setup_camera`'s
-/// `Startup` spawn has flushed). Contact shadows re-attach props to the floor "without the cost of full
-/// raytracing" and, unlike Bevy's GTAO/SSAO, do **not** require `Msaa::Off` — so the scene keeps its
-/// cheap 4× MSAA edge smoothing (this stylized isometric look leans on clean edges, and the VHS
-/// post-process already stylizes; GTAO's corner-darkening is not worth losing MSAA here). The component
-/// `#[require]`s a depth prepass, which auto-inserts. Kept LDR — no HDR/Bloom (mycelia is LDR-calibrated).
-///
-/// `linear_steps` is bumped from the upstream default (16 → 48); `length`/`thickness` are left at
-/// their defaults so the shadow's reach and softness are unchanged. Bevy's raymarch dithers its ray
-/// start by up to one step's world-space length (`interleaved_gradient_noise` seeded on
-/// `globals.frame_count`, `bevy_pbr::pbr_functions::calculate_contact_shadow`) so the fixed step count
-/// doesn't band — that dither is meant to be averaged out by TAA across frames, which this project
-/// doesn't run, and rendering never stops (not even while the sim is paused — see
-/// `WinitSettings::Continuous` in `lib.rs`), so every render frame showed a different dither pattern:
-/// a large, soft, ever-shifting dark region under geometry that read as z-fighting even at a full
-/// stop (player report, `debug_screenshots/region_2026-07-25_12-25-53-009.png`). Shrinking the
-/// per-step distance (more steps over the same `length`) shrinks the jitter's world-space amplitude
-/// by the same factor, which is what actually suppresses the visible flicker — reducing `length` or
-/// `thickness` instead would just make the shadow itself shorter/thinner without touching the jitter
-/// magnitude. If 48 steps still show visible dither, don't keep raising this — the correct fix at
-/// that point is temporal accumulation (`TemporalAntiAliasing`), which this project has deliberately
-/// not adopted yet (see the MSAA-vs-GTAO tradeoff above); that's a project-wide decision, not a local
-/// tune.
-fn setup_camera_fx(mut commands: Commands, cam: Query<Entity, With<Camera3d>>) {
-    for e in &cam {
-        commands.entity(e).insert(ContactShadows { linear_steps: 48, ..default() });
-    }
-}
-
 /// Groups the per-room failing-tube cap in [`attach_fixture_lights`]: fixtures placed in the same room
 /// share a bucket; a fixture with no [`PlacedIn`] (nothing outside `placement::furnish` currently emits
 /// one, but the query allows it) gets its own `Solo` bucket keyed on its entity, so it's never capped
 /// alongside an unrelated fixture that also happens to lack a room.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum FlickerRoom {
     Region(RegionId),
     Solo(Entity),
@@ -962,7 +979,7 @@ enum FlickerRoom {
 /// per room (`flicker_max_failing_per_room`) before any command is issued, so a room that rolls more
 /// failing tubes than its cap allows doesn't have that decided by which fixture happened to be visited
 /// first in this frame's query order (`tests/determinism_lint.rs`'s "query order decides nothing" rule
-/// — the tie-break below is the position hash already used for the roll, a stable total order).
+/// — see the `sort_total!` below for the total key that replaces query order).
 fn attach_fixture_lights(
     mut commands: Commands,
     config: Res<GameConfig>,
@@ -972,6 +989,8 @@ fn attach_fixture_lights(
         (Entity, &Transform, Option<&PlacedIn>),
         (With<LightEmitter>, Without<FixtureLit>, Without<ScreenEmitter>),
     >,
+    // Failing-tube slots already spent per room, carried BETWEEN runs of this system — see the use site.
+    mut room_slots: Local<HashMap<FlickerRoom, usize>>,
 ) {
     let c = &config.lighting;
     let color = Color::srgb(c.fixture_color[0], c.fixture_color[1], c.fixture_color[2]);
@@ -980,6 +999,8 @@ fn attach_fixture_lights(
         entity: Entity,
         phase: f32,
         hash: u32,
+        /// The fixture's world position, bit-exact. Carried purely to complete the sort key below.
+        pos_bits: [u32; 3],
         wants_to_fail: bool,
         room: FlickerRoom,
     }
@@ -995,27 +1016,37 @@ fn attach_fixture_lights(
             let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
             // A golden-angle phase decorrelates the shimmer; a hash of the seed picks the
             // `flicker_fail_ratio` fraction that WANT to fail — subject to the per-room cap below.
-            let phase = seed as f32 * 2.399_963; // golden angle (radians)
+            let phase = flicker_phase(seed);
             let mut h = seed.wrapping_mul(0x9E37_79B1);
             h ^= h >> 16;
             let wants_to_fail = (h % 1000) as f32 / 1000.0 < c.flicker_fail_ratio;
             let room = placed.map_or(FlickerRoom::Solo(e), |p| FlickerRoom::Region(p.0));
-            Candidate { entity: e, phase, hash: h, wants_to_fail, room }
+            let pos_bits = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            Candidate { entity: e, phase, hash: h, pos_bits, wants_to_fail, room }
         })
         .collect();
 
-    // Stable total order over the tie-break (lowest hash wins a room's failing slots first) — the same
-    // determinism-safe pattern as `sort_total!` elsewhere in this project, applied to a `Startup`-only
-    // cosmetic system rather than pinned sim state.
-    candidates.sort_by_key(|cand| cand.hash);
-    let mut slots_used: HashMap<&FlickerRoom, usize> = HashMap::new();
+    // Lowest hash wins a room's failing slots first. The order is load-bearing — it decides a scarce
+    // per-room resource — so it needs a key that is a TOTAL order, and `hash` alone is not one: `seed` is
+    // a 3-into-1 XOR fold of the position's bits and is not injective, so two fixtures at different
+    // positions can collide, and a raw `sort_by_key` would then resolve them by ECS query order, which is
+    // not stable across `App` instances. Completing the key with the position's own bits makes it total
+    // (level geometry never puts two fixtures at one point) and `sort_total!` proves that at runtime
+    // under `test-harness`/debug instead of asserting it in a comment.
+    crate::sort_total!(&mut candidates, |cand| (cand.hash, cand.pos_bits));
+    // Persists across invocations. `attach_fixture_lights` runs on `Update` (not `Startup`) and filters on
+    // `Without<FixtureLit>`, so fixtures arrive in whatever batches the fog reveal and GLB scene loads
+    // produce; a `HashMap` rebuilt per call would hand every later batch a fresh full allowance and cap
+    // nothing. Keyed by owned `FlickerRoom`, and each fixture is counted exactly once because it gets
+    // `FixtureLit` in the same run.
+    let slots_used: &mut HashMap<FlickerRoom, usize> = &mut room_slots;
     let failing: Vec<bool> = candidates
         .iter()
         .map(|cand| {
             if !cand.wants_to_fail {
                 return false;
             }
-            let used = slots_used.entry(&cand.room).or_insert(0);
+            let used = slots_used.entry(cand.room.clone()).or_insert(0);
             if *used < c.flicker_max_failing_per_room {
                 *used += 1;
                 true

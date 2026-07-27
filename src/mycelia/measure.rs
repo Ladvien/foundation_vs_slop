@@ -105,7 +105,12 @@ struct Measure {
     previous: Option<Frame>,
 }
 
-pub(super) fn build(app: &mut App) {
+/// Dev calibration instrument. No-ops unless its environment variable is set, so it costs nothing in a
+/// normal run — but it is a plugin so that "this is opt-in dev tooling" is legible at the call site.
+pub struct MoldMeasurePlugin;
+
+impl Plugin for MoldMeasurePlugin {
+    fn build(&self, app: &mut App) {
     if env::var(ENV_FLAG).is_err() {
         return;
     }
@@ -116,6 +121,7 @@ pub(super) fn build(app: &mut App) {
     app.init_resource::<Measure>()
         .add_systems(Startup, arm.after(super::setup_mycelia))
         .add_systems(Update, tick);
+}
 }
 
 fn arm(mut commands: Commands, images: Res<MoldImages>) {

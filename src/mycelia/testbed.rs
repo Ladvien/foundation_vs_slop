@@ -39,13 +39,18 @@ const SITE_OFFSETS: [f32; 6] = [0.02, 0.06, 0.12, 0.18, 0.26, 0.40];
 /// Scale to plant them at. Fixed rather than jittered, so the row is a controlled comparison.
 const TESTBED_SCALE: f32 = 4.0;
 
-pub(super) fn build(app: &mut App) {
+/// Dev testbed. Same env-gated opt-in shape as `MoldMeasurePlugin`.
+pub struct MoldTestbedPlugin;
+
+impl Plugin for MoldTestbedPlugin {
+    fn build(&self, app: &mut App) {
     if env::var(ENV_FLAG).is_err() {
         return;
     }
     warn!("mycelia: {ENV_FLAG} is set — planting a fruit-body testbed row. Not a shipping configuration.");
     app.add_systems(Startup, plant.after(super::setup_mycelia));
     app.add_systems(Update, audit);
+}
 }
 
 /// Re-check every mushroom the mold actually grew.

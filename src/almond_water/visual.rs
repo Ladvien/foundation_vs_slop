@@ -84,7 +84,8 @@ pub struct AlmondWaterVisualPlugin;
 impl Plugin for AlmondWaterVisualPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<AlmondWaterMaterial>::default())
-            .add_systems(Startup, setup_puddle)
+            // Reads the `Dungeon` to seat the puddle, so it is per-run (FVS-A-5).
+            .add_systems(OnEnter(crate::session::RunState::Active), setup_puddle.in_set(crate::session::RunBuild::Populate))
             .add_systems(Update, (upload_level, splash_on_step));
     }
 }

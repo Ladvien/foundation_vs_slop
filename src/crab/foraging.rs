@@ -819,7 +819,10 @@ pub(crate) fn nest_reproduce(
     dungeon: Res<Dungeon>,
     crab_assets: Option<Res<CrabAssets>>,
     crab_anim: Option<Res<CrabAnim>>,
-    mut nests: Query<(Entity, &mut crate::nest::Nest)>,
+    // `Without<Capped>` is FVS-B-7's whole mechanic: a capped nest is sealed, so it never breeds
+    // again. Expressed as a query filter rather than a branch inside the loop — a sealed structure is
+    // not a nest that breeds zero crabs, it is a nest the breeding pass cannot see.
+    mut nests: Query<(Entity, &mut crate::nest::Nest), Without<crate::containment::Capped>>,
     crabs: Query<(), With<Crab>>,
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,

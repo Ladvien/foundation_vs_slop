@@ -91,6 +91,7 @@ pub fn spawn_nest(
     inward_normal: Vec3,
     delivery_pos: Vec3,
     dungeon: &Dungeon,
+    seq: &mut crate::containment::TargetSeq,
 ) -> Option<Entity> {
     let goal = dungeon.world_to_cell(delivery_pos);
     let flow = FlowField::build(dungeon, goal)?;
@@ -112,6 +113,9 @@ pub fn spawn_nest(
     let center = wall_point.with_y(NEST_WALL_HEIGHT) + inward_normal * 0.01;
     let id = commands
         .spawn((
+            crate::session::run_scoped(),
+            // The uniform key the player's aim resolves by (FVS-B-7's cap verb targets a nest).
+            seq.next(),
             Nest {
                 hoard: 0.0,
                 pos: delivery_pos.with_y(0.0),

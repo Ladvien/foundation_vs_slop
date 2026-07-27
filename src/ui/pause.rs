@@ -122,7 +122,12 @@ fn spawn_pause(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                         b.spawn(text(&theme, &fonts, "QUIT TO TITLE", theme.font_body));
                     })
                     .observe(
-                        |_: On<Activate>, mut next: ResMut<NextState<AppState>>| {
+                        |_: On<Activate>,
+                         mut next: ResMut<NextState<AppState>>,
+                         mut run: ResMut<NextState<crate::session::RunState>>| {
+                            // Abandoning the run ends it: `OnExit(Active)` despawns the world and advances
+                            // the seed, so the next NEW RUN is a different map (FVS-A-5).
+                            run.set(crate::session::RunState::Idle);
                             next.set(AppState::Title);
                         },
                     );

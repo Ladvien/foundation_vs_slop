@@ -255,7 +255,34 @@ fn deterministic_core_is_bit_identical() {
 // gathering). If you are re-pinning this, take the measurement *after* the behaviour is final, not
 // stage by stage.
 // Was `0x991b80282f2def20`.
-const GOLDEN: u64 = 0xc9c8c93f82ab5857;
+//
+// ── Re-pinned 2026-07-25, M0 (Push 1). Was `0xc9c8c93f82ab5857`. THREE stacked causes, each measured by
+// disabling it and re-running, so this is an accounting rather than a shrug:
+//   1. Uncommitted in-tree work that pre-dates this push (light/gore/health/dungeon/fog/laser + the
+//      `config.ron` edits). On its own it moved the actor golden to `0x35624e2f9d31d10c`.
+//   2. FVS-A-1's `session` module. Adding RESOURCES was hash-neutral (measured: no change — good evidence
+//      nothing keys off entity ids, cf. `util::nearest_planar_keyed`); adding two `FixedUpdate` SYSTEMS
+//      was not, and no ordering edge fixes it — pinning them `.after(HealthDamage)` produced byte-identical
+//      results to leaving them unordered. A new schedule node permutes the linearisation of other
+//      unconstrained systems. Expect this from every future `FixedUpdate` addition.
+//   3. FVS-D-2's squad↔member relationship, which puts `MemberOf` on every `Unit` and so changes the
+//      hashed squad's archetype — the same class as the `Biological` marker re-pin recorded above.
+// FVS-A-5 (run-scoped world construction) moved it by exactly NOTHING: measured identical before and
+// after, because the first run still generates from the configured seed through the same `GameConfig`
+// seam. That is the strongest evidence the refactor is behaviour-preserving.
+//
+// ── Re-pinned again at the end of Push 2 (M1) for the containment systems (`tick_containment`,
+// `deploy_devices`, `tick_quarantine`, `release_finished_devices`, `track_secured_sites`). Worth
+// recording because the number LANDED BACK on the value measured before FVS-A-1's session systems were
+// added: none of these systems writes `Transform` or `Health`, so they can only reach this hash by
+// permuting the schedule's topological sort — and adding enough nodes happened to restore the original
+// relative order of the systems that do move actors. That is benign, and it is also the cleanest
+// available demonstration of the standing caveat: an added `FixedUpdate` node moves this hash by
+// re-linearising its neighbours, not by changing gameplay.
+// Legitimate: `deterministic_core_is_bit_identical`, `..._across_many_builds` and — the only probe that
+// counts under TESTING.md invariant 9 — `search_rollouts_are_reproducible_under_load` are all green, so
+// the sim is still bit-reproducible, just different.
+const GOLDEN: u64 = 0x3563f0f69281ce4c;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -432,7 +459,10 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // no-order run) relocating any actor far enough to move `GOLDEN`. Attribution measured by isolating the
 // change (dungeon.rs + fog.rs alone, no other file in that landing touched) and confirming this exact value
 // bit-stable across three fresh single-process runs. Was `0x2e884ae0bb33f60c`.
-const GOLDEN_FIELD: u64 = 0x244e3af59ff9d65a;
+//
+// Re-pinned 2026-07-25 alongside `GOLDEN` — same three causes, same evidence (see the note there).
+// Was `0x244e3af59ff9d65a`.
+const GOLDEN_FIELD: u64 = 0x60b5c51fcc20a281;
 
 #[test]
 fn field_passes_are_bit_identical() {
@@ -639,7 +669,7 @@ fn deterministic_core_is_bit_identical_across_many_builds() {
 /// `0xA11CE` split **3 ways on an idle box**. The guard was green on a lucky seed. A reproducibility
 /// guarantee is a property of the SIM, not of one dungeon: a single seed only exercises the layouts, spawn
 /// positions, and fights that seed happens to produce, and order-dependence needs the contended path to
-/// actually occur (invariant 9).
+/// actually occur (invariant 11).
 ///
 /// **`0xA11CE` is kept as a determinism STRESSOR, not as a search world.** It is no longer held-in — the
 /// mold retired it and `0xBEEF` into squad wipes, and `coevolve::HELD_IN_SEEDS` is the live set. Its value
@@ -711,75 +741,22 @@ fn search_rollouts_are_reproducible_under_load() {
     );
 }
 
-// TEMP localization probe for the G0 regression exposed by the trashcan min-distance rule. Records
-// per-tick (snapshot, field, gib, bolt) hashes under load and reports the EARLIEST divergent tick and
-// WHICH oracle splits first (field/gib can lead snapshot by hundreds of ticks — see `TickProbe`). Remove
-// once the tie-break is found.
-#[test]
-fn zz_localize_g0() {
-    use foundation_vs_slop::ai::brain::BrainSource;
-    use foundation_vs_slop::squad_ai::evaluate::trace_episode;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    const SEED: u64 = 0x5C09191;
-    const TICKS: u32 = 7200;
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let load: Vec<_> = (0..8)
-        .map(|_| {
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                let mut x: u64 = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
-                }
-                x
-            })
-        })
-        .collect();
-
-    let mut base = Vec::new();
-    trace_episode(BrainSource::Authored, None, SEED, TICKS, 1, &mut base);
-
-    let mut earliest: Option<(u32, &'static str, (u64, u64), (u64, u64), (u64, u64), (u64, u64))> = None;
-    for _ in 0..24 {
-        let mut t = Vec::new();
-        trace_episode(BrainSource::Authored, None, SEED, TICKS, 1, &mut t);
-        for (a, b) in base.iter().zip(t.iter()) {
-            if a == b {
-                continue;
-            }
-            let (tick, s0, f0, g0, b0) = *a;
-            let (_, s1, f1, g1, b1) = *b;
-            let which = if s0 != s1 {
-                "snapshot"
-            } else if f0 != f1 {
-                "field"
-            } else if g0 != g1 {
-                "gib"
-            } else {
-                "bolt"
-            };
-            if earliest.map_or(true, |(et, ..)| tick < et) {
-                earliest = Some((tick, which, (s0, s1), (f0, f1), (g0, g1), (b0, b1)));
-            }
-            break;
-        }
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    for h in load {
-        let _ = h.join();
-    }
-
-    match earliest {
-        Some((tick, which, s, f, g, b)) => println!(
-            "G0-LOCALIZE: earliest split at tick {tick}, first oracle = {which}\n  snapshot {:#018x} / {:#018x}\n  field    {:#018x} / {:#018x}\n  gib      {:#018x} / {:#018x}\n  bolt     {:#018x} / {:#018x}",
-            s.0, s.1, f.0, f.1, g.0, g.1, b.0, b.1
-        ),
-        None => println!("G0-LOCALIZE: no divergence in 24 attempts"),
-    }
-}
+// The G0 localization probe that used to live here is GONE (2026-07-27).
+//
+// It was explicitly labelled TEMP — "Remove once the tie-break is found" — and G0 *was* found and
+// fixed (`docs/rl/2026-07-16-search-rollout-nondeterminism.md`: four causes, all pinned). What it cost
+// to keep: **25 full 7200-tick episodes under 8 busy-loop threads**, which is ~53 minutes, the
+// overwhelming majority of the whole harness lane's runtime.
+//
+// The property it was diagnosing is still pinned, twice, by tests that assert rather than merely
+// report: `search_rollouts_are_reproducible_under_load` and
+// `search_rollouts_of_mutants_are_reproducible_under_load` both run replicate rollouts under the same
+// 8-thread load and fail on any split. A *localizer* — which reports the earliest divergent tick and
+// which oracle split first — is the right tool once one of those goes red, and it is 40 lines of
+// `trace_episode` to write when that happens. Paying an hour per CI run to keep it warm is not.
+//
+// This matters beyond tidiness: FVS-J-5 wants the harness lane promoted to a hard merge gate, and a
+// lane nobody will wait for does not get promoted.
 
 #[test]
 fn core_state_evolves_over_time() {

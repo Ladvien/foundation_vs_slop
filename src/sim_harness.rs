@@ -405,7 +405,29 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         (crate::anim::PoseBlendPlugin, crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,
-        crate::health::HealthPlugin,
+        // `SessionPlugin` is harness-visible ON PURPOSE — it is the reason the module exists. The
+        // win/lose decision runs on `FixedUpdate` inside the pinned core, so `tests/session.rs` can
+        // drive a fixed seed to Victory and to Defeat and hash the result. The *screens* that show it
+        // (`ui::debrief`) are windowed-only and never registered here, exactly like every other UI
+        // surface (`ui_never_leaks_into_deterministic_core`). Nested with health for the same reason
+        // as production `lib::run`.
+        (
+            crate::health::HealthPlugin,
+            crate::session::SessionPlugin,
+            // Containment is the capture verb — pinned gameplay on `FixedUpdate`, so the exact-hash gate
+            // must cover it (FVS-B-3).
+            crate::containment::ContainmentPlugin,
+            // The Site's GAMEPLAY half only (the persistent root + the specimen relationship).
+            // Harness-visible because FVS-D-4's acceptance is "specimens accumulate across
+            // expeditions" — windowed-only would make the roguelite boundary untestable. It adds no
+            // `FixedUpdate` node and its entity is bodiless, so it cannot reach `snapshot_hash`.
+            crate::site::SitePlugin,
+            // Harness-visible for the same reason `SitePlugin` is: FVS-E-4's acceptance is that a
+            // completed posterior grants exactly one unlock, and meta-progress that no test can
+            // reach is the thing most worth pinning.
+            crate::research::ResearchPlugin,
+            crate::knowledge::KnowledgePlugin,
+        ),
         (
             crate::ai::AiPlugin,
             crate::enemy::EnemyPlugin,
@@ -806,6 +828,298 @@ pub fn squad_health(app: &mut App) -> (f32, f32) {
     curs.sort_by(f32::total_cmp);
     maxs.sort_by(f32::total_cmp);
     (curs.iter().sum(), maxs.iter().sum())
+}
+
+/// How the run has resolved — `Undecided` while it is still going. The headless read of the sim's
+/// terminal state; `tests/session.rs` asserts on it. Read-only.
+pub fn run_outcome(app: &mut App) -> crate::session::RunOutcome {
+    *app.world().resource::<crate::session::RunOutcome>()
+}
+
+/// Fixed ticks elapsed in the current run (see [`crate::session::RunClock`]). Read-only.
+pub fn run_ticks(app: &mut App) -> u64 {
+    app.world().resource::<crate::session::RunClock>().ticks
+}
+
+/// The run's current phase (`Locating` / `Containing` / `Extracting`). Read-only.
+///
+/// Remember `NextState` applies in `StateTransition`, which runs *before* `RunFixedMainLoop` — so a
+/// phase decided on fixed tick N is not observable here until the following frame. Step twice.
+pub fn run_phase(app: &mut App) -> crate::session::RunPhase {
+    *app.world().resource::<State<crate::session::RunPhase>>().get()
+}
+
+/// How many anomalies currently carry `containment::Contained` — the count the win condition reads.
+///
+/// Deliberately distinct from [`specimen_count`]: `Contained` rides run-scoped anomalies and therefore
+/// resets each expedition, while `Specimen` is the roguelite record and accumulates forever.
+pub fn contained_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(), With<crate::containment::Contained>>();
+    q.iter(world).count()
+}
+
+/// How many `Specimen` records exist — meta-progress banked across every expedition so far.
+pub fn specimen_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query::<&crate::containment::Specimen>();
+    q.iter(world).count()
+}
+
+/// The cell of the run's extraction zone, so a test can order the squad to it.
+pub fn extraction_zone_cell(app: &mut App) -> Option<IVec2> {
+    let world = app.world_mut();
+    let pos = {
+        let mut q = world.query_filtered::<&Transform, With<crate::containment::ExtractionZone>>();
+        q.iter(world).next().map(|tf| tf.translation)?
+    };
+    Some(world.resource::<crate::dungeon::Dungeon>().world_to_cell(pos))
+}
+
+/// Every anomaly the player could aim a verb at, **sorted by `TargetId`** so a caller's choice of
+/// target is a stable function of the world rather than of query order.
+///
+/// The sort is load-bearing for the offline search, not just for tests: `evaluate::run_episode`'s
+/// synthetic player picks from this list, and an unsorted pick would launder ECS iteration order — which
+/// is not stable across `App` instances — into which creature every rollout tries to capture.
+pub fn containable_targets(app: &mut App) -> Vec<(crate::containment::TargetId, Entity, Vec3)> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (&crate::containment::TargetId, Entity, &Transform),
+        (With<crate::containment::Containment>, Without<crate::containment::Contained>),
+    >();
+    let mut out: Vec<_> = q.iter(world).map(|(id, e, tf)| (*id, e, tf.translation)).collect();
+    // SORT-OK: `TargetId` is minted once per targetable spawn and never reused — total by construction.
+    out.sort_unstable_by_key(|(id, ..)| *id);
+    out
+}
+
+/// World positions of every living squad unit, **sorted by `SquadMember`** for the same reason.
+pub fn living_unit_positions(app: &mut App) -> Vec<Vec3> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (&crate::squad::SquadMember, &Transform, &crate::health::Health),
+        With<crate::squad::Unit>,
+    >();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .filter(|(_, _, hp)| hp.current > 0.0)
+        .map(|(m, tf, _)| (m.0, tf.translation))
+        .collect();
+    // SORT-OK: `SquadMember` is the stable spawn index, unique per unit — total by construction.
+    out.sort_unstable_by_key(|(m, _)| *m);
+    out.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The configured device reach, so a caller can decide whether a throw would connect before spending
+/// a charge.
+pub fn device_reach(app: &mut App) -> f32 {
+    app.world().resource::<crate::sim::SimTuning>().containment.device_reach
+}
+
+/// The Site's specimens in **capture order** — the total order the relationship itself does not provide.
+///
+/// Returns empty when the Site holds nothing, which is not an error state: Bevy removes a relationship
+/// target component when it empties, so a first expedition legitimately has no `SiteSpecimens` at all.
+pub fn site_specimens(app: &mut App) -> Vec<Entity> {
+    let world = app.world_mut();
+    let Some(site) = world.get_resource::<crate::site::SiteRoot>().map(|s| s.0) else {
+        return Vec::new();
+    };
+    let roster: Vec<Entity> = {
+        let Some(r) = world.get::<crate::site::SiteSpecimens>(site) else {
+            return Vec::new();
+        };
+        // Snapshot the ids so the sort below can borrow the specimen query independently.
+        r.iter().collect()
+    };
+    let mut rows: Vec<(u64, Entity, Entity)> = {
+        let mut q = world.query::<(Entity, &crate::containment::Specimen)>();
+        roster
+            .iter()
+            .filter_map(|&e| q.get(world, e).ok().map(|(e, s)| (s.captured_tick, s.captured, e)))
+            .collect()
+    };
+    // SORT-OK: `(captured_tick, captured)` is total — an anomaly cannot be captured twice, since
+    // `Contained` is inserted once and never removed.
+    rows.sort_unstable_by_key(|(tick, captured, _)| (*tick, *captured));
+    rows.into_iter().map(|(_, _, e)| e).collect()
+}
+
+/// The Site entity, if one exists.
+pub fn site_root(app: &mut App) -> Option<Entity> {
+    app.world().get_resource::<crate::site::SiteRoot>().map(|s| s.0)
+}
+
+/// Is every living unit inside an extraction zone — i.e. the second half of `ExtractContained`?
+///
+/// Mirrors `session::resolve_run`'s predicate exactly, and exists because a test that wants to assert
+/// "a capture ALONE does not win" has to first establish the squad is genuinely off the pad. That is
+/// not a formality: the squad *spawns clustered around* `Dungeon::spawn`, which is where the extraction
+/// zone is, so at tick 0 this is already `true` and a capture there wins on the spot.
+pub fn squad_is_extracted(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let zones: Vec<(f32, Vec3)> = {
+        let mut q =
+            world.query::<(&crate::containment::ExtractionZone, &Transform)>();
+        q.iter(world).map(|(z, tf)| (z.radius, tf.translation)).collect()
+    };
+    let mut q = world
+        .query_filtered::<(&Transform, &crate::health::Health), With<crate::squad::Unit>>();
+    // `all` over a predicate — commutative, so no canonical order is needed.
+    q.iter(world).filter(|(_, hp)| hp.current > 0.0).all(|(tf, _)| {
+        zones.iter().any(|(r, c)| (tf.translation.xz() - c.xz()).length() <= *r)
+    })
+}
+
+/// Throw a capture device at a **named** target, spending a charge. Returns `false` if the pouch is
+/// empty.
+///
+/// The windowed path (`selection::throw_device_input`) resolves the target from the cursor, which is a
+/// pick; this names it outright, so **there is no pick on the harness path and no sort is needed**. The
+/// mirror of `issue_squad_order`'s canonical-order note, inverted: stating why there is no order here.
+pub fn throw_containment_device(app: &mut App, target: Entity, from: Vec3) -> bool {
+    let world = app.world_mut();
+    if world.resource::<crate::containment::DeviceSupply>().0 == 0 {
+        return false;
+    }
+    let reach = world.resource::<crate::sim::SimTuning>().containment.device_reach;
+    world.resource_mut::<crate::containment::DeviceSupply>().0 -= 1;
+    world.spawn((
+        crate::session::run_scoped(),
+        crate::containment::ContainmentDevice { target, reach },
+        Transform::from_translation(from),
+    ));
+    true
+}
+
+/// Place a quarantine region on `cell`, spending a charge. Returns `false` if none are left.
+pub fn place_quarantine(app: &mut App, cell: IVec2) -> bool {
+    let world = app.world_mut();
+    if world.resource::<crate::containment::QuarantineSupply>().0 == 0 {
+        return false;
+    }
+    let radius = world.resource::<crate::sim::SimTuning>().containment.quarantine_radius;
+    let pos = world.resource::<crate::dungeon::Dungeon>().cell_center(cell);
+    world.resource_mut::<crate::containment::QuarantineSupply>().0 -= 1;
+    world.spawn((
+        crate::session::run_scoped(),
+        crate::containment::Quarantine { radius },
+        Transform::from_translation(pos),
+    ));
+    true
+}
+
+/// Cap a **named** nest. No pick, so no sort. Grants nothing — that is archetype 3's whole point.
+pub fn cap_nest(app: &mut App, nest: Entity) {
+    app.world_mut().entity_mut(nest).insert(crate::containment::Capped);
+}
+
+/// Order the squad to hold fire (or release it). See `laser::WeaponsTight`.
+pub fn set_weapons_tight(app: &mut App, tight: bool) {
+    app.world_mut().resource_mut::<crate::laser::WeaponsTight>().0 = tight;
+}
+
+/// Sample a stigmergy channel at a world position — used to assert that holding fire actually starves
+/// the `THREAT_GUN` channel SCP-999's rule reads.
+pub fn field_at(app: &mut App, channel: usize, pos: Vec3) -> f32 {
+    let world = app.world();
+    let dungeon = world.resource::<crate::dungeon::Dungeon>();
+    world
+        .resource::<crate::ai::field::Stig>()
+        .sample(crate::ai::field::FieldId(channel), dungeon, pos)
+}
+
+/// Whether every squad unit's fracture set has finished baking (`autogib::bake_autogib`).
+///
+/// A **precondition probe**, not a driver. `bake_autogib` self-gates on the figurine's sub-meshes being
+/// present in `Assets<Mesh>` — async GLB streaming — so *whether the bake has happened yet* is wall-clock
+/// dependent. Production never notices, and `bake_autogib`'s own doc says why: "combat can't start before
+/// scenes load, so the bake is a completed prerequisite of any death." A **test** that kills units a
+/// second into the run breaks that premise, and an unbaked death produces a completely different gib
+/// population — measured at 45 chunks vs 160 for the same seed, under CPU load, on adjacent reps.
+///
+/// So: any test that kills units early must [`step_until_autogib_ready`] first. Skipping it does not make
+/// the test flaky at the margin — it makes it assert on asset-load timing.
+pub fn autogib_ready(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let sources: Vec<bevy::asset::AssetId<bevy::prelude::WorldAsset>> = {
+        let mut q =
+            world.query_filtered::<&crate::squad::FigurineSource, With<crate::squad::Unit>>();
+        q.iter(world).map(|f| f.0.id()).collect()
+    };
+    if sources.is_empty() {
+        return false;
+    }
+    let cache = world.resource::<crate::autogib::AutogibCache>();
+    sources.iter().all(|s| cache.fragments(*s).is_some())
+}
+
+/// Step until [`autogib_ready`], up to `max_ticks`. Returns the ticks spent, or `None` if the bake never
+/// completed — a `None` is a real failure (the asset never streamed in), never something to step past.
+pub fn step_until_autogib_ready(app: &mut App, cfg: &SimConfig, max_ticks: u32) -> Option<u32> {
+    for t in 0..max_ticks {
+        if autogib_ready(app) {
+            return Some(t);
+        }
+        step(app, cfg, 1);
+    }
+    autogib_ready(app).then_some(max_ticks)
+}
+
+/// Whether every squad unit's figurine has streamed in and been wired to a [`crate::anim::PoseBlender`].
+///
+/// A **precondition probe**, like [`autogib_ready`] and for the same reason: the figurine is an async GLB,
+/// so *whether a unit has a blender yet* is wall-clock dependent. A test that measures blend weights
+/// before the wiring lands reads zero from an empty query and reports "the squad never engaged" — which
+/// is a statement about asset-load timing wearing the costume of a gameplay assertion.
+pub fn squad_blenders_ready(app: &mut App) -> bool {
+    let world = app.world_mut();
+    let units = world
+        .query_filtered::<(), With<crate::squad::Unit>>()
+        .iter(world)
+        .count();
+    if units == 0 {
+        return false;
+    }
+    let blenders = world
+        .query::<&crate::anim::PoseBlender>()
+        .iter(world)
+        .count();
+    blenders >= units
+}
+
+/// Step until [`squad_blenders_ready`], up to `max_ticks`. `None` means the figurines never wired — a
+/// real failure (the asset never streamed in), never something to step past.
+pub fn step_until_squad_blenders_ready(app: &mut App, cfg: &SimConfig, max_ticks: u32) -> Option<u32> {
+    for t in 0..max_ticks {
+        if squad_blenders_ready(app) {
+            return Some(t);
+        }
+        step(app, cfg, 1);
+    }
+    squad_blenders_ready(app).then_some(max_ticks)
+}
+
+/// Kill every squad member outright, returning how many were struck.
+///
+/// A **test driver**, in the same category as [`issue_squad_order`] / [`clear_squad_orders`]: it drives
+/// the real game path (zero the `Health` the sim already reads) rather than short-circuiting it, so the
+/// wipe still flows through `squad::despawn_dead_units` → gore/din deposits → `session::resolve_run`
+/// exactly as a wipe earned in play would. It exists because reaching a genuine wipe from the shipped
+/// seed takes thousands of ticks of combat, which would make the terminal-state test a slow, indirect
+/// assertion about crab balance instead of a fast, direct one about the session rule.
+pub fn kill_squad(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&mut crate::health::Health, With<crate::squad::Unit>>();
+    let mut struck = 0usize;
+    // Order-independent: every unit gets the same write, so no canonical order is needed (contrast a
+    // *lethal pick*, which `tests/determinism_lint.rs` requires a total sort for).
+    for mut hp in q.iter_mut(world) {
+        hp.current = 0.0;
+        struck += 1;
+    }
+    struck
 }
 
 /// Field-degeneracy stats `(peak, flatness)` for the offline search's field-sanity gate (see

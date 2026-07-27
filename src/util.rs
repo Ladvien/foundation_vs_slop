@@ -140,7 +140,7 @@ pub fn nearest_planar<T>(
 /// (six fully-tied crab pairs were measured at one tick; see [`crate::health::CyanideSmell::id`]) —
 /// resolves by a STABLE per-candidate key instead of falling through to ECS query order. Without this,
 /// two co-located hosts that differ only in the payload (facing, `Entity`) hand the pick to iteration
-/// order and the physics-free replay hash stops reproducing (TESTING.md invariant 10).
+/// order and the physics-free replay hash stops reproducing (TESTING.md invariant 12).
 ///
 /// The key must be (a) reproducible across same-seed `App` instances, (b) unique per candidate, and (c)
 /// **never derived from the tied quantity** — a position-derived key cannot break a position tie (the

@@ -585,6 +585,28 @@
             copy_w_a: 0.34,            // relative weight of building an A (ear) copy
             copy_w_b: 0.33,            // ...and a B; C takes max(0, 1 - copy_w_a - copy_w_b)
         ),
+
+        // Containment LOGISTICS — how much capture capability an expedition carries, and how far each
+        // verb reaches. Deliberately here in `sim:` (evolvable) rather than in the `containment:` slice
+        // (not evolvable): that slice holds the RULES, which define what capturing means, while these
+        // define how HARD it is. Difficulty is exactly what the world genome exists to explore; the
+        // objective is not. See `sim::ContainmentTuning`.
+        // FVS-O-2 — how hard an operative's beliefs bite. SHIPPED AT ZERO, which makes
+        // `knowledge::coupling::apply_belief_fear` a bit-exact no-op, so the goldens do not move
+        // for a mechanic nobody enabled. Evolvable (bounds 0.0..1.0): what a belief MEANS is not
+        // an evolvable objective, but how much it COSTS you is exactly difficulty.
+        belief_fear_gain: 0.0,
+        containment: (
+            device_supply: 3,          // enough to miss twice and still make the tutorial capture
+            device_reach: 2.5,         // a deliberate approach, not a cross-room snipe
+            quarantine_supply: 1,      // the area verb is the scarce one - it bounds a whole region
+            quarantine_radius: 3.0,
+            cap_reach: 1.5,            // parity with the crab latch reach: sealed at arm's length
+            extraction_radius: 2.5,    // five units fit without shoving each other back out
+            out_watch_threshold: 0.45, // ambient ATTENTION at which SCP-1048 counts as watched; the
+                                       // SAME number its authored capture rule uses, so suppressing
+                                       // the build and completing the capture are one action
+        ),
     ),
 
     // =============================================================================================
@@ -819,9 +841,11 @@
         // Feather the mold's reveal/coverage edge so it stops snapping to the per-cell control-texture
         // grid (which read as square "tiles"). Domain-warp the coverage tap with world-space fbm
         // (Lagae et al. 2010 noise survey). 0 amp = the old cell-aligned edge.
-        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams. Big enough to wander
-                                  // across a WALL_THICKNESS-thin wall on its own; no-cross-wall-bleed is
-                                  // enforced by the shaders' unwarped-tap clamp, not by this amplitude.
+        reveal_warp_amp: 0.012,   // UV jostle, ~1-2 dungeon cells — hides seams. Big enough to wander across
+                                  // a WALL_THICKNESS-thin wall on its own, so the shaders fence the warped
+                                  // tap inside its own control texel (`warped_tap`); that fence, not this
+                                  // amplitude, is what makes cross-wall bleed impossible. Raising this past
+                                  // one texel therefore widens the wander but never the leak.
         reveal_warp_scale: 0.7,   // warp frequency (cycles/world unit); ~cell-scale wander
 
         // ── Fruiting (src/mycelia/fruit.rs). Where the mat has grown thick and eaten its substrate, in the
@@ -1454,8 +1478,13 @@
         mushroom_light_size_bonus: 0.5,        // death caps grow up to +50% bigger under a lamp (photomorphogenesis)
         mushroom_light_size_rate: 0.25,        // scale-units/sec the size bonus eases in (slow, sub-perceptual)
         flicker_hum_depth: 0.06,               // cosmetic fluorescent shimmer depth (fraction)
-        flicker_fail_ratio: 0.12,              // ~1 in 8 tubes is a failing/strobing Backrooms fluorescent
-        flicker_max_failing_per_room: 1,       // hard cap: at most this many tubes strobe at once per room, however many roll under flicker_fail_ratio
+        flicker_fail_ratio: 0.12,              // per-tube odds of being a failing/strobing Backrooms fluorescent
+                                               // (~1 in 8) — but see the cap below, which overrides this in any
+                                               // room with more than ~8 emitters
+        flicker_max_failing_per_room: 1,       // hard cap: at most this many tubes strobe at once per room, however
+                                               // many roll under flicker_fail_ratio. Binds in dense rooms, so it —
+                                               // not the ratio — sets the realized rate there. docs/artist_guide.md
+                                               // documents the pair together; keep them in step.
         // The Researcher's flashlight — a moving directional emitter in the LightField (repels photophobes)
         flashlight_intensity: 3.0,             // gameplay peak illuminance at the beam origin (>fixtures, so it drives crabs off)
         flashlight_range: 8.0,                 // beam reach in dungeon cells (wall-occluded like a fixture)
@@ -1552,5 +1581,222 @@
             crab_draw_to_din: 0.20777673,
             investigate_threshold: 0.22598898,
         ),
+    ),
+
+    // =============================================================================================
+    // containment — what it takes to CAPTURE each anomaly (see `ContainmentConfig` in
+    // src/containment/mod.rs). Every condition must hold simultaneously, for `hold_secs` of simulated
+    // time, sampled at the anomaly's own cell against the live stigmergy field.
+    //
+    // NOT evolvable, like `session:` — a containment rule defines what capturing that anomaly *means*,
+    // so a search free to retune it would be moving the objective rather than solving it.
+    //
+    // `sign` is the polarity: AtLeast = drive the channel UP, AtMost = starve it. The same channel read
+    // with opposite signs is how two anomalies get opposite containment procedures (see ATTENTION in
+    // src/ai/field.rs).
+    // =============================================================================================
+    containment: (
+        // FVS-O-2's benefit half, SHIPPED OFF. `true` makes the containment HUD refuse to show an
+        // anomaly's rule clauses until some operative holds a `Containable` belief about it —
+        // which is the design doc's claim ("knowledge is the only thing that makes containment
+        // legible") taken literally. It is off because turning it on makes the FIRST encounter
+        // with every anomaly blind, which is a real pacing decision. Research grants the belief
+        // (`brief_the_squad_on_completed_research`), so the loop is closed either way.
+        require_knowledge_for_rules: false,
+
+        // SCP-999 — the TUTORIAL capture, and deliberately the gentlest verb in the game: you contain
+        // the comfort blob by *befriending* it, not by trapping it. Holster (let THREAT_GUN decay at its
+        // cell) and stay with it (keep ATTENTION on it). Both clauses are things the player does by
+        // choosing NOT to fight, which is the whole pivot stated in one creature.
+        //
+        // Thresholds are deliberately forgiving — this is the first capture anyone performs.
+        scp999: (
+            requires: [
+                (channel: 1, sign: AtMost,  threshold: 0.05),  // THREAT_GUN — stop shooting near it
+                (channel: 9, sign: AtLeast, threshold: 0.25),  // ATTENTION  — keep eyes on it
+            ],
+            hold_secs: 4.0,
+            break_on_fail: Keep,   // cumulative: a nervous trigger finger costs progress, not the run
+        ),
+
+        // SCP-1048 — the OUT-WATCH capture (FVS-C-3), and the exact inverse of 999's.
+        //
+        // The bear builds hostile copies of itself out of scavenged material, and canon is explicit
+        // that it does so UNOBSERVED. So containing it is refusing to look away: hold the ambient
+        // ATTENTION field over its cell and it can neither build nor slip the net.
+        //
+        // Note this is the AMBIENT decaying/diffusing scalar, not a per-entity watch boolean — that
+        // distinction is the whole of C-3, and `enemy::ObservedBySquad` (the per-entity primitive
+        // FVS-M-1 added for 173/096) is deliberately NOT what this reads. An ambient field means
+        // observation is a place you maintain, not a flag you set.
+        //
+        // Harder than 999 on both axes, because it is the second capture anyone performs: a higher
+        // ATTENTION bar (0.45 vs 0.25), twice the hold, and `Reset` rather than `Keep` — look away and
+        // you start over. That is the mechanic stating itself.
+        scp1048: (
+            requires: [
+                (channel: 9, sign: AtLeast, threshold: 0.45),  // ATTENTION — do not look away
+            ],
+            hold_secs: 8.0,
+            break_on_fail: Reset,
+        ),
+
+        // SCP-150 — the CURE capture (FVS-C-4), and the one that is not about pressure at all.
+        //
+        // The tongue-eating louse is contained by treating the person it is inside, not by driving it
+        // into a basin: `parasite::cure_infested_hosts` extracts it directly. So this rule is carried
+        // for the SPECIMEN rather than consulted as a gate — the research layer needs a rule to read,
+        // and `unmet()` needs something to render if the HUD ever surfaces one.
+        //
+        // Authored as "keep the host calm" because that is what the fiction says treatment needs, and
+        // because a rule that can never be satisfied would be a lie in the records.
+        scp150: (
+            requires: [
+                (channel: 1, sign: AtMost, threshold: 0.10),  // THREAT_GUN — you cannot operate under fire
+            ],
+            hold_secs: 3.0,
+            break_on_fail: Keep,
+        ),
+    ),
+
+    // =============================================================================================
+    // session — how a run ends (see `SessionConfig` in src/session/mod.rs).
+    //
+    // NOT evolvable: this slice is deliberately absent from `WorldConfig`, so the offline search
+    // cannot touch it. The win condition defines what winning MEANS, and a search allowed to shorten
+    // the timer would "solve" every level by making it shorter — the knob that sets the objective
+    // cannot itself be an objective. Every other tunable in this file is fair game; this one is the
+    // reasoned exception to the "every feature must evolve" rule.
+    //
+    // `ExtractContained` is the REAL win and replaces the `SurviveTicks(18000)` placeholder that
+    // shipped until now: contain `count` anomalies, then walk the surviving squad back to the cell it
+    // inserted at. Both halves are required — a capture you cannot walk out with is not a secure, and
+    // that walk back through a level you have already stirred up is where the tension lives.
+    //
+    // `count: 1` because SCP-999 is the only capturable anomaly wired today (FVS-C-2) and it is
+    // deliberately the tutorial: you contain the comfort blob by befriending it. Raise this as the
+    // roster grows.
+    //
+    // `SurviveTicks` is kept as a variant (not deleted) because the harness still drives it directly
+    // to exercise the resolve -> screens -> teardown spine without needing a capture. It counts FIXED
+    // ticks at the pinned 60 Hz, so it is identical at any frame rate and any headless `speed`.
+    // =============================================================================================
+    session: (
+        win: ExtractContained(count: 1),
+    ),
+
+    // =============================================================================================
+    // research — the THAUMIEL CURRICULUM (FVS-E-5 / F-1's graph / F-3's mapping).
+    //
+    // What a captured specimen can be asked, what completing it is worth, and what must be understood
+    // first. See `src/research/curriculum.rs` for the model and its grounding.
+    //
+    // NOT evolvable, like `containment:` and `session:`. These define what research is WORTH; a search
+    // free to retune the payouts would be moving the objective rather than solving it.
+    //
+    // The order of `subjects` is load-bearing: it is the tiebreak for the derived progression, so
+    // reordering this list reorders the curriculum the player is shown.
+    //
+    // THE SHAPE, AND WHY IT IS AUTHORED BACKWARDS. Wang et al. 2019 ("Goal-based Progression Synthesis",
+    // FDG '19, 10.1145/3337722.3337745) found that a good progression is GOAL-DRIVEN rather than merely
+    // gradual — engagement comes from reaching a hard thing, which is why games have boss levels — and
+    // that a post-order DFS over a "harder than" graph yields an order that is topologically sound AND
+    // front-loads the small wins. So this is authored as a chain toward SCP-150, and the presentation
+    // order is DERIVED (`Curriculum::progression`), never hand-sequenced.
+    //
+    // `requires` gates STUDYING a specimen, not capturing it. You may bank an anomaly you cannot yet
+    // make sense of; the readout then names the prior research it is waiting on. Gating the payout
+    // instead would dead-end a player who researched out of order — the work spent, the capability gone.
+    //
+    // ⚠️ OPEN CONTENT GAP: `RemoteCapping` is granted by nothing here, so it is currently unearnable.
+    // That is not an oversight in this file — it is FVS-B-7's design landing where it has to: capping a
+    // nest deliberately yields NO specimen (rewarding source-elimination would undo the whole
+    // win-by-containing pivot), so there is no crab specimen for its capability to come from. Either the
+    // crab line needs a capture that is not capping, or `RemoteCapping` needs a different parent. That
+    // is a design decision, not a config edit — see BACKLOG.md FVS-F-3.
+    // =============================================================================================
+    research: (
+        subjects: [
+            // ── 1. SCP-999, the comfort blob — THE ENTRY POINT ────────────────────────────────────
+            // No prerequisites: it is the tutorial capture, so it must be studiable from a cold start
+            // or the campaign can never begin (pinned by `an_entry_point_is_available_from_a_cold_start`).
+            // Its reliabilities are the highest in the file for the same reason its containment
+            // thresholds are the most forgiving — the first research anyone performs should resolve
+            // visibly rather than teach them that research is slow.
+            (
+                subject: ComfortBlob,
+                // Every answer is justified by a SHIPPED mechanic, not invented: 999 has no attack path
+                // in `src/scp999/`, makes no copies of itself, and its authored rule's positive clause
+                // is ATTENTION AtLeast — a channel you MAINTAIN. It is harmless in every direction,
+                // which is exactly right for the tutorial: the first thing you research turns out to be
+                // safe, and the second one does not.
+                truth: (lethality: false, contagion: false, capture_basin: true, proliferation: false),
+                unlocks: [MoraleField],
+                requires: [],
+                experiments: [
+                    (name: "AFFECT ASSAY",            param: Lethality,     reliability: 0.89),
+                    (name: "CONTACT TRIAL",           param: Contagion,     reliability: 0.88),
+                    (name: "ATTENTION BASIN MAPPING", param: CaptureBasin,  reliability: 0.87),
+                    (name: "VOLUME SURVEY",           param: Proliferation, reliability: 0.86),
+                ],
+            ),
+
+            // ── 2. SCP-1048, the builder bear ─────────────────────────────────────────────────────
+            // Gated on the 999-derived morale field: out-watching the bear means standing still and
+            // looking at it while its copies are abroad, which is not a thing you send operatives to do
+            // until you can calm what comes at them. Harder than 999 in containment (0.45 vs 0.25, twice
+            // the hold, OnBreak::Reset) and harder here too — lower reliabilities mean more repeats, and
+            // E-3's fatigue makes each repeat weaker.
+            (
+                subject: BuilderBear,
+                // The BENIGN original: it never attacks, so `lethality: false` — and that is the
+                // finding that matters, because the copies it builds are the lethal ones and an
+                // operative who conflates them is the FVS-O-5 misinformation case waiting to happen.
+                // `contagion` and `proliferation` are both true and both earned: `scp1048_scavenge`
+                // builds 1048-A copies from scavenged material if it is left unwatched.
+                // `capture_basin: true` — ATTENTION AtLeast 0.45, a channel you maintain.
+                truth: (lethality: false, contagion: true, capture_basin: true, proliferation: true),
+                // TWO capabilities, and this is where `RemoteCapping` finally gets a parent.
+                // FVS-B-7 makes capping a nest yield NO specimen on purpose, so there is no crab
+                // specimen to derive a sealing charge from — and a capability nothing can grant
+                // reads as broken in the tech-tree HUD. Studying how the bear SOURCES and
+                // ASSEMBLES material is how you learn to seal a structure, so the bear teaches
+                // both. Better than inventing a crab capture (which would change every offline
+                // rollout) and better than leaving a dead node in the graph.
+                unlocks: [RemoteObserver, RemoteCapping],
+                requires: [MoraleField],
+                experiments: [
+                    (name: "ANIMATION THRESHOLD TEST", param: Lethality,     reliability: 0.86),
+                    (name: "MATERIAL SOURCING AUDIT",  param: Proliferation, reliability: 0.85),
+                    (name: "OBSERVER GAZE TRIAL",      param: CaptureBasin,  reliability: 0.84),
+                    (name: "COPY LINEAGE SCREEN",      param: Contagion,     reliability: 0.83),
+                ],
+            ),
+
+            // ── 3. SCP-150, the parasite — THE GOAL ───────────────────────────────────────────────
+            // The sink of the graph, so `Curriculum::goals` names it and the progression builds toward
+            // it. Gated on the 1048-derived remote observer, which is the Thaumiel step that makes the
+            // cure practical: the observer holds ATTENTION on the host's cell without an operative
+            // standing there, which is what frees a pair of hands to actually administer treatment.
+            // The lowest reliabilities in the file — this is the boss, and it should feel like one.
+            (
+                subject: Parasite,
+                // The only lethal one on the roster: `gestation_tick` kills its host outright if the
+                // burst is not interrupted. `contagion` and `proliferation` both true — a burst seeds
+                // new manca, which embed in new hosts. `capture_basin: FALSE`, and it is the one
+                // false here: SCP-150 is not driven into a field basin at all, it is extracted BY HAND
+                // (`cure_infested_hosts`). Resolving that parameter is the moment the player learns
+                // this anomaly does not play by the rule the other two taught them.
+                truth: (lethality: true, contagion: true, capture_basin: false, proliferation: true),
+                unlocks: [FieldCure],
+                requires: [RemoteObserver],
+                experiments: [
+                    (name: "HOST NECROSIS PANEL",     param: Lethality,     reliability: 0.85),
+                    (name: "VECTOR TRANSMISSION RUN", param: Contagion,     reliability: 0.84),
+                    (name: "EXCISION REHEARSAL",      param: CaptureBasin,  reliability: 0.82),
+                    (name: "BROOD COUNT",             param: Proliferation, reliability: 0.82),
+                ],
+            ),
+        ],
     ),
 )

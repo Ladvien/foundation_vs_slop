@@ -456,6 +456,7 @@ pub fn furnish_regions(
         // sits flush instead of poking its far side through the wall (README: furniture through a wall).
         let origin = req.pos - req.rot * Vec3::new(req.pivot.x, 0.0, req.pivot.y);
         let mut entity = commands.spawn((
+            crate::session::run_scoped(),
             PlacedIn(req.region),
             WorldAssetRoot(scene),
             Transform::from_translation(origin)

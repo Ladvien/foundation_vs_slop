@@ -31,6 +31,58 @@ use crate::squad_ai::dialogue::MemoryStream;
 use crate::squad_ai::persona::load_personas;
 use crate::squad_ai::role::RoleId;
 
+/// The squad itself — a bodiless organisational entity that owns its operatives through the
+/// [`MemberOf`] relationship.
+///
+/// Deliberately carries **no `Transform` and no `Health`**: it is a roster node, not an actor, so it is
+/// invisible to `sim_harness::snapshot_hash` (which folds exactly `(Transform, Health)`) and to
+/// `liveness_violations`' actor count. The squad's *spatial* model stays where it already lives — the
+/// virtual `squad_ai::cohesion::SquadAnchor` centroid — because that is a smoothed position, not a
+/// member list, and the two answer different questions.
+#[derive(Component)]
+pub struct Squad;
+
+/// "This operative serves in that squad." Carried by **every** `Unit`, inserted at spawn and never
+/// toggled, so the hashed squad stays in one archetype (the same rule the module docs state for
+/// `SquadMember` versus the windowed-only `Leader` marker).
+#[derive(Component)]
+#[relationship(relationship_target = SquadRoster)]
+pub struct MemberOf(pub Entity);
+
+/// Every living operative in this squad. Maintained by Bevy: a member that despawns is removed from
+/// this collection by the relationship's own hooks, which is the despawn hygiene D-2 asks for — no
+/// bookkeeping system, and no stale `Entity` to dereference after a death.
+///
+/// **This component is REMOVED when the last member dies**, not left behind empty — that is Bevy's
+/// representation of an empty relationship target. So read it as `Option<&SquadRoster>`; a bare
+/// `Query<&SquadRoster>` silently matches nothing on a wiped squad, which reads as "no squad" rather
+/// than "a squad with no survivors". `tests/squad.rs` pins the behaviour.
+///
+/// **Iteration order is spawn order, not a total order.** It is fine to *count* or *test membership*
+/// here, but anything that picks, budgets, or draws from a shared RNG while walking this collection
+/// must first impose a stable key — `SquadMember` is the one every other site uses (`laser::fire_laser`,
+/// `sim_harness::issue_squad_order`). See `tests/determinism_lint.rs`.
+#[derive(Component)]
+#[relationship_target(relationship = MemberOf)]
+pub struct SquadRoster(Vec<Entity>);
+
+impl SquadRoster {
+    /// How many operatives are still alive on this roster.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the squad has been wiped.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The members, in **spawn order**. Read the type docs before letting this order decide anything.
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.iter().copied()
+    }
+}
+
 /// Marker for a squad member (the RTS unit; replaces the old single-agent `Player`).
 #[derive(Component)]
 pub struct Unit;
@@ -150,8 +202,8 @@ struct Recolored;
 /// proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the visual on purpose — see below.
 const FIGURINE_SCALE: f32 = 1.13;
 /// Square collision half-extent. Sized well under the narrowest walkable channel so units don't
-/// wedge/catch in 1-tile doorways: a doorway walled on both sides has `TILE - 2·WALL_THICKNESS = 0.6`
-/// of clear width, and 0.44-wide unit leaves ~0.08 m of slack per side to slide through cleanly. Well
+/// wedge/catch in 1-tile doorways: a doorway walled on both sides has `TILE - 2·WALL_THICKNESS = 0.72`
+/// of clear width, and a 0.44-wide unit leaves ~0.14 m of slack per side to slide through cleanly. Well
 /// under the figurine's visual radius on purpose — reaching the goal reliably beats pixel-exact
 /// contact, and the visual is far wider anyway.
 const UNIT_HALF_EXTENTS: Vec2 = Vec2::splat(0.22);
@@ -573,7 +625,10 @@ impl Plugin for SquadPlugin {
         // player can't perceive. `recolor_units` is cosmetic and stays on `Update`.
         // Chained: `spawn_unit` pins the `ValkyrieAnim` graph + slots on each figurine child as an
         // `anim::BlendSource`, so the resource must exist before the first unit spawns.
-        app.add_systems(Startup, (build_valkyrie_anim, spawn_squad).chain())
+        // `build_valkyrie_anim` loads assets (process-lifetime) and stays on `Startup`; `spawn_squad`
+        // populates the world and is therefore per-run (FVS-A-5).
+        app.add_systems(Startup, build_valkyrie_anim)
+            .add_systems(OnEnter(crate::session::RunState::Active), spawn_squad.in_set(crate::session::RunBuild::Populate))
             // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
             // `AiSet::Think`, so that edge is pinned explicitly rather than left to registration order.
             // Both are on `FixedUpdate`, so without the constraint Bevy is free to run them in either
@@ -644,6 +699,10 @@ fn spawn_squad(
     // malformed/invalid override is a loud startup panic, never a silent default (mirrors roles.ron).
     let personas = load_personas().unwrap_or_else(|e| panic!("personas.ron: {e}"));
 
+    // The roster node, spawned before its members so every unit can name it at spawn (a relationship
+    // source may not point at an entity that does not exist yet).
+    let squad = commands.spawn((Squad, crate::session::run_scoped())).id();
+
     for (i, &cell) in cells.iter().enumerate() {
         // The normal squad's `SquadMember` and role are the same 0..5 index, so pass `i` for both — the
         // spawn stays byte-identical to the pre-extraction loop.
@@ -657,6 +716,7 @@ fn spawn_squad(
             dungeon.cell_center(cell),
             i,
             i,
+            squad,
         );
     }
 }
@@ -678,6 +738,7 @@ pub(crate) fn spawn_unit(
     pos: Vec3,
     role_index: usize,
     squad_member: usize,
+    squad: Entity,
 ) -> Entity {
     let i = role_index;
     let outfit = OUTFITS[i];
@@ -691,8 +752,11 @@ pub(crate) fn spawn_unit(
     let figurine: Handle<WorldAsset> =
         assets.load(GltfAssetLabel::Scene(0).from_asset(FIGURINE_GLB));
     let mut unit = commands.spawn((
-        Unit,
-        SquadMember(squad_member),
+        // Grouped to stay under Bevy's 15-element tuple cap.
+        (crate::session::run_scoped(), Unit),
+        // Grouped: the bundle is at Bevy's 15-element tuple ceiling, and these two are the same fact —
+        // who this operative is, and whose roster they are on.
+        (SquadMember(squad_member), MemberOf(squad)),
         Prey, // crabs may swarm/bite units (nearest-prey targeting)
         MoveSpeed(beh.squad_move.unit_speed),
         Velocity(Vec2::ZERO),
@@ -725,6 +789,11 @@ pub(crate) fn spawn_unit(
         avian3d::prelude::TransformInterpolation,
     ));
     unit.insert(crate::parasite::host_infestation_bundle());
+    // FVS-O-1b: what this operative knows. A SECOND `insert` because the bundle above is already at
+    // Bevy's 15-element tuple cap — the same idiom the infestation bundle uses. A **value field present
+    // from spawn**, never a marker toggled on acquisition, so learning something cannot split the
+    // hashed archetype (`scp1048`'s rule).
+    unit.insert(crate::knowledge::Knowledge::default());
     unit.with_child((
         FigurineModel,
         WorldAssetRoot(figurine),

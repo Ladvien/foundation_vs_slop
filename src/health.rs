@@ -230,11 +230,10 @@ impl Material for HealthBarMaterial {
     // already fixed for `BloodPoolMaterial` in `gore.rs`; here the tiebreak is cheaper: `_pad0` carries
     // a stable per-bar seed (set once in `attach_health_bars`, never touching the shader, which only
     // reads `fraction`) instead of a `Transform` jitter, since a bar's own screen position must stay
-    // exact for its fill to read as attached to its owner. `_pad0` is stamped as a clean integer in
-    // `[0, 100_000)` (see `attach_health_bars`), so this divides rather than `.fract()`s it down to
-    // `[0, 1)` — an already-whole-number float has no fractional part for `.fract()` to return.
+    // exact for its fill to read as attached to its owner. `attach_health_bars` stamps `_pad0` already
+    // normalised to `[0, 1)`.
     fn depth_bias(&self) -> f32 {
-        (self.settings._pad0 / 100_000.0 - 0.5) * 0.004
+        (self.settings._pad0 - 0.5) * 0.004
     }
 }
 
@@ -266,23 +265,35 @@ fn attach_health_bars(
     mut commands: Commands,
     assets: Res<HealthBarAssets>,
     mut materials: ResMut<Assets<HealthBarMaterial>>,
-    owners: Query<(Entity, &Health, &Transform), (Without<HasHealthBar>, Without<NoHealthBar>)>,
+    owners: Query<(Entity, &Health), (Without<HasHealthBar>, Without<NoHealthBar>)>,
+    // Bars attached so far. See below — this ordinal, not the owner's position, is the tiebreak.
+    mut attached: Local<u32>,
 ) {
-    for (owner, health, tf) in &owners {
-        // Stable per-bar tiebreak seed for `HealthBarMaterial::depth_bias` — the owner's spawn
-        // position, not `owner.to_bits()` (entity ids are spawn-order/allocator-dependent, so which
-        // bar wins a sort tie would vary same-seed run to run; a position is immortal). Same hashing
-        // recipe as `light::attach_fixture_lights`'s flicker seed. Reduced to a small integer
-        // (`% 100_000`) before the `as f32` cast — casting a full `u32` hash straight to `f32` rounds
-        // away its low bits (a `u32` needs 32 mantissa bits, `f32` has 24), which left `_pad0.fract()`
-        // returning ~0.0 for every bar, silently defeating the whole tiebreak.
-        let p = tf.translation;
-        let seed = p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22);
-        let h = seed.wrapping_mul(0x9E37_79B1);
+    for (owner, health) in &owners {
+        // Stable per-bar tiebreak seed for `HealthBarMaterial::depth_bias`.
+        //
+        // **An ordinal, NOT a hash of the owner's position.** A tiebreak computed from the very
+        // quantity that ties is not a tiebreak: two `Health` owners standing on one point hash
+        // identically, get the same `depth_bias`, and the sort falls back to extraction order exactly
+        // as it did before — the flicker returns in precisely the tightest-cluster case this exists
+        // for. That is reachable today (the Research Room's `spawn_unit` callers pass an explicit
+        // `pos` and can seat several units on one cell), and it is the same trap `crab::setup`
+        // already documents for per-crab draws: "Every per-crab random draw comes from the unique
+        // spawn seed, NOT the spawn position — bred crabs share a delivery cell, so a position hash
+        // would clone them." The recipe was borrowed from `light::attach_fixture_lights`, where it is
+        // sound only because fixtures are immobile level geometry that never shares a cell.
+        //
+        // A counter is unique by construction. Spread it through the golden-ratio multiply
+        // (`0x9E37_79B9` ≈ 2³²·φ⁻¹, a bijection on `u32`) so consecutive bars land far apart in
+        // `[0, 1)` rather than adjacent, then normalise by `u32::MAX` — dividing a whole `u32` range
+        // instead of `.fract()`-ing a float, since an already-whole-number float has no fractional
+        // part for `.fract()` to return.
+        let ordinal = *attached;
+        *attached = attached.wrapping_add(1);
         let material = materials.add(HealthBarMaterial {
             settings: HealthBarUniform {
                 fraction: health.fraction(),
-                _pad0: (h % 100_000) as f32,
+                _pad0: ordinal.wrapping_mul(0x9E37_79B9) as f32 / u32::MAX as f32,
                 _pad1: 0.0,
                 _pad2: 0.0,
             },

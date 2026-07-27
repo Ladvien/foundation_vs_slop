@@ -111,12 +111,55 @@ fn is_visible(a: f32) -> f32 {
 // construction. `mycelia_sim.wgsl` clamps U/V to [0,1] every tick, but WGSL's `clamp`/`min`/`max` are not
 // specified to filter a NaN INPUT on every backend (`mycelia_wall.wgsl` already carries a documented
 // naga/Metal undefined-behavior workaround for a different intrinsic), so a transient NaN from the reaction
-// step could in principle survive the sim's own clamp and land here. `x != x` is true only for NaN per IEEE
-// 754 and is a direct definitional check, not reliant on `clamp`'s NaN behavior — sanitizing at this last
-// consumption point means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN
-// pixel (which upstream tonemapping/exposure can turn into a solid, screen-filling wrong color).
+// step could in principle survive the sim's own clamp and land here. Sanitizing at this last consumption
+// point means a numerically unstable sim frame reads as "no mold here" instead of a raw NaN pixel (which
+// upstream tonemapping/exposure can turn into a solid, screen-filling wrong color).
+//
+// The test must be a BIT-PATTERN test, not `x != x`. `x != x` is the textbook IEEE 754 NaN check, but it
+// does not survive this toolchain: naga lowers a WGSL float `!=` to SPIR-V `OpFOrdNotEqual` (an ORDERED
+// compare, false whenever either operand is NaN — `naga/src/back/spv/block.rs`, which reserves the unordered
+// `FUnordNotEqual` for float→bool casts), so `select(x, 0.0, x != x)` folds to the identity on Vulkan; the
+// Metal backend builds `MTLCompileOptions` with fast-math left on, which licenses the same fold. An
+// all-ones exponent is NaN or Inf by definition, and `bitcast` is opaque to finite-math assumptions. Inf is
+// deliberately caught alongside NaN: it is just as fatal once it reaches tonemapping.
 fn no_nan(x: f32) -> f32 {
-    return select(x, 0.0, x != x);
+    return select(x, 0.0, (bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u);
+}
+
+// ── Control-texture taps: one texel is exactly one dungeon cell ────────────────────────────────────────
+// `CONTROL_SIZE` (192) equals `WORLD_EXTENT` (192) at `TILE_SIZE` 1.0, so control-texel space IS cell space.
+fn control_dims() -> vec2<f32> {
+    return vec2<f32>(textureDimensions(control_tex, 0));
+}
+
+// Substrate of the cell containing `uv`, read with NEAREST semantics.
+//
+// `field::control_texture` leaves `Image::sampler` at `ImageSampler::Default`, which `DefaultPlugins`
+// resolves to LINEAR filtering, so `textureSampleLevel` returns a bilinear blend of the four surrounding
+// cells rather than this cell's value. Thresholding that blend does NOT split floor from void: across the
+// boundary between a floor cell (alpha F >= 0.33) and the void cell beside it the reconstruction is the ramp
+// F·(1 − d/Δ), so a `step(0.1, …)` on it puts the iso-contour at d = Δ·(1 − 0.1/F) — for a visible cell
+// (F = 1) that is 0.9 cells, i.e. ~0.4 world units PAST the boundary, against a wall slab only
+// WALL_THICKNESS (0.14) thick. That dilated mask is what let the coat paint into solid rock ("mold seeps
+// under the walls"). `textureLoad` bypasses the sampler entirely, so the four-state mask stays four-state.
+fn substrate_at_cell(uv: vec2<f32>) -> f32 {
+    let dims = control_dims();
+    let coord = vec2<i32>(clamp(floor(uv * dims), vec2<f32>(0.0), dims - 1.0));
+    return textureLoad(control_tex, coord, 0).a;
+}
+
+// The domain-warped tap position, fenced inside the cell `uv` belongs to.
+//
+// The warp exists to stop the reveal edge snapping to the cell grid, but `reveal_warp_amp` (0.012 UV over a
+// 192-unit extent) reaches ~1.15 world units — far enough to hop a single-cell-thick wall and read the NEXT
+// room's fog state. Clamping the tap to its own cell's footprint makes that structurally impossible rather
+// than merely unlikely: bilinear reconstruction at a point inside a texel only ever mixes that texel with
+// its IMMEDIATE neighbours, and the floor on the far side of a wall is two cells away, so it carries zero
+// weight regardless of warp direction. The edge still wanders sub-cell, which is what breaks up the grid.
+fn warped_tap(uv: vec2<f32>, warp: vec2<f32>) -> vec2<f32> {
+    let dims = control_dims();
+    let lo = floor(uv * dims) / dims;
+    return clamp(uv + warp * mold.reveal_warp_amp, lo, lo + 1.0 / dims);
 }
 
 /// How physically thick the mold is at `uv`, in arbitrary units. Drives the surface normal.
@@ -152,17 +195,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         fbm4(world_xz * mold.reveal_warp_scale),
         fbm4(world_xz * mold.reveal_warp_scale + vec2<f32>(31.4, 17.7)),
     ) - 0.5;
-    let ctrl_uv = uv + warp * mold.reveal_warp_amp;
-    let substrate_warped = textureSampleLevel(control_tex, control_samp, ctrl_uv, 0.0).a;
-    // The warp above can wander ~1 world unit off the bare `uv` — an order of magnitude past
-    // WALL_THICKNESS, easily far enough to hop across a single-cell-thick wall into the next room's
-    // floor texel. Re-sample the UNWARPED tap (the texel this fragment actually sits on) and hard-zero
-    // the warped result whenever that direct tap is void. Void is exactly 0.0 and every floor state is
-    // >= 0.33 (see `control.rs::write_control`), so a 0.1 threshold is a clean binary split. This keeps
-    // the warp free to wander the reveal edge WITHIN a floor cell while making cross-wall bleed
-    // impossible regardless of warp direction.
-    let substrate_direct = textureSampleLevel(control_tex, control_samp, uv, 0.0).a;
-    let is_floor_direct = step(0.1, substrate_direct);
+    // `warped_tap` fences the warp inside this fragment's own cell, so the tap can never reach across a
+    // wall (see its comment). That handles the "which room's fog state" half of the problem.
+    let substrate_warped = textureSampleLevel(control_tex, control_samp, warped_tap(uv, warp), 0.0).a;
+    // The remaining half: this overlay is a SINGLE quad spanning the whole world, so it covers solid rock
+    // too. Kill the coat wherever the fragment's own cell is void. Void is exactly 0.0 and every floor state
+    // is >= 0.33 (see `control.rs::write_control`), so 0.1 is a clean binary split — but only against the
+    // NEAREST tap. Read through the linear sampler this same threshold dilates the floor mask ~0.4 world
+    // units into the rock; that is the bug, not the constant.
+    let is_floor_direct = step(0.1, substrate_at_cell(uv));
     let substrate = substrate_warped * is_floor_direct;
     let coverage = is_explored(substrate);
     let lit = mix(FOG_DIM, vec3<f32>(1.0), is_visible(substrate));

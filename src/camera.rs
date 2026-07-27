@@ -49,10 +49,18 @@ pub const SCREEN_FORWARD: Vec3 = Vec3::new(-1.0, 0.0, -1.0);
 /// Screen-aligned "right" on the ground plane — perpendicular to [`SCREEN_FORWARD`].
 pub const SCREEN_RIGHT: Vec3 = Vec3::new(1.0, 0.0, -1.0);
 
-/// The camera's target point and zoom.
+/// Where the camera is looking and from how far.
+///
+/// `pub` because Site-67 legitimately needs to aim the camera too, and it cannot do so through
+/// `focus_camera_on_spawn`: that reads `Res<Dungeon>` and is keyed to a run, whereas the Site is what
+/// exists when there is no run. A second place needing the same seam is the point at which a private
+/// field becomes a hidden API — see `dungeon::DOORWAY_HEIGHT` for the same call.
+///
+/// Set `focus` and the per-frame `drive_camera` eases to it; to jump instantly, also write the camera
+/// `Transform` (what [`snap_camera_to`] does).
 #[derive(Resource)]
-struct CameraRig {
-    focus: Vec3,
+pub struct CameraRig {
+    pub focus: Vec3,
     height: f32,
     /// Current camera yaw (radians) about the focus — eases toward `target_yaw` each frame.
     yaw: f32,
@@ -95,7 +103,14 @@ impl Plugin for CameraPlugin {
             target_yaw: 0.0,
         })
         .init_resource::<CameraView>()
+        // The camera OUTLIVES a run — the title screen needs one, and `DespawnOnExit` would take it
+        // away between expeditions. So it is split rather than made run-scoped (FVS-A-5): the entity is
+        // spawned once on `Startup`, and `focus_camera_on_spawn` re-aims it at each new dungeon.
         .add_systems(Startup, setup_camera)
+        .add_systems(
+            OnEnter(crate::session::RunState::Active),
+            focus_camera_on_spawn.in_set(crate::session::RunBuild::Populate),
+        )
         // Read `SimBlocked` only after its sole writer has settled this frame, so opening/closing a
         // menu never leaks or drops a frame of pan. (No-op in the headless harness, where
         // `sync_sim_blocked` isn't registered — an `.after` on an absent system is simply ignored.)
@@ -112,14 +127,9 @@ fn shake_noise(t: f32, seed: f32) -> f32 {
     (t * 37.0 + seed).sin() * 0.6 + (t * 91.0 + seed * 2.3).sin() * 0.4
 }
 
-fn setup_camera(
-    mut commands: Commands,
-    dungeon: Res<Dungeon>,
-    mut rig: ResMut<CameraRig>,
-    mut view: ResMut<CameraView>,
-) {
-    // Start focused on the squad's spawn so there is no opening lurch.
-    rig.focus = dungeon.spawn_world();
+/// Spawn the one persistent camera. Deliberately reads no `Dungeon`: it is created before any world
+/// exists (see the plugin note), and [`focus_camera_on_spawn`] aims it once there is one.
+fn setup_camera(mut commands: Commands, rig: Res<CameraRig>, mut view: ResMut<CameraView>) {
     // yaw = 0 ⇒ camera looks from (+X,+Z); seed the cutaway so the E/S near walls are already knee-high
     // on the first rendered frame (no startup squash animation).
     view.to_camera = Vec3::new(1.0, 0.0, 1.0);
@@ -134,6 +144,25 @@ fn setup_camera(
         }),
         Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y),
     ));
+}
+
+/// Aim the persistent camera at this run's squad spawn, so a new expedition opens on its own map with
+/// no lurch — the half of the old `setup_camera` that depends on the world.
+/// Point the camera at `focus` immediately, without easing. For entering a *different place* (the Site,
+/// a run) rather than for per-frame motion.
+pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, With<Camera3d>>) {
+    rig.focus = focus;
+    for mut t in cams.iter_mut() {
+        *t = Transform::from_translation(focus + ISO_OFFSET).looking_at(focus, Vec3::Y);
+    }
+}
+
+fn focus_camera_on_spawn(
+    dungeon: Res<Dungeon>,
+    mut rig: ResMut<CameraRig>,
+    mut cams: Query<&mut Transform, With<Camera3d>>,
+) {
+    snap_camera_to(dungeon.spawn_world(), &mut rig, &mut cams);
 }
 
 fn drive_camera(
