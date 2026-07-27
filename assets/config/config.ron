@@ -591,11 +591,17 @@
         // (not evolvable): that slice holds the RULES, which define what capturing means, while these
         // define how HARD it is. Difficulty is exactly what the world genome exists to explore; the
         // objective is not. See `sim::ContainmentTuning`.
-        // FVS-O-2 — how hard an operative's beliefs bite. SHIPPED AT ZERO, which makes
-        // `knowledge::coupling::apply_belief_fear` a bit-exact no-op, so the goldens do not move
-        // for a mechanic nobody enabled. Evolvable (bounds 0.0..1.0): what a belief MEANS is not
-        // an evolvable objective, but how much it COSTS you is exactly difficulty.
-        belief_fear_gain: 0.0,
+        // FVS-O-2 — how hard an operative's beliefs bite. **TURNED ON 2026-07-27 (Director).**
+        //
+        // 0.4: a confident firsthand `Lethal` belief (0.85) multiplies that operative's FEAR by ~1.34
+        // while the subject is within `PRESENCE_RADIUS`. Enough to pull a veteran toward Flee sooner
+        // than a rookie beside the same creature — which is the whole point, since it is what makes
+        // knowledge a genuine trade rather than a strict upgrade — without saturating FEAR outright
+        // (1.0 would nearly double it and break a containment hold on its own).
+        //
+        // Evolvable, bounds 0.0..1.0: what a belief MEANS is not an evolvable objective, but how much
+        // it COSTS you is exactly difficulty. The search may legitimately choose 0 (the mechanic off).
+        belief_fear_gain: 0.4,
         containment: (
             device_supply: 3,          // enough to miss twice and still make the tutorial capture
             device_reach: 2.5,         // a deliberate approach, not a cross-room snipe
@@ -1602,7 +1608,15 @@
         // legible") taken literally. It is off because turning it on makes the FIRST encounter
         // with every anomaly blind, which is a real pacing decision. Research grants the belief
         // (`brief_the_squad_on_completed_research`), so the loop is closed either way.
-        require_knowledge_for_rules: false,
+        // **TURNED ON 2026-07-27 (Director).** The containment HUD refuses to show an anomaly's rule
+        // clauses until some operative holds a `Containable` belief about it — the design doc's claim
+        // ("knowledge is the only thing that makes containment legible") taken literally.
+        //
+        // The consequence, accepted deliberately: the FIRST encounter with every anomaly is blind. That
+        // is the intended shape of the loop — you meet a thing, you contain it the hard way or you do
+        // not, you research it, and *then* the procedure is legible for every later encounter. Research
+        // grants the belief (`brief_the_squad_on_completed_research`), so the loop closes.
+        require_knowledge_for_rules: true,
 
         // SCP-999 — the TUTORIAL capture, and deliberately the gentlest verb in the game: you contain
         // the comfort blob by *befriending* it, not by trapping it. Holster (let THREAT_GUN decay at its
