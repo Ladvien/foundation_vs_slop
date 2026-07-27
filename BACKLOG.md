@@ -308,9 +308,33 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]
 - **FVS-K-6 — SCP-1048 clip driver was invisible to the harness (FIXED 2026-07-25)** · S · ✅ **LANDED**
   `Scp1048Plugin` (harness-visible) spawns bears **with an `anim::BlendSource`**, and `anim::attach_pose_blenders` — also harness-visible — then wired their `AnimationPlayer` with **every slot at zero weight**. But `anim::drive_scp1048_animation`, the only system that ever sets those targets, lived in the windowed-only `Scp1048VisualsPlugin`. So headless, a bear held a permanently undriven blender, and `liveness::every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run` failed the moment the bear's GLB finished streaming — presenting as a flake, since load timing decided whether it fired. Squad, crab and manca all register their clip drivers in their *harness-visible* creature plugins; 1048 was the lone outlier (introduced by `2ab526b`). Fixed by moving the driver into `Scp1048Plugin`; `Scp1048VisualsPlugin` keeps only the fog hiding. · *Touches:* `src/scp1048/mod.rs`, `src/lib.rs`
-- **FVS-K-2 — SCP-1048-A triangle fix** · S · *determinism: SSIM*
-  1048-A carries 2.6× triangles from 3 dead UV sets — cheapest asset win + a test-suite slowdown. Strip dead UVs.
-  *Done when:* triangle count drops ~2.6×; SSIM unchanged; suite faster. · *Deps:* — · *Touches:* 1048 asset · *Reading:* — (no corpus resource)
+- **FVS-K-2 — SCP-1048-A triangle fix** · S · ⚠️ **MEASURED 2026-07-27 — the premise conflates two separate facts, and neither is what the item claims**
+  The item said "2.6× triangles **from** 3 dead UV sets — cheapest asset win + a test-suite slowdown".
+  Measured directly out of the GLB headers:
+  | asset | verts | tris | UV sets |
+  |---|---|---|---|
+  | `scp-1048-a.glb` | 8,074 | **11,680** | **TEXCOORD_0..3** |
+  | `scp-1048.glb` | 3,126 | 4,556 | TEXCOORD_0 |
+  | `scp-1048-b.glb` | 3,210 | 4,700 | TEXCOORD_0 |
+  | `scp-1048-c.glb` | 4,235 | 5,172 | TEXCOORD_0 |
+  Both halves of the claim are real, but they are **unrelated**:
+  * **The dead UV sets are real.** Every material in the file references `texCoord: 0` only, so
+    TEXCOORD_1/2/3 are dead payload. They cost **189 KiB of 2,050 KiB — 9.2%** of the asset.
+  * **UV sets do not affect triangle count.** 1048-A genuinely has ~2.5× the triangles of its siblings
+    because it is a denser mesh. Stripping UVs cannot change that; reducing it is a *decimation* pass
+    with visual consequences, which is a different job and the one that would actually need the SSIM bar.
+  * **Neither would speed the suite measurably.** The harness lane is dominated by simulation ticks
+    (`replay.rs` ~34 min, `search_parallel` ~62 min); 189 KiB of vertex attributes is not in that budget.
+    The original "test-suite slowdown" framing came from the `RUST_MIN_STACK` incident, which was about
+    the *number* of GLBs the 1048 family added, not this one's size.
+  **Not shipped, deliberately.** The only glTF tooling on this host is Blender; an import/export
+  round-trip re-encodes the whole asset — meshes, materials, skinning and the animation clips
+  `tests/creature_clip_contract.rs` pins — which is a real risk to a rigged character for a 9.2% saving
+  on one file (~1.5% of `assets/`). A surgical strip needs `gltf-transform`/`gltfpack` (neither
+  installed), and that is a five-minute job the day one of them is.
+  *Done when:* **either** a surgical tool strips TEXCOORD_1..3 (189 KiB, clip contract untouched), **or**
+  this is split into a real decimation item with an SSIM bar and the UV strip is closed as "not worth a
+  round-trip". · *Deps:* — · *Touches:* `assets/scp1048a/` · *Reading:* — (no corpus resource)
 - **FVS-M-2 / M-3 — DECISION: crab "numbers-kill" and pounce gates** · ✅ **DECIDED 2026-07-25 (user) — claim rejected, docs corrected**
   **Decision: there is no threshold. The code was right; the README was wrong.** `crab_damage_exponent` already makes a pile-on super-linear, so one or two crabs barely register and a swarm shreds — density is the threat without a cliff. A hard "zero damage under N" gate was rejected on feel: a crab that does *literally nothing* reads as broken, not as tactical. M-3 follows M-2 (the user chose "match whatever M-2 decides"), so pounce damage stays on the same curve — one rule for contact and leap, which is the single explainable mechanic the README was reaching for.
   *Landed:* `README.md` §Crabs — both bullets rewritten to describe the shipped curve and to state the *absence* of a threshold as deliberate, so nobody re-adds it from the old text. **Zero gameplay change, zero golden movement** — this was a documentation defect, and the cheapest correct outcome was to fix the document.
