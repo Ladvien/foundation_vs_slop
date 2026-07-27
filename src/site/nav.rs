@@ -199,7 +199,7 @@ mod tests {
     fn an_avatar_slides_along_a_wall_instead_of_sticking() {
         // Push diagonally into a wall and assert real progress along the free axis. Without the
         // axis-separated retry this returns ~0 and every brush against a wall reads as a freeze.
-        let (l, n) = nav();
+        let (_l, n) = nav();
         // The spine's south edge: walkable at z=12, void below (the async hall ends at z=11 only for
         // x<12, so pick a spine cell east of the hall).
         let start = n.cell_center(IVec2::new(20, 12));
