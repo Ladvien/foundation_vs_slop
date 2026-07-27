@@ -834,7 +834,15 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `search_rollouts_are_reproducible_under_load` and its mutant sibling. A **localizer** is the right
   tool once one of those goes red, and it is 40 lines of `trace_episode` to write then; paying an hour
   per CI run to keep it warm is not. Removed. A lane nobody will wait for never gets promoted.
-  **Still ~34 minutes**, essentially all of it `replay.rs`'s remaining 18 tests, so J-5 is not free yet:
+  ⚠️ **And removing it revealed the real cost centre: `tests/search_parallel.rs`.** It had been
+  *failing fast* in every recent measurement (129 s, on an unrelated config error), so nobody had seen
+  it actually run. It takes **~60 minutes** — longer than `replay.rs` — because
+  `parallel_search_reproduces_the_inline_archives_bit_for_bit` runs a full inline search *and* a
+  worker-process search and compares the archives bit for bit. That is a load-bearing guard (it is what
+  makes `--jobs N` trustworthy, and it was red for months) so it must not simply be cut; but **J-5's
+  blocker is this test, not the probe I removed**. The honest options are a nightly lane for it, or
+  shrinking its search budget while keeping the comparison exact.
+  `replay.rs` is **~34 minutes**, essentially all of it the remaining 18 tests, so J-5 is not free yet:
   `deterministic_core_is_bit_identical_across_many_builds` alone builds 24 `App`s, and the two
   `search_rollouts_*_under_load` tests run replicate 7200-tick rollouts. Those are load-bearing and
   should not be cut; the next honest lever is running the lane's targets in parallel *processes* (they
