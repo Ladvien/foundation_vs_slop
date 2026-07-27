@@ -29,7 +29,8 @@ use super::posterior::ResearchPosterior;
 ///
 /// **Thaumiel logic** — use the contained to contain. Each of these is a *verb the player did not have*,
 /// which is FVS-F-2's hard review rule: no entry here may ever be "+X% to something".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Capability {
     /// From SCP-999: a calm field that lets the squad lower an anomaly's aggression without firing.
     MoraleField,
@@ -88,6 +89,20 @@ impl TechTree {
     }
     pub fn count(&self) -> u32 {
         self.0.count_ones()
+    }
+    /// The raw flag bits, for persistence (FVS-G-2).
+    ///
+    /// Round-tripping the bitset rather than a list of names is deliberate: `Capability`'s bits are
+    /// **append-only** (like `HiddenParam`'s indices and `squad_ai`'s `ActorKind`), so the number is
+    /// stable across builds, whereas a renamed variant would silently drop an unlock from a save.
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+    /// Restore from saved bits. Unknown bits are kept rather than masked off — a save written by a
+    /// build that had more capabilities should not silently lose them on a round trip through an older
+    /// one, and `has()` only ever asks about capabilities this build knows.
+    pub fn from_bits(bits: u32) -> Self {
+        Self(bits)
     }
 }
 

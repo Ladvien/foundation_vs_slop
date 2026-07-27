@@ -706,3 +706,127 @@ fn every_banked_specimen_arrives_with_an_open_research_posterior() {
         assert_eq!(p.belief(q), 0.5, "and must start at maximum entropy on every parameter");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-G-2 — save/load, and FVS-G-3's boundary made concrete.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_campaign_survives_a_full_world_round_trip() {
+    // G-2's acceptance against the REAL world rather than a struct: capture, snapshot the campaign,
+    // wipe every specimen as a process restart would, restore, and check the meta-progress came back.
+    use foundation_vs_slop::persist::{apply_save, capture_save};
+    use foundation_vs_slop::research::{Capability, ResearchPosterior, TechTree, Unlocks};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(t) = containable_targets(&mut app).into_iter().next() else { return };
+    force_contained(&mut app, t.1);
+    step(&mut app, &cfg, 5);
+    let banked = site_specimens(&mut app);
+    assert_eq!(banked.len(), 1, "precondition: one capture banked");
+
+    // Give it a payout and some research, so the round trip has something to lose.
+    app.world_mut().entity_mut(banked[0]).insert(Unlocks(Capability::MoraleField));
+    if let Some(mut p) = app.world_mut().get_mut::<ResearchPosterior>(banked[0]) {
+        p.observe(foundation_vs_slop::research::HiddenParam::Lethality, true, 0.85);
+    }
+    app.world_mut().resource_mut::<TechTree>().grant(Capability::FieldCure);
+    let seed_before = app.world().resource::<foundation_vs_slop::session::RunSeed>().0;
+
+    let save = capture_save(app.world_mut());
+    assert_eq!(save.specimens.len(), 1);
+    assert!(save.specimens[0].unlocks.is_some(), "the payout must be saved");
+
+    // Simulate a restart: every specimen gone, the tree cleared, the seed clobbered.
+    for e in site_specimens(&mut app) {
+        app.world_mut().despawn(e);
+    }
+    *app.world_mut().resource_mut::<TechTree>() = TechTree::default();
+    app.world_mut().resource_mut::<foundation_vs_slop::session::RunSeed>().0 = 1;
+    assert!(site_specimens(&mut app).is_empty(), "precondition: the campaign is gone");
+
+    apply_save(app.world_mut(), &save).expect("a save this build wrote must load");
+
+    let restored = site_specimens(&mut app);
+    assert_eq!(restored.len(), 1, "the specimen must come back");
+    let p = app.world().get::<ResearchPosterior>(restored[0]).copied().expect("posterior restored");
+    assert!(
+        p.belief(foundation_vs_slop::research::HiddenParam::Lethality) > 0.5,
+        "research progress must survive the round trip, not reset to 0.5"
+    );
+    assert!(
+        app.world().resource::<TechTree>().has(Capability::FieldCure),
+        "unlocks must survive"
+    );
+    assert_eq!(
+        app.world().resource::<foundation_vs_slop::session::RunSeed>().0,
+        seed_before,
+        "the Branch seed must survive, or you resume someone else's campaign"
+    );
+    // And it is HeldAt the Site again, not floating.
+    assert!(
+        app.world().get::<foundation_vs_slop::site::HeldAt>(restored[0]).is_some(),
+        "a restored specimen must be linked to the Site"
+    );
+}
+
+#[test]
+fn loading_twice_does_not_double_the_campaign() {
+    // The merge-versus-replace decision, pinned. Merging would silently double a campaign every time
+    // it loaded, and there is no correct answer to "which of these two identical records is real".
+    use foundation_vs_slop::persist::{apply_save, capture_save};
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(t) = containable_targets(&mut app).into_iter().next() else { return };
+    force_contained(&mut app, t.1);
+    step(&mut app, &cfg, 5);
+
+    let save = capture_save(app.world_mut());
+    apply_save(app.world_mut(), &save).expect("load");
+    apply_save(app.world_mut(), &save).expect("load again");
+    assert_eq!(site_specimens(&mut app).len(), 1, "loading is a replacement, not a merge");
+}
+
+#[test]
+fn a_lost_run_still_preserves_meta_progress() {
+    // FVS-G-3's boundary, asserted rather than assumed: the squad wipes, the world tears down, and the
+    // specimen banked earlier is still there. This is the whole reason `Specimen` is not run-scoped.
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(t) = containable_targets(&mut app).into_iter().next() else { return };
+    // OFF THE PAD FIRST — the squad spawns inside the extraction zone, so capturing without moving
+    // wins the run instantly and there is no loss to preserve progress across. Same trap as
+    // `a_capture_alone_does_not_win_the_run`; it catches me every time this file grows a test.
+    if !walk_squad_off_the_pad(&mut app, &cfg) {
+        return;
+    }
+    force_contained(&mut app, t.1);
+    step(&mut app, &cfg, 5);
+    assert_eq!(site_specimens(&mut app).len(), 1);
+
+    kill_squad(&mut app);
+    step(&mut app, &cfg, 10);
+    assert_eq!(
+        run_outcome(&mut app),
+        RunOutcome::Defeat(DefeatCause::SquadWipe),
+        "precondition: the run was genuinely lost"
+    );
+    re_enter_a_run(&mut app, &cfg);
+
+    assert_eq!(
+        site_specimens(&mut app).len(),
+        1,
+        "a LOST run must still preserve what it banked — that is the roguelite boundary"
+    );
+}

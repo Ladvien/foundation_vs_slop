@@ -46,11 +46,13 @@
 pub mod aperture;
 pub mod layout;
 pub mod nav;
+pub mod o5;
 pub mod pieces;
 pub mod visuals;
 
 pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
+pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
 pub use visuals::SiteVisualsPlugin;
 pub use pieces::SitePiece;
 
@@ -118,7 +120,7 @@ impl Plugin for SitePlugin {
 
 /// Create the Site and publish its handle. Note the absence of `session::run_scoped()` — that *is* the
 /// persistence mechanism (FVS-A-4's surviving half), not an oversight.
-fn spawn_site(mut commands: Commands) {
+pub(crate) fn spawn_site(mut commands: Commands) {
     let site = commands.spawn(Site).id();
     commands.insert_resource(SiteRoot(site));
 }

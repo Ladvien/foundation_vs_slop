@@ -89,6 +89,8 @@ pub mod scp999;
 /// plugins for the determinism gate; see the module docs.
 pub mod scp1048;
 pub mod selection;
+pub mod knowledge;
+pub mod persist;
 pub mod research;
 pub mod session;
 pub mod site;
@@ -344,6 +346,9 @@ pub fn run() {
             // never registers. Grouped in a nested tuple to stay under Bevy's 16-element plugin limit.
             (
                 ui::UiPlugin,
+                // Save/load is windowed-only: it keys off `AppState::Site`, which the harness never
+                // registers, and a headless rollout must never touch the player's campaign file.
+                persist::PersistPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,

@@ -665,7 +665,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **The failure is upstream of the animation entirely:** `aimed = 0/5` — with 43 hostiles alive, *no unit ever acquires a target*. Three decoy placements were tried and all read 0: 1.5 m straight ahead (can land inside a wall slab, where fog never marks it visible), on the unit's own cell (degenerate aim direction — `(enemy - unit)` normalised fails the front-arc gate), and a scanned visible floor cell at a 1–3 tile standoff. Since real crabs are also present and also never engaged over 1200 ticks, the decoys are probably not the variable at all — the marching squad simply never closes with anything in this seed.
   *Improvements kept regardless:* the decoy placement now picks a visible floor cell at a real standoff (both prior placements were latent bugs), and the measurement loop breaks as soon as the property is observed instead of always burning a fixed 200 ticks.
   *Done when:* the scenario reliably produces an engagement — most likely by driving the squad *at* a known hostile cluster rather than marching it across the map and hoping — and the test passes 10/10 under load with `#[ignore]` removed. · *Deps:* — · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
-- **FVS-N-8 — Gib spawn positions were order-dependent** · M · ✅ **FIXED 2026-07-26 — the cause was one line**
+- **FVS-N-8 — Gib spawn positions were order-dependent** · M · ⚠️ **MOSTLY FIXED 2026-07-26 — a RESIDUAL survives under heavy load**
   **`autogib::seed_from` hashed the `AssetId` of the character GLB to seed the fracture.** An `AssetId`
   is a **slot index in the asset arena**, assigned by async load order — so the same mesh got a
   different id run to run, hashed to a different seed, and `fracture` sliced the body along
@@ -698,6 +698,25 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   identical ring order + positions differing in the last bits points at the **geometry source**, not at
   the ordering of the code that consumes it.* Two sessions were spent auditing consumers. The question
   that ended it was "is the bake output reproducible?" — a 30-line test with no death in it at all.
+  **⚠️ REOPENED the same night — the fix is real but not complete.** With the whole `session` suite
+  running **immediately after a full `cargo test`**, `gib_spawn_positions_stay_identical_under_load`
+  fails again. Characterised, not guessed:
+  * **Reproduces deliberately:** `cargo test >/dev/null; cargo test --features test-harness --test
+    session -- --test-threads=1`. Roughly 1 failure per run in that shape.
+  * **Does NOT reproduce** running `session` alone and idle (20/20, four consecutive runs), nor running
+    *only* that test after the gate (passes). It needs the other 19 tests' load on top of a
+    still-settling box.
+  * **The bake DOES settle** — the panic is the gib-split assertion at `tests/session.rs:309`, not the
+    `step_until_autogib_ready` precondition. So this is not the test giving up early; the gib state
+    genuinely still splits.
+  So the `AssetId`-seeded fracture was **a** cause and its fix stands (the bake is now provably
+  reproducible — `tests/autogib_determinism.rs`, 0 of 23 fragments differing where it was 23 of 23).
+  But something downstream of the bake still varies under sufficient load. Next places to look, in
+  order: whether `GibSeq`'s cumulative counter can diverge when two runs process different numbers of
+  gore events before the kill; and whether `AutogibCache` insertion order reaches anything else.
+  **The claim to distrust is my own:** the commit that fixed the seed said N-8 was closed on the
+  strength of a clean 48-minute replay and a green un-ignored reproducer. Both were true, and both were
+  measured under a *lighter* load than the one that still breaks it — TESTING.md invariant 13 exactly.
   **Corrects a standing claim in Push 8:** *"adding a resource is hash-neutral ⇒ no gameplay path keys
   off entity ids"* was inferred from the victory/timer path, which never spawns a gib. Registering
   `site::SitePlugin` (one bodiless `Startup` entity) was enough to perturb load timing and turn this
