@@ -849,9 +849,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 >
 > Reproducibility held at every step: `deterministic_core_is_bit_identical`, `..._across_many_builds` and `search_rollouts_are_reproducible_under_load` are all green.
 
-- **FVS-J-3 — macOS/ARM CI lane** · M · *determinism: guards the core*
-  Add an ARM lane to catch the known ARM↔x86 f32 divergence (critical once C-6 facing math lands).
-  *Done when:* CI runs the core on ARM and x86; divergence is a failure or a documented tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
+- **FVS-J-3 — macOS/ARM CI lane** · M · ✅ **LANDED 2026-07-27 — as a MEASUREMENT, deliberately not yet a gate**
+  *Shipped:* a `determinism-arm` job on `ubuntu-24.04-arm` running the deterministic core, `continue-on-error`.
+  **Advisory is the correct state, and the reason is not timidity.** Every golden here is pinned on x86
+  (`tests/replay.rs` says so at the constant). If f32 gameplay math diverges on aarch64 this lane goes
+  red **on the goldens** — and that red is the *finding*, not a regression. §7 records the choice it
+  forces as "an unforced decision": fixed-point core, or per-platform goldens. Neither is a CI setting,
+  and promoting the lane to a hard gate before that decision is made would just mean switching it off
+  within a day — the exact failure mode `tests/panic_budget.rs` exists to avoid for clippy.
+  A failure prints what it means and points at §7, so the next person meets the decision rather than a
+  mystery. It matters most for **FVS-C-6**, whose freeze/aggro turns on a per-entity *facing* check;
+  §7's standing instruction is "do not ship C-6 on divergent floats", and this is how anyone finds out.
+  *Scope note:* `cargo test` only. Duplicating the harness lane here would double the CI bill to
+  re-measure the same f32 question through a slower path.
+  *Done when (revised):* the determinism-model decision is made, and this lane becomes either a hard
+  gate or a documented per-platform tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
 - **FVS-J-4 — clippy denylist vs unwrap/expect/panic/unsafe** · S
   *Done when:* CI fails on new `unwrap`/`expect`/`panic!`/`unsafe` in shipped crates (harness exempt). · *Deps:* — · *Touches:* CI, lints · *Reading:* — (no corpus resource)
 - **FVS-J-5 — Make harness CI lane gating** · S
