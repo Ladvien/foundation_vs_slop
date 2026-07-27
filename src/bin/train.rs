@@ -1085,6 +1085,19 @@ fn probe(ticks: u32, seeds: &[u64]) -> Result<(), String> {
             100.0 * (1.0 - o.ordered_ticks as f32 / ticks as f32));
         println!("  swarm          : {} killed, {} alive (peak {})", o.crabs_killed, o.crabs_alive, o.crab_peak);
         println!("  parasite       : {} removed, {} alive (peak {})", o.manca_deaths, o.manca_alive, o.manca_peak);
+        // Containment yield. FVS-B-8 added these counters and nothing has ever printed them, so the
+        // pivot the whole backlog is organised around has been invisible to the calibration report —
+        // which is why FVS-I-1's constraint could not be sized. `attempted` is the one that matters:
+        // it is the difference between "this world offers no capture" and "the player fluffed it".
+        println!(
+            "  containment    : {} completed / {} attempted, {} broken, {} held at end, extracted {}, {} ticks weapons-tight",
+            o.captures_completed,
+            o.captures_attempted,
+            o.captures_broken,
+            o.contained_at_end,
+            o.extracted,
+            o.weapons_tight_ticks,
+        );
         println!("  boss           : {} removed, {} alive", o.boss_deaths, o.boss_alive);
         println!("  vitality       : {} total deaths, {} total lives, {} peak pop  <- calibrate DEATHS/LIVES_FULLSCALE from these",
             o.total_deaths(), o.total_lives(), o.peak_population());
