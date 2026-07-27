@@ -46,7 +46,7 @@ pub struct ExpeditionReport {
 }
 
 /// The Council's verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rating {
     /// Contained and extracted with the squad intact.
     Exemplary,
@@ -132,7 +132,14 @@ pub fn allowance(r: &ExpeditionReport) -> u32 {
 }
 
 /// The Director's standing and unspent funds. Meta-progress: not run-scoped.
-#[derive(bevy::prelude::Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// **Serialized** (FVS-P-3's *Done when*: "the budget round-trips through save/load"). Meta-progress
+/// that does not survive a restart is not meta-progress — an allowance earned by an exemplary
+/// expedition and then lost to quitting makes the review a per-session score rather than a campaign.
+#[derive(
+    bevy::prelude::Resource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct O5Standing {
     pub budget: u32,
     pub last_rating: Option<Rating>,

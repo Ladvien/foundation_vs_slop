@@ -1722,12 +1722,12 @@
     // make sense of; the readout then names the prior research it is waiting on. Gating the payout
     // instead would dead-end a player who researched out of order — the work spent, the capability gone.
     //
-    // ⚠️ OPEN CONTENT GAP: `RemoteCapping` is granted by nothing here, so it is currently unearnable.
-    // That is not an oversight in this file — it is FVS-B-7's design landing where it has to: capping a
-    // nest deliberately yields NO specimen (rewarding source-elimination would undo the whole
-    // win-by-containing pivot), so there is no crab specimen for its capability to come from. Either the
-    // crab line needs a capture that is not capping, or `RemoteCapping` needs a different parent. That
-    // is a design decision, not a config edit — see BACKLOG.md FVS-F-3.
+    // `RemoteCapping`'s parent was FVS-F-3's one open content gap, CLOSED below on SCP-1048: capping a
+    // nest deliberately yields NO specimen (FVS-B-7 — rewarding source-elimination would undo the
+    // win-by-containing pivot), so no crab specimen exists to derive a sealing charge from, and the
+    // capability read as unearnable in the tech-tree HUD. The bear teaches it instead; the reasoning is
+    // at its `unlocks` entry. Do not re-open this note — the graph has no dead nodes, and
+    // `a_prerequisite_nothing_grants_is_rejected` is what keeps it that way.
     // =============================================================================================
     research: (
         subjects: [

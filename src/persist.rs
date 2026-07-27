@@ -24,6 +24,14 @@
 //! for a shipped game and better for one under construction, and when the format stabilises the right
 //! answer is a deliberate migration written once — not a fallback that accretes.
 //!
+//! **Which is why no field here carries `#[serde(default)]`, and why one must not be added back.**
+//! Several did, each justified by a comment about loading a campaign saved before some subsystem
+//! existed. Every one of those comments described behaviour that cannot happen: [`SAVE_VERSION`] is
+//! checked on load, so an older save is refused whether or not its missing fields could have been
+//! defaulted. They were an unreachable compatibility branch wearing a rationale — the exact shape the
+//! one-path rule forbids, and worse than useless because they documented a fallback that was not there.
+//! A missing field now fails at parse, which is the same outcome by a shorter route.
+//!
 //! ## Determinism
 //!
 //! Nothing here is on `FixedUpdate`. Save/load happens at the Site, between expeditions, and touches no
@@ -41,10 +49,15 @@ use crate::site::{HeldAt, SiteRoot};
 
 /// Bumped whenever the saved shape changes. A mismatch is refused, never migrated — see the module docs.
 ///
+/// `3` (2026-07-27): the O5 economy joined the save (`o5`, `requisitioned`). FVS-P-3 shipped the
+/// review, the allowance and the requisition panel but never added them here, so its own *Done when* —
+/// "the budget round-trips through save/load" — was unmet: every restart handed the Director a zeroed
+/// budget and silently deleted anything already bought.
+///
 /// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
 /// captured but not *what* they were, and the research battery and unlock payout are both keyed on
 /// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,13 +74,10 @@ pub struct SavedSpecimen {
     ///
     /// Saved because without it a reload would hand the player a fresh battery of full-strength tests
     /// on a specimen they had already exhausted, which is a free reset of the whole research economy.
-    /// `#[serde(default)]` so a specimen banked before the bench existed loads as untested.
-    #[serde(default)]
     pub experiments: crate::research::ExperimentLog,
     /// Whether its research arc has already paid out.
     pub researched: bool,
     /// Which capabilities completing it grants. Empty when nothing is authored for its species.
-    #[serde(default)]
     pub unlocks: Vec<Capability>,
 }
 
@@ -86,14 +96,18 @@ pub struct SaveGame {
     /// What each operative believes (FVS-G-3 / L-5).
     ///
     /// Keyed by `SquadMember` index rather than by entity, because operatives are `run_scoped()` and
-    /// rebuilt every expedition — "operatives persist" means their *beliefs* do. `#[serde(default)]`
-    /// so a campaign saved before the knowledge layer existed loads with an inexperienced squad.
-    #[serde(default)]
+    /// rebuilt every expedition — "operatives persist" means their *beliefs* do.
     pub squad_knowledge: crate::knowledge::SquadKnowledge,
     /// The Site's filed reports (FVS-O-4) — the only knowledge channel that outlives an operative, so
     /// losing it on a restart would undo the whole reason a report is worth writing.
-    #[serde(default)]
     pub records: crate::knowledge::Records,
+    /// The Director's standing and unspent allowance (FVS-P-1/P-3).
+    pub o5: crate::site::O5Standing,
+    /// Consumables bought and not yet spent (FVS-P-2/P-3).
+    ///
+    /// Saved *with* the budget rather than separately, because they are one quantity in two states.
+    /// Persisting the budget alone would make a restart a way to lose the thing you spent it on.
+    pub requisitioned: crate::site::Requisitioned,
 }
 
 impl SaveGame {
@@ -163,11 +177,19 @@ pub fn capture_save(world: &mut World) -> SaveGame {
     let squad_knowledge =
         world.get_resource::<crate::knowledge::SquadKnowledge>().copied().unwrap_or_default();
     let records = world.get_resource::<crate::knowledge::Records>().cloned().unwrap_or_default();
+    // `O5Plugin` registers both, but a bare-`App` unit test legitimately has neither — the same
+    // optionality `SiteRoot` has in `apply_save`. A campaign with no Council yet is an unfunded one,
+    // which `O5Standing::default()` already states.
+    let o5 = world.get_resource::<crate::site::O5Standing>().copied().unwrap_or_default();
+    let requisitioned =
+        world.get_resource::<crate::site::Requisitioned>().copied().unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
         squad_knowledge,
         records,
+        o5,
+        requisitioned,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -202,6 +224,12 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
         // Replacement, not a merge — the same rule the specimen list follows. Merging two squads'
         // beliefs would compound a campaign every time it was loaded.
         *k = save.squad_knowledge;
+    }
+    if let Some(mut s) = world.get_resource_mut::<crate::site::O5Standing>() {
+        *s = save.o5;
+    }
+    if let Some(mut r) = world.get_resource_mut::<crate::site::Requisitioned>() {
+        *r = save.requisitioned;
     }
 
     let site = world.get_resource::<SiteRoot>().map(|s| s.0);
@@ -271,6 +299,14 @@ mod tests {
             tech_tree: 0b0101,
             squad_knowledge: crate::knowledge::SquadKnowledge::default(),
             records: crate::knowledge::Records::default(),
+            // Non-default on purpose: a round-trip test whose fixture is all zeroes passes just as
+            // happily when the field is dropped on the floor.
+            o5: crate::site::O5Standing {
+                budget: 175,
+                last_rating: Some(crate::site::Rating::Exemplary),
+                expeditions: 3,
+            },
+            requisitioned: crate::site::Requisitioned { devices: 2, quarantines: 1, medkits: 4 },
             specimens: vec![
                 SavedSpecimen {
                     captured_tick: 120,
@@ -334,6 +370,60 @@ mod tests {
         assert!(!path.with_extension("ron.tmp").exists(), "the tmp file must be renamed, not left");
         assert_eq!(read_save(&path).expect("read"), Some(sample()));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_o5_budget_and_its_purchases_survive_a_restart() {
+        // FVS-P-3's *Done when* — "the budget round-trips through save/load" — which the item claimed
+        // and did not have. `SaveGame` carried the specimens, the tech tree and the beliefs, and the
+        // economy was simply absent: every restart handed the Director a zeroed budget and silently
+        // deleted anything already bought. Driven through the real resources rather than through the
+        // struct alone, because the gap was in `capture_save`/`apply_save`, not in the shape.
+        let mut world = World::new();
+        world.insert_resource(crate::site::O5Standing {
+            budget: 210,
+            last_rating: Some(crate::site::Rating::Satisfactory),
+            expeditions: 7,
+        });
+        world.insert_resource(crate::site::Requisitioned {
+            devices: 3,
+            quarantines: 0,
+            medkits: 1,
+        });
+
+        let save = capture_save(&mut world);
+        assert_eq!(save.o5.budget, 210, "the standing must reach the save");
+        assert_eq!(save.requisitioned.devices, 3, "and so must the stock it was spent on");
+
+        // The restart: the process is gone, so the resources come back at their defaults.
+        world.insert_resource(crate::site::O5Standing::default());
+        world.insert_resource(crate::site::Requisitioned::default());
+        apply_save(&mut world, &save).expect("a save this build wrote must load");
+
+        let standing = world.resource::<crate::site::O5Standing>();
+        assert_eq!(standing.budget, 210);
+        assert_eq!(standing.expeditions, 7, "the review history is meta-progress too");
+        assert_eq!(standing.last_rating, Some(crate::site::Rating::Satisfactory));
+        assert_eq!(
+            *world.resource::<crate::site::Requisitioned>(),
+            crate::site::Requisitioned { devices: 3, quarantines: 0, medkits: 1 },
+            "a device bought before quitting is still bought after loading"
+        );
+    }
+
+    #[test]
+    fn no_saved_field_may_default_away_a_missing_one() {
+        // The one-path rule applied to the save format. `#[serde(default)]` on a `SaveGame` field is an
+        // unreachable compatibility branch — `validate` already refuses any foreign `version`, so a
+        // field that went missing did so through corruption, and defaulting it silently substitutes a
+        // fresh campaign for a damaged one. This is the assertion that stops one being re-added.
+        let text = ron::ser::to_string_pretty(&sample(), ron::ser::PrettyConfig::default())
+            .expect("ser");
+        let without_budget = text.replace("o5:", "unused_o5:");
+        assert!(
+            ron::from_str::<SaveGame>(&without_budget).is_err(),
+            "a save missing the O5 economy must fail loudly, not load as an unfunded campaign"
+        );
     }
 
     #[test]
