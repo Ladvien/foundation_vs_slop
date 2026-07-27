@@ -120,13 +120,23 @@ fn bar_line(
 ///
 /// Reads `RunPhase`, which is exactly what that state is for — presentation. It must never gate pinned
 /// gameplay (see `session::advance_run_phase`), and a `Update`-side readout is the shape that cannot.
-fn objective_line(win: WinCondition, phase: RunPhase, contained: u32) -> String {
+fn objective_line(
+    win: WinCondition,
+    phase: RunPhase,
+    contained: u32,
+    nests: (usize, usize),
+) -> String {
+    // Nest progress rides alongside the objective rather than in its own panel: capping is a verb with
+    // no other feedback at all (`Capped` grants nothing and is deliberately invisible — FVS-B-7), so
+    // without this the player seals a nest and sees literally nothing happen.
+    let (capped, total) = nests;
+    let sites = if total > 0 { format!("   NESTS {capped}/{total}") } else { String::new() };
     match win {
-        WinCondition::SurviveTicks(_) => "HOLD THE SITE".into(),
+        WinCondition::SurviveTicks(_) => format!("HOLD THE SITE{sites}"),
         WinCondition::ExtractContained { count } => match phase {
-            RunPhase::Locating => format!("LOCATE AND CONTAIN {count} ANOMALY(S)"),
-            RunPhase::Containing => format!("CONTAINING — {contained}/{count} SECURED"),
-            RunPhase::Extracting => "RETURN TO THE EXTRACTION POINT".into(),
+            RunPhase::Locating => format!("LOCATE AND CONTAIN {count} ANOMALY(S){sites}"),
+            RunPhase::Containing => format!("CONTAINING — {contained}/{count} SECURED{sites}"),
+            RunPhase::Extracting => format!("RETURN TO THE EXTRACTION POINT{sites}"),
         },
     }
 }
@@ -149,10 +159,16 @@ fn update_bar(
 fn update_objective(
     win: Res<WinCondition>,
     phase: Res<State<RunPhase>>,
+    secured: Res<crate::containment::SiteSecured>,
     contained: Query<(), With<crate::containment::Contained>>,
     mut readout: Query<&mut Text, With<ObjectiveReadout>>,
 ) {
-    let line = objective_line(*win, *phase.get(), contained.iter().count() as u32);
+    let line = objective_line(
+        *win,
+        *phase.get(),
+        contained.iter().count() as u32,
+        (secured.capped, secured.total),
+    );
     for mut text in &mut readout {
         if text.0 != line {
             text.0 = line.clone();
@@ -190,9 +206,18 @@ mod tests {
     #[test]
     fn the_objective_names_the_extraction_only_once_the_quota_is_met() {
         let win = WinCondition::ExtractContained { count: 1 };
-        assert!(objective_line(win, RunPhase::Locating, 0).contains("LOCATE"));
-        assert!(objective_line(win, RunPhase::Containing, 0).contains("0/1"));
-        assert!(objective_line(win, RunPhase::Extracting, 1).contains("EXTRACTION"));
+        assert!(objective_line(win, RunPhase::Locating, 0, (0, 0)).contains("LOCATE"));
+        assert!(objective_line(win, RunPhase::Containing, 0, (0, 0)).contains("0/1"));
+        assert!(objective_line(win, RunPhase::Extracting, 1, (0, 0)).contains("EXTRACTION"));
+    }
+
+    #[test]
+    fn nest_progress_shows_only_when_there_are_nests() {
+        // A "NESTS 0/0" on a level with none would be noise, and capping is otherwise INVISIBLE
+        // feedback (`Capped` grants nothing by design), so this line is the verb's only acknowledgement.
+        let win = WinCondition::ExtractContained { count: 1 };
+        assert!(!objective_line(win, RunPhase::Locating, 0, (0, 0)).contains("NESTS"));
+        assert!(objective_line(win, RunPhase::Locating, 0, (2, 4)).contains("NESTS 2/4"));
     }
 
     #[test]
@@ -201,7 +226,7 @@ mod tests {
         // between the win variant and the copy.
         let win = WinCondition::SurviveTicks(100);
         for phase in [RunPhase::Locating, RunPhase::Containing, RunPhase::Extracting] {
-            assert_eq!(objective_line(win, phase, 0), "HOLD THE SITE");
+            assert_eq!(objective_line(win, phase, 0, (0, 0)), "HOLD THE SITE");
         }
     }
 }

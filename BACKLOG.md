@@ -257,9 +257,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   specimen and marks **the parasite itself** (not a proxy) `Contained`; an untreated host stays infested
   and yields nothing; and curing a *clean* host is a no-op — the failure mode a cure verb invites is
   spamming it on healthy operatives to mint specimens. · *Deps:* B-5, D-1 · *Reading:* [STIG-AD], [ECS]
-- **FVS-C-5 — Crab-nest source-elimination integration** · M · *determinism: FixedUpdate; swarm cadence deterministic*
-  Connect nest-capping (B-7) to `src/nest.rs` breeding and the 40→5000 swarm.
-  *Done when:* capping halts breeding; swarm attrition follows; secured flag set. · *Deps:* B-7 · *Touches:* `src/nest.rs` · *Reading:* [STIG-AD], [STIG]
+- **FVS-C-5 — Crab-nest source-elimination integration** · M · ✅ **LANDED 2026-07-26**
+  Two of the three acceptance clauses were already satisfied by B-7 (`nest_reproduce` runs
+  `Without<Capped>`; `SiteSecured` is derived every tick). What was missing was the **connection** —
+  nothing proved capping actually stopped the swarm, and nothing told the player it had.
+  *Shipped:* `containment::capping_every_nest_stops_the_swarm_replenishing`, which fills every hoard
+  **past the breeding threshold first** (so "no new crabs" cannot pass vacuously), caps them all,
+  asserts `SiteSecured::fully_secured()`, and runs 600 ticks with the population non-increasing. Plus a
+  `NESTS n/m` readout on the objective line.
+  **The HUD line is not decoration — it is the verb's ONLY feedback.** `Capped` grants nothing and is
+  invisible by design (B-7: giving source-elimination a reward would undo the pivot). Without a readout
+  the player seals a nest and sees literally nothing happen, which reads as a broken button.
+  **Deliberately NO starvation model.** "Swarm attrition follows" is satisfied by the swarm being unable
+  to replace losses while the squad kills — capping removes replenishment, the squad does the rest.
+  Adding a hunger-kill so the number falls on its own would be a balance change the item never asked
+  for, and it would land in the pinned core. Recorded because the absence is a decision, not an
+  oversight. · *Deps:* B-7 · *Reading:* [STIG-AD], [STIG]
 - **FVS-D-1 — Parasite↔host relationship** · M · ✅ **LANDED 2026-07-26**
   *Shipped:* `InfectedBy` / `Hosting` — the repo's **fourth** Bevy relationship, after
   `squad::MemberOf`/`SquadRoster`, `containment::Holding`/`HeldBy` and `site::HeldAt`/`SiteSpecimens`.

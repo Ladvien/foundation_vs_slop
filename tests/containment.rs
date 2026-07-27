@@ -780,3 +780,64 @@ fn curing_a_clean_host_is_a_no_op_rather_than_a_free_specimen() {
     }
     assert_eq!(specimen_count(&mut app), before, "curing a clean host must grant nothing");
 }
+
+#[test]
+fn capping_every_nest_stops_the_swarm_replenishing() {
+    // FVS-C-5's connection, end to end. B-7 made a capped nest invisible to `nest_reproduce`; this is
+    // the assertion that the swarm therefore cannot grow back — which is what "attrition follows"
+    // means here. There is deliberately no starvation model: crabs die to the squad, and capping
+    // removes their ability to be replaced. Inventing a hunger-kill to make the number fall on its own
+    // would be a balance change the item never asked for.
+    use foundation_vs_slop::containment::{Capped, SiteSecured};
+    use foundation_vs_slop::sim_harness::cap_nest;
+
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let nests: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<foundation_vs_slop::nest::Nest>>();
+        q.iter(world).collect()
+    };
+    if nests.is_empty() {
+        return;
+    }
+    let crabs = |a: &mut App| {
+        let w = a.world_mut();
+        let mut q = w.query_filtered::<(), With<foundation_vs_slop::crab::Crab>>();
+        q.iter(w).count()
+    };
+
+    // Fill every hoard past the breeding threshold, so the nests WOULD breed if uncapped — otherwise
+    // "no new crabs" is vacuous.
+    {
+        let meat = app.world().resource::<foundation_vs_slop::sim::SimTuning>().breeding.meat_per_crab;
+        for &n in &nests {
+            if let Some(mut nest) = app.world_mut().get_mut::<foundation_vs_slop::nest::Nest>(n) {
+                nest.hoard = meat * 20.0;
+            }
+        }
+    }
+    for &n in &nests {
+        cap_nest(&mut app, n);
+    }
+    step(&mut app, &cfg, 5);
+
+    let secured = *app.world().resource::<SiteSecured>();
+    assert_eq!(secured.capped, nests.len(), "every nest must read as capped");
+    assert_eq!(secured.total, nests.len());
+    assert!(secured.fully_secured(), "a fully-capped site must report itself secured");
+    for &n in &nests {
+        assert!(app.world().get::<Capped>(n).is_some());
+    }
+
+    let before = crabs(&mut app);
+    step(&mut app, &cfg, 600);
+    let after = crabs(&mut app);
+    assert!(
+        after <= before,
+        "a fully-capped site must not replenish its swarm (was {before}, now {after})"
+    );
+}
