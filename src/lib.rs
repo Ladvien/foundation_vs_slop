@@ -363,6 +363,10 @@ pub fn run() {
                 // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
                 // the screen is UI, and the carry writes `Knowledge` only at world construction.
                 knowledge::RosterPlugin,
+                // The records office (FVS-O-4): the cross-run knowledge channel, and the shelf
+                // FVS-O-5's planted report will sit on. Windowed except its briefing, which is
+                // world construction.
+                knowledge::RecordsPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,

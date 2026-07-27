@@ -158,6 +158,59 @@ mod tests {
         );
     }
 
+    /// The **live** path, driven through a real `App` — because M-1's warning applies here verbatim:
+    /// "the goldens did NOT move, and that is a warning, not a reassurance". The 1800-tick golden run
+    /// has no synthetic player, so no operative ever acquires a belief and this system's contended path
+    /// is never exercised by it. This test is what actually covers the mechanic.
+    #[test]
+    fn a_knowing_operative_beside_the_subject_ends_up_more_afraid_than_an_ignorant_one() {
+        use crate::ai::drives::{DriveId, Drives, DRIVE_COUNT};
+        use crate::containment::Containment;
+        use crate::containment::rule::{ContainmentRule, FieldCondition, OnBreak, Sign};
+
+        fn run(gain: f32, knows: bool) -> f32 {
+            let mut app = App::new();
+            let mut sim = crate::sim::SimTuning::default();
+            sim.belief_fear_gain = gain;
+            app.insert_resource(sim).add_systems(Update, apply_belief_fear);
+            // The subject, standing right there. `Containment` is what carries a subject on the field.
+            app.world_mut().spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Containment::new(
+                    ContainmentRule {
+                        requires: vec![FieldCondition { channel: 0, sign: Sign::AtLeast, threshold: 0.5 }],
+                        hold_secs: 1.0,
+                        break_on_fail: OnBreak::Reset,
+                    },
+                    Subject::ComfortBlob,
+                ),
+            ));
+            let mut k = Knowledge::default();
+            if knows {
+                k.learn(Subject::ComfortBlob, Claim::Lethal, Provenance::Firsthand, 1);
+            }
+            let mut drives = Drives { v: [0.0; DRIVE_COUNT] };
+            drives.v[DriveId::FEAR.0] = 0.5;
+            let e = app.world_mut().spawn((Unit, Transform::from_translation(Vec3::ZERO), k, drives)).id();
+            app.update();
+            app.world().get::<Drives>(e).expect("drives").v[DriveId::FEAR.0]
+        }
+
+        let ignorant = run(0.4, false);
+        let knowing = run(0.4, true);
+        assert!(
+            knowing > ignorant,
+            "an operative who knows the thing is lethal must fear it MORE ({knowing} vs {ignorant}) — \
+             that cost is what stops knowledge being a strict upgrade"
+        );
+        assert_eq!(ignorant.to_bits(), 0.5f32.to_bits(), "knowing nothing must leave FEAR untouched");
+        // ...and the shipped gain is no longer zero, so the mechanic is actually live.
+        assert!(
+            crate::sim::SimTuning::default().belief_fear_gain > 0.0,
+            "FVS-O-2 was turned on; a default back at 0.0 would silently disable it again"
+        );
+    }
+
     #[test]
     fn a_belief_about_one_bear_does_not_transfer_to_the_other() {
         // The benign original and the hostile copies are different subjects on purpose. If a belief

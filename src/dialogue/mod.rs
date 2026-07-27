@@ -24,6 +24,31 @@ pub use runtime::{Bark, ConversationLock, StartConversation};
 
 pub struct DialoguePlugin;
 
+/// Voice belief propagation (FVS-O-3) as ambient barks.
+///
+/// **This is the job `src/dialogue/` did not have.** It shipped with one authored conversation on a dev
+/// hotkey; now a rumour crossing the squad is something the player watches happen, which is what makes
+/// FVS-O-5's *false* rumour noticeable rather than a number on a screen.
+///
+/// Windowed-only, reading `knowledge::RecentTellings` — a resource the pinned propagation writes and
+/// nothing pinned reads back, so a balloon can never feed into the simulation.
+pub fn bark_belief_tellings(
+    said: Option<Res<crate::knowledge::RecentTellings>>,
+    mut out: MessageWriter<runtime::Bark>,
+) {
+    let Some(said) = said else { return };
+    // At most one per frame: `BarkQueue` already rate-limits balloons squad-wide, and pushing five
+    // messages a tick would just fill it with stale lines. The first is the earliest in SquadMember
+    // order, which is the same total order the propagation itself used.
+    let Some(t) = said.0.first() else { return };
+    out.write(runtime::Bark {
+        speaker: t.teller,
+        kind: model::BubbleKind::Speech,
+        emotion: model::Emotion::Neutral,
+        text: crate::knowledge::gossip::line_for(t.subject, t.claim).to_string(),
+    });
+}
+
 impl Plugin for DialoguePlugin {
     fn build(&self, app: &mut App) {
         // The dialogue graph is a slice of the unified `GameConfig` (loaded + validated by
@@ -37,6 +62,7 @@ impl Plugin for DialoguePlugin {
         app.insert_resource(script)
             // 3D quads are only pickable with the mesh backend; UI picking (DefaultPlugins) isn't enough.
             .add_plugins(MeshPickingPlugin)
+            .add_systems(Update, bark_belief_tellings)
             .add_systems(Startup, bubble::setup_bubble_assets)
             .add_systems(
                 Update,

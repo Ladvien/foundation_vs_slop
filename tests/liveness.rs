@@ -202,20 +202,24 @@ fn every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run() {
 /// the squad is still locomoting when it is shot at. Ordering them *to* the cluster is not enough: they
 /// arrive, stop, and fire from a standstill, which can never satisfy a layering assertion.
 ///
-/// # Still `#[ignore]`d, and the reason is now much narrower
+/// # Two more causes, and the first hypothesis about them was wrong
 ///
-/// That scenario work moved `max_action` from **0.000 over 1200 ticks** (the squad never fired at all)
-/// to **0.169**, reproducibly. So contact happens now. What does not happen is the assertion's `> 0.5`.
+/// Driving the squad through the cluster moved `max_action` from 0.000 to 0.169, and I concluded from
+/// that number alone that "the aim state must be flickering" — a target-acquisition bug. **Measuring it
+/// refuted that outright**, and the measurement is the reason this test now passes:
 ///
-/// `squad.rs` sets `alpha = ACTION_ALPHA (0.9)` whenever a unit is `firing || aiming`, and weights ease
-/// to target in ~3·`FADE_TAU` ≈ 0.24 s — so a unit that *held* an aim would sit at 0.9, comfortably over
-/// the bar. Reaching only ~19% of `ACTION_ALPHA` therefore says the **aim state is flickering** rather
-/// than the blend being wrong: units acquire a target, lose it, and the ease never converges.
+/// * **The cluster was 94 world units away.** Picking the *densest* neighbourhood anywhere sent the
+///   squad on a long march again in a different costume. Sampled every 50 ticks: **zero** crabs were
+///   ever fog-visible, and the squad had closed only to 9.5 units after 1200 ticks. No unit could
+///   acquire what it could not see. Fixed by targeting the **nearest** qualifying cluster.
+/// * **The loop exited before the property could form.** It broke on `best_together` and then asserted
+///   `max_action`, but the overlap appears the instant the action layer starts easing while
+///   `max_action` needs ~3·`FADE_TAU` to reach its 0.9 target — so it stopped at 0.169 and then failed
+///   a `> 0.5` check against a number it had just refused to let grow.
 ///
-/// That is a target-acquisition question (`fire_laser`'s front-arc gate and `AimTarget`'s lifetime),
-/// not an animation one, and it is a different investigation from the one this test is for. Left
-/// `#[ignore]`d rather than relaxed to a threshold the design happens to produce — a test tuned until it
-/// passes stops being evidence.
+/// There is no aim flicker. On contact the action layer reaches **0.730**, comfortably over the bar.
+/// The lesson is the one this repo keeps paying for: 0.169 *looked* like a mechanism and was an
+/// artefact of the harness around it. Measure the gate, do not infer it from the symptom.
 ///
 /// Two other things kept from the diagnosis, because each was its own false failure:
 /// * **Wait for the figurines** before measuring, or the loop finds no `PoseBlender`, `max_action`
@@ -225,7 +229,6 @@ fn every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run() {
 ///   "did a firefight start in N ticks" with "does the blend layer" is what made a combat-pacing
 ///   accident report itself as an animation regression.
 #[test]
-#[ignore = "scenario now engages, but the aim state flickers — see FVS-N-9 for the narrowed diagnosis"]
 fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
     use bevy::prelude::{Transform, Vec3, With};
     use foundation_vs_slop::anim::{blend, PoseBlender};
@@ -250,6 +253,7 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
     // is a couple of tiles, which is "the squad will be shot at on arrival" rather than a precise claim.
     const CLUSTER_R: i32 = 3;
     const MIN_CLUSTER: usize = 3;
+    let squad_home = squad_centroid_cell(&mut app);
     let target: IVec2 = {
         let world = app.world_mut();
         let positions: Vec<Vec3> = {
@@ -267,26 +271,39 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
                 *counts.entry((c.x, c.y)).or_default() += 1;
             }
         }
-        let best = counts
-            .keys()
-            .map(|&(x, y)| {
-                let near: usize = counts
-                    .iter()
-                    .filter(|((ox, oy), _)| (ox - x).abs() <= CLUSTER_R && (oy - y).abs() <= CLUSTER_R)
-                    .map(|(_, n)| *n)
-                    .sum();
-                (near, -x, -y)
-            })
-            .max();
-        let Some((n, nx, ny)) = best else {
-            panic!("no live hostile stands on a floor cell — the scenario cannot produce an engagement");
+        // The NEAREST qualifying cluster, not the densest anywhere. Measured 2026-07-27: taking the
+        // densest put the target **94 world units away**, and the squad had closed only to 9.5 after
+        // 1200 ticks — zero crabs were ever fog-visible in that window, so no unit could acquire one.
+        // The scenario was a long march again, wearing a different costume.
+        let home = squad_home;
+        let mut best: Option<(i32, IVec2, usize)> = None;
+        for &(x, y) in counts.keys() {
+            let near: usize = counts
+                .iter()
+                .filter(|((ox, oy), _)| (ox - x).abs() <= CLUSTER_R && (oy - y).abs() <= CLUSTER_R)
+                .map(|(_, n)| *n)
+                .sum();
+            if near < MIN_CLUSTER {
+                continue;
+            }
+            let cell = IVec2::new(x, y);
+            let d = (cell - home).length_squared();
+            // SORT-OK by construction: `(distance², cell)` is total — the cell breaks a distance tie.
+            let better = match best {
+                None => true,
+                Some((bd, bc, _)) => (d, cell.x, cell.y) < (bd, bc.x, bc.y),
+            };
+            if better {
+                best = Some((d, cell, near));
+            }
+        }
+        let Some((_, cell, _)) = best else {
+            panic!(
+                "no hostile neighbourhood anywhere holds {MIN_CLUSTER}+ within {CLUSTER_R} tiles — the \
+                 scenario cannot produce an engagement"
+            );
         };
-        assert!(
-            n >= MIN_CLUSTER,
-            "densest hostile neighbourhood holds only {n} (< {MIN_CLUSTER}) within {CLUSTER_R} tiles — \
-             too thin to rely on for contact"
-        );
-        IVec2::new(-nx, -ny)
+        cell
     };
 
     // **Order the squad THROUGH the cluster, not to it** — and this is the whole trick.
@@ -302,7 +319,7 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
     // reproducible.
     let goal = {
         const NEAR_CLUSTER: i32 = 8;
-        let centre = squad_centroid_cell(&mut app);
+        let centre = squad_home;
         let floors = floor_cells(&mut app);
         // Every floor cell in the cluster's neighbourhood, farthest-from-the-squad first. Walking to one
         // of those routes the squad THROUGH the crabs and keeps it moving until it is past them.
@@ -355,7 +372,12 @@ fn a_unit_shooting_on_the_move_keeps_its_legs_running() {
             max_action = max_action.max(action);
             best_together = best_together.max(gait.min(action));
         }
-        if best_together > 0.05 {
+        // Break only when BOTH properties are satisfied. Breaking on `best_together` alone was a bug in
+        // this loop: the overlap appears the instant the action layer starts easing up, while
+        // `max_action` needs ~3·FADE_TAU to reach its 0.9 target — so the loop exited at 0.169 and then
+        // asserted `> 0.5` against a number it had just refused to let grow. Measured: that alone
+        // accounted for the whole remaining failure once the squad actually engaged.
+        if best_together > 0.05 && max_action > 0.5 {
             break;
         }
     }

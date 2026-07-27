@@ -733,6 +733,35 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   >
   > **The counters already exist and are write-only** — FVS-B-8 added `captures_completed/attempted/
   > broken`, `contained_at_end`, `extracted`, `weapons_tight_ticks` to `EpisodeOutcome`.
+  >
+  > ### ⛔ MEASURED 2026-07-27 — the constraint CANNOT ship yet, and the blocker is UPSTREAM of it
+  >
+  > Before shipping the constraint I added a `containment:` line to `train probe`'s report — those
+  > counters had never been printed, so the pivot this whole backlog is organised around was
+  > **invisible to the calibration diagnostic**. Against the held-in set:
+  >
+  > | world | containment |
+  > |---|---|
+  > | `0x5C09191` | **0 completed / 0 attempted** |
+  > | `0x1CE5` | 1 completed / 2 attempted, 1 broken, 1 held at end |
+  > | `0xFEED` | **0 completed / 0 attempted** |
+  >
+  > **Two of the three authored baseline worlds never attempt a capture at all.** A feasibility
+  > constraint on `captures_attempted > 0` would therefore reject two thirds of the *shipped* baseline
+  > before the search generated anything — the archive-emptying failure this item's own risk note
+  > predicted, now measured rather than feared.
+  >
+  > **So the blocker is not the constraint's design; it is that the synthetic player almost never gets
+  > near a capturable anomaly.** `evaluate`'s containment beat targets the lowest `TargetId` within
+  > `device_reach` during the existing ENGAGE window, and 999/1048/150 are sparse while crabs are not
+  > capturable at all. Fixing that is the prerequisite, and it carries its own risk: making the
+  > synthetic player *seek* a capture target changes every rollout trajectory again — the same cost
+  > FVS-B-8 already paid once.
+  >
+  > *Order of work:* (1) make the synthetic player reach a capturable anomaly on a majority of held-in
+  > worlds, re-probing until it does; (2) **then** the constraint, which will by then reject genuinely
+  > capture-hostile worlds rather than the baseline; (3) **then** H-1's retrain. Step 1 is now
+  > measurable, which it was not before.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
 - **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI*
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
@@ -787,7 +816,16 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL
   Author the SCP-9191 arc: research cashes out as "restoring curation/quality against an out-of-control generator," culminating in a confrontation with SCP-9191. Deprecate semiotic-decay/2521/Gat-Hayes (optional flavor only if non-contradictory). Consider mining the canon "alarm switch ON/OFF" locker detail for the confrontation trigger.
   *Done when:* endgame trigger fires after a curriculum threshold; confrontation derives from the generator theme; no shipped copy references deprecated theming as canon. · *Deps:* F-3, K-3 · *Touches:* narrative, tech-tree, `lib.rs` lore refs · *Reading:* **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG]
-- **FVS-K-3 — Dialogue content buildout** · L
+- **FVS-K-3 — Dialogue content buildout** · L · ⚠️ **PARTIALLY LANDED 2026-07-27 — the module has a JOB now**
+  The item's real complaint was that `src/dialogue/` had "exactly **one** authored conversation on a dev
+  hotkey" — i.e. no reason to exist. FVS-O-3 fixed that half: `dialogue::bark_belief_tellings` voices
+  every belief that crosses the squad, from an 18-line authored table (`gossip::line_for`) covering every
+  `Subject` × `Claim` pairing, with a test that a new one cannot reach a speech balloon as a debug
+  string. Dialogue is now **gameplay-load-bearing** rather than decoration, which was the point.
+  **What remains is the authored conversations themselves** — capture/research/Site beats with
+  researcher and xenobiologist role voice, triggered from real events. The `StartConversation` message
+  and the RON graph are both ready; this is content work, not wiring.
+  *Done when:* ≥N authored conversations trigger from real game events, not a hotkey. · *Deps:* F-3
   `src/dialogue/` (world-space bubbles + RON graph) has exactly **one** authored conversation on a dev hotkey. Author capture/research/Site conversations incl. researcher/xenobiologist role voice.
   *Done when:* ≥N authored conversations trigger from real game events, not a hotkey. · *Deps:* F-3 · *Touches:* `src/dialogue/`, RON · *Reading:* — (no corpus resource; only relevant if you go generative)
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
@@ -840,9 +878,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 >
 > Reproducibility held at every step: `deterministic_core_is_bit_identical`, `..._across_many_builds` and `search_rollouts_are_reproducible_under_load` are all green.
 
-- **FVS-J-3 — macOS/ARM CI lane** · M · *determinism: guards the core*
-  Add an ARM lane to catch the known ARM↔x86 f32 divergence (critical once C-6 facing math lands).
-  *Done when:* CI runs the core on ARM and x86; divergence is a failure or a documented tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
+- **FVS-J-3 — macOS/ARM CI lane** · M · ✅ **LANDED 2026-07-27 — as a MEASUREMENT, deliberately not yet a gate**
+  *Shipped:* a `determinism-arm` job on `ubuntu-24.04-arm` running the deterministic core, `continue-on-error`.
+  **Advisory is the correct state, and the reason is not timidity.** Every golden here is pinned on x86
+  (`tests/replay.rs` says so at the constant). If f32 gameplay math diverges on aarch64 this lane goes
+  red **on the goldens** — and that red is the *finding*, not a regression. §7 records the choice it
+  forces as "an unforced decision": fixed-point core, or per-platform goldens. Neither is a CI setting,
+  and promoting the lane to a hard gate before that decision is made would just mean switching it off
+  within a day — the exact failure mode `tests/panic_budget.rs` exists to avoid for clippy.
+  A failure prints what it means and points at §7, so the next person meets the decision rather than a
+  mystery. It matters most for **FVS-C-6**, whose freeze/aggro turns on a per-entity *facing* check;
+  §7's standing instruction is "do not ship C-6 on divergent floats", and this is how anyone finds out.
+  *Scope note:* `cargo test` only. Duplicating the harness lane here would double the CI bill to
+  re-measure the same f32 question through a slower path.
+  *Done when (revised):* the determinism-model decision is made, and this lane becomes either a hard
+  gate or a documented per-platform tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
 - **FVS-J-4 — clippy denylist vs unwrap/expect/panic/unsafe** · S
   *Done when:* CI fails on new `unwrap`/`expect`/`panic!`/`unsafe` in shipped crates (harness exempt). · *Deps:* — · *Touches:* CI, lints · *Reading:* — (no corpus resource)
 - **FVS-J-5 — Make harness CI lane gating** · S
@@ -918,7 +968,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **Do not bulk-copy into `assets/`.** The share is the *library*; `assets/` holds only what the game loads, converted and named for its use (`docs/artist_guide.md` §2).
   *License:* commercial use and modification permitted; redistributing the pack itself is not — fine for shipping inside a game.
   *Done when:* a repeatable script converts a named pack subset to `.glb` meeting the artist-guide contract, and one converted prop loads in-game. · *Deps:* — · *Touches:* new `scripts/`, `assets/site/` · *Reading:* — (no corpus resource)
-- **FVS-N-9 — `a_unit_shooting_on_the_move_keeps_its_legs_running` is intermittent (FOUND 2026-07-25)** · S · *determinism: test-only*
+- **FVS-N-9 — `a_unit_shooting_on_the_move_keeps_its_legs_running` is intermittent (FOUND 2026-07-25)** · S · ✅ **CLOSED 2026-07-27 — `#[ignore]` removed, 10/10 under load**
+  **There was never an animation bug, and there was never an aim flicker either.** Three scenario
+  defects, each of which produced a confident wrong conclusion until it was measured:
+  1. **The squad marched and hoped.** Fixed by driving it *through* a hostile cluster.
+  2. **The cluster was 94 world units away.** Targeting the *densest* neighbourhood anywhere was the
+     long march again in a different costume. Sampled every 50 ticks: **zero** crabs were ever
+     fog-visible, and the squad had closed only to 9.5 units after 1200 ticks. Fixed by targeting the
+     **nearest** qualifying cluster.
+  3. **The loop exited before the property could form.** It broke on `best_together` and then asserted
+     `max_action` — but the overlap appears the instant the action layer starts easing, while
+     `max_action` needs ~3·`FADE_TAU` to reach 0.9. It stopped at 0.169 and then failed a `> 0.5` check
+     against a number it had just refused to let grow.
+  **The retracted hypothesis is worth keeping.** From `max_action = 0.169` I concluded "the aim state
+  must be flickering — a target-acquisition bug in `fire_laser`'s front-arc gate", wrote it into this
+  entry, and shipped it. A 30-line diagnostic refuted it outright: units aim on **8 of 1200 ticks**, in
+  one unbroken run, and on contact the action layer reaches **0.730**. 0.169 *looked* like a mechanism
+  and was an artefact of the harness around it. **Measure the gate; do not infer it from the symptom** —
+  which is the same lesson FVS-N-8 cost three sessions to learn.
+  *Verified:* 10/10 under 8 busy-loop threads with `#[ignore]` removed, and the load generators were
+  tracked by PID and confirmed dead afterwards. · *Touches:* `tests/liveness.rs` · *Reading:* [TEST-NT]
+  *Original filing, kept because its ruled-out list saved time:*
   `#[ignore]`d in `tests/liveness.rs` rather than left red. It failed in 3 of 4 full-suite runs on a loaded box, across code states that both pre-date and post-date FVS-A-5, so it is **not** an A-5 regression.
   What was ruled out by instrumenting it: the figurines *are* streamed and wired (all 5 squad `PoseBlender`s present — a `step_until_squad_blenders_ready` settle was added to `sim_harness` and did not fix it), the squad *is* engaging (`AimTarget` set on 4 units, 43 hostiles alive), and the slot filter *does* match (5 blenders at `LOCO_SLOTS + 2`). So the failure is real: the upper-body action layer takes **no weight at all** over 200 ticks in the failing runs.
   The action layer arms only on the frames a **bolt actually spawns** (`drive_valkyrie_animation` reads newly-added bolts, and `fire_laser` only spawns on the cooldown-wrap tick), so the likely cause is that no bolt is emitted in the window — aiming is not firing. The test's own message ("the squad did not engage") is therefore misleading and should be re-worded once the cause is known.
@@ -1216,14 +1286,82 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **Cost:** with the subject in perception, a high-confidence `Lethal` belief raises that operative's FEAR gain — a frightened operative flees sooner, aims worse, breaks a containment hold. **Benefit:** knowledge is what makes containment *legible* — an operative with a `CapturableBy` belief can read that anomaly's rule clauses in the containment HUD (L-1 already renders per-clause state); without it they show as unknown.
   **The asymmetry is the thesis:** understanding a thing is what makes it frightening, and also the only way to contain it. Same trade the research economy encodes (Push 4), pushed down onto the individual.
   *Done when:* a knowing operative measurably fears the subject more, and can read its rule; an ignorant one does neither. · *Deps:* O-1, L-1 (done) · *Touches:* `src/knowledge/`, `src/ai/drives.rs`, `src/ui/containment_hud.rs` · *Reading:* [SDT-00], [GRIP]
-- **FVS-O-3 — Propagation by conversation (`Told`)** · M · *determinism: a pick — needs a total sort*
+- **FVS-O-3 — Propagation by conversation (`Told`)** · M · ✅ **LANDED 2026-07-27**
+  *Shipped:* `src/knowledge/gossip.rs` — operatives within `EARSHOT` swap what they know on a fixed
+  cadence, and `dialogue::bark_belief_tellings` voices it as a speech balloon. **That is the job
+  `src/dialogue/` did not have**: a rumour crossing the squad is now something the player *watches*,
+  which is what will make FVS-O-5's false rumour noticeable rather than a number on a screen.
+  **Retelling degrades, and that is the design.** `Provenance::Told`'s flat 0.45 could not express a
+  *chain*, so `Knowledge::hear` scales the **teller's own** confidence by `RETELL_DECAY` instead of
+  stamping a constant: 0.85 → 0.60 → 0.42 → … until it falls under `WORTH_SAYING` and dies out. So a
+  rumour fades along its path instead of saturating the squad with certainty nobody earned — and the
+  *shape* of it is legible on L-5's roster, where a 0.42 `Told` belief is visibly three people from
+  whoever saw the thing.
+  **Grounded in [MISPERCEPT], which gave two things the item did not have:**
+  * *"To be influenced by another's characteristics and behaviors, one must know of them. Without that
+    knowledge social influence is stifled."* → propagation requires **contact**, never a squad-wide
+    broadcast. That is what `EARSHOT` is for, and why a lone scout comes home holding what nobody else
+    learned.
+  * *"Some are the result of secrets. Some are the result of mere error. **Intentionality**
+    differentiates the gap that results from a secret from the gap that results from an error."* →
+    this module is the **error** kind; FVS-O-5's seeding will be the **secret** kind. The distinction is
+    load-bearing because the counter-play differs: you *verify* against a degraded rumour and you
+    *curate* against a planted one.
+  **Hearsay never overwrites experience**, including a contradicting claim — you cannot talk an
+  operative out of what they saw. That asymmetry is precisely what O-5 has to attack.
+  *Determinism:* it is a pick over a query on `FixedUpdate`, so the roster is `sort_total!`ed by
+  `SquadMember` **and** every transfer is decided from a snapshot taken before any write — so a belief
+  cannot hop twice in one tick and the result cannot depend on the order writes land. **Goldens
+  measured unmoved** despite the new node (chained into the existing `AiSet` ordering).
+  *Pinned by:* `containment::a_belief_spreads_through_the_squad_and_weakens_as_it_goes`, which drives
+  the real `App` and asserts **both** halves of the acceptance. · *Deps:* O-1 (~~K-3~~ — it rides the
+  existing `Bark` surface; the authored-conversation buildout is still K-3's own item) · *Reading:*
+  **[MISPERCEPT]**, [ECS]
   One operative tells another in the field; confidence decays with each retelling. **Rides the existing dialogue system** (`src/dialogue/`, `squad_ai::dialogue::MemoryStream`, already grounded in Park et al.). That is the point: the dialogue layer currently has **one authored conversation on a dev hotkey** (K-3) and no reason to exist — this gives it one, so authoring conversations becomes gameplay-load-bearing rather than decoration.
   **Determinism:** "A tells B" over a query is a *pick*, so it needs a stable total key — `SquadMember` is the one every other site uses (`tests/determinism_lint.rs`).
   *Done when:* a belief measurably spreads squad-wide through conversation; retold confidence is strictly lower than firsthand. · *Deps:* O-1, K-3 · *Touches:* `src/knowledge/`, `src/dialogue/` · *Reading:* **[MISPERCEPT]**, [ECS]
-- **FVS-O-4 — Reports: written and read at the Site (`Read`)** · L
+- **FVS-O-4 — Reports: written and read at the Site (`Read`)** · L · ✅ **LANDED 2026-07-27**
+  *Shipped:* `src/knowledge/records.rs` — the archive (`Records`, saved), the `K` verb at the Site that
+  writes up what the squad knows, and `brief_from_records` handing it to the next squad at
+  `RunBuild::PostPopulate` as `Provenance::Read`.
+  **Only FIRSTHAND findings are filed, and it is the most important rule in the module.** A report is a
+  primary source; letting an operative write up something they were merely *told* would launder hearsay
+  into the archive — and since `Read` beliefs are then briefed to every later squad, a false belief
+  could circulate **forever** by having been written down, outliving the decay in O-3 that is supposed
+  to kill it.
+  **`Read` is the weakest provenance, below `Told`, and that is the point.** The archive *preserves*
+  knowledge without *replacing* experience: a squad rebuilt entirely from reports is measurably more
+  tentative than the veterans it replaced, which is the right consequence of having lost them.
+  **The cost of filing is exposure, not currency.** Charging O5 budget would couple the two economies
+  FVS-P-2 keeps disjoint by kind. The real price is that a filed report is an **attack surface** — which
+  is exactly what O-5 needed.
+  *Also:* filing dedupes on `(subject, claim)`, so two operatives filing one observation is one fact
+  rather than manufactured corroboration. · *Deps:* O-3, G-2, G-4
   The cross-run channel. An operative who dies takes their firsthand knowledge with them — but a filed report survives for the next squad. Since operatives **persist** (G-3), a report is *insurance*: a voluntary hedge against your own death, which makes the records office a **choice** ("spend the time writing it up?") rather than mandatory bookkeeping.
   *Done when:* a report written in run N is readable in run N+1 and confers a `Read`-provenance belief; needs save/load. · *Deps:* O-3, G-2, G-4 · *Touches:* `src/knowledge/`, `src/site/` · *Reading:* [MISPERCEPT]
-- **FVS-O-5 — False belief as SCP-9191's attack surface** · L · **the payoff**
+- **FVS-O-5 — False belief as SCP-9191's attack surface** · L · ✅ **MECHANISM LANDED 2026-07-27 — the trigger is K-4's**
+  *Shipped:* `SeedMisinformation`, `records::seed_misinformation`, the `PHANTOM_AUTHOR` signature, and
+  both counter-plays. Pinned end to end by
+  `containment::a_planted_lie_reaches_the_squad_and_firsthand_experience_undoes_it`, which exercises all
+  four verbs the item names — seeded, spread, acted on, corrected.
+  **[MISPERCEPT] gave the distinction the item was missing:** *"Some are the result of secrets. Some are
+  the result of mere error. **Intentionality** differentiates the gap that results from a secret from
+  the gap that results from an error."* O-3's degrading rumour is the **error**; a planted report is the
+  **secret**. They are different objects with different counter-play, and the code now says so:
+  * **Verify firsthand** — experience *displaces* a contradicting rumour outright rather than sitting
+    beside it. You cannot be talked out of what you saw.
+  * **Curate the archive** — `Records::purge` pulls every report making a claim and reports the count,
+    so the office can say what happened rather than silently succeeding.
+  **Intent is visible, deliberately.** A planted report carries `PHANTOM_AUTHOR`, outside the roster, and
+  the records screen renders it `?? UNATTRIBUTED ??` rather than printing a nonsense index. Curation you
+  cannot perform is not counter-play, so the tell has to be findable.
+  **Seeding a TRUE claim is refused**, validated against the `research:` curriculum's `HiddenTruth` —
+  the same table the research economy converges on, so a planted lie is false in exactly the sense the
+  player can *disprove* by studying the specimen. An antagonist that accidentally supplied accurate
+  intelligence would make the whole detection loop meaningless.
+  **Still to come:** *when* 9191 seeds. That is FVS-K-4's decision, and shipping the mechanism behind a
+  `Message` means the endgame only has to choose the moment — and means this is fully tested now rather
+  than blocked on a boss that does not exist. · *Deps:* O-4, K-4 (trigger only)
   Hearsay can be **wrong** and propagates anyway. [MISPERCEPT] supplies the mechanism — pluralistic ignorance, where a false belief survives because everyone assumes everyone else knows better.
   **This is what the antagonist is for.** Slop is not only ugly monsters, it is **plausible garbage** — which is exactly what a false report is. Giving SCP-9191 a way to seed misinformation into the squad's belief network makes the endgame theme ("restoring curation/quality against an out-of-control generator", K-4) a *mechanic the player fights* rather than a narrative frame around unrelated combat. The counter-play is Foundation-shaped: **verify firsthand, and curate the records.**
   *Done when:* a false belief can be seeded, spread, acted on, and corrected by firsthand verification or by purging a report. · *Deps:* O-4, K-4 · *Touches:* `src/knowledge/`, narrative · *Reading:* **[MISPERCEPT]**, [UV-REV]
@@ -1301,7 +1439,24 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 ## 7. Risks, decisions, and things to re-verify
 
 - **Top design risk — kill-vs-capture fitness conflict (I-1).** The live QD objective rewards spectacular kills; making captures valuable pulls the opposite way. Unresolved, the director (H-3) surfaces anti-loop content. A weighting/decomposition decision is required, not optional — and I-1 gates H-3.
-- **Determinism model is an unforced decision.** The known ARM↔x86 f32 divergence forces a choice (fixed-point core vs per-platform golden hashing) that C-6 (facing) and B-3/B-6 (field ops) make urgent. J-3's ARM lane is only meaningful once this is decided. Do not ship C-6 on divergent floats.
+- ~~**Determinism model is an unforced decision.**~~ ✅ **DECIDED 2026-07-27 (Director): PER-PLATFORM GOLDENS.**
+  `f32` gameplay math is not guaranteed identical across instruction sets, so one hash cannot hold on
+  both x86-64 and aarch64. Of the three options:
+  * **A tolerance was rejected** — exact-hash discipline is what has caught *every* determinism bug this
+    project has found, two of them on the day of the decision. An epsilon would blind the one oracle
+    that works.
+  * **Fixed-point was rejected for now** as a large invasive change to movement/fields/ORCA. It remains
+    the only option that makes a replay portable *between machines*, so it is the right answer if
+    cross-platform replay ever becomes a requirement.
+  * **Per-platform goldens** keep each architecture held to **bit-exact** reproducibility against
+    itself, which is the property every golden actually relies on.
+  *Shipped:* `GOLDEN`/`GOLDEN_FIELD` are `cfg(target_arch)`-selected. aarch64 is deliberately left
+  **unpinned** rather than guessed — it fails loudly, prints the hash it measured, and says to pin it
+  once the `determinism-arm` lane reproduces it across builds.
+  **The cost, stated plainly:** a replay or campaign captured on one architecture is **not** verifiable
+  on another, and harness results cannot be compared across a heterogeneous fleet.
+  **This unblocks FVS-C-6** — the standing "do not ship C-6 on divergent floats" instruction is
+  satisfied by each platform having its own pin, so 173/096's facing math is no longer gated on it.
 - **GOAP vs utility for squad orders is open.** Secure→Contain→Extract is naturally a GOAP precondition/effect plan ([GOAP]); creatures already run utility AI. Decide whether squad *orders* get a GOAP layer or stay utility considerations — affects P2, P3, P7.
 - **Bevy 0.19 spellings to re-confirm on docs.rs:** observer trigger `On<Add, C>` (not `Trigger<OnAdd, C>`); lifecycle `Replace`→`Discard` (derive attribute `on_replace`→`on_discard`, though the trait *getter* may still read `on_replace`); `NextState::set_if_neq()`; `bevy_world_serialization` renames. Component hooks are the stable path for the reward invariant (B-4).
 - **SCP canon to re-verify before shipping as copy:** the SCP-9191 origin line could not be re-confirmed verbatim in a full fetch (the article page returned mostly navigation chrome); the "alarm switch ON/OFF locker" containment detail *is* confirmed. Re-verify the 9191 origin against the live article.

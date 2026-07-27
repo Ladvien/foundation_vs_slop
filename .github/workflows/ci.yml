@@ -180,3 +180,49 @@ jobs:
           key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (search_parallel only, single-threaded)
         run: cargo test --features test-harness --test search_parallel -- --test-threads=1
+
+  # FVS-J-3 — the ARM lane. Its job is to MEASURE the known ARM<->x86 f32 divergence, not yet to gate on
+  # it, and the distinction is the whole reason this is `continue-on-error`.
+  #
+  # Every golden in this repo is pinned on x86 (`tests/replay.rs` says so at the constant). If f32
+  # gameplay math diverges on aarch64, this lane goes red on the goldens — and that red is the FINDING,
+  # not a regression. BACKLOG.md §7 records the choice it forces as "an unforced decision": either the
+  # core moves to fixed-point, or goldens become per-platform. Neither is a CI setting, so promoting
+  # this to a hard gate before that decision would just mean switching it off within a day — the exact
+  # failure `tests/panic_budget.rs` was written to avoid for clippy.
+  #
+  # It matters most for FVS-C-6 (SCP-173/096), whose freeze/aggro turns on a per-entity FACING check.
+  # §7's standing instruction is "do not ship C-6 on divergent floats", and this lane is how anyone finds
+  # out whether they are.
+  #
+  # `cargo test` only — the deterministic core. The harness lane is not duplicated here: it would double
+  # the CI bill to re-measure the same f32 question through a slower path.
+  determinism-arm:
+    name: determinism (aarch64 — advisory, measures ARM<->x86 divergence)
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-arm-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test (deterministic core on aarch64)
+        run: cargo test
+      - name: What a failure here means
+        if: failure()
+        run: |
+          echo "::warning::The deterministic core diverges between x86 and aarch64."
+          echo "That is this lane's PURPOSE, not a regression. See BACKLOG.md section 7:"
+          echo "  'Determinism model is an unforced decision' — fixed-point core vs per-platform goldens."
+          echo "Do NOT ship FVS-C-6 (SCP-173/096 facing math) until it is settled."
+

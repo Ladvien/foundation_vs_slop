@@ -1,0 +1,458 @@
+//! **The records office** (FVS-O-4) — the `Read` channel, and the only thing that outlives an operative.
+//!
+//! # Why a report is a *choice*, not bookkeeping
+//!
+//! FVS-G-3 decided operatives persist across runs carrying their knowledge, and
+//! [`super::roster::sync_squad_knowledge`] makes death lose it **structurally** — the table is rebuilt
+//! from the living, so an operative who did not come back contributes nothing and their slot resets.
+//!
+//! That is what makes a report worth writing. It is **insurance**: a voluntary hedge against your own
+//! death, filed while you are alive, readable by whoever replaces you. If knowledge survived death
+//! automatically the records office would be a formality; because it does not, filing is a decision the
+//! player makes with incomplete information about how the next expedition will go.
+//!
+//! # The cost is exposure, not currency
+//!
+//! Filing is free in resources, and deliberately so — charging O5 budget would couple the two economies
+//! FVS-P-2 keeps disjoint by kind. The real price is that **a filed report is an attack surface**.
+//! [MISPERCEPT]'s distinction is the design here: *"Some are the result of secrets. Some are the result
+//! of mere error. Intentionality differentiates the gap that results from a secret from the gap that
+//! results from an error."* [`super::gossip`] produces the *error* — honest retelling that degrades.
+//! The archive is where the *secret* can be planted, because a written record is exactly the kind of
+//! plausible artefact SCP-9191 produces (FVS-O-5). Curating it is the counter-play, which is why
+//! [`Records::purge`] exists before anything can seed a lie.
+//!
+//! # `Read` is the weakest provenance, and that is the point
+//!
+//! `Provenance::Read` sits below `Told`. An operative who read a write-up believes it less than one who
+//! was told by a colleague, who believes it less than one who saw it. So the archive **preserves**
+//! knowledge without **replacing** experience — a squad rebuilt entirely from reports is measurably
+//! more tentative than the veterans it replaced, which is the right consequence of losing them.
+
+use bevy::prelude::*;
+
+use super::{Claim, Knowledge, Provenance, Subject};
+use crate::squad::Unit;
+
+/// One filed write-up.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Report {
+    pub subject: Subject,
+    pub claim: Claim,
+    /// Which operative filed it. Kept so the records screen can attribute a claim, and so FVS-O-5's
+    /// planted report can be identified by an author nobody recognises.
+    pub author: usize,
+    /// Run tick it was filed on.
+    pub filed: u64,
+}
+
+/// The Site's archive. Meta-progress: not run-scoped, and saved.
+#[derive(Resource, Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Records {
+    pub filed: Vec<Report>,
+}
+
+impl Records {
+    /// File one claim, if it is not already on the shelf.
+    ///
+    /// Deduplicated on `(subject, claim)` rather than on the whole report: two operatives filing the
+    /// same finding is one fact, not two, and letting it stack would let a squad manufacture apparent
+    /// corroboration out of a single observation.
+    pub fn file(&mut self, report: Report) -> bool {
+        if self.filed.iter().any(|r| r.subject == report.subject && r.claim == report.claim) {
+            return false;
+        }
+        self.filed.push(report);
+        true
+    }
+
+    /// Remove every report making a claim. **The curation counter-play** (FVS-O-5).
+    ///
+    /// Returns how many were pulled, so the UI can say what happened rather than silently succeeding.
+    pub fn purge(&mut self, subject: Subject, claim: Claim) -> usize {
+        let before = self.filed.len();
+        self.filed.retain(|r| !(r.subject == subject && r.claim == claim));
+        before - self.filed.len()
+    }
+
+    /// Everything the archive says about one subject.
+    pub fn about(&self, subject: Subject) -> impl Iterator<Item = &Report> {
+        self.filed.iter().filter(move |r| r.subject == subject)
+    }
+}
+
+/// Write up what the squad currently knows firsthand.
+///
+/// **Only firsthand findings are filed.** A report is a primary source; letting an operative write up
+/// something they were merely *told* would launder hearsay into the archive, and since `Read` beliefs
+/// are then handed to the next squad it would let a rumour outlive its own decay — a false belief could
+/// circulate forever by being written down. This is the single most important rule in the module.
+pub fn file_squad_findings(
+    table: &super::SquadKnowledge,
+    records: &mut Records,
+    tick: u64,
+) -> usize {
+    let mut filed = 0;
+    // `SquadKnowledge` is an array indexed by `SquadMember`, so this walk is already a total order —
+    // no query, no sort needed.
+    for (member, knowledge) in table.members.iter().enumerate() {
+        for subject in Subject::ALL {
+            for claim in Claim::ALL {
+                let Some(b) = knowledge.of(subject, claim) else { continue };
+                if b.provenance != Provenance::Firsthand {
+                    continue;
+                }
+                if records.file(Report { subject, claim, author: member, filed: tick }) {
+                    filed += 1;
+                }
+            }
+        }
+    }
+    filed
+}
+
+/// Hand the archive to the squad that just deployed.
+///
+/// Runs at world construction (`RunBuild::PostPopulate`), after
+/// [`super::roster::restore_squad_knowledge`], so a returning veteran's own stronger beliefs are
+/// already in place and `learn`'s provenance ordering refuses to downgrade them.
+pub fn brief_from_records(
+    records: Res<Records>,
+    clock: Res<crate::session::RunClock>,
+    mut operatives: Query<&mut Knowledge, With<Unit>>,
+) {
+    for mut knowledge in &mut operatives {
+        for report in &records.filed {
+            knowledge.learn(report.subject, report.claim, Provenance::Read, clock.ticks);
+        }
+    }
+}
+
+/// The author index a **planted** report carries.
+///
+/// Outside the roster on purpose (`SquadKnowledge` holds `ROSTER_SLOTS`), so the records screen shows a
+/// signature belonging to no operative who has ever served. That is the player-facing tell, and it is
+/// the whole reason `Report::author` is stored: [MISPERCEPT]'s point is that **intentionality** is what
+/// separates a planted lie from an honest error, and a forged attribution is where the intent shows.
+///
+/// It is deliberately *findable*, not hidden. The counter-play is curation, and curation you cannot
+/// perform is not counter-play.
+pub const PHANTOM_AUTHOR: usize = usize::MAX;
+
+/// Ask the archive to carry a lie (FVS-O-5).
+///
+/// A `Message` rather than a direct call because the **trigger** is SCP-9191's, and that antagonist is
+/// FVS-K-4's work. Shipping the mechanism behind a message means the endgame only has to decide *when*
+/// — and it means this is fully testable now, rather than blocked on a boss that does not exist.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct SeedMisinformation {
+    pub subject: Subject,
+    /// The claim to plant. Callers should plant something the ground truth CONTRADICTS; validated by
+    /// [`is_false`] so a "lie" that happens to be true cannot be seeded by accident.
+    pub claim: Claim,
+}
+
+/// Is this claim actually false about this subject, per the authored ground truth?
+///
+/// The truth lives in the `research:` curriculum (`HiddenTruth`), which is the same table the research
+/// economy converges on — so a planted lie is false in exactly the sense the player can *disprove* by
+/// studying the specimen. One source of truth, two consumers.
+pub fn is_false(
+    curriculum: &crate::research::Curriculum,
+    subject: Subject,
+    claim: Claim,
+) -> Option<bool> {
+    let truth = curriculum.truth(subject)?;
+    Some(match claim {
+        Claim::Lethal => !truth.lethality,
+        Claim::Harmless => truth.lethality,
+        // "It can be contained" is false only where nothing contains it — i.e. the curriculum has no
+        // entry at all, which the `?` above already returned `None` for.
+        Claim::Containable => false,
+    })
+}
+
+/// Plant a forged report.
+pub fn seed_misinformation(
+    mut asked: MessageReader<SeedMisinformation>,
+    curriculum: Option<Res<crate::research::Curriculum>>,
+    clock: Option<Res<crate::session::RunClock>>,
+    mut records: ResMut<Records>,
+) {
+    let Some(curriculum) = curriculum else { return };
+    let tick = clock.map(|c| c.ticks).unwrap_or(0);
+    for req in asked.read() {
+        // Refuse to plant something that is TRUE. A "lie" the player could verify and find correct
+        // would make the whole detection loop meaningless — and it would quietly turn the antagonist
+        // into a source of accurate intelligence.
+        match is_false(&curriculum, req.subject, req.claim) {
+            Some(true) => {}
+            _ => {
+                warn!(
+                    "records: refusing to plant {:?}/{:?} — it is not false per the authored truth",
+                    req.subject, req.claim
+                );
+                continue;
+            }
+        }
+        if records.file(Report {
+            subject: req.subject,
+            claim: req.claim,
+            author: PHANTOM_AUTHOR,
+            filed: tick,
+        }) {
+            warn!("records: a report signed by no known operative has appeared on the shelf");
+        }
+    }
+}
+
+/// Root marker for the records readout at the Site.
+#[derive(Component)]
+pub struct RecordsPanel;
+
+#[derive(Component)]
+pub struct RecordsReadout;
+
+/// What the archive screen says. Pure, so the wording is testable without an `App`.
+pub fn records_text(records: &Records, unfiled: usize) -> String {
+    let mut out = String::from("RECORDS OFFICE\n");
+    out.push_str(&format!("[K] FILE {unfiled} UNWRITTEN FINDING(S)\n\n"));
+    if records.filed.is_empty() {
+        // Distinct from "nothing to file": an empty archive is a real state, and saying so tells the
+        // player the office works rather than leaving them looking at a blank panel.
+        out.push_str("THE ARCHIVE IS EMPTY.\n");
+        return out;
+    }
+    for r in &records.filed {
+        // A planted report is named as *unattributed*, not silently rendered with a nonsense index.
+        // The player has to be able to SEE the thing they are meant to curate.
+        let by = if r.author == PHANTOM_AUTHOR {
+            "?? UNATTRIBUTED ??".to_string()
+        } else {
+            format!("OPERATIVE {}", r.author)
+        };
+        out.push_str(&format!("  {:?}: {:?}  — filed by {by} @ t{}\n", r.subject, r.claim, r.filed));
+    }
+    out
+}
+
+fn spawn_panel(
+    mut commands: Commands,
+    theme: Res<crate::ui::theme::UiTheme>,
+    fonts: Res<crate::ui::theme::FontAssets>,
+) {
+    commands
+        .spawn((
+            RecordsPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(theme.space_lg),
+                right: Val::Px(theme.space_lg),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            GlobalZIndex(crate::ui::theme::Z_MENU - 1),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                RecordsReadout,
+                crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
+            ));
+        });
+}
+
+/// How many firsthand findings are not yet on the shelf.
+fn unfiled_count(table: &super::SquadKnowledge, records: &Records) -> usize {
+    let mut probe = records.clone();
+    file_squad_findings(table, &mut probe, 0)
+}
+
+fn records_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    table: Res<super::SquadKnowledge>,
+    clock: Option<Res<crate::session::RunClock>>,
+    mut records: ResMut<Records>,
+) {
+    // `K` for the archive — free alongside `R` (research), `B`/`N`/`M` (requisition) and `L` (roster).
+    if keys.just_pressed(KeyCode::KeyK) {
+        let tick = clock.map(|c| c.ticks).unwrap_or(0);
+        let n = file_squad_findings(&table, &mut records, tick);
+        if n > 0 {
+            info!("records: filed {n} finding(s)");
+        }
+    }
+}
+
+fn update_panel(
+    records: Res<Records>,
+    table: Res<super::SquadKnowledge>,
+    mut text_q: Query<&mut Text, With<RecordsReadout>>,
+) {
+    let line = records_text(&records, unfiled_count(&table, &records));
+    for mut t in &mut text_q {
+        if t.0 != line {
+            t.0 = line.clone();
+        }
+    }
+}
+
+/// The records office. Windowed except the briefing, which is world construction.
+pub struct RecordsPlugin;
+
+impl Plugin for RecordsPlugin {
+    fn build(&self, app: &mut App) {
+        use crate::ui::state::{despawn_scoped, AppState};
+        app.init_resource::<Records>()
+            .add_message::<SeedMisinformation>()
+            .add_systems(Update, seed_misinformation)
+            .add_systems(
+                OnEnter(crate::session::RunState::Active),
+                // AFTER the roster restore, so a returning veteran's firsthand beliefs are already in
+                // place and `learn`'s provenance ordering refuses to downgrade them to `Read`.
+                brief_from_records
+                    .in_set(crate::session::RunBuild::PostPopulate)
+                    .after(super::roster::restore_squad_knowledge),
+            )
+            .add_systems(OnEnter(AppState::Site), spawn_panel)
+            .add_systems(OnExit(AppState::Site), despawn_scoped::<RecordsPanel>)
+            .add_systems(
+                Update,
+                (records_input, update_panel).run_if(in_state(AppState::Site)),
+            );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge::SquadKnowledge;
+
+    fn table_with(provenance: Provenance) -> SquadKnowledge {
+        let mut t = SquadKnowledge::default();
+        t.members[1].learn(Subject::BearCopies, Claim::Lethal, provenance, 7);
+        t
+    }
+
+    #[test]
+    fn only_firsthand_findings_are_written_up() {
+        // THE rule of this module. Filing hearsay would launder a rumour into the archive, and since
+        // `Read` beliefs are handed to the next squad, a false belief could then circulate forever by
+        // having been written down — outliving the decay that is supposed to kill it.
+        let mut records = Records::default();
+        assert_eq!(file_squad_findings(&table_with(Provenance::Firsthand), &mut records, 1), 1);
+
+        let mut records = Records::default();
+        assert_eq!(file_squad_findings(&table_with(Provenance::Told), &mut records, 1), 0);
+        assert_eq!(file_squad_findings(&table_with(Provenance::Read), &mut records, 1), 0);
+        assert!(records.filed.is_empty(), "hearsay must never reach the shelf");
+    }
+
+    #[test]
+    fn the_same_finding_filed_twice_is_one_fact() {
+        // Two operatives filing the same observation is one fact. Letting it stack would let a squad
+        // manufacture apparent corroboration out of a single sighting.
+        let mut t = SquadKnowledge::default();
+        t.members[0].learn(Subject::Crabs, Claim::Lethal, Provenance::Firsthand, 1);
+        t.members[3].learn(Subject::Crabs, Claim::Lethal, Provenance::Firsthand, 1);
+        let mut records = Records::default();
+        assert_eq!(file_squad_findings(&t, &mut records, 1), 1);
+        assert_eq!(records.filed.len(), 1);
+        // ...and re-filing later is a no-op rather than a duplicate.
+        assert_eq!(file_squad_findings(&t, &mut records, 99), 0);
+    }
+
+    #[test]
+    fn purging_pulls_every_report_making_the_claim() {
+        // The curation counter-play FVS-O-5 needs. It reports a COUNT so the UI can say what happened
+        // rather than silently succeeding.
+        let mut records = Records::default();
+        records.file(Report { subject: Subject::Parasite, claim: Claim::Harmless, author: 0, filed: 1 });
+        records.file(Report { subject: Subject::Parasite, claim: Claim::Lethal, author: 1, filed: 2 });
+        assert_eq!(records.purge(Subject::Parasite, Claim::Harmless), 1);
+        assert_eq!(records.purge(Subject::Parasite, Claim::Harmless), 0, "purging twice is idempotent");
+        assert_eq!(records.about(Subject::Parasite).count(), 1, "the other claim is untouched");
+    }
+
+    #[test]
+    fn a_report_confers_the_weakest_provenance_so_it_cannot_replace_experience() {
+        // The archive PRESERVES knowledge without REPLACING it: a squad rebuilt entirely from reports
+        // is measurably more tentative than the veterans it replaced, which is the right consequence
+        // of having lost them.
+        assert!(
+            Provenance::Read.base_confidence() < Provenance::Told.base_confidence(),
+            "a write-up must be believed less than a colleague's word"
+        );
+        let mut veteran = Knowledge::default();
+        veteran.learn(Subject::BearCopies, Claim::Lethal, Provenance::Firsthand, 1);
+        let before = veteran.of(Subject::BearCopies, Claim::Lethal).expect("held");
+        veteran.learn(Subject::BearCopies, Claim::Lethal, Provenance::Read, 2);
+        assert_eq!(
+            veteran.of(Subject::BearCopies, Claim::Lethal),
+            Some(before),
+            "reading a write-up must not downgrade what an operative saw"
+        );
+    }
+
+    #[test]
+    fn a_planted_report_is_visibly_unattributed() {
+        // The counter-play is CURATION, and curation you cannot perform is not counter-play. The panel
+        // must show the forged signature rather than rendering usize::MAX as a plausible index.
+        let mut records = Records::default();
+        records.file(Report {
+            subject: Subject::Parasite,
+            claim: Claim::Harmless,
+            author: PHANTOM_AUTHOR,
+            filed: 3,
+        });
+        let out = records_text(&records, 0);
+        assert!(out.contains("UNATTRIBUTED"), "the tell must be visible: {out}");
+        assert!(!out.contains(&PHANTOM_AUTHOR.to_string()), "never print the raw sentinel: {out}");
+    }
+
+    #[test]
+    fn a_lie_can_be_corrected_by_purging_it_or_by_seeing_for_yourself() {
+        // FVS-O-5's acceptance, both routes, at the model level.
+        let mut records = Records::default();
+        records.file(Report {
+            subject: Subject::Parasite,
+            claim: Claim::Harmless,
+            author: PHANTOM_AUTHOR,
+            filed: 1,
+        });
+
+        // Route 1 — CURATE: pull it off the shelf, so it stops being briefed to anyone.
+        let mut curated = records.clone();
+        assert_eq!(curated.purge(Subject::Parasite, Claim::Harmless), 1);
+        assert!(curated.filed.is_empty());
+
+        // Route 2 — VERIFY FIRSTHAND: the operative who was briefed the lie meets the thing itself.
+        let mut victim = Knowledge::default();
+        victim.learn(Subject::Parasite, Claim::Harmless, Provenance::Read, 2);
+        assert!(victim.of(Subject::Parasite, Claim::Harmless).is_some(), "the lie took");
+        victim.learn(Subject::Parasite, Claim::Lethal, Provenance::Firsthand, 3);
+        assert!(
+            victim.of(Subject::Parasite, Claim::Harmless).is_none(),
+            "experience must displace the contradicting rumour outright, not sit beside it"
+        );
+        assert_eq!(
+            victim.of(Subject::Parasite, Claim::Lethal).expect("learned").provenance,
+            Provenance::Firsthand
+        );
+    }
+
+    #[test]
+    fn the_panel_distinguishes_an_empty_archive_from_nothing_to_file() {
+        let empty = records_text(&Records::default(), 0);
+        assert!(empty.contains("THE ARCHIVE IS EMPTY"), "{empty}");
+        assert!(empty.contains("FILE 0 UNWRITTEN"), "{empty}");
+
+        let mut records = Records::default();
+        records.file(Report { subject: Subject::Crabs, claim: Claim::Lethal, author: 2, filed: 5 });
+        let filled = records_text(&records, 3);
+        assert!(!filled.contains("THE ARCHIVE IS EMPTY"), "{filled}");
+        assert!(filled.contains("OPERATIVE 2"), "a report must be attributable: {filled}");
+        assert!(filled.contains("FILE 3 UNWRITTEN"), "{filled}");
+    }
+}

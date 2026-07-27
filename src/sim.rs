@@ -340,7 +340,7 @@ impl Default for SimTuning {
             // FVS-O-2 ships OFF. `0.0` makes `knowledge::coupling::apply_belief_fear` a bit-exact
             // no-op, so the goldens do not move for a mechanic nobody enabled; turning it on is a
             // deliberate act that earns its own measured re-pin.
-            belief_fear_gain: 0.0,
+            belief_fear_gain: 0.4,
             fear: FearTuning {
                 per_crab: 0.08,
                 of_anomaly: 0.9,
