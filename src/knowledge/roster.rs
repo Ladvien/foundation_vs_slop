@@ -237,8 +237,21 @@ impl Plugin for RosterPlugin {
             .add_systems(Update, update_roster.run_if(in_state(MenuState::Roster)))
             .add_systems(
                 Update,
-                toggle_roster
-                    .run_if(in_state(AppState::InGame).or_else(in_state(AppState::Site))),
+                // `InGame` ONLY, and the `.or_else(in_state(AppState::Site))` that used to be here was
+                // not a feature — it was a crash. `MenuState` is a SubState sourced on
+                // `AppState::InGame`, so Bevy REMOVES `State<MenuState>` the moment the app leaves it;
+                // this system takes `Res<State<MenuState>>` non-optionally and panicked on the first
+                // frame at the Site with "Parameter `Res<State<MenuState>>` failed validation: Resource
+                // does not exist". Reported from real play 2026-07-28, reproduced by
+                // `replay::returning_to_the_site_after_a_run_does_not_panic`.
+                //
+                // Restricting rather than wrapping in `Option`, because the roster could never have
+                // opened at the Site regardless: `spawn_roster` hangs off `OnEnter(MenuState::Roster)`,
+                // and that state does not exist there either. An `Option` would silence the panic and
+                // leave a key that does nothing — a worse failure, because it looks supported.
+                // Reviewing the roster between expeditions is a real want; it needs a Site-side screen
+                // of its own, the way `ui::site_hud` works. Tracked as FVS-L-6.
+                toggle_roster.run_if(in_state(AppState::InGame)),
             );
     }
 }

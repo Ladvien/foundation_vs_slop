@@ -1087,6 +1087,29 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
+- **FVS-L-6 — The roster cannot be reviewed at the Site, and pretending it could was a CRASH (FOUND 2026-07-28)** · S
+  **Reported from real play**, and reproduced: entering the Site after `RETURN TO SITE` panicked with
+  `Parameter Res<State<MenuState>> failed validation: Resource does not exist`, from
+  `knowledge::roster::toggle_roster`.
+  **Root cause.** `MenuState` is a **SubState** sourced on `AppState::InGame`
+  (`#[source(AppState = AppState::InGame)]`), so Bevy **removes** `State<MenuState>` the moment the app
+  leaves `InGame`. `toggle_roster` takes it non-optionally and was registered
+  `.run_if(in_state(AppState::InGame).or_else(in_state(AppState::Site)))` — so at the Site it ran with
+  its own state gone.
+  **The `.or_else(…Site)` was never a working feature.** Even without the panic the roster could not
+  have opened there: `spawn_roster` hangs off `OnEnter(MenuState::Roster)`, and that state does not
+  exist at the Site either. It bought a crash and nothing else.
+  *Fixed:* restricted to `AppState::InGame` — where the whole `MenuState` mechanism actually works.
+  **Deliberately NOT wrapped in `Option`**, which the Bevy error message suggests and which would be
+  wrong here: it silences the panic and leaves a key that does nothing, which is a worse failure because
+  it *looks* supported.
+  *Pinned by* `replay::returning_to_the_site_after_a_run_does_not_panic` — it drives the real transition
+  (`Debrief` → `RunState::Idle` + `AppState::Site`) under the **windowed plugin set**, and runs in the
+  `test-harness` build so `bevy/debug` names the offending system. The shipped binary cannot.
+  **What remains, and it is a real want:** reviewing what each operative believes *between* expeditions
+  is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
+  `ui::site_hud` works — not a reach into the in-game overlay stack.
+  *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
 - **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
   ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
   intermittently **because the bug is intermittent**. That is the test working.

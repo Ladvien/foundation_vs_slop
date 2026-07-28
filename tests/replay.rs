@@ -1176,3 +1176,94 @@ fn search_rollouts_of_mutants_are_reproducible_under_load() {
         split.join("\n  "),
     );
 }
+
+/// **Reproduce the RETURN-TO-SITE crash** — the transition a player reported panicking (2026-07-28).
+///
+/// # What the report showed
+///
+/// Play log, in order: the O5 report filed (`OnEnter(AppState::Debrief)`), the campaign saved
+/// (`OnEnter(AppState::Site)`), then two panics from parallel systems — *"No entities fit the query"*
+/// and *"Parameter … failed validation: Resource does not exist"*. Both anonymised, because the shipped
+/// binary is built without `bevy/debug`.
+///
+/// # Why this is a test rather than a manual repro
+///
+/// The crash sits on a state transition, not on gameplay: `RETURN TO SITE` sets `RunState::Idle` **and**
+/// `AppState::Site` in one step, and `DespawnOnExit(RunState::Active)` then removes the squad and the
+/// whole expedition world. Any system still running at the Site that requires a run-scoped **entity**
+/// (a `Single<…>` param, a `.single()`) or a run-scoped **resource** panics on the next frame.
+///
+/// That is reproducible without a player, and it is exactly the shape FVS-G-6 is about — which makes it
+/// worth pinning permanently rather than diagnosing once. This binary is built with `test-harness`,
+/// which enables `bevy/debug`, so a failure here **names the offending system** where the shipped build
+/// cannot.
+#[test]
+fn returning_to_the_site_after_a_run_does_not_panic() {
+    use bevy::prelude::*;
+    use foundation_vs_slop::session::RunState;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    use foundation_vs_slop::ui::state::AppState;
+    use foundation_vs_slop::ui::UiPlugin;
+
+    let _serial = serial_guard();
+    // SAFETY: `serial_guard` is held, so this is the only thread touching the environment.
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("fvs_site_repro"));
+        // Never touch the real campaign: `persist` saves on entering the Site, which this test does.
+        std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join("fvs_site_repro_data"));
+    }
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app_unfinished(&cfg);
+    // The WINDOWED plugin set, not just `UiPlugin`. `ui::site_hud` and `ui::research_hud` read
+    // `StudySubject` and write `RunExperiment`, both of which come from `ResearchLabPlugin` — which
+    // `sim_harness` deliberately omits. Adding the UI alone reproduces a plugin-set mismatch of the
+    // test's own making rather than anything a player can hit, and the panic it produces looks
+    // exactly like the real one. Mirror `lib::run`'s windowed group so this test fails only for
+    // reasons the shipped game can actually reach.
+    app.add_plugins((
+        UiPlugin,
+        foundation_vs_slop::research::ResearchLabPlugin,
+        foundation_vs_slop::site::O5Plugin,
+        foundation_vs_slop::knowledge::RosterPlugin,
+        foundation_vs_slop::knowledge::RecordsPlugin,
+        foundation_vs_slop::antagonist::AntagonistPlugin,
+        foundation_vs_slop::director::DirectorPlugin,
+        foundation_vs_slop::ui::briefing::BriefingPlugin,
+    ));
+    app.finish();
+    app.cleanup();
+
+    for _ in 0..40 {
+        app.update();
+    }
+
+    // Into an expedition, and let the world actually build and run.
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    for _ in 0..30 {
+        app.update();
+    }
+
+    // The debrief — where the O5 report is filed while the world is still alive.
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Debrief);
+    app.update();
+    app.update();
+
+    // RETURN TO SITE: both halves, in one transition, exactly as `ui::debrief` does it. This is the
+    // step that despawns the squad and the expedition world out from under anything still running.
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Site);
+
+    // Several frames, not one: a missing-`Res` panic is *parameter validation*, which fires the first
+    // time each system actually runs — and a `Single<…>` miss needs the despawn commands to have been
+    // applied. One frame would miss both.
+    for _ in 0..60 {
+        app.update();
+    }
+
+    assert_eq!(
+        app.world().resource::<State<AppState>>().get(),
+        &AppState::Site,
+        "the Site must be reachable and survivable after a run ends"
+    );
+}
