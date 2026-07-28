@@ -1087,6 +1087,63 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
+- **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
+  ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
+  intermittently **because the bug is intermittent**. That is the test working.
+  **The evidence.** On PR #68, `search_rollouts_of_mutants_are_reproducible_under_load` failed on CI:
+  ```
+  mutant #3 (rng seed 0x6d07a17) on world 0x5c09191:
+    2 distinct [(66c73bd35b9ceb48, 1f25), (15c4e253ae10b46a, 1f25)]
+  ```
+  Two replicate rollouts of the **same** mutant genome on the **same** world: snapshot hashes differ,
+  **field hashes identical**. So actor state diverged while the stigmergy grids did not — which points
+  at a gameplay decision keyed on ECS query order rather than at a field-update ordering bug.
+  **It is intermittent, and that is measured rather than assumed:** commit `1d3c0a7` produced a harness
+  lane **success and a failure on two runs of identical code**.
+  > ### 🔑 THE DIVERGENCE IS BIMODAL AND STABLE — this is a discrete decision, not float drift
+  > It reproduced at `08f7b38` with **byte-identical output** to the `1d3c0a7` failure: same mutant #3,
+  > same world `0x5c09191`, and the *same two* snapshot hashes `66c73bd35b9ceb48` / `15c4e253ae10b46a`.
+  > Two different commits, two different CI runs, one pair of outcomes.
+  >
+  > That rules out the obvious explanation. **Accumulated float noise under scheduling pressure would
+  > give a different hash every time.** A rollout landing on exactly one of *two* states, repeatably,
+  > is a **binary decision flipping** — an `if`, a tie-break, a "first match wins" over an unordered
+  > iteration — not drift.
+  >
+  > **And the field hash is `1f25` in BOTH branches.** The stigmergy grids evolve identically; only
+  > actor state (`Transform`/`Health`) differs. So whatever flipped either does not deposit, or flips
+  > late enough that no deposit follows it. That is a strong filter on where to look: a decision that
+  > moves or damages an actor without writing a field.
+  >
+  > This is far more tractable than the failure first appeared, and it narrows the search to a
+  > *specific* genome × world pair that sits on a knife edge — which is exactly what
+  > `evaluate::trace_episode` + `row_trace` are built to bisect.
+  **It is very likely NOT new.** main's scheduled nightly the same day failed *both*
+  `search_parallel` tests — the same family (load-based determinism), on the same runner class, on a
+  branch containing none of PR #68's work. Two independent tests in that family failing on CI while
+  passing on a 24-core workstation is one pattern, not two.
+  **Why this box cannot see it, and why that matters.** The load generator spawns a fixed **8 busy-loop
+  threads**. On 24 cores that is mild; on a 2–4 core GitHub runner it is 2–4× oversubscription. **The CI
+  runner is a strictly harsher determinism probe than the development machine** — which inverts the
+  usual assumption that local reproduction is the prerequisite for investigating. TESTING.md invariant
+  13 applies directly: an exoneration is only as strong as the condition it was measured under, and
+  every local pass here was measured under a weaker one.
+  ⚠️ **FVS-J-5's lane split reduced this test's visibility, and that was decided BEFORE this failure was
+  seen.** It now runs only in the nightly job — still a HARD job, so it still gates, but no longer per
+  PR. That split was justified on runtime (two tests were ~89% of a 2-hour lane) and it stands on those
+  grounds; it must not become the reason this goes uninvestigated. **If this proves to be a live
+  determinism bug, the split should be revisited** — a per-PR lane that cannot catch it is the exact
+  gap FVS-J-5 exists to close.
+  *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
+  `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
+  first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The
+  precedent is `docs/rl/2026-07-16-search-rollout-nondeterminism.md`, the G0 investigation.
+  **Reproducing it locally will likely require raising the load generator's thread count** well past 8,
+  to emulate the runner's oversubscription — the cheapest first experiment, and it is one this box can
+  actually run.
+  *Done when:* the divergent decision is named and fixed, **or** the failure is proven to be an artefact
+  of oversubscription that cannot occur at shipped thread counts — with the measurement that shows it.
+  · *Deps:* — · *Touches:* `src/squad_ai/evaluate.rs`, wherever the order-dependent decision lives · *Reading:* [ABM], [TEST-NT]
 - **FVS-N-12 — `train --no-apply` still overwrites the one TRACKED archive (FOUND 2026-07-28)** · S · *determinism: offline* · ✅ **FIXED 2026-07-28**
   **Measured, and it bit during a smoke run.** `--no-apply` is documented as "do NOT bake at the end …
   leave `config.ron`/goldens alone", and it honours that. But each island phase *also* copies its winner
@@ -1128,8 +1185,20 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   behaviour archive was flagged for — and audio was never on that list, because the 2026-07-24 audit
   verified `swarm_descriptor` **in isolation**.
   **The generalised rule, which is the real finding: a descriptor is only "healthy" relative to a given
-  SEARCH. Audit the knobs↔descriptor *pair*, never the descriptor alone.** `levels` in the same run came
-  back healthy (55–62 elites) because level genes move swarm behaviour directly.
+  SEARCH. Audit the knobs↔descriptor *pair*, never the descriptor alone.**
+  ✅ **CONFIRMED BY CONTROLLED COMPARISON 2026-07-28.** One smoke run, four archives, identical budget
+  (4 generations × batch 8, 24 islands, same machine, same seed) — so search budget, contention and
+  emitter are held constant and only the knobs↔descriptor pairing varies:
+  | archive | what the genome moves | descriptor axes | coverage / 64 |
+  |---|---|---|---|
+  | **policy** | squad decisions | bespoke `rl_eval::policy_descriptor` (initiative × caretaking) | **21** |
+  | **levels** | dungeon architecture | swarm behaviour | **17** |
+  | audio | acoustic *stimulus* knobs | decision-mode shares | **1** |
+  | behavior | physical speeds/bands | decision-mode shares | **1** |
+  The two that collapse are **exactly** the two scoring *physical* knobs against *decision-mode* axes;
+  the two that illuminate are the ones whose genome moves the measured axes directly. This is not "QD
+  does not work on this project" — `policy_descriptor`, itself the fix for an earlier collapse, is the
+  best archive in the run.
   *Done when:* audio is scored against axes its knobs actually move — candidates: mean field gradient
   and din-driven displacement — and a bake illuminates materially more than 3 cells. **Changing a
   descriptor invalidates committed archives and shifts training semantics, so it is a design decision,
