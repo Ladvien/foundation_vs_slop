@@ -237,6 +237,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 
 - **FVS-C-1 — Wire SCP-610 from zero** · L (+ an asset export first) · *determinism: core*
   ⚠️ **Corrected 2026-07-25 — 610 is NOT asset-complete.** The claim "asset-complete + rigged … the most shovel-ready item in the repo" was wrong. There is **no `.glb` anywhere** — not in `assets/`, not in `/mnt/codex_fs/game_assets/SCP_Characters/gltf/`. What exists is a Blender *generator* (`SCP_Characters/src/scp_characters/monsters/scp610.py`, `examples/build_scp610_infected.py`, `tests/test_scp610.py`) plus one reference photo. So C-1 carries a **prerequisite**: run the builder and export `scp610.glb` against the `docs/artist_guide.md` contract. Until then 610 is *less* shovel-ready than 999/1048/150, which have shipped rigs — consider leading Push 3 with those.
+  ⛔ **MEASURED 2026-07-27 — the prerequisite is not "run the builder". The builder is BROKEN.**
+  Ran it headless (`blender --background`) against the generator's current home. It does not reach an
+  export; it dies inside its own mesh construction:
+  ```
+  monsters/infected.py:616 in _build_mesh
+  AssertionError: stub topology mismatch: basis has 3923 verts, grown target has 3921
+                  — the collapsed/grown builds diverged
+  ```
+  Two separate things are now known that the old "run the builder and export" framing hid:
+  * **The example driver's paths are stale.** `examples/build_scp610_infected.py` hardcodes
+    `REPO = /mnt/codex_fs/game_assets/SCP_Characters`, which no longer exists — the project moved under
+    `projects/`. Worked around here by putting the real `src` on `sys.path` first and `runpy`-ing the
+    builder, so **that** part is not the blocker and needs no edit to their repo.
+  * **The generator has a real geometry bug.** The assertion guards the basis/grown shape-key
+    correspondence, and the two builds genuinely disagree by 2 vertices. The n-gon triangulation
+    immediately above it is documented as vertex-count-neutral (fan/ear-clip over existing verts), so
+    the divergence is upstream of it, in the collapsed-vs-grown dual build itself.
+  **Not fixed here, deliberately.** It is a different repository's geometry pipeline, the fix needs an
+  understanding of their dual-build correspondence rather than a guess at ±2 verts, and guessing at it
+  would produce an asset whose shape keys are subtly wrong — which would surface later as broken
+  secondary motion rather than as an error. **C-1 is blocked on that bug**, and so is FVS-K-1 behind it.
   Then: faction membership, field deposits/reads, drives, and a `ContainmentRule` consumed by the quarantine archetype (B-6).
   *Done when:* `scp610.glb` exists and loads; 610 spawns, participates in the shared substrate, is containable via quarantine; killable but yields nothing. · *Deps:* B-6, **610 asset export** · *Touches:* new `src/scp610/`, `src/ai/`, `src/ai/field.rs`, `assets/scp610/` · *Reading:* [STIG], [STIG-AD]
 - **FVS-C-2 — SCP-999 befriend-capture** · M · ✅ **LANDED 2026-07-26 — the first real capture in the game**
