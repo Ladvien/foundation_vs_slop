@@ -10,7 +10,7 @@
 //! classifies tabular visitation counts as a different method it argues against.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bevy::prelude::{IVec2, Resource};
 
@@ -59,6 +59,66 @@ impl SquadPolicy for RemotePolicy {
             // Nothing queued → hold (the Wander no-op), NOT index 0 (a role duty).
             None => hold_index(behaviors),
         }
+    }
+}
+
+/// A live handle to a [`RemotePolicy`] that is *already installed in a running sim* (FVS-I-3).
+///
+/// # The gap this closes
+///
+/// `RemotePolicy` shipped with `push_action` and **no caller**: the seam existed and nothing could
+/// reach it, because `ActivePolicy` owns a `Box<dyn SquadPolicy>` and a boxed trait object cannot be
+/// pushed to from outside. So the hook was reachable only by a test that constructed the policy
+/// directly — the "pure library, no caller" shape this backlog names as its top process risk.
+///
+/// The fix is ownership, not new machinery: `RemotePolicy`'s queue is already behind a `Mutex`, so an
+/// `Arc` of it is safely shared between the sim and whatever is driving it. The driver keeps one clone
+/// and hands another to `SimConfig::with_policy`.
+///
+/// # Live, not batch
+///
+/// A trainer pushes an action, steps the sim one tick, reads the result, pushes the next. Between
+/// pushes the unit **holds** — [`RemotePolicy`]'s documented `Mode::Wander` no-op — so a slow trainer
+/// produces a stationary squad rather than a squad running the previous action repeatedly. That
+/// distinction is the difference between "the trainer is thinking" and "the trainer is stuck", and only
+/// the first is recoverable.
+///
+/// **Advisory until FVS-J-5**, per this item's own acceptance: nothing gates on a remotely-driven run,
+/// because the harness lane that would gate it is not yet blocking.
+#[derive(Clone, Default)]
+pub struct RemoteDriver(Arc<RemotePolicy>);
+
+impl RemoteDriver {
+    /// Enqueue the next action index for whichever unit decides next.
+    ///
+    /// Deliberately **not** per-unit: `SquadPolicy::choose` is called once per deciding unit per tick
+    /// with no stable unit identity in its signature, so a per-unit queue would need an ordering
+    /// contract the seam does not offer. One queue, consumed in decision order, is the honest model of
+    /// what the trait actually exposes — and it is what a trainer stepping one tick at a time wants.
+    pub fn push_action(&self, index: usize) {
+        self.0.push_action(index);
+    }
+
+    /// How many actions are queued but not yet consumed.
+    ///
+    /// A trainer that lets this grow is running ahead of the sim, which silently decouples its
+    /// observations from the actions they justify — so this is the number to watch, not a debug aid.
+    pub fn pending(&self) -> usize {
+        self.0.queue.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
+    /// The factory `SimConfig::with_policy` takes. Shares *this* driver's queue.
+    pub fn policy_factory(&self) -> Arc<dyn Fn() -> Box<dyn SquadPolicy> + Send + Sync> {
+        let shared = self.0.clone();
+        Arc::new(move || Box::new(shared.clone()) as Box<dyn SquadPolicy>)
+    }
+}
+
+/// So an `Arc<RemotePolicy>` can BE the installed policy while the driver keeps a handle to it.
+/// Delegation only — the decision logic stays in one place.
+impl SquadPolicy for Arc<RemotePolicy> {
+    fn choose(&self, perc: &Perception, behaviors: &[Behavior], role: RoleId, rng: &mut u32) -> usize {
+        RemotePolicy::choose(self, perc, behaviors, role, rng)
     }
 }
 
@@ -180,6 +240,74 @@ mod tests {
         let held = p.choose(&perc(), &behaviors, RoleId::Medic, &mut rng);
         assert_eq!(behaviors[held].mode, Mode::Wander, "hold must be the Wander no-op, not a duty");
         assert_ne!(held, 0, "the Medic's index 0 (TendWounded) is not a hold");
+    }
+
+    #[test]
+    fn an_action_pushed_by_a_driver_reaches_the_installed_policy() {
+        // FVS-I-3's acceptance, and the thing that was impossible before: `ActivePolicy` owns a
+        // `Box<dyn SquadPolicy>`, so nothing outside could push to the queue — the hook was reachable
+        // only by a test that built the policy directly. The driver shares the `Arc`, so the policy the
+        // sim holds and the handle the trainer holds are the SAME queue.
+        let behaviors = default_behaviors_for_test(RoleId::Medic);
+        let driver = RemoteDriver::default();
+        let policy = (driver.policy_factory())();
+        let mut rng = 1u32;
+
+        driver.push_action(2);
+        assert_eq!(driver.pending(), 1);
+        assert_eq!(
+            policy.choose(&perc(), &behaviors, RoleId::Medic, &mut rng),
+            2,
+            "the action a driver pushed must be the action the installed policy takes"
+        );
+        assert_eq!(driver.pending(), 0, "consuming an action must drain it");
+    }
+
+    #[test]
+    fn a_silent_trainer_holds_rather_than_repeating_its_last_action() {
+        // The live-vs-batch distinction. Repeating the last action would make "the trainer is thinking"
+        // indistinguishable from "the trainer is stuck", and only the first is recoverable.
+        let behaviors = default_behaviors_for_test(RoleId::Medic);
+        let driver = RemoteDriver::default();
+        let policy = (driver.policy_factory())();
+        let mut rng = 1u32;
+
+        driver.push_action(2);
+        assert_eq!(policy.choose(&perc(), &behaviors, RoleId::Medic, &mut rng), 2);
+        for _ in 0..3 {
+            let held = policy.choose(&perc(), &behaviors, RoleId::Medic, &mut rng);
+            assert_eq!(behaviors[held].mode, Mode::Wander, "an idle trainer must HOLD");
+            assert_ne!(held, 2, "and must not repeat the last action");
+        }
+    }
+
+    #[test]
+    fn every_clone_of_a_driver_feeds_the_same_queue() {
+        // The property the `Arc` exists for: the trainer holds one clone while the sim holds another,
+        // and a push through either must be seen by the policy. If this ever split, the trainer would
+        // push into a queue nothing reads and the squad would silently hold forever — which looks
+        // exactly like a trainer that is merely slow.
+        let behaviors = default_behaviors_for_test(RoleId::Medic);
+        let a = RemoteDriver::default();
+        let b = a.clone();
+        let policy = (a.policy_factory())();
+        b.push_action(2);
+        assert_eq!(a.pending(), 1, "clones must share one queue");
+        assert_eq!(policy.choose(&perc(), &behaviors, RoleId::Medic, &mut 1), 2);
+    }
+
+    #[test]
+    fn an_external_trainer_cannot_crash_the_game_with_a_stale_action_space() {
+        // The driver is another PROCESS. A trainer built against a different `MODE_COUNT` must be
+        // clamped, not able to index out of bounds.
+        let behaviors = default_behaviors_for_test(RoleId::Medic);
+        let driver = RemoteDriver::default();
+        let policy = (driver.policy_factory())();
+        driver.push_action(usize::MAX);
+        assert_eq!(
+            policy.choose(&perc(), &behaviors, RoleId::Medic, &mut 1),
+            behaviors.len() - 1
+        );
     }
 
     #[test]

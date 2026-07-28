@@ -1036,7 +1036,30 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Shipped:* `tests/genome_coverage.rs`, and its scoping decision is worth keeping. **Per-knob drift is already caught by something stronger than a lint** — `world_genome::authored_round_trips_exactly` asserts `decode ∘ encode` is the identity on the shipped config, so a field added to `SimTuning` without a matching `encode`/`BOUNDS`/`decode` entry fails immediately, and the audio and behavior genomes carry the same guard. What nothing caught was the **coarser** drift: a whole config slice that no genome touches at all, which breaks no round-trip because it is not in one. That is the gap this closes.
   **It is a ledger, not a ban**, and the exemptions are stated once rather than re-litigated: cosmetics cannot move the sim, and three slices (`session:`, `containment:`, `research:`) are deliberately outside the search because they define the **objective** rather than the difficulty — a search free to retune what "winning" or "capturing" means would be moving the measuring stick and archive fitness would stop being comparable between bakes. The failure mode is a *new, unclassified* slice: adding one fails the test by name and demands a decision, which is exactly the review moment the rule wants. Same ratchet shape as `tests/panic_budget.rs`.
   *Done when:* CI enumerates tunable knobs vs genome coverage and fails/warns on gaps; the four families tracked. · *Deps:* — · *Touches:* `src/squad_ai/`, genome defs, CI · *Reading:* [ME], [QD]
-- **FVS-I-3 — Wire the RemotePolicy live-trainer hook** · M · *determinism: offline*
+- **FVS-I-3 — Wire the RemotePolicy live-trainer hook** · M · *determinism: offline* · ✅ **LANDED 2026-07-28**
+  *Shipped:* `squad_ai::rl::RemoteDriver` — a live handle to a `RemotePolicy` that is *already installed
+  in a running sim*, plus `impl SquadPolicy for Arc<RemotePolicy>`.
+  **Why the hook was unreachable, and it was not a missing feature.** `push_action` existed with **no
+  caller** because `ActivePolicy` owns a `Box<dyn SquadPolicy>` — a boxed trait object cannot be pushed
+  to from outside, so the seam was reachable only by a test that constructed the policy directly. That
+  is the "pure library, no caller" shape this backlog names as its top process risk, and the fix is
+  **ownership, not new machinery**: the queue was already behind a `Mutex`, so an `Arc` of it is safely
+  shared between the sim and whatever drives it. The driver keeps one clone and hands another to
+  `SimConfig::with_policy`.
+  **One queue, not per-unit, and that is honest rather than lazy.** `SquadPolicy::choose` is called once
+  per deciding unit per tick with **no stable unit identity in its signature**, so a per-unit queue would
+  require an ordering contract the seam does not offer. One queue consumed in decision order is the
+  accurate model of what the trait exposes — and it is what a trainer stepping one tick at a time wants.
+  **A silent trainer HOLDS rather than repeating its last action**, which is the live-vs-batch
+  distinction: repeating would make "the trainer is thinking" indistinguishable from "the trainer is
+  stuck", and only the first is recoverable. Pinned by
+  `a_silent_trainer_holds_rather_than_repeating_its_last_action`.
+  **The driver is another PROCESS**, so a trainer built against a stale `MODE_COUNT` is clamped rather
+  than able to index out of bounds — `an_external_trainer_cannot_crash_the_game_with_a_stale_action_space`.
+  *Advisory until J-5*, per this item's own acceptance: nothing gates on a remotely-driven run.
+  ⚠️ **`Deps: H-1` was wrong.** The acceptance is *"the hook receives policy updates from a driver"* — a
+  wiring property, testable with any policy. A baked archive would make the driven policy *good*; it was
+  never needed to make the hook *reachable*.
   The hook exists but nothing drives it; connect it for live/near-live policy iteration (feeds H-3).
   *Done when:* the hook receives policy updates from a driver; documented advisory until J-5. · *Deps:* H-1 · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
 - **FVS-H-1 — Retrain stale RL policy archive (PREREQUISITE)** · L · *determinism: offline; harness-gated*
@@ -1094,10 +1117,139 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   ⚠️ **Correction (2026-07-27): the old "otherwise the director is built on the weaker emitter" overstates it.** CMA-**ME** (`map_elites_cma_loop`) *is* reachable via `train rl --cma`, has been used in anger (the 2026-07-23 island run), and is what `train all` already passes for the `rl` phase. So the status quo is CMA-ME, not the isotropic emitter. Also worth knowing before scoping: `rl_search` is the **only** consumer of any CMA emitter — `levels`/`audio`/`behavior`/`evolve3` all use isotropic `map_elites_loop` — so this improves the *policy* archive only unless the wiring is widened.
   Mechanically it means turning `RlSearchConfig`'s boolean `use_cma` into a 3-way emitter enum and threading CMA-MAE's `alpha` (annealing rate) through `SearchArgs`.
   *Done when:* a `train` subcommand runs CMA-MAE end-to-end and writes an archive. · *Deps:* — · *Touches:* `bin/train.rs`, `src/squad_ai/map_elites.rs`, `rl_search.rs` · *Reading:* [ME], [QD], [QD-OEE]
-- **FVS-H-3 — `CurriculumDirector` runtime archive-selection system** · XL · *determinism: selection seeded + logged; sampled config feeds the core*
+- **FVS-H-3 — `CurriculumDirector` runtime archive-selection system** · XL · *determinism: selection seeded + logged; sampled config feeds the core* · ✅ **LANDED 2026-07-28**
+  > ### The grounding argues AGAINST this item's own phrasing, and that decided the design
+  > The item says "target the learning-progress **band**", which reads as *pick the middle-difficulty
+  > cell* — a pair of thresholds. [LPM] (Oudeyer & Kaplan 2007, §"Maximizing competence progress — aka
+  > Flow motivation") considers exactly that and rejects it:
+  > > "a possible manner to model flow would be to introduce two thresholds defining the zone of optimal
+  > > difficulty. **Yet, the use of thresholds can be rather fragile, require hand tuning** … Another
+  > > approach can be taken, which avoids the use of thresholds. It consists in defining the
+  > > interestingness of a challenge as the **competence progress** that is experienced as the robot
+  > > repeatedly tries to achieve it."
+  >
+  > So a cell is not interesting because its difficulty sits in a band — it is interesting because the
+  > player is **getting better at it**. That deletes two hand-tuned constants the band design needed,
+  > which is the reason to prefer it rather than a stylistic choice.
+  >
+  > **The paper's precondition is free here, and it is why this belongs on the archive.** CPM is only
+  > meaningful *within* regions `R_n`, whose boundaries normally have to be learned — and **a MAP-Elites
+  > archive is already partitioned into cells by behaviour descriptor**. The QD structure the search
+  > produced for unrelated reasons supplies exactly the grouping the model requires. A difficulty scalar
+  > would not have.
+  >
+  > [GRIP] names the consequence: progress niches "progressively disappear as they become more
+  > predictable". Nothing decays a mastered cell by hand — the window slides and the derivative falls to
+  > zero, pinned by `a_closing_progress_niche_stops_being_chosen_on_its_own`.
+  >
+  > *Shipped:* `src/director.rs` — `CurriculumDirector`, `CellHistory::learning_progress` (difference of
+  > two window means, [LPM]'s smoothed CPM form), `competence()` over `ExpeditionReport`, and
+  > `elite_overlay::levels_archive_cells`.
+  > **Decisions worth keeping:**
+  > * **Absolute progress, not signed.** A cell the player is getting rapidly *worse* at is as
+  >   informative as one they are mastering — both mean the difficulty is live. Signed progress would
+  >   make the director flee anything going badly, which is the opposite of a curriculum.
+  > * **Unvisited cells score `INFINITY`.** A pure-progress rule can never choose a cell with no history
+  >   — there is no progress to measure — so the campaign would never leave where it started. [LPM]'s
+  >   progress niches must be *discovered*; this is optimism-under-uncertainty doing real work.
+  > * **`learning_progress` returns `Option`, not `0.0`.** "No evidence" and "measured flat" are
+  >   different states; collapsing them makes an untried cell look mastered. The same distinction
+  >   `knowledge::Knowledge::of` draws, for the same reason.
+  > * **`competence()` reads the Council's five terms for a different question.** P-1 gave the search
+  >   and the Council one vocabulary for "how did that expedition go"; this is a third *reader*, not a
+  >   fourth definition — the Council asks what funding this earned, the director asks how competent it
+  >   was, and a cheap win in an easy world funds well while teaching nothing.
+  > * **An empty/missing archive yields no pick and the AUTHORED world plays.** Not a fallback: with
+  >   nothing to sample, `config.ron` is the right expedition rather than a degraded one.
+  > *Determinism:* **windowed-only and structurally so** — `DirectorPlugin` is registered in the
+  > windowed group alone, so the harness's `OnEnter(RunState::Active)` keeps exactly the nodes the
+  > deterministic core has always had. Selection is reproducible given the `RunSeed`: candidates are
+  > sorted before any draw, interest is a pure function of stored history, and the only randomness is
+  > the seeded tie-break — which exists because ties are the norm at a cold start, where every cell is
+  > `UNVISITED`, and "first in sort order" would walk the archive on a fixed, learnable path.
+  > `SAVE_VERSION` 5 → **6**: the per-cell history *is* the curriculum, and dropping it on restart would
+  > hand the player back the worlds they had already mastered and call it adaptive difficulty.
+  > ⚠️ **The archive it samples predates FVS-I-1's containment constraint**, so it may contain
+  > capture-hostile worlds — the "director surfaces anti-loop content" risk I-1 was filed against. That
+  > is an argument about the **data**, not the system: re-bake and the same director samples better
+  > worlds with no code change. See H-1.
   A **new** resource sampling the QD archive `OnEnter(InGame)` to pick the next challenge — experience-driven/dynamic difficulty. **Not** the static env-var `elite_overlay`. Target the learning-progress band.
   *Done when:* successive expeditions receive archive-sampled challenges tuned toward intermediate difficulty; selection reproducible given seed. · *Deps:* H-1 (ideally H-2), I-1 · *Touches:* new director module, `src/squad_ai/`, `elite_overlay.rs` (read-only ref), app-state · *Reading:* **[QD-PCG]**, [LPM], [QD], [QD-OEE]
-- **FVS-L-4 — Curriculum/expedition briefing HUD** · S · *determinism: render*
+- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · *determinism: offline measurement*
+  **The decision, made 2026-07-28 in FVS-H-3.** `CellHistory::interest` takes `|progress|`, so a cell the
+  player is getting rapidly **worse** at is as interesting as one they are mastering — both mean the
+  difficulty is live rather than settled. Signed progress would make the director *flee* anything going
+  badly, which is the opposite of a curriculum.
+  **Why it is a spike and not a settled fact:** [LPM] defines CPM over the *derivative* of competence
+  without committing to a sign, because a robot setting its own goals and a game pacing a player are not
+  the same problem. A player on a losing streak may experience "the game keeps sending me back to the
+  thing beating me" as punishment rather than as a curriculum — the failure mode absolute progress
+  invites and signed progress cannot have.
+  *Falsify it:* play (or replay) a campaign that deliberately declines, and check whether the director
+  parks in the declining cell. Measure how many consecutive expeditions it takes to leave.
+  *If wrong:* half-wave rectify — weight gains fully and losses partially — rather than flipping to
+  pure signed, which would reintroduce the flee behaviour. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]
+- **FVS-H-5 — SPIKE: does `UNVISITED = INFINITY` starve the measured cells?** · S · *determinism: offline measurement*
+  **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
+  measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
+  there is no progress to measure — and the campaign never leaves where it started. [LPM]'s progress
+  niches have to be *discovered*.
+  **The risk it creates, and it is real:** the shipped `elites_levels.ron` has **55 occupied cells**. At
+  one expedition per pick that is 55 expeditions of pure exploration before the director exploits
+  anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
+  correct in principle and possibly far too patient at this archive size.
+  *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
+  *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
+  *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
+- **FVS-H-6 — SPIKE: `Option` vs `0.0` for an unmeasured cell — is the distinction load-bearing?** · S
+  **The decision.** `CellHistory::learning_progress` returns `Option<f32>`, `None` until two full
+  windows exist — *not* `0.0`. "No evidence" and "measured flat" are different states, and collapsing
+  them makes an untried cell look **mastered**, which is the one reading that would stop the director
+  exploring entirely. Same distinction `knowledge::Knowledge::of` draws for beliefs, grounded in
+  [EPISTEMIC]'s Fisher argument that ignorance is not a uniform probability.
+  **Why it is still a spike:** the distinction is currently load-bearing only because `interest()` maps
+  `None` to `UNVISITED`. If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
+  into that prior and become ceremony. Worth re-checking *after* H-5, not before.
+  *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
+  whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
+- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S
+  **The decision.** A missing or empty archive makes `CurriculumDirector::pick` return `None`, the
+  director does not fire, and the **authored** `config.ron` world plays. Claimed as one path rather than
+  a fallback: with nothing to sample there is no degraded substitute being written — the authored world
+  is the *right* expedition, not a consolation for a failed one.
+  **The reason to check rather than assert it:** that argument is exactly the shape a fallback uses to
+  justify itself, and this repo's rule is unusually strict ("no backup modes, no rollover behavior").
+  The honest test is whether the two paths can ever *disagree about what the player is playing* — if a
+  campaign can silently alternate between directed and authored worlds without the player being told,
+  it is a second path however it is framed.
+  *Falsify it:* delete the archive mid-campaign and check the player can tell. `pick_next_challenge`
+  currently `info!`s it, which is invisible in a shipped build.
+  *If wrong:* surface it in FVS-L-4's briefing — "AUTHORED UNIVERSE (no archive)" — so the state is
+  legible rather than silent. That is probably the right move regardless. · *Deps:* H-3, L-4 · *Reading:* — (no corpus resource)
+- **FVS-L-4 — Curriculum/expedition briefing HUD** · S · *determinism: render* · ✅ **LANDED 2026-07-28**
+  *Shipped:* `src/ui/briefing.rs` — the sampled world named as a **Branch universe** at run start.
+  **Why it is not optional polish.** FVS-H-3 samples a world by where the player is learning fastest,
+  and without this panel that is *completely invisible*: worlds change, the reason does not surface, and
+  adaptive difficulty is indistinguishable from randomness — or from the game being inconsistent. **A
+  director the player cannot perceive is one that gets blamed for bad luck.**
+  **It renders the archive's OWN axes — `clutter` and `infestation` — and deliberately does not collapse
+  them into "difficulty: 7/10".** MAP-Elites does not produce a difficulty scalar, and inventing one
+  here would discard exactly what the archive exists to preserve: two worlds can be equally hard in
+  *different ways*, and a dense clean ruin is not interchangeable with an open infested one. Pinned by
+  `the_axes_are_shown_separately_not_collapsed_into_a_difficulty_score`.
+  Bars rather than numbers, because the axes are **comparative** — what matters is that this world is
+  more cluttered than the last, not that it scores 0.62.
+  ✅ **Closes FVS-H-7's tell.** With no archive the authored `config.ron` world plays, and the briefing
+  now says `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED` in as many words, in the same voice as the sampled
+  case so it reads as a legitimate expedition rather than an error. That was the spike's actual
+  question: not whether the reasoning is sound, but whether the player can **tell** — a path you cannot
+  perceive is a second path however the code frames it. The spike stays open only for its wider
+  audit; its concrete fix has landed.
+  Rendered through `ui::widgets::text_colored` rather than a hand-rolled bundle, so it honours
+  `theme.scale` — a panel that ignores the accessibility text-scale knob stops being readable for
+  exactly the players who turned it up.
+  *Determinism:* windowed-only; `BriefingPlugin` is in the windowed group, so the harness never
+  registers it. · *Deps:* H-3
   Surface the director's chosen challenge as a Branch-universe briefing at run start.
   *Done when:* each expedition shows its sampled challenge framing. · *Deps:* H-3 · *Touches:* UI, director · *Reading:* [LPM], [QD-PCG]
 
@@ -1287,7 +1439,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `search_rollouts_*_under_load` tests run replicate 7200-tick rollouts. Those are load-bearing and
   should not be cut; the next honest lever is running the lane's targets in parallel *processes* (they
   are only serialised within a binary today) or splitting the slow replicate tests onto a nightly.
-  *Done when:* harness lane blocks merge on regression. · *Deps:* H-1 · *Touches:* CI · *Reading:* [TEST-NT], [TEST-OW], [ABM]
+  ⚠️ **RE-MEASURED 2026-07-28 — the stated dep is wrong and the real gate is one number nobody has.**
+  * **`Deps: H-1` does not hold.** The entry says "promote … once retrain stabilizes archives", but the
+    lane does not run a search: `search_parallel`'s two archive tests are already **`--skip`ped into the
+    nightly job**. Nothing this lane executes depends on a baked archive.
+  * **The runtime blocker is already half-solved.** Measured on this box 2026-07-28: `search_parallel`
+    **3475 s (58 min)** — correctly moved to nightly — and the rest of the lane **866 passed / 0 failed**
+    with `replay.rs` at 2059 s (34 min). But that is a 24-core workstation; a GitHub runner is far
+    slower, and the local figure does not transfer.
+  * **What is actually missing: one GREEN harness run's CI duration.** Every observation so far is a
+    time-to-*failure* (6 m 5 s, on `playtest_level` — a real bug, since fixed), which says nothing about
+    the green path. A per-PR hard gate is a decision about how long a merge waits, and that number has
+    to be measured, not estimated.
+  **This lane has already earned promotion on evidence.** It caught a genuine defect on PR #68 that the
+  pure-CPU gate could not see — FVS-I-1's containment constraint was scoped into the *shared*
+  `minimal_criterion` and broke `playtest_level`, which is `test-harness`-gated and therefore invisible
+  to `cargo test`. That is precisely the class of regression an advisory lane fails to stop.
+  *Done when:* harness lane blocks merge on regression. · *Deps:* ~~H-1~~ — **one green CI run's
+  duration**, then a decision on acceptable merge latency · *Touches:* CI · *Reading:* [TEST-NT], [TEST-OW], [ABM]
 
 ---
 

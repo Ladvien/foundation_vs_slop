@@ -49,6 +49,10 @@ use crate::site::{HeldAt, SiteRoot};
 
 /// Bumped whenever the saved shape changes. A mismatch is refused, never migrated — see the module docs.
 ///
+/// `6` (2026-07-28): `director` (FVS-H-3). The per-cell competence history IS the curriculum — a
+/// restart that dropped it would hand the player back the worlds they had already mastered and call it
+/// adaptive difficulty.
+///
 /// `5` (2026-07-27): `antagonist` (FVS-K-4). SCP-9191's phase and the standing of its argument with
 /// the archive are campaign state — a restart that reset it would hand the Director a clean shelf and
 /// a dormant antagonist, which is the endgame undone rather than resumed.
@@ -65,7 +69,7 @@ use crate::site::{HeldAt, SiteRoot};
 /// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
 /// captured but not *what* they were, and the research battery and unlock payout are both keyed on
 /// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
-pub const SAVE_VERSION: u32 = 5;
+pub const SAVE_VERSION: u32 = 6;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,6 +124,8 @@ pub struct SaveGame {
     pub conversations_played: crate::dialogue::triggers::ConversationsPlayed,
     /// SCP-9191's phase and the standing of its argument with the archive (FVS-K-4).
     pub antagonist: crate::antagonist::Antagonist,
+    /// What the curriculum director has learned about each archive cell (FVS-H-3).
+    pub director: crate::director::CurriculumDirector,
 }
 
 impl SaveGame {
@@ -201,6 +207,8 @@ pub fn capture_save(world: &mut World) -> SaveGame {
         .unwrap_or_default();
     let antagonist =
         world.get_resource::<crate::antagonist::Antagonist>().copied().unwrap_or_default();
+    let director =
+        world.get_resource::<crate::director::CurriculumDirector>().cloned().unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
@@ -210,6 +218,7 @@ pub fn capture_save(world: &mut World) -> SaveGame {
         requisitioned,
         conversations_played,
         antagonist,
+        director,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -258,6 +267,9 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
     }
     if let Some(mut a) = world.get_resource_mut::<crate::antagonist::Antagonist>() {
         *a = save.antagonist;
+    }
+    if let Some(mut d) = world.get_resource_mut::<crate::director::CurriculumDirector>() {
+        *d = save.director.clone();
     }
 
     let site = world.get_resource::<SiteRoot>().map(|s| s.0);
@@ -338,6 +350,15 @@ mod tests {
             conversations_played: crate::dialogue::triggers::ConversationsPlayed(
                 ["intro".to_string(), "first_capture".to_string()].into_iter().collect(),
             ),
+            director: {
+                let mut d = crate::director::CurriculumDirector::default();
+                d.current = Some((2, 3));
+                d.cells.insert(
+                    crate::director::key((2, 3)),
+                    crate::director::CellHistory { recent: vec![0.2, 0.4, 0.6] },
+                );
+                d
+            },
             antagonist: crate::antagonist::Antagonist {
                 phase: crate::antagonist::Phase::Curating,
                 seeded: 3,

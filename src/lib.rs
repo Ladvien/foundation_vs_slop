@@ -55,6 +55,7 @@ pub mod perf_hud;
 #[cfg(debug_assertions)]
 pub mod research_room;
 pub mod dialogue;
+pub mod director;
 pub mod dungeon;
 /// Evolved-elite runtime overlay: `FVS_*_ELITE` env vars install a search elite (behaviour / world / audio
 /// / levels config slices, or an RL `NeuralPolicy`) at startup without editing `config.ron`.
@@ -372,6 +373,14 @@ pub fn run() {
                 // windowed-only for the same reason the records office is: the endgame is an argument
                 // conducted at Site-67, not in the field.
                 antagonist::AntagonistPlugin,
+                // FVS-H-3: samples the levels archive for the next expedition's world. Windowed-only,
+                // so `OnEnter(RunState::Active)` keeps exactly the nodes the deterministic core has
+                // always had — the director cannot move a golden.
+                director::DirectorPlugin,
+                // FVS-L-4: renders what the director chose. Without it, adaptive difficulty is
+                // indistinguishable from randomness — a director the player cannot perceive is one
+                // that gets blamed for bad luck.
+                ui::briefing::BriefingPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,
