@@ -46,7 +46,14 @@ impl Plugin for ResearchHudPlugin {
             .add_systems(OnExit(AppState::Site), despawn_scoped::<ResearchHudRoot>)
             .add_systems(
                 Update,
-                (request_experiment, update_readout).run_if(in_state(AppState::Site)).distributive_run_if(in_state(crate::session::RunState::Active)),
+                // NO `RunState::Active` gate here, and that is load-bearing: research happens at the
+                // SITE, which is only ever entered by `RETURN TO SITE` — and that sets `RunState::Idle`
+                // in the same transition. `Site ∧ Active` is never true, so gating on it silently kills
+                // the research verb (all of FVS-E-5). It was added by FVS-G-6's sweep, which matched
+                // registrations by system NAME: `ui::containment_hud` has a *different* `update_readout`
+                // that does take `Res<Dungeon>`, and the bare name collided. Neither system here takes a
+                // run-scoped resource, so there is nothing to gate.
+                (request_experiment, update_readout).run_if(in_state(AppState::Site)),
             );
     }
 }
