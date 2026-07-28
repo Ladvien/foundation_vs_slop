@@ -1110,6 +1110,90 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
   `ui::site_hud` works — not a reach into the in-game overlay stack.
   *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
+- **FVS-N-13 — Dungeon tiles are not `run_scoped()`, so every expedition leaks a whole dungeon (FOUND 2026-07-28, review)** · M · *determinism: touches the pinned core*
+  `dungeon::render::spawn_tiles` moved from `Startup` to `OnEnter(RunState::Active)` in the per-run
+  migration, but its tile entities never gained `session::run_scoped()`. The only `run_scoped()` in the
+  file is on the ground half-space. So floor tiles, wall slabs, lintels, corner posts — **and their
+  Avian static colliders** — survive the run.
+  **Play run 1 → RETURN TO SITE → run 2** and a different map generates at the same origin while run 1's
+  entire tile set is still resident: two interpenetrating dungeons, invisible run-1 walls that gib
+  chunks bounce off, and an unbounded entity/mesh/collider leak of one dungeon per expedition.
+  `session::run_scoped`'s own doc names dungeon tiles as a carrier; the migration simply missed them.
+  `tests/session.rs::leaving_and_re_entering_a_run_builds_a_fresh_different_world` only counts `Unit`,
+  which is why nothing caught it.
+  ⚠️ **Adding the tag WILL move the goldens** — it changes what exists in the pinned world — so this
+  needs a deliberate measure-and-re-pin, not a drive-by edit. That is the only reason it is filed rather
+  than fixed. · *Deps:* — · *Touches:* `src/dungeon/render.rs`, `src/gore.rs`, `src/mycelia/` · *Reading:* [ECS]
+- **FVS-H-8 — FVS-H-3's director is INERT: the elite overlay writes config nobody re-reads (FOUND 2026-07-28, review)** · M
+  `director::pick_next_challenge` calls `apply_dim(&mut gc, Dim::Levels, …)`, which writes `gc.dungeon`,
+  `gc.mycelia`, `gc.placement.metropolis` and `gc.placement.density`. **None is ever read again.**
+  `DungeonPlugin::build` copies `gc.dungeon` into `DungeonConfigRes` and `generate_dungeon` reads only
+  that; `PlacementPlugin` and `MyceliaPlugin` snapshot theirs the same way at plugin-build time.
+  So the log says a challenge was sampled and **every expedition is identical**. FVS-H-3 ships a
+  correct, tested selector wired to nothing — the exact "pure library, no caller" shape this backlog
+  names as its top process risk, one layer out.
+  *Fix is not in `director.rs`:* either the consumers must read `GameConfig` at world-build time, or the
+  director must write the resources they actually read (`DungeonConfigRes`, `PlacementSolvers`,
+  `Density`, `MyceliaConfig`). The second is smaller; the first is more honest about where config lives.
+  **An architectural call, which is why it is filed.** · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
+- **FVS-I-5 — `containment_criterion` still gates the squad and swarm archives (FOUND 2026-07-28, review)** · M · *determinism: offline*
+  FVS-I-1's constraint was moved out of the shared `minimal_criterion` and into `coevolve/search.rs` —
+  but it landed inside `score_triple_compact`, whose `None` **discards the whole triple**. So a
+  capture-hostile world drops the squad and swarm candidates evaluated alongside it, which is precisely
+  the coupling the scoping fix existed to remove. The constraint is correct; its *placement* still is
+  not. Correcting it means letting the world candidate be rejected independently of its partners, which
+  changes what the co-evolution admits — so it wants a probe run, not a quick edit. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
+- **FVS-B-9 — The quarantine verb is a no-op: nothing inserts `Quarantinable` (FOUND 2026-07-28, review)** · M
+  `tick_quarantine`'s anomaly query is filtered `With<Quarantinable>`, and **no production spawner
+  inserts it** — the marker appears only in `area.rs`'s own tests and the `mod.rs` re-export. So a
+  player spends **50 O5 budget** on a `QuarantineCharge`, carries it into the expedition, places it, and
+  the charge and the budget are consumed with **zero effect and no warning**. Containment archetype 2
+  (FVS-B-6) is reachable only from unit tests.
+  **Which anomalies are quarantinable is a design decision, not a repair** — that is why this is filed
+  rather than fixed. · *Deps:* B-6 · *Touches:* `src/containment/area.rs`, the anomaly spawners
+- **FVS-J-7 — The config mtime guard rejects `train apply`, the one process meant to rewrite config (FOUND 2026-07-28, review)** · S
+  `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard against
+  editing config during a test run. But `train apply` **writes** `config.ron` and then reloads it to
+  verify, so it trips its own guard and aborts **with the file already rewritten**, which is the
+  half-baked state the guard exists to prevent. · *Deps:* — · *Touches:* `src/config.rs`, `src/bin/train.rs`
+- **FVS-J-8 — `repin_one` cannot re-pin a per-platform golden (FOUND 2026-07-28, review)** · S
+  `bake::repin_one` refuses a marker that appears twice, treating duplication as ambiguity. The
+  per-platform golden decision made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected, so each marker
+  now **literally appears twice** in `tests/replay.rs`. `train apply --repin-goldens` therefore fails at
+  the re-pin step every time. Two correct answers land in one file and the tool calls it ambiguous.
+  · *Deps:* J-3 · *Touches:* `src/bake.rs`
+- **FVS-N-14 — The flicker budget is a `Local` that never resets, so run 2 gets no failing tubes (FOUND 2026-07-28, review)** · S
+  `light.rs`'s per-room failing-tube cap is a `Local<HashMap<FlickerRoom, usize>>` that is never
+  cleared. Fixtures are `run_scoped()` and re-spawned per expedition, and `RegionId` is a per-dungeon
+  `u32` restarting at 0 — so budget spent in run 1 permanently bars the *different* rooms that reuse
+  those ids in run 2. · *Deps:* — · *Touches:* `src/light.rs`
+- **FVS-N-15 — The gore shader seed lost its randomization when the seed source changed (FOUND 2026-07-28, review)** · S
+  `let fseed = *seed as f32 * 0.618` was kept verbatim while `seed` changed from a small `Local<u32>`
+  counter to a full-range FNV-1a hash (`scatter_seed`). At that magnitude `hash21`'s `fract(p * 0.1031)`
+  loses all mantissa precision and returns exactly 0, so **every blood pool and spray gets the identical
+  hash output** and the per-pool variation the shader exists to provide is gone. · *Deps:* — · *Touches:* `src/gore.rs`
+- **FVS-O-6 — `Knowledge::hear` reports success when `learn` refused the belief (FOUND 2026-07-28, review)** · S
+  `hear` returns `true` after `learn` silently declines a contradicting `Told`-vs-`Told` claim. So
+  `dialogue::bark_belief_tellings` voices a speech balloon and `RecentTellings` records a transfer that
+  **never happened** — the player watches a rumour visibly cross the squad while FVS-L-5's roster shows
+  the listener unchanged. The two halves of FVS-O-3 disagree about whether anything occurred. · *Deps:* O-3 · *Touches:* `src/knowledge/gossip.rs`
+- **FVS-O-7 — Research briefing re-learns every frame, saturating a `Read` belief to certainty (FOUND 2026-07-28, review)** · S
+  `research::unlock::brief_the_squad_on_completed_research` is on bare `Update` with no run condition and
+  re-calls `learn` every frame. `learn` compounds confidence, so a belief that should sit at
+  `Provenance::Read`'s **0.35** climbs to ~**0.99** in well under a second — making a write-up
+  indistinguishable from firsthand experience and defeating the provenance ordering FVS-O-4's whole
+  "only firsthand findings are filed" rule depends on. · *Deps:* O-2 · *Touches:* `src/research/unlock.rs`
+- **FVS-N-16 — Bear and manca smell ids collide (FOUND 2026-07-28, review)** · S
+  SCP-1048 mints its `CyanideSmell` under `smell_seed::MANCA` with an **independent counter starting at
+  the same values**, so a bear and a manca in one run receive the same id — the id
+  `health::smell_tests::same_raw_seed_yields_distinct_ids_across_species` exists to keep unique across
+  species by construction. · *Deps:* — · *Touches:* `src/scp1048/mod.rs`
+- **FVS-E-7 — The study-subject tiebreak never reads its own tiebreak key (FOUND 2026-07-28, review)** · S · *determinism: windowed pick*
+  `research::lab::keep_a_study_subject`'s comparison never reads `key.3`, so the `Entity` tiebreak its
+  comment claims makes the order **total** is not applied. Two specimens tying on every earlier
+  component are ordered by query iteration order, which is not stable across `App` instances. Exactly
+  the class `tests/determinism_lint.rs` enforces — and the fourth site in this repo whose comment
+  asserts a total order it does not have. · *Deps:* E-5 · *Touches:* `src/research/lab.rs`
 - **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
   ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
   intermittently **because the bug is intermittent**. That is the test working.
