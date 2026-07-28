@@ -389,7 +389,7 @@ impl bevy::prelude::Plugin for KnowledgePlugin {
             )
                 .chain()
                 .after(crate::ai::AiSet::Drives)
-                .before(crate::ai::AiSet::Think),
-        );
+                .before(crate::ai::AiSet::Think).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }

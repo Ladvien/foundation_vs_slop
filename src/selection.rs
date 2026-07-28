@@ -77,10 +77,16 @@ impl Plugin for SelectionPlugin {
                     .run_if(resource_equals(ArmedTool::Cap)),
             )
                 .chain()
+                // FVS-G-6: none of these mean anything without an expedition, and `command_input` /
+                // `place_quarantine_input` take `Res<Dungeon>` non-optionally — the exact pair whose
+                // panic blocked a world-less frame. `distributive_run_if`, not `run_if`: the tuple form
+                // wraps an anonymous set whose extra graph node permutes the schedule's linearisation
+                // and moves the deterministic golden by itself (measured).
+                .distributive_run_if(in_state(crate::session::RunState::Active))
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         );
         // Cosmetic only — ring gizmos + cursor icon read state but feed nothing pinned, so they stay on `Update`.
-        app.add_systems(Update, (draw_selection_rings, update_cursor));
+        app.add_systems(Update, (draw_selection_rings, update_cursor).distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

@@ -90,6 +90,6 @@ impl Plugin for PlacementPlugin {
         // Reveal each room's furniture the first time a squad unit walks into it, and keep it revealed
         // thereafter (remembered, per-room — see `furniture_room_visibility`).
         app.init_resource::<furnish::RevealedRooms>();
-        app.add_systems(Update, furnish::furniture_room_visibility);
+        app.add_systems(Update, furnish::furniture_room_visibility.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }

@@ -46,7 +46,7 @@ impl Plugin for ResearchHudPlugin {
             .add_systems(OnExit(AppState::Site), despawn_scoped::<ResearchHudRoot>)
             .add_systems(
                 Update,
-                (request_experiment, update_readout).run_if(in_state(AppState::Site)),
+                (request_experiment, update_readout).run_if(in_state(AppState::Site)).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

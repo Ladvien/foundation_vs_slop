@@ -476,7 +476,7 @@ impl Plugin for ParasitePlugin {
                     // charge with no bespoke code — and psi-vision renders it. Pushed before the drain so the
                     // dread lands this tick (mirrors `enemy::deposit_anomaly_aura`).
                     deposit_manca_dread.before(crate::ai::AiSet::Deposits),
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Cosmetic: skeletal animation stays on `Update` (mirrors the crab). Attaching is the
             // shared `anim::attach_pose_blenders` pass (each manca root carries a `BlendSource` from
@@ -486,7 +486,7 @@ impl Plugin for ParasitePlugin {
                 Update,
                 drive_manca_animation
                     .after(crate::anim::PoseAttachSet)
-                    .before(crate::anim::PoseBlendSet),
+                    .before(crate::anim::PoseBlendSet).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

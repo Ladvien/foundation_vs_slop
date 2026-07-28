@@ -627,8 +627,8 @@ impl Plugin for LightFieldPlugin {
             (bake_light_field, apply_dynamic_lights)
                 .chain()
                 .in_set(LightFieldWritten)
-                .after(crate::squad::unit_facing),
-        );
+                .after(crate::squad::unit_facing).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 
@@ -831,8 +831,8 @@ impl Plugin for LightingPlugin {
                 attach_screen_lights,
                 glow_screens,
                 flicker_screens,
-            ),
-        );
+            ).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 

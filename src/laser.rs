@@ -187,8 +187,8 @@ impl Plugin for LaserPlugin {
                     .after(crate::parasite::parasite_burst)
                     .in_set(crate::health::HealthDamage),
                 update_lasers,
-            ),
-        );
+            ).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 

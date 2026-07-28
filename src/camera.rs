@@ -116,8 +116,8 @@ impl Plugin for CameraPlugin {
         // `sync_sim_blocked` isn't registered — an `.after` on an absent system is simply ignored.)
         .add_systems(
             Update,
-            drive_camera.after(crate::ui::state::sync_sim_blocked),
-        );
+            drive_camera.after(crate::ui::state::sync_sim_blocked).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 

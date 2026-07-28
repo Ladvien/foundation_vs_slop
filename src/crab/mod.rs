@@ -316,7 +316,7 @@ impl Plugin for CrabPlugin {
                         .after(crate::ai::AiSet::FieldUpdate)
                         .before(crate::ai::AiSet::Think),
                     nest_reproduce,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Cosmetic: skeletal animation stays on `Update`. Attaching is the shared
             // `anim::attach_pose_blenders` pass (each crab root carries a `BlendSource` from spawn);
@@ -326,7 +326,7 @@ impl Plugin for CrabPlugin {
                 Update,
                 drive_crab_animation
                     .after(crate::anim::PoseAttachSet)
-                    .before(crate::anim::PoseBlendSet),
+                    .before(crate::anim::PoseBlendSet).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

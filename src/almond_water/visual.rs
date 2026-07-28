@@ -86,7 +86,7 @@ impl Plugin for AlmondWaterVisualPlugin {
         app.add_plugins(MaterialPlugin::<AlmondWaterMaterial>::default())
             // Reads the `Dungeon` to seat the puddle, so it is per-run (FVS-A-5).
             .add_systems(OnEnter(crate::session::RunState::Active), setup_puddle.in_set(crate::session::RunBuild::Populate))
-            .add_systems(Update, (upload_level, splash_on_step));
+            .add_systems(Update, (upload_level, splash_on_step).distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

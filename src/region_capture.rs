@@ -77,7 +77,7 @@ impl Plugin for RegionCapturePlugin {
                     sync_marquee,
                     run_pending_capture,
                 )
-                    .chain(),
+                    .chain().distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // The note box only lives while a `NoteDraft` exists (opened by `run_pending_capture`).
             .add_systems(Update, note_input.run_if(resource_exists::<NoteDraft>))

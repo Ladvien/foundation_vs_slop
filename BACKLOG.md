@@ -700,7 +700,56 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-G-5 — The ASYNC door** · M · ✅ **LANDED 2026-07-26**
   *Shipped:* the door trigger in `site::visuals::enter_the_door` (`NextState::set(RunState::Active)` — **no new state machinery**, exactly as scoped: FVS-A-5's `Idle ↔ Active` already *was* the door), plus `src/site/aperture.rs` + `assets/shaders/async_aperture.wgsl` — the volume inside the frame that visibly is-not-a-room, with its charge eased per-frame.
   ⚠️ **The aperture's uniform defaults are guesses.** The shader was written without ever being looked at; nobody has judged it on screen. It is the game's signature image, so it wants one deliberate art pass — see §7. · *Deps:* G-4 · *Reading:* [UV-REV]
-- **FVS-G-6 — `Res<Dungeon>` audit: make `RunState::Idle` a state the game can SIT IN (NEW, 2026-07-26)** · M · *determinism: touches the pinned core*
+- **FVS-G-6 — `Res<Dungeon>` audit: make `RunState::Idle` a state the game can SIT IN (NEW, 2026-07-26)** · M · *determinism: touches the pinned core* · ✅ **LANDED 2026-07-28 — and the goldens did NOT move**
+  > ### The design choice this item left open, decided: `in_state(RunState::Active)`
+  > The asymmetry the entry predicted is real and decides it. **`Dungeon` is never removed**
+  > (`remove_resource::<Dungeon>` → 0 hits), so after `RETURN TO SITE` it survives, describing a
+  > *despawned* world — `resource_exists::<Dungeon>` reads **true** for a stale world and would gate
+  > nothing, while `in_state` would. It is also the condition `session`'s own `FixedUpdate` systems have
+  > always carried, so this is **one mechanism**, not a second way of saying "there is a run".
+  >
+  > ### ⚠️ THE GOLDEN RISK WAS REAL, AND IT WAS NOT WHERE IT LOOKED
+  >
+  > **`.run_if()` on a TUPLE moves the deterministic golden by itself.** It wraps the tuple in an
+  > anonymous system set, and that extra graph node permutes the schedule's linearisation. Nothing is
+  > skipped — the condition is `true` throughout a golden run, because `begin_first_run` flips to
+  > `Active` on `PostStartup` and the frame's own `StateTransition` lands before the first fixed tick.
+  >
+  > **Proved rather than inferred:** replacing the condition with a trivially-true `|| true` produced
+  > the *identical* drifted hash (`305495817500266690` vs golden `3847183448515137100`). So the drift is
+  > structural. **`.distributive_run_if()`** attaches the condition to each system individually, adds no
+  > node, and leaves the golden **bit-identical**. That is what ships.
+  >
+  > Worth generalising: this repo already knows "adding a system changes linearisation". The new part is
+  > that **adding a run condition to a tuple is adding a node**, which reads as a no-op and is not one.
+  >
+  > ### Scope, and where the first attempt over-reached
+  >
+  > Gated: **24** `FixedUpdate` registrations + the `Update` and `RunFixedMainLoop` registrations whose
+  > systems take a run-scoped resource non-optionally — `selection::command_input` (the exact system the
+  > 2026-07-26 measurement named), `place_quarantine_input`, and the `fog`/`light`/`mold`/`gore`/
+  > `psi_vision`/`placement` per-frame systems.
+  >
+  > ⚠️ **A first pass applied the rule broadly — "expedition gameplay only runs during an expedition" —
+  > and broke 14 hard-gate tests.** Bare-`App` unit tests in `anim`, `containment` and `mycelia::fruit`
+  > never enter `Active`, so their systems simply stopped running. **The correct rule is narrower: gate
+  > what would PANIC without a world, not everything.** Those modules' per-frame systems take no
+  > `Dungeon` and never needed it. Recorded because the broad rule is the tempting one and it is wrong.
+  >
+  > ### Corrected scope numbers
+  > The entry says "90 `Res<Dungeon>` sites across 20 files". Measured 2026-07-28: **94 sites across 45
+  > files**, and **81 distinct systems** take it. The registration surface is far smaller — **27
+  > `FixedUpdate` registrations across 18 files** — which is why this was tractable at all.
+  >
+  > *Shipped:* the gating, plus `the_game_can_sit_in_a_world_less_frame_without_a_dungeon` — 120 frames
+  > with `AutoStartFirstRun(false)`, no panic, state stays `Idle`, no `Dungeon` resource. 120 rather
+  > than one, because a missing-`Res` panic is *parameter validation* that fires the first time each
+  > system actually runs.
+  >
+  > ⚠️ **The shipped default is UNCHANGED.** Making the Site the boot destination is a game-design
+  > decision, and this entry itself argues the current order (field first, Site as somewhere you come
+  > *back* to) is "arguably better than opening at the Site anyway". G-6's job was to make the flip
+  > *possible*; it is now one line whenever the Director wants it.
   **The blocker between the Site existing and the Site being where the game opens.** Today `Idle` is a
   one-frame blip at boot: `session::begin_first_run` leaves it on `PostStartup`, so nothing ever observes
   a world-less frame. Site-67 requires the opposite — the player stands in `Idle` for minutes.
