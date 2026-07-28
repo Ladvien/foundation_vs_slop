@@ -296,11 +296,9 @@ impl Plugin for GameAudioPlugin {
                     crab_squitter,
                     growl_stinger,
                     watcher_stinger,
-                    watcher_pad,
                     ambient_oneshots,
-                    update_music,
                     mute_when_background,
-                ).distributive_run_if(in_state(crate::session::RunState::Active)),
+                ),
             );
     }
 }
@@ -608,14 +606,20 @@ fn growl_stinger(
     mut commands: Commands,
     assets: Res<AudioAssets>,
     mut bus: ResMut<AudioBus>,
-    dungeon: Res<Dungeon>,
-    fog: Res<FogGrid>,
+    dungeon: Option<Res<Dungeon>>,
+    fog: Option<Res<FogGrid>>,
     enemies: Query<(Entity, &Transform), With<Enemy>>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
     mut near: Local<HashMap<Entity, bool>>,
     mut rng: Local<u32>,
     mut last: Local<usize>,
 ) {
+    // FVS-G-6: the world may not exist — at a cold boot to Site-67 there is no `Dungeon`
+    // yet. Audio must still RUN there (music and the ambient bed are not expedition state),
+    // so the world-dependent spatialisation is what becomes conditional, not the system.
+    // Gating the whole system on `RunState::Active` instead silenced Site-67 entirely.
+    let (Some(dungeon), Some(fog)) = (dungeon, fog) else { return };
+
     let live: HashSet<Entity> = enemies.iter().map(|(e, _)| e).collect();
 
     for (entity, etf) in &enemies {
@@ -681,13 +685,19 @@ fn watcher_pad(
     time: Res<Time<Real>>,
     bus: Res<AudioBus>,
     gv: Res<GlobalVolume>,
-    dungeon: Res<Dungeon>,
-    fog: Res<FogGrid>,
+    dungeon: Option<Res<Dungeon>>,
+    fog: Option<Res<FogGrid>>,
     watchers: Query<(&Transform, &SmileyState)>,
     units: Query<&Transform, With<Unit>>,
     mut level: Local<f32>,
     mut pad: Query<&mut AudioSink, With<WatcherPad>>,
 ) {
+    // FVS-G-6: the world may not exist — at a cold boot to Site-67 there is no `Dungeon`
+    // yet. Audio must still RUN there (music and the ambient bed are not expedition state),
+    // so the world-dependent spatialisation is what becomes conditional, not the system.
+    // Gating the whole system on `RunState::Active` instead silenced Site-67 entirely.
+    let (Some(dungeon), Some(fog)) = (dungeon, fog) else { return };
+
     // Present = some watcher is calmly observing, in live sight, and near enough to unsettle.
     let present = watchers.iter().any(|(tf, st)| {
         st.is_watching()
@@ -771,8 +781,8 @@ fn ambient_oneshots(
 fn update_music(
     time: Res<Time<Real>>,
     bus: Res<AudioBus>,
-    dungeon: Res<Dungeon>,
-    fog: Res<FogGrid>,
+    dungeon: Option<Res<Dungeon>>,
+    fog: Option<Res<FogGrid>>,
     gv: Res<GlobalVolume>,
     // A cleared-but-standing Nest is `Hostile` (siege-killable) yet not a live threat, so exclude it —
     // otherwise the combat track latches on forever whenever an inert nest sits in the squad's LOS.
@@ -783,6 +793,12 @@ fn update_music(
     mut calm: Query<&mut AudioSink, (With<CalmMusic>, Without<CombatMusic>)>,
     mut combat: Query<&mut AudioSink, (With<CombatMusic>, Without<CalmMusic>)>,
 ) {
+    // FVS-G-6: the world may not exist — at a cold boot to Site-67 there is no `Dungeon`
+    // yet. Audio must still RUN there (music and the ambient bed are not expedition state),
+    // so the world-dependent spatialisation is what becomes conditional, not the system.
+    // Gating the whole system on `RunState::Active` instead silenced Site-67 entirely.
+    let (Some(dungeon), Some(fog)) = (dungeon, fog) else { return };
+
     // Continuous threat scalar: for each visible hostile, weight by proximity to the nearest unit
     // (1 at THREAT_NEAR, 0 past THREAT_FAR); the loudest single threat sets the intensity target.
     let mut target = 0.0f32;

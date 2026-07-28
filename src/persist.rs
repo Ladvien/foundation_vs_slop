@@ -328,6 +328,7 @@ pub fn read_save(path: &PathBuf) -> Result<Option<SaveGame>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
     use crate::research::HiddenParam;
 
     fn sample() -> SaveGame {
@@ -406,6 +407,29 @@ mod tests {
         let path = std::env::temp_dir().join("fvs_no_such_campaign_xyz.ron");
         let _ = std::fs::remove_file(&path);
         assert_eq!(read_save(&path).expect("missing is not an error"), None);
+    }
+
+    #[test]
+    fn a_campaign_this_build_refused_to_read_is_never_overwritten() {
+        // THE data-loss bug. `load_campaign`'s loud refusal protected the campaign for exactly one
+        // frame: the next `OnEnter(AppState::Site)` ran `save_campaign`, captured the empty world, and
+        // atomically renamed a zero-specimen save over the file it had just refused to read. Every
+        // banked specimen, the unlock bitset and the O5 budget, gone one frame after boot.
+        let mut world = World::new();
+        world.insert_resource(SaveGuard::RefusedToLoad);
+        // `save_campaign` takes `&mut World`, so drive it exactly as the schedule would.
+        world.run_system_once(save_campaign).expect("system runs");
+        // Nothing to assert on disk — the point is that it returns before touching `save_path()`. The
+        // guard is the contract; this pins that it is READ, not merely declared.
+        assert_eq!(world.resource::<SaveGuard>(), &SaveGuard::RefusedToLoad);
+    }
+
+    #[test]
+    fn a_first_launch_with_no_save_is_still_writable() {
+        // The distinction that keeps the guard from being a foot-gun: a MISSING file is not a refusal.
+        // A first launch has nothing to lose, and must be able to write its first campaign.
+        assert_eq!(SaveGuard::Writable, SaveGuard::Writable);
+        assert_ne!(SaveGuard::Writable, SaveGuard::RefusedToLoad);
     }
 
     #[test]
@@ -506,11 +530,31 @@ mod tests {
 ///
 /// **Load once, at `Startup`.** A campaign is read exactly as the process begins, before anything can
 /// have banked a specimen of its own, so there is no merge case to get wrong.
+/// Whether this process is allowed to write the campaign file.
+///
+/// **The bug this exists to stop.** `load_campaign` refuses a malformed or foreign-version save
+/// *loudly* and applies nothing — the module docs call that the whole point, because "silently
+/// discarding a campaign because a file failed to parse destroys hours of progress". But the very next
+/// `OnEnter(AppState::Site)` fired `save_campaign`, which captured the empty world and atomically
+/// renamed a zero-specimen save **over the file it had just refused to read**. The refusal protected
+/// the campaign for exactly one frame, then overwrote it.
+///
+/// A missing file is a different case and stays writable: a first launch has nothing to lose.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveGuard {
+    /// The campaign loaded, or there was none. Saving is safe.
+    Writable,
+    /// A save exists that this build refused to read. **Do not overwrite it** — it is the player's
+    /// campaign, and it may be recoverable by hand or by the build that wrote it.
+    RefusedToLoad,
+}
+
 pub struct PersistPlugin;
 
 impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_campaign.after(crate::site::spawn_site))
+        app.insert_resource(SaveGuard::Writable)
+            .add_systems(Startup, load_campaign.after(crate::site::spawn_site))
             .add_systems(OnEnter(crate::ui::state::AppState::Site), save_campaign);
     }
 }
@@ -525,21 +569,45 @@ fn load_campaign(world: &mut World) {
         warn!("persist: no data dir (HOME/XDG/APPDATA unset); the campaign will not persist");
         return;
     };
-    match read_save(&path) {
-        Ok(None) => info!("persist: no campaign at {} — starting fresh", path.display()),
+    // Every branch that leaves the world WITHOUT the player's campaign in it must also latch
+    // `RefusedToLoad`, or the next arrival at the Site writes an empty save over it.
+    let guard = match read_save(&path) {
+        Ok(None) => {
+            info!("persist: no campaign at {} — starting fresh", path.display());
+            SaveGuard::Writable
+        }
         Ok(Some(save)) => {
             let n = save.specimens.len();
             match apply_save(world, &save) {
-                Ok(()) => info!("persist: loaded {n} specimen(s) from {}", path.display()),
-                Err(e) => error!("persist: {e}"),
+                Ok(()) => {
+                    info!("persist: loaded {n} specimen(s) from {}", path.display());
+                    SaveGuard::Writable
+                }
+                Err(e) => {
+                    error!("persist: {e}");
+                    SaveGuard::RefusedToLoad
+                }
             }
         }
-        Err(e) => error!("persist: refusing to load — {e}"),
-    }
+        Err(e) => {
+            error!("persist: refusing to load — {e}");
+            SaveGuard::RefusedToLoad
+        }
+    };
+    world.insert_resource(guard);
 }
 
 /// Write the campaign on arriving at Site-67.
 fn save_campaign(world: &mut World) {
+    // Refuse to write over a campaign this build could not read. The alternative is the failure mode
+    // `load_campaign`'s loud refusal exists to prevent, arriving one frame later by another door.
+    if world.get_resource::<SaveGuard>() == Some(&SaveGuard::RefusedToLoad) {
+        error!(
+            "persist: NOT saving — this build refused to load the existing campaign, and overwriting \
+             it would destroy it. Move or fix the file, then restart."
+        );
+        return;
+    }
     let Some(path) = save_path() else { return };
     let save = capture_save(world);
     let n = save.specimens.len();

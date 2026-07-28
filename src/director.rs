@@ -396,20 +396,24 @@ pub fn pick_next_challenge(
 /// does *after* the debrief, so this is the last point at which the report is still true.
 pub fn record_expedition(
     mut director: ResMut<CurriculumDirector>,
-    standing: Option<Res<crate::site::O5Standing>>,
     tally: Option<Res<crate::site::ExpeditionTally>>,
     survivors: Query<(), With<crate::squad::Unit>>,
     contained: Query<(), With<crate::containment::Contained>>,
+    secured: Option<Res<crate::containment::SiteSecured>>,
     outcome: Option<Res<crate::session::RunOutcome>>,
 ) {
-    let _ = standing;
     let Some(tally) = tally else { return };
     let report = ExpeditionReport {
         squad_size: tally.squad_size,
         survivors: survivors.iter().count() as u32,
         captures: contained.iter().count() as u32,
         extracted: outcome.is_some_and(|o| matches!(*o, crate::session::RunOutcome::Victory)),
-        breaches: 0,
+        // Derived exactly as `site::review::file_expedition_report` derives it, rather than hardcoded
+        // to 0. A hardcoded zero made an expedition that left every nest uncapped score as competently
+        // as one that capped them all — so the curriculum learned from a signal that disagreed with the
+        // game's own definition of how the run went. `SiteSecured` may legitimately be absent in a
+        // world with no nests, which is zero breaches rather than unknown.
+        breaches: secured.map(|s| s.total.saturating_sub(s.capped) as u32).unwrap_or(0),
     };
     director.record(&report);
 }

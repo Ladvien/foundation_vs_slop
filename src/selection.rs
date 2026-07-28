@@ -35,6 +35,23 @@ const SNAP_MAX_RING: i32 = 8;
 /// about why a throw failed.
 const AIM_TOLERANCE: f32 = 1.2;
 
+/// Aim tolerance for a verb whose mechanic reaches `reach` world units.
+///
+/// **The affordance must never be tighter than the mechanic**, which is what the doc above promises and
+/// what the shipped constants violated. Measured 2026-07-28 from a play log: `AIM_TOLERANCE` is `1.2`
+/// while `cap_reach` is `1.5`, `device_reach` is `2.5` and `quarantine_radius` is `3.0` — so the *aim*
+/// was the binding constraint on all three verbs. A player standing well inside cap range, clicking
+/// 1.3 m from a nest's centre, got `no uncapped nest under the cursor` and no way to tell whether they
+/// had missed or were out of range. The log that surfaced this shows **nine** consecutive failed cap
+/// attempts.
+///
+/// Deriving it from the reach rather than raising the constant keeps one rule instead of a number that
+/// has to be re-checked every time a reach is tuned — and `max` preserves the 1.2 floor for any verb
+/// whose reach is smaller, so this only ever loosens, never tightens.
+fn aim_tolerance(reach: f32) -> f32 {
+    reach.max(AIM_TOLERANCE)
+}
+
 pub struct SelectionPlugin;
 
 impl Plugin for SelectionPlugin {
@@ -247,8 +264,11 @@ pub fn throw_device_input(
     }
     // Aim tolerance is generous relative to the reach: the player should be able to click a creature,
     // not a pixel. Whether the throw CONNECTS is `deploy_devices`' call, using `reach` below.
-    let Some(target) =
-        crate::containment::verbs::pick_target(point, AIM_TOLERANCE, targets.iter().map(|(id, e, tf)| (*id, e, tf.translation)))
+    let Some(target) = crate::containment::verbs::pick_target(
+        point,
+        aim_tolerance(tuning.containment.device_reach),
+        targets.iter().map(|(id, e, tf)| (*id, e, tf.translation)),
+    )
     else {
         warn!("no containable anomaly under the cursor");
         sfx.write(Sfx::Invalid);
@@ -352,7 +372,7 @@ pub fn cap_nest_input(
     };
     let Some((nest, nest_pos)) = crate::containment::verbs::pick_target(
         point,
-        AIM_TOLERANCE,
+        aim_tolerance(tuning.containment.cap_reach),
         nests.iter().map(|(id, e, tf)| (*id, (e, tf.translation), tf.translation)),
     ) else {
         warn!("no uncapped nest under the cursor");
@@ -425,4 +445,41 @@ fn update_cursor(
         SystemCursorIcon::Default
     };
     commands.entity(*window).insert(CursorIcon::from(icon));
+}
+
+#[cfg(test)]
+mod aim_tests {
+    use super::*;
+
+    #[test]
+    fn the_affordance_is_never_tighter_than_the_mechanic() {
+        // THE invariant `AIM_TOLERANCE`'s doc states and the shipped constants violated: aim is a UI
+        // affordance ("did you mean that one?"), reach is the mechanic ("are you close enough?"), and
+        // an aim tighter than the reach means a player who IS in range is told they missed. Nine
+        // consecutive failed cap attempts in a play log is what that looks like from the outside.
+        for reach in [1.5_f32, 2.5, 3.0] {
+            assert!(
+                aim_tolerance(reach) >= reach,
+                "aim {} must not be tighter than reach {reach}",
+                aim_tolerance(reach)
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_reach_still_gets_the_baseline_affordance() {
+        // The `max` floor: a verb with a tiny reach must not inherit a tiny click target. Clicking is a
+        // mouse-precision problem, not a game-distance one, so it has its own minimum.
+        assert_eq!(aim_tolerance(0.1), AIM_TOLERANCE);
+        assert!(aim_tolerance(0.0) > 0.0);
+    }
+
+    #[test]
+    fn the_shipped_reaches_are_all_looser_than_they_were() {
+        // Pins the actual regression: every shipped verb reach exceeds the old flat constant, so all
+        // three were mis-gated by the aim, not by the mechanic.
+        for reach in [1.5_f32, 2.5, 3.0] {
+            assert!(reach > AIM_TOLERANCE, "reach {reach} was tighter-gated by aim {AIM_TOLERANCE}");
+        }
+    }
 }
