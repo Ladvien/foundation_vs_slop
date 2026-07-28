@@ -1275,7 +1275,35 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-N-5 — Remove orphaned assets** · S · ✅ **LANDED 2026-07-25**
   Verified unreferenced repo-wide first (nothing in `src/`, `assets/config/`, `tests/`, `docs/` — the only hit was this backlog entry naming them), then removed `assets/hazmat/`, `assets/hazmat_locomotion_pack/`, `assets/kenney_blaster-kit_2.1/`: **10.1 MB**, `assets/` now 52 MB. Hard gate green.
   *Also corrected:* `CREDITS.md` attributed "Blaster kit, prototype kit … `assets/kenney_*`" — the blaster kit is now gone while `kenney_prototype-kit` stays, so the line was narrowed to what actually ships. An attribution table that lists assets the repo no longer contains is worse than no table.
-- **FVS-N-10 — FBX/OBJ → GLB asset conversion pipeline (an ART UPGRADE, not a blocker)** · M · *design doc §7*
+- **FVS-N-10 — FBX/OBJ → GLB asset conversion pipeline (an ART UPGRADE, not a blocker)** · M · *design doc §7* · ✅ **PIPELINE LANDED 2026-07-28 — the art pass itself is still a separate call**
+  *Shipped:* `scripts/fbx_to_glb.py` (headless, `--factory-startup`), `assets/site/ozea/doorframe_double.glb`
+  as the first promoted prop, and `tests/ozea_asset.rs` pinning the artist-guide §3 contract in the
+  **hard gate**.
+  **Measured, whole-library run: 418/418 converted, zero failures.**
+  * **The 7 colliding basenames are real** — `SM_Door`, `SM_Floor_V1`, `SM_Floor_V2`, `SM_Floor_Grate`,
+    `SM_Control_Pannel`, `SM_Trash_Bin`, `SM_Assault_Rifle`. A flat output directory would have
+    silently lost 7 files, so every output is **unconditionally** pack-prefixed rather than
+    prefixed-on-collision: the failure cannot come back with a new pack.
+  * **418 `._*.fbx` AppleDouble forks** are skipped by name. A naive `glob('*.fbx')` returns them as
+    phantom duplicates and the importer either fails or produces garbage.
+  * Output is a **staging dir, never `assets/`** — artist guide §2: the share is the library, `assets/`
+    holds only what the game loads, converted **and named for its use**. A human promotes and renames.
+  ⚠️ **THE UNITS CLAIM IN THIS ENTRY WAS RIGHT, BUT FOR A REASON THAT NEARLY BIT.** "Already authored
+  in metres … `SM_DoorFrame_Double` is 1.98 m" is true *in Blender*. In the file, the importer expresses
+  the centimetre authoring as a node `scale` of `0.01` over **100× vertex data** — valid glTF, renders
+  correctly, and a trap: anything reading a mesh AABB **directly** (a collider, a bbox check, a
+  placement heuristic) sees centimetres and is wrong by 100× with nothing failing. Measured before the
+  fix: accessor bounds **200.3 units**, node scale `0.01`, true height `2.003 m`.
+  The converter now bakes the object transform into the mesh data, so *the numbers in the file are
+  metres* — which is what §3 rule 2 actually promises. `the_prop_is_authored_in_metres_on_the_games_grid`
+  reads the **raw accessor bounds** specifically so a regression to the old shape fails there, and
+  `no_node_carries_a_compensating_scale` states the other half directly. Verified on the grid:
+  height **2.003 m** vs `DOORWAY_HEIGHT` 2.0, width **1.98 m** vs two `TILE_SIZE` tiles.
+  ⚠️ **"One converted prop loads in-game" is met as a CONTRACT, not as a spawn.** The prop is in
+  `assets/` and pinned by a hard-gate test, but nothing references it yet — swapping a greybox Kenney
+  doorframe for an Ozea one is the **art pass**, and this entry's own advice is to do that only after
+  the greybox layout is proven, so the conversion targets the meshes the Site actually uses. The
+  pipeline no longer blocks it; the aesthetic decision is the Director's.
   ⚠️ **Corrected 2026-07-26 — this does NOT block the Site.** The old claim ("nothing in Push 5's Site work can start without this") was wrong: the repo already ships 145 Kenney prototype `.glb`, enough to greybox all six areas. Do this **after** the greybox layout is proven, so the conversion targets only the meshes the Site actually uses instead of all 411.
   Verified while correcting it: Blender 5.1.2 has `import_scene.fbx` + `export_scene.gltf` enabled under `--factory-startup` (no addon step); the library is **already authored in metres on a 1 m grid** (`SM_Floor_Plain` is exactly 1.0 × 1.0, matching `TILE_SIZE`; `SM_DoorFrame_Double` is 1.98 m, matching `DOORWAY_HEIGHT`), so no unit conversion; **33 of 37 packs carry zero textures** (flat PBR base colours — the artist guide's "strongly preferred" case), only the I series has `*_BaseColor.png` siblings. `assets/low_poly_furniture/` is an undocumented in-repo precedent: it holds both the source `.fbx` and a mirrored converted `glb/` subtree, so the same job was done once before and no script survived — reproduce that output layout. The exporter contract already exists in code at `/mnt/codex_fs/game_assets/projects/scp_characters/src/scp_characters/export/gltf.py` (`export_yup`, `export_tangents`, `export_apply`, `export_image_format`).
   Real counts, measured: **418 `.fbx`** (411 distinct basenames — **7 collide across packs** and would overwrite each other in a flat output dir), 418 `._*` forks (not the ~700 the design doc claims). Two source layouts exist, and `Pack_SciFi_A_001+_V2.0` is nested one level deeper with a `+` in the path.

@@ -1,0 +1,24 @@
+train all — cores=24, jobs=24, islands=24, batch=16, generations=30, apply=false, repin_goldens=false
+
+═══ train all — phase 1/6: prior (baseline the shipped brain) ═══
+sweeping the authored brain over 3 world(s), 7200 ticks each...
+[2m2026-07-28T00:45:19.413032Z[0m [33m WARN[0m [2mfoundation_vs_slop::gore[0m[2m:[0m gore: no autogib bake for this character; skipping fragment gibs
+[2m2026-07-28T00:45:19.723592Z[0m [33m WARN[0m [2mfoundation_vs_slop::gore[0m[2m:[0m gore: no autogib bake for this character; skipping fragment gibs
+wrote assets/config/baseline_prior.ron: 7416 observed decisions
+
+═══ train all — phase 2/6: levels (dungeon architecture + furniture + mushrooms) ═══
+>> launching 24 'levels' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_levels_24.ron  (best fitness 1.0000; 24 of 24 islands produced elites)
+   winner copied to assets/config/elites_levels.ron
+   ship it:  FVS_LEVELS_ELITE=assets/config/elites_levels.ron (overlay — handles any elite), or `train apply levels assets/config/elites_levels.ron` for a value-only elite that keeps every room type
+
+═══ train all — phase 3/6: audio (acoustic stimulus) ═══
+>> launching 24 'audio' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_audio_2.ron  (best fitness 0.1137; 24 of 24 islands produced elites)
+   winner copied to assets/config/elites_audio.ron
+   ship it:  train apply audio assets/config/elites_audio.ron   (or re-run with --apply)
+
+═══ train all — phase 4/6: behavior (squad brain tuning — speeds, bands, thresholds) ═══
+>> launching 24 'behavior' islands → islands_out/ (each a separate process)
