@@ -216,9 +216,26 @@ pub struct RecordsPanel;
 pub struct RecordsReadout;
 
 /// What the archive screen says. Pure, so the wording is testable without an `App`.
-pub fn records_text(records: &Records, unfiled: usize) -> String {
+/// The archive readout.
+///
+/// `disprovable` is how many filed reports the squad's own firsthand experience contradicts — i.e. what
+/// `[J]` would pull right now. Surfaced as a **count of the verb's effect** rather than as a bare
+/// keybind, because FVS-L-1's rule applies here too: an unmet clause is an *instruction*. "NOTHING TO
+/// CURATE" and "PULL 2 DISPROVEN" are different situations and the player must be able to tell them
+/// apart without pressing the key to find out.
+pub fn records_text(records: &Records, unfiled: usize, disprovable: usize) -> String {
     let mut out = String::from("RECORDS OFFICE\n");
-    out.push_str(&format!("[K] FILE {unfiled} UNWRITTEN FINDING(S)\n\n"));
+    out.push_str(&format!("[K] FILE {unfiled} UNWRITTEN FINDING(S)\n"));
+    if disprovable > 0 {
+        out.push_str(&format!("[J] PULL {disprovable} REPORT(S) YOU HAVE DISPROVEN\n\n"));
+    } else if records.filed.iter().any(|r| r.author == PHANTOM_AUTHOR) {
+        // The whole point of the endgame, stated as an instruction. A player looking at a report signed
+        // by nobody must be told the counter-play is *an expedition*, not a keypress they are missing.
+        out.push_str("[J] CURATE — NOTHING HERE IS DISPROVEN YET.\n");
+        out.push_str("    GO AND SEE THE THING ITSELF; HEARSAY CANNOT EDIT THE ARCHIVE.\n\n");
+    } else {
+        out.push_str("[J] CURATE — NOTHING TO PULL.\n\n");
+    }
     if records.filed.is_empty() {
         // Distinct from "nothing to file": an empty archive is a real state, and saying so tells the
         // player the office works rather than leaving them looking at a blank panel.
@@ -290,7 +307,12 @@ fn update_panel(
     table: Res<super::SquadKnowledge>,
     mut text_q: Query<&mut Text, With<RecordsReadout>>,
 ) {
-    let line = records_text(&records, unfiled_count(&table, &records));
+    // Counted through the SAME function the verb uses, on a clone, so the panel cannot promise a purge
+    // `J` would not perform. Two implementations of "what is disprovable" would drift, and the one the
+    // player reads is the one that would be wrong.
+    let mut probe = records.clone();
+    let disprovable = crate::antagonist::purge_disproven(&table, &mut probe);
+    let line = records_text(&records, unfiled_count(&table, &records), disprovable);
     for mut t in &mut text_q {
         if t.0 != line {
             t.0 = line.clone();
@@ -406,7 +428,7 @@ mod tests {
             author: PHANTOM_AUTHOR,
             filed: 3,
         });
-        let out = records_text(&records, 0);
+        let out = records_text(&records, 0, 0);
         assert!(out.contains("UNATTRIBUTED"), "the tell must be visible: {out}");
         assert!(!out.contains(&PHANTOM_AUTHOR.to_string()), "never print the raw sentinel: {out}");
     }
@@ -444,13 +466,13 @@ mod tests {
 
     #[test]
     fn the_panel_distinguishes_an_empty_archive_from_nothing_to_file() {
-        let empty = records_text(&Records::default(), 0);
+        let empty = records_text(&Records::default(), 0, 0);
         assert!(empty.contains("THE ARCHIVE IS EMPTY"), "{empty}");
         assert!(empty.contains("FILE 0 UNWRITTEN"), "{empty}");
 
         let mut records = Records::default();
         records.file(Report { subject: Subject::Crabs, claim: Claim::Lethal, author: 2, filed: 5 });
-        let filled = records_text(&records, 3);
+        let filled = records_text(&records, 3, 0);
         assert!(!filled.contains("THE ARCHIVE IS EMPTY"), "{filled}");
         assert!(filled.contains("OPERATIVE 2"), "a report must be attributable: {filled}");
         assert!(filled.contains("FILE 3 UNWRITTEN"), "{filled}");

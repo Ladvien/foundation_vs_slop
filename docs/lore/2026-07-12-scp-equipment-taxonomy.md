@@ -1,6 +1,18 @@
 # SCP Foundation Equipment & Paratech Taxonomy
 ### Reference for agents designing items, loadouts, and consumables
 
+> ⚠️ **DEPRECATED THEMING — the semiotic-decay material below is NOT canon (FVS-K-4, decided 2026-07-27).**
+> This document develops *semiotic decay* — meaning coming loose from things, countered by the Gat-Hayes
+> Semantic Stabilization Device — as the antagonist. **The game settled on a different one.** SCP-9191 is
+> a **generator**, and its horror is that its output is *bad*: detail lavished where it does not matter,
+> proportions subtly wrong, enormous care spent by something that does not understand what it is making.
+> That is the uncanny valley, not semiotics — and the two are not compatible flavours of one idea. One
+> says meaning is draining out of the world; the other says it is being mass-produced badly. The
+> research economy, which cashes out as restoring curation against an out-of-control generator, only
+> makes sense under the second.
+> **The material is kept because it is good work and it produced the decision. Do not mine it for
+> shipped copy** — `tests/lore_canon.rs` fails the build if you do.
+
 **Status:** Research reference. Not a design decision record.
 **Companion to:** `2026-07-12-scp-role-taxonomy.md` (same confidence markers, same schema conventions).
 **Canon posture:** Tight, not religious.

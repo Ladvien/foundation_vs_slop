@@ -49,6 +49,10 @@ use crate::site::{HeldAt, SiteRoot};
 
 /// Bumped whenever the saved shape changes. A mismatch is refused, never migrated — see the module docs.
 ///
+/// `5` (2026-07-27): `antagonist` (FVS-K-4). SCP-9191's phase and the standing of its argument with
+/// the archive are campaign state — a restart that reset it would hand the Director a clean shelf and
+/// a dormant antagonist, which is the endgame undone rather than resumed.
+///
 /// `4` (2026-07-27): `conversations_played` (FVS-K-3). The authored beats are *first time* scenes —
 /// the first capture, the first specimen carried home, the first operative lost — and a first that
 /// repeats every launch is not a first. Meta-progress in exactly FVS-G-3's sense.
@@ -61,7 +65,7 @@ use crate::site::{HeldAt, SiteRoot};
 /// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
 /// captured but not *what* they were, and the research battery and unlock payout are both keyed on
 /// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +118,8 @@ pub struct SaveGame {
     pub requisitioned: crate::site::Requisitioned,
     /// Which one-shot conversations this campaign has already played (FVS-K-3).
     pub conversations_played: crate::dialogue::triggers::ConversationsPlayed,
+    /// SCP-9191's phase and the standing of its argument with the archive (FVS-K-4).
+    pub antagonist: crate::antagonist::Antagonist,
 }
 
 impl SaveGame {
@@ -193,6 +199,8 @@ pub fn capture_save(world: &mut World) -> SaveGame {
         .get_resource::<crate::dialogue::triggers::ConversationsPlayed>()
         .cloned()
         .unwrap_or_default();
+    let antagonist =
+        world.get_resource::<crate::antagonist::Antagonist>().copied().unwrap_or_default();
     SaveGame {
         version: SAVE_VERSION,
         run_seed,
@@ -201,6 +209,7 @@ pub fn capture_save(world: &mut World) -> SaveGame {
         o5,
         requisitioned,
         conversations_played,
+        antagonist,
         tech_tree: tech_tree.bits(),
         specimens: rows.into_iter().map(|(_, s)| s).collect(),
     }
@@ -246,6 +255,9 @@ pub fn apply_save(world: &mut World, save: &SaveGame) -> Result<(), String> {
         world.get_resource_mut::<crate::dialogue::triggers::ConversationsPlayed>()
     {
         *c = save.conversations_played.clone();
+    }
+    if let Some(mut a) = world.get_resource_mut::<crate::antagonist::Antagonist>() {
+        *a = save.antagonist;
     }
 
     let site = world.get_resource::<SiteRoot>().map(|s| s.0);
@@ -326,6 +338,11 @@ mod tests {
             conversations_played: crate::dialogue::triggers::ConversationsPlayed(
                 ["intro".to_string(), "first_capture".to_string()].into_iter().collect(),
             ),
+            antagonist: crate::antagonist::Antagonist {
+                phase: crate::antagonist::Phase::Curating,
+                seeded: 3,
+                purged: 1,
+            },
             specimens: vec![
                 SavedSpecimen {
                     captured_tick: 120,

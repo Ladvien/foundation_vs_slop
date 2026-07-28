@@ -206,11 +206,7 @@ pub fn on_unattributed_report(
     mut starts: MessageWriter<StartConversation>,
 ) {
     let Some(records) = records else { return };
-    if records
-        .filed
-        .iter()
-        .any(|r| r.author == crate::knowledge::records::PHANTOM_AUTHOR)
-    {
+    if crate::antagonist::holds_unattributed(&records) {
         play("slop_signature", &mut played, lock.as_deref(), &mut starts);
     }
 }

@@ -1038,7 +1038,49 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG], [GOAP]
 **Done when:** the endgame trigger fires after a curriculum threshold; confrontation mechanics derive from the SCP-9191 generator theme; 173/096 are capturable via a new per-entity continuous-watch state (explicitly distinct from the ambient field); no shipped copy cites the deprecated semiotic-decay theming as canon.
 
-- **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL
+- **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL · ⚠️ **CURATION PHASE LANDED 2026-07-27 — the manifestation is sequenced behind H-1's bake**
+  > **Shape decided 2026-07-27 (Director): curation phase, then a manifestation.**
+  *Shipped:* `src/antagonist.rs` — `Antagonist { phase, seeded, purged }`, the wake trigger, the
+  seeding, the **curation verb**, and `tests/lore_canon.rs`.
+  **The threshold is the curriculum's own goal, not a new number.** F-3 authored the graph backwards
+  from SCP-150 so that finishing it *means* something; reusing it keeps one definition of "the
+  Foundation has learned what there is to learn here" rather than minting a second that could disagree
+  with the tech-tree HUD the player is reading.
+  **The counter-play is the design, and it is gated on having gone and looked.** `J` at the Site pulls
+  every filed report the squad's **firsthand** experience contradicts — and *only* firsthand, which is
+  the whole mechanic rather than a strictness:
+  * **`Told` would let a rumour purge the truth.** O-3's retellings degrade but persist, so a squad that
+    merely *heard* something could pull a correct report. The archive edited by gossip is the failure
+    FVS-O-4 exists to prevent.
+  * **`Read` would make the archive edit itself.** `Read` beliefs come *from* the shelf, so a planted
+    lie briefed onto the squad would authorise purging whatever contradicts it — 9191 curating on the
+    Director's behalf, erasing more the more it lied.
+  So the price of curation is **an expedition**, and the endgame *drives* the core loop instead of
+  replacing it. That is what "research cashes out as restoring curation against an out-of-control
+  generator" means once it is mechanical.
+  **The panel states the instruction, not the keybind** (FVS-L-1's rule): `PULL 2 REPORT(S) YOU HAVE
+  DISPROVEN` versus `NOTHING HERE IS DISPROVEN YET — GO AND SEE THE THING ITSELF`. The count is computed
+  through the *same function the verb uses*, on a clone, so the panel cannot promise a purge `J` would
+  not perform.
+  ✅ **Third clause met and linted.** `tests/lore_canon.rs` scans `src/`, `config.ron` and `README.md`
+  for the deprecated semiotic-decay theming and fails the build on a hit; the two `docs/lore/` documents
+  that develop it now carry a deprecation banner in their first lines. **They are kept, not deleted** —
+  they are good work and they produced the decision — but a reader meets the ruling before the material.
+  A third test asserts the *generator* reading is actually present in shipped copy, because a lint that
+  only forbids the old theming would pass just as happily on a game with no antagonist theming at all,
+  which is the state K-4 was filed to fix.
+  ⚠️ **The manifestation is NOT shipped, and the sequencing is deliberate.** It is a field creature: new
+  `FixedUpdate` nodes, a permuted schedule, moved goldens, and therefore a re-bake of every archive.
+  Landing it before FVS-H-1's bake would pay that 12–20 h **twice** — the identical mistake this backlog
+  records under H-1 about I-1. So the seam is `Antagonist::confrontation_due()`, a real tested predicate
+  over real state, rather than a `Phase::Manifest` variant that exists and does nothing: a dead enum
+  variant is the "shipped a mechanism, nobody can reach it" shape this repo keeps catching, while a
+  predicate that reads `true` and has no consumer yet is honestly incomplete instead.
+  *Determinism:* windowed-only. Gated on `AppState::Site`, which the harness never enters, and the lie
+  is chosen by a **fixed scan** over `Subject::ALL × Claim::ALL` rather than a draw — no seeded RNG to
+  get wrong. `SAVE_VERSION` 4 → **5**: a restart that reset 9191 would hand the Director a clean shelf
+  and a dormant antagonist, which is the endgame undone rather than resumed.
+  *Remaining:* the manifestation + its containment rule, after the bake.
   Author the SCP-9191 arc: research cashes out as "restoring curation/quality against an out-of-control generator," culminating in a confrontation with SCP-9191. Deprecate semiotic-decay/2521/Gat-Hayes (optional flavor only if non-contradictory). Consider mining the canon "alarm switch ON/OFF" locker detail for the confrontation trigger.
   *Done when:* endgame trigger fires after a curriculum threshold; confrontation derives from the generator theme; no shipped copy references deprecated theming as canon. · *Deps:* F-3, K-3 · *Touches:* narrative, tech-tree, `lib.rs` lore refs · *Reading:* **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG]
 - **FVS-K-3 — Dialogue content buildout** · L · ✅ **LANDED 2026-07-27 — 14 conversations, all event-triggered, hotkey deleted**

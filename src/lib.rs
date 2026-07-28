@@ -18,6 +18,7 @@
 /// Cosmetic pose blending — the shared clip-weight/gait-phase driver every skinned model goes
 /// through (squad figurine, crab, manca). Never touches hashed sim state; see its module docs.
 pub mod anim;
+pub mod antagonist;
 /// Config-bake machinery (RON splicing + golden re-pinning) shared with the `train` binary.
 pub mod bake;
 pub mod audio;
@@ -367,6 +368,10 @@ pub fn run() {
                 // FVS-O-5's planted report will sit on. Windowed except its briefing, which is
                 // world construction.
                 knowledge::RecordsPlugin,
+                // SCP-9191 (FVS-K-4). AFTER RecordsPlugin so the shelf exists to be written to, and
+                // windowed-only for the same reason the records office is: the endgame is an argument
+                // conducted at Site-67, not in the field.
+                antagonist::AntagonistPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
                 ai_overlay::AiOverlayPlugin,

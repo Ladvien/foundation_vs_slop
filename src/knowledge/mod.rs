@@ -127,7 +127,7 @@ impl Claim {
     /// know both. A first draft stored one belief per *subject*, which forced these into competition and
     /// made "it is lethal" silently erase "and here is how to contain it". The test
     /// `only_a_containable_belief_makes_a_rule_legible` caught it.
-    fn contradicts(self) -> Option<Claim> {
+    pub fn contradicts(self) -> Option<Claim> {
         match self {
             Claim::Lethal => Some(Claim::Harmless),
             Claim::Harmless => Some(Claim::Lethal),
