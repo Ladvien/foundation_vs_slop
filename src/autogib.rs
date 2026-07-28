@@ -986,7 +986,7 @@ impl Plugin for AutogibPlugin {
         app.init_resource::<AutogibCache>()
             // Tag the in-scene rifle `GunModel` before the bake reads the scene, so the gun chunk is pruned
             // out of the body soup and the bake gate sees a non-empty gun (see `tag_valkyrie_rifle`).
-            .add_systems(Update, (tag_valkyrie_rifle, bake_autogib).chain());
+            .add_systems(Update, (tag_valkyrie_rifle, bake_autogib).chain().distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

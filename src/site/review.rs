@@ -28,6 +28,7 @@
 //! `reset_verbs` runs at `OnEnter(RunState::Active)`; see [`carry_purchases_into_the_expedition`].
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use super::o5::{allowance, rate, Consumable, ExpeditionReport, O5Standing};
 use crate::containment::{Contained, SiteSecured};
@@ -47,7 +48,12 @@ pub struct ExpeditionTally {
 /// *this* expedition and `reset_verbs` zeroes it from tuning at every insertion — so a purchase written
 /// straight into it would be wiped by the next run. Purchases accumulate here and are folded in
 /// afterwards, which also means a device bought and not used is not silently lost.
-#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// **Serialized alongside [`O5Standing`]**, and it has to be: the budget and the stock it was spent on
+/// are two halves of one quantity. Saving only the budget would delete a purchase on every restart —
+/// the money gone and nothing to show for it, which reads as a game bug rather than as a rule.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Requisitioned {
     pub devices: u32,
     pub quarantines: u32,

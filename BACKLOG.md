@@ -56,8 +56,23 @@ Assumed by every item; stated once here rather than repeated. Verified against t
 > FVS-O-1b, all landed the same day, plus F-3's curriculum and L-3's screen. The gate reads *"a full
 > capture→research→unlock→harder-capture path playable across two persisted expeditions"*, and it is.
 >
-> M4 (P6/P7) is untouched and correctly sequenced behind I-1 → H-1. The remaining Push 10 items (O-3,
-> O-4, O-5) are the propagation half and wait on K-3's dialogue content.
+> M4 (P6/P7) is untouched and correctly sequenced behind I-1 → H-1.
+>
+> **Push 10 is complete as of 2026-07-27 (PR #67).** O-3, O-4 and O-5 all landed — beliefs propagate by
+> conversation and decay along the chain, firsthand findings are filed at the Site and briefed to later
+> squads, and a planted false report can be corrected both by experience and by curation. They did not
+> in the end wait on K-3's content: O-3 *gave* `src/dialogue/` its job (every belief crossing the squad
+> is voiced from an authored table), which was K-3's actual complaint. **The M3+ gate is met** — an
+> operative who has met SCP-1048-A behaves differently from one who has only heard of it, and O-2's
+> FEAR coupling is on rather than inert.
+>
+> **A reconciliation pass ran 2026-07-27 and it found more staleness than work.** Six items (A-4, F-2,
+> I-2, F-3's content gap, O-2, E-6) were marked open while their acceptance had already been met in
+> code — in one case the ⚠️ sat 55 lines above the config that closed it. One item was stale in the
+> other direction: **FVS-P-3 claimed the O5 budget persisted and it did not**, which is the failure this
+> backlog names as its top process risk, moved up a level — a claim of completeness in the entry itself,
+> which no test contradicted because the round-trip test only asserted over the fields that existed.
+> Read a status marker as a claim someone made on a particular day, and re-measure before trusting it.
 
 **Dependency spine:** P1 → P2 → P3; P2 → P4 (research needs captured specimens); P4 ↔ P5 (unlock hooks ↔ tech-tree; persistence needs posteriors); P5 → P6 (director needs a retrained archive + resolved fitness); P6 → P7 (endgame needs the generator/difficulty spine). P8 is continuous with two items pulled early into P1/P2. P9 is continuous and independent.
 **Wiring caveat added 2026-07-27:** the spine assumes an item's *logic* landing means the push advanced. Three items broke that assumption (E-5, P-3, O-1b). Read a "LANDED" marker as a claim about code, and the "Done when" as the claim about the game — they were not the same thing in Push 4, Push 5's economy, or Push 10.
@@ -101,8 +116,10 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   * **`RunState` has no `Resolved` variant.** The settled design had one; it broke immediately. Resolving a run transitioned `Active → Resolved`, which fired `OnExit(Active)` — despawning the **entire world at the moment of victory** (the debrief would render over nothing) and resetting the outcome that had just been written. `Active` therefore means *"a world exists"*, not *"the run is unresolved"*; the outcome lives in `RunOutcome`, and **leaving** the run is what tears the world down. `resolve_run` now writes only the resource, never a state.
   * **The camera is split, not run-scoped.** It must outlive a run (the title screen needs one), so `setup_camera` stays on `Startup` and reads no `Dungeon`; a new `focus_camera_on_spawn` re-aims it per run. A `DespawnOnExit` on the camera would have blanked the title.
   *Also:* `RunState::Idle` is load-bearing — Bevy runs `StateTransition` **before** `PreStartup`, so a default of `Active` would build the world before a single asset existed. `PostStartup` leaves `Idle`, and the frame's own transition builds before the first fixed tick. · *Deps:* A-1 · *Reading:* [ECS], [ABM]
-- **FVS-A-4 — DespawnOnExit run-teardown hygiene** · S · *determinism: teardown not mid-tick* · **SPLIT 2026-07-25**
-  The teardown half is subsumed by A-5 (you cannot verify "run entities despawn" without a re-entry path). What remains here is only the **Site exemption**, which genuinely needs G-1: exempt the persistent Site from run teardown; `set_if_neq` to avoid same-state despawns.
+- **FVS-A-4 — DespawnOnExit run-teardown hygiene** · S · *determinism: teardown not mid-tick* · **SPLIT 2026-07-25** · ✅ **CLOSED 2026-07-27 — both halves shipped, neither in this item**
+  The teardown half is subsumed by A-5 (you cannot verify "run entities despawn" without a re-entry path). What remained was the **Site exemption**, which needed G-1.
+  ✅ **Verified shipped 2026-07-27.** The exemption is the *absence* of a tag, not a system: `site::spawn_site` runs on `Startup` and deliberately does not attach `session::run_scoped()`, and `src/site/mod.rs:123` names that omission as the mechanism. So there is nothing to exempt the Site *from* — it was never enrolled in teardown, which is one path rather than an opt-out list that could drift. `set_if_neq` on the state transition is likewise already in place.
+  Recorded rather than silently ticked because the item sat open for two days after its own acceptance was met — the same staleness class as O-2 and F-2 below, and the reason this reconciliation pass exists.
   *Done when:* leaving a run despawns run entities but not the Site; no leaked observers. · *Deps:* A-5, G-1 · *Touches:* `src/session/`, Site module · *Reading:* [ECS]
 - **FVS-D-2 — Squad↔member relationship** · S · ✅ **LANDED 2026-07-25**
   *Shipped:* a bodiless `Squad` roster node (no `Transform`/`Health`, so it is invisible to `snapshot_hash` and to the liveness actor count) owning every operative through `MemberOf` / `SquadRoster` — the repo's **first** use of Bevy's built-in relationships. `spawn_unit` gained a `squad: Entity` parameter so *every* unit carries `MemberOf` and the hashed squad stays in one archetype; the Research Room's dev spawner threads the same node.
@@ -220,6 +237,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 
 - **FVS-C-1 — Wire SCP-610 from zero** · L (+ an asset export first) · *determinism: core*
   ⚠️ **Corrected 2026-07-25 — 610 is NOT asset-complete.** The claim "asset-complete + rigged … the most shovel-ready item in the repo" was wrong. There is **no `.glb` anywhere** — not in `assets/`, not in `/mnt/codex_fs/game_assets/SCP_Characters/gltf/`. What exists is a Blender *generator* (`SCP_Characters/src/scp_characters/monsters/scp610.py`, `examples/build_scp610_infected.py`, `tests/test_scp610.py`) plus one reference photo. So C-1 carries a **prerequisite**: run the builder and export `scp610.glb` against the `docs/artist_guide.md` contract. Until then 610 is *less* shovel-ready than 999/1048/150, which have shipped rigs — consider leading Push 3 with those.
+  ⛔ **MEASURED 2026-07-27 — the prerequisite is not "run the builder". The builder is BROKEN.**
+  Ran it headless (`blender --background`) against the generator's current home. It does not reach an
+  export; it dies inside its own mesh construction:
+  ```
+  monsters/infected.py:616 in _build_mesh
+  AssertionError: stub topology mismatch: basis has 3923 verts, grown target has 3921
+                  — the collapsed/grown builds diverged
+  ```
+  Two separate things are now known that the old "run the builder and export" framing hid:
+  * **The example driver's paths are stale.** `examples/build_scp610_infected.py` hardcodes
+    `REPO = /mnt/codex_fs/game_assets/SCP_Characters`, which no longer exists — the project moved under
+    `projects/`. Worked around here by putting the real `src` on `sys.path` first and `runpy`-ing the
+    builder, so **that** part is not the blocker and needs no edit to their repo.
+  * **The generator has a real geometry bug.** The assertion guards the basis/grown shape-key
+    correspondence, and the two builds genuinely disagree by 2 vertices. The n-gon triangulation
+    immediately above it is documented as vertex-count-neutral (fan/ear-clip over existing verts), so
+    the divergence is upstream of it, in the collapsed-vs-grown dual build itself.
+  **Not fixed here, deliberately.** It is a different repository's geometry pipeline, the fix needs an
+  understanding of their dual-build correspondence rather than a guess at ±2 verts, and guessing at it
+  would produce an asset whose shape keys are subtly wrong — which would surface later as broken
+  secondary motion rather than as an error. **C-1 is blocked on that bug**, and so is FVS-K-1 behind it.
   Then: faction membership, field deposits/reads, drives, and a `ContainmentRule` consumed by the quarantine archetype (B-6).
   *Done when:* `scp610.glb` exists and loads; 610 spawns, participates in the shared substrate, is containable via quarantine; killable but yields nothing. · *Deps:* B-6, **610 asset export** · *Touches:* new `src/scp610/`, `src/ai/`, `src/ai/field.rs`, `assets/scp610/` · *Reading:* [STIG], [STIG-AD]
 - **FVS-C-2 — SCP-999 befriend-capture** · M · ✅ **LANDED 2026-07-26 — the first real capture in the game**
@@ -308,7 +346,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]
 - **FVS-K-6 — SCP-1048 clip driver was invisible to the harness (FIXED 2026-07-25)** · S · ✅ **LANDED**
   `Scp1048Plugin` (harness-visible) spawns bears **with an `anim::BlendSource`**, and `anim::attach_pose_blenders` — also harness-visible — then wired their `AnimationPlayer` with **every slot at zero weight**. But `anim::drive_scp1048_animation`, the only system that ever sets those targets, lived in the windowed-only `Scp1048VisualsPlugin`. So headless, a bear held a permanently undriven blender, and `liveness::every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run` failed the moment the bear's GLB finished streaming — presenting as a flake, since load timing decided whether it fired. Squad, crab and manca all register their clip drivers in their *harness-visible* creature plugins; 1048 was the lone outlier (introduced by `2ab526b`). Fixed by moving the driver into `Scp1048Plugin`; `Scp1048VisualsPlugin` keeps only the fog hiding. · *Touches:* `src/scp1048/mod.rs`, `src/lib.rs`
-- **FVS-K-2 — SCP-1048-A triangle fix** · S · ⚠️ **MEASURED 2026-07-27 — the premise conflates two separate facts, and neither is what the item claims**
+- **FVS-K-2 — SCP-1048-A triangle fix** · S · ✅ **CLOSED 2026-07-27 — premise measured, UV strip declined with a reason**
   The item said "2.6× triangles **from** 3 dead UV sets — cheapest asset win + a test-suite slowdown".
   Measured directly out of the GLB headers:
   | asset | verts | tris | UV sets |
@@ -332,9 +370,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `tests/creature_clip_contract.rs` pins — which is a real risk to a rigged character for a 9.2% saving
   on one file (~1.5% of `assets/`). A surgical strip needs `gltf-transform`/`gltfpack` (neither
   installed), and that is a five-minute job the day one of them is.
-  *Done when:* **either** a surgical tool strips TEXCOORD_1..3 (189 KiB, clip contract untouched), **or**
-  this is split into a real decimation item with an SSIM bar and the UV strip is closed as "not worth a
-  round-trip". · *Deps:* — · *Touches:* `assets/scp1048a/` · *Reading:* — (no corpus resource)
+  ✅ **CLOSED 2026-07-27 on the second branch, which this item wrote for itself.**
+  Checked the host: **no `gltf-transform`, no `gltfpack`, no `node`/`npm`.** The only glTF tooling here
+  is Blender, and an import/export round-trip re-encodes meshes, materials, skinning and the animation
+  clips `tests/creature_clip_contract.rs` pins — a real risk to a rigged character for **9.2% of one
+  file (~1.5% of `assets/`)** that the item already measured as buying **no** suite time. Writing the
+  strip by hand in Python is worse: removing the attribute references without repacking the buffer saves
+  zero bytes, and repacking a rigged, animated GLB by hand is precisely the surgery being avoided.
+  So: **the UV strip is closed as not worth a round-trip.** It becomes a five-minute job the day one of
+  those tools is installed, and the measurement above is what makes that call rather than a guess.
+  **The decimation is a different item and is NOT filed**, deliberately — 1048-A's ~2.5× triangle count
+  is a *denser mesh*, unrelated to the UV sets, and reducing it has visual consequences that need an
+  SSIM bar and an artist's eye. File it when the frame budget actually asks for it; there is no
+  measurement today saying it does.
+  *Done when:* ~~**either** a surgical tool strips TEXCOORD_1..3 (189 KiB, clip contract untouched),~~
+  **or** this is split into a real decimation item with an SSIM bar and the UV strip is closed as "not
+  worth a round-trip". · *Deps:* — · *Touches:* `assets/scp1048a/` · *Reading:* — (no corpus resource)
 - **FVS-M-2 / M-3 — DECISION: crab "numbers-kill" and pounce gates** · ✅ **DECIDED 2026-07-25 (user) — claim rejected, docs corrected**
   **Decision: there is no threshold. The code was right; the README was wrong.** `crab_damage_exponent` already makes a pile-on super-linear, so one or two crabs barely register and a swarm shreds — density is the threat without a cliff. A hard "zero damage under N" gate was rejected on feel: a crab that does *literally nothing* reads as broken, not as tactical. M-3 follows M-2 (the user chose "match whatever M-2 decides"), so pounce damage stays on the same curve — one rule for contact and leap, which is the single explainable mechanic the README was reaching for.
   *Landed:* `README.md` §Crabs — both bullets rewritten to describe the shipped curve and to state the *absence* of a threshold as deliberate, so nobody re-adds it from the old text. **Zero gameplay change, zero golden movement** — this was a documentation defect, and the cheapest correct outcome was to fix the document.
@@ -491,7 +542,66 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Not done here:* FVS-L-3's Site/tech-tree screen and its specimen selector — `keep_a_study_subject` is
   an explicit placeholder that picks the most-uncertain available specimen by a total key.
   · *Deps:* E-1..E-4, L-2, F-3 · *Reading:* **[PROG]**, [PROB-ML], [GRIP], [SDT-00]
-- **FVS-E-6 — The reveal threshold and the fatigue curve are mutually unsatisfiable (FOUND 2026-07-27)** · M · ⚠️ **NEEDS A DESIGN DECISION**
+- **FVS-E-6 — The reveal threshold and the fatigue curve are mutually unsatisfiable (FOUND 2026-07-27)** · M · ✅ **DECIDED + LANDED 2026-07-27 — `decay = 0.87`, found by sweep**
+  > ### The decision, and the measurement that changed it
+  > **Director chose option 1 — raise `decay`.** Raising it is right. *How far* turned out to be a
+  > question nobody had measured, and the sweep found the optimum was not where either candidate sat.
+  >
+  > **The band has TWO lower edges, and only one had ever been characterised.**
+  > * The **resolve floor** — below it a parameter exhausts before reaching `REVEAL_AT`, so the specimen
+  >   can never complete. `check_resolvable` enforces it. It **falls** as `decay` rises.
+  > * The **taper floor** — below it round 2 resolves *more* than round 1, because a weaker test on a
+  >   still-uncertain posterior can out-resolve a strong test on a posterior already moved (binary
+  >   entropy is concave). Nothing enforced it, nothing had measured it, and it **rises** as `decay`
+  >   rises.
+  >
+  > So the usable band is **not monotone in `decay` — it peaks**, and both the old 0.8 and the interim
+  > 0.88 sat off the peak in opposite directions:
+  >
+  > | decay | usable `reliability` band | width |
+  > |---|---|---|
+  > | 0.80 | [0.82, 0.89] | 8 |
+  > | 0.84 | [0.79, 0.89] | 11 |
+  > | **0.85–0.87** | **[0.78, 0.89]** | **12** |
+  > | 0.88 | [0.80, 0.89] | 10 |
+  > | 0.90 | [0.81, 0.89] | 9 |
+  > | 0.92 | [0.83, 0.89] | 7 |
+  >
+  > **0.87 is the top of the tied plateau** — widest band, and the most tests before a parameter
+  > exhausts among the three decays that tie for it. Both halves of E-6's complaint were "more room",
+  > so the tie-break takes both. The authored content spans 0.82–0.89 and now has four points of
+  > headroom at the bottom, which is the room a genuinely hard anomaly needs and which 0.80's 8-wide
+  > strip did not have.
+  >
+  > **The upper edge is 0.89 at every decay and fatigue cannot move it**: at 0.90 a single reading
+  > clears `REVEAL_AT` outright. That is a property of the threshold, so option 2 (lower `REVEAL_AT`)
+  > would have moved this edge and option 1 could not — worth recording, because the two options were
+  > presented as interchangeable ways to widen the band and they are not.
+  >
+  > **Option 3 (several experiments per parameter) was never blocked** — fatigue counts per *parameter*,
+  > so it already works and remains the lever for a longer arc without touching either constant.
+  >
+  > ### A second finding, and the more important one
+  > **`schedule_is_front_loaded` was measuring the wrong thing for real content.** The strict step-wise
+  > check passes on `tests::full_battery` — four *identical* 0.8 experiments — which is the one shape
+  > where the step-wise and round-wise readings agree, and therefore the one shape that could not have
+  > caught this. Against the **shipped** batteries it fails for SCP-1048 and SCP-150 at every decay from
+  > 0.80 to 0.99, because their reliabilities deliberately differ and `reveal_schedule` *chooses* by
+  > expected information gain while *recording* the entropy resolved on the likelier branch — orderings
+  > that do not coincide when the questions are unequal.
+  > `pacing::arc_tapers_across_rounds` is the property FVS-E-3 actually claims (the existing test's own
+  > comment already says so about the leading plateau: *"what must fall is the arc across ROUNDS"*), and
+  > `every_shipped_arc_tapers_across_rounds` now pins it **on the shipped content**. The strict check is
+  > kept for uniform batteries, where it detects a selector regression. Round over round the real arcs
+  > fall hard and always did — 0.42 → 0.30 for the bear.
+  >
+  > *Landed:* `decay` 0.88 → **0.87**; `pacing::arc_tapers_across_rounds`; and three tests that pin the
+  > **sweep** rather than the number — `the_decay_sits_where_the_authoring_band_is_widest`,
+  > `the_authored_reliabilities_sit_inside_the_band`, `every_shipped_arc_tapers_across_rounds`. The two
+  > previous statements of this band were doc comments and **both went stale without anything
+  > noticing**, which is the whole reason it is now a sweep the suite re-runs.
+  > *No golden risk:* `research:` is outside `WorldConfig` (not evolved) and the verb is windowed-only
+  > (`Update` + `AppState::Site`), so it cannot reach `snapshot_hash`. Confirmed unmoved.
   **Found the first time anything actually ran an experiment**, which is the point: three numbers that
   are each individually reasonable cannot all hold.
   * `ExperimentFatigue::decay = 0.8` with `USELESS_BELOW = 0.5` allows only **three** tests on a
@@ -505,6 +615,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Shipped as a stopgap, not a fix:* `ResearchConfig::check_resolvable` simulates the best case (every
   reading concordant) under the shipped fatigue and **refuses to load** a battery that cannot finish, so
   this can never be invisible again. The authored batteries were retuned into the band that works.
+  *Original framing, kept because it posed the question correctly even though its numbers were the
+  pre-decision ones — and because one of its three options turned out to be mis-costed:*
   **The band is the problem, and it is the user's call.** With `decay = 0.8` the usable range is only
   **[0.82, 0.89]**: below 0.82 a parameter never resolves, at 0.90 it resolves in a *single* test. So
   `reliability` — the knob meant to express how hard an anomaly is to study — can currently express
@@ -512,7 +624,11 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   three anomalies. Three ways out, and they trade against each other:
   1. **Raise `decay` toward 0.9** — 5 tests per parameter, a much wider reliability band, longer arcs.
      Costs a re-measure of FVS-E-3's `schedule_is_front_loaded`, whose 0.8 was *measured*, not guessed.
+     ⚠️ *Mis-costed, found on doing it:* "toward 0.9" overshoots — the band peaks at 0.85–0.87 and 0.90
+     is **narrower** than 0.88. The re-measure it warned about is what caught that, so the warning
+     earned its place.
   2. **Lower `REVEAL_AT`** from 0.9 — resolves sooner, but weakens what "the Foundation knows this" means.
+     *Now known to be the only option that can move the band's UPPER edge*, which option 1 cannot touch.
   3. **Allow several experiments per parameter** — already supported (fatigue counts per *parameter*),
      so a second, weaker test on the same question extends the arc without touching either constant.
   *Done when:* a decision is recorded and the constants agree; `schedule_is_front_loaded` re-measured
@@ -584,7 +700,56 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-G-5 — The ASYNC door** · M · ✅ **LANDED 2026-07-26**
   *Shipped:* the door trigger in `site::visuals::enter_the_door` (`NextState::set(RunState::Active)` — **no new state machinery**, exactly as scoped: FVS-A-5's `Idle ↔ Active` already *was* the door), plus `src/site/aperture.rs` + `assets/shaders/async_aperture.wgsl` — the volume inside the frame that visibly is-not-a-room, with its charge eased per-frame.
   ⚠️ **The aperture's uniform defaults are guesses.** The shader was written without ever being looked at; nobody has judged it on screen. It is the game's signature image, so it wants one deliberate art pass — see §7. · *Deps:* G-4 · *Reading:* [UV-REV]
-- **FVS-G-6 — `Res<Dungeon>` audit: make `RunState::Idle` a state the game can SIT IN (NEW, 2026-07-26)** · M · *determinism: touches the pinned core*
+- **FVS-G-6 — `Res<Dungeon>` audit: make `RunState::Idle` a state the game can SIT IN (NEW, 2026-07-26)** · M · *determinism: touches the pinned core* · ✅ **LANDED 2026-07-28 — and the goldens did NOT move**
+  > ### The design choice this item left open, decided: `in_state(RunState::Active)`
+  > The asymmetry the entry predicted is real and decides it. **`Dungeon` is never removed**
+  > (`remove_resource::<Dungeon>` → 0 hits), so after `RETURN TO SITE` it survives, describing a
+  > *despawned* world — `resource_exists::<Dungeon>` reads **true** for a stale world and would gate
+  > nothing, while `in_state` would. It is also the condition `session`'s own `FixedUpdate` systems have
+  > always carried, so this is **one mechanism**, not a second way of saying "there is a run".
+  >
+  > ### ⚠️ THE GOLDEN RISK WAS REAL, AND IT WAS NOT WHERE IT LOOKED
+  >
+  > **`.run_if()` on a TUPLE moves the deterministic golden by itself.** It wraps the tuple in an
+  > anonymous system set, and that extra graph node permutes the schedule's linearisation. Nothing is
+  > skipped — the condition is `true` throughout a golden run, because `begin_first_run` flips to
+  > `Active` on `PostStartup` and the frame's own `StateTransition` lands before the first fixed tick.
+  >
+  > **Proved rather than inferred:** replacing the condition with a trivially-true `|| true` produced
+  > the *identical* drifted hash (`305495817500266690` vs golden `3847183448515137100`). So the drift is
+  > structural. **`.distributive_run_if()`** attaches the condition to each system individually, adds no
+  > node, and leaves the golden **bit-identical**. That is what ships.
+  >
+  > Worth generalising: this repo already knows "adding a system changes linearisation". The new part is
+  > that **adding a run condition to a tuple is adding a node**, which reads as a no-op and is not one.
+  >
+  > ### Scope, and where the first attempt over-reached
+  >
+  > Gated: **24** `FixedUpdate` registrations + the `Update` and `RunFixedMainLoop` registrations whose
+  > systems take a run-scoped resource non-optionally — `selection::command_input` (the exact system the
+  > 2026-07-26 measurement named), `place_quarantine_input`, and the `fog`/`light`/`mold`/`gore`/
+  > `psi_vision`/`placement` per-frame systems.
+  >
+  > ⚠️ **A first pass applied the rule broadly — "expedition gameplay only runs during an expedition" —
+  > and broke 14 hard-gate tests.** Bare-`App` unit tests in `anim`, `containment` and `mycelia::fruit`
+  > never enter `Active`, so their systems simply stopped running. **The correct rule is narrower: gate
+  > what would PANIC without a world, not everything.** Those modules' per-frame systems take no
+  > `Dungeon` and never needed it. Recorded because the broad rule is the tempting one and it is wrong.
+  >
+  > ### Corrected scope numbers
+  > The entry says "90 `Res<Dungeon>` sites across 20 files". Measured 2026-07-28: **94 sites across 45
+  > files**, and **81 distinct systems** take it. The registration surface is far smaller — **27
+  > `FixedUpdate` registrations across 18 files** — which is why this was tractable at all.
+  >
+  > *Shipped:* the gating, plus `the_game_can_sit_in_a_world_less_frame_without_a_dungeon` — 120 frames
+  > with `AutoStartFirstRun(false)`, no panic, state stays `Idle`, no `Dungeon` resource. 120 rather
+  > than one, because a missing-`Res` panic is *parameter validation* that fires the first time each
+  > system actually runs.
+  >
+  > ⚠️ **The shipped default is UNCHANGED.** Making the Site the boot destination is a game-design
+  > decision, and this entry itself argues the current order (field first, Site as somewhere you come
+  > *back* to) is "arguably better than opening at the Site anyway". G-6's job was to make the flip
+  > *possible*; it is now one line whenever the Director wants it.
   **The blocker between the Site existing and the Site being where the game opens.** Today `Idle` is a
   one-frame blip at boot: `session::begin_first_run` leaves it on `PostStartup`, so nothing ever observes
   a world-less frame. Site-67 requires the opposite — the player stands in `Idle` for minutes.
@@ -622,11 +787,15 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Shipped:* `HeldAt` / `SiteSpecimens` — the repo's **third** Bevy relationship — attached inside the `Contained` **hook** (`containment::state::grant_specimen`) rather than by a sweep-up system. Two reasons, both load-bearing: a system would be a new `FixedUpdate` node and would permute the schedule's linearisation for nothing, and the hook keeps *one* path from containment to a banked specimen, so no specimen can come into existence unlinked. A Site legitimately may not exist (bare-`App` unit tests never build one) — that is one optional *link*, not a fallback path; the specimen is granted identically either way.
   *Also shipped:* `specimens_in_capture_order()` and `site::visuals::fill_containment_cells`. **Cell assignment is a pick, and it is keyed correctly:** `SiteSpecimens` is a relationship target ordered by *attach* order, which is not a total order, so the sort is `(captured_tick, captured)` — which is exactly the job `Specimen::captured_tick` was added for. Overflow past the six authored cells `warn!`s rather than silently dropping.
   ⚠️ **Every specimen renders as the same neutral stand-in** (`SitePiece::SpecimenStandin`), because `Specimen` records **no species** — only `captured: Entity` (process-local, deliberately unsaved) and `captured_tick`. That is also the blocker under FVS-E-5's payout table; fixing it once, by giving `Specimen` a `knowledge::Subject`, serves the cell model, the research payout and FVS-O-4's records office together. · *Deps:* G-1, G-4 · *Reading:* [ECS]
-- **FVS-F-1 — Tech-tree flags resource + graph** · M · ⚠️ *duplicate entry — the live one is in Push 4 (**PARTIALLY LANDED**: flags yes, graph no). The graph half is FVS-F-3's job; see there.*
-- **FVS-F-2 — Enabling (not numeric) unlock effects** · M
+- **FVS-F-1 — Tech-tree flags resource + graph** · M · ✅ *duplicate entry — the live one is in Push 4 (line ~426), now **fully landed**: flags 2026-07-26, graph 2026-07-27 via F-3, and F-3's `RemoteCapping` gap closed the same day so no node is unreachable. Kept as a pointer only; do not track status here.*
+- **FVS-F-2 — Enabling (not numeric) unlock effects** · M · ✅ **CLOSED 2026-07-27 — the lint exists and is stricter than the item asked for**
   Every unlock grants a **new verb / capability** ("999-derived morale field lets you calm 610"), never "+X%." Hard review rule.
+  ✅ **Verified shipped 2026-07-27.** Two enforcement points, not one, and they cover different halves:
+  * `research::unlock::every_capability_is_named_as_a_verb_not_a_number` walks `Capability::ALL` and fails on a label containing `%` or `+`. The item asked for "a lint/checklist"; a checklist rots, and this is the version that cannot be forgotten.
+  * `site::o5::nothing_purchasable_is_a_capability` (shipped with P-2) enforces the other direction — the soft currency cannot buy a capability — which is what keeps the two economies disjoint **by kind** rather than by price.
+  Every shipped `Capability` is already a verb (`DEPLOY MORALE FIELD`, `FIRE SEALING CHARGE`), and F-3's curriculum authors them as graph nodes, so the acceptance's first clause was met by construction.
   *Done when:* each unlock adds a capability/tool/containment option; a lint/checklist rejects numeric-only unlocks. · *Deps:* F-1 · *Touches:* tech-tree, equipment, containment · *Reading:* **[SDT-00]**, [SDT-13]
-- **FVS-F-3 — Thaumiel dependency mapping to roster** · L · ✅ **LANDED 2026-07-27 (with one open content gap)**
+- **FVS-F-3 — Thaumiel dependency mapping to roster** · L · ✅ **LANDED 2026-07-27 — content gap CLOSED 2026-07-27**
   *Shipped:* the graph and the authored chain, in `src/research/curriculum.rs` + the `research:` config
   slice. **SCP-999 → morale field → SCP-1048 → remote observer → SCP-150 (the goal).** Each edge is
   Thaumiel logic rather than an arbitrary gate: the 999-derived morale field is what makes standing
@@ -636,13 +805,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `the_progression_never_introduces_a_subject_before_its_prerequisite` pins the topological guarantee.
   Validation refuses a cycle, a prerequisite nothing grants (a soft-locked campaign), a duplicated
   subject, and two subjects granting one capability.
-  ⚠️ **`RemoteCapping` is granted by nothing and is currently unearnable.** Not an authoring oversight —
-  it is FVS-B-7's design landing where it must: capping a nest deliberately yields **no specimen**
-  (rewarding source-elimination would undo the win-by-containing pivot), so there is no crab specimen
-  for its capability to derive from. Either the crab line needs a capture that is not capping, or
-  `RemoteCapping` needs a different parent, or it should be cut. **A design decision, not a config edit.**
-  This is also why F-1's acceptance is only *mostly* met: the graph parses, flags persist, and a node is
-  gated on its prerequisites — but one node has no path to it at all.
+  ✅ **`RemoteCapping`'s missing parent — CLOSED.** The gap was real: capping a nest deliberately yields
+  **no specimen** (FVS-B-7; rewarding source-elimination would undo the win-by-containing pivot), so no
+  crab specimen exists to derive a sealing charge from and the capability read as unearnable in the
+  tech-tree HUD. Three ways out were on the table — invent a crab capture that is not capping, re-parent
+  it, or cut it. **Re-parented onto SCP-1048**, which now grants two capabilities: studying how the bear
+  *sources and assembles* material is how you learn to **seal** a structure. Smallest change, best
+  fiction, and it avoids the one option with a real cost — a new crab capture would have changed every
+  offline rollout. `SubjectResearch::unlocks` being a `Vec` rather than a single `Capability` is what
+  made it a config edit; that plurality is documented at the field for exactly this reason.
+  With it, **F-1's acceptance is fully met**: the graph parses, flags persist, every node is gated on
+  its prerequisites, and no node is unreachable. `a_prerequisite_nothing_grants_is_rejected` is what
+  keeps it that way.
+  *(Marked 2026-07-27 during the reconciliation pass — the fix had shipped in `config.ron` and both this
+  entry and the comment above the `research:` slice still described the gap as open, 55 lines above the
+  config that closed it.)*
   *Also landed here:* the un-built half of **FVS-F-1**. Its Push 4 entry can be closed.
   *Original scoping note, kept because it decided the shape:*
   **Grounded 2026-07-27 in [PROG], and it changes the authoring direction.** Wang et al. model progression content as a **directed graph whose edges are "harder than"** and derive the presentation order by **post-order DFS from the goal**. Two consequences worth taking:
@@ -655,24 +832,58 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Shipped:* `src/persist.rs` — `SaveGame { version, run_seed, tech_tree, specimens }`, atomic tmp+rename write to `$XDG_DATA_HOME/FoundationVsSlop/campaign.ron`, loaded once on `Startup.after(site::spawn_site)` and saved `OnEnter(AppState::Site)` (on arriving home, not on quit, so a crash cannot eat the campaign). Windowed-only: it keys off `AppState::Site`, which the harness never enters.
   **`Specimen::captured` is deliberately NOT serialized.** It is an `Entity` — a process-local arena index — and FVS-N-8's root cause is the standing proof that persisting an allocated id across processes is meaningless. Same reasoning, different subsystem.
   **A version mismatch REFUSES rather than migrating**, and **loading is a replacement, not a merge** (`apply_save` despawns every existing `Specimen` first; merging would silently double a campaign on each load). Both are the right call for a game under construction and both are pinned by tests; revisit the first when the format stabilises.
-  ⚠️ **Coverage is about 40% of FVS-G-3's list.** Not saved: operative **beliefs**, the **O5 standing/budget**, the operative roster, filed reports. Each lands with the item that wires it (Phase 3 for beliefs, FVS-P-3 for the budget), and each is a `SAVE_VERSION` bump. · *Deps:* G-1, E-1, F-1 · *Reading:* — (no corpus resource)
-- **FVS-G-3 — Roguelite meta boundary** · M · *design doc §6*
+  ✅ **Coverage caught up 2026-07-27 — the list is now saved.** Beliefs (`squad_knowledge`) and filed reports (`records`) landed with FVS-O-3/O-4 at `SAVE_VERSION` 2; the **O5 standing/budget** and unspent purchases landed at `SAVE_VERSION` **3** (see FVS-P-3 — its entry claimed this a day before it was true). What remains unsaved is the operative **roster** itself, and deliberately: operatives are `run_scoped()` and rebuilt every expedition, so "operatives persist" is implemented as their *beliefs* persisting, keyed by `SquadMember` index rather than by entity. If FVS-G-3's veteran identity ever needs names and histories rather than knowledge, that is a new field and another bump, not a gap in this one. · *Deps:* G-1, E-1, F-1 · *Reading:* — (no corpus resource)
+- **FVS-G-3 — Roguelite meta boundary** · M · *design doc §6* · ✅ **MET 2026-07-27 — all three clauses, verified**
+  Verified during the reconciliation pass; the decision below was made 2026-07-26 and the code caught up
+  across O-1b/O-3/O-4/P-3 without anyone closing the item.
+  * *"A lost run preserves meta-progress"* — `SaveGame` v3 carries specimens, tech tree, beliefs, filed
+    reports, and (as of this pass) the O5 standing and unspent purchases.
+  * *"A won run banks the extracted specimen"* — `containment::state::grant_specimen`, inside the
+    `Contained` hook, so no specimen can come into existence unlinked.
+  * *"A dead operative's unwritten knowledge is gone"* — and this one is **structural rather than
+    enforced**, which is the good kind. `knowledge::roster::sync_squad_knowledge` rebuilds the table
+    from `Query<(&SquadMember, &Knowledge), With<Unit>>` — the *living* — into a fresh
+    `[Knowledge::default(); ROSTER_SLOTS]`. An operative who did not come back contributes nothing and
+    their slot resets. There is no "forget the dead" system that could be forgotten, and that is exactly
+    what makes a filed report worth writing (FVS-O-4).
+  **Still to measure, not to build:** the veteran lock-in risk below. O-2's FEAR coupling is now on, so
+  the counter-pressure (the veteran is also the most afraid) is live and can finally be observed.
   What persists vs resets. **Decided 2026-07-26: operatives PERSIST across runs, carrying their knowledge.** Persists: operatives + their beliefs, specimens, research, unlocks, filed reports, the O5 standing. Resets: the `RunSeed`'s world, run-scoped entities, the run clock/outcome.
   **Consequences of persistence that must be designed for, not inherited:** losing an operative is a permanent loss of everything they knew, so **death must be rare and legible** — routine attrition would reset the meta-loop constantly and knowledge would never compound. Reports become *insurance* (a voluntary hedge against your own death) rather than the only memory. Veterans diverge, which makes squad selection a real decision. **Watch for veteran lock-in** — one operative accumulating everything while the others rot; the natural counter-pressure is already in the design, since fear accumulates alongside knowledge and the veteran is also the most afraid.
   *Done when:* a lost run preserves meta-progress; a won run banks the extracted specimen; a dead operative's unwritten knowledge is gone. · *Deps:* G-1, A-1 (done) · *Touches:* `src/site/`, `src/session/` · *Reading:* [SDT-00]
-- **FVS-P-1 — O5 performance review + budget** · M · ⚠️ **LOGIC LANDED 2026-07-26, WIRING ABSENT — see FVS-P-3**
+- **FVS-P-1 — O5 performance review + budget** · M · ✅ **LANDED — logic 2026-07-26, wiring 2026-07-27 (FVS-P-3), persistence 2026-07-27**
   *Shipped as pure functions* in `src/site/o5.rs` (7 unit tests, **no plugin and no systems**): `ExpeditionReport { squad_size, survivors, captures, extracted, breaches }` — deliberately the same terms `squad_ai::surprise::EpisodeOutcome` carries, cross-referenced at `surprise.rs:621`, so "how did that expedition go" has one definition surfaced twice; `Rating {Exemplary, Satisfactory, Displeased}` + `rate()`, where extraction and ≥1 capture are the hinge; `allowance()`; and `O5Standing::record()`.
   **The budget floor is settled, and it is a price rather than a number:** `BUDGET_FLOOR = Consumable::CaptureDevice.price()`. The floor's job is not generosity — it is that the loop stays *attemptable*. A Director who cannot afford to contain anything is in a state the game offers no way out of.
   **There is deliberately NO "relieved of command" band.** A review that can end a campaign is a second lose condition competing with the squad wipe, and a worse one: it fires from accumulated mediocrity rather than from anything the player can watch happen.
-  ⚠️ **None of it runs.** `O5Standing` is never `init_resource`'d and `record()` is never called — nothing builds an `ExpeditionReport` from a finished run. That is FVS-P-3. · *Deps:* G-4 (~~I-1~~ — the shared *terms* were enough; the fitness does not have to exist first) · *Reading:* [SDT-00], [QD-PCG]
-- **FVS-P-2 — Requisition: consumables only** · M · ⚠️ **LOGIC LANDED 2026-07-26, WIRING ABSENT — see FVS-P-3**
+  ~~⚠️ **None of it runs.**~~ ✅ Resolved by FVS-P-3 (`O5Plugin` registers it, the report is filed `OnEnter(AppState::Debrief)`) and by this pass (`SAVE_VERSION` 3 carries the standing across restarts). · *Deps:* G-4 (~~I-1~~ — the shared *terms* were enough; the fitness does not have to exist first) · *Reading:* [SDT-00], [QD-PCG]
+- **FVS-P-2 — Requisition: consumables only** · M · ✅ **LANDED — logic 2026-07-26, wiring 2026-07-27 (FVS-P-3), persistence 2026-07-27**
   *Shipped:* `Consumable {CaptureDevice 30, QuarantineCharge 50, Medkit 20}` and `O5Standing::buy()`.
   **P-2's actual rule is enforced as a test, not remembered:** `nothing_purchasable_is_a_capability` walks `research::Capability::ALL` and fails if the budget can buy any of them. Keeping the two economies disjoint **by kind** is what stops the soft currency from eating the research loop — a checklist would have rotted.
-  ⚠️ **`buy()` is never called**, there is no requisition screen, and nothing carries a purchased consumable into an expedition — so the "Done when" is unmet. FVS-P-3. · *Deps:* P-1 · *Reading:* **[SDT-00]**
+  ~~⚠️ **`buy()` is never called**…~~ ✅ Resolved by FVS-P-3 (the `B`/`N`/`M` requisition panel, purchases folded in `.after(reset_verbs)`) and by this pass — unspent purchases are saved alongside the budget, because money and the stock it bought are one quantity in two states. · *Deps:* P-1 · *Reading:* **[SDT-00]**
 - **FVS-P-3 — Wire the O5 economy into the game (NEW, 2026-07-27)** · M · ✅ **LANDED 2026-07-27**
   *Shipped:* `src/site/review.rs` + `O5Plugin` — `O5Standing`/`ExpeditionTally`/`Requisitioned`
   registered, the report filed on `OnEnter(AppState::Debrief)`, a requisition panel at the Site
-  (`B`/`N`/`M`), and purchases carried into the next expedition. Budget and standing persist.
+  (`B`/`N`/`M`), and purchases carried into the next expedition.
+  ⚠️ **"Budget and standing persist" was FALSE when written, and is true as of 2026-07-27.** Measured
+  during the reconciliation pass: `SaveGame` carried `version / run_seed / tech_tree / specimens /
+  squad_knowledge / records` and **`grep -rn O5Standing src/` never touched `persist.rs`**. So this
+  item's own *Done when* — "the budget round-trips through save/load" — was unmet, and every restart
+  handed the Director a zeroed budget and silently deleted anything already bought. This is the
+  **TOP PROCESS RISK one layer down**: not a pure library with no caller this time, but a *claim of
+  completeness in the entry itself* that no test contradicted, because the round-trip test asserted
+  only over the fields that existed.
+  *Fixed:* `SAVE_VERSION` 2 → **3**; `o5: O5Standing` and `requisitioned: Requisitioned` added to
+  `SaveGame` and captured/applied beside `squad_knowledge`. **Both, not just the budget** — they are one
+  quantity in two states, and saving the money without the stock it was spent on would make a restart a
+  way to lose the thing you bought. Pinned by `the_o5_budget_and_its_purchases_survive_a_restart`, which
+  drives the real resources rather than the struct, because the gap was in `capture_save`/`apply_save`
+  and not in the shape.
+  *Also removed, one-path rule:* every `#[serde(default)]` on the save format. Each carried a comment
+  about loading a campaign saved before some subsystem existed, and **every one of those comments
+  described behaviour that cannot happen** — `validate` refuses any foreign `version` before a default
+  could matter. They were an unreachable compatibility branch wearing a rationale, which is worse than
+  useless because they documented a fallback that was not there.
+  `no_saved_field_may_default_away_a_missing_one` is what stops one being re-added.
   **Two decisions worth keeping:**
   * **The report is filed at the DEBRIEF, not on leaving the run.** FVS-A-5 tears the world down on
     exiting `RunState::Active`, which `RETURN TO SITE` does *after* the debrief — so the debrief is the
@@ -710,7 +921,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[QD-PCG]**, [QD], [ME], [QD-OEE], [LPM]
 **Done when:** the retrained archive loads at MODE_COUNT 29; I-1's ablation shows capture-favoring seeds are selectable; successive expeditions receive archive-sampled challenges tuned toward intermediate difficulty, reproducibly.
 
-- **FVS-I-1 — Containment/yield fitness terms + kill-vs-capture conflict resolution** · XL · *determinism: offline; mirrors B-4*
+- **FVS-I-1 — Containment/yield fitness terms + kill-vs-capture conflict resolution** · XL · *determinism: offline; mirrors B-4* · ✅ **DESIGN + BOTH CODE STEPS LANDED 2026-07-27 — only H-1's bake remains**
   `surprise = W·S·L` has no containment/yield term and actively rewards spectacular **kills**. Add capture-quality/yield terms and resolve the conflict — Constrained Surprise Search (surprise as a *constrained* QD objective) is the direct precedent.
   > **📐 DECOMPOSITION DECIDED 2026-07-27 — containment is a CONSTRAINT and an ARCHIVE AXIS, and `W·S·L` is left alone.**
   > The item offers "separate capture-quality archive dimension **vs** scalarized term". It is the first,
@@ -762,11 +973,93 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > worlds, re-probing until it does; (2) **then** the constraint, which will by then reject genuinely
   > capture-hostile worlds rather than the baseline; (3) **then** H-1's retrain. Step 1 is now
   > measurable, which it was not before.
+  >
+  > ### ✅ STEP 1 LANDED 2026-07-27 — 3 of 3, not merely a majority
+  >
+  > `sim_harness::containable_goal_cell` + an **alternating** tour in `evaluate::run_episode`. The
+  > containment beat could previously only fire on an anomaly the squad had *coincidentally* walked
+  > within `device_reach` of while touring crab nests; it can now go and look.
+  >
+  > | world | before | after |
+  > |---|---|---|
+  > | `0x5C09191` | **0 completed / 0 attempted** | **2 completed / 3 attempted** |
+  > | `0x1CE5` | 1 completed / 2 attempted | 1 completed / 1 attempted |
+  > | `0xFEED` | **0 completed / 0 attempted** | **1 completed / 2 attempted** |
+  >
+  > All three now *complete* a capture, and all three still `PASS` the criterion — so a feasibility
+  > constraint on `captures_attempted > 0` would now admit the whole shipped baseline rather than
+  > rejecting two thirds of it. **The blocker under step 2 is cleared.**
+  >
+  > **Alternating rather than replacing, and that is the design.** Always seeking the anomaly would
+  > starve the crab-nest tour, and the nest tour is what produces the firefights whose `NOISE_SQUAD` din
+  > is the swarm's stimulus — i.e. the search's main signal. Always touring nests is the status quo that
+  > cannot see containment. Alternating on `hub_idx` keeps both beats and costs **no exploration
+  > ticks**: the schedule's shape and the episode's length are unchanged.
+  >
+  > The goal is recomputed **inside** the dwell loop rather than once per hub, because 999 oozes toward
+  > the most-anxious operative and 1048 walks — a goal fixed at the top of the tour would send the squad
+  > to where the anomaly used to be. That costs nothing; `issue_squad_order` already runs every window.
+  >
+  > *Determinism:* the pick is keyed on `(quantised distance², TargetId)`, **total by construction**
+  > since `TargetId` is minted once per targetable spawn and never reused. That matters more than it
+  > looks — 999 and 1048 are sparse and often near-equidistant from the squad centroid, so distance
+  > alone ties routinely, and a stable sort would then leak query order (not stable across `App`
+  > instances) into the tour. It is the exact trap `nest_cells` documents and the reason its `(c.y, c.x)`
+  > suffix exists.
+  >
+  > **The goldens did not move, and here the reason is structural rather than lucky:** the golden replay
+  > runs the pinned core with *no synthetic player at all*, so `run_episode`'s tour is not in that path.
+  > What this **does** invalidate is every baked archive and `sweep_prior` — which H-1 already declares
+  > stale for two independent reasons, and this is now the third.
+  >
+  > ### ✅ STEP 2 LANDED 2026-07-27 — the constraint, in `minimal_criterion`
+  >
+  > `captures_attempted == 0` is now **infeasible**. The decomposition the item asked for is therefore
+  > settled in code: containment is a **constraint and an archive axis**, and `W·S·L` is left alone.
+  >
+  > **Why `attempted` and not `completed`** — a world where the squad reached a capturable anomaly and
+  > *failed* is exactly the interesting one; it is a containment problem the search should be free to
+  > make harder. Gating on completion would select for worlds where capture is **easy**, which inverts
+  > the item. Pinned by `a_failed_capture_attempt_is_still_feasible`.
+  >
+  > It preserves `Fitness::score`'s multiplicative-veto property — a fourth factor would make *every*
+  > elite require a completed capture, emptying the archive rather than shaping it — and it lands in
+  > `minimal_criterion`, which already takes `&EpisodeOutcome`, so `fitness()`'s signature is unchanged
+  > across all five call sites.
+  >
+  > *Remaining:* step 3, H-1's bake. Deliberately **not** started — run `cargo train bench` for this
+  > box's projection before committing a night to it. **I-1 is otherwise closed**, and H-3 is unblocked
+  > the moment the archive exists.
   *Done when:* fitness includes explicit containment/yield terms; a documented decomposition (separate capture-quality archive dimension vs scalarized term) bounds the tension; ablation shows capture-favoring seeds selectable. · *Deps:* B-4 · *Touches:* `src/squad_ai/` surprise/fitness, `coevolve.rs` · *Reading:* **[QD-PCG]**, [QD], [LPM]
-- **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI*
+- **FVS-I-2 — "Every feature must evolve" coverage lint** · M · *determinism: offline/CI* · ✅ **LANDED 2026-07-27 (marked 2026-07-27 — it shipped with L-3 and was never ticked)**
   Make CLAUDE.md's rule a lint: flag un-evolved knobs — `GoreSettings.autogib_*` (already caused a 5/5-win→wipe regression), `MetropolisWeights`, most `PerceptionTuning` thresholds, crab/parasite cadence.
+  *Shipped:* `tests/genome_coverage.rs`, and its scoping decision is worth keeping. **Per-knob drift is already caught by something stronger than a lint** — `world_genome::authored_round_trips_exactly` asserts `decode ∘ encode` is the identity on the shipped config, so a field added to `SimTuning` without a matching `encode`/`BOUNDS`/`decode` entry fails immediately, and the audio and behavior genomes carry the same guard. What nothing caught was the **coarser** drift: a whole config slice that no genome touches at all, which breaks no round-trip because it is not in one. That is the gap this closes.
+  **It is a ledger, not a ban**, and the exemptions are stated once rather than re-litigated: cosmetics cannot move the sim, and three slices (`session:`, `containment:`, `research:`) are deliberately outside the search because they define the **objective** rather than the difficulty — a search free to retune what "winning" or "capturing" means would be moving the measuring stick and archive fitness would stop being comparable between bakes. The failure mode is a *new, unclassified* slice: adding one fails the test by name and demands a decision, which is exactly the review moment the rule wants. Same ratchet shape as `tests/panic_budget.rs`.
   *Done when:* CI enumerates tunable knobs vs genome coverage and fails/warns on gaps; the four families tracked. · *Deps:* — · *Touches:* `src/squad_ai/`, genome defs, CI · *Reading:* [ME], [QD]
-- **FVS-I-3 — Wire the RemotePolicy live-trainer hook** · M · *determinism: offline*
+- **FVS-I-3 — Wire the RemotePolicy live-trainer hook** · M · *determinism: offline* · ✅ **LANDED 2026-07-28**
+  *Shipped:* `squad_ai::rl::RemoteDriver` — a live handle to a `RemotePolicy` that is *already installed
+  in a running sim*, plus `impl SquadPolicy for Arc<RemotePolicy>`.
+  **Why the hook was unreachable, and it was not a missing feature.** `push_action` existed with **no
+  caller** because `ActivePolicy` owns a `Box<dyn SquadPolicy>` — a boxed trait object cannot be pushed
+  to from outside, so the seam was reachable only by a test that constructed the policy directly. That
+  is the "pure library, no caller" shape this backlog names as its top process risk, and the fix is
+  **ownership, not new machinery**: the queue was already behind a `Mutex`, so an `Arc` of it is safely
+  shared between the sim and whatever drives it. The driver keeps one clone and hands another to
+  `SimConfig::with_policy`.
+  **One queue, not per-unit, and that is honest rather than lazy.** `SquadPolicy::choose` is called once
+  per deciding unit per tick with **no stable unit identity in its signature**, so a per-unit queue would
+  require an ordering contract the seam does not offer. One queue consumed in decision order is the
+  accurate model of what the trait exposes — and it is what a trainer stepping one tick at a time wants.
+  **A silent trainer HOLDS rather than repeating its last action**, which is the live-vs-batch
+  distinction: repeating would make "the trainer is thinking" indistinguishable from "the trainer is
+  stuck", and only the first is recoverable. Pinned by
+  `a_silent_trainer_holds_rather_than_repeating_its_last_action`.
+  **The driver is another PROCESS**, so a trainer built against a stale `MODE_COUNT` is clamped rather
+  than able to index out of bounds — `an_external_trainer_cannot_crash_the_game_with_a_stale_action_space`.
+  *Advisory until J-5*, per this item's own acceptance: nothing gates on a remotely-driven run.
+  ⚠️ **`Deps: H-1` was wrong.** The acceptance is *"the hook receives policy updates from a driver"* — a
+  wiring property, testable with any policy. A baked archive would make the driven policy *good*; it was
+  never needed to make the hook *reachable*.
   The hook exists but nothing drives it; connect it for live/near-live policy iteration (feeds H-3).
   *Done when:* the hook receives policy updates from a driver; documented advisory until J-5. · *Deps:* H-1 · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
 - **FVS-H-1 — Retrain stale RL policy archive (PREREQUISITE)** · L · *determinism: offline; harness-gated*
@@ -794,15 +1087,285 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
-- **FVS-H-2 — Make CMA-MAE emitter reachable (ideally)** · M · *determinism: offline*
+- **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
+  ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
+  intermittently **because the bug is intermittent**. That is the test working.
+  **The evidence.** On PR #68, `search_rollouts_of_mutants_are_reproducible_under_load` failed on CI:
+  ```
+  mutant #3 (rng seed 0x6d07a17) on world 0x5c09191:
+    2 distinct [(66c73bd35b9ceb48, 1f25), (15c4e253ae10b46a, 1f25)]
+  ```
+  Two replicate rollouts of the **same** mutant genome on the **same** world: snapshot hashes differ,
+  **field hashes identical**. So actor state diverged while the stigmergy grids did not — which points
+  at a gameplay decision keyed on ECS query order rather than at a field-update ordering bug.
+  **It is intermittent, and that is measured rather than assumed:** commit `1d3c0a7` produced a harness
+  lane **success and a failure on two runs of identical code**.
+  > ### 🔑 THE DIVERGENCE IS BIMODAL AND STABLE — this is a discrete decision, not float drift
+  > It reproduced at `08f7b38` with **byte-identical output** to the `1d3c0a7` failure: same mutant #3,
+  > same world `0x5c09191`, and the *same two* snapshot hashes `66c73bd35b9ceb48` / `15c4e253ae10b46a`.
+  > Two different commits, two different CI runs, one pair of outcomes.
+  >
+  > That rules out the obvious explanation. **Accumulated float noise under scheduling pressure would
+  > give a different hash every time.** A rollout landing on exactly one of *two* states, repeatably,
+  > is a **binary decision flipping** — an `if`, a tie-break, a "first match wins" over an unordered
+  > iteration — not drift.
+  >
+  > **And the field hash is `1f25` in BOTH branches.** The stigmergy grids evolve identically; only
+  > actor state (`Transform`/`Health`) differs. So whatever flipped either does not deposit, or flips
+  > late enough that no deposit follows it. That is a strong filter on where to look: a decision that
+  > moves or damages an actor without writing a field.
+  >
+  > This is far more tractable than the failure first appeared, and it narrows the search to a
+  > *specific* genome × world pair that sits on a knife edge — which is exactly what
+  > `evaluate::trace_episode` + `row_trace` are built to bisect.
+  **It is very likely NOT new.** main's scheduled nightly the same day failed *both*
+  `search_parallel` tests — the same family (load-based determinism), on the same runner class, on a
+  branch containing none of PR #68's work. Two independent tests in that family failing on CI while
+  passing on a 24-core workstation is one pattern, not two.
+  **Why this box cannot see it, and why that matters.** The load generator spawns a fixed **8 busy-loop
+  threads**. On 24 cores that is mild; on a 2–4 core GitHub runner it is 2–4× oversubscription. **The CI
+  runner is a strictly harsher determinism probe than the development machine** — which inverts the
+  usual assumption that local reproduction is the prerequisite for investigating. TESTING.md invariant
+  13 applies directly: an exoneration is only as strong as the condition it was measured under, and
+  every local pass here was measured under a weaker one.
+  ⚠️ **FVS-J-5's lane split reduced this test's visibility, and that was decided BEFORE this failure was
+  seen.** It now runs only in the nightly job — still a HARD job, so it still gates, but no longer per
+  PR. That split was justified on runtime (two tests were ~89% of a 2-hour lane) and it stands on those
+  grounds; it must not become the reason this goes uninvestigated. **If this proves to be a live
+  determinism bug, the split should be revisited** — a per-PR lane that cannot catch it is the exact
+  gap FVS-J-5 exists to close.
+  *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
+  `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
+  first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The
+  precedent is `docs/rl/2026-07-16-search-rollout-nondeterminism.md`, the G0 investigation.
+  **Reproducing it locally will likely require raising the load generator's thread count** well past 8,
+  to emulate the runner's oversubscription — the cheapest first experiment, and it is one this box can
+  actually run.
+  *Done when:* the divergent decision is named and fixed, **or** the failure is proven to be an artefact
+  of oversubscription that cannot occur at shipped thread counts — with the measurement that shows it.
+  · *Deps:* — · *Touches:* `src/squad_ai/evaluate.rs`, wherever the order-dependent decision lives · *Reading:* [ABM], [TEST-NT]
+- **FVS-N-12 — `train --no-apply` still overwrites the one TRACKED archive (FOUND 2026-07-28)** · S · *determinism: offline* · ✅ **FIXED 2026-07-28**
+  **Measured, and it bit during a smoke run.** `--no-apply` is documented as "do NOT bake at the end …
+  leave `config.ron`/goldens alone", and it honours that. But each island phase *also* copies its winner
+  to the canonical `assets/config/elites_<dim>.ron`, and that copy is **not** gated by `--no-apply`.
+  Five of those six paths are gitignored. **`elites_levels.ron` is not** — it is the only tracked
+  archive in the directory. So a 4-generation smoke run silently replaced a committed **55-cell**
+  archive with a **17-cell** one, and `git status` was the only thing that noticed.
+  **It is worse than a hygiene problem, because that exact file is what FVS-H-3's `CurriculumDirector`
+  samples.** A throwaway bake quietly makes the director's world pool three times thinner, and nothing
+  in the game reports it — the expeditions just get less varied.
+  **Why the flag reads as safe when it is not:** `--no-apply`'s own help text is about `config.ron` and
+  the goldens, which are the destructive, hard-to-undo effects. Overwriting an archive is neither, so it
+  was never in scope for the flag — the gap is that one archive became *tracked* while the others stayed
+  ignored, and the copy step never learned the difference.
+  *Fixed:* an exploratory run writes `elites_<dim>.**candidate**.ron` beside the canonical archive; only
+  `--apply` targets the canonical path. The `FVS_*_ELITE` hint follows the file actually written, so it
+  never points at something that was not updated.
+  **Why not simply gate the copy off** — the obvious fix, and it is wrong: `islands_out/` is **cleared at
+  the start of the next island phase**, so with no copy at all `train all --no-apply` would lose each
+  phase's winner as the following phase began. That is the flag's main use. The copy has to happen; only
+  its *destination* was the bug.
+  The candidate name still matches the `assets/config/elites_*.ron` ignore pattern, so it cannot be
+  committed by accident, and promoting one is an explicit act — the same raw→curated split `models/` →
+  `gen_ai/` already uses for assets.
+  *Done when:* ~~either the winner copy is gated behind `--apply`~~ **or** the copy target moves to a path
+  that is ignored like its five siblings and promoting an archive becomes an explicit act. · *Deps:* — · *Touches:* `src/bin/train.rs` · *Reading:* — (no corpus resource)
+- **FVS-I-4 — The AUDIO archive's descriptor does not track its knobs (FOUND 2026-07-28)** · M · *determinism: offline*
+  Measured across two runs. `elites_audio.ron` comes back **coverage 3 of 64** at 30 generations and
+  **coverage 1** at 4 — fifteen times the search budget for two extra cells. That is the signature of a
+  descriptor the search cannot move, not of an under-powered search.
+  **The confounder is eliminated, which is why this is now a filed item rather than a suspicion.** The
+  first measurement was taken while FVS-I-1's containment clause was wrongly scoped into the *shared*
+  `minimal_criterion` and was rejecting audio candidates. The second was taken after that was scoped out
+  — and audio still collapses. It is the descriptor.
+  **The shape:** `audio_search` scores *physical acoustic knobs* (`evaporate`, `diffuse`,
+  `deposit_radius`, per-event loudness) against `coevolve::swarm_descriptor`, whose axes are
+  **decision-mode shares** (aggression × persistence). The knobs move the swarm's *stimulus*; the axes
+  measure its *choices*, and the coupling between them is weak. This is the identical shape the
+  behaviour archive was flagged for — and audio was never on that list, because the 2026-07-24 audit
+  verified `swarm_descriptor` **in isolation**.
+  **The generalised rule, which is the real finding: a descriptor is only "healthy" relative to a given
+  SEARCH. Audit the knobs↔descriptor *pair*, never the descriptor alone.**
+  ✅ **CONFIRMED BY CONTROLLED COMPARISON 2026-07-28.** One smoke run, four archives, identical budget
+  (4 generations × batch 8, 24 islands, same machine, same seed) — so search budget, contention and
+  emitter are held constant and only the knobs↔descriptor pairing varies:
+  | archive | what the genome moves | descriptor axes | coverage / 64 |
+  |---|---|---|---|
+  | **policy** | squad decisions | bespoke `rl_eval::policy_descriptor` (initiative × caretaking) | **21** |
+  | **levels** | dungeon architecture | swarm behaviour | **17** |
+  | audio | acoustic *stimulus* knobs | decision-mode shares | **1** |
+  | behavior | physical speeds/bands | decision-mode shares | **1** |
+  The two that collapse are **exactly** the two scoring *physical* knobs against *decision-mode* axes;
+  the two that illuminate are the ones whose genome moves the measured axes directly. This is not "QD
+  does not work on this project" — `policy_descriptor`, itself the fix for an earlier collapse, is the
+  best archive in the run.
+  *Done when:* audio is scored against axes its knobs actually move — candidates: mean field gradient
+  and din-driven displacement — and a bake illuminates materially more than 3 cells. **Changing a
+  descriptor invalidates committed archives and shifts training semantics, so it is a design decision,
+  not a unilateral fix.** · *Deps:* — · *Touches:* `src/squad_ai/audio_eval.rs`, `coevolve/descriptors.rs` · *Reading:* **[ME]**, [QD]
+- **FVS-H-2 — Make CMA-MAE emitter reachable** · M · *determinism: offline* · ✅ **LANDED 2026-07-27**
+  *Shipped:* `rl_search::Emitter` (`Isotropic` / `CmaMe` / `CmaMae`) replacing the `use_cma` boolean,
+  `cma_mae_alpha` threaded through `RlSearchConfig`, and `train rl --emitter cma-mae [--alpha X]`.
+  **A boolean cannot name three emitters, and that is why CMA-MAE stayed dead** — the code was
+  implemented, unit-tested and correct, with nowhere to put the third choice. The enum is that place.
+  **`--cma` still works and still means CMA-ME**, and the two flags are `conflicts_with` rather than
+  ranked by a precedence rule. Deliberate: a silent winner between two flags that both name an emitter
+  is how a **12–20 h bake** ends up searching a landscape nobody chose, discovered only when the archive
+  turns out incomparable. `the_emitter_shorthand_and_the_flag_agree` and
+  `cma_and_emitter_cannot_both_be_given` pin both halves.
+  **The worker forward is the subtle part.** Island children were launched with `--cma`; a child
+  launched with `--cma` while the parent ran `--emitter cma-mae` would search a *different* landscape,
+  which is precisely what `search_parallel`'s bit-for-bit archive comparison exists to catch. The
+  emitter choice is now forwarded, `--alpha` with it.
+  `min_f` is **`0.0`**, not a tuned constant: policy fitness is `W·S·L`, a product of three non-negative
+  factors, so zero is the true infimum and an empty cell's threshold starts where "nothing archived
+  here yet" actually is.
+  **`train all` is unchanged** — it still drives the `rl` phase through `--cma`. Making CMA-MAE the
+  pipeline default is a decision for whoever commits the night to H-1, not a side effect of making it
+  reachable.
+  ⚠️ **Scope, re-measured and unchanged:** `rl_search` is the **only** consumer of any CMA emitter —
+  `levels`/`audio`/`behavior`/`evolve3` all use isotropic `map_elites_loop` — so this improves the
+  **policy** archive alone unless that wiring is widened.
+  *Superseded note:* the old "otherwise the director is built on the weaker emitter" overstated it. The
+  status quo was CMA-**ME**, used in anger (the 2026-07-23 island run) and already what `train all`
+  passes. This widens the choice rather than fixing a weakness.
   CMA-MAE (`map_elites::map_elites_cma_mae_loop`, Fontaine & Nikolaidis 2023) is implemented and unit-tested but `pub(crate)` and referenced **only by its own two tests** — confirmed dead 2026-07-27.
   ⚠️ **Correction (2026-07-27): the old "otherwise the director is built on the weaker emitter" overstates it.** CMA-**ME** (`map_elites_cma_loop`) *is* reachable via `train rl --cma`, has been used in anger (the 2026-07-23 island run), and is what `train all` already passes for the `rl` phase. So the status quo is CMA-ME, not the isotropic emitter. Also worth knowing before scoping: `rl_search` is the **only** consumer of any CMA emitter — `levels`/`audio`/`behavior`/`evolve3` all use isotropic `map_elites_loop` — so this improves the *policy* archive only unless the wiring is widened.
   Mechanically it means turning `RlSearchConfig`'s boolean `use_cma` into a 3-way emitter enum and threading CMA-MAE's `alpha` (annealing rate) through `SearchArgs`.
   *Done when:* a `train` subcommand runs CMA-MAE end-to-end and writes an archive. · *Deps:* — · *Touches:* `bin/train.rs`, `src/squad_ai/map_elites.rs`, `rl_search.rs` · *Reading:* [ME], [QD], [QD-OEE]
-- **FVS-H-3 — `CurriculumDirector` runtime archive-selection system** · XL · *determinism: selection seeded + logged; sampled config feeds the core*
+- **FVS-H-3 — `CurriculumDirector` runtime archive-selection system** · XL · *determinism: selection seeded + logged; sampled config feeds the core* · ✅ **LANDED 2026-07-28**
+  > ### The grounding argues AGAINST this item's own phrasing, and that decided the design
+  > The item says "target the learning-progress **band**", which reads as *pick the middle-difficulty
+  > cell* — a pair of thresholds. [LPM] (Oudeyer & Kaplan 2007, §"Maximizing competence progress — aka
+  > Flow motivation") considers exactly that and rejects it:
+  > > "a possible manner to model flow would be to introduce two thresholds defining the zone of optimal
+  > > difficulty. **Yet, the use of thresholds can be rather fragile, require hand tuning** … Another
+  > > approach can be taken, which avoids the use of thresholds. It consists in defining the
+  > > interestingness of a challenge as the **competence progress** that is experienced as the robot
+  > > repeatedly tries to achieve it."
+  >
+  > So a cell is not interesting because its difficulty sits in a band — it is interesting because the
+  > player is **getting better at it**. That deletes two hand-tuned constants the band design needed,
+  > which is the reason to prefer it rather than a stylistic choice.
+  >
+  > **The paper's precondition is free here, and it is why this belongs on the archive.** CPM is only
+  > meaningful *within* regions `R_n`, whose boundaries normally have to be learned — and **a MAP-Elites
+  > archive is already partitioned into cells by behaviour descriptor**. The QD structure the search
+  > produced for unrelated reasons supplies exactly the grouping the model requires. A difficulty scalar
+  > would not have.
+  >
+  > [GRIP] names the consequence: progress niches "progressively disappear as they become more
+  > predictable". Nothing decays a mastered cell by hand — the window slides and the derivative falls to
+  > zero, pinned by `a_closing_progress_niche_stops_being_chosen_on_its_own`.
+  >
+  > *Shipped:* `src/director.rs` — `CurriculumDirector`, `CellHistory::learning_progress` (difference of
+  > two window means, [LPM]'s smoothed CPM form), `competence()` over `ExpeditionReport`, and
+  > `elite_overlay::levels_archive_cells`.
+  > **Decisions worth keeping:**
+  > * **Absolute progress, not signed.** A cell the player is getting rapidly *worse* at is as
+  >   informative as one they are mastering — both mean the difficulty is live. Signed progress would
+  >   make the director flee anything going badly, which is the opposite of a curriculum.
+  > * **Unvisited cells score `INFINITY`.** A pure-progress rule can never choose a cell with no history
+  >   — there is no progress to measure — so the campaign would never leave where it started. [LPM]'s
+  >   progress niches must be *discovered*; this is optimism-under-uncertainty doing real work.
+  > * **`learning_progress` returns `Option`, not `0.0`.** "No evidence" and "measured flat" are
+  >   different states; collapsing them makes an untried cell look mastered. The same distinction
+  >   `knowledge::Knowledge::of` draws, for the same reason.
+  > * **`competence()` reads the Council's five terms for a different question.** P-1 gave the search
+  >   and the Council one vocabulary for "how did that expedition go"; this is a third *reader*, not a
+  >   fourth definition — the Council asks what funding this earned, the director asks how competent it
+  >   was, and a cheap win in an easy world funds well while teaching nothing.
+  > * **An empty/missing archive yields no pick and the AUTHORED world plays.** Not a fallback: with
+  >   nothing to sample, `config.ron` is the right expedition rather than a degraded one.
+  > *Determinism:* **windowed-only and structurally so** — `DirectorPlugin` is registered in the
+  > windowed group alone, so the harness's `OnEnter(RunState::Active)` keeps exactly the nodes the
+  > deterministic core has always had. Selection is reproducible given the `RunSeed`: candidates are
+  > sorted before any draw, interest is a pure function of stored history, and the only randomness is
+  > the seeded tie-break — which exists because ties are the norm at a cold start, where every cell is
+  > `UNVISITED`, and "first in sort order" would walk the archive on a fixed, learnable path.
+  > `SAVE_VERSION` 5 → **6**: the per-cell history *is* the curriculum, and dropping it on restart would
+  > hand the player back the worlds they had already mastered and call it adaptive difficulty.
+  > ⚠️ **The archive it samples predates FVS-I-1's containment constraint**, so it may contain
+  > capture-hostile worlds — the "director surfaces anti-loop content" risk I-1 was filed against. That
+  > is an argument about the **data**, not the system: re-bake and the same director samples better
+  > worlds with no code change. See H-1.
   A **new** resource sampling the QD archive `OnEnter(InGame)` to pick the next challenge — experience-driven/dynamic difficulty. **Not** the static env-var `elite_overlay`. Target the learning-progress band.
   *Done when:* successive expeditions receive archive-sampled challenges tuned toward intermediate difficulty; selection reproducible given seed. · *Deps:* H-1 (ideally H-2), I-1 · *Touches:* new director module, `src/squad_ai/`, `elite_overlay.rs` (read-only ref), app-state · *Reading:* **[QD-PCG]**, [LPM], [QD], [QD-OEE]
-- **FVS-L-4 — Curriculum/expedition briefing HUD** · S · *determinism: render*
+- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · *determinism: offline measurement*
+  **The decision, made 2026-07-28 in FVS-H-3.** `CellHistory::interest` takes `|progress|`, so a cell the
+  player is getting rapidly **worse** at is as interesting as one they are mastering — both mean the
+  difficulty is live rather than settled. Signed progress would make the director *flee* anything going
+  badly, which is the opposite of a curriculum.
+  **Why it is a spike and not a settled fact:** [LPM] defines CPM over the *derivative* of competence
+  without committing to a sign, because a robot setting its own goals and a game pacing a player are not
+  the same problem. A player on a losing streak may experience "the game keeps sending me back to the
+  thing beating me" as punishment rather than as a curriculum — the failure mode absolute progress
+  invites and signed progress cannot have.
+  *Falsify it:* play (or replay) a campaign that deliberately declines, and check whether the director
+  parks in the declining cell. Measure how many consecutive expeditions it takes to leave.
+  *If wrong:* half-wave rectify — weight gains fully and losses partially — rather than flipping to
+  pure signed, which would reintroduce the flee behaviour. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]
+- **FVS-H-5 — SPIKE: does `UNVISITED = INFINITY` starve the measured cells?** · S · *determinism: offline measurement*
+  **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
+  measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
+  there is no progress to measure — and the campaign never leaves where it started. [LPM]'s progress
+  niches have to be *discovered*.
+  **The risk it creates, and it is real:** the shipped `elites_levels.ron` has **55 occupied cells**. At
+  one expedition per pick that is 55 expeditions of pure exploration before the director exploits
+  anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
+  correct in principle and possibly far too patient at this archive size.
+  *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
+  *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
+  *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
+- **FVS-H-6 — SPIKE: `Option` vs `0.0` for an unmeasured cell — is the distinction load-bearing?** · S
+  **The decision.** `CellHistory::learning_progress` returns `Option<f32>`, `None` until two full
+  windows exist — *not* `0.0`. "No evidence" and "measured flat" are different states, and collapsing
+  them makes an untried cell look **mastered**, which is the one reading that would stop the director
+  exploring entirely. Same distinction `knowledge::Knowledge::of` draws for beliefs, grounded in
+  [EPISTEMIC]'s Fisher argument that ignorance is not a uniform probability.
+  **Why it is still a spike:** the distinction is currently load-bearing only because `interest()` maps
+  `None` to `UNVISITED`. If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
+  into that prior and become ceremony. Worth re-checking *after* H-5, not before.
+  *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
+  whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
+- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S
+  **The decision.** A missing or empty archive makes `CurriculumDirector::pick` return `None`, the
+  director does not fire, and the **authored** `config.ron` world plays. Claimed as one path rather than
+  a fallback: with nothing to sample there is no degraded substitute being written — the authored world
+  is the *right* expedition, not a consolation for a failed one.
+  **The reason to check rather than assert it:** that argument is exactly the shape a fallback uses to
+  justify itself, and this repo's rule is unusually strict ("no backup modes, no rollover behavior").
+  The honest test is whether the two paths can ever *disagree about what the player is playing* — if a
+  campaign can silently alternate between directed and authored worlds without the player being told,
+  it is a second path however it is framed.
+  *Falsify it:* delete the archive mid-campaign and check the player can tell. `pick_next_challenge`
+  currently `info!`s it, which is invisible in a shipped build.
+  *If wrong:* surface it in FVS-L-4's briefing — "AUTHORED UNIVERSE (no archive)" — so the state is
+  legible rather than silent. That is probably the right move regardless. · *Deps:* H-3, L-4 · *Reading:* — (no corpus resource)
+- **FVS-L-4 — Curriculum/expedition briefing HUD** · S · *determinism: render* · ✅ **LANDED 2026-07-28**
+  *Shipped:* `src/ui/briefing.rs` — the sampled world named as a **Branch universe** at run start.
+  **Why it is not optional polish.** FVS-H-3 samples a world by where the player is learning fastest,
+  and without this panel that is *completely invisible*: worlds change, the reason does not surface, and
+  adaptive difficulty is indistinguishable from randomness — or from the game being inconsistent. **A
+  director the player cannot perceive is one that gets blamed for bad luck.**
+  **It renders the archive's OWN axes — `clutter` and `infestation` — and deliberately does not collapse
+  them into "difficulty: 7/10".** MAP-Elites does not produce a difficulty scalar, and inventing one
+  here would discard exactly what the archive exists to preserve: two worlds can be equally hard in
+  *different ways*, and a dense clean ruin is not interchangeable with an open infested one. Pinned by
+  `the_axes_are_shown_separately_not_collapsed_into_a_difficulty_score`.
+  Bars rather than numbers, because the axes are **comparative** — what matters is that this world is
+  more cluttered than the last, not that it scores 0.62.
+  ✅ **Closes FVS-H-7's tell.** With no archive the authored `config.ron` world plays, and the briefing
+  now says `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED` in as many words, in the same voice as the sampled
+  case so it reads as a legitimate expedition rather than an error. That was the spike's actual
+  question: not whether the reasoning is sound, but whether the player can **tell** — a path you cannot
+  perceive is a second path however the code frames it. The spike stays open only for its wider
+  audit; its concrete fix has landed.
+  Rendered through `ui::widgets::text_colored` rather than a hand-rolled bundle, so it honours
+  `theme.scale` — a panel that ignores the accessibility text-scale knob stops being readable for
+  exactly the players who turned it up.
+  *Determinism:* windowed-only; `BriefingPlugin` is in the windowed group, so the harness never
+  registers it. · *Deps:* H-3
   Surface the director's chosen challenge as a Branch-universe briefing at run start.
   *Done when:* each expedition shows its sampled challenge framing. · *Deps:* H-3 · *Touches:* UI, director · *Reading:* [LPM], [QD-PCG]
 
@@ -813,10 +1376,81 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG], [GOAP]
 **Done when:** the endgame trigger fires after a curriculum threshold; confrontation mechanics derive from the SCP-9191 generator theme; 173/096 are capturable via a new per-entity continuous-watch state (explicitly distinct from the ambient field); no shipped copy cites the deprecated semiotic-decay theming as canon.
 
-- **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL
+- **FVS-K-4 — SCP-9191 antagonist reveal + endgame** · XL · ⚠️ **CURATION PHASE LANDED 2026-07-27 — the manifestation is sequenced behind H-1's bake**
+  > **Shape decided 2026-07-27 (Director): curation phase, then a manifestation.**
+  *Shipped:* `src/antagonist.rs` — `Antagonist { phase, seeded, purged }`, the wake trigger, the
+  seeding, the **curation verb**, and `tests/lore_canon.rs`.
+  **The threshold is the curriculum's own goal, not a new number.** F-3 authored the graph backwards
+  from SCP-150 so that finishing it *means* something; reusing it keeps one definition of "the
+  Foundation has learned what there is to learn here" rather than minting a second that could disagree
+  with the tech-tree HUD the player is reading.
+  **The counter-play is the design, and it is gated on having gone and looked.** `J` at the Site pulls
+  every filed report the squad's **firsthand** experience contradicts — and *only* firsthand, which is
+  the whole mechanic rather than a strictness:
+  * **`Told` would let a rumour purge the truth.** O-3's retellings degrade but persist, so a squad that
+    merely *heard* something could pull a correct report. The archive edited by gossip is the failure
+    FVS-O-4 exists to prevent.
+  * **`Read` would make the archive edit itself.** `Read` beliefs come *from* the shelf, so a planted
+    lie briefed onto the squad would authorise purging whatever contradicts it — 9191 curating on the
+    Director's behalf, erasing more the more it lied.
+  So the price of curation is **an expedition**, and the endgame *drives* the core loop instead of
+  replacing it. That is what "research cashes out as restoring curation against an out-of-control
+  generator" means once it is mechanical.
+  **The panel states the instruction, not the keybind** (FVS-L-1's rule): `PULL 2 REPORT(S) YOU HAVE
+  DISPROVEN` versus `NOTHING HERE IS DISPROVEN YET — GO AND SEE THE THING ITSELF`. The count is computed
+  through the *same function the verb uses*, on a clone, so the panel cannot promise a purge `J` would
+  not perform.
+  ✅ **Third clause met and linted.** `tests/lore_canon.rs` scans `src/`, `config.ron` and `README.md`
+  for the deprecated semiotic-decay theming and fails the build on a hit; the two `docs/lore/` documents
+  that develop it now carry a deprecation banner in their first lines. **They are kept, not deleted** —
+  they are good work and they produced the decision — but a reader meets the ruling before the material.
+  A third test asserts the *generator* reading is actually present in shipped copy, because a lint that
+  only forbids the old theming would pass just as happily on a game with no antagonist theming at all,
+  which is the state K-4 was filed to fix.
+  ⚠️ **The manifestation is NOT shipped, and the sequencing is deliberate.** It is a field creature: new
+  `FixedUpdate` nodes, a permuted schedule, moved goldens, and therefore a re-bake of every archive.
+  Landing it before FVS-H-1's bake would pay that 12–20 h **twice** — the identical mistake this backlog
+  records under H-1 about I-1. So the seam is `Antagonist::confrontation_due()`, a real tested predicate
+  over real state, rather than a `Phase::Manifest` variant that exists and does nothing: a dead enum
+  variant is the "shipped a mechanism, nobody can reach it" shape this repo keeps catching, while a
+  predicate that reads `true` and has no consumer yet is honestly incomplete instead.
+  *Determinism:* windowed-only. Gated on `AppState::Site`, which the harness never enters, and the lie
+  is chosen by a **fixed scan** over `Subject::ALL × Claim::ALL` rather than a draw — no seeded RNG to
+  get wrong. `SAVE_VERSION` 4 → **5**: a restart that reset 9191 would hand the Director a clean shelf
+  and a dormant antagonist, which is the endgame undone rather than resumed.
+  *Remaining:* the manifestation + its containment rule, after the bake.
   Author the SCP-9191 arc: research cashes out as "restoring curation/quality against an out-of-control generator," culminating in a confrontation with SCP-9191. Deprecate semiotic-decay/2521/Gat-Hayes (optional flavor only if non-contradictory). Consider mining the canon "alarm switch ON/OFF" locker detail for the confrontation trigger.
   *Done when:* endgame trigger fires after a curriculum threshold; confrontation derives from the generator theme; no shipped copy references deprecated theming as canon. · *Deps:* F-3, K-3 · *Touches:* narrative, tech-tree, `lib.rs` lore refs · *Reading:* **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG]
-- **FVS-K-3 — Dialogue content buildout** · L · ⚠️ **PARTIALLY LANDED 2026-07-27 — the module has a JOB now**
+- **FVS-K-3 — Dialogue content buildout** · L · ✅ **LANDED 2026-07-27 — 14 conversations, all event-triggered, hotkey deleted**
+  *Shipped:* `src/dialogue/triggers.rs` + 13 new authored conversations in the `dialogue:` config slice
+  (**14 total**, against the item's bar of ≥12, fixed at scoping time).
+  * **Loop beats (7):** expedition start, first capture, first research completion, a capability
+    unlock, arriving home carrying a specimen, an operative lost, the squad-wipe debrief.
+  * **First contact (4):** SCP-999, SCP-1048, SCP-150, crab nest.
+  * **SCP-9191 foreshadowing (3):** the first bear *copy* (something that was **made**), the second
+    capability (the defect is a signature, not a species trait), and an unattributed report on the
+    shelf. Written now so **FVS-K-4 only has to choose the moment** — the same staging O-5 used when it
+    shipped the seeding mechanism behind a `Message` rather than blocking on a boss that does not exist.
+  **The `T` demo hotkey is deleted, and that is load-bearing rather than tidiness.** A hotkey is a
+  trigger that reaches *everything*, so leaving it would make `every_authored_conversation_has_a_trigger`
+  vacuous. Two tests hold both directions: a trigger naming an id `config.ron` does not define is a beat
+  that silently never plays, and an authored conversation nothing can start is the exact state K-3 was
+  filed about — a corpus rots back into decoration one unreferenced entry at a time.
+  **The beats are one-shot and PERSISTED** (`SAVE_VERSION` 3 → **4**, `conversations_played`). A "first
+  capture" line that fires on every launch is not a first, and re-reading it is the specific annoyance
+  that makes players skip dialogue. Meta-progress in exactly FVS-G-3's sense.
+  **A blocked beat is not consumed:** `play()` refuses while a conversation is running *without* marking
+  it played. Marking-then-dropping would lose the scene forever and present as "that never happened"
+  with nothing to debug.
+  **The Watcher deliberately has no contact scene** — its whole character is that it does not announce
+  itself, and a balloon on sighting would undo the one thing it does. Pinned, because it reads as an
+  omission.
+  *Determinism:* structurally windowed-only — `DialoguePlugin` is never registered in the headless
+  harness, every system is on `Update`, and none writes sim state. Cannot reach `snapshot_hash`.
+  *Role voice*, as the item asked: speaker 0 team lead (procedural), 1 xenobiologist (curious past the
+  point of comfort), 2 research analyst (cites the document), 3 security (blunt), 4 medic (says the
+  human thing). A line goes to whoever it costs something.
+  *Original filing, kept because its diagnosis was right:*
   The item's real complaint was that `src/dialogue/` had "exactly **one** authored conversation on a dev
   hotkey" — i.e. no reason to exist. FVS-O-3 fixed that half: `dialogue::bark_belief_tellings` voices
   every belief that crosses the squad, from an 18-line authored table (`gossip::line_for`) covering every
@@ -893,9 +1527,47 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   re-measure the same f32 question through a slower path.
   *Done when (revised):* the determinism-model decision is made, and this lane becomes either a hard
   gate or a documented per-platform tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
-- **FVS-J-4 — clippy denylist vs unwrap/expect/panic/unsafe** · S
+- **FVS-J-4 — clippy denylist vs unwrap/expect/panic/unsafe** · S · ✅ *duplicate entry — the live one is in Push 9 (line ~1324), **LANDED 2026-07-26** as a ratchet (`tests/panic_budget.rs`) rather than a ban. Kept as a pointer only; do not track status here.*
   *Done when:* CI fails on new `unwrap`/`expect`/`panic!`/`unsafe` in shipped crates (harness exempt). · *Deps:* — · *Touches:* CI, lints · *Reading:* — (no corpus resource)
-- **FVS-J-5 — Make harness CI lane gating** · S
+- **FVS-J-5 — Make harness CI lane gating** · S · ⚠️ **HALF LANDED 2026-07-28 — the lane is split; the gate flip waits on one number**
+  > ### The blocker was two tests, not a slow lane
+  > Measured on CI 2026-07-28: with `search_parallel` already moved out, the harness lane still ran
+  > **over 2 hours** (start 15:29:52, still going at 17:31) against 3–4 minutes for every other lane.
+  > Local per-target breakdown from the same code:
+  >
+  > | target | time | share |
+  > |---|---|---|
+  > | **`replay.rs`** | **2050 s** | **93%** |
+  > | `session.rs` | 130 s | 6% |
+  > | 11 others | ~190 s | 1% |
+  >
+  > and inside `replay.rs`, `search_rollouts_are_reproducible_under_load` + its mutant sibling are
+  > **1966 s of that 2050 s** — measured directly in a dedicated run. So **two tests out of ~90 were
+  > ~89% of the entire lane.**
+  >
+  > *Shipped:* both moved to the nightly job, which is renamed **`search + rollout determinism
+  > (nightly)`** and stays a HARD job. Same cadence argument that moved `search_parallel`: they
+  > replicate 7200-tick rollouts under 8-thread load, and what they guard — rollout reproducibility
+  > under contention — changes only when the search or the sim changes.
+  >
+  > This is the lever this entry already named ("splitting the slow replicate tests onto a nightly"),
+  > now with the numbers to justify which ones.
+  >
+  > ⚠️ **The gate flip is deliberately NOT in this change.** Local arithmetic says the lane drops to
+  > ~8 min, and CI ran ~3× local, so ~25 min — **but that is an extrapolation, and extrapolation has
+  > been wrong twice today** (the mini-bake's "1 hour" was 4, and this lane's own runtime was projected
+  > from a time-to-failure). Promoting a lane to a hard merge gate is a decision about how long every
+  > merge waits, and it needs the measured post-split number, which the next CI run produces.
+  >
+  > ⚠️ **Also corrected: `Deps: H-1` never held.** The lane runs no search — `search_parallel`'s archive
+  > tests were already skipped out of it — so nothing it executes depends on a baked archive.
+  >
+  > **The lane has already earned promotion on evidence.** It caught a real defect on PR #68 that the
+  > pure-CPU gate could not see: FVS-I-1's containment constraint was scoped into the *shared*
+  > `minimal_criterion` and broke `playtest_level`, which is `test-harness`-gated and therefore
+  > invisible to `cargo test`. That is exactly the class of regression an advisory lane fails to stop.
+  >
+  > *Remaining:* one green post-split CI duration, then flip `continue-on-error: false`.
   Promote the advisory (continue-on-error) harness lane to a hard gate once retrain (H-1) stabilizes archives.
   ⚠️ **A large chunk of the runtime blocker is fixed (2026-07-27), and here is the MEASURED number.**
   `tests/replay.rs` took **3201.8 s with 19 tests** and takes **2029.8 s with 18** — so
@@ -921,7 +1593,24 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `search_rollouts_*_under_load` tests run replicate 7200-tick rollouts. Those are load-bearing and
   should not be cut; the next honest lever is running the lane's targets in parallel *processes* (they
   are only serialised within a binary today) or splitting the slow replicate tests onto a nightly.
-  *Done when:* harness lane blocks merge on regression. · *Deps:* H-1 · *Touches:* CI · *Reading:* [TEST-NT], [TEST-OW], [ABM]
+  ⚠️ **RE-MEASURED 2026-07-28 — the stated dep is wrong and the real gate is one number nobody has.**
+  * **`Deps: H-1` does not hold.** The entry says "promote … once retrain stabilizes archives", but the
+    lane does not run a search: `search_parallel`'s two archive tests are already **`--skip`ped into the
+    nightly job**. Nothing this lane executes depends on a baked archive.
+  * **The runtime blocker is already half-solved.** Measured on this box 2026-07-28: `search_parallel`
+    **3475 s (58 min)** — correctly moved to nightly — and the rest of the lane **866 passed / 0 failed**
+    with `replay.rs` at 2059 s (34 min). But that is a 24-core workstation; a GitHub runner is far
+    slower, and the local figure does not transfer.
+  * **What is actually missing: one GREEN harness run's CI duration.** Every observation so far is a
+    time-to-*failure* (6 m 5 s, on `playtest_level` — a real bug, since fixed), which says nothing about
+    the green path. A per-PR hard gate is a decision about how long a merge waits, and that number has
+    to be measured, not estimated.
+  **This lane has already earned promotion on evidence.** It caught a genuine defect on PR #68 that the
+  pure-CPU gate could not see — FVS-I-1's containment constraint was scoped into the *shared*
+  `minimal_criterion` and broke `playtest_level`, which is `test-harness`-gated and therefore invisible
+  to `cargo test`. That is precisely the class of regression an advisory lane fails to stop.
+  *Done when:* harness lane blocks merge on regression. · *Deps:* ~~H-1~~ — **one green CI run's
+  duration**, then a decision on acceptable merge latency · *Touches:* CI · *Reading:* [TEST-NT], [TEST-OW], [ABM]
 
 ---
 
@@ -958,7 +1647,35 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-N-5 — Remove orphaned assets** · S · ✅ **LANDED 2026-07-25**
   Verified unreferenced repo-wide first (nothing in `src/`, `assets/config/`, `tests/`, `docs/` — the only hit was this backlog entry naming them), then removed `assets/hazmat/`, `assets/hazmat_locomotion_pack/`, `assets/kenney_blaster-kit_2.1/`: **10.1 MB**, `assets/` now 52 MB. Hard gate green.
   *Also corrected:* `CREDITS.md` attributed "Blaster kit, prototype kit … `assets/kenney_*`" — the blaster kit is now gone while `kenney_prototype-kit` stays, so the line was narrowed to what actually ships. An attribution table that lists assets the repo no longer contains is worse than no table.
-- **FVS-N-10 — FBX/OBJ → GLB asset conversion pipeline (an ART UPGRADE, not a blocker)** · M · *design doc §7*
+- **FVS-N-10 — FBX/OBJ → GLB asset conversion pipeline (an ART UPGRADE, not a blocker)** · M · *design doc §7* · ✅ **PIPELINE LANDED 2026-07-28 — the art pass itself is still a separate call**
+  *Shipped:* `scripts/fbx_to_glb.py` (headless, `--factory-startup`), `assets/site/ozea/doorframe_double.glb`
+  as the first promoted prop, and `tests/ozea_asset.rs` pinning the artist-guide §3 contract in the
+  **hard gate**.
+  **Measured, whole-library run: 418/418 converted, zero failures.**
+  * **The 7 colliding basenames are real** — `SM_Door`, `SM_Floor_V1`, `SM_Floor_V2`, `SM_Floor_Grate`,
+    `SM_Control_Pannel`, `SM_Trash_Bin`, `SM_Assault_Rifle`. A flat output directory would have
+    silently lost 7 files, so every output is **unconditionally** pack-prefixed rather than
+    prefixed-on-collision: the failure cannot come back with a new pack.
+  * **418 `._*.fbx` AppleDouble forks** are skipped by name. A naive `glob('*.fbx')` returns them as
+    phantom duplicates and the importer either fails or produces garbage.
+  * Output is a **staging dir, never `assets/`** — artist guide §2: the share is the library, `assets/`
+    holds only what the game loads, converted **and named for its use**. A human promotes and renames.
+  ⚠️ **THE UNITS CLAIM IN THIS ENTRY WAS RIGHT, BUT FOR A REASON THAT NEARLY BIT.** "Already authored
+  in metres … `SM_DoorFrame_Double` is 1.98 m" is true *in Blender*. In the file, the importer expresses
+  the centimetre authoring as a node `scale` of `0.01` over **100× vertex data** — valid glTF, renders
+  correctly, and a trap: anything reading a mesh AABB **directly** (a collider, a bbox check, a
+  placement heuristic) sees centimetres and is wrong by 100× with nothing failing. Measured before the
+  fix: accessor bounds **200.3 units**, node scale `0.01`, true height `2.003 m`.
+  The converter now bakes the object transform into the mesh data, so *the numbers in the file are
+  metres* — which is what §3 rule 2 actually promises. `the_prop_is_authored_in_metres_on_the_games_grid`
+  reads the **raw accessor bounds** specifically so a regression to the old shape fails there, and
+  `no_node_carries_a_compensating_scale` states the other half directly. Verified on the grid:
+  height **2.003 m** vs `DOORWAY_HEIGHT` 2.0, width **1.98 m** vs two `TILE_SIZE` tiles.
+  ⚠️ **"One converted prop loads in-game" is met as a CONTRACT, not as a spawn.** The prop is in
+  `assets/` and pinned by a hard-gate test, but nothing references it yet — swapping a greybox Kenney
+  doorframe for an Ozea one is the **art pass**, and this entry's own advice is to do that only after
+  the greybox layout is proven, so the conversion targets the meshes the Site actually uses. The
+  pipeline no longer blocks it; the aesthetic decision is the Director's.
   ⚠️ **Corrected 2026-07-26 — this does NOT block the Site.** The old claim ("nothing in Push 5's Site work can start without this") was wrong: the repo already ships 145 Kenney prototype `.glb`, enough to greybox all six areas. Do this **after** the greybox layout is proven, so the conversion targets only the meshes the Site actually uses instead of all 411.
   Verified while correcting it: Blender 5.1.2 has `import_scene.fbx` + `export_scene.gltf` enabled under `--factory-startup` (no addon step); the library is **already authored in metres on a 1 m grid** (`SM_Floor_Plain` is exactly 1.0 × 1.0, matching `TILE_SIZE`; `SM_DoorFrame_Double` is 1.98 m, matching `DOORWAY_HEIGHT`), so no unit conversion; **33 of 37 packs carry zero textures** (flat PBR base colours — the artist guide's "strongly preferred" case), only the I series has `*_BaseColor.png` siblings. `assets/low_poly_furniture/` is an undocumented in-repo precedent: it holds both the source `.fbx` and a mirrored converted `glb/` subtree, so the same job was done once before and no script survived — reproduce that output layout. The exporter contract already exists in code at `/mnt/codex_fs/game_assets/projects/scp_characters/src/scp_characters/export/gltf.py` (`export_yup`, `export_tangents`, `export_apply`, `export_image_format`).
   Real counts, measured: **418 `.fbx`** (411 distinct basenames — **7 collide across packs** and would overwrite each other in a flat output dir), 418 `._*` forks (not the ~700 the design doc claims). Two source layouts exist, and `Pack_SciFi_A_001+_V2.0` is nested one level deeper with a `+` in the path.
@@ -1194,7 +1911,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   concurrent harness `App`s has been wrong before.
   *Done when:* either reproduced and diagnosed, or a documented decision that the sweep shape is the
   cause and the sweep changes. · *Deps:* — · *Touches:* `tests/session.rs` · *Reading:* [TEST-NT]
-- **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent*
+- **FVS-N-7 — Fracture-bake completion is wall-clock dependent (FOUND 2026-07-25)** · S+M · *determinism: latent* · ✅ **CLOSED 2026-07-27 — the decision below IS the deliverable**
+  No code ships for this, and that is the outcome rather than a deferral: the decision was *do not gate the search*, and the alternative it names (an assertion in `evaluate::rollout`) is explicitly conditional on the hazard ever being observed. It has not been. Writing the assertion now would be a guard against a condition with no evidence, and the three reasons below are why gating would have been actively worse. Re-open only if `search_rollouts_are_reproducible_under_load` goes red with a gib-count divergence.
   `autogib::bake_autogib` self-gates on the figurine's sub-meshes being present in `Assets<Mesh>` — i.e. on async GLB streaming — and documents the premise it leans on: *"combat can't start before scenes load, so the bake is a completed prerequisite of any death."* That holds for a human playing, but it is a **timing assumption, not an invariant**. If a unit dies before its bake lands, the death spawns a completely different gib population (measured under CPU load, same seed: **45 chunks vs 160**), and `gib_hash`'s own docs describe the cascade — a different `Carryable` steers `crab::assign_meat_targets`, so the bisect lands on the crab, not the cause.
   Not currently a shipped bug (nothing kills a unit in the first second of a real run), and it is **not** worth forcing the bake synchronous. What is worth deciding: whether the offline search — which runs thousands of rollouts on evolved worlds where an early death is plausible — should gate its rollouts on `sim_harness::autogib_ready` the way `tests/session.rs` now does.
   ✅ **DECIDED 2026-07-27: do NOT gate the search. Assert instead, if it ever bites.**
@@ -1234,7 +1952,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 
 **Why this is not levelling.** A level is a scalar that makes an operative better at everything, everywhere, forever. A belief is a proposition about a **kind of thing** that only acts when that kind is present: contextual, legible ("Okafor knows 1048-A is lethal"), *transmissible*, and capable of being **wrong**. None of that is true of a number going up.
 
-- **FVS-O-1 — `Belief` model + firsthand acquisition** · M · ⚠️ **MODEL LANDED 2026-07-26; ACCEPTANCE UNMET — see FVS-O-1b**
+- **FVS-O-1 — `Belief` model + firsthand acquisition** · M · ✅ **CLOSED — model 2026-07-26, acceptance met 2026-07-27 by FVS-O-1b**
   *Shipped:* `src/knowledge/mod.rs` (354 lines, 8 unit tests, **no plugin and no systems**) — `Subject` (6 append-only variants covering the whole roster), `Claim {Lethal, Harmless, Containable}` with `contradicts()` so `Containable` is orthogonal to the other two, `Provenance {Firsthand 0.85, Witnessed 0.65, Told 0.45, Read 0.35}`, `Belief`, and the `Knowledge` component. `learn()` implements the reliability ordering, so a retelling can never overwrite firsthand experience.
   **Absence of a belief is NOT a low-confidence belief** — the one modelling point not compromised. Fisher, quoted in [EPISTEMIC]: *"not knowing the chance of mutually exclusive events and knowing the chance to be equal are two quite different states of knowledge."* `Knowledge::of` returns `Option`, so "never met it" is a distinct behavioural state from "unsure", pinned by `never_having_met_something_is_not_the_same_as_being_unsure_about_it`.
   **Deliberately distinct from `ai::brain::Fact`** (perception: *is this true right now, sensorily*) and from `research::ResearchPosterior` (institutional, converges on truth). A belief is personal, transmissible, and **can be wrong** — collapsing any two of the three would lose O-5 entirely.
@@ -1252,7 +1970,9 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   The wiring half of O-1. Insert `Knowledge` at `spawn_unit` as a **value field on a component present from spawn** — never a marker toggled on acquisition, per `scp1048`'s rule that a flipped marker splits the hashed archetype; copy the `containment::Containment` pattern. Note `spawn_unit`'s bundle is already at Bevy's 15-element tuple cap, so it must nest.
   Then the acquisition itself: being struck by 1048-A writes a `Firsthand` `Lethal` belief on **that** operative and on nobody else.
   *Done when:* O-1's stated acceptance actually passes as a harness test. · *Deps:* O-1 · *Touches:* `src/knowledge/`, `src/squad.rs`, `src/scp1048/` · *Reading:* [EPISTEMIC], [ECS]
-- **FVS-O-2 — Knowledge changes behaviour, both ways** · M · ⚠️ **WIRED AT GAIN ZERO 2026-07-27 — genuinely inert this time**
+- **FVS-O-2 — Knowledge changes behaviour, both ways** · M · ✅ **LANDED 2026-07-27 — wired at gain zero, then TURNED ON (`feac9b5`)**
+  **Both flags are live** (marked 2026-07-27; the entry below described only the first of the two steps and went stale the same day). `sim.belief_fear_gain` **0.0 → 0.4**: a confident firsthand `Lethal` belief (0.85) multiplies that operative's FEAR by ~1.34 while the subject is inside `PRESENCE_RADIUS` — enough to pull a veteran toward `Flee` sooner than a rookie standing beside the same creature, which is what makes knowledge a genuine **trade** rather than a strict upgrade, without saturating FEAR outright (1.0 would nearly double it and break a containment hold on its own). `containment.require_knowledge_for_rules` **false → true**: the HUD refuses to show an anomaly's rule clauses until some operative holds a `Containable` belief, so the **first** encounter with every anomaly is blind — meet it, contain it the hard way or don't, research it, and *then* the procedure is legible for every later encounter. Research grants the belief, so the loop closes.
+  ⚠️ **THE GOLDENS DID NOT MOVE, AND THAT IS A WARNING RATHER THAN A REASSURANCE.** It is FVS-M-1's note verbatim: the 1800-tick golden runs with no synthetic player, so the squad idles at spawn, nobody ever acquires a belief, `fear_scale` returns exactly 1.0, and this system's contended path is never exercised. Coverage of a *system* is not coverage of its *contended* path — the blind spot that hid G0 for months. The mechanic is instead covered by `a_knowing_operative_beside_the_subject_ends_up_more_afraid_than_an_ignorant_one`, which builds a real `App`, puts the subject in front of two operatives differing **only** in what they believe, and asserts the knowing one ends up more afraid while the ignorant one's FEAR is bit-unchanged. It also asserts the shipped gain is non-zero, so a default quietly reverting to 0.0 fails rather than silently disabling the feature.
   *Shipped:* `src/knowledge/coupling.rs` — `apply_belief_fear` on `FixedUpdate`, ordered
   `.after(AiSet::Drives).before(AiSet::Think)` so it scales the fear the drive rules already settled
   this tick; plus the knob the handoff claimed existed, `sim.belief_fear_gain`, **evolvable** and in

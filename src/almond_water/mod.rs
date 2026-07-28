@@ -913,7 +913,7 @@ impl Plugin for AlmondWaterPlugin {
             // ONLY the field update carries that marker — keeping the heal out of it avoids a cycle
             // (crab_locomotion → crab_jump → heal would otherwise loop back into a set crab_locomotion is
             // after). The heal is a separate, late sink.
-            .add_systems(FixedUpdate, accumulate_evaporate_diffuse.in_set(AlmondWaterWritten))
+            .add_systems(FixedUpdate, accumulate_evaporate_diffuse.in_set(AlmondWaterWritten).distributive_run_if(in_state(crate::session::RunState::Active)))
             .add_systems(
                 FixedUpdate,
                 almond_water_effect
@@ -928,7 +928,7 @@ impl Plugin for AlmondWaterPlugin {
                     // deterministically — the water gets the last word (a killing blow can be out-healed while
                     // you stand in it). See [`crate::health::HealthDamage`].
                     .after(crate::health::HealthDamage)
-                    .after(crate::squad_ai::actions::medic_heal),
+                    .after(crate::squad_ai::actions::medic_heal).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

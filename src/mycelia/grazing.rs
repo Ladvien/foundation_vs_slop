@@ -68,8 +68,8 @@ impl Plugin for GrazingPlugin {
             // determinism firewall as `deposit_fruit_scent` — `MyceliaPlugin` is never in the harness.
             mold_mat_scent.before(AiSet::Deposits),
             crabs_graze_fruit_bodies.after(AiSet::Think),
-        ),
-    );
+        ).distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
 }
 }
 

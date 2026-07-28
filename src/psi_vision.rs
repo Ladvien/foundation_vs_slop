@@ -45,7 +45,7 @@ impl Plugin for PsiVisionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PsiVisionState>()
             .add_systems(Startup, setup_psi_assets)
-            .add_systems(Update, redraw_psi_vision);
+            .add_systems(Update, redraw_psi_vision.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

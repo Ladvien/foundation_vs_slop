@@ -205,9 +205,19 @@ struct SearchArgs {
     /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); capped useful at OPPONENTS (3).
     #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
     jobs: usize,
-    /// Use the CMA-ME adaptive emitter (only honoured by `rl`).
-    #[arg(long)]
+    /// Use the CMA-ME adaptive emitter (only honoured by `rl`). Shorthand for `--emitter cma-me`.
+    #[arg(long, conflicts_with = "emitter")]
     cma: bool,
+    /// Proposal operator for the `rl` policy search (FVS-H-2).
+    ///
+    /// `isotropic` (default) is bit-reproducible; `cma-me` is the adaptive covariance `--cma` selects;
+    /// `cma-mae` adds per-cell annealed acceptance thresholds (Fontaine & Nikolaidis 2023), which is
+    /// what makes a run of near-misses in one cell worth something instead of only outright wins.
+    #[arg(long, value_enum)]
+    emitter: Option<EmitterArg>,
+    /// CMA-MAE archive-annealing rate, 0.0..=1.0. Only meaningful with `--emitter cma-mae`.
+    #[arg(long, default_value_t = 0.1, value_parser = parse_unit_f32)]
+    alpha: f32,
     /// Override the output archive path (single-output searches only).
     #[arg(long)]
     out: Option<PathBuf>,
@@ -515,6 +525,12 @@ fn run_all(a: AllArgs) -> Result<(), String> {
         seeds: seeds.clone(),
         jobs,
         cma,
+        // `train all` drives the `rl` phase through the `--cma` shorthand it has always used, so the
+        // emitter choice stays where it was. `--emitter` is a single-search flag; wiring it into the
+        // pipeline would mean deciding CMA-MAE is the default for a 12–20 h bake, which is a call for
+        // whoever runs one (FVS-H-1).
+        emitter: None,
+        alpha: 0.1,
         out: None,
         apply,
         islands,
@@ -794,8 +810,18 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
             .args(["--islands", "1", "--island-child"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if a.cma {
-            cmd.arg("--cma");
+        // Forward the emitter choice, not the shorthand: a worker launched with `--cma` while the
+        // parent ran `--emitter cma-mae` would search a different landscape and the archives would not
+        // be comparable — which is exactly what `search_parallel`'s bit-for-bit guard exists to catch.
+        match a.emitter_choice() {
+            rl_search::Emitter::Isotropic => {}
+            rl_search::Emitter::CmaMe => {
+                cmd.arg("--emitter").arg("cma-me");
+            }
+            rl_search::Emitter::CmaMae => {
+                cmd.arg("--emitter").arg("cma-mae");
+                cmd.arg("--alpha").arg(a.alpha.to_string());
+            }
         }
         // Die with the driver: without this, a Ctrl+C/kill on the parent orphaned these island processes
         // (they kept searching at ~75% CPU each and pegged the box). See `parallel::set_pdeathsig`.
@@ -914,15 +940,36 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
         if failed > 0 { format!(", {failed} failed") } else { String::new() }
     );
 
-    // Land the winner at the stable canonical path. `islands_out/` is gitignored and cleared at the start of
-    // the next island run, so a winner left there is gone by the next phase — and the `FVS_*_ELITE` overlay
-    // hints (and any hand bake) would point at a stale file. Copy first, then bake/hint from the canonical
-    // location, so "the winner is at elites_<dim>.ron" is always true.
+    // Land the winner at a stable path. `islands_out/` is gitignored and **cleared at the start of the
+    // next island run**, so a winner left there is gone by the next phase of `train all` — and the
+    // `FVS_*_ELITE` overlay hints (and any hand bake) would point at a file that no longer exists.
+    //
+    // ── FVS-N-12: which stable path depends on `--apply`, and it has to ──────────────────────────────
+    //
+    // `--apply` is documented as being about `config.ron` and the goldens, so it never covered this copy
+    // — and for five of the six dimensions that was harmless, because their canonical archives are
+    // gitignored. **`elites_levels.ron` is the exception: it is TRACKED**, because FVS-H-3's
+    // `CurriculumDirector` samples it at runtime and therefore needs a committed archive to exist.
+    //
+    // Measured 2026-07-28: a throwaway 4-generation smoke run with `--no-apply` silently replaced that
+    // committed **55-cell** archive with a **17-cell** one. Nothing in the game reports it; the
+    // expeditions just quietly get less varied. `git status` was the only witness.
+    //
+    // So an exploratory run writes a **candidate** beside the canonical file instead. It is stable
+    // across phases (which is the whole reason the copy exists), it matches the `elites_*.ron` ignore
+    // pattern so it is never committed by accident, and promoting it is an explicit act — the same
+    // raw→curated split `models/` → `gen_ai/` already uses for assets.
     let canonical = match kind.archive_path() {
         Some(p) => {
-            std::fs::copy(&win_out, p).map_err(|e| format!("copy winner {win_out} -> {p}: {e}"))?;
-            println!("   winner copied to {p}");
-            p.to_string()
+            let dest = if a.apply { p.to_string() } else { candidate_path(p) };
+            std::fs::copy(&win_out, &dest)
+                .map_err(|e| format!("copy winner {win_out} -> {dest}: {e}"))?;
+            if a.apply {
+                println!("   winner copied to {dest}");
+            } else {
+                println!("   winner copied to {dest}  (--no-apply: {p} left untouched)");
+            }
+            dest
         }
         None => win_out.clone(),
     };
@@ -1442,11 +1489,12 @@ fn rl_run(a: &SearchArgs, progress: &Progress) -> Result<SearchOutcome, String> 
         resolution: a.res,
         dungeon_seeds: a.seeds.clone(),
         episode_ticks: a.ticks,
-        use_cma: a.cma,
+        emitter: a.emitter_choice(),
+        cma_mae_alpha: a.alpha,
     };
     println!(
         "evolving policy ({}): {} generations x {} children, res {}, held-in worlds {:?}, seed 0x{:X}, {} ticks/episode",
-        if a.cma { "CMA-ME emitter" } else { "neuroevolution, isotropic" },
+        a.emitter_choice().label(),
         cfg.generations, cfg.batch, cfg.resolution, cfg.dungeon_seeds, cfg.seed, cfg.episode_ticks
     );
 
@@ -1870,6 +1918,55 @@ fn parse_pos_u32(v: &str) -> Result<u32, String> {
     Ok(n)
 }
 
+/// CLI spelling of [`rl_search::Emitter`]. Separate from the library enum so `clap`'s derive lives in the
+/// binary and the library stays dependency-free of it — the same split every other arg here uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum EmitterArg {
+    Isotropic,
+    CmaMe,
+    CmaMae,
+}
+
+impl SearchArgs {
+    /// The emitter this invocation selects, resolving the `--cma` shorthand.
+    ///
+    /// `--cma` and `--emitter` are `conflicts_with`, so exactly one can be set and there is no
+    /// precedence rule to get wrong — which matters because a silent precedence between two flags that
+    /// both name an emitter is how a 12-hour bake ends up searching a landscape nobody chose.
+    fn emitter_choice(&self) -> rl_search::Emitter {
+        match self.emitter {
+            Some(EmitterArg::Isotropic) => rl_search::Emitter::Isotropic,
+            Some(EmitterArg::CmaMe) => rl_search::Emitter::CmaMe,
+            Some(EmitterArg::CmaMae) => rl_search::Emitter::CmaMae,
+            None if self.cma => rl_search::Emitter::CmaMe,
+            None => rl_search::Emitter::Isotropic,
+        }
+    }
+}
+
+/// Where an exploratory (`--no-apply`) run lands its winner: `…/elites_levels.candidate.ron`.
+///
+/// FVS-N-12. Beside the canonical archive rather than inside `islands_out/`, because that directory is
+/// cleared at the start of the next island phase and `train all` would lose each phase's winner as the
+/// following one began. Matches the `assets/config/elites_*.ron` ignore pattern, so it cannot be
+/// committed by accident.
+fn candidate_path(canonical: &str) -> String {
+    match canonical.strip_suffix(".ron") {
+        Some(stem) => format!("{stem}.candidate.ron"),
+        // A canonical path that is not `.ron` is a programming error rather than a runtime condition,
+        // but suffixing is still the honest answer — it cannot collide with the canonical name.
+        None => format!("{canonical}.candidate"),
+    }
+}
+
+fn parse_unit_f32(v: &str) -> Result<f32, String> {
+    let x = v.parse::<f32>().map_err(|e| format!("{v:?}: {e}"))?;
+    if !(0.0..=1.0).contains(&x) {
+        return Err(format!("{v:?} must be in 0.0..=1.0"));
+    }
+    Ok(x)
+}
+
 fn parse_pos_usize(v: &str) -> Result<usize, String> {
     let n = v.parse::<usize>().map_err(|e| format!("{v:?}: {e}"))?;
     if n == 0 {
@@ -1956,5 +2053,102 @@ fn bench(ticks: u32, seeds: &[u64], speed: f32) {
     for genomes in [1_000u32, 5_000, 20_000] {
         let wall_h = (f64::from(genomes) * per_genome) / processes as f64 / 3600.0;
         println!("  {genomes:>6} genomes → {wall_h:6.2} h wall");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> SearchArgs {
+        SearchArgs {
+            generations: 1,
+            patience: 0,
+            batch: 1,
+            ticks: 60,
+            res: 4,
+            seed: 1,
+            seeds: Vec::new(),
+            jobs: 1,
+            cma: false,
+            emitter: None,
+            alpha: 0.1,
+            out: None,
+            apply: false,
+            islands: 1,
+            repin_goldens: false,
+            no_progress: true,
+            island_child: false,
+        }
+    }
+
+    #[test]
+    fn the_emitter_shorthand_and_the_flag_agree() {
+        // FVS-H-2. `--cma` predates `--emitter` and both name an emitter, so the resolution is the one
+        // place a real bug could hide — and it would hide *expensively*: a 12–20 h bake searching a
+        // landscape nobody chose, discovered only when the archive turned out incomparable.
+        assert_eq!(args().emitter_choice(), rl_search::Emitter::Isotropic, "default is reproducible");
+
+        let shorthand = SearchArgs { cma: true, ..args() };
+        assert_eq!(shorthand.emitter_choice(), rl_search::Emitter::CmaMe, "--cma still means CMA-ME");
+
+        let explicit = SearchArgs { emitter: Some(EmitterArg::CmaMe), ..args() };
+        assert_eq!(explicit.emitter_choice(), shorthand.emitter_choice(), "two spellings, one emitter");
+
+        let mae = SearchArgs { emitter: Some(EmitterArg::CmaMae), ..args() };
+        assert_eq!(mae.emitter_choice(), rl_search::Emitter::CmaMae);
+        assert_ne!(
+            mae.emitter_choice().label(),
+            shorthand.emitter_choice().label(),
+            "the banner must distinguish them, or a run's log cannot say what produced the archive"
+        );
+    }
+
+    #[test]
+    fn cma_and_emitter_cannot_both_be_given() {
+        // Enforced by clap's `conflicts_with` rather than by a precedence rule, deliberately: a silent
+        // winner between two flags that both name an emitter is worse than a parse error.
+        use clap::Parser;
+        let bad = Cli::try_parse_from(["train", "rl", "--cma", "--emitter", "cma-mae"]);
+        assert!(bad.is_err(), "--cma with --emitter must be refused, not silently resolved");
+    }
+
+    #[test]
+    fn an_exploratory_run_never_writes_the_canonical_archive_path() {
+        // FVS-N-12. Five of the six canonical archives are gitignored, so clobbering them is harmless;
+        // `elites_levels.ron` is TRACKED, because FVS-H-3's director samples it at runtime and needs a
+        // committed archive to exist. A 4-generation smoke run silently replaced a committed 55-cell
+        // archive with a 17-cell one, and nothing but `git status` noticed.
+        for canonical in [
+            "assets/config/elites_levels.ron",
+            "assets/config/elites_audio.ron",
+            "assets/config/elites_policy.ron",
+        ] {
+            let candidate = candidate_path(canonical);
+            assert_ne!(candidate, canonical, "an exploratory run must not target the canonical path");
+            assert!(
+                candidate.ends_with(".candidate.ron"),
+                "the candidate must be obviously a candidate: {candidate}"
+            );
+            // Still matches `assets/config/elites_*.ron`, so it cannot be committed by accident.
+            assert!(candidate.starts_with("assets/config/elites_"), "{candidate}");
+        }
+    }
+
+    #[test]
+    fn the_candidate_path_cannot_collide_with_the_canonical_one() {
+        // Belt and braces on the suffix rule: a canonical path that is not `.ron` must still produce a
+        // distinct name rather than silently returning the input.
+        assert_ne!(candidate_path("weird/path/elites_levels"), "weird/path/elites_levels");
+    }
+
+    #[test]
+    fn the_annealing_rate_is_bounded() {
+        // `alpha` outside 0..=1 is not a slow search, it is a meaningless one: the threshold update
+        // `min_f + alpha*(f - min_f)` either overshoots the elite or walks backwards.
+        assert!(parse_unit_f32("0.0").is_ok());
+        assert!(parse_unit_f32("1.0").is_ok());
+        assert!(parse_unit_f32("1.01").is_err());
+        assert!(parse_unit_f32("-0.1").is_err());
     }
 }

@@ -131,7 +131,7 @@ impl Plugin for AiPlugin {
                     // `think` reads the LOS grid (`seen_by_squad`), so it must run after `update_los`
                     // writes it this tick (see `fog::LosWritten`), not race it in the multithreaded build.
                     brain::think.in_set(AiSet::Think).after(crate::fog::LosWritten),
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Diagnostics are cosmetic logging — they read the fields but never feed the pinned hash, so
             // they stay on `Update` (variable dt is fine).
@@ -143,7 +143,7 @@ impl Plugin for AiPlugin {
                     diag::log_boss,
                     diag::log_crab_modes,
                     diag::log_crew,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

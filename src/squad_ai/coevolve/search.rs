@@ -3,6 +3,7 @@
 //! Split out of the former single-file `coevolve.rs`; a pure move (FVS-N-3).
 
 use super::*;
+use crate::squad_ai::surprise::containment_criterion;
 
 // ── The search ───────────────────────────────────────────────────────────────────────────────────
 
@@ -159,11 +160,14 @@ pub(crate) fn score_triple_compact(
 ) -> Result<Option<TripleScore>, String> {
     let wc = world_genome::decode(world)?;
     let a = rollout(brains_of(t, squad, swarm)?, Some(wc), None, None, seed_a, episode_ticks);
-    if minimal_criterion(&a.outcome).is_err() {
+    // FVS-I-1: the containment constraint is applied HERE, at the world archive, and nowhere else.
+    // `minimal_criterion` is the shared gate every other evaluator uses; a level or an audio config is
+    // not infeasible because nobody captured anything. See `surprise::containment_criterion`.
+    if minimal_criterion(&a.outcome).is_err() || containment_criterion(&a.outcome).is_err() {
         return Ok(None);
     }
     let b = rollout(brains_of(t, squad, swarm)?, Some(wc), None, None, seed_b, episode_ticks);
-    if minimal_criterion(&b.outcome).is_err() {
+    if minimal_criterion(&b.outcome).is_err() || containment_criterion(&b.outcome).is_err() {
         return Ok(None);
     }
     Ok(Some(TripleScore {

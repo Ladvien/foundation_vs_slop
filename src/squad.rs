@@ -643,7 +643,7 @@ impl Plugin for SquadPlugin {
                     unit_movement.after(crate::ai::AiSet::Think),
                     unit_facing.after(unit_movement),
                     despawn_dead_units,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Cosmetic skeletal animation stays on `Update` (never touches hashed state). Attaching is
             // the shared `anim::attach_pose_blenders` pass (the figurine child carries a `BlendSource`
@@ -658,7 +658,7 @@ impl Plugin for SquadPlugin {
                     drive_valkyrie_animation
                         .after(anim::PoseAttachSet)
                         .before(anim::PoseBlendSet),
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
         // NOTE: leader tracking (`ensure_leader` + the `Leader` marker) is deliberately NOT registered
         // here. The `Leader` marker sits on exactly one `Unit`, which would split the hashed squad into

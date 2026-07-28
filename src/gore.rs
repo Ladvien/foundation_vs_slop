@@ -613,7 +613,7 @@ impl Plugin for GorePlugin {
                     cap_blood_pools,
                     cap_gib_chunks,
                     despawn_gore,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

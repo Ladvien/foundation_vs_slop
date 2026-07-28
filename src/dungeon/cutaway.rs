@@ -18,7 +18,7 @@ pub struct CutawayPlugin;
 
 impl Plugin for CutawayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_cutaway);
+        app.add_systems(Update, update_cutaway.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

@@ -318,11 +318,11 @@ impl Plugin for Scp1048Plugin {
                 FixedUpdate,
                 (replicate::scp1048_scavenge, replicate::scp1048_replicate)
                     .chain()
-                    .in_set(Scp1048Set::Replicate),
+                    .in_set(Scp1048Set::Replicate).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
-            .add_systems(FixedUpdate, behavior::scp1048_act.in_set(Scp1048Set::Act))
+            .add_systems(FixedUpdate, behavior::scp1048_act.in_set(Scp1048Set::Act).distributive_run_if(in_state(crate::session::RunState::Active)))
             // Exposure reads the pose Act just set, so it belongs in Effects.
-            .add_systems(FixedUpdate, effects::scp1048_scream_exposure.in_set(Scp1048Set::Effects))
+            .add_systems(FixedUpdate, effects::scp1048_scream_exposure.in_set(Scp1048Set::Effects).distributive_run_if(in_state(crate::session::RunState::Active)))
             // The dread deposit is deliberately NOT in `Effects`. The AI phase runs
             // Deposits → FieldUpdate → Drives → Think, so "after the executor" and "before this tick's
             // deposit drain" are contradictory — Bevy rejects that schedule outright. Emitting before
@@ -330,7 +330,7 @@ impl Plugin for Scp1048Plugin {
             // That is exactly what `parasite::deposit_manca_dread` does and it is imperceptible: the
             // alternative (landing in the next tick's drain) would lag by one tick anyway, and this way
             // the dread is evaporated and diffused on the same pass it arrives.
-            .add_systems(FixedUpdate, effects::deposit_bear_dread.before(crate::ai::AiSet::Deposits))
+            .add_systems(FixedUpdate, effects::deposit_bear_dread.before(crate::ai::AiSet::Deposits).distributive_run_if(in_state(crate::session::RunState::Active)))
             // The eighth and ninth links in the cross-plugin `HealthDamage` chain (see
             // `health::HealthDamage`). The explicit `.after(fire_laser)` is not decoration: several
             // writers hit one unit's `Health` on the same tick and float addition is not associative,
@@ -342,7 +342,7 @@ impl Plugin for Scp1048Plugin {
                     .chain()
                     .after(crate::laser::fire_laser)
                     .after(Scp1048Set::Act)
-                    .in_set(crate::health::HealthDamage),
+                    .in_set(crate::health::HealthDamage).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // The clip driver lives HERE, not in the windowed `Scp1048VisualsPlugin`, even though it is
             // cosmetic (`Update`, writes only blend weights). It has to: `spawn_scp1048` puts an
@@ -358,7 +358,7 @@ impl Plugin for Scp1048Plugin {
                 Update,
                 anim::drive_scp1048_animation
                     .after(crate::anim::PoseAttachSet)
-                    .before(crate::anim::PoseBlendSet),
+                    .before(crate::anim::PoseBlendSet).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }
@@ -374,8 +374,8 @@ impl Plugin for Scp1048VisualsPlugin {
             Update,
             // The hostile copies are already hidden by the shared `hide_in_fog::<Hostile>` pass,
             // so only the benign original names itself here — one fog writer per entity.
-            crate::fog::hide_in_fog::<Scp1048Benign>,
-        );
+            crate::fog::hide_in_fog::<Scp1048Benign>.distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 

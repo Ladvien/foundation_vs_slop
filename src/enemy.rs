@@ -374,7 +374,7 @@ impl Plugin for EnemyPlugin {
                 FixedUpdate,
                 update_observation
                     .after(crate::fog::LosWritten)
-                    .before(smiley_reflex),
+                    .before(smiley_reflex).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             .add_systems(OnEnter(crate::session::RunState::Active), spawn_enemies.in_set(crate::session::RunBuild::Populate))
             // Pinned sim (movement/reflex/AI-driven) on `FixedUpdate`; the `.after(AiSet::Think)` ordering
@@ -408,7 +408,7 @@ impl Plugin for EnemyPlugin {
                         .after(smiley_reflex)
                         .after(crate::ai::AiSet::Think),
                     despawn_dead,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Cosmetic: fog toggle, face uniforms + form swap, and the lightning-beam VFX stay on `Update`.
             .add_systems(
@@ -419,7 +419,7 @@ impl Plugin for EnemyPlugin {
                     update_smiley_faces,
                     drain_lightning,
                     despawn_lightning,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

@@ -249,7 +249,7 @@ impl Plugin for HealthPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<HealthBarMaterial>::default())
             .add_systems(Startup, setup_health_bar_assets)
-            .add_systems(Update, (attach_health_bars, update_health_bars).chain());
+            .add_systems(Update, (attach_health_bars, update_health_bars).chain().distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

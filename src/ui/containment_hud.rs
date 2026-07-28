@@ -38,7 +38,7 @@ impl Plugin for ContainmentHudPlugin {
             .add_systems(OnExit(AppState::InGame), despawn_scoped::<ContainmentHudRoot>)
             .add_systems(
                 Update,
-                update_readout.run_if(in_state(AppState::InGame)),
+                update_readout.run_if(in_state(AppState::InGame)).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

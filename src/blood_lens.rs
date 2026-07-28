@@ -48,7 +48,7 @@ impl Plugin for BloodLensPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BloodLens>()
             .add_systems(Startup, load_image)
-            .add_systems(Update, (spawn_lens_splats, fade_lens_splats));
+            .add_systems(Update, (spawn_lens_splats, fade_lens_splats).distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

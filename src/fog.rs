@@ -108,9 +108,9 @@ impl Plugin for FogPlugin {
             // `update_los` is PINNED gameplay: the visibility grid it writes gates laser targeting and
             // the crabs' `seen_by_squad` perception, so it must advance on the fixed timestep (and at the
             // same rate as the systems that read it, or fast-forward would change what's visible when).
-            .add_systems(FixedUpdate, update_los.in_set(LosWritten))
+            .add_systems(FixedUpdate, update_los.in_set(LosWritten).distributive_run_if(in_state(crate::session::RunState::Active)))
             // `apply_floor_fog` only tints floor tiles from that grid — cosmetic, so it stays on `Update`.
-            .add_systems(Update, apply_floor_fog);
+            .add_systems(Update, apply_floor_fog.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

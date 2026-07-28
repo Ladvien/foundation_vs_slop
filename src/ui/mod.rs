@@ -18,6 +18,7 @@
 use bevy::prelude::*;
 
 pub mod boot;
+pub mod briefing;
 pub mod containment_hud;
 pub mod research_hud;
 pub mod site_hud;

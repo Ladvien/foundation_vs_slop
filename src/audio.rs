@@ -300,7 +300,7 @@ impl Plugin for GameAudioPlugin {
                     ambient_oneshots,
                     update_music,
                     mute_when_background,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

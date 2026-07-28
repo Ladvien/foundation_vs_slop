@@ -107,7 +107,7 @@ impl Plugin for Scp999Plugin {
             // next tick's Think reads). Pinned sim on `FixedUpdate`, like every creature system.
             .add_systems(
                 FixedUpdate,
-                movement::scp999_seek_and_tickle.after(crate::ai::AiSet::Think),
+                movement::scp999_seek_and_tickle.after(crate::ai::AiSet::Think).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }
@@ -129,11 +129,11 @@ impl Plugin for Scp999VisualsPlugin {
                     // one shared `fog::hide_in_fog` pass, keyed on this marker (SCP-999 isn't `Hostile`,
                     // so it names itself). Cosmetic: Visibility is render state; gameplay runs regardless.
                     crate::fog::hide_in_fog::<Scp999>,
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Reactive modal jiggle, written onto the gel's morph weights (see `jiggle`). `PostUpdate` so it
             // runs after gameplay movement set this tick's Transform (the springs read its acceleration).
-            .add_systems(PostUpdate, jiggle::drive_blob_jiggle);
+            .add_systems(PostUpdate, jiggle::drive_blob_jiggle.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

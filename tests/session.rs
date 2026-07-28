@@ -845,3 +845,58 @@ fn a_lost_run_still_preserves_meta_progress() {
         "a LOST run must still preserve what it banked — that is the roguelite boundary"
     );
 }
+
+/// **FVS-G-6** — `RunState::Idle` is a state the game can SIT IN.
+///
+/// # What this pins, and why it could not be pinned before
+///
+/// `Idle` used to be a one-frame blip: `session::begin_first_run` flips it on `PostStartup`, so nothing
+/// ever observed a world-less frame. Site-67 needs the opposite — the player stands in `Idle` for
+/// minutes. Measured 2026-07-26, flipping `AutoStartFirstRun(false)` panicked on the first frame:
+/// `Parameter Res<Dungeon> failed validation: Resource does not exist`. In Bevy 0.19 a missing `Res<T>`
+/// **panics**; it does not skip the system.
+///
+/// The fix is that every expedition-simulation system on `FixedUpdate` now carries
+/// `distributive_run_if(in_state(RunState::Active))` — the same condition `session`'s own systems have
+/// always used, so it is one mechanism rather than a second way of saying "there is a run".
+///
+/// **Why `in_state` and not `resource_exists::<Dungeon>`**, which the item left open: `Dungeon` is
+/// **never removed** (`grep remove_resource::<Dungeon>` → 0 hits). After `RETURN TO SITE` it survives,
+/// describing a despawned world — so `resource_exists` reads *true* for a stale world and would not
+/// gate anything, while `in_state` would. That asymmetry decides it.
+///
+/// **Why `distributive_run_if` and not `run_if`**, which is the part worth remembering: `.run_if()` on
+/// a *tuple* wraps it in an anonymous system set, and that extra graph node permutes the schedule's
+/// linearisation — measured, it moved the deterministic golden by itself. `.distributive_run_if()`
+/// attaches the condition to each system individually, adds no node, and leaves the golden **bit
+/// identical**. Verified by giving the tuple form a trivially-true condition: the hash moved anyway,
+/// proving the drift was structural rather than anything being skipped.
+#[test]
+fn the_game_can_sit_in_a_world_less_frame_without_a_dungeon() {
+    use bevy::prelude::State;
+    let _guard = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = foundation_vs_slop::sim_harness::build_headless_app_unfinished(&cfg);
+    // Before `PostStartup`, so `begin_first_run` reads it and leaves the state in `Idle`.
+    app.insert_resource(foundation_vs_slop::session::AutoStartFirstRun(false));
+    app.finish();
+    app.cleanup();
+
+    // Several frames, not one: the panic this guards against is a *system parameter* validation, which
+    // fires the first time each system actually runs. A single frame would miss anything gated behind a
+    // fixed-timestep accumulator that has not yet reached its first tick.
+    for _ in 0..120 {
+        app.update();
+    }
+
+    assert_eq!(
+        *app.world().resource::<State<RunState>>().get(),
+        RunState::Idle,
+        "with AutoStartFirstRun(false) the game must STAY world-less, not quietly start a run"
+    );
+    assert!(
+        app.world().get_resource::<foundation_vs_slop::dungeon::Dungeon>().is_none(),
+        "no expedition was started, so there must be no Dungeon — if one exists, something built a \
+         world behind the Director's back and the Site would be showing a live expedition"
+    );
+}

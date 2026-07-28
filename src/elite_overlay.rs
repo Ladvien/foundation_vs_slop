@@ -81,6 +81,13 @@ struct AudioEntry {
 struct LevelEntry {
     cell: (usize, usize),
     fitness: f32,
+    /// Behaviour-descriptor axes. Named here — the other entry types let serde ignore them — because
+    /// FVS-L-4's briefing describes the sampled world to the player in these terms, and a cell index
+    /// alone ("(3, 5)") tells them nothing about what they are walking into.
+    #[serde(default)]
+    clutter: f32,
+    #[serde(default)]
+    infestation: f32,
     dungeon: DungeonConfig,
     metropolis: MetropolisWeights,
     density: PlacementDensity,
@@ -165,6 +172,48 @@ fn read_elite<E: Elite + serde::de::DeserializeOwned>(spec: &str, dim: &str) -> 
         ron::from_str(&text).map_err(|e| format!("{path}: not a {dim} archive: {e}"))?;
     let idx = pick_index(&arch.elites, cell, &path)?;
     Ok(arch.elites.swap_remove(idx))
+}
+
+/// Every **occupied** cell in a levels archive, sorted.
+///
+/// FVS-H-3's `CurriculumDirector` needs the candidate set before it can choose one, and it must be a
+/// *stable* set: the pick is required to be reproducible given a seed, so the order this returns cannot
+/// depend on how the archive happens to be laid out on disk.
+///
+/// Levels-only on purpose. The director samples a **challenge** — a world — and `levels` is the archive
+/// whose elites are worlds. Widening this to the other dimensions would invite sampling a *behaviour*
+/// or an *audio* elite as if it were a challenge, which is a different and much less defensible idea.
+pub fn levels_archive_cells(path: &str) -> Result<Vec<LevelChallenge>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("levels archive: cannot read {path}: {e}"))?;
+    let arch: Archive<LevelEntry> =
+        ron::from_str(&text).map_err(|e| format!("{path}: not a levels archive: {e}"))?;
+    let mut cells: Vec<LevelChallenge> = arch
+        .elites
+        .iter()
+        .map(|e| LevelChallenge {
+            cell: e.cell,
+            clutter: e.clutter,
+            infestation: e.infestation,
+            fitness: e.fitness,
+        })
+        .collect();
+    // SORT-OK: archive cells are unique by construction (one elite per cell) — total.
+    cells.sort_unstable_by_key(|c| c.cell);
+    Ok(cells)
+}
+
+/// One world the director may sample, with the axes that describe it.
+///
+/// The descriptors are what FVS-L-4's briefing turns into English. They are the *level* archive's axes
+/// — how cluttered the architecture is, and how infested — not a difficulty scalar, because MAP-Elites
+/// does not produce one and inventing it would throw away the thing the archive is for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelChallenge {
+    pub cell: (usize, usize),
+    pub clutter: f32,
+    pub infestation: f32,
+    pub fitness: f32,
 }
 
 /// A config-slice evolved dimension (the ones `train apply` can permanently bake and `FVS_*_ELITE` can

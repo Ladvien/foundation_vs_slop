@@ -82,17 +82,45 @@ impl Default for ExperimentFatigue {
         // multiply to ~7.5 — a belief of **0.882** against a `REVEAL_AT` of **0.9**. No parameter could
         // ever resolve, so no specimen could complete and no capability could ever be unlocked.
         //
-        // 0.88 is the value that satisfies both. Computed, then confirmed by the tests below:
-        // * Four tests survive the floor (`0.8 → 0.704 → 0.620 → 0.545`), LR product ≈ 18.6, and the
-        //   belief crosses `REVEAL_AT` on the **second** test at p ≈ 0.905.
-        // * The arc still tapers: 0.278 bits then 0.271. Narrow, and that is the point — raising decay
-        //   further wins back reliability headroom but loses the taper (at 0.9 the sequence rises,
-        //   0.278 → 0.287, because binary entropy's concavity beats the weakened test).
+        // **0.87, decided 2026-07-27 by SWEEP (FVS-E-6, closed) — and the sweep found the maximum was
+        // not where either previous number sat.** The decision taken was "raise `decay` toward 0.9 for
+        // a wider authoring band". Raising it is right; 0.9 overshoots, and so did the interim 0.88.
         //
-        // The usable authoring band for `Experiment::reliability` is therefore about **[0.77, 0.89]**:
-        // below it a parameter never resolves, at 0.90 a single test resolves it outright.
-        // `ResearchConfig::check_resolvable` enforces the lower edge at load.
-        Self { decay: 0.88 }
+        // The band has **two** lower edges, and only one of them had ever been characterised:
+        // * the **resolve floor** — below it a parameter exhausts before reaching `REVEAL_AT`, so the
+        //   specimen can never complete. `check_resolvable` enforces this one. It *falls* as decay rises.
+        // * the **taper floor** — below it the arc stops front-loading: round 2 resolves *more* than
+        //   round 1, because a weaker test on a still-uncertain posterior can out-resolve a strong test
+        //   on a posterior already moved (binary entropy is concave). Nothing enforced this one, nothing
+        //   had measured it, and it *rises* as decay rises.
+        //
+        // The two floors close on each other from opposite directions, so the usable band is not
+        // monotone in `decay` — it peaks. Swept over a uniform battery, band = both floors cleared:
+        // | decay | usable `reliability` band | width |
+        // |---|---|---|
+        // | 0.80 | [0.82, 0.89] | 8 |
+        // | 0.84 | [0.79, 0.89] | 11 |
+        // | **0.85–0.87** | **[0.78, 0.89]** | **12** |
+        // | 0.88 | [0.80, 0.89] | 10 |
+        // | 0.90 | [0.81, 0.89] | 9 |
+        // | 0.92 | [0.83, 0.89] | 7 |
+        //
+        // 0.87 is the **top of the tied plateau**: it buys the widest band *and*, among the three decays
+        // that tie for it, the most tests before a parameter exhausts. That is the tie-break, and it is
+        // the one E-6 cares about — the item's complaint was that `reliability` could express only
+        // three outcomes, and both halves of the fix are "more room".
+        //
+        // The band's **upper** edge is 0.89 at every decay and fatigue cannot move it: at 0.90 a single
+        // reading clears `REVEAL_AT` outright, which is a property of the threshold, not of fatigue. A
+        // battery authored there is not a research arc, it is a button.
+        //
+        // The authored content spans 0.82–0.89 and so sits inside [0.78, 0.89] with four points of
+        // headroom at the bottom — which is the room a genuinely hard anomaly needs, and which 0.80's
+        // 8-wide strip did not have.
+        //
+        // `curriculum`'s `the_decay_sits_where_the_authoring_band_is_widest` pins the whole sweep rather
+        // than this number, so the table cannot go stale the way its two predecessors did.
+        Self { decay: 0.87 }
     }
 }
 
@@ -155,11 +183,44 @@ pub fn reveal_schedule(
     out
 }
 
-/// Is this arc front-loaded — does each step resolve no more than the one before it?
+/// Is this arc front-loaded — does each **step** resolve no more than the one before it?
 ///
 /// The tolerance absorbs `f32` noise only; it is not slack for a genuinely rising step.
+///
+/// ⚠️ **This is the strict, step-wise reading, and it only holds for a battery whose experiments are
+/// equally reliable.** With non-uniform reliabilities — which every shipped battery has, because that
+/// ramp is the authored difficulty — the second round's steps rise slightly, and it is not a defect:
+/// see [`arc_tapers_across_rounds`], which is the property the shipped content is held to. Use this one
+/// for uniform batteries and for detecting a selector regression, where the two agree.
 pub fn schedule_is_front_loaded(schedule: &[f32]) -> bool {
     schedule.windows(2).all(|w| w[1] <= w[0] + 1.0e-4)
+}
+
+/// Does the arc taper across **rounds** — does the k-th test on a parameter resolve no more than the
+/// (k−1)-th did?
+///
+/// This is what FVS-E-3's "front-load resolvable surprise" actually claims, and it is the check the
+/// shipped batteries are held to. The distinction matters because [`reveal_schedule`] interleaves
+/// *different questions*: within one round it walks all four parameters, and there is no reason the
+/// second question should reveal less than the first — they are independent, and the existing
+/// `a_research_arc_front_loads_without_an_authored_curve` already says so about the leading plateau.
+/// What must fall is the arc **once fatigue starts biting**, i.e. round over round.
+///
+/// The within-round wobble that makes the step-wise check fail on real content is a consequence of
+/// greedy selection: [`reveal_schedule`] *chooses* by expected information gain but *records* the
+/// entropy actually resolved on the likelier branch, and with unequal reliabilities those two orderings
+/// do not coincide. A parameter tested by a weaker experiment retains more entropy, so its second
+/// reading resolves more — while still resolving far less than any first reading did.
+///
+/// Each round is one pass over the parameters, so the rounds are `PARAM_COUNT`-sized chunks. A short
+/// final chunk (parameters that resolved early drop out) is compared on the same terms; it can only be
+/// smaller, which is the direction the property wants.
+pub fn arc_tapers_across_rounds(schedule: &[f32]) -> bool {
+    let peaks: Vec<f32> = schedule
+        .chunks(super::PARAM_COUNT)
+        .map(|round| round.iter().copied().fold(0.0f32, f32::max))
+        .collect();
+    peaks.windows(2).all(|w| w[1] <= w[0] + 1.0e-4)
 }
 
 /// What one step of research *feels* worth.

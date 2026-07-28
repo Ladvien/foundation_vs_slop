@@ -109,10 +109,10 @@ impl Plugin for ContainmentPlugin {
                 // Release last, so a capture that completes this tick drops its device on the same tick.
                 device::release_finished_devices,
             )
-                .chain(),
-        )
+                .chain().distributive_run_if(in_state(crate::session::RunState::Active)),
+            )
         .init_resource::<area::SiteSecured>()
-        .add_systems(FixedUpdate, area::track_secured_sites)
+        .add_systems(FixedUpdate, area::track_secured_sites.distributive_run_if(in_state(crate::session::RunState::Active)))
         // The extraction point, placed on the insertion cell. `RunBuild::Populate` because it reads
         // `Dungeon`, which only exists after `RunBuild::World`. Not a `FixedUpdate` node, so it cannot
         // permute the pinned schedule's linearisation.

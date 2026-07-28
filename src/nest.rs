@@ -202,9 +202,9 @@ impl Plugin for NestPlugin {
             // material/visual refresh stays on `Update`.
             .add_systems(
                 FixedUpdate,
-                (nest_alarm.before(crate::ai::AiSet::Deposits), despawn_dead_nests),
+                (nest_alarm.before(crate::ai::AiSet::Deposits), despawn_dead_nests).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
-            .add_systems(Update, update_nests);
+            .add_systems(Update, update_nests.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 

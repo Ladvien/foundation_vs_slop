@@ -15,6 +15,7 @@
 pub mod bubble;
 pub mod model;
 mod runtime;
+pub mod triggers;
 
 use bevy::picking::mesh_picking::MeshPickingPlugin;
 use bevy::prelude::*;
@@ -73,10 +74,10 @@ impl Plugin for DialoguePlugin {
                     crate::squad::ensure_leader,
                     bubble::track_bubbles,
                     bubble::expire_bubbles,
-                    demo_input,
                 ),
             );
         runtime::plugin(app);
+        triggers::plugin(app);
     }
 }
 
@@ -117,19 +118,8 @@ fn bark_squad_lines(
     }
 }
 
-/// Dev hook: `T` starts the demo conversation.
-///
-/// The `Y` "sample thought bark" hook is gone — barks now come from real gameplay via
-/// [`bark_squad_lines`]. Conversations still have no gameplay trigger and the corpus is a single authored
-/// `"intro"`, so this stays until one exists.
-fn demo_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    lock: Option<Res<ConversationLock>>,
-    mut starts: MessageWriter<StartConversation>,
-) {
-    if keys.just_pressed(KeyCode::KeyT) && lock.is_none() {
-        starts.write(StartConversation {
-            id: "intro".into(),
-        });
-    }
-}
+// The `T` demo hotkey is **gone** (FVS-K-3). It existed because conversations had no gameplay trigger
+// and the corpus was a single authored `"intro"` — which was the item's whole complaint. `triggers`
+// now starts all fourteen from real events, and `every_authored_conversation_has_a_trigger` fails if a
+// conversation is added without one. Re-adding a hotkey would make that check vacuous, because the
+// hotkey is a trigger that reaches everything and therefore proves nothing.

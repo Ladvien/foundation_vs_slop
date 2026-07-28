@@ -581,4 +581,154 @@ mod tests {
         assert!(c.payouts(Subject::Watcher).is_empty());
         assert!(!c.is_available(Subject::Watcher, &TechTree::default()));
     }
+
+    /// The shipped `research:` slice, as the game actually loads it.
+    fn shipped() -> ResearchConfig {
+        crate::config::load_game_config().expect("the shipped config must parse").research
+    }
+
+    /// Tests needed to resolve one parameter at `base` reliability, or `None` if it never resolves.
+    fn tests_to_resolve(base: f32, fatigue: super::super::pacing::ExperimentFatigue) -> Option<u32> {
+        let mut p = crate::research::ResearchPosterior::unknown();
+        let mut runs = 0u32;
+        while let Some(r) = fatigue.effective(base, runs) {
+            p.observe(HiddenParam::Lethality, true, r);
+            runs += 1;
+            if p.is_revealed(HiddenParam::Lethality) {
+                return Some(runs);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_shipped_arc_tapers_across_rounds() {
+        // **FVS-E-3's actual claim, checked against the actual content.** The existing
+        // `a_research_arc_front_loads_without_an_authored_curve` proves the property on a synthetic
+        // battery of four IDENTICAL experiments — which is the one shape where the step-wise and
+        // round-wise readings agree, and therefore the one shape that could not have caught this.
+        //
+        // Measured 2026-07-27: the step-wise check fails for SCP-1048 and SCP-150 at every decay from
+        // 0.80 to 0.99, because their authored reliabilities differ and greedy selection interleaves
+        // four different questions. Round over round the arc falls hard and always has
+        // (0.42 → 0.30 for the bear). That is the property; this is where it is pinned.
+        let cfg = shipped();
+        let fatigue = super::super::pacing::ExperimentFatigue::default();
+        for s in &cfg.subjects {
+            let arc = super::super::pacing::reveal_schedule(
+                &s.experiments,
+                &crate::research::ResearchPosterior::unknown(),
+                fatigue,
+            );
+            assert!(
+                arc.len() > HiddenParam::ALL.len(),
+                "{:?}: the arc must reach a second round or there is nothing to taper: {arc:?}",
+                s.subject
+            );
+            assert!(
+                super::super::pacing::arc_tapers_across_rounds(&arc),
+                "{:?}: research must resolve less each round, not more: {arc:?}",
+                s.subject
+            );
+        }
+    }
+
+    /// Does a uniform battery at `base` both **resolve** and **taper** under this fatigue?
+    ///
+    /// The two conditions are the band's two lower edges, and they move in opposite directions as
+    /// `decay` changes — which is the whole finding behind FVS-E-6's number.
+    fn is_authorable(base: f32, f: super::super::pacing::ExperimentFatigue) -> bool {
+        let battery: Vec<Experiment> = HiddenParam::ALL
+            .iter()
+            .map(|p| Experiment { name: format!("{p:?}"), param: *p, reliability: base })
+            .collect();
+        let arc = super::super::pacing::reveal_schedule(
+            &battery,
+            &crate::research::ResearchPosterior::unknown(),
+            f,
+        );
+        let tapers = arc.len() > HiddenParam::ALL.len()
+            && super::super::pacing::arc_tapers_across_rounds(&arc);
+        tapers && tests_to_resolve(base, f).is_some()
+    }
+
+    /// How many whole-percent reliabilities are authorable at this decay.
+    fn band_width(f: super::super::pacing::ExperimentFatigue) -> usize {
+        (50..=99).filter(|i| is_authorable(*i as f32 / 100.0, f)).count()
+    }
+
+    #[test]
+    fn the_decay_sits_where_the_authoring_band_is_widest() {
+        // **FVS-E-6, closed — and the sweep found the answer neither previous number had.** The call
+        // was to raise `decay` toward 0.9 for a wider authoring band. Raising it is right, but the band
+        // is not monotone: it *peaks*, because it has two lower edges that move in opposite directions
+        // (`check_resolvable`'s resolve floor falls with decay, the taper floor rises). 0.9 is past the
+        // peak; so was the interim 0.88.
+        //
+        // Pinned as a SWEEP rather than as a remembered number, because the previous two statements of
+        // this band were doc comments and both went stale without anything noticing.
+        let shipped = super::super::pacing::ExperimentFatigue::default();
+        let widest = (70..=99)
+            .map(|i| super::super::pacing::ExperimentFatigue { decay: i as f32 / 100.0 })
+            .map(|f| (band_width(f), f))
+            .max_by_key(|(w, _)| *w)
+            .map(|(w, _)| w)
+            .expect("the sweep is non-empty");
+        assert_eq!(
+            band_width(shipped),
+            widest,
+            "decay {} gives a {}-wide authorable band against a maximum of {widest} — E-6's whole \
+             complaint was that this band is too narrow, so shipping off its peak needs a stated reason",
+            shipped.decay,
+            band_width(shipped),
+        );
+
+        // The tie-break: several decays reach the peak, and the highest of them also allows the most
+        // tests before a parameter exhausts. Both halves of E-6's fix are "more room", so take both.
+        let highest_at_peak = (70..=99)
+            .map(|i| super::super::pacing::ExperimentFatigue { decay: i as f32 / 100.0 })
+            .filter(|f| band_width(*f) == widest)
+            .map(|f| f.decay)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (shipped.decay - highest_at_peak).abs() < 1.0e-6,
+            "decay {} ties for the widest band but {highest_at_peak} does too and allows longer arcs — \
+             take the headroom or record why not",
+            shipped.decay,
+        );
+    }
+
+    #[test]
+    fn the_authored_reliabilities_sit_inside_the_band() {
+        // The band is only worth measuring if the content lives in it. Both edges are real and they are
+        // set by different things: the lower by fatigue, the upper by `REVEAL_AT` — at 0.90 one reading
+        // resolves a parameter outright, so a battery authored there is a button, not an arc.
+        let f = super::super::pacing::ExperimentFatigue::default();
+        let lo = (50..=99)
+            .map(|i| i as f32 / 100.0)
+            .find(|b| is_authorable(*b, f))
+            .expect("some reliability must be authorable, or research is impossible");
+        let one_shot = (50..=99)
+            .map(|i| i as f32 / 100.0)
+            .find(|b| tests_to_resolve(*b, f) == Some(1))
+            .expect("a strong enough test resolves in one reading");
+        assert!(
+            (lo - 0.78).abs() < 1.0e-6 && (one_shot - 0.90).abs() < 1.0e-6,
+            "the band moved to [{lo}, {one_shot}) — update the table in `ExperimentFatigue::default`, \
+             because a designer authoring to the documented band is about to be rejected at load"
+        );
+
+        for s in &shipped().subjects {
+            for e in &s.experiments {
+                assert!(
+                    e.reliability >= lo && e.reliability < one_shot,
+                    "{:?}/{}: reliability {} is outside the authorable band [{lo}, {one_shot}) — it \
+                     either never resolves, resolves in a single test, or drips instead of tapering",
+                    s.subject,
+                    e.name,
+                    e.reliability
+                );
+            }
+        }
+    }
 }

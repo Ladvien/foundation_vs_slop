@@ -765,6 +765,61 @@ pub fn minimal_criterion(outcome: &EpisodeOutcome) -> Result<(), String> {
     Ok(())
 }
 
+/// **The containment feasibility constraint** (FVS-I-1) — for the WORLD archive only.
+///
+/// # Why this is not part of [`minimal_criterion`]
+///
+/// It was, for about four hours on 2026-07-27, and that was wrong. `minimal_criterion` is the *shared*
+/// gate — `level_eval`, `audio_eval`, `behavior_eval`, `rl_eval`, `poet` and `replayability` all consume
+/// it — so putting a containment clause there silently declared a **level** infeasible because nobody
+/// captured anything, which is not what a level is being judged on. CI caught it:
+/// `shipped_level_playtests_and_is_deterministic` runs an 1800-tick smoke rollout, far too short for
+/// the hub tour to reach its seeking beat, and the whole test went red.
+///
+/// The convenience argument that put it there (`minimal_criterion` already takes `&EpisodeOutcome`, so
+/// no signature has to change across five call sites) was exactly backwards: **those five call sites
+/// are the reason it does not belong there.**
+///
+/// # The decomposition it implements
+///
+/// I-1 offered "separate capture-quality archive dimension **vs** scalarized term". It is the first, and
+/// three independent lines pointed there:
+///
+/// * **[QD-PCG]'s Constrained Surprise Search is literally this shape** — surprise stays the objective,
+///   feasibility is a *constraint*. Bolting a capture bonus onto `W·S·L` is the other thing.
+/// * **Skalse et al. (arXiv:2209.13085), cited by `minimal_criterion`: restrict the policy set, do not
+///   subtract a penalty.** A capture term inside the objective is a bonus on the objective — the shape
+///   that produces reward hacking, here worlds that stage a cheap capture and nothing else.
+/// * **`coevolve/descriptors.rs` already says it**: *"Fitness stays `W·S·L` — these axes carry
+///   diversity, not quality."* A capture axis IS diversity, which is the literal reading of I-1's own
+///   acceptance: "capture-favoring **seeds** are selectable" is a property of the *world* archive.
+///
+/// It also preserves the multiplicative-veto property `Fitness::score` is built on: a fourth factor
+/// would make *every* elite require a completed capture, emptying the archive rather than shaping it.
+///
+/// # `attempted`, not `completed`
+///
+/// A world where the squad reached a capturable anomaly and **failed** is exactly the interesting one —
+/// a containment problem the search should be free to make harder. Requiring completion would select
+/// for worlds where capture is *easy*, which inverts the item.
+///
+/// ⚠️ **This could not ship before 2026-07-27.** Measured against the held-in set, `0x5C09191` and
+/// `0xFEED` recorded **0 attempted**, so it would have rejected two of the three *shipped* baseline
+/// worlds before the search generated anything — the archive-emptying failure I-1's own risk note
+/// predicted. The blocker was that the synthetic player could not *find* a capturable anomaly;
+/// `evaluate::run_episode`'s tour now alternates toward one, and all three baselines attempt and
+/// complete. Re-probe with `cargo train probe` before touching this.
+pub fn containment_criterion(outcome: &EpisodeOutcome) -> Result<(), String> {
+    if outcome.captures_attempted == 0 {
+        return Err(
+            "the squad never attempted a containment — the world is capture-hostile, and an archive \
+             of worlds where the game's central verb is unreachable cannot pace a curriculum"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,6 +1134,8 @@ mod tests {
             // A sparse, non-degenerate field: a modest peak over a small fraction of the floor.
             peak_field: 8.0,
             field_flatness: 0.15,
+            // FVS-I-1's feasibility clause: a healthy episode reached a capturable anomaly.
+            captures_attempted: 1,
             // Per-species vitality census defaults to 0 — not consulted by `minimal_criterion`.
             ..Default::default()
         }
@@ -1087,6 +1144,32 @@ mod tests {
     #[test]
     fn minimal_criterion_admits_a_real_encounter() {
         assert!(minimal_criterion(&healthy()).is_ok());
+    }
+
+    #[test]
+    fn minimal_criterion_rejects_a_capture_hostile_world() {
+        // FVS-I-1's constraint. A world the squad can survive, fight through and map, but where it
+        // never once gets near something containable, is a world in which the game's central verb does
+        // not exist — and an archive full of them cannot pace a containment curriculum.
+        let hostile = EpisodeOutcome { captures_attempted: 0, ..healthy() };
+        // Feasible for every OTHER search — a level is not broken because nobody captured anything.
+        assert!(minimal_criterion(&hostile).is_ok(), "the shared gate must not carry this clause");
+        let err = containment_criterion(&hostile).expect_err("no attempt must be infeasible");
+        assert!(err.contains("containment"), "the rejection must name what is missing: {err}");
+    }
+
+    #[test]
+    fn a_failed_capture_attempt_is_still_feasible() {
+        // Deliberate, and the opposite choice would invert the item. Gating on `captures_completed`
+        // would select for worlds where capture is EASY; the interesting world is the one where the
+        // squad reached the anomaly and lost it, which is a containment problem worth evolving toward.
+        let tried_and_failed = EpisodeOutcome {
+            captures_attempted: 2,
+            captures_completed: 0,
+            captures_broken: 2,
+            ..healthy()
+        };
+        assert!(containment_criterion(&tried_and_failed).is_ok());
     }
 
     #[test]

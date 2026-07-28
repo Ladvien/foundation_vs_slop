@@ -386,7 +386,7 @@ impl Plugin for MoldPlugin {
                         .after(LightFieldWritten)
                         .after(crate::fog::LosWritten)
                         .after(crate::almond_water::AlmondWaterWritten),
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
 }

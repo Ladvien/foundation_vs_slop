@@ -173,11 +173,11 @@ impl Plugin for SquadAiPlugin {
                     // `ActiveBehavior` this tick.
                     trace::record_decisions.after(crate::ai::AiSet::Think),
                     trace::record_outcome.after(crate::ai::AiSet::Think),
-                ),
+                ).distributive_run_if(in_state(crate::session::RunState::Active)),
             )
             // Dialogue generation is cosmetic — it turns emitted observations into lines on `Update`
             // (never pinned; a line's text must not enter `snapshot_hash`).
-            .add_systems(Update, dialogue::generate_dialogue);
+            .add_systems(Update, dialogue::generate_dialogue.distributive_run_if(in_state(crate::session::RunState::Active)));
     }
 }
 
