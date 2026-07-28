@@ -1460,7 +1460,45 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   gate or a documented per-platform tolerance. · *Deps:* — · *Touches:* CI config · *Reading:* [ABM], [TEST-OW]
 - **FVS-J-4 — clippy denylist vs unwrap/expect/panic/unsafe** · S · ✅ *duplicate entry — the live one is in Push 9 (line ~1324), **LANDED 2026-07-26** as a ratchet (`tests/panic_budget.rs`) rather than a ban. Kept as a pointer only; do not track status here.*
   *Done when:* CI fails on new `unwrap`/`expect`/`panic!`/`unsafe` in shipped crates (harness exempt). · *Deps:* — · *Touches:* CI, lints · *Reading:* — (no corpus resource)
-- **FVS-J-5 — Make harness CI lane gating** · S
+- **FVS-J-5 — Make harness CI lane gating** · S · ⚠️ **HALF LANDED 2026-07-28 — the lane is split; the gate flip waits on one number**
+  > ### The blocker was two tests, not a slow lane
+  > Measured on CI 2026-07-28: with `search_parallel` already moved out, the harness lane still ran
+  > **over 2 hours** (start 15:29:52, still going at 17:31) against 3–4 minutes for every other lane.
+  > Local per-target breakdown from the same code:
+  >
+  > | target | time | share |
+  > |---|---|---|
+  > | **`replay.rs`** | **2050 s** | **93%** |
+  > | `session.rs` | 130 s | 6% |
+  > | 11 others | ~190 s | 1% |
+  >
+  > and inside `replay.rs`, `search_rollouts_are_reproducible_under_load` + its mutant sibling are
+  > **1966 s of that 2050 s** — measured directly in a dedicated run. So **two tests out of ~90 were
+  > ~89% of the entire lane.**
+  >
+  > *Shipped:* both moved to the nightly job, which is renamed **`search + rollout determinism
+  > (nightly)`** and stays a HARD job. Same cadence argument that moved `search_parallel`: they
+  > replicate 7200-tick rollouts under 8-thread load, and what they guard — rollout reproducibility
+  > under contention — changes only when the search or the sim changes.
+  >
+  > This is the lever this entry already named ("splitting the slow replicate tests onto a nightly"),
+  > now with the numbers to justify which ones.
+  >
+  > ⚠️ **The gate flip is deliberately NOT in this change.** Local arithmetic says the lane drops to
+  > ~8 min, and CI ran ~3× local, so ~25 min — **but that is an extrapolation, and extrapolation has
+  > been wrong twice today** (the mini-bake's "1 hour" was 4, and this lane's own runtime was projected
+  > from a time-to-failure). Promoting a lane to a hard merge gate is a decision about how long every
+  > merge waits, and it needs the measured post-split number, which the next CI run produces.
+  >
+  > ⚠️ **Also corrected: `Deps: H-1` never held.** The lane runs no search — `search_parallel`'s archive
+  > tests were already skipped out of it — so nothing it executes depends on a baked archive.
+  >
+  > **The lane has already earned promotion on evidence.** It caught a real defect on PR #68 that the
+  > pure-CPU gate could not see: FVS-I-1's containment constraint was scoped into the *shared*
+  > `minimal_criterion` and broke `playtest_level`, which is `test-harness`-gated and therefore
+  > invisible to `cargo test`. That is exactly the class of regression an advisory lane fails to stop.
+  >
+  > *Remaining:* one green post-split CI duration, then flip `continue-on-error: false`.
   Promote the advisory (continue-on-error) harness lane to a hard gate once retrain (H-1) stabilizes archives.
   ⚠️ **A large chunk of the runtime blocker is fixed (2026-07-27), and here is the MEASURED number.**
   `tests/replay.rs` took **3201.8 s with 19 tests** and takes **2029.8 s with 18** — so

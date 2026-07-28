@@ -108,6 +108,23 @@ jobs:
       - name: Test (harness — replay + liveness + search-calibration, single-threaded)
         # Serial: headless Apps must not overlap (serial_guard + --test-threads=1).
         #
+        # FVS-J-5, measured 2026-07-28. With `search_parallel` already moved out, the lane was still
+        # **over 2 hours on CI** — and the cause is two tests, not a broad slowness:
+        #
+        #   replay.rs      2050 s   93% of the lane
+        #   session.rs      130 s    6%
+        #   11 others      ~190 s    1%
+        #
+        # and within `replay.rs`, `search_rollouts_are_reproducible_under_load` + its mutant sibling are
+        # **1966 s of that 2050 s**. So TWO tests out of ~90 were ~89% of the whole lane. They are moved
+        # to the nightly job for the same reason `search_parallel` was: they replicate 7200-tick rollouts
+        # under 8-thread load, and what they guard — rollout reproducibility under contention — changes
+        # only when the search or the sim changes, which is a nightly cadence, not a per-PR one.
+        #
+        # This is the lever the backlog names ("splitting the slow replicate tests onto a nightly") and
+        # it is what makes promoting this lane to a hard merge gate viable at all: a 2-hour lane is one
+        # nobody waits for, which is the identical argument that removed the `zz_localize_g0` probe.
+        #
         # `search_parallel`'s two tests are SKIPPED here and run in the nightly job below. Measured
         # 2026-07-27: they take **3754 s (62 min)** — longer than the whole rest of the lane — because
         # `parallel_search_reproduces_the_inline_archives_bit_for_bit` runs a full inline search AND a
@@ -119,7 +136,9 @@ jobs:
         run: |
           cargo test --features test-harness -- --test-threads=1 \
             --skip parallel_search_reproduces_the_inline_archives_bit_for_bit \
-            --skip batch_emitter_scales_past_opponents_deterministically
+            --skip batch_emitter_scales_past_opponents_deterministically \
+            --skip search_rollouts_are_reproducible_under_load \
+            --skip search_rollouts_of_mutants_are_reproducible_under_load
 
   # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
   # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,
@@ -152,15 +171,15 @@ jobs:
       - name: Test (deterministic core, release profile)
         run: cargo test --release
 
-  # The parallel-search equivalence guard, split out of the per-PR lane purely on runtime (see the skip
-  # note above). It answers one question — does `--jobs N` produce byte-identical archives to `--jobs 1`
+  # The heavy determinism guards, split out of the per-PR lane purely on runtime (see the skip note
+  # above): parallel-search equivalence, and the two replicate-rollout reproducibility tests. It answers one question — does `--jobs N` produce byte-identical archives to `--jobs 1`
   # — and the answer changes only when the search or the sim changes, so nightly is the right cadence.
   #
   # Kept a HARD job (no continue-on-error): when this goes red, every baked elite since the last green
   # run is suspect, which is exactly the state `docs/rl/2026-07-16-search-rollout-nondeterminism.md`
   # describes as "the offline search is scoring against a wobbling objective".
   search-parallel-nightly:
-    name: parallel search equivalence (nightly)
+    name: search + rollout determinism (nightly)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -180,6 +199,14 @@ jobs:
           key: ${{ runner.os }}-cargo-harness-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (search_parallel only, single-threaded)
         run: cargo test --features test-harness --test search_parallel -- --test-threads=1
+      # The two replicate-rollout guards moved out of the per-PR lane (FVS-J-5). Same cadence argument
+      # as `search_parallel` above, and the same HARD-job treatment: when either goes red, every rollout
+      # the offline search scored since the last green run is suspect.
+      - name: Test (replicate rollout reproducibility under load)
+        run: |
+          cargo test --features test-harness --test replay -- --test-threads=1 \
+            search_rollouts_are_reproducible_under_load \
+            search_rollouts_of_mutants_are_reproducible_under_load
 
   # FVS-J-3 — the ARM lane. Its job is to MEASURE the known ARM<->x86 f32 divergence, not yet to gate on
   # it, and the distinction is the whole reason this is `continue-on-error`.
