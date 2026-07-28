@@ -940,15 +940,36 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
         if failed > 0 { format!(", {failed} failed") } else { String::new() }
     );
 
-    // Land the winner at the stable canonical path. `islands_out/` is gitignored and cleared at the start of
-    // the next island run, so a winner left there is gone by the next phase — and the `FVS_*_ELITE` overlay
-    // hints (and any hand bake) would point at a stale file. Copy first, then bake/hint from the canonical
-    // location, so "the winner is at elites_<dim>.ron" is always true.
+    // Land the winner at a stable path. `islands_out/` is gitignored and **cleared at the start of the
+    // next island run**, so a winner left there is gone by the next phase of `train all` — and the
+    // `FVS_*_ELITE` overlay hints (and any hand bake) would point at a file that no longer exists.
+    //
+    // ── FVS-N-12: which stable path depends on `--apply`, and it has to ──────────────────────────────
+    //
+    // `--apply` is documented as being about `config.ron` and the goldens, so it never covered this copy
+    // — and for five of the six dimensions that was harmless, because their canonical archives are
+    // gitignored. **`elites_levels.ron` is the exception: it is TRACKED**, because FVS-H-3's
+    // `CurriculumDirector` samples it at runtime and therefore needs a committed archive to exist.
+    //
+    // Measured 2026-07-28: a throwaway 4-generation smoke run with `--no-apply` silently replaced that
+    // committed **55-cell** archive with a **17-cell** one. Nothing in the game reports it; the
+    // expeditions just quietly get less varied. `git status` was the only witness.
+    //
+    // So an exploratory run writes a **candidate** beside the canonical file instead. It is stable
+    // across phases (which is the whole reason the copy exists), it matches the `elites_*.ron` ignore
+    // pattern so it is never committed by accident, and promoting it is an explicit act — the same
+    // raw→curated split `models/` → `gen_ai/` already uses for assets.
     let canonical = match kind.archive_path() {
         Some(p) => {
-            std::fs::copy(&win_out, p).map_err(|e| format!("copy winner {win_out} -> {p}: {e}"))?;
-            println!("   winner copied to {p}");
-            p.to_string()
+            let dest = if a.apply { p.to_string() } else { candidate_path(p) };
+            std::fs::copy(&win_out, &dest)
+                .map_err(|e| format!("copy winner {win_out} -> {dest}: {e}"))?;
+            if a.apply {
+                println!("   winner copied to {dest}");
+            } else {
+                println!("   winner copied to {dest}  (--no-apply: {p} left untouched)");
+            }
+            dest
         }
         None => win_out.clone(),
     };
@@ -1923,6 +1944,21 @@ impl SearchArgs {
     }
 }
 
+/// Where an exploratory (`--no-apply`) run lands its winner: `…/elites_levels.candidate.ron`.
+///
+/// FVS-N-12. Beside the canonical archive rather than inside `islands_out/`, because that directory is
+/// cleared at the start of the next island phase and `train all` would lose each phase's winner as the
+/// following one began. Matches the `assets/config/elites_*.ron` ignore pattern, so it cannot be
+/// committed by accident.
+fn candidate_path(canonical: &str) -> String {
+    match canonical.strip_suffix(".ron") {
+        Some(stem) => format!("{stem}.candidate.ron"),
+        // A canonical path that is not `.ron` is a programming error rather than a runtime condition,
+        // but suffixing is still the honest answer — it cannot collide with the canonical name.
+        None => format!("{canonical}.candidate"),
+    }
+}
+
 fn parse_unit_f32(v: &str) -> Result<f32, String> {
     let x = v.parse::<f32>().map_err(|e| format!("{v:?}: {e}"))?;
     if !(0.0..=1.0).contains(&x) {
@@ -2075,6 +2111,35 @@ mod tests {
         use clap::Parser;
         let bad = Cli::try_parse_from(["train", "rl", "--cma", "--emitter", "cma-mae"]);
         assert!(bad.is_err(), "--cma with --emitter must be refused, not silently resolved");
+    }
+
+    #[test]
+    fn an_exploratory_run_never_writes_the_canonical_archive_path() {
+        // FVS-N-12. Five of the six canonical archives are gitignored, so clobbering them is harmless;
+        // `elites_levels.ron` is TRACKED, because FVS-H-3's director samples it at runtime and needs a
+        // committed archive to exist. A 4-generation smoke run silently replaced a committed 55-cell
+        // archive with a 17-cell one, and nothing but `git status` noticed.
+        for canonical in [
+            "assets/config/elites_levels.ron",
+            "assets/config/elites_audio.ron",
+            "assets/config/elites_policy.ron",
+        ] {
+            let candidate = candidate_path(canonical);
+            assert_ne!(candidate, canonical, "an exploratory run must not target the canonical path");
+            assert!(
+                candidate.ends_with(".candidate.ron"),
+                "the candidate must be obviously a candidate: {candidate}"
+            );
+            // Still matches `assets/config/elites_*.ron`, so it cannot be committed by accident.
+            assert!(candidate.starts_with("assets/config/elites_"), "{candidate}");
+        }
+    }
+
+    #[test]
+    fn the_candidate_path_cannot_collide_with_the_canonical_one() {
+        // Belt and braces on the suffix rule: a canonical path that is not `.ron` must still produce a
+        // distinct name rather than silently returning the input.
+        assert_ne!(candidate_path("weird/path/elites_levels"), "weird/path/elites_levels");
     }
 
     #[test]

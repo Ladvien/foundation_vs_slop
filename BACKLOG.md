@@ -1087,6 +1087,53 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
+- **FVS-N-12 — `train --no-apply` still overwrites the one TRACKED archive (FOUND 2026-07-28)** · S · *determinism: offline* · ✅ **FIXED 2026-07-28**
+  **Measured, and it bit during a smoke run.** `--no-apply` is documented as "do NOT bake at the end …
+  leave `config.ron`/goldens alone", and it honours that. But each island phase *also* copies its winner
+  to the canonical `assets/config/elites_<dim>.ron`, and that copy is **not** gated by `--no-apply`.
+  Five of those six paths are gitignored. **`elites_levels.ron` is not** — it is the only tracked
+  archive in the directory. So a 4-generation smoke run silently replaced a committed **55-cell**
+  archive with a **17-cell** one, and `git status` was the only thing that noticed.
+  **It is worse than a hygiene problem, because that exact file is what FVS-H-3's `CurriculumDirector`
+  samples.** A throwaway bake quietly makes the director's world pool three times thinner, and nothing
+  in the game reports it — the expeditions just get less varied.
+  **Why the flag reads as safe when it is not:** `--no-apply`'s own help text is about `config.ron` and
+  the goldens, which are the destructive, hard-to-undo effects. Overwriting an archive is neither, so it
+  was never in scope for the flag — the gap is that one archive became *tracked* while the others stayed
+  ignored, and the copy step never learned the difference.
+  *Fixed:* an exploratory run writes `elites_<dim>.**candidate**.ron` beside the canonical archive; only
+  `--apply` targets the canonical path. The `FVS_*_ELITE` hint follows the file actually written, so it
+  never points at something that was not updated.
+  **Why not simply gate the copy off** — the obvious fix, and it is wrong: `islands_out/` is **cleared at
+  the start of the next island phase**, so with no copy at all `train all --no-apply` would lose each
+  phase's winner as the following phase began. That is the flag's main use. The copy has to happen; only
+  its *destination* was the bug.
+  The candidate name still matches the `assets/config/elites_*.ron` ignore pattern, so it cannot be
+  committed by accident, and promoting one is an explicit act — the same raw→curated split `models/` →
+  `gen_ai/` already uses for assets.
+  *Done when:* ~~either the winner copy is gated behind `--apply`~~ **or** the copy target moves to a path
+  that is ignored like its five siblings and promoting an archive becomes an explicit act. · *Deps:* — · *Touches:* `src/bin/train.rs` · *Reading:* — (no corpus resource)
+- **FVS-I-4 — The AUDIO archive's descriptor does not track its knobs (FOUND 2026-07-28)** · M · *determinism: offline*
+  Measured across two runs. `elites_audio.ron` comes back **coverage 3 of 64** at 30 generations and
+  **coverage 1** at 4 — fifteen times the search budget for two extra cells. That is the signature of a
+  descriptor the search cannot move, not of an under-powered search.
+  **The confounder is eliminated, which is why this is now a filed item rather than a suspicion.** The
+  first measurement was taken while FVS-I-1's containment clause was wrongly scoped into the *shared*
+  `minimal_criterion` and was rejecting audio candidates. The second was taken after that was scoped out
+  — and audio still collapses. It is the descriptor.
+  **The shape:** `audio_search` scores *physical acoustic knobs* (`evaporate`, `diffuse`,
+  `deposit_radius`, per-event loudness) against `coevolve::swarm_descriptor`, whose axes are
+  **decision-mode shares** (aggression × persistence). The knobs move the swarm's *stimulus*; the axes
+  measure its *choices*, and the coupling between them is weak. This is the identical shape the
+  behaviour archive was flagged for — and audio was never on that list, because the 2026-07-24 audit
+  verified `swarm_descriptor` **in isolation**.
+  **The generalised rule, which is the real finding: a descriptor is only "healthy" relative to a given
+  SEARCH. Audit the knobs↔descriptor *pair*, never the descriptor alone.** `levels` in the same run came
+  back healthy (55–62 elites) because level genes move swarm behaviour directly.
+  *Done when:* audio is scored against axes its knobs actually move — candidates: mean field gradient
+  and din-driven displacement — and a bake illuminates materially more than 3 cells. **Changing a
+  descriptor invalidates committed archives and shifts training semantics, so it is a design decision,
+  not a unilateral fix.** · *Deps:* — · *Touches:* `src/squad_ai/audio_eval.rs`, `coevolve/descriptors.rs` · *Reading:* **[ME]**, [QD]
 - **FVS-H-2 — Make CMA-MAE emitter reachable** · M · *determinism: offline* · ✅ **LANDED 2026-07-27**
   *Shipped:* `rl_search::Emitter` (`Isotropic` / `CmaMe` / `CmaMae`) replacing the `use_cma` boolean,
   `cma_mae_alpha` threaded through `RlSearchConfig`, and `train rl --emitter cma-mae [--alpha X]`.
