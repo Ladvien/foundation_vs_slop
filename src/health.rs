@@ -56,9 +56,21 @@ impl Health {
 /// just above the unit figurine's head — the figurine is ~1.82 m tall (0.7 m base mesh × `squad::
 /// FIGURINE_SCALE` 2.6), so the bar clears it with a small gap. Tune by eye via devshot.
 const BAR_Y: f32 = 2.0;
-/// Bar quad size in world units (wide and short).
+/// Bar quad size in world units (wide and short), authored to read correctly at [`BAR_REF_ZOOM`].
 const BAR_WIDTH: f32 = 1.1;
 const BAR_HEIGHT: f32 = 0.16;
+
+/// The camera zoom (`CameraView::viewport_height`) these bar dimensions were tuned at — the startup
+/// zoom, `camera::VIEWPORT_HEIGHT`.
+///
+/// The bar is scaled by `viewport_height / BAR_REF_ZOOM` so it holds a **constant apparent size**
+/// across the zoom range. Without it the quad is a fixed size in *world* units while the viewport is
+/// not, so its share of the screen is `BAR_WIDTH / viewport_height` — 3% of screen width at
+/// `camera::MAX_ZOOM` (34) but **22% at `camera::MIN_ZOOM` (5)**. A player zoomed all the way in on a
+/// clustered squad got five overlapping green slabs across a fifth of the screen each, which is what
+/// `debug_screenshots/region_2026-07-29_13-12-23-426` caught. At the reference zoom the scale is
+/// exactly 1.0, so the authored calibration above is preserved.
+const BAR_REF_ZOOM: f32 = 12.0;
 
 /// A bar entity's link back to the combatant it displays.
 #[derive(Component)]
@@ -313,11 +325,32 @@ fn attach_health_bars(
     }
 }
 
+/// Uniform scale that holds a bar at a constant **apparent** size as the camera zooms.
+///
+/// The quad is a fixed size in world units while the viewport is not, so without this a bar's share
+/// of the screen is `BAR_WIDTH / viewport_height` — it balloons as the player zooms in. Pure and
+/// tested because the degenerate inputs matter: `CameraView` is readable before `setup_camera` runs
+/// (its `Default` seeds the startup zoom, but a future change could not), and a zero or NaN here
+/// would silently collapse every bar in the game to nothing.
+fn bar_zoom_scale(viewport_height: Option<f32>) -> f32 {
+    match viewport_height {
+        Some(h) if h.is_finite() && h > 0.0 => h / BAR_REF_ZOOM,
+        // No camera resource (the headless harness) or a nonsense viewport: draw at the authored
+        // size, which is exactly the behaviour before this existed.
+        _ => 1.0,
+    }
+}
+
 /// Track each bar to its owner: reposition above the head, face the camera, refresh the fill, and
 /// mirror the owner's visibility (so a fog-hidden enemy's bar hides too). Orphaned bars despawn.
 fn update_health_bars(
     mut commands: Commands,
     camera: Single<&GlobalTransform, With<Camera3d>>,
+    // Optional: `HealthPlugin` runs in the headless harness (`sim_harness.rs`) where `CameraPlugin`
+    // — the only registrar of `CameraView` (`camera.rs:105`) — is absent. In Bevy 0.19 a missing
+    // `Res<T>` PANICS the system rather than skipping it, so a non-optional read here would take
+    // every headless run down. Absent → scale 1.0, i.e. exactly the old behaviour.
+    view: Option<Res<crate::camera::CameraView>>,
     owners: Query<(&Transform, &Health, &Visibility), Without<HealthBar>>,
     mut bars: Query<
         (
@@ -332,6 +365,8 @@ fn update_health_bars(
     mut materials: ResMut<Assets<HealthBarMaterial>>,
 ) {
     let cam_rot = camera.rotation();
+    let zoom_scale = bar_zoom_scale(view.map(|v| v.viewport_height));
+
     for (bar_entity, bar, mut tf, mut vis, mat_handle) in &mut bars {
         let Ok((owner_tf, health, owner_vis)) = owners.get(bar.owner) else {
             // Owner is gone — clean up its bar.
@@ -340,6 +375,7 @@ fn update_health_bars(
         };
         tf.translation = owner_tf.translation + Vec3::Y * BAR_Y;
         tf.rotation = cam_rot;
+        tf.scale = Vec3::splat(zoom_scale);
         *vis = *owner_vis;
         if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
             mat.settings.fraction = health.fraction();
@@ -368,5 +404,44 @@ mod tests {
         let anosmic = (0..n).filter(|&s| CyanideSmell::from_seed_in(CRAB, s).anosmic).count();
         let frac = anosmic as f32 / n as f32;
         assert!((frac - 0.25).abs() < 0.02, "anosmia fraction {frac} is not ~1/4");
+    }
+}
+
+#[cfg(test)]
+mod bar_scale_tests {
+    use super::*;
+
+    #[test]
+    fn a_bar_holds_a_constant_share_of_the_screen_across_the_zoom_range() {
+        // The bug this fixes: the quad is fixed in WORLD units, so its share of the screen is
+        // BAR_WIDTH / viewport_height — 3% of screen width at MAX_ZOOM but 22% at MIN_ZOOM. Five of
+        // those over a clustered squad is the wall of green in
+        // debug_screenshots/region_2026-07-29_13-12-23-426.
+        let share = |zoom: f32| (BAR_WIDTH * bar_zoom_scale(Some(zoom))) / zoom;
+        let near = share(crate::camera::MIN_ZOOM);
+        let far = share(crate::camera::MAX_ZOOM);
+        assert!(
+            (near - far).abs() < 1.0e-5,
+            "a bar must occupy the same share of the screen at both zoom extremes: \
+             {near} at MIN_ZOOM vs {far} at MAX_ZOOM"
+        );
+    }
+
+    #[test]
+    fn the_authored_size_is_preserved_at_the_reference_zoom() {
+        // BAR_WIDTH/BAR_HEIGHT/BAR_Y were all tuned by eye at the startup zoom. Scaling must be a
+        // no-op there, or this "fix" silently re-tunes a calibration someone did against devshot.
+        assert_eq!(bar_zoom_scale(Some(BAR_REF_ZOOM)), 1.0);
+    }
+
+    #[test]
+    fn a_missing_or_nonsense_viewport_draws_at_the_authored_size() {
+        // `HealthPlugin` runs in the headless harness, where `CameraView` does not exist. A zero or
+        // NaN must not collapse every bar in the game to nothing.
+        assert_eq!(bar_zoom_scale(None), 1.0);
+        assert_eq!(bar_zoom_scale(Some(0.0)), 1.0);
+        assert_eq!(bar_zoom_scale(Some(-4.0)), 1.0);
+        assert_eq!(bar_zoom_scale(Some(f32::NAN)), 1.0);
+        assert_eq!(bar_zoom_scale(Some(f32::INFINITY)), 1.0);
     }
 }

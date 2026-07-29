@@ -260,6 +260,7 @@ fn run_pending_capture(
     menu: Option<Res<State<MenuState>>>,
     theme: Res<UiTheme>,
     fonts: Res<FontAssets>,
+    assets: Res<AssetServer>,
     ents: Query<(
         Entity,
         &GlobalTransform,
@@ -269,7 +270,10 @@ fn run_pending_capture(
         Has<Crab>,
         Has<Manca>,
         Has<Nest>,
-        Has<PlacedIn>,
+        Option<&PlacedIn>,
+        // The prop's source scene. Furniture is the one kind whose glb is DATA (`ManifestItem::glb`),
+        // not a module constant, so it cannot be hardcoded in `classify` like the others.
+        Option<&WorldAssetRoot>,
     )>,
 ) {
     let Phase::Pending {
@@ -353,6 +357,7 @@ fn run_pending_capture(
         cam_view.as_deref(),
         &app_state,
         menu.as_deref(),
+        &assets,
         &ents,
     );
 
@@ -448,19 +453,31 @@ fn classify(
     manca: bool,
     nest: bool,
     prop: bool,
-) -> Option<(&'static str, &'static str)> {
+    scene: Option<&WorldAssetRoot>,
+    assets: &AssetServer,
+) -> Option<(&'static str, String)> {
     if enemy {
-        Some(("smiley-boss", "procedural mesh (enemy.rs)"))
+        Some(("smiley-boss", "procedural mesh (enemy.rs)".to_string()))
     } else if manca {
-        Some(("manca/parasite", "scp150/scp-150.glb"))
+        Some(("manca/parasite", "scp150/scp-150.glb".to_string()))
     } else if crab {
-        Some(("dimensional-crab", "dimensional_crab/dimensional_crab.glb"))
+        Some(("dimensional-crab", "dimensional_crab/dimensional_crab.glb".to_string()))
     } else if nest {
-        Some(("nest", "procedural mesh (nest.rs)"))
+        Some(("nest", "procedural mesh (nest.rs)".to_string()))
     } else if unit {
-        Some(("squad-unit", "characters/valkyrie.glb"))
+        Some(("squad-unit", "characters/valkyrie.glb".to_string()))
     } else if prop {
-        Some(("prop/furniture", "glTF scene (glb path not on entity)"))
+        // Resolved from the live handle rather than hardcoded. Every furniture prop used to report
+        // "glTF scene (glb path not on entity)", which made a capture over a furnished room a list of
+        // fifteen anonymous rows — a player reporting "weird trashcan flickering" on 2026-07-29 cost
+        // an entire investigation working out that twelve of them were wall sconces and three were
+        // bins. The path IS on the entity: `WorldAssetRoot` wraps the `Handle<WorldAsset>` the
+        // placement pass loaded, and `AssetServer::get_path` gives its source.
+        let path = scene
+            .and_then(|s| assets.get_path(s.0.id()))
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "glTF scene (handle not yet resolved)".to_string());
+        Some(("prop/furniture", path))
     } else {
         None
     }
@@ -492,6 +509,7 @@ fn build_metadata(
     cam_view: Option<&CameraView>,
     app_state: &State<AppState>,
     menu: Option<&State<MenuState>>,
+    assets: &AssetServer,
     ents: &Query<(
         Entity,
         &GlobalTransform,
@@ -501,22 +519,27 @@ fn build_metadata(
         Has<Crab>,
         Has<Manca>,
         Has<Nest>,
-        Has<PlacedIn>,
+        Option<&PlacedIn>,
+        // The prop's source scene. Furniture is the one kind whose glb is DATA (`ManifestItem::glb`),
+        // not a module constant, so it cannot be hardcoded in `classify` like the others.
+        Option<&WorldAssetRoot>,
     )>,
 ) -> String {
     let campos = cam_tf.translation();
 
     // One pass: tally scene-wide counts and collect the tracked entities that project inside the box.
     let mut counts = [0usize; 5]; // unit, enemy, crab, manca, nest
-    let mut inbox: Vec<(f32, Entity, &'static str, String, Vec3, Vec2, &'static str)> = Vec::new();
-    for (ent, gt, name, unit, enemy, crab, manca, nest, prop) in ents {
+    let mut inbox: Vec<(f32, Entity, &'static str, String, Vec3, Vec2, String, String)> = Vec::new();
+    for (ent, gt, name, unit, enemy, crab, manca, nest, placed, scene) in ents {
+        let prop = placed.is_some();
         counts[0] += unit as usize;
         counts[1] += enemy as usize;
         counts[2] += crab as usize;
         counts[3] += manca as usize;
         counts[4] += nest as usize;
 
-        let Some((kind, asset)) = classify(unit, enemy, crab, manca, nest, prop) else {
+        let Some((kind, asset)) = classify(unit, enemy, crab, manca, nest, prop, scene, assets)
+        else {
             continue;
         };
         let world = gt.translation();
@@ -527,7 +550,10 @@ fn build_metadata(
             continue;
         }
         let name = name.map(|n| format!(" \"{}\"", n.as_str())).unwrap_or_default();
-        inbox.push((campos.distance(world), ent, kind, name, world, screen, asset));
+        // The region a prop was placed into — makes "these twelve sconces are spread across ten
+        // different rooms" self-evident in the report instead of something to be inferred.
+        let region = placed.map(|p| format!(" · region {:?}", p.0)).unwrap_or_default();
+        inbox.push((campos.distance(world), ent, kind, name, world, screen, asset, region));
     }
     // Nearest first; entity id breaks ties into a total order.
     // SORT-OK: dev-only debug-report ordering, never touches pinned sim state.
@@ -609,10 +635,10 @@ fn build_metadata(
     if inbox.is_empty() {
         let _ = writeln!(md, "_(no tracked gameplay entity projects inside the box)_");
     } else {
-        for (dist, _idx, kind, name, world, screen, asset) in &inbox {
+        for (dist, _idx, kind, name, world, screen, asset, region) in &inbox {
             let _ = writeln!(
                 md,
-                "- **{kind}**{name} · asset `{asset}` · world=({:.2}, {:.2}, {:.2}) · screen=({:.0}, {:.0}) · dist={dist:.1}",
+                "- **{kind}**{name} · asset `{asset}` · world=({:.2}, {:.2}, {:.2}) · screen=({:.0}, {:.0}) · dist={dist:.1}{region}",
                 world.x, world.y, world.z, screen.x, screen.y
             );
         }

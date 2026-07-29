@@ -732,6 +732,60 @@ mod tests {
         }
     }
 
+    /// A settled clump whose root then TELEPORTS must re-settle, not fly apart.
+    ///
+    /// This is the case the player hit: a squad unit is respawned by the `RunState::Idle → Active`
+    /// world rebuild, so its head bone jumps tens of metres in one frame. `step_clump` re-pins
+    /// `pos[0]` but leaves `pos[1..]` behind, and PBD derives velocity from `pos - prev` — so the
+    /// constraint yank that drags the chain across the gap is re-read as velocity on the next
+    /// substep, and the clump explodes into cards stretched across the level.
+    ///
+    /// Nothing re-seeds a diverged rig (`HairRig::seeded` is set once), so it never recovers —
+    /// which is why the artifact persisted across two captures 49 s apart.
+    #[test]
+    fn a_teleported_root_re_settles_instead_of_exploding() {
+        let settings = test_settings();
+        let n = settings.segments_per_strand + 1;
+        let mut clump = HairClump::new(settings.segments_per_strand, Vec3::ZERO, Vec3::NEG_Y, 0.0);
+        for i in 0..n {
+            let p = Vec3::NEG_Y * (i as f32 * settings.rest_length);
+            clump.pos[i] = p;
+            clump.prev[i] = p;
+        }
+        // Settle at the origin first, so this starts from a healthy chain.
+        for _ in 0..120 {
+            step_clump(&mut clump, Vec3::ZERO, 1.0 / 60.0, 0.0, &settings);
+        }
+
+        // The rebuild: the head bone lands 80 units away in a single frame.
+        let far = Vec3::new(80.0, 0.0, 45.0);
+        for _ in 0..120 {
+            step_clump(&mut clump, far, 1.0 / 60.0, 0.0, &settings);
+        }
+
+        for (i, p) in clump.pos.iter().enumerate() {
+            assert!(p.is_finite(), "particle {i} is non-finite after a teleport: {p:?}");
+        }
+        // The whole point: a card is drawn between consecutive particles, so a segment far past its
+        // rest length IS the stretched spike in the capture.
+        for i in 0..n - 1 {
+            let len = (clump.pos[i + 1] - clump.pos[i]).length();
+            let rest = settings.rest_length;
+            assert!(
+                len < rest * 2.0,
+                "segment {i} is {len} long, {:.0}x its rest length {rest} — the chain exploded \
+                 instead of following the teleported root",
+                len / rest
+            );
+        }
+        // …and it must have actually followed the root, not merely stayed short somewhere else.
+        let tip_to_root = (clump.pos[n - 1] - far).length();
+        assert!(
+            tip_to_root < settings.rest_length * (n as f32) * 1.5,
+            "the chain did not follow its root: tip is {tip_to_root} from the bone"
+        );
+    }
+
     #[test]
     fn xpbd_distance_correct_pulls_a_stretched_pair_toward_rest_length() {
         let mut pos = vec![Vec3::ZERO, Vec3::new(0.0, -1.0, 0.0)]; // 1.0 apart
