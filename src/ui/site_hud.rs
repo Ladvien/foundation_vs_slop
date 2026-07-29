@@ -28,10 +28,13 @@
 //! nothing pinned reads.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::ScrollArea;
 
+use super::layout::{self, HudRegions, Region};
+use super::rows::{sync_rows, Cell, Emphasis, Row, RowPanel};
 use super::state::{despawn_scoped, AppState};
-use super::theme::{FontAssets, UiTheme, Z_PANEL};
-use super::widgets::text_colored;
+use super::theme::{glyph, FontAssets, UiTheme};
+use super::widgets::border_all;
 use crate::containment::Specimen;
 use crate::knowledge::Subject;
 use crate::research::{Curriculum, Researched, ResearchPosterior, StudySubject, TechTree};
@@ -43,11 +46,16 @@ pub struct SiteHudRoot;
 #[derive(Component)]
 pub struct SiteHudReadout;
 
-/// One line of the curriculum.
+/// One curriculum node, as rows.
 ///
 /// `studied` marks the specimen currently on the slab, so the selector's effect is visible in the same
-/// place the choice is made.
-pub fn curriculum_line(
+/// place the choice is made — now as a `»` glyph plus an emphasis step rather than a leading `>`,
+/// which was findable only by reading.
+///
+/// The four states (locked / not-captured / held / researched) stay **four distinct rows**. Collapsing
+/// any pair would hide the actual next action, which differs for each: satisfy a prerequisite, go
+/// catch one, run an experiment, or nothing.
+pub fn curriculum_rows(
     subject: Subject,
     name: &str,
     payouts: &[crate::research::Capability],
@@ -56,51 +64,64 @@ pub fn curriculum_line(
     held: bool,
     done: bool,
     studied: bool,
-) -> String {
+) -> Vec<Row> {
     let _ = subject;
-    let marker = if studied { '>' } else { ' ' };
-    let mut line = format!("{marker} {name}");
-    if is_goal {
+    let title = if is_goal {
         // [PROG]'s boss level. Naming it is the difference between a ramp and a path.
-        line.push_str("  (GOAL)");
-    }
-    line.push('\n');
-    for c in payouts {
-        line.push_str(&format!("    -> {}\n", c.label()));
-    }
+        format!("{name}  (GOAL)")
+    } else {
+        name.to_string()
+    };
+
+    let head = if studied {
+        Row::kv(title, "STUDYING")
+            .with_glyph(glyph::CURRENT)
+            .with_emphasis(Emphasis::Alert)
+    } else if done {
+        Row::kv(title, "RESEARCHED")
+            .with_glyph(glyph::DONE)
+            .with_emphasis(Emphasis::Muted)
+    } else if !unmet.is_empty() {
+        Row::kv(title, "LOCKED")
+            .with_glyph(glyph::LOCKED)
+            .with_emphasis(Emphasis::Muted)
+    } else if held {
+        Row::kv(title, "READY TO STUDY").with_glyph(glyph::MET)
+    } else {
+        Row::kv(title, "NOT YET CAPTURED").with_glyph(glyph::MET).with_emphasis(Emphasis::Muted)
+    };
+
+    let mut rows = vec![head];
     if !unmet.is_empty() {
         // The rule FVS-L-1 set: say what unblocks it, not merely that it is blocked.
         let names: Vec<&str> = unmet.iter().map(|c| c.label()).collect();
-        line.push_str(&format!("    LOCKED — NEEDS: {}\n", names.join(", ")));
-    } else if done {
-        line.push_str("    RESEARCHED\n");
-    } else if held {
-        line.push_str("    HELD — READY TO STUDY\n");
-    } else {
-        // Available in principle, but nothing has been captured. That is a different state from locked
-        // and from finished, and collapsing them would hide the actual next action: go and catch one.
-        line.push_str("    NOT YET CAPTURED\n");
+        rows.push(Row::note(format!("NEEDS: {}", names.join(", "))).with_indent(1));
     }
-    line
+    for c in payouts {
+        rows.push(Row::note(format!("\u{2192} {}", c.label())).with_indent(1));
+    }
+    rows
 }
 
 /// The whole panel.
-pub fn site_text(
+pub fn site_rows(
     curriculum: &Curriculum,
     tree: &TechTree,
     held: &[(Subject, bool, bool)],
     name_of: impl Fn(Subject) -> &'static str,
-) -> String {
-    let mut out = String::from("SITE-67 — THAUMIEL CURRICULUM\n");
-    out.push_str(&format!(
-        "CAPABILITIES DERIVED: {}/{}\n[TAB] SELECT SPECIMEN\n\n",
-        tree.count(),
-        crate::research::Capability::ALL.len()
-    ));
+) -> Vec<Row> {
+    let derived = tree.count();
+    let total = crate::research::Capability::ALL.len();
+    let mut out = vec![
+        Row::header("SITE-67 — THAUMIEL CURRICULUM"),
+        Row::kv("CAPABILITIES DERIVED", format!("{derived}/{total}"))
+            .push(Cell::Bar { frac: if total == 0 { 0.0 } else { derived as f32 / total as f32 } }),
+        Row::note("[TAB] SELECT SPECIMEN"),
+    ];
     let goals = curriculum.goals();
     for subject in curriculum.progression() {
         let entry = held.iter().find(|(s, _, _)| *s == subject);
-        out.push_str(&curriculum_line(
+        out.extend(curriculum_rows(
             subject,
             name_of(subject),
             curriculum.payouts(subject),
@@ -143,52 +164,64 @@ pub fn cycle_study_subject(
     studied.0 = Some(next);
 }
 
-fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAssets>) {
-    commands
-        .spawn((
-            SiteHudRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(theme.space_lg),
-                left: Val::Px(theme.space_lg),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(theme.space_xs),
-                ..default()
-            },
-            GlobalZIndex(Z_PANEL),
-        ))
-        .with_children(|p| {
-            p.spawn((
-                SiteHudReadout,
-                text_colored(&theme, &fonts, "", theme.font_body, theme.text),
-            ));
-        });
+fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegions>) {
+    let root = (
+        SiteHudRoot,
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
+            // The curriculum grows with the content pack, and an unbounded panel would run off the
+            // bottom of the screen with the goal node — the one the player most needs — below the
+            // fold. Cap it and scroll.
+            max_height: Val::Percent(100.0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        BackgroundColor(theme.panel),
+        border_all(theme.panel_border),
+        // Scrollable, so it must accept the pointer — `bevy_ui_widgets::ScrollArea` reads hover.
+        ScrollArea,
+    );
+    let Some(mut ec) = layout::panel_in(&mut commands, &regions, Region::TopLeft, root) else {
+        error!("site HUD: no layout frame at spawn — the curriculum is not shown");
+        return;
+    };
+    ec.with_children(|p| {
+        p.spawn((
+            SiteHudReadout,
+            RowPanel::default(),
+            Node { flex_direction: FlexDirection::Column, ..default() },
+            Pickable::IGNORE,
+        ));
+    });
 }
 
 fn update_panel(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    fonts: Res<FontAssets>,
     curriculum: Res<Curriculum>,
     tree: Res<TechTree>,
     studied: Res<StudySubject>,
     specimens: Query<(Entity, &Specimen, Option<&Researched>, &ResearchPosterior)>,
-    mut text_q: Query<&mut Text, With<SiteHudReadout>>,
+    mut readout: Query<(Entity, &mut RowPanel), With<SiteHudReadout>>,
 ) {
+    let Ok((entity, mut panel)) = readout.single_mut() else { return };
+    // SORT-OK: `held` is only ever probed by `find` on `subject` below, never iterated for output —
+    // the panel's row order comes from `curriculum.progression()`, which is authored, not from this.
     let held: Vec<(Subject, bool, bool)> = specimens
         .iter()
         .map(|(e, s, done, _)| (s.subject, done.is_some(), studied.0 == Some(e)))
         .collect();
-    let line = site_text(&curriculum, &tree, &held, super::research_hud::subject_name);
-    for mut t in &mut text_q {
-        if t.0 != line {
-            t.0 = line.clone();
-        }
-    }
+    let rows = site_rows(&curriculum, &tree, &held, super::research_hud::subject_name);
+    sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows);
 }
 
 pub struct SiteHudPlugin;
 
 impl Plugin for SiteHudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Site), spawn_panel)
+        app.add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
             .add_systems(OnExit(AppState::Site), despawn_scoped::<SiteHudRoot>)
             .add_systems(
                 Update,
@@ -242,15 +275,40 @@ mod tests {
         }
     }
 
+    /// Flatten rows to the text a player would read, for assertions about *content*.
+    /// Structure (emphasis, glyph) is asserted directly on the rows.
+    fn flat(rows: &[Row]) -> String {
+        rows.iter()
+            .map(|r| {
+                let cells: Vec<String> = r
+                    .cells
+                    .iter()
+                    .filter_map(|c| match c {
+                        Cell::Label(s) | Cell::Value(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                format!("{} {}", r.glyph, cells.join("  "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn a_locked_node_names_the_research_that_unlocks_it() {
         // FVS-L-1's rule applied to the curriculum: a bare padlock leaves the player with nothing to
         // do about it.
-        let out = site_text(&chain(), &TechTree::default(), &[], name_of);
-        assert!(out.contains("LOCKED — NEEDS:"), "{out}");
+        let rows = site_rows(&chain(), &TechTree::default(), &[], name_of);
+        let out = flat(&rows);
+        assert!(out.contains("LOCKED"), "{out}");
         assert!(
             out.contains(Capability::MoraleField.label()),
             "the lock must name its prerequisite: {out}"
+        );
+        // And the locked node carries the locked glyph, so the state survives without colour.
+        assert!(
+            rows.iter().any(|r| r.glyph == glyph::LOCKED),
+            "a locked node needs its own glyph, not just the word"
         );
     }
 
@@ -259,7 +317,7 @@ mod tests {
         // The whole reason the order is derived rather than authored ([PROG]): a prerequisite must
         // never be listed after the thing that needs it, and the progression needs something to build
         // toward.
-        let out = site_text(&chain(), &TechTree::default(), &[], name_of);
+        let out = flat(&site_rows(&chain(), &TechTree::default(), &[], name_of));
         let blob = out.find("SCP-999").expect("999 listed");
         let para = out.find("SCP-150").expect("150 listed");
         assert!(blob < para, "the prerequisite must be listed first:\n{out}");
@@ -270,8 +328,12 @@ mod tests {
     fn unlocking_the_prerequisite_opens_the_next_node() {
         let mut tree = TechTree::default();
         tree.grant(Capability::MoraleField);
-        let out = site_text(&chain(), &tree, &[], name_of);
-        assert!(!out.contains("LOCKED"), "nothing should still be locked:\n{out}");
+        let rows = site_rows(&chain(), &tree, &[], name_of);
+        assert!(!flat(&rows).contains("LOCKED"), "nothing should still be locked");
+        assert!(
+            !rows.iter().any(|r| r.glyph == glyph::LOCKED),
+            "and no node should still carry the locked glyph"
+        );
     }
 
     #[test]
@@ -280,30 +342,41 @@ mod tests {
         // one; "held" means go and study it; "researched" means it already paid out.
         let mut tree = TechTree::default();
         tree.grant(Capability::MoraleField);
-        let out = site_text(
+        let out = flat(&site_rows(
             &chain(),
             &tree,
             &[(Subject::ComfortBlob, true, false), (Subject::Parasite, false, true)],
             name_of,
-        );
+        ));
         assert!(out.contains("RESEARCHED"), "{out}");
-        assert!(out.contains("HELD — READY TO STUDY"), "{out}");
 
-        let none_held = site_text(&chain(), &tree, &[], name_of);
+        let none_held = flat(&site_rows(&chain(), &tree, &[], name_of));
         assert!(none_held.contains("NOT YET CAPTURED"), "{none_held}");
+
+        let held_only = flat(&site_rows(
+            &chain(),
+            &tree,
+            &[(Subject::ComfortBlob, false, false)],
+            name_of,
+        ));
+        assert!(held_only.contains("READY TO STUDY"), "{held_only}");
     }
 
     #[test]
     fn the_studied_specimen_is_marked_where_the_choice_is_made() {
-        let out = site_text(
+        let rows = site_rows(
             &chain(),
             &TechTree::default(),
             &[(Subject::ComfortBlob, false, true)],
             name_of,
         );
+        let studied: Vec<&Row> = rows.iter().filter(|r| r.glyph == glyph::CURRENT).collect();
+        assert_eq!(studied.len(), 1, "exactly one row is the current selection");
         assert!(
-            out.lines().any(|l| l.starts_with("> SCP-999")),
-            "the selector's effect must be visible in the list it selects from:\n{out}"
+            studied[0].label().unwrap_or_default().contains("SCP-999"),
+            "the selector's effect must be visible in the list it selects from: {studied:?}"
         );
+        // It is also the loud row — the selection is what the player just acted on.
+        assert_eq!(studied[0].emphasis, Emphasis::Alert);
     }
 }

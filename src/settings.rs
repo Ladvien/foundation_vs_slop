@@ -24,7 +24,7 @@ pub enum RosterDetail {
     Full,
 }
 
-/// Player-controllable HUD density (Game-UI Guidance §2). A [`Resource`] and serialized.
+/// Player-controllable HUD density (`docs/ui.md` §2). A [`Resource`] and serialized.
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct HudSettings {
@@ -44,15 +44,28 @@ impl Default for HudSettings {
     }
 }
 
-/// Accessibility preferences (Game-UI Guidance §1.3 / §4 — Presentation lens).
+/// **Access** preferences (`docs/ui.md` §1.3 / §4) — how the game is presented, never how hard it is.
+///
+/// The Access/Challenge split is Power et al. 2019 (DOI 10.1016/j.ijhcs.2019.06.010). Nothing here
+/// may become an RL/QD genome gene: these describe the *player*, not the world, so evolving them
+/// would be optimising against whoever happened to be sitting at the keyboard.
+///
+/// **There is deliberately no `colorblind_safe` flag.** There used to be, and it was dead — written
+/// by the settings menu, read by nobody. It is gone rather than implemented because the encoding it
+/// existed to work around is gone: threat now rides the ACS **luminosity** ramp with a redundant
+/// glyph (`ui::theme::Hazard`), and roster chips carry their operative's **role letter**
+/// (`ui::hud::role_letter`), so no readout in the game depends on telling two hues apart. Redundant
+/// coding beats an opt-in palette on both counts — it needs no toggle to find, and it helps everyone
+/// reading the HUD in peripheral vision while looking at the world, not only the ~8% of men with a
+/// red-green deficiency.
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct AccessibilitySettings {
-    /// Multiplies UI font sizes. 0.75..=1.5.
+    /// Multiplies UI text size, via the `RemSize` resource. 0.75..=1.5.
     pub text_scale: f32,
-    /// Swap the unit/threat/health palette for a colorblind-safe set.
-    pub colorblind_safe: bool,
-    /// Damp scanline shimmer, hit-flash, and muzzle/blood strobing.
+    /// Damp the VHS tape glitch — scanline shimmer, chroma split, noise. Damped to a quarter rather
+    /// than switched off: the glitch is a narrative tell, so removing it would delete information
+    /// rather than soften it. Applied in `vhs::drive_fade`.
     pub reduce_flashing: bool,
 }
 
@@ -60,7 +73,6 @@ impl Default for AccessibilitySettings {
     fn default() -> Self {
         Self {
             text_scale: 1.0,
-            colorblind_safe: false,
             reduce_flashing: false,
         }
     }
@@ -176,7 +188,6 @@ mod tests {
             },
             accessibility: AccessibilitySettings {
                 text_scale: 1.5,
-                colorblind_safe: true,
                 reduce_flashing: true,
             },
         };
@@ -184,7 +195,7 @@ mod tests {
         let parsed: UserSettings = ron::from_str(&text).unwrap();
         assert_eq!(parsed.hud.roster_detail, original.hud.roster_detail);
         assert!((parsed.hud.hud_scale - 1.25).abs() < f32::EPSILON);
-        assert!(parsed.accessibility.colorblind_safe);
+        assert!((parsed.accessibility.text_scale - 1.5).abs() < f32::EPSILON);
         assert!(parsed.accessibility.reduce_flashing);
     }
 

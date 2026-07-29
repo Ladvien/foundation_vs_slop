@@ -142,23 +142,51 @@ fn envelope(x: f32, config: &VhsConfig) -> f32 {
 /// Each frame: read the current glitch envelope (a single, refractory-gated pulse — see [`drive_glitch`])
 /// and push it — plus the constant `base_level` texture floor and the effect strengths — into every
 /// camera's `VhsSettings`.
-fn drive_fade(time: Res<Time>, config: Res<VhsConfig>, glitch: Res<VhsGlitch>, mut cameras: Query<&mut VhsSettings>) {
+fn drive_fade(
+    time: Res<Time>,
+    config: Res<VhsConfig>,
+    glitch: Res<VhsGlitch>,
+    // Optional because the windowed build supplies it via `ui::UiPlugin` → `SettingsPlugin`, and the
+    // harness has neither. In Bevy 0.19 a missing `Res<T>` PANICS the system rather than skipping it,
+    // so a non-optional read here would take down every headless run.
+    access: Option<Res<crate::settings::AccessibilitySettings>>,
+    mut cameras: Query<&mut VhsSettings>,
+) {
     let t = time.elapsed_secs();
     // One driver for the spike: the trapezoidal envelope over the current glitch's `phase`. Idle between
     // glitches (`phase` runs past the envelope span → 0), so there is no always-on wash.
     let spike = envelope(glitch.phase, &config);
 
+    // **Reduce flashing** (`docs/ui.md` §1.3). This is the one place the tape effect's on-screen
+    // strength is decided, so damping here reaches every channel of it and cannot be forgotten by a
+    // future effect that reads `VhsSettings`.
+    //
+    // Damped, not switched off: Lewandowska, Dziśko & Jankowski 2022 (DOI 10.1038/s41598-022-16284-2)
+    // found that "a high visual intensity is not necessarily needed for the best impact" and that
+    // sustained high contrast "can cause unnecessary irritation or even cognitive load" — so the
+    // accessible setting is a lower-contrast presentation of the same signal, not a missing one. The
+    // player still gets the found-footage tell; it just stops strobing.
+    let damp = match access.as_deref() {
+        Some(a) if a.reduce_flashing => REDUCED_FLASH_SCALE,
+        _ => 1.0,
+    };
+
     for mut s in &mut cameras {
         s.base = config.base_level;
-        s.spike = spike;
+        s.spike = spike * damp;
         s.time = t;
-        s.chroma = config.chroma;
-        s.wave = config.wave;
-        s.scanline = config.scanline;
-        s.noise_amt = config.noise_amt;
-        s.bloom = config.bloom;
+        s.chroma = config.chroma * damp;
+        s.wave = config.wave * damp;
+        s.scanline = config.scanline * damp;
+        s.noise_amt = config.noise_amt * damp;
+        s.bloom = config.bloom * damp;
     }
 }
+
+/// How far `reduce_flashing` pulls the tape effect down. Not `0.0`: the glitch is a narrative tell
+/// (something anomalous just manifested), and deleting it would remove information rather than
+/// soften it.
+const REDUCED_FLASH_SCALE: f32 = 0.25;
 
 /// The VHS glitch clock: a single tracking-error pulse that fires at most once per `cycle_period` and is
 /// triggered by a REAL anomaly manifesting (the watcher unleashing, a chestburster erupting) OR the ambient

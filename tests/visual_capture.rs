@@ -61,6 +61,19 @@ fn capture_once(timeout: Duration) -> Option<Vec<f32>> {
     None
 }
 
+/// **The committed golden is STALE as of the 2026-07-28 UI pass and needs re-pinning on a machine
+/// with a display.**
+///
+/// `ui::theme::load_fonts` now loads `assets/fonts/FiraMono-Regular.ttf` instead of resolving to
+/// Bevy's embedded `FiraMono-subset.ttf`, which carries only 95 codepoints. The title screen's
+/// subtitle is `"// SCP-9191 CONTAINMENT SITE — WATCH FEED"`; that em-dash (U+2014) was **tofu** in
+/// every frame the golden was captured from and now renders as a dash. The change is a fix, not a
+/// regression, but it moves the pixels.
+///
+/// This could not be re-pinned where the pass was done (no monitor → black drawable), and
+/// `TESTING.md` is explicit that changing a golden is "a deliberate, human-reviewed act — never
+/// auto-approve a diff" — so it was left for a human to regenerate and eyeball rather than
+/// rewritten blind. Procedure is in the module doc above.
 #[test]
 #[ignore] // display-gated — see module doc.
 fn title_screen_matches_golden() {

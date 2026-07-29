@@ -259,20 +259,32 @@ fn spawn_panel(
     mut commands: Commands,
     theme: Res<crate::ui::theme::UiTheme>,
     fonts: Res<crate::ui::theme::FontAssets>,
+    regions: Res<crate::ui::layout::HudRegions>,
 ) {
-    commands
-        .spawn((
+    // Parented into the shared region grid rather than absolutely positioned. The Site runs FOUR
+    // panels at once (curriculum, research, requisition, records) and each used to claim a corner
+    // independently, with no owner able to notice a collision or make room for a fifth.
+    let panel = (
             RecordsPanel,
             Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(theme.space_lg),
-                right: Val::Px(theme.space_lg),
                 flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
                 ..default()
             },
-            GlobalZIndex(crate::ui::theme::Z_PANEL),
-        ))
-        .with_children(|p| {
+            BackgroundColor(theme.panel),
+            crate::ui::widgets::border_all(theme.panel_border),
+            Pickable::IGNORE,
+    );
+    let Some(mut ec) = crate::ui::layout::panel_in(
+        &mut commands,
+        &regions,
+        crate::ui::layout::Region::BottomRight,
+        panel,
+    ) else {
+        error!("records office: no layout frame at spawn — the filing readout is not shown");
+        return;
+    };
+    ec.with_children(|p| {
             p.spawn((
                 RecordsReadout,
                 crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
@@ -337,7 +349,10 @@ impl Plugin for RecordsPlugin {
                     .in_set(crate::session::RunBuild::PostPopulate)
                     .after(super::roster::restore_squad_knowledge),
             )
-            .add_systems(OnEnter(AppState::Site), spawn_panel)
+            .add_systems(
+                OnEnter(AppState::Site),
+                spawn_panel.after(crate::ui::layout::spawn_frame),
+            )
             .add_systems(OnExit(AppState::Site), despawn_scoped::<RecordsPanel>)
             .add_systems(
                 Update,

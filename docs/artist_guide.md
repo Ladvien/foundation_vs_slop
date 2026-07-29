@@ -673,6 +673,18 @@ invariant list.
 
 ---
 
+## 14b. UI — not covered here
+
+There is no UI art contract in this guide, deliberately: the UI is drawn from code with design
+tokens, not from authored assets. If you need to know the HUD's colour language, its glyph set (and
+which glyphs the shipped font actually carries), the typographic scale, or the layout regions, read
+**`docs/ui.md`**.
+
+The one thing that crosses over: **`src/palette.rs` is the world palette and `src/ui/theme.rs` is the
+UI palette, and they are deliberately different.** The world follows the SCP colour language
+(desaturation = reality, saturation = anomaly); the UI is a phosphor-green terminal. Do not "unify"
+them.
+
 ## 15. Key file references
 
 | What | Where |

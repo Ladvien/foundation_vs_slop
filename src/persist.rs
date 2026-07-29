@@ -346,6 +346,7 @@ mod tests {
                 budget: 175,
                 last_rating: Some(crate::site::Rating::Exemplary),
                 expeditions: 3,
+                last_report: None,
             },
             requisitioned: crate::site::Requisitioned { devices: 2, quarantines: 1, medkits: 4 },
             conversations_played: crate::dialogue::triggers::ConversationsPlayed(
@@ -465,6 +466,7 @@ mod tests {
             budget: 210,
             last_rating: Some(crate::site::Rating::Satisfactory),
             expeditions: 7,
+                last_report: None,
         });
         world.insert_resource(crate::site::Requisitioned {
             devices: 3,

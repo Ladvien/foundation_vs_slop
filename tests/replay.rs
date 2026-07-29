@@ -880,7 +880,7 @@ fn ui_never_leaks_into_deterministic_core() {
 
 #[test]
 fn ui_screens_spawn_and_pause_blocks_the_sim() {
-    // OPERABILITY liveness (Game-UI Guidance §1.5): boot the *real* windowed UI headless and prove
+    // OPERABILITY liveness (`docs/ui.md` §1.5): boot the *real* windowed UI headless and prove
     // the screens actually spawn and the state flow works — the substitute for a pixel screenshot,
     // which this headless env can't produce (no monitor → black drawable). Not a determinism test:
     // it builds its own UI-inclusive app; the core reference app (`build_headless_app`) is untouched.

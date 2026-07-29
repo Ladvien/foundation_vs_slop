@@ -33,7 +33,8 @@
 use serde::{Deserialize, Serialize};
 
 /// What the Council saw. Derived from the same terms the QD fitness computes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExpeditionReport {
     pub squad_size: u32,
     pub survivors: u32,
@@ -144,6 +145,12 @@ pub struct O5Standing {
     pub budget: u32,
     pub last_rating: Option<Rating>,
     pub expeditions: u32,
+    /// The expedition just filed, retained so the **debrief** can show what happened rather than
+    /// only that something did. Without it the summary can state a verdict and a clock reading and
+    /// nothing else — which is the screen the player is looking at when they decide whether the run
+    /// was worth it.
+    #[serde(default)]
+    pub last_report: Option<ExpeditionReport>,
 }
 
 impl O5Standing {
@@ -152,6 +159,15 @@ impl O5Standing {
         self.last_rating = Some(rate(report));
         self.budget = self.budget.saturating_add(allowance(report));
         self.expeditions += 1;
+        self.last_report = Some(*report);
+    }
+
+    /// What the last expedition *earned*, as a change rather than a level.
+    ///
+    /// Recomputed from the retained report rather than stored, so it can never disagree with the
+    /// budget `record` actually granted.
+    pub fn last_allowance(&self) -> Option<u32> {
+        self.last_report.as_ref().map(allowance)
     }
 
     /// Spend, if affordable. Returns whether the purchase happened — one path, no partial buys.

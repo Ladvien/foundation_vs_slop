@@ -164,21 +164,33 @@ fn spawn_panel(
     mut commands: Commands,
     theme: Res<crate::ui::theme::UiTheme>,
     fonts: Res<crate::ui::theme::FontAssets>,
+    regions: Res<crate::ui::layout::HudRegions>,
 ) {
-    commands
-        .spawn((
+    // Parented into the shared region grid rather than absolutely positioned. The Site runs FOUR
+    // panels at once (curriculum, research, requisition, records) and each used to claim a corner
+    // independently, with no owner able to notice a collision or make room for a fifth.
+    let panel = (
             RequisitionPanel,
             Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(theme.space_lg),
-                left: Val::Px(theme.space_lg),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(theme.space_xs),
+                padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
                 ..default()
             },
-            GlobalZIndex(crate::ui::theme::Z_PANEL),
-        ))
-        .with_children(|p| {
+            BackgroundColor(theme.panel),
+            crate::ui::widgets::border_all(theme.panel_border),
+            Pickable::IGNORE,
+    );
+    let Some(mut ec) = crate::ui::layout::panel_in(
+        &mut commands,
+        &regions,
+        crate::ui::layout::Region::BottomLeft,
+        panel,
+    ) else {
+        error!("requisition: no layout frame at spawn — the O5 budget readout is not shown");
+        return;
+    };
+    ec.with_children(|p| {
             p.spawn((
                 RequisitionReadout,
                 crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
@@ -247,7 +259,10 @@ impl Plugin for O5Plugin {
                 ),
             )
             .add_systems(OnEnter(AppState::Debrief), file_expedition_report)
-            .add_systems(OnEnter(AppState::Site), spawn_panel)
+            .add_systems(
+                OnEnter(AppState::Site),
+                spawn_panel.after(crate::ui::layout::spawn_frame),
+            )
             .add_systems(OnExit(AppState::Site), despawn_scoped::<RequisitionPanel>)
             .add_systems(
                 Update,
@@ -297,7 +312,12 @@ mod tests {
     #[test]
     fn the_panel_states_the_budget_the_verdict_and_what_is_affordable() {
         let standing =
-            O5Standing { budget: 35, last_rating: Some(Rating::Displeased), expeditions: 1 };
+            O5Standing {
+                budget: 35,
+                last_rating: Some(Rating::Displeased),
+                expeditions: 1,
+                last_report: None,
+            };
         let out = requisition_text(&standing, &Requisitioned::default());
         assert!(out.contains("O5 BUDGET: 35"), "{out}");
         assert!(out.contains("NOT RELIEVED OF COMMAND"), "the remark, not just the grade: {out}");

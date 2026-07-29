@@ -16,10 +16,13 @@
 //! Windowed-only. `Update` and `OnEnter`/`OnExit` only; reads state, never writes it.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::ScrollArea;
 
+use super::layout::{self, HudRegions, Region};
+use super::rows::{sync_rows, Cell, Emphasis, Row, RowPanel};
 use super::state::{despawn_scoped, AppState};
-use super::theme::{FontAssets, UiTheme, Z_PANEL};
-use super::widgets::text_colored;
+use super::theme::{glyph, FontAssets, UiTheme};
+use super::widgets::border_all;
 use crate::research::{
     rank_by_information_gain, Experiment, HiddenParam, ResearchPosterior, Researched,
 };
@@ -42,7 +45,7 @@ pub struct ResearchHudPlugin;
 
 impl Plugin for ResearchHudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Site), spawn_panel)
+        app.add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
             .add_systems(OnExit(AppState::Site), despawn_scoped::<ResearchHudRoot>)
             .add_systems(
                 Update,
@@ -58,23 +61,33 @@ impl Plugin for ResearchHudPlugin {
     }
 }
 
-fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAssets>) {
-    commands
-        .spawn((
-            ResearchHudRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(theme.space_lg),
-                right: Val::Px(theme.space_lg),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(theme.space_xs),
-                ..default()
-            },
-            GlobalZIndex(Z_PANEL),
-        ))
-        .with_children(|p| {
-            p.spawn((ResearchReadout, text_colored(&theme, &fonts, "", theme.font_body, theme.text)));
-        });
+fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegions>) {
+    let root = (
+        ResearchHudRoot,
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
+            min_width: Val::Px(320.0),
+            max_height: Val::Percent(100.0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        BackgroundColor(theme.panel),
+        border_all(theme.panel_border),
+        ScrollArea,
+    );
+    let Some(mut ec) = layout::panel_in(&mut commands, &regions, Region::TopRight, root) else {
+        error!("research HUD: no layout frame at spawn — the stat sheet is not shown");
+        return;
+    };
+    ec.with_children(|p| {
+        p.spawn((
+            ResearchReadout,
+            RowPanel::default(),
+            Node { flex_direction: FlexDirection::Column, ..default() },
+            Pickable::IGNORE,
+        ));
+    });
 }
 
 /// Player-facing name for a hidden parameter. A `match`, so adding one fails to compile here until
@@ -93,21 +106,35 @@ fn param_name(p: HiddenParam) -> &'static str {
 /// A revealed parameter states the **finding**; an unrevealed one states the **uncertainty**. Those are
 /// different sentences on purpose: "68% LETHAL" invites the player to treat a guess as a fact, whereas
 /// naming it as unresolved keeps the fog honest — which is the point of a fog-of-war stat sheet.
-fn param_line(p: HiddenParam, belief: f32, revealed: bool) -> String {
+fn param_row(p: HiddenParam, belief: f32, revealed: bool) -> Row {
     let name = param_name(p);
     if revealed {
         let verdict = if belief >= 0.5 { "CONFIRMED" } else { "RULED OUT" };
-        format!("[*] {name}: {verdict}")
+        Row::kv(name, verdict)
+            .with_glyph(glyph::DONE)
+            .with_emphasis(Emphasis::Muted)
     } else {
-        format!("[ ] {name}: UNRESOLVED ({:.0}%)", belief * 100.0)
+        // The bar is the belief, so "how unsure am I" is a LENGTH rather than a number the player has
+        // to parse — and it keeps the fog visible at a glance next to the resolved rows.
+        Row::kv(name, format!("UNRESOLVED ({:.0}%)", belief * 100.0))
+            .with_glyph(glyph::LOCKED)
+            .push(Cell::Bar { frac: belief })
     }
 }
 
 /// One offered experiment, with the reason it is offered.
-fn experiment_line(rank: usize, name: &str, bits: f32) -> String {
-    // Bits, not a percentage: the quantity really is information, and rounding it to a percentage of
-    // nothing-in-particular would be a number that looks meaningful and is not.
-    format!("{}. {name}  (+{bits:.2} bits)", rank + 1)
+///
+/// Bits, not a percentage: the quantity really is information, and rounding it to a percentage of
+/// nothing-in-particular would be a number that looks meaningful and is not. It is rendered as a
+/// [`Cell::Delta`] — an explicitly signed CHANGE — because that is the quantity the player responds
+/// to. Andersen, Miller, Kiverstein & Deterding 2022 (DOI 10.3389/fpsyg.2022.924953) argue players
+/// are "sensitive not just to absolute error, but also to changes in the rate of error reduction",
+/// so a panel that shows only the standing posterior withholds the part that carries the affect.
+fn experiment_row(rank: usize, name: &str, bits: f32, top: bool) -> Row {
+    Row::kv(format!("{}. {name}", rank + 1), "")
+        .with_glyph(if top { glyph::CURRENT } else { "" })
+        .with_emphasis(if top { Emphasis::Alert } else { Emphasis::Normal })
+        .push(Cell::Delta(bits))
 }
 
 /// Player-facing name of a specimen's species. A test pins that every one is named, so a new
@@ -131,45 +158,52 @@ fn readout(
     experiments: &[Experiment],
     finished: bool,
     unmet: &[crate::research::Capability],
-) -> String {
-    let mut out = format!("RESEARCH — {}\n", subject_name(subject));
+) -> Vec<Row> {
+    let mut out = vec![Row::header(format!("RESEARCH — {}", subject_name(subject)))];
     for p in HiddenParam::ALL {
-        out.push_str(&param_line(p, posterior.belief(p), posterior.is_revealed(p)));
-        out.push('\n');
+        out.push(param_row(p, posterior.belief(p), posterior.is_revealed(p)));
     }
     // The prerequisite gate, stated as an instruction rather than a refusal — the same rule FVS-L-1
     // set for containment clauses ("RAISE OBSERVATION", not "unmet"). A bare "unavailable" leaves the
     // player with nothing to do about it.
-    if let Some(first) = unmet.first() {
-        out.push_str("\nAWAITING PRIOR RESEARCH:\n");
+    if !unmet.is_empty() {
+        out.push(Row::header("AWAITING PRIOR RESEARCH"));
         for c in unmet {
-            out.push_str(&format!("  - {}\n", c.label()));
+            out.push(Row::note(c.label()).with_indent(1).with_glyph(glyph::LOCKED));
         }
-        let _ = first;
         return out;
     }
     if finished {
         // The payout is the point of the arc, so say so rather than leaving an empty list that reads
         // like a bug.
-        out.push_str("\nRESEARCH COMPLETE — CAPABILITY DERIVED");
+        out.push(Row::kv("RESEARCH COMPLETE", "CAPABILITY DERIVED").with_glyph(glyph::DONE));
         return out;
     }
-    out.push_str(&format!("\nREMAINING UNCERTAINTY: {:.2} bits\n", posterior.total_entropy()));
-    out.push_str("[R] RUN THE TOP TEST\n");
+
+    // The standing level of uncertainty…
+    let entropy = posterior.total_entropy();
+    out.push(Row::kv("REMAINING UNCERTAINTY", format!("{entropy:.2} bits")));
+
     let ranked = rank_by_information_gain(experiments, posterior);
     let mut offered = 0;
+    let mut rows = Vec::new();
     for &i in &ranked {
         let bits = experiments[i].expected_information_gain(posterior);
         if bits <= 0.0 || offered >= OFFERED {
             break;
         }
-        out.push_str(&experiment_line(offered, &experiments[i].name, bits));
-        out.push('\n');
+        rows.push(experiment_row(offered, &experiments[i].name, bits, offered == 0));
         offered += 1;
     }
     if offered == 0 {
-        out.push_str("NO INFORMATIVE TEST REMAINS");
+        out.push(Row::note("NO INFORMATIVE TEST REMAINS"));
+        return out;
     }
+    // …and, right beside it, how far the next action would MOVE it. That pairing is the point: the
+    // level alone tells the player where they are, the delta tells them whether the next test is
+    // worth running, which is the decision this panel exists to support.
+    out.push(Row::header("[R] RUN THE TOP TEST"));
+    out.extend(rows);
     out
 }
 
@@ -188,17 +222,21 @@ fn request_experiment(
 }
 
 fn update_readout(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    fonts: Res<FontAssets>,
     specimens: Query<(&crate::containment::Specimen, &ResearchPosterior, Option<&Researched>)>,
     studied: Res<crate::research::StudySubject>,
     curriculum: Res<crate::research::Curriculum>,
     tree: Res<crate::research::TechTree>,
-    mut text_q: Query<&mut Text, With<ResearchReadout>>,
+    mut readout_q: Query<(Entity, &mut RowPanel), With<ResearchReadout>>,
 ) {
     // The experiment battery is read from the authored curriculum, keyed on what the specimen actually
     // IS. It used to come from an `AuthoredExperiments` resource that nothing ever inserted, so this
     // panel rendered an empty node for a whole session while its unit tests stayed green — the reason
     // FVS-E-5 exists. One source of truth now: the `research:` config slice.
-    let line = match studied.0.and_then(|e| specimens.get(e).ok()) {
+    let Ok((entity, mut panel)) = readout_q.single_mut() else { return };
+    let rows = match studied.0.and_then(|e| specimens.get(e).ok()) {
         Some((specimen, posterior, done)) => {
             let unmet = curriculum.unmet_prerequisites(specimen.subject, &tree);
             readout(
@@ -209,13 +247,9 @@ fn update_readout(
                 &unmet,
             )
         }
-        None => "RESEARCH — NO SPECIMENS HELD".into(),
+        None => vec![Row::header("RESEARCH — NO SPECIMENS HELD")],
     };
-    for mut t in &mut text_q {
-        if t.0 != line {
-            t.0 = line.clone();
-        }
-    }
+    sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows);
 }
 
 #[cfg(test)]
@@ -229,9 +263,29 @@ mod tests {
             .collect()
     }
 
+    /// Flatten rows to readable text, for assertions about *content*. Structure (emphasis, glyph,
+    /// which cell carries the delta) is asserted directly on the rows.
+    fn flat(rows: &[Row]) -> String {
+        rows.iter()
+            .map(|r| {
+                let cells: Vec<String> = r
+                    .cells
+                    .iter()
+                    .map(|c| match c {
+                        Cell::Label(s) | Cell::Value(s) => s.clone(),
+                        Cell::Delta(d) => super::super::rows::format_delta(*d),
+                        Cell::Bar { frac } => format!("[bar {frac:.2}]"),
+                    })
+                    .collect();
+                format!("{} {}", r.glyph, cells.join("  "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The panel for a specimen with no unmet prerequisites — the case every wording test below is
     /// about. The gated case has its own test rather than an argument threaded through all of them.
-    fn ungated(p: &ResearchPosterior, exps: &[Experiment], finished: bool) -> String {
+    fn ungated(p: &ResearchPosterior, exps: &[Experiment], finished: bool) -> Vec<Row> {
         readout(crate::knowledge::Subject::ComfortBlob, p, exps, finished, &[])
     }
 
@@ -239,19 +293,23 @@ mod tests {
     fn a_gated_specimen_names_the_research_it_is_waiting_on() {
         // FVS-L-1's rule applied to the curriculum: say WHY, and say it as something the player can act
         // on. "Unavailable" with no name is a dead end.
-        let out = readout(
+        let rows = readout(
             crate::knowledge::Subject::Parasite,
             &ResearchPosterior::unknown(),
             &battery(),
             false,
             &[crate::research::Capability::MoraleField],
         );
+        let out = flat(&rows);
         assert!(out.contains("AWAITING PRIOR RESEARCH"), "{out}");
         assert!(
             out.contains(crate::research::Capability::MoraleField.label()),
             "the gate must NAME the prerequisite: {out}"
         );
-        assert!(!out.contains("bits)"), "a gated specimen must offer no tests: {out}");
+        assert!(
+            !rows.iter().any(|r| r.cells.iter().any(|c| matches!(c, Cell::Delta(_)))),
+            "a gated specimen must offer no tests: {out}"
+        );
     }
 
     #[test]
@@ -269,16 +327,22 @@ mod tests {
     fn an_unresolved_parameter_reads_as_uncertain_not_as_a_fact() {
         // "68% LETHAL" invites the player to act on a guess as though it were a finding. Naming it
         // UNRESOLVED keeps the fog honest, which is the point of a fog-of-war stat sheet.
-        let line = param_line(HiddenParam::Lethality, 0.68, false);
-        assert!(line.contains("UNRESOLVED"), "{line}");
-        assert!(line.starts_with("[ ]"), "{line}");
+        let r = param_row(HiddenParam::Lethality, 0.68, false);
+        assert!(flat(&[r.clone()]).contains("UNRESOLVED"));
+        assert_eq!(r.glyph, glyph::LOCKED, "an open question is marked open");
+        assert!(
+            r.cells.iter().any(|c| matches!(c, Cell::Bar { .. })),
+            "and its uncertainty is shown as a length, not only a number"
+        );
     }
 
     #[test]
     fn a_resolved_parameter_states_a_verdict_in_both_directions() {
         // Certainty of absence is a finding too — a specimen proven harmless must not read as blank.
-        assert!(param_line(HiddenParam::Contagion, 0.97, true).contains("CONFIRMED"));
-        assert!(param_line(HiddenParam::Contagion, 0.02, true).contains("RULED OUT"));
+        assert!(flat(&[param_row(HiddenParam::Contagion, 0.97, true)]).contains("CONFIRMED"));
+        assert!(flat(&[param_row(HiddenParam::Contagion, 0.02, true)]).contains("RULED OUT"));
+        // A settled question recedes; it is no longer where the player should look.
+        assert_eq!(param_row(HiddenParam::Contagion, 0.97, true).emphasis, Emphasis::Muted);
     }
 
     #[test]
@@ -287,13 +351,45 @@ mod tests {
         for _ in 0..4 {
             p.observe(HiddenParam::Lethality, true, 0.85);
         }
-        let out = ungated(&p, &battery(), false);
-        let first = out.lines().find(|l| l.starts_with("1.")).expect("an offer");
+        let rows = ungated(&p, &battery(), false);
+        let first = rows
+            .iter()
+            .find(|r| r.label().is_some_and(|l| l.starts_with("1.")))
+            .expect("an offer");
         assert!(
-            !first.contains("Lethality"),
-            "the nearly-settled question must not be offered first: {first}"
+            !first.label().unwrap_or_default().contains("Lethality"),
+            "the nearly-settled question must not be offered first: {first:?}"
         );
-        assert!(first.contains("bits"), "the offer must state WHY it is offered: {first}");
+        assert!(
+            first.cells.iter().any(|c| matches!(c, Cell::Delta(_))),
+            "the offer must state WHY it is offered — the expected gain: {first:?}"
+        );
+    }
+
+    #[test]
+    fn the_top_offer_is_the_loud_one() {
+        // `[R]` runs the top test, so the row `[R]` would act on has to be the row the eye lands on.
+        let rows = ungated(&ResearchPosterior::unknown(), &battery(), false);
+        let offers: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.cells.iter().any(|c| matches!(c, Cell::Delta(_))))
+            .collect();
+        assert!(!offers.is_empty(), "there should be offers");
+        assert_eq!(offers[0].emphasis, Emphasis::Alert, "the top offer is emphasised");
+        for other in &offers[1..] {
+            assert_ne!(other.emphasis, Emphasis::Alert, "only the top offer is: {other:?}");
+        }
+    }
+
+    #[test]
+    fn the_expected_gain_is_shown_as_a_signed_change_not_a_bare_level() {
+        // Andersen et al. 2022: affect tracks the RATE of error reduction. A panel showing only the
+        // standing posterior withholds the quantity the player actually responds to, so the offer
+        // carries a signed delta and the standing uncertainty is a separate row.
+        let rows = ungated(&ResearchPosterior::unknown(), &battery(), false);
+        let out = flat(&rows);
+        assert!(out.contains("REMAINING UNCERTAINTY"), "the level is still shown: {out}");
+        assert!(out.contains('+'), "and the change is signed: {out}");
     }
 
     #[test]
@@ -305,31 +401,24 @@ mod tests {
                 reliability: 0.8,
             })
             .collect();
-        let out = ungated(&ResearchPosterior::unknown(), &many, false);
-        let offers = out.lines().filter(|l| l.contains("bits)")).count();
-        assert_eq!(offers, OFFERED, "an unbounded list buries the ranking's whole point");
-    }
-
-    #[test]
-    fn a_finished_specimen_reads_as_finished_rather_than_as_an_empty_list() {
-        let mut p = ResearchPosterior::unknown();
-        for q in HiddenParam::ALL {
-            p.reveal(q);
-        }
-        let out = ungated(&p, &battery(), true);
-        assert!(out.contains("RESEARCH COMPLETE"), "{out}");
-        assert!(!out.contains("bits)"), "a finished arc must offer nothing: {out}");
+        let rows = ungated(&ResearchPosterior::unknown(), &many, false);
+        let offers = rows
+            .iter()
+            .filter(|r| r.cells.iter().any(|c| matches!(c, Cell::Delta(_))))
+            .count();
+        assert!(offers <= OFFERED, "offered {offers}, cap is {OFFERED}");
     }
 
     #[test]
     fn a_specimen_with_no_informative_test_left_says_so() {
-        // The state between "there is work to do" and "it is finished": every remaining question is
-        // resolved but the arc has not been marked complete. An empty panel would read as a bug.
-        let mut p = ResearchPosterior::unknown();
-        for q in HiddenParam::ALL {
-            p.reveal(q);
-        }
-        let out = ungated(&p, &battery(), false);
+        // An empty list reads as a bug. Say the arc is done rather than showing nothing.
+        let out = flat(&ungated(&ResearchPosterior::unknown(), &[], false));
         assert!(out.contains("NO INFORMATIVE TEST REMAINS"), "{out}");
+    }
+
+    #[test]
+    fn a_finished_specimen_reads_as_finished_rather_than_as_an_empty_list() {
+        let out = flat(&ungated(&ResearchPosterior::unknown(), &battery(), true));
+        assert!(out.contains("RESEARCH COMPLETE"), "{out}");
     }
 }
