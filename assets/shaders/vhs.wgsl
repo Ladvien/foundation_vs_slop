@@ -22,6 +22,14 @@
 
 const PI: f32 = 3.14159265;
 
+/// Grain amplitude retained at zero luminance, as a fraction of the full-brightness amplitude.
+///
+/// Not 0.0: a pure-black area with *no* grain reads as clean digital, which is the opposite of the
+/// tape look. Not 1.0 either — that is flat additive grain, the thing that made the empty void the
+/// noisiest region on screen (see the grain block below). This keeps in-scene shadow alive while
+/// taking the crawl off the out-of-world background.
+const GRAIN_FLOOR: f32 = 0.15;
+
 // Must byte-match `VhsSettings` in src/vhs.rs (8 × f32 = 32 bytes, 16-byte aligned).
 // Two drive channels: `base` is the always-on texture floor; `spike` is the periodic glitch
 // envelope (heavy distortion). See the fragment for how they gate each sub-effect.
@@ -79,7 +87,15 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     uv.x = uv.x + sw * (vnoise(vec2<f32>(uv.y * 90.0, t * 9.0)) - 0.5) * 0.25 * settings.wave;
 
     // --- chromatic aberration / RGB channel split : a faint constant fringe, wider during a spike ---
-    let off = vec2<f32>(0.006 * sin(t) + 0.004, 0.0) * settings.chroma * mix(0.15, 1.0, dist_amt);
+    //
+    // The at-rest strength follows `base`, it is NOT a hardcoded floor. It used to read
+    // `mix(0.15, 1.0, dist_amt)`, which pinned the resting fringe at 15% however low `base_level`
+    // was set — so the config knob silently did not control the most visible always-on artifact.
+    // Only `base_level: 0.0` removed it, and then only via the early-out above. Measured on 2026-07-29
+    // at 3440 px wide, that resting fringe was ~5 px of RGB split oscillating on `sin(t)`.
+    // `tex_amt` is `base` at rest and ramps to 1.0 through a spike, which is exactly the curve the
+    // other always-on textures (scanlines, grain) already use.
+    let off = vec2<f32>(0.006 * sin(t) + 0.004, 0.0) * settings.chroma * max(tex_amt, dist_amt);
     var col = vec3<f32>(tex(uv + off).r, tex(uv).g, tex(uv - off).b);
 
     // --- horizontal chroma-bloom smear: a few one-sided taps, per-channel staggered (spike-gated) ---
@@ -102,8 +118,24 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     col = col * (1.0 - settings.scanline * 0.15 * (1.0 - line));
 
     // --- grain: per-pixel jitter that also crawls with time (always-on texture) ---
+    //
+    // **Weighted by local luminance, not added flat.** Flat additive grain has a fixed amplitude
+    // regardless of what is underneath, so it is *proportionally* loudest exactly where the image is
+    // darkest — and the darkest thing on screen is the empty void outside the dungeon, which is not
+    // part of the scene at all. Measured on 2026-07-29 (mean absolute frame-to-frame luma change over
+    // a 7-frame burst): the empty background moved **4.50/255 per frame** against the lit dungeon's
+    // 2.70, i.e. the void was the noisiest region on screen. That is what a player boxed at max
+    // zoom-out and reported as "weird flickering and other rendering artifacts" — small bright props
+    // against a crawling black field.
+    //
+    // Real tape noise modulates the signal rather than sitting on top of it, so scaling by luminance
+    // is both the physically-motivated form and the one that fixes the complaint: lit surfaces keep
+    // the texture that sells the found-footage look, the void goes quiet. `GRAIN_FLOOR` keeps a
+    // little life in genuine in-scene shadow so black areas do not read as dead-clean digital.
+    let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let grain_weight = GRAIN_FLOOR + (1.0 - GRAIN_FLOOR) * clamp(luma, 0.0, 1.0);
     let grain = (hash21(uv * dims + vec2<f32>(t * 137.0, t * 91.0)) - 0.5) * 0.12 * settings.noise_amt;
-    col = col + grain;
+    col = col + grain * grain_weight;
 
     // --- AC beat: a subtle vertical brightness pulse ---
     col = col * (1.0 + clamp(vnoise(vec2<f32>(0.0, uv.y + t * 0.2)) * 0.4 - 0.15, 0.0, 0.1));
