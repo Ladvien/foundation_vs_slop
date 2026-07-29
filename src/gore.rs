@@ -772,7 +772,12 @@ fn drain_gore(
     for (index_in_tick, ev) in queue.0.drain(..).enumerate() {
         // Derived from THIS death (see `scatter_seed`), never from a running counter.
         let seed = scatter_seed(&ev, index_in_tick as u32);
-        let fseed = seed as f32 * 0.618;
+        // MASKED to the low bits before the float cast. `seed` used to be a small `Local<u32>`
+        // counter; `scatter_seed` made it a full-range FNV-1a hash, and this line was kept verbatim.
+        // At full range the product overruns f32's mantissa, so the shader's `fract(p * 0.1031)`
+        // returned exactly 0 for every pool and spray and the per-pool variation silently vanished.
+        // The low bits of an FNV-1a hash are as well-mixed as the high ones, so this costs nothing.
+        let fseed = (seed & 0x3FF) as f32 * 0.618;
 
         // Cosmetic viscera burst (the SCP-150 chestburster eruption): a few non-economy flesh chunks fly out
         // and NOTHING else — no meat/fragments, no blood spray/pool/shake here (the eruption sprays blood via

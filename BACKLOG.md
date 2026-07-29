@@ -1162,33 +1162,33 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   now **literally appears twice** in `tests/replay.rs`. `train apply --repin-goldens` therefore fails at
   the re-pin step every time. Two correct answers land in one file and the tool calls it ambiguous.
   · *Deps:* J-3 · *Touches:* `src/bake.rs`
-- **FVS-N-14 — The flicker budget is a `Local` that never resets, so run 2 gets no failing tubes (FOUND 2026-07-28, review)** · S
+- **FVS-N-14 — The flicker budget is a `Local` that never resets, so run 2 gets no failing tubes (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S
   `light.rs`'s per-room failing-tube cap is a `Local<HashMap<FlickerRoom, usize>>` that is never
   cleared. Fixtures are `run_scoped()` and re-spawned per expedition, and `RegionId` is a per-dungeon
   `u32` restarting at 0 — so budget spent in run 1 permanently bars the *different* rooms that reuse
   those ids in run 2. · *Deps:* — · *Touches:* `src/light.rs`
-- **FVS-N-15 — The gore shader seed lost its randomization when the seed source changed (FOUND 2026-07-28, review)** · S
+- **FVS-N-15 — The gore shader seed lost its randomization when the seed source changed (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S
   `let fseed = *seed as f32 * 0.618` was kept verbatim while `seed` changed from a small `Local<u32>`
   counter to a full-range FNV-1a hash (`scatter_seed`). At that magnitude `hash21`'s `fract(p * 0.1031)`
   loses all mantissa precision and returns exactly 0, so **every blood pool and spray gets the identical
   hash output** and the per-pool variation the shader exists to provide is gone. · *Deps:* — · *Touches:* `src/gore.rs`
-- **FVS-O-6 — `Knowledge::hear` reports success when `learn` refused the belief (FOUND 2026-07-28, review)** · S
+- **FVS-O-6 — `Knowledge::hear` reports success when `learn` refused the belief (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S
   `hear` returns `true` after `learn` silently declines a contradicting `Told`-vs-`Told` claim. So
   `dialogue::bark_belief_tellings` voices a speech balloon and `RecentTellings` records a transfer that
   **never happened** — the player watches a rumour visibly cross the squad while FVS-L-5's roster shows
   the listener unchanged. The two halves of FVS-O-3 disagree about whether anything occurred. · *Deps:* O-3 · *Touches:* `src/knowledge/gossip.rs`
-- **FVS-O-7 — Research briefing re-learns every frame, saturating a `Read` belief to certainty (FOUND 2026-07-28, review)** · S
+- **FVS-O-7 — Research briefing re-learns every frame, saturating a `Read` belief to certainty (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S
   `research::unlock::brief_the_squad_on_completed_research` is on bare `Update` with no run condition and
   re-calls `learn` every frame. `learn` compounds confidence, so a belief that should sit at
   `Provenance::Read`'s **0.35** climbs to ~**0.99** in well under a second — making a write-up
   indistinguishable from firsthand experience and defeating the provenance ordering FVS-O-4's whole
   "only firsthand findings are filed" rule depends on. · *Deps:* O-2 · *Touches:* `src/research/unlock.rs`
-- **FVS-N-16 — Bear and manca smell ids collide (FOUND 2026-07-28, review)** · S
+- **FVS-N-16 — Bear and manca smell ids collide (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S
   SCP-1048 mints its `CyanideSmell` under `smell_seed::MANCA` with an **independent counter starting at
   the same values**, so a bear and a manca in one run receive the same id — the id
   `health::smell_tests::same_raw_seed_yields_distinct_ids_across_species` exists to keep unique across
   species by construction. · *Deps:* — · *Touches:* `src/scp1048/mod.rs`
-- **FVS-E-7 — The study-subject tiebreak never reads its own tiebreak key (FOUND 2026-07-28, review)** · S · *determinism: windowed pick*
+- **FVS-E-7 — The study-subject tiebreak never reads its own tiebreak key (FOUND 2026-07-28, review)** · ✅ **FIXED 2026-07-28** · S · *determinism: windowed pick*
   `research::lab::keep_a_study_subject`'s comparison never reads `key.3`, so the `Entity` tiebreak its
   comment claims makes the order **total** is not applied. Two specimens tying on every earlier
   component are ordered by query iteration order, which is not stable across `App` instances. Exactly

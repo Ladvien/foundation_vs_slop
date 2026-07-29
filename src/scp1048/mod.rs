@@ -535,7 +535,7 @@ pub fn spawn_scp1048_at(
         ec.insert((
             crate::health::Biological,
             crate::health::CyanideSmell::from_seed_in(
-                crate::health::smell_seed::MANCA,
+                crate::health::smell_seed::BEAR,
                 seed as u64,
             ),
         ));

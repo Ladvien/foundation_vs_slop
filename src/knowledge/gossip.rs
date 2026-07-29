@@ -106,7 +106,13 @@ impl Knowledge {
         // what you saw does not change your mind, and that is the asymmetry FVS-O-5 will attack.
         if let Some(opposite) = claim.contradicts() {
             if let Some(held) = self.of(subject, opposite) {
-                if held.provenance.base_confidence() > Provenance::Told.base_confidence() {
+                // `>=`, not `>` — this must mirror `learn`, which refuses a contradicting claim whose
+                // held provenance is `>=` the incoming one. With `>` an EQUAL-provenance contradiction
+                // (Told vs Told) slipped past here, was then silently refused by `learn`, and `hear`
+                // still returned `true` — so `dialogue::bark_belief_tellings` voiced a balloon and
+                // `RecentTellings` recorded a transfer that never happened. The player watched a rumour
+                // cross the squad while FVS-L-5's roster showed the listener unchanged.
+                if held.provenance.base_confidence() >= Provenance::Told.base_confidence() {
                     return false;
                 }
             }
@@ -234,6 +240,32 @@ mod tests {
         }
         assert!(hops >= 2, "a rumour should survive at least a couple of hops, got {hops}");
         assert!(hops <= 8, "a rumour should not cross an arbitrarily long chain, got {hops}");
+    }
+
+    #[test]
+    fn a_telling_that_changed_nothing_is_not_reported_as_a_telling() {
+        // FVS-O-6. `hear` guarded contradicting claims with `>` Told while `learn` refuses at `>=`
+        // Told, so an EQUAL-provenance contradiction slipped past the guard, was silently refused by
+        // `learn`, and `hear` still returned `true`. The windowed layer believes that return value:
+        // `dialogue::bark_belief_tellings` voices a balloon and `RecentTellings` records a transfer.
+        // The player watched a rumour cross the squad while the roster showed the listener unchanged.
+        let mut listener = Knowledge::default();
+        listener.learn(Subject::Parasite, Claim::Lethal, Provenance::Told, 1);
+        let before = listener.of(Subject::Parasite, Claim::Lethal);
+
+        // A teller passing on the OPPOSITE claim, on evidence no better than the listener's.
+        let said = listener.hear(Subject::Parasite, Claim::Harmless, 0.85, 2);
+
+        assert!(!said, "a telling that changed no belief must not report success");
+        assert_eq!(
+            listener.of(Subject::Parasite, Claim::Lethal),
+            before,
+            "and the held belief must be untouched"
+        );
+        assert!(
+            listener.of(Subject::Parasite, Claim::Harmless).is_none(),
+            "the refused claim must not have been recorded either"
+        );
     }
 
     #[test]

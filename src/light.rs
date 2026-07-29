@@ -991,7 +991,21 @@ fn attach_fixture_lights(
     >,
     // Failing-tube slots already spent per room, carried BETWEEN runs of this system — see the use site.
     mut room_slots: Local<HashMap<FlickerRoom, usize>>,
+    // The expedition those slots belong to. A `Local` survives the whole PROCESS, but fixtures are
+    // `run_scoped()` and re-spawned per expedition while `RegionId` is a per-dungeon `u32` that restarts
+    // at 0 — so without this, budget spent on run 1's room 3 permanently barred run 2's *different*
+    // room 3, and later expeditions got no failing tubes at all.
+    mut slots_run: Local<Option<u64>>,
+    run_seed: Option<Res<crate::session::RunSeed>>,
 ) {
+    // Reset on a new Branch universe. Keyed on the seed rather than on a state transition because this
+    // system has no `OnEnter` to hang off — and the seed is exactly what makes one expedition a
+    // different world from the last.
+    let this_run = run_seed.map(|s| s.0);
+    if *slots_run != this_run {
+        room_slots.clear();
+        *slots_run = this_run;
+    }
     let c = &config.lighting;
     let color = Color::srgb(c.fixture_color[0], c.fixture_color[1], c.fixture_color[2]);
 

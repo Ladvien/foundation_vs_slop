@@ -233,8 +233,15 @@ pub fn keep_a_study_subject(
         // same-tick double capture, which is the same key `Specimen` documents for cell assignment.
         let better = match best {
             None => true,
-            Some((ba, be, bt, _)) => {
-                (key.0, key.1) > (ba, be) || (key.0 == ba && key.1 == be && key.2 < bt)
+            Some((ba, be, bt, bi)) => {
+                // The full key, including `key.3` (the `Entity`). It used to stop at `.2`, so two
+                // specimens tying on availability, entropy AND captured_tick fell through to query
+                // iteration order — which is not stable across `App` instances, and is exactly what the
+                // comment above claims this key rules out. The fourth site in this repo whose comment
+                // asserted a total order it did not have.
+                (key.0, key.1) > (ba, be)
+                    || (key.0 == ba && key.1 == be && key.2 < bt)
+                    || (key.0 == ba && key.1 == be && key.2 == bt && key.3 < bi)
             }
         };
         if better {

@@ -181,7 +181,16 @@ pub fn brief_the_squad_on_completed_research(
     curriculum: Option<Res<super::curriculum::Curriculum>>,
     clock: Option<Res<crate::session::RunClock>>,
     mut table: ResMut<crate::knowledge::SquadKnowledge>,
-    finished: Query<&crate::containment::Specimen, With<Researched>>,
+    // `Added<Researched>`, NOT `With<Researched>`. `Researched` is inserted once and never removed, so
+    // this fires exactly once per completed specimen.
+    //
+    // With `With<…>` the system re-briefed every frame, and `learn`'s equal-provenance reinforcement —
+    // `c + (1 - c) * 0.4`, capped at 0.99 — compounds: a `Read` belief starting at 0.35 reaches ~0.99
+    // in about nine frames, under a fifth of a second. The old comment below argued the repeat was
+    // "safe by the model's own rule"; the rule bounds the reinforcement's VALUE, not its RATE, so a
+    // write-up became indistinguishable from firsthand experience and the provenance ordering that
+    // FVS-O-4's "only firsthand findings are filed" depends on stopped meaning anything.
+    finished: Query<&crate::containment::Specimen, Added<Researched>>,
 ) {
     let Some(curriculum) = curriculum else { return };
     let tick = clock.map(|c| c.ticks).unwrap_or(0);
@@ -192,9 +201,8 @@ pub fn brief_the_squad_on_completed_research(
             continue;
         }
         for member in table.members.iter_mut() {
-            // `learn` is idempotent at equal provenance apart from a bounded reinforcement, and a
-            // stronger firsthand belief already held is never overwritten — so re-running this every
-            // frame is safe by the model's own rule rather than by a guard here.
+            // A stronger firsthand belief already held is never overwritten — that part of the model's
+            // rule does hold. What does NOT hold is running this repeatedly; see the query above.
             member.learn(
                 specimen.subject,
                 crate::knowledge::Claim::Containable,

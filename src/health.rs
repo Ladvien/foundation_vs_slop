@@ -143,6 +143,11 @@ pub mod smell_seed {
     pub const CRAB: u64 = 2 << 40;
     pub const MANCA: u64 = 3 << 40;
     pub const BOSS: u64 = 4 << 40;
+    /// SCP-1048 and its copies. Added 2026-07-28: the bears were minting smells under [`MANCA`] with
+    /// their own independent counter starting at the same values, so a bear and a manca in one run
+    /// collided on the id `smell_tests::same_raw_seed_yields_distinct_ids_across_species` exists to
+    /// keep unique across species *by construction*.
+    pub const BEAR: u64 = 5 << 40;
 }
 
 /// The splitmix64 finalizer — a bijection on `u64`, so distinct inputs give distinct outputs, which is
