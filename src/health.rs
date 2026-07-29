@@ -435,6 +435,67 @@ mod bar_scale_tests {
     }
 
     #[test]
+    fn the_health_bar_fill_matches_the_theme_and_stays_desaturated() {
+        // A shader cannot read a Rust resource, so `assets/shaders/health_bar.wgsl` carries the fill
+        // colour as a literal and this is the only thing that can notice it drifting from
+        // `UiTheme::health_fill`.
+        //
+        // It is worth a test because the drift already happened once, invisibly: the 2026-07-29 palette
+        // pass desaturated the UI and left the shader's `vec3(0.30, 0.85, 0.38)` behind, which made the
+        // worldspace health bars the single most saturated thing on screen — chroma 0.55, *higher* than
+        // the phosphor accent that pass had just removed. Every unit test passed. A live screen capture
+        // is what found it, and this test is so the next one is found earlier.
+        let src = std::fs::read_to_string("assets/shaders/health_bar.wgsl")
+            .expect("the health-bar shader must be readable from the crate root");
+        let marker = "let fill = vec3<f32>(";
+        let at = src.find(marker).expect("the shader must declare its fill colour") + marker.len();
+        let rest = &src[at..];
+        let end = rest.find(')').expect("unterminated vec3 in the shader");
+        let parts: Vec<f32> = rest[..end]
+            .split(',')
+            .map(|t| t.trim().parse::<f32>().expect("shader fill components must be literals"))
+            .collect();
+        assert_eq!(parts.len(), 3, "the fill must be a vec3");
+
+        let theme = crate::ui::theme::UiTheme::default();
+        let want = theme.health_fill.to_srgba();
+        for (got, want) in parts.iter().zip([want.red, want.green, want.blue]) {
+            assert!(
+                (got - want).abs() < 0.02,
+                "the shader fill {parts:?} has drifted from UiTheme::health_fill {want:?}"
+            );
+        }
+
+        // And independently of the theme: it must obey the same chroma ceiling every other
+        // reality-describing colour does. A worldspace readout is not exempt from `docs/ui.md` §1.3
+        // just because it is drawn by a shader instead of by `bevy_ui`.
+        let (hi, lo) = parts.iter().fold((f32::MIN, f32::MAX), |(h, l), v| (h.max(*v), l.min(*v)));
+        assert!(
+            hi - lo <= crate::ui::theme::MAX_UI_CHROMA,
+            "the health bar fill has chroma {:.3}; reality is desaturated (max {})",
+            hi - lo,
+            crate::ui::theme::MAX_UI_CHROMA
+        );
+    }
+
+    #[test]
+    fn the_selection_ring_is_bright_rather_than_green() {
+        // `crate::palette::SELECTION_RING` marks the operatives an order will move. It was
+        // `srgb(0.10, 1.00, 0.20)` — chroma 0.90, the most saturated colour in the game, and
+        // specifically the GOC's Type Green, i.e. the *anomaly* colour painted onto the player's own
+        // squad. Selection is a status, and status rides luminance (`docs/ui.md` §1.3).
+        let c = crate::palette::SELECTION_RING.to_srgba();
+        let (hi, lo) = (c.red.max(c.green).max(c.blue), c.red.min(c.green).min(c.blue));
+        assert!(
+            hi - lo <= crate::ui::theme::MAX_UI_CHROMA,
+            "the selection ring has chroma {:.3} — it must read by brightness, not by hue",
+            hi - lo
+        );
+        // Still the brightest thing on the floor, which is what actually made it visible.
+        assert!(lo > 0.8, "the ring must stay bright against a near-black floor: {c:?}");
+    }
+
+    #[test]
     fn a_missing_or_nonsense_viewport_draws_at_the_authored_size() {
         // `HealthPlugin` runs in the headless harness, where `CameraView` does not exist. A zero or
         // NaN must not collapse every bar in the game to nothing.

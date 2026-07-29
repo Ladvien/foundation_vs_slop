@@ -72,6 +72,8 @@ pub mod geom;
 pub mod gore;
 pub mod hair;
 pub mod health;
+/// The keyboard registry — every binding in one place, with a collision test. See `src/input/`.
+pub mod input;
 pub mod juice;
 pub mod impact_fx;
 pub mod laser;
@@ -96,6 +98,8 @@ pub mod scp999;
 /// plugins for the determinism gate; see the module docs.
 pub mod scp1048;
 pub mod selection;
+/// The Engineer's sensor drone — the only thing that turns the minimap on. See `src/sensor.rs`.
+pub mod sensor;
 pub mod knowledge;
 pub mod persist;
 pub mod research;
@@ -262,7 +266,11 @@ pub fn run() {
                 mold::MoldPlugin,
             ),
             world::WorldPlugin,
-            camera::CameraPlugin,
+            // Owns the single writer of `input::KeyboardOwned` — the guard that stops a keystroke
+            // meant for a focused menu button from also firing a gameplay action. Windowed-only:
+            // the harness has no menus, so the flag stays false there and every action reads
+            // ungated. Grouped with the camera because the camera is its first consumer.
+            (input::InputPlugin, camera::CameraPlugin),
             // `PoseBlendPlugin` runs the one apply pass every skinned model's clip weights go through
             // (squad, crab, manca), so it is registered once here rather than by each creature plugin.
             // Cosmetic, but grouped with the squad because that is where the drivers order against it.
@@ -388,6 +396,10 @@ pub fn run() {
                 ui::briefing::BriefingPlugin,
                 dialogue::DialoguePlugin,
                 psi_vision::PsiVisionPlugin,
+                // The extraction point's column of light, and the sensor drone that turns the
+                // minimap on. Windowed-only for the same reason `psi_vision` is: both are
+                // presentation, and the harness must not spawn either.
+                (containment::extraction::ExtractionBeaconPlugin, sensor::SensorPlugin),
                 ai_overlay::AiOverlayPlugin,
             ),
         ));

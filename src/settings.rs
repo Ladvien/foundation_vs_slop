@@ -7,9 +7,9 @@
 //! the headless replay harness performs no filesystem IO and its settings resources stay at
 //! defaults.
 //!
-//! Scope note: this currently carries **HUD** + **accessibility** preferences. Audio volumes and
-//! keybindings are added when their gated phases land (they depend on sibling-worktree rewrites);
-//! every field is `#[serde(default)]` so growing the schema never breaks an existing save file.
+//! Scope note: this carries **HUD**, **accessibility** and **keybinding** preferences. Audio volumes
+//! are added when that gated phase lands; every field is `#[serde(default)]` so growing the schema
+//! never breaks an existing save file.
 
 use std::path::PathBuf;
 
@@ -85,13 +85,22 @@ impl Default for AccessibilitySettings {
 pub struct UserSettings {
     pub hud: HudSettings,
     pub accessibility: AccessibilitySettings,
+    /// Keyboard overrides (`crate::input`). Stores only what the player *changed*, so the action
+    /// list can grow — and a shipped default can be improved — without a stale save silently
+    /// pinning the old binding.
+    pub input: crate::input::InputSettings,
 }
 
 impl UserSettings {
-    fn from_resources(hud: &HudSettings, acc: &AccessibilitySettings) -> Self {
+    fn from_resources(
+        hud: &HudSettings,
+        acc: &AccessibilitySettings,
+        bindings: &crate::input::KeyBindings,
+    ) -> Self {
         Self {
             hud: hud.clone(),
             accessibility: acc.clone(),
+            input: crate::input::InputSettings::from_bindings(bindings),
         }
     }
 }
@@ -101,7 +110,12 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         let settings = load_or_seed();
-        app.insert_resource(settings.hud)
+        // `to_bindings` resolves the stored overrides against the shipped defaults, dropping any
+        // that are unreadable or that would collide — with a `warn!`, never a panic. This is the
+        // ONE place the live table is built; `input::InputPlugin` only claims the resource.
+        app.insert_resource(settings.input.to_bindings())
+            .insert_resource(settings.input)
+            .insert_resource(settings.hud)
             .insert_resource(settings.accessibility)
             .add_systems(Update, autosave_on_change);
     }
@@ -142,12 +156,16 @@ fn load_or_seed() -> UserSettings {
 
 /// Persist the current settings resources whenever either changes. `is_changed()` fires once on
 /// insert too, which conveniently rewrites the file on first boot after a schema addition.
-fn autosave_on_change(hud: Res<HudSettings>, acc: Res<AccessibilitySettings>) {
-    if !(hud.is_changed() || acc.is_changed()) {
+fn autosave_on_change(
+    hud: Res<HudSettings>,
+    acc: Res<AccessibilitySettings>,
+    bindings: Res<crate::input::KeyBindings>,
+) {
+    if !(hud.is_changed() || acc.is_changed() || bindings.is_changed()) {
         return;
     }
     let Some(path) = settings_path() else { return };
-    write_settings(&path, &UserSettings::from_resources(&hud, &acc));
+    write_settings(&path, &UserSettings::from_resources(&hud, &acc, &bindings));
 }
 
 /// Atomic write (tmp + rename) so a crash mid-write can't corrupt the settings file.
@@ -190,6 +208,7 @@ mod tests {
                 text_scale: 1.5,
                 reduce_flashing: true,
             },
+            input: crate::input::InputSettings::default(),
         };
         let text = ron::ser::to_string_pretty(&original, ron::ser::PrettyConfig::default()).unwrap();
         let parsed: UserSettings = ron::from_str(&text).unwrap();
@@ -197,6 +216,37 @@ mod tests {
         assert!((parsed.hud.hud_scale - 1.25).abs() < f32::EPSILON);
         assert!((parsed.accessibility.text_scale - 1.5).abs() < f32::EPSILON);
         assert!(parsed.accessibility.reduce_flashing);
+    }
+
+    #[test]
+    fn a_rebound_key_survives_the_round_trip_to_disk() {
+        // The whole point of persisting bindings: a player who remaps a key must find it remapped
+        // next launch. Covers the seam between `input`'s name-based storage and this file's RON.
+        use crate::input::{Action, Binding, Chord, KeyBindings};
+        use bevy::prelude::KeyCode;
+
+        let mut bindings = KeyBindings::default();
+        bindings
+            .rebind(Action::ArmDevice, Binding::one(Chord::plain(KeyCode::KeyT)))
+            .expect("T is free");
+
+        let saved = UserSettings::from_resources(
+            &HudSettings::default(),
+            &AccessibilitySettings::default(),
+            &bindings,
+        );
+        let text = ron::ser::to_string_pretty(&saved, ron::ser::PrettyConfig::default()).unwrap();
+        let parsed: UserSettings = ron::from_str(&text).unwrap();
+
+        assert_eq!(
+            parsed.input.to_bindings().get(Action::ArmDevice).primary.key,
+            KeyCode::KeyT
+        );
+        // Everything untouched still reads its shipped default rather than a frozen copy.
+        assert_eq!(
+            parsed.input.to_bindings().get(Action::ArmCap),
+            Action::ArmCap.default_binding()
+        );
     }
 
     #[test]

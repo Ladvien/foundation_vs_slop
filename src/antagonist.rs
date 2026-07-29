@@ -202,15 +202,22 @@ pub fn purge_disproven(table: &SquadKnowledge, records: &mut Records) -> usize {
     pulled
 }
 
-/// `J` at the Site: curate the archive against what the squad has actually seen.
+/// Curate the archive against what the squad has actually seen — the key, or the panel's PULL button.
 pub fn curate_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
+    mut requests: MessageReader<crate::knowledge::records::ArchiveRequest>,
     table: Res<SquadKnowledge>,
     mut records: ResMut<Records>,
     mut nine: ResMut<Antagonist>,
 ) {
-    // `J` is free alongside `R` (research), `K` (file), `L` (roster), `B`/`N`/`M` (requisition).
-    if !keys.just_pressed(KeyCode::KeyJ) {
+    // `crate::input::Action` owns the binding; `input::the_key_space_has_no_collisions` is what
+    // keeps this key from quietly colliding with another. The button routes through the same message
+    // rather than calling `purge_disproven` itself, so this stays the single caller — the discipline
+    // `selection::ArmRequest` set. Every request is drained so an unread one cannot purge twice.
+    let clicked = requests
+        .read()
+        .any(|r| *r == crate::knowledge::records::ArchiveRequest::Curate);
+    if !clicked && !actions.just_pressed(crate::input::Action::CurateArchive) {
         return;
     }
     let n = purge_disproven(&table, &mut records);

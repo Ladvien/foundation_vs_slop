@@ -26,7 +26,9 @@
 //! (`selection`) has no time coupling at all. Changing speed — or pausing — never alters how the mouse
 //! or keyboard respond.
 //!
-//! **Accepted side effects at high speed** (this is a dev/inspection tool, not a shipping UX):
+//! **Accepted side effects at high speed** (the rungs past ×2 are a dev/inspection tool, not a
+//! shipping UX — which is why they are `debug_assertions`-only and behind `Alt`, see
+//! [`SHIPPING_LADDER`]):
 //! - Cosmetic *gameplay-feel* systems that read the generic `Time` do scale with the multiplier —
 //!   trauma decay + screen-shake phase (`juice`/`camera` shake), audio timers. At ×64 the shake buzzes
 //!   and SFX race; this is intentional (they track sim time, not wall time) and is not input.
@@ -59,7 +61,7 @@ impl Default for GameSpeed {
     }
 }
 
-/// Player-toggled pause (the `0` key). Kept separate from [`SimBlocked`] so the two independent
+/// Player-toggled pause (`Space`). Kept separate from [`SimBlocked`] so the two independent
 /// pause sources compose through a *single* writer of [`GameSpeed::paused`] ([`compose_pause`])
 /// instead of racing to set it. Defaults `false`.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -78,14 +80,43 @@ pub fn paused_from(user_paused: bool, sim_blocked: bool) -> bool {
     user_paused || sim_blocked
 }
 
-/// Discrete speed presets bound to number keys `1..=9` (index 0..=8). Index 2 (`×1.0`) is real time;
-/// left of it slows down, right of it speeds up.
+/// The full inspection ladder. Index 2 (`×1.0`) is real time; left of it slows down, right of it
+/// speeds up.
+///
+/// **Only [`SHIPPING_LADDER`] is reachable in a release build.** The rungs beyond ×2 are an
+/// inspection tool — this module's own header says so — and reaching them used to cost the entire
+/// `1`–`9` row, which is the prime real estate of an RTS keyboard. `BACKLOG.md` records the
+/// consequence in as many words: *"Keybindings are constrained, not chosen"*, and the containment
+/// verbs landed on `C`/`Z`/`X`/`F` because the digits were already gone. They are free now.
 pub const SPEED_LADDER: [f32; 9] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 
-/// Number keys `1..=9`, positionally aligned with [`SPEED_LADDER`]'s rungs (digit 1 → rung 0, …). Kept
-/// as a parallel array rather than `(KeyCode, index)` pairs so the rung index is derived from position;
-/// `zip` with `SPEED_LADDER` means a length mismatch simply ignores the extra entries — never an
+/// The rungs a player can reach, as indices into [`SPEED_LADDER`]: ×0.5, ×1, ×2.
+///
+/// Three rungs rather than nine because more options cost *commitment time*, not perception —
+/// Itthipuripat et al. 2018 (DOI 10.1523/jneurosci.0440-18.2018) isolate the mechanism behind
+/// Hick's-law slowing and find added choices raise the decision threshold rather than the
+/// perceptual load. Under horror time pressure that reads as freezing.
+pub const SHIPPING_LADDER: [usize; 3] = [1, 2, 3];
+
+/// Position within [`SHIPPING_LADDER`] of real time (×1.0) — where a fresh run sits.
+const DEFAULT_SHIPPING_POS: usize = 1;
+
+/// The multiplier at a position along [`SHIPPING_LADDER`].
+///
+/// Two chained `get`s rather than indexing: the repo's no-panic rule means a mis-authored
+/// `SHIPPING_LADDER` entry must degrade to `None` here, not take the process down.
+fn shipping_mult(pos: usize) -> Option<f32> {
+    SHIPPING_LADDER.get(pos).and_then(|&i| SPEED_LADDER.get(i)).copied()
+}
+
+/// Digit keys `1..=9`, positionally aligned with [`SPEED_LADDER`]'s rungs (digit 1 → rung 0, …).
+///
+/// **Debug builds only, and behind `Alt`.** Bare `1`–`9` now belong to the player (control groups);
+/// `Alt` keeps the inspection ladder reachable without shadowing them. Kept as a parallel array
+/// rather than `(KeyCode, index)` pairs so the rung index is derived from position; `zip` with
+/// `SPEED_LADDER` means a length mismatch simply ignores the extra entries — never an
 /// out-of-bounds panic (repo no-panic rule).
+#[cfg(debug_assertions)]
 const DIGIT_KEYS: [KeyCode; 9] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
@@ -102,6 +133,7 @@ pub struct TimeControlPlugin;
 
 impl Plugin for TimeControlPlugin {
     fn build(&self, app: &mut App) {
+        crate::input::claim_bindings(app);
         app.init_resource::<GameSpeed>()
             .init_resource::<UserPaused>()
             .init_resource::<SimBlocked>()
@@ -109,28 +141,85 @@ impl Plugin for TimeControlPlugin {
             // `SimBlocked` into the single `GameSpeed::paused` write. `.chain()` keeps that order so
             // a key press and its resulting pause state land in the same frame.
             .add_systems(Update, (read_speed_input, compose_pause).chain());
+        #[cfg(debug_assertions)]
+        app.add_systems(Update, read_inspection_ladder.before(compose_pause));
     }
 }
 
-/// Number-key presets: `1..=9` pick a rung of [`SPEED_LADDER`] (and un-pause), `0` toggles pause.
-/// Uses `just_pressed` so a held key changes speed once. Digits don't collide with the camera
-/// controls (WASD / arrows / scroll / middle-drag — see `camera::drive_camera`).
+/// Step one rung along [`SHIPPING_LADDER`], clamped at both ends.
+///
+/// Pure so the walk is testable without an `App`. Takes the *current* multiplier rather than a
+/// stored index because an inspection rung (or an RL tool) may have written a multiplier that is
+/// not on the shipping ladder at all — this snaps back onto it rather than carrying a second,
+/// divergent notion of "where the player is".
+fn step_rung(current: f32, up: bool) -> f32 {
+    // Nearest shipping rung to where we are. A linear scan over three entries, and it handles the
+    // off-ladder case (an inspection rung, or an RL tool that wrote an arbitrary multiplier) by
+    // snapping onto the ladder rather than carrying a second, divergent notion of "where the player
+    // is" — so one keypress always produces a predictable speed.
+    let mut here = DEFAULT_SHIPPING_POS;
+    let mut best = f32::INFINITY;
+    for pos in 0..SHIPPING_LADDER.len() {
+        let Some(m) = shipping_mult(pos) else { continue };
+        let d = (m - current).abs();
+        if d < best {
+            best = d;
+            here = pos;
+        }
+    }
+    let last = SHIPPING_LADDER.len().saturating_sub(1);
+    let next = if up { (here + 1).min(last) } else { here.saturating_sub(1) };
+    shipping_mult(next)
+        .or_else(|| shipping_mult(DEFAULT_SHIPPING_POS))
+        .unwrap_or(1.0)
+}
+
+/// The shipping time controls: pause, and one step along [`SHIPPING_LADDER`].
 ///
 /// Pause is written to [`UserPaused`], not `GameSpeed` directly, so it composes with the UI's
 /// [`SimBlocked`] through the single writer [`compose_pause`].
+///
+/// The focus guard that keeps `Space` from both activating a focused menu button and toggling the
+/// pause lives in `input::Actions` now, applied to every non-menu action — `research_room::editor`
+/// used to carry a hand-rolled copy of it for this exact key.
 fn read_speed_input(
+    actions: crate::input::Actions,
+    mut speed: ResMut<GameSpeed>,
+    mut user_paused: ResMut<UserPaused>,
+) {
+    if actions.just_pressed(crate::input::Action::TogglePause) {
+        user_paused.0 = !user_paused.0;
+    }
+    let down = actions.just_pressed(crate::input::Action::SpeedDown);
+    let up = actions.just_pressed(crate::input::Action::SpeedUp);
+    // Both at once is a no-op rather than last-writer-wins, so a stuck key can't walk the ladder.
+    if down != up {
+        speed.base = step_rung(speed.base, up);
+        user_paused.0 = false;
+    }
+}
+
+/// `Alt` + `1..=9` pick any rung of the full [`SPEED_LADDER`] — the inspection tool this module's
+/// header describes, kept out of the player's key space.
+///
+/// Reads raw keys rather than going through `input::Action`: nine debug rungs would be nine enum
+/// variants and nine controls-screen rows for something no player can reach. The `Alt` requirement
+/// is what keeps it from colliding with the bare digits, and `input::the_key_space_has_no_collisions`
+/// covers the bindings that ARE in the registry.
+#[cfg(debug_assertions)]
+fn read_inspection_ladder(
     keys: Res<ButtonInput<KeyCode>>,
     mut speed: ResMut<GameSpeed>,
     mut user_paused: ResMut<UserPaused>,
 ) {
+    if !keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
+        return;
+    }
     for (&mult, key) in SPEED_LADDER.iter().zip(DIGIT_KEYS) {
         if keys.just_pressed(key) {
             speed.base = mult;
             user_paused.0 = false;
         }
-    }
-    if keys.just_pressed(KeyCode::Digit0) {
-        user_paused.0 = !user_paused.0;
     }
 }
 
@@ -161,5 +250,42 @@ mod tests {
         assert!(paused_from(true, false), "player pause freezes the sim");
         assert!(paused_from(false, true), "an open menu freezes the sim");
         assert!(paused_from(true, true));
+    }
+
+    #[test]
+    fn the_shipping_ladder_is_a_real_slice_of_the_full_one() {
+        // Indices, not copied numbers, so the two can never disagree about what "×2" means.
+        for pos in 0..SHIPPING_LADDER.len() {
+            assert!(shipping_mult(pos).is_some(), "SHIPPING_LADDER[{pos}] is out of range");
+        }
+        assert_eq!(shipping_mult(DEFAULT_SHIPPING_POS), Some(1.0), "the middle rung is real time");
+        // Ascending, or "speed up" would sometimes slow down.
+        for pos in 1..SHIPPING_LADDER.len() {
+            let (prev, cur) = (shipping_mult(pos - 1), shipping_mult(pos));
+            assert!(prev < cur, "the shipping ladder must ascend: {prev:?} then {cur:?}");
+        }
+        // The inspection rungs are strictly beyond it, which is what makes them worth hiding.
+        assert!(SPEED_LADDER.iter().any(|&m| m > 2.0), "there is nothing left to gate behind Alt");
+    }
+
+    #[test]
+    fn stepping_walks_the_shipping_ladder_and_stops_at_both_ends() {
+        assert_eq!(step_rung(1.0, true), 2.0);
+        assert_eq!(step_rung(1.0, false), 0.5);
+        // Clamped, not wrapped: holding "faster" must never drop the player back to ×0.5.
+        assert_eq!(step_rung(2.0, true), 2.0);
+        assert_eq!(step_rung(0.5, false), 0.5);
+    }
+
+    #[test]
+    fn stepping_from_an_inspection_rung_snaps_back_onto_the_shipping_ladder() {
+        // `Alt+9` (×64) or an RL tool can leave `base` far off the player's ladder. One press must
+        // then produce a predictable speed rather than an arbitrary jump — the reason `step_rung`
+        // reads the current multiplier instead of storing an index beside it.
+        assert_eq!(step_rung(64.0, false), 1.0, "×64 is nearest ×2, so 'slower' gives ×1");
+        assert_eq!(step_rung(64.0, true), 2.0, "already at the top of what a player can reach");
+        assert_eq!(step_rung(0.25, true), 1.0, "×0.25 is nearest ×0.5, so 'faster' gives ×1");
+        // A value on no rung at all still lands somewhere sane.
+        assert_eq!(step_rung(0.0, true), 1.0);
     }
 }

@@ -20,12 +20,16 @@ use bevy::prelude::*;
 pub mod boot;
 pub mod briefing;
 pub mod containment_hud;
+pub mod controls_screen;
+pub mod event_line;
 pub mod research_hud;
 pub mod site_hud;
 pub mod verb_bar;
 pub mod debrief;
 pub mod hud;
 pub mod layout;
+pub mod minimap;
+pub mod offscreen;
 pub mod pause;
 pub mod rows;
 pub mod settings_menu;
@@ -54,7 +58,22 @@ impl Plugin for UiPlugin {
                 title::TitlePlugin,
                 warmup::WarmupScreenPlugin,
                 pause::PauseMenuPlugin,
-                settings_menu::SettingsMenuPlugin,
+                // Nested rather than given their own slots: the top-level tuple is at Bevy's
+                // 15-element cap (`docs/ui.md` §5), and these two belong together anyway — both are
+                // Access-side surfaces that tell the player where things are.
+                (
+                    // The key list, reachable from both the title and the pause menu.
+                    controls_screen::ControlsScreenPlugin,
+                    // Edge markers for the extraction point and the selected operatives. The camera
+                    // follows nothing by design; these keep "follows nothing" from meaning "cannot
+                    // find them again".
+                    offscreen::OffscreenIndicatorPlugin,
+                    // Topology of what you have seen — visible only while a sensor drone is live.
+                    minimap::MinimapPlugin,
+                    // One transient line for the thing that just happened. The game had no log,
+                    // toast or notification of any kind before this.
+                    event_line::EventLinePlugin,
+                ),
                 hud::HudPlugin,
                 // Terminal screens. Presentation only — the win/lose decision is `crate::session`,
                 // inside the deterministic core; this plugin mirrors it one-way onto `AppState`.

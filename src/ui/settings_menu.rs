@@ -112,8 +112,15 @@ impl Plugin for SettingsMenuPlugin {
 }
 
 /// Esc from the title-opened Settings returns to the title root (mirrors the "BACK" button).
-fn settings_escape_to_title(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<TitleMenu>>) {
-    if keys.just_pressed(KeyCode::Escape) {
+///
+/// [`Action::MenuBack`](crate::input::Action::MenuBack) rather than `PauseMenu`, even though both
+/// default to `Escape`: they sit in different [`Context`](crate::input::Context)s, which is what
+/// lets one key legally serve both and what the collision test checks.
+fn settings_escape_to_title(
+    actions: crate::input::Actions,
+    mut next: ResMut<NextState<TitleMenu>>,
+) {
+    if actions.just_pressed(crate::input::Action::MenuBack) {
         next.set(TitleMenu::Root);
     }
 }
@@ -121,8 +128,11 @@ fn settings_escape_to_title(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<Ne
 /// Esc from the pause-opened Settings returns to the pause menu (mirrors the "BACK" button).
 /// `pause::toggle_pause` also sees this Esc but ignores it while `MenuState::Settings`, so there is
 /// no double handling.
-fn settings_escape_to_pause(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<MenuState>>) {
-    if keys.just_pressed(KeyCode::Escape) {
+fn settings_escape_to_pause(
+    actions: crate::input::Actions,
+    mut next: ResMut<NextState<MenuState>>,
+) {
+    if actions.just_pressed(crate::input::Action::MenuBack) {
         next.set(MenuState::Pause);
     }
 }
@@ -192,13 +202,6 @@ fn spawn_settings(commands: &mut Commands, theme: &UiTheme, fonts: &FontAssets, 
             toggle_button(root, theme, fonts, SettingKey::RosterDetail);
 
             // --- Disabled groups (pending gated phases) ---
-            root.spawn(text_colored(
-                theme,
-                fonts,
-                "CONTROLS  — pending keybind remap",
-                theme.font_body,
-                theme.text_muted.with_alpha(0.5),
-            ));
             root.spawn(text_colored(
                 theme,
                 fonts,

@@ -9,6 +9,8 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::time::Real;
 
+use crate::input::Action;
+
 use std::f32::consts::TAU;
 
 use crate::dungeon::Dungeon;
@@ -96,6 +98,9 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
+        // `drive_camera` reads the binding table non-optionally; the plugin that registers a reader
+        // is what guarantees the resource exists (see `input::claim_bindings`).
+        crate::input::claim_bindings(app);
         app.insert_resource(CameraRig {
             focus: Vec3::ZERO,
             height: VIEWPORT_HEIGHT,
@@ -170,7 +175,7 @@ fn drive_camera(
     // (pan and rotate) run on `real` so they feel identical at any game speed — including paused.
     time: Res<Time>,
     real: Res<Time<Real>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     mouse_motion: Res<AccumulatedMouseMotion>,
@@ -183,11 +188,24 @@ fn drive_camera(
     // — panning while that tactical pause is active is intentional (see below). Stays `false` in the
     // headless harness, so camera control there is unchanged.
     sim_blocked: Res<SimBlocked>,
+    // The squad's eased centroid, already computed every fixed tick for the cohesion leash. `Option`
+    // because it is a squad-AI resource and the camera outlives any run (title screen, Site).
+    anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
     let allow_pan = !sim_blocked.0;
+
+    // Recentre on the squad. The rig deliberately follows nothing — that is what makes it an RTS
+    // camera rather than a third-person one — but "follows nothing" and "cannot find them again"
+    // are different things, and only the first is a design choice. `rig.focus` is eased toward by
+    // the transform build below, so this is a smooth pull rather than a teleport.
+    if actions.just_pressed(Action::CameraRecenter) {
+        if let Some(anchor) = anchor.filter(|a| a.valid) {
+            rig.focus = anchor.pos;
+        }
+    }
 
     if scroll.delta.y != 0.0 {
         rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -197,10 +215,10 @@ fn drive_camera(
     // one step; the current yaw eases toward it below, so rapid taps stack and the camera smoothly
     // chases the accumulated target. Q turns counter-clockwise (from above), E clockwise.
     let step = TAU / ROTATION_STEPS as f32;
-    if keys.just_pressed(KeyCode::KeyQ) {
+    if actions.just_pressed(Action::CameraRotateLeft) {
         rig.target_yaw += step;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
+    if actions.just_pressed(Action::CameraRotateRight) {
         rig.target_yaw -= step;
     }
     // Ease on REAL time so the rotation feels identical at any game speed and works while paused.
@@ -231,16 +249,16 @@ fn drive_camera(
     // case those keys belong to menu navigation.
     let mut pan = Vec3::ZERO;
     if allow_pan {
-        if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        if actions.pressed(Action::CameraPanForward) {
             pan += screen_forward;
         }
-        if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        if actions.pressed(Action::CameraPanBack) {
             pan -= screen_forward;
         }
-        if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        if actions.pressed(Action::CameraPanRight) {
             pan += screen_right;
         }
-        if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        if actions.pressed(Action::CameraPanLeft) {
             pan -= screen_right;
         }
     }

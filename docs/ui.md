@@ -46,6 +46,29 @@ still "support the entire range of activities that operators will be faced with.
 
 ### §1.3 Encoding — the accessibility rules that are not optional
 
+**Baseline reality is desaturated, and saturation is reserved.** `ui::theme` is warm-neutral
+throughout — chroma under `MAX_UI_CHROMA` (0.12), `red >= blue`, and separation between `accent`,
+`text` and `text_muted` riding on **luminance alone**. Two tests pin it:
+`the_foundation_has_no_house_palette` and `baseline_reality_is_slightly_warm`.
+
+This replaced a phosphor-green CRT palette whose accent had a chroma of 0.45. Two independent
+arguments landed in the same place, as with the hazard ramp below:
+
+- *In-fiction*: `docs/lore/2026-07-12-scp-color-language.md` §6's core rule is **"Desaturation =
+  reality. Saturation = anomaly"**, with baseline reality described as *"near-monochrome and slightly
+  warm — like a photocopied document"*; §7's guardrail is **"Don't: Give the Foundation a house
+  palette. It doesn't have one and shouldn't"**, and **"Make color mean deviation, not danger."**
+- *Perceptual*: Wolfe 2021, *Guided Search 6.0* (`10.3758/s13423-020-01859-9`) — only a small set of
+  features guide attention at all, and colour is one of them. A saturated hue spent on permanent
+  chrome is the one channel that could have pulled the eye to a threat, spent on a background.
+  Rosenholtz 2016 (`10.1146/annurev-vision-082114-035733`) adds the periphery half: a screen-edge
+  element is encoded as **summary statistics** — a colour blob and gross motion — so hue is doing
+  *more* work out there, not less, and icon detail or small text at the edge is wasted pixels.
+
+`UiTheme::anomaly` holds the vacated saturation and is exempt from the ceiling by design, along with
+`danger` (destructive actions) and `warn` (cautionary copy). The exemptions are asserted **loudly** —
+if one of them desaturates, it has stopped carrying its meaning.
+
 **Threat is luminosity, never hue.** `ui::theme::Hazard` implements the SCP ACS Disruption scale
 (Dark → Vlam → Keneq → Ekhi → Amida) as a brightness ramp on one hue. Two independent arguments land
 in the same place:
@@ -194,6 +217,166 @@ and an uninformative alert "is essentially a false alarm."
 **So you cannot fix alert spam by animating harder or recolouring.** Delete the low-informativeness
 alerts. One interruptive alert per tactical beat; dedupe by entity so the same anomaly cannot fire
 twice in one encounter; everything else goes to a passive line.
+
+`ui::event_line` implements exactly that, and it is the game's **only** notification surface — there
+was none at all before it. Three consequences of the finding, made structural rather than advisory:
+`Severity::Passive` has *no surface* (deleted, not demoted — volume is the mechanism, intensity is
+not); `ReportedSubjects` dedupes by entity per expedition, which is the unit Ancker measured
+"encounter" as; and a blank line is refused outright, because an uninformative alert "is essentially a
+false alarm."
+
+Two further rules the line obeys, both already sourced elsewhere in this document:
+
+- **It fades.** Lewandowska et al. found a *constant* peripheral element habituates away and stops
+  working when it matters. Arriving-and-leaving is a contrast **delta**; permanent is a steady state
+  that has stopped carrying information.
+- **It pips.** Van der Burg, Olivers, Bronkhorst & Theeuwes 2008 (`10.1037/0096-1523.34.5.1053`, **in
+  the library, full text**). A non-spatial, *non-informative* tone synchronised with a visual change
+  makes that change pop out of a cluttered dynamic display. The size of it is the part worth quoting:
+  search slope **147 ms/item without the tone → 31 ms/item with it**, and *with* the tone the set-size
+  effect stopped being significant at all (F(2,10)=1.9, p=.224) — the target went from hunted to seen.
+  Tone presence F(1,5)=10.7, p<.05, ηp=.68; Tone × Set Size F(2,10)=12.7, p<.005, ηp=.72.
+  Their own controls rule out the two cheap explanations: it is **not general alerting** ("does not
+  occur with visual cues") and **not top-down cuing** (it survives synchronising the pip with
+  distractors on most trials). **Synchrony is the mechanism**, so the pip must fire *with* the line,
+  not near it. Salience for **zero pixels** — the right currency for a horror HUD.
+
+### §3.4.1 Tooltips are for controls, never for readouts
+
+`rows::Row::label()` has reserved a tooltip hook since the row model landed, and it is still
+unimplemented **on purpose**. §1.4's rule is that a row states its instruction *inline*
+(`RAISE OBSERVATION  ≥ 0.50  now 0.10`), and Llanos & Jørgensen 2011 is explicit that information
+which is critical or continuously gauged is the wrong thing to minimise. A containment clause behind a
+hover would undo both at once.
+
+A *verb* is the opposite case: its meaning is learned once and then never needed again, which is
+precisely what a hover is for. So `verb_bar::Verb::hint` explains the five verbs, and nothing else in
+the game carries a tooltip.
+
+---
+
+## §3.4.2 Spatial orientation — the map is a verb
+
+**Director's decision, 2026-07-29:** an extraction beacon and off-screen bearings *always*; a minimap
+**only while an Engineer sensor drone is live**. The three surfaces are `containment::extraction`'s
+light column, `ui::offscreen`, and `ui::minimap` gated on `crate::sensor`.
+
+Say the evidence honestly first: **there is no study isolating minimap presence against immersion or
+performance, in any genre.** Battlefield's "hardcore" servers remove it as a *difficulty* measure and
+Iacovides et al. speculate in discussion that the effect is really immersion-via-fewer-distractors, but
+that is a speculation, not a result. The design below is reasoned, and the reasoning is what has to be
+preserved if someone changes it.
+
+- **The gate, not the map, is the design.** McCall et al. 2022 (`10.3758/s13428-022-02002-3`) separate
+  **spatial uncertainty** from temporal unpredictability as its own axis of ambiguity, and a permanent
+  minimap deletes that axis. Delatorre et al. 2019 (`10.1109/access.2019.2924200`) put a number on the
+  middle ground: the optimum is *"randomly providing the **minimal** amount of information that still
+  allows the player to counteract the threat"* — not none (frustration), not a radar (tension
+  collapse). A map you switch on for seconds is that middle.
+- **The cooldown must outlast the duration.** Otherwise the player chains drones into the permanent
+  minimap this rule exists to prevent, and it looks like a balance tweak rather than the deletion of a
+  horror axis. `sensor::the_cooldown_outlasts_the_reveal` is the guard.
+- **The minimap never draws a creature.** The fog already withholds enemies outside live line of sight
+  — `fog::visible_at` is what `laser::fire_laser` targets through — and enemy blips would hand back
+  exactly what the fog exists to take away, while claiming to be a spatial aid.
+- **It reveals topology you have walked, not topology that exists.** Gated on `fog::seen_at`, bounded
+  by `sensor::SENSOR_RADIUS`. A sensor is not a wallhack.
+- **Prefer lighting to markers for the fixed destination.** Marples 2017 (PhD, Huddersfield) derives
+  the thresholds at which guidance lighting begins to bias a route and finds a usable window *below*
+  the level at which players notice being guided — which is what a horror game wants. Hence the
+  extraction beacon is a light column, and the HUD marker is only a bearing for when it is off-screen.
+- **An edge marker is a colour blob, not an icon.** Rosenholtz 2016 — the periphery encodes summary
+  statistics, so detail out there is wasted pixels — and its pulse sits at the *bottom* of
+  Lewandowska et al.'s effective band, because a permanent marker is the extended-usage case by
+  definition.
+
+The prior reading in §6 (*"in a WFC dungeon with limited sightlines, connectors and navigational cues
+do work no minimap can"*) still stands and is not in tension with this: the argument was never that the
+information is worthless, it was that **free continuous access is the wrong price**.
+
+---
+
+## §3.5 Controls
+
+The section this document did not have, and whose absence was load-bearing: key allocation used to
+live in **five hand-written prose censuses** (`selection.rs`, `site/review.rs`,
+`knowledge/records.rs`, `antagonist.rs`, `ui/research_hud.rs`), all five of which had drifted to the
+same wrong answer — every one named `T` as taken, long after the `T` hotkey was deleted.
+
+**Every binding is data, in `src/input/`.** `Action` is the census; `KeyBindings` is the live table
+(a fixed array indexed by `Action::index`, not a map — same reasoning as `ui::layout::HudRegions`);
+`Actions` is the read side, and taking it instead of `Res<ButtonInput<KeyCode>>` is what applies the
+focus guard. `the_key_space_has_no_collisions` is what keeps the census true.
+
+**Some collisions are legal, so contexts are part of the model.** `W` is both "pan forward" and "menu
+up"; the two can never be live together. Each action declares a `Context`, and the collision test
+asks whether two contexts can be live *simultaneously* (`Context::overlaps`) rather than applying a
+flat uniqueness rule that would force a worse binding. `Context::Dev` deliberately overlaps every
+play context — a dev key shadowing a player key is exactly the bug being hunted.
+
+**The focus guard has one home.** While a menu button holds `InputFocus` or the dev note box is
+taking raw text, the keyboard belongs to that, and every non-`Menu` action is suppressed.
+`research_room::editor` found this the hard way (one `Space` both clicked the focused palette button
+and toggled the pause) and grew a local copy; that copy is gone.
+
+**Input and Control are two Access categories, not one.** Power/Cairns et al. 2019 separate *Input*
+options (which key) from *Control* options (hold vs toggle, how many actions a task needs). §4.1's
+Access/Challenge split applies to both, and neither may be gated by difficulty.
+
+**Immediately-issuable orders stay at ~3–4.** Itthipuripat et al. 2018
+(`10.1523/jneurosci.0440-18.2018`) isolate the mechanism behind Hick's-law slowing while controlling
+difficulty and attention: added choices leave *sensory* processing untouched and instead **raise the
+decision threshold**. More options cost commitment time, not perception — under horror time pressure
+that reads as freezing. Anything past the first few belongs behind a deliberate mode.
+
+**A vocabulary of ~12 is learnable to recall in ~30 minutes.** Zheng et al. 2018, *M3 Gesture Menu*
+(`10.1145/3173574.3173823`) demonstrated recall-based execution of a dozen commands after three
+ten-minute sessions, and found the **grid/gesture** form beats a radial one past ~8 items. Wentzel et
+al. 2024 (`10.1109/tvcg.2024.3420236`) split it further: flat menus favour direct pointing,
+*hierarchical* ones favour marking. Samp 2011 adds that radial's cost is paid at first sight — so fix
+item positions permanently and never reorder by recency.
+
+**Offering a fast path beside a slow one does not work on its own.** Cockburn, Gutwin, Scarr &
+Malacria 2014 (`10.1145/2659796`) document the intermodal-transition failure: users plateau on the
+slow method and never switch, because no single moment hurts enough to justify the switching cost.
+The fix is a *bridge* where the novice path rehearses the expert path (Kurtenbach & Buxton 1994's
+marking menus are the canonical one). Practically: a control group that binds invisibly is a control
+group nobody binds twice — the readout has to show it happened. `hud::RosterChipTag` is that readout.
+
+**The order set is small because the mode vocabulary is gated on applicability, not preference.** This
+review set out to expose `ai::utility::Mode`'s squad actions as a twelve-item order wheel, and reading
+the repertoires killed it. Every role behaviour in `squad_ai::role` is `gate(Fact::…)` on whether the
+action is *possible*: `Ward` needs `PhotophobeBearingKnown`, `TendWounded` needs `AllyDownNearby`,
+`Examine` needs `HasUnexaminedNearby`. Ordering one with its gate off does **nothing at all** — and a
+control that silently does nothing is the "magic results that are hard to debug" this project's first
+rule exists to prevent. (`Suppress` and `DeploySensor` are not even authored into a repertoire; the
+real count was never twelve.)
+
+Exactly one genuine *preference* survives that filter, and it was a real gap: the Gunman has
+`Overwatch` at rank 4 and `Engage` at rank 2 **on the same gate**, so gunmen always held and the
+player could not ask them to close. `squad::PushOrder` is that ask, and with `HOLD FIRE` and the move
+order it makes three immediately-issuable orders — which is exactly Itthipuripat et al.'s budget above,
+arrived at from the other direction.
+
+**A player order overrides the decision; it does not become a brain parameter.** The tidy
+implementation is a consideration on `Overwatch` reading a new `Fact`, and it would even be
+bit-identical headless (multiplying a score by exactly `1.0`). But `squad_ai::genome` encodes a
+repertoire by **walking its considerations in order**, so one more grows the Gunman's genome by three
+params and invalidates every archived behaviour elite. So the override sits at the decision seam in
+`squad_ai::perception`, next to — and for the same stated reason as — the `MoveOrder` branch that
+already overrides the AI's movement goal. Verified: the shipped golden and
+`deterministic_core_is_bit_identical_across_many_builds` both unmoved.
+
+**Budget the onboarding against 23%.** Iacovides et al. 2015 dropped **7 of 31** screened
+participants — all self-reported FPS players — for "obviously struggling with the controls" inside 20
+minutes. `ui::controls_screen` exists because the game shipped ~26 player bindings of which 6 were
+stated anywhere; it is reachable from the **title** as well as the pause menu, because a player who
+cannot work the controls has not started a run yet.
+
+**The controls screen lists what the registry cannot see.** Mouse buttons are not keys, and the
+digit row is one mechanism with nine slots rather than nine rebindable actions. A screen generated
+purely from `Action` would omit the two most-used inputs in the game, so `UNBOUND_LINES` states them
+explicitly and a test asserts they are there.
 
 ---
 
@@ -351,6 +534,65 @@ Not in scope for the current pass. Recorded here so the rules exist before the a
 | `10.1109_CCNC.2016.7444811` | Salomoni et al. 2016, *Diegetic game interface with Oculus Rift*, IEEE CCNC |
 | `10.1109_tvcg.2009.113` | Machado, Oliveira & Fernandes 2009, *CVD simulation*, IEEE TVCG — **record page only** |
 
+### Cited above, surfaced by the 2026-07-29 UI/controls review
+
+**Ingest status, measured 2026-07-29 — and be precise about it, because the note that used to stand
+here was false for some time and nobody noticed.**
+
+- **Downloaded, converted, indexed, full text in hand:** `10.1037/0096-1523.34.5.1053` (pip and pop,
+  24 chunks). Reading it upgraded the claim materially — §3.4's bullet now carries the real search
+  slopes and both of the paper's own controls, where the abstract had supported only "makes a change
+  pop out".
+- **Downloaded and catalogued, conversion failing:** `10.3758/s13423-020-01859-9`,
+  `10.1109/access.2019.2924200`, `10.26503/dl.v2018i3.1051`, `10.1109/tvcg.2024.3420236`,
+  `10.1080/10447318.2023.2210880`. The PDFs are on disk; `scribe_convert` returns *"olmocr did not
+  write the expected file"* for each. The scribe instances both report `healthy`, so this is the
+  backend writing no output rather than a queue — the same **service-ownership** question this section
+  has recorded before, not a code change. Retrying is cheap once it is resolved.
+- **No open-access PDF for the DOI at all**, needs a manual fetch: Cockburn et al.
+  (`10.1145/2659796`), the M3 gesture menu (`10.1145/3173574.3173823`), both Misztal papers,
+  Rosenholtz (`10.1146/annurev-vision-082114-035733`), van den Berg (`10.1167/9.4.24`), Itthipuripat
+  (`10.1523/jneurosci.0440-18.2018`).
+
+Every claim attributed to anything in the last two groups — in §1.3, §3.4, §3.4.1, §3.4.2 or §3.5 —
+is sourced from its **abstract or published results summary, not from full text**, and the module docs
+in `src/` that cite them say so at the site.
+
+| DOI | Paper | Fills |
+|---|---|---|
+| `10.1145/3410404.3414238` | Misztal, Carbonell & Schild 2020, *Visual Delegates*, CHI PLAY | 67 catalogued ways games render a character's non-visual sensation — **the** reference for a body-horror game |
+| `10.1145/3491102.3501885` | Misztal & Schild 2022, *VD-frame*, CHI | the evaluation framework for the above |
+| `10.1145/2659796` | Cockburn, Gutwin, Scarr & Malacria 2014, *Novice to Expert Transitions*, ACM Comput. Surv. | §3.5's intermodal-transition failure |
+| `10.1145/3173574.3173823` | Zheng, Bi, Li, Li & Zhai 2018, *M3 Gesture Menu*, CHI | the 12-commands-in-30-minutes budget |
+| `10.1145/191666.191759` | Kurtenbach & Buxton 1994, *Marking menus*, CHI | novice use as expert rehearsal |
+| `10.1109/tvcg.2024.3420236` | Wentzel et al. 2024, *VR Menu Archetypes*, IEEE TVCG | flat → direct pointing, hierarchical → marking |
+| `10.1523/jneurosci.0440-18.2018` | Itthipuripat et al. 2018, *J. Neurosci.* | choice count raises the **decision threshold**, not perceptual load |
+| `10.3758/s13423-020-01859-9` | Wolfe 2021, *Guided Search 6.0*, Psychon Bull Rev | which features guide attention (§1.3's palette argument) |
+| `10.1146/annurev-vision-082114-035733` | Rosenholtz 2016, *Peripheral Vision*, Annu. Rev. Vis. Sci. | the periphery encodes summary statistics |
+| `10.1167/9.4.24` | van den Berg, Cornelissen & Roerdink 2009, *J. Vision* | clutter is **crowding**, not element count — spacing ≈ 0.5 × eccentricity |
+| `10.1037/0096-1523.34.5.1053` | Van der Burg et al. 2008, *Pip and pop*, JEP:HPP | a 20 ms tick makes a visual change pop out — salience for zero pixels |
+| `10.3758/s13428-022-02002-3` | McCall et al. 2022, *The Underwood Project*, Behav Res Methods | **in the library**; dread from withheld response-mapping, and the always-on-soundtrack finding |
+| `10.1109/access.2019.2924200` | Delatorre, León, Salguero & Tapscott 2019, *IEEE Access* | the threat-information optimum: minimal, stochastic, still actionable |
+| `10.26503/dl.v2018i3.1051` | Boonen & Mieritz 2018, *Paralysing Fear*, DiGRA | agency parameters in horror |
+| `10.1109/gem.2015.7377211` | Peacocke, Teather, Carette & MacKenzie 2015, IEEE GEM | the diegetic *number* won on precision + gaze co-location; diegetic *bullets* did not |
+| `10.1145/3102071.3106358` | Yang et al. 2017, FDG | **in the library**; more information *improved* performance — "reduce clutter" is not free |
+| `10.1080/10447318.2023.2210880` | Caroux & Pujol 2023, *IJHCI* meta-analysis | control mode showed **no** significant effect on enjoyment |
+| — | Marples 2017, *Intrinsic perceptual cues on navigation*, PhD, Huddersfield | thresholds at which guidance **lighting** steers a route below conscious notice (the extraction beacon) |
+| `10.1371/journal.pone.0075129` | Thompson, Blair, Chen & Henrey 2013, *PLoS ONE* | which skill variable predicts league **changes with league** |
+
+**Three claims this project must stop making.** The corpus does **not** establish that diegetic UI
+raises immersion: Iacovides et al. 2015 found it helps experts only, on two subscales; Llanos &
+Jørgensen 2011 found it helps **nobody**; Peacocke et al.'s winning "diegetic" display is confounded
+with precision and gaze position; and Fagerholt & Lorentzon 2009 — the taxonomy everyone cites — is
+an unvalidated MSc thesis whose own position is a middle ground, and which never measured immersion.
+`src/psi_vision.rs` and `src/dialogue/mod.rs` both currently cite that literature as if it settled
+the question. The design choices are fine; the justification should say **contested**.
+
+Likewise there is **no study isolating minimap presence/absence** against immersion or performance in
+any genre, and RTS/squad *input* design is essentially absent from peer review — no work on tactical
+pause, control groups, box-select or hybrid schemes. Where this document reasons about those, it is
+inference, and `src/selection.rs`'s header says so in as many words.
+
 ### Wanted, not yet in the library
 
 The library's classical human-factors shelf is empty. Each of these fills a load-bearing gap above;
@@ -366,14 +608,15 @@ all were attempted on 2026-07-28 and blocked (see the note below).
 | `10.1145/1357054.1357282` | Pinelle, Wong & Stach 2008, *Heuristic Evaluation for Games* | a game-specific heuristic set |
 | — | Fagerholt & Lorentzon 2009, *Beyond the HUD* (Chalmers MSc) | origin of the diegetic/non-diegetic/spatial/meta taxonomy |
 
-> **Ingest is currently blocked, not merely pending.** `hs-serve-olmocr-vllm.service` is crash-looping
-> on `EADDRINUSE` for port 8081, which `llama-swap` already owns (and which has its own `olmocr`
-> entry). PDFs download and catalogue but hang in conversion until their page-scaled timeout.
-> `scribe_health` reports `ok` regardless — it does not probe the backend — and `pipeline_drift` sits
-> at 466 against a threshold of 3. Resolving it is a service-ownership decision (llama-swap vs the
-> dedicated vLLM unit), not a code change.
+> **Ingest is no longer blocked — measured 2026-07-29.** The note that stood here said
+> `hs-serve-olmocr-vllm.service` was crash-looping on `EADDRINUSE` for port 8081 and that PDFs hung
+> in conversion. `system_status` now reports **both scribe instances healthy** (one idle with 12 free
+> slots, one actively converting), distill up on CUDA with **8,150 embedded documents / 247k chunks**,
+> and conversions completing in 50–230 s. `pipeline_drift` is 130 against a threshold of 3, which is
+> a backlog, not a stall. **The papers below are fetchable; the blocker was resolved and this note
+> was not updated.**
 >
-> Separately: `paper_download` never consults CORE even when `paper_search` returns CORE URLs in the
+> Still true: `paper_download` never consults CORE even when `paper_search` returns CORE URLs in the
 > same response, which is what blocked Healey & Enns and Sweetser & Wyeth specifically.
 
 ---
@@ -382,7 +625,13 @@ all were attempted on 2026-07-28 and blocked (see the note below).
 
 | Concern | File |
 |---|---|
-| Design tokens, hazard ramp, glyph set, layers, scale wiring | `src/ui/theme.rs` |
+| Design tokens, hazard ramp, chroma ceiling, glyph set, layers, scale wiring | `src/ui/theme.rs` |
+| The keyboard registry — every binding, its context, the collision test | `src/input/` |
+| The key list shown to the player | `src/ui/controls_screen.rs` |
+| Selection, control groups, order queue | `src/selection.rs` |
+| Off-screen bearings (extraction, selected operatives) | `src/ui/offscreen.rs` |
+| The sensor-gated minimap, and the drone that gates it | `src/ui/minimap.rs`, `src/sensor.rs` |
+| The one-line event budget + its emitters | `src/ui/event_line.rs` |
 | The row model + renderer | `src/ui/rows.rs` |
 | The 3×3 region frame | `src/ui/layout.rs` |
 | Shared widgets, menu focus/keyboard nav | `src/ui/widgets.rs` |

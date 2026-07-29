@@ -61,23 +61,56 @@ fn capture_once(timeout: Duration) -> Option<Vec<f32>> {
     None
 }
 
-/// **The committed golden is STALE and this test currently FAILS — measured SSIM 0.8873 vs the 0.95
-/// gate on 2026-07-29.** It needs re-pinning; the current render was inspected and is correct.
+/// Regenerate the committed golden from a `screenshot.png` sitting in the crate root.
 ///
-/// It is stale because the golden was last written 90 commits ago (`ad098e5`, the 2026-07-19 review
-/// pass) and **43 file-touches to `src/{dungeon,world,health,light,mycelia,placement}` have landed
-/// since** — the dungeon layout behind the title card is simply a different world now, and the
-/// worldspace health bars over the squad are visible in a way they were not when the golden was
-/// captured. Since the test is `#[ignore]`d it has been failing unnoticed for all 90.
+/// The module doc above described this procedure in prose and nothing implemented it, which left the
+/// riskiest part to hand: the golden **must** be produced by the same resize + grayscale path
+/// [`to_gray`] uses for the live capture, or the comparison is against a differently-filtered image
+/// and the threshold means nothing. Sharing [`W`]/[`H`]/`FilterType::Triangle` with the comparison is
+/// the whole point of it being code.
 ///
-/// The 2026-07-28 UI pass is a *minor additional* contributor, not the cause: `ui::theme::load_fonts`
-/// now loads `assets/fonts/FiraMono-Regular.ttf` rather than resolving to Bevy's embedded
-/// `FiraMono-subset.ttf` (95 codepoints), so the subtitle's em-dash in
-/// `"// SCP-9191 CONTAINMENT SITE — WATCH FEED"` renders instead of being tofu. Verified visually in
-/// the 2026-07-29 capture. That shifts a line of centred text; it does not move the geometry.
+/// `#[ignore]`d and never run by CI: re-pinning a golden is a deliberate, human-reviewed act
+/// (`TESTING.md` — "never auto-approve a diff"). Capture a clean title frame first, **look at it**,
+/// then:
+///   `cargo test --features test-harness --test visual_capture -- --ignored regenerate_golden`
+#[test]
+#[ignore] // regeneration tool, not a check.
+fn regenerate_golden_from_screenshot() {
+    let src = image::open("screenshot.png").expect(
+        "put a freshly captured screenshot.png in the crate root first (touch screenshot.request \
+         while the windowed game runs)",
+    );
+    src.resize_exact(W, H, image::imageops::FilterType::Triangle)
+        .to_luma8()
+        .save(GOLDEN)
+        .expect("failed to write the golden");
+    eprintln!("re-pinned {GOLDEN} at {W}x{H} grayscale from screenshot.png");
+}
+
+/// **Re-pinned 2026-07-29** after the UI/controls pass, having inspected the live render.
 ///
-/// Re-pinning was deliberately **not** done automatically. `TESTING.md`: changing a golden is "a
-/// deliberate, human-reviewed act — never auto-approve a diff." Procedure is in the module doc above.
+/// Two changes are in the new golden, and only the second is from that pass:
+///
+///  1. **The golden had already been stale for ~90 commits** and this test had been failing unnoticed
+///     the whole time (it is `#[ignore]`d): measured SSIM 0.8873 *before* any of the 2026-07-29 work,
+///     because 43 file-touches to `src/{dungeon,world,health,light,mycelia,placement}` had landed
+///     since `ad098e5` — the dungeon behind the title card is simply a different world now.
+///  2. The **palette desaturation** (`docs/ui.md` §1.3). Title text, menu, worldspace health bars and
+///     selection rings all moved from phosphor/saturated green to warm neutral.
+///
+/// The capture that justified re-pinning also *found a bug*, which is the argument for having looked
+/// rather than just re-pinning: the UI had desaturated but `health_bar.wgsl` and
+/// `palette::SELECTION_RING` had not, so the bars and rings were left as the most saturated things on
+/// screen — chroma 0.55 and 0.90 against a HUD that had just dropped to 0.07. Every unit test passed.
+/// `health::the_health_bar_fill_matches_the_theme_and_stays_desaturated` and
+/// `health::the_selection_ring_is_bright_rather_than_green` now guard both.
+///
+/// Note also that the subtitle's em-dash in `"// SCP-9191 CONTAINMENT SITE — WATCH FEED"` renders
+/// rather than tofu-ing, because `ui::theme::load_fonts` loads the full
+/// `assets/fonts/FiraMono-Regular.ttf` instead of resolving to Bevy's embedded 95-codepoint
+/// `FiraMono-subset.ttf`. That shifts a line of centred text; it does not move geometry.
+///
+/// To re-pin again, use [`regenerate_golden_from_screenshot`] — and look at the frame first.
 #[test]
 #[ignore] // display-gated — see module doc.
 fn title_screen_matches_golden() {

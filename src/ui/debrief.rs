@@ -86,8 +86,8 @@ fn mirror_run_outcome(outcome: Res<RunOutcome>, mut next: ResMut<NextState<AppSt
 /// Dev hotkey (F10) — request a victory. Writes a *message* the sim's single writer consumes; it never
 /// touches [`RunOutcome`] itself, and a real defeat still beats it (`session::decide`).
 #[cfg(debug_assertions)]
-fn dev_force_victory(keys: Res<ButtonInput<KeyCode>>, mut force: MessageWriter<ForceVictory>) {
-    if keys.just_pressed(KeyCode::F10) {
+fn dev_force_victory(actions: crate::input::Actions, mut force: MessageWriter<ForceVictory>) {
+    if actions.just_pressed(crate::input::Action::DevForceVictory) {
         force.write(ForceVictory);
     }
 }

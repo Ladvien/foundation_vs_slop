@@ -53,7 +53,15 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
         // one that needs attention; a healthy squad's bars sit back and stop dominating the frame.
         let hurt = 1.0 - frac;
         let gain = mix(0.34, 1.0, hurt * hurt); // eased, so only real damage lights up
-        let fill = vec3<f32>(0.30, 0.85, 0.38) * gain;
+        // WARM-NEUTRAL, matching `ui::theme` (`docs/ui.md` §1.3). This was `vec3(0.30, 0.85, 0.38)`
+        // — a saturated green with a chroma of 0.55, which after the 2026-07-29 palette pass made the
+        // health bars the single most saturated thing on screen: *more* saturated than the phosphor
+        // accent that pass removed. Desaturating the HUD and leaving these behind would not have
+        // fixed the problem, only relocated it, and a live capture is what showed that.
+        //
+        // Kept in sync with `UiTheme::health_fill` by hand — a shader cannot read a Rust resource, and
+        // `health_bar_fill_matches_the_theme` in `src/health.rs` is the test that fails if they drift.
+        let fill = vec3<f32>(0.80, 0.78, 0.73) * gain;
         return vec4<f32>(fill, 1.0);
     }
     return vec4<f32>(0.12, 0.12, 0.12, 0.9); // empty track

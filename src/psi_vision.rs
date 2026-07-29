@@ -9,9 +9,22 @@
 //! rather than through line of sight (`squad_ai::perception`). The overlay is the visible face of a sense
 //! the simulation already had.
 //!
-//! Diegetic rather than a HUD readout, on purpose — spatial UI in Fagerholt & Lorentzon's taxonomy;
-//! removing non-diegetic screen elements measurably raises involvement (Kennedy et al., *Removing the
-//! HUD*, 2015, DOI 10.1145/2793107.2793120). Same argument as the in-world dialogue bubbles.
+//! Diegetic rather than a HUD readout, on purpose — "spatial" UI in Fagerholt & Lorentzon's taxonomy.
+//! Same argument as the in-world dialogue bubbles.
+//!
+//! **The evidence for that choice is contested, and this comment used to overstate it.** It read
+//! "removing non-diegetic screen elements measurably raises involvement", citing Iacovides, Cox,
+//! Kennedy, Cairns & Jennett 2015 (DOI 10.1145/2793107.2793120). That paper found the benefit **only
+//! for experts**, and only on the cognitive-involvement and control subscales — not challenge, not
+//! emotional involvement. Llanos & Jørgensen 2011 (DOI 10.26503/dl.v2011i1.514) ran the comparable
+//! study and found removal helped **no** respondent type. Peacocke et al. 2015
+//! (DOI 10.1109/gem.2015.7377211), the one quantitative head-to-head, found the winning "diegetic"
+//! display won on **precision and co-location with the point of gaze** — its diegetic *number* beat
+//! every HUD variant while its diegetic *bullets* did not, which is an argument about legibility, not
+//! diegesis. And the taxonomy itself is an unvalidated MSc thesis that never measured immersion.
+//!
+//! The design still stands on its own feet: the fields are spatial, so a spatial readout is the one
+//! that can show *where*. That is a better reason than the citation was.
 //!
 //! Cosmetic and windowed-only: everything here runs on `Update` and touches nothing the pinned sim reads,
 //! so it can never enter `snapshot_hash`.

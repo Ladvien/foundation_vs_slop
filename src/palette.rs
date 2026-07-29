@@ -55,9 +55,22 @@ pub const OUTFITS: [Color; 5] = [
     OUTFIT_ENGINEER,
 ];
 
-/// Selection ring — deliberately bright cyan-green, high-contrast against both drab gear and the
-/// near-monochrome floor, so unit selection stays legible no matter how desaturated the world grades.
-pub const SELECTION_RING: Color = Color::srgb(0.10, 1.00, 0.20);
+/// Selection ring — the mark on the operatives the player's next order will move.
+///
+/// **Bright, warm-neutral, and deliberately not green.** It was `srgb(0.10, 1.00, 0.20)`: a chroma of
+/// 0.90, the most saturated colour in the game. Two things made that wrong rather than merely loud:
+///
+///  1. `docs/lore/2026-07-12-scp-color-language.md` §7 — *"make color mean deviation, not danger"* —
+///     and saturated green is specifically the GOC's Type Green (reality benders) and the four-phase
+///     corruption arc. Painting *your own squad* in the anomaly colour inverts the whole grammar.
+///  2. `docs/ui.md` §1.3 — selection is a status, and status rides **luminance, never hue**. The
+///     roster chip's selection frame (`ui::hud::update_selection_marks`) already uses the UI accent
+///     for exactly this; a ring in a different colour would make one selection read as two things.
+///
+/// The old doc-comment's reasoning — that it must stay legible however desaturated the world grades —
+/// is *more* true now, not less, and brightness against a near-black floor is what delivers it. Hue
+/// was never what made it visible.
+pub const SELECTION_RING: Color = Color::srgb(0.96, 0.94, 0.88);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GOC damage-type matrix — the rival's color language for anomalous entities (§3).

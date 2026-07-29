@@ -54,8 +54,8 @@ struct AiLabel {
     text: String,
 }
 
-fn toggle_overlay(keys: Res<ButtonInput<KeyCode>>, mut overlay: ResMut<AiOverlay>) {
-    if keys.just_pressed(KeyCode::F3) {
+fn toggle_overlay(actions: crate::input::Actions, mut overlay: ResMut<AiOverlay>) {
+    if actions.just_pressed(crate::input::Action::DevAiOverlay) {
         overlay.on = !overlay.on;
         info!("squad AI overlay: {}", if overlay.on { "on" } else { "off" });
     }

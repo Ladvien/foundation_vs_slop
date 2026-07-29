@@ -49,6 +49,23 @@ pub struct FlowField {
 }
 
 impl FlowField {
+    /// A 1×1 field for tests that only need *a* field to hand around — e.g. the order queue, which
+    /// stores `Arc<FlowField>` and never looks inside one. Building a real field needs a `Dungeon`,
+    /// which is far more machinery than such a test is about.
+    ///
+    /// Test-only (the same shape as `squad_ai::role::default_behaviors_for_test`), so it is not a
+    /// second construction path in the shipped game.
+    #[cfg(test)]
+    pub(crate) fn placeholder_for_test() -> FlowField {
+        FlowField {
+            width: 1,
+            height: 1,
+            goal: IVec2::ZERO,
+            cost: vec![0],
+            flow: vec![Vec2::ZERO],
+        }
+    }
+
     #[inline]
     fn index(&self, c: IVec2) -> usize {
         crate::util::row_major(c, self.width)

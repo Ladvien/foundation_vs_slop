@@ -57,6 +57,7 @@ pub enum MenuState {
     Closed,
     Pause,
     Settings,
+    Controls,
     Roster,
     /// A modal dialogue exchange is in progress (see `crate::dialogue`). Blocking like the other
     /// overlays — it freezes the sim via [`sync_sim_blocked`] — but spawns no dim overlay of its own,
@@ -79,6 +80,10 @@ pub enum TitleMenu {
     #[default]
     Root,
     Settings,
+    /// The key list (`ui::controls_screen`). Reachable from the title as well as from the pause
+    /// menu because it is an **Access** surface — a player who cannot work the controls has not
+    /// started the game yet, so making them start one to read the keys is backwards.
+    Controls,
 }
 
 /// Generic "despawn on screen exit": remove every entity tagged with the screen-root marker `T`

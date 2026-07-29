@@ -113,6 +113,18 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                     },
                 );
 
+            // Controls — reachable BEFORE starting a run, deliberately. A player who cannot work
+            // the controls has not started the game yet (`ui::controls_screen`).
+            p.spawn(button_visual(&theme))
+                .with_children(|b| {
+                    b.spawn(text(&theme, &fonts, "CONTROLS", theme.font_body));
+                })
+                .observe(
+                    |_: On<Activate>, mut next: ResMut<NextState<TitleMenu>>| {
+                        next.set(TitleMenu::Controls);
+                    },
+                );
+
             // Quit
             p.spawn(button_visual(&theme))
                 .with_children(|b| {

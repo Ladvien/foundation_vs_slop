@@ -89,14 +89,14 @@ const _: () = assert!(PROPS.len() == 9, "update the unrolled prop_button! calls 
 
 /// F6 toggles the palette open/closed, spawning or despawning the panel.
 pub(super) fn toggle_editor(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mut state: ResMut<EditorState>,
     mut commands: Commands,
     roots: Query<Entity, With<EditorRoot>>,
     theme: Res<UiTheme>,
     fonts: Res<FontAssets>,
 ) {
-    if !keys.just_pressed(KeyCode::F6) {
+    if !actions.just_pressed(crate::input::Action::DevResearchRoom) {
         return;
     }
     state.open = !state.open;
@@ -679,26 +679,18 @@ pub(super) fn refresh_quantity_label(
     }
 }
 
-/// Space toggles the sim pause via the game's single-writer `UserPaused`, so you can stage a scene
-/// (spawn + arrange) with everything frozen, then resume to watch it run.
-///
-/// Space is **not** an exclusive hotkey: it is also `bevy_ui_widgets::Button`'s activation key (see
-/// `ui::widgets`), and the Ctrl+P note box takes raw text. Unguarded, one press both clicked the focused
-/// palette button and toggled the pause — two unrelated actions from one keystroke. When something else
-/// owns the keyboard, the press belongs to it.
-pub(super) fn toggle_pause_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    focus: Res<bevy::input_focus::InputFocus>,
-    note_input: Option<Res<crate::NoteInputActive>>,
-    mut paused: ResMut<crate::time_control::UserPaused>,
-) {
-    if focus.get().is_some() || note_input.is_some() {
-        return;
-    }
-    if keys.just_pressed(KeyCode::Space) {
-        paused.0 = !paused.0;
-    }
-}
+// The Space-to-pause hotkey that used to live here is **gone, not moved**.
+//
+// It existed because Space is not an exclusive key — it is also `bevy_ui_widgets::Button`'s
+// activation key and the Ctrl+P note box takes raw text — so unguarded, one press both clicked the
+// focused palette button and toggled the pause. This file grew a local `InputFocus` +
+// `NoteInputActive` guard for that.
+//
+// `Action::TogglePause` is now the shipping pause key (`time_control::read_speed_input`) and
+// `input::Actions` applies that same guard to *every* non-menu action, once. A second handler here
+// would be a second writer of `UserPaused` with its own copy of the toggle rule — exactly the shape
+// this codebase's one-writer discipline forbids. The pause label below reads `UserPaused` directly,
+// so the palette still tracks the state.
 
 /// Keep the palette's pause status label in sync with `UserPaused`.
 pub(super) fn refresh_pause_label(

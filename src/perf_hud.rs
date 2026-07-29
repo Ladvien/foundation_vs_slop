@@ -37,23 +37,33 @@ impl Plugin for PerfHudPlugin {
             SystemInformationDiagnosticsPlugin,
         ))
         .init_resource::<PerfHudVisible>()
-        .add_systems(Startup, spawn_perf_hud)
+        // After the on-disk face is loaded, so the overlay can use `FontAssets` rather than the
+        // embedded subset (see `spawn_perf_hud`).
+        .add_systems(Startup, spawn_perf_hud.after(crate::ui::theme::load_fonts))
         .add_systems(Update, (toggle_perf_hud, update_perf_hud).chain());
     }
 }
 
-/// Spawn the overlay once, hidden. A single UI text node in the embedded monospace font, top-left,
-/// on a dim panel for legibility over any scene.
-fn spawn_perf_hud(mut commands: Commands) {
+/// Spawn the overlay once, hidden. A single UI text node, top-left, on a dim panel for legibility
+/// over any scene.
+///
+/// **Uses `FontAssets`, not `Handle::default()`.** This was the one place in the codebase still
+/// reaching for Bevy's embedded face, which `ui::theme` documents as a **95-codepoint** subset that
+/// renders every non-ASCII glyph as tofu. It happened to look fine only because this overlay's copy
+/// is pure ASCII — i.e. it was one `·` away from being a bug, and nothing said so.
+fn spawn_perf_hud(mut commands: Commands, fonts: Res<crate::ui::theme::FontAssets>, theme: Res<crate::ui::theme::UiTheme>) {
     commands.spawn((
         PerfHudText,
         Text::new("perf: F4"),
         TextFont {
-            font: FontSource::Handle(Handle::default()),
+            font: FontSource::Handle(fonts.body.clone()),
             font_size: FontSize::Px(14.0),
             ..default()
         },
-        TextColor(Color::srgb(0.55, 1.0, 0.62)), // phosphor green, matches the UI theme accent
+        // From the theme rather than a copied literal — this used to hold the old phosphor green as
+        // a hardcoded `srgb(0.55, 1.0, 0.62)` with a comment claiming it "matches the UI theme
+        // accent", which stopped being true the moment the palette desaturated.
+        TextColor(theme.accent),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(6.0),
@@ -70,11 +80,11 @@ fn spawn_perf_hud(mut commands: Commands) {
 
 /// **F4** flips the overlay's visibility (its node `display`).
 fn toggle_perf_hud(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mut visible: ResMut<PerfHudVisible>,
     mut node: Query<&mut Node, With<PerfHudText>>,
 ) {
-    if !keys.just_pressed(KeyCode::F4) {
+    if !actions.just_pressed(crate::input::Action::DevPerfHud) {
         return;
     }
     visible.0 = !visible.0;

@@ -22,7 +22,7 @@ use super::layout::{self, HudRegions, Region};
 use super::rows::{sync_rows, Cell, Emphasis, Row, RowPanel};
 use super::state::{despawn_scoped, AppState};
 use super::theme::{glyph, FontAssets, UiTheme};
-use super::widgets::border_all;
+use super::widgets::{border_all, text_colored};
 use crate::research::{
     rank_by_information_gain, Experiment, HiddenParam, ResearchPosterior, Researched,
 };
@@ -56,12 +56,18 @@ impl Plugin for ResearchHudPlugin {
                 // registrations by system NAME: `ui::containment_hud` has a *different* `update_readout`
                 // that does take `Res<Dungeon>`, and the bare name collided. Neither system here takes a
                 // run-scoped resource, so there is nothing to gate.
-                (request_experiment, update_readout).run_if(in_state(AppState::Site)),
+                (request_experiment, update_readout, update_run_button)
+                    .run_if(in_state(AppState::Site)),
             );
     }
 }
 
-fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegions>) {
+fn spawn_panel(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    fonts: Res<FontAssets>,
+    regions: Res<HudRegions>,
+) {
     let root = (
         ResearchHudRoot,
         Node {
@@ -87,6 +93,35 @@ fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegi
             Node { flex_direction: FlexDirection::Column, ..default() },
             Pickable::IGNORE,
         ));
+        p.spawn((
+            RunTestButton,
+            bevy::ui_widgets::Button,
+            bevy::picking::hover::Hovered::default(),
+            Node {
+                padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_xs)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(theme.radius)),
+                margin: UiRect::top(Val::Px(theme.space_sm)),
+                ..default()
+            },
+            BackgroundColor(theme.panel),
+            border_all(theme.panel_border),
+        ))
+        .observe(
+            |_: On<bevy::ui_widgets::Activate>,
+             mut out: MessageWriter<crate::research::RunExperiment>| {
+                // The SAME intent message the key sends; `research::lab::run_experiments` is the
+                // single writer either way, so the click and the key cannot diverge.
+                out.write(crate::research::RunExperiment);
+            },
+        )
+        .with_children(|b| {
+            b.spawn((
+                RunTestLabel,
+                text_colored(&theme, &fonts, "", theme.font_body, theme.text),
+                Pickable::IGNORE,
+            ));
+        });
     });
 }
 
@@ -202,7 +237,10 @@ fn readout(
     // …and, right beside it, how far the next action would MOVE it. That pairing is the point: the
     // level alone tells the player where they are, the delta tells them whether the next test is
     // worth running, which is the decision this panel exists to support.
-    out.push(Row::header("[R] RUN THE TOP TEST"));
+    // The header names the SECTION; the key lives on the real button below the panel. It used to read
+    // `[R] RUN THE TOP TEST` — a header styled like a control that could not be clicked, which is the
+    // "row of things that look like buttons and are not" failure `ui::verb_bar`'s header names.
+    out.push(Row::header("OFFERED TESTS"));
     out.extend(rows);
     out
 }
@@ -210,14 +248,88 @@ fn readout(
 /// Ask the bench to run the top-ranked test on the studied specimen.
 ///
 /// Only *asks* — `research::lab::run_experiments` decides and is the single writer, the same discipline
-/// `session::ForceVictory` and `parasite::CureRequest` use. `R` is free: the digits are the time-control
-/// rungs, `Q`/`E`/`WASD` the camera, and `C`/`Z`/`X`/`F` the containment verbs.
+/// `session::ForceVictory` and `parasite::CureRequest` use. The key itself lives in `crate::input`,
+/// which is also what proves it does not collide with anything that can be live at the same time.
 fn request_experiment(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mut out: MessageWriter<crate::research::RunExperiment>,
 ) {
-    if keys.just_pressed(KeyCode::KeyR) {
+    if actions.just_pressed(crate::input::Action::RunTopExperiment) {
         out.write(crate::research::RunExperiment);
+    }
+}
+
+/// The clickable "run the top test" button. Spawned once, outside the `RowPanel` subtree, because
+/// `rows::sync_rows` despawns that subtree whenever the offers change — which running a test does.
+#[derive(Component)]
+pub struct RunTestButton;
+
+/// Its label node, so the text can be rewritten without respawning the button.
+#[derive(Component)]
+pub struct RunTestLabel;
+
+/// What the button reads. Pure, states its key, and distinguishes "nothing left to learn" from a dead
+/// control — `docs/ui.md` §1.4's rule that an unmet condition is an instruction.
+pub fn run_test_label(offers: usize) -> String {
+    let key = crate::input::key_name(
+        crate::input::Action::RunTopExperiment.default_binding().primary.key,
+    )
+    .unwrap_or("?");
+    if offers == 0 {
+        format!("{key}  NO INFORMATIVE TEST REMAINS")
+    } else {
+        format!("{key}  RUN THE TOP TEST")
+    }
+}
+
+/// Keep the run button's label and ink in step with whether a test is on offer.
+fn update_run_button(
+    theme: Res<UiTheme>,
+    specimens: Query<(&crate::containment::Specimen, &ResearchPosterior, Option<&Researched>)>,
+    studied: Res<crate::research::StudySubject>,
+    curriculum: Res<crate::research::Curriculum>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<RunTestLabel>>,
+    mut buttons: Query<
+        (&bevy::picking::hover::Hovered, &mut BackgroundColor, &mut BorderColor),
+        With<RunTestButton>,
+    >,
+) {
+    // "Is a test on offer" is derived the SAME way the panel derives it — through
+    // `rank_by_information_gain` on the studied specimen — so the button cannot promise a test the
+    // panel does not list, or refuse one it does.
+    let offers = studied
+        .0
+        .and_then(|_| specimens.iter().find(|(_, _, done)| done.is_none()))
+        .map(|(spec, post, _)| {
+            let battery = curriculum.experiments(spec.subject);
+            rank_by_information_gain(&battery, post).len()
+        })
+        .unwrap_or(0);
+    let want = run_test_label(offers);
+    for (mut text, mut color) in &mut labels {
+        if text.0 != want {
+            text.0 = want.clone();
+        }
+        let ink = if offers > 0 { theme.text } else { theme.text_muted };
+        if color.0 != ink {
+            color.0 = ink;
+        }
+    }
+    for (hovered, mut bg, mut border) in &mut buttons {
+        let want_bg = if hovered.0 && offers > 0 {
+            theme.panel_border.with_alpha(0.16)
+        } else {
+            theme.panel
+        };
+        let want_border =
+            if offers > 0 { theme.panel_border } else { theme.panel_border.with_alpha(0.25) };
+        if bg.0 != want_bg {
+            bg.0 = want_bg;
+        }
+        let want = border_all(want_border);
+        if border.top != want.top {
+            *border = want;
+        }
     }
 }
 
@@ -287,6 +399,21 @@ mod tests {
     /// about. The gated case has its own test rather than an argument threaded through all of them.
     fn ungated(p: &ResearchPosterior, exps: &[Experiment], finished: bool) -> Vec<Row> {
         readout(crate::knowledge::Subject::ComfortBlob, p, exps, finished, &[])
+    }
+
+    #[test]
+    fn the_run_button_states_its_key_and_when_there_is_nothing_left() {
+        // The `[R] RUN THE TOP TEST` *header* was a control-looking row that could not be clicked.
+        // Now the header names the section and this button carries the verb — so it must state the key
+        // (operability, `docs/ui.md` §4.2) and name the exhausted state rather than going dead.
+        let none = run_test_label(0);
+        let some = run_test_label(2);
+        for l in [&none, &some] {
+            assert!(!l.trim().is_empty());
+            assert!(l.starts_with('R'), "{l} must lead with its key");
+        }
+        assert!(none.contains("NO INFORMATIVE TEST REMAINS"), "{none}");
+        assert_ne!(none, some);
     }
 
     #[test]

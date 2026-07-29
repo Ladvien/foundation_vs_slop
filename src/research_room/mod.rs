@@ -73,9 +73,9 @@ impl Plugin for ResearchRoomPlugin {
                     enter_room_state.run_if(in_state(AppState::Title)),
                     // F6 toggles the spawn palette (drop props/creatures / clear room).
                     editor::toggle_editor,
-                    // Space pauses/resumes the sim (stage a scene frozen, then run it); the palette's
-                    // status label tracks the pause state.
-                    editor::toggle_pause_hotkey,
+                    // Space pauses/resumes the sim (stage a scene frozen, then run it) via the game's
+                    // one pause key — `time_control::read_speed_input`, which this room does not
+                    // duplicate. The palette's status label tracks the resulting state.
                     editor::refresh_pause_label,
                     editor::refresh_quantity_label,
                 )

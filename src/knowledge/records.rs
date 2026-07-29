@@ -215,45 +215,117 @@ pub struct RecordsPanel;
 #[derive(Component)]
 pub struct RecordsReadout;
 
-/// What the archive screen says. Pure, so the wording is testable without an `App`.
-/// The archive readout.
+/// A request to act on the archive, from **either** input route — the key or the panel button.
 ///
-/// `disprovable` is how many filed reports the squad's own firsthand experience contradicts — i.e. what
-/// `[J]` would pull right now. Surfaced as a **count of the verb's effect** rather than as a bare
-/// keybind, because FVS-L-1's rule applies here too: an unmet clause is an *instruction*. "NOTHING TO
-/// CURATE" and "PULL 2 DISPROVEN" are different situations and the player must be able to tell them
-/// apart without pressing the key to find out.
-pub fn records_text(records: &Records, unfiled: usize, disprovable: usize) -> String {
-    let mut out = String::from("RECORDS OFFICE\n");
-    out.push_str(&format!("[K] FILE {unfiled} UNWRITTEN FINDING(S)\n"));
-    if disprovable > 0 {
-        out.push_str(&format!("[J] PULL {disprovable} REPORT(S) YOU HAVE DISPROVEN\n\n"));
-    } else if records.filed.iter().any(|r| r.author == PHANTOM_AUTHOR) {
-        // The whole point of the endgame, stated as an instruction. A player looking at a report signed
-        // by nobody must be told the counter-play is *an expedition*, not a keypress they are missing.
-        out.push_str("[J] CURATE — NOTHING HERE IS DISPROVEN YET.\n");
-        out.push_str("    GO AND SEE THE THING ITSELF; HEARSAY CANNOT EDIT THE ARCHIVE.\n\n");
-    } else {
-        out.push_str("[J] CURATE — NOTHING TO PULL.\n\n");
-    }
+/// Two variants and two readers: [`records_input`] files, `antagonist::curate_archive` purges. Each
+/// `MessageReader` has its own cursor, so one message type serving both costs nothing and keeps the
+/// click and the key on one path per verb — the `selection::ArmRequest` discipline.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveRequest {
+    /// Write the squad's firsthand findings onto the shelf.
+    File,
+    /// Pull the reports the squad's own experience contradicts.
+    Curate,
+}
+
+/// The archive readout, as rows.
+///
+/// `disprovable` is how many filed reports the squad's own firsthand experience contradicts — i.e.
+/// what curating would pull right now. Surfaced as a **count of the verb's effect** rather than as a
+/// bare keybind, because FVS-L-1's rule applies here too: an unmet clause is an *instruction*.
+/// "NOTHING TO CURATE" and "PULL 2 DISPROVEN" are different situations and the player must be able to
+/// tell them apart without pressing the key to find out.
+///
+/// Rows rather than one `\n`-joined `String`. The old form had a single `TextColor`, so a report
+/// signed `?? UNATTRIBUTED ??` — the entire tell of the SCP-9191 endgame — rendered in exactly the
+/// same ink as the genuine ones. The player was expected to *read* for it. It is now the loud row.
+pub fn records_rows(
+    records: &Records,
+    unfiled: usize,
+    disprovable: usize,
+) -> Vec<crate::ui::rows::Row> {
+    use crate::ui::rows::{Emphasis, Row};
+    let mut rows = vec![Row::header("RECORDS OFFICE")];
+
     if records.filed.is_empty() {
         // Distinct from "nothing to file": an empty archive is a real state, and saying so tells the
         // player the office works rather than leaving them looking at a blank panel.
-        out.push_str("THE ARCHIVE IS EMPTY.\n");
-        return out;
+        rows.push(Row::note("THE ARCHIVE IS EMPTY."));
+        return rows;
     }
+    if disprovable == 0 && records.filed.iter().any(|r| r.author == PHANTOM_AUTHOR) {
+        // The whole point of the endgame, stated as an instruction. A player looking at a report
+        // signed by nobody must be told the counter-play is *an expedition*, not a keypress they are
+        // missing.
+        rows.push(
+            Row::note("GO AND SEE THE THING ITSELF; HEARSAY CANNOT EDIT THE ARCHIVE.")
+                .with_emphasis(Emphasis::Normal),
+        );
+    }
+    let _ = unfiled; // The counts live on the buttons now — see `archive_button_label`.
+
     for r in &records.filed {
-        // A planted report is named as *unattributed*, not silently rendered with a nonsense index.
-        // The player has to be able to SEE the thing they are meant to curate.
-        let by = if r.author == PHANTOM_AUTHOR {
-            "?? UNATTRIBUTED ??".to_string()
+        // A planted report is named as *unattributed*, not silently rendered with a nonsense index,
+        // and it is now the brightest row in the panel. The player has to be able to SEE the thing
+        // they are meant to curate.
+        let row = if r.author == PHANTOM_AUTHOR {
+            Row::unmet(
+                format!("{:?}: {:?}", r.subject, r.claim),
+                "?? UNATTRIBUTED ??".to_string(),
+            )
         } else {
-            format!("OPERATIVE {}", r.author)
+            Row::met(
+                format!("{:?}: {:?}", r.subject, r.claim),
+                format!("OP {} @ t{}", r.author, r.filed),
+            )
         };
-        out.push_str(&format!("  {:?}: {:?}  — filed by {by} @ t{}\n", r.subject, r.claim, r.filed));
+        rows.push(row);
     }
-    out
+    rows
 }
+
+/// What one archive button reads. Pure, states its key, and **names the count** so the two verbs are
+/// distinguishable before they are pressed.
+pub fn archive_button_label(req: ArchiveRequest, unfiled: usize, disprovable: usize) -> String {
+    let (action, verb, n) = match req {
+        ArchiveRequest::File => {
+            (crate::input::Action::FileFindings, "FILE", unfiled)
+        }
+        ArchiveRequest::Curate => {
+            (crate::input::Action::CurateArchive, "PULL", disprovable)
+        }
+    };
+    let key = crate::input::key_name(action.default_binding().primary.key)
+        .and_then(|k| k.chars().next())
+        .unwrap_or('?');
+    if n == 0 {
+        // Never a bare disabled verb. Which *nothing* this is matters: nothing to write up is a
+        // different instruction from nothing to disprove.
+        let why = match req {
+            ArchiveRequest::File => "NOTHING UNWRITTEN",
+            ArchiveRequest::Curate => "NOTHING DISPROVEN",
+        };
+        format!("{key}  {verb} — {why}")
+    } else {
+        let noun = match req {
+            ArchiveRequest::File => "UNWRITTEN FINDING(S)",
+            ArchiveRequest::Curate => "REPORT(S) YOU HAVE DISPROVEN",
+        };
+        format!("{key}  {verb} {n} {noun}")
+    }
+}
+
+/// One clickable archive button, tagged with the request it sends.
+///
+/// **Spawned once and never rebuilt**, for the reason `site::review::BuyButton` records:
+/// `rows::sync_rows` despawns a panel's children whenever its content changes, and filing changes it,
+/// so a button inside that subtree would be destroyed under a cursor mid-click.
+#[derive(Component, Clone, Copy)]
+pub struct ArchiveButton(pub ArchiveRequest);
+
+/// An archive button's label node, so the counts can be rewritten without respawning the button.
+#[derive(Component, Clone, Copy)]
+pub struct ArchiveButtonLabel(pub ArchiveRequest);
 
 fn spawn_panel(
     mut commands: Commands,
@@ -268,11 +340,15 @@ fn spawn_panel(
             RecordsPanel,
             Node {
                 flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(theme.space_xs),
                 padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
+                min_width: Val::Px(340.0),
                 ..default()
             },
             BackgroundColor(theme.panel),
             crate::ui::widgets::border_all(theme.panel_border),
+            // The container ignores clicks; the buttons below are individually pickable, which is
+            // what `Pickable` being per-entity buys.
             Pickable::IGNORE,
     );
     let Some(mut ec) = crate::ui::layout::panel_in(
@@ -285,11 +361,60 @@ fn spawn_panel(
         return;
     };
     ec.with_children(|p| {
-            p.spawn((
-                RecordsReadout,
-                crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
-            ));
+        // The shelf scrolls: an archive grows without bound across a campaign, and a panel that
+        // silently ran off the bottom of the screen would hide exactly the planted report the player
+        // is hunting. Same `ScrollArea` + `Overflow::scroll_y` pair `site_hud`/`research_hud` use.
+        p.spawn((
+            RecordsReadout,
+            crate::ui::rows::RowPanel::default(),
+            bevy::ui_widgets::ScrollArea::default(),
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(theme.space_xs),
+                max_height: Val::Px(220.0),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+        ));
+
+        // The action half: two stable buttons.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(theme.space_xs),
+                margin: UiRect::top(Val::Px(theme.space_sm)),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|col| {
+            for req in [ArchiveRequest::File, ArchiveRequest::Curate] {
+                col.spawn((
+                    ArchiveButton(req),
+                    bevy::ui_widgets::Button,
+                    bevy::picking::hover::Hovered::default(),
+                    Node {
+                        padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_xs)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(theme.radius)),
+                        ..default()
+                    },
+                    BackgroundColor(theme.panel),
+                    crate::ui::widgets::border_all(theme.panel_border),
+                ))
+                .observe(move |_: On<bevy::ui_widgets::Activate>, mut out: MessageWriter<ArchiveRequest>| {
+                    out.write(req);
+                })
+                .with_children(|b| {
+                    b.spawn((
+                        ArchiveButtonLabel(req),
+                        crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
+                        Pickable::IGNORE,
+                    ));
+                });
+            }
         });
+    });
 }
 
 /// How many firsthand findings are not yet on the shelf.
@@ -299,13 +424,17 @@ fn unfiled_count(table: &super::SquadKnowledge, records: &Records) -> usize {
 }
 
 fn records_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
+    mut requests: MessageReader<ArchiveRequest>,
     table: Res<super::SquadKnowledge>,
     clock: Option<Res<crate::session::RunClock>>,
     mut records: ResMut<Records>,
 ) {
-    // `K` for the archive — free alongside `R` (research), `B`/`N`/`M` (requisition) and `L` (roster).
-    if keys.just_pressed(KeyCode::KeyK) {
+    // `crate::input::Action` owns the binding; `input::the_key_space_has_no_collisions` is what
+    // keeps this key from quietly colliding with another. Every request is drained so an unread one
+    // cannot be redelivered next frame and file twice.
+    let clicked = requests.read().any(|r| *r == ArchiveRequest::File);
+    if clicked || actions.just_pressed(crate::input::Action::FileFindings) {
         let tick = clock.map(|c| c.ticks).unwrap_or(0);
         let n = file_squad_findings(&table, &mut records, tick);
         if n > 0 {
@@ -315,19 +444,72 @@ fn records_input(
 }
 
 fn update_panel(
+    mut commands: Commands,
+    theme: Res<crate::ui::theme::UiTheme>,
+    fonts: Res<crate::ui::theme::FontAssets>,
     records: Res<Records>,
     table: Res<super::SquadKnowledge>,
-    mut text_q: Query<&mut Text, With<RecordsReadout>>,
+    mut panels: Query<(Entity, &mut crate::ui::rows::RowPanel), With<RecordsReadout>>,
+    mut labels: Query<(&ArchiveButtonLabel, &mut Text)>,
 ) {
     // Counted through the SAME function the verb uses, on a clone, so the panel cannot promise a purge
-    // `J` would not perform. Two implementations of "what is disprovable" would drift, and the one the
-    // player reads is the one that would be wrong.
+    // the key would not perform. Two implementations of "what is disprovable" would drift, and the one
+    // the player reads is the one that would be wrong.
     let mut probe = records.clone();
     let disprovable = crate::antagonist::purge_disproven(&table, &mut probe);
-    let line = records_text(&records, unfiled_count(&table, &records), disprovable);
-    for mut t in &mut text_q {
-        if t.0 != line {
-            t.0 = line.clone();
+    let unfiled = unfiled_count(&table, &records);
+    let rows = records_rows(&records, unfiled, disprovable);
+    for (entity, mut panel) in &mut panels {
+        crate::ui::rows::sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows.clone());
+    }
+    for (label, mut text) in &mut labels {
+        let want = archive_button_label(label.0, unfiled, disprovable);
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+}
+
+/// Hover + has-anything-to-do styling for the archive buttons. Luminance and border only, never hue.
+fn style_archive_buttons(
+    theme: Res<crate::ui::theme::UiTheme>,
+    records: Res<Records>,
+    table: Res<super::SquadKnowledge>,
+    mut buttons: Query<(
+        &ArchiveButton,
+        &bevy::picking::hover::Hovered,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut labels: Query<(&ArchiveButtonLabel, &mut TextColor)>,
+) {
+    let mut probe = records.clone();
+    let disprovable = crate::antagonist::purge_disproven(&table, &mut probe);
+    let unfiled = unfiled_count(&table, &records);
+    let live = |req: ArchiveRequest| match req {
+        ArchiveRequest::File => unfiled > 0,
+        ArchiveRequest::Curate => disprovable > 0,
+    };
+    for (btn, hovered, mut bg, mut border) in &mut buttons {
+        let want_bg = if hovered.0 && live(btn.0) {
+            theme.panel_border.with_alpha(0.16)
+        } else {
+            theme.panel
+        };
+        let want_border =
+            if live(btn.0) { theme.panel_border } else { theme.panel_border.with_alpha(0.25) };
+        if bg.0 != want_bg {
+            bg.0 = want_bg;
+        }
+        let want = crate::ui::widgets::border_all(want_border);
+        if border.top != want.top {
+            *border = want;
+        }
+    }
+    for (label, mut color) in &mut labels {
+        let want = if live(label.0) { theme.text } else { theme.text_muted };
+        if color.0 != want {
+            color.0 = want;
         }
     }
 }
@@ -340,6 +522,9 @@ impl Plugin for RecordsPlugin {
         use crate::ui::state::{despawn_scoped, AppState};
         app.init_resource::<Records>()
             .add_message::<SeedMisinformation>()
+            // The clickable FILE / PULL buttons send this; `records_input` and
+            // `antagonist::curate_archive` are its two readers, one verb each.
+            .add_message::<ArchiveRequest>()
             .add_systems(Update, seed_misinformation)
             .add_systems(
                 OnEnter(crate::session::RunState::Active),
@@ -356,7 +541,8 @@ impl Plugin for RecordsPlugin {
             .add_systems(OnExit(AppState::Site), despawn_scoped::<RecordsPanel>)
             .add_systems(
                 Update,
-                (records_input, update_panel).run_if(in_state(AppState::Site)),
+                (records_input, update_panel, style_archive_buttons)
+                    .run_if(in_state(AppState::Site)),
             );
     }
 }
@@ -443,9 +629,25 @@ mod tests {
             author: PHANTOM_AUTHOR,
             filed: 3,
         });
-        let out = records_text(&records, 0, 0);
-        assert!(out.contains("UNATTRIBUTED"), "the tell must be visible: {out}");
-        assert!(!out.contains(&PHANTOM_AUTHOR.to_string()), "never print the raw sentinel: {out}");
+        let rows = records_rows(&records, 0, 0);
+        let planted = rows
+            .iter()
+            .find(|r| r.cells.iter().any(|c| matches!(c, crate::ui::rows::Cell::Value(v) if v.contains("UNATTRIBUTED"))))
+            .expect("the tell must be visible");
+        // STRONGER than the string test it replaces: the forged report is now the *loud* row, not
+        // merely present. As one `\n`-joined `Text` node the panel had a single `TextColor`, so the
+        // entire tell of the SCP-9191 endgame rendered in the same ink as the genuine reports and the
+        // player was expected to read for it.
+        assert_eq!(
+            planted.emphasis,
+            crate::ui::rows::Emphasis::Alert,
+            "the forged report must be the brightest thing in the panel"
+        );
+        let printed = format!("{rows:?}");
+        assert!(
+            !printed.contains(&PHANTOM_AUTHOR.to_string()),
+            "never print the raw sentinel: {printed}"
+        );
     }
 
     #[test]
@@ -481,15 +683,63 @@ mod tests {
 
     #[test]
     fn the_panel_distinguishes_an_empty_archive_from_nothing_to_file() {
-        let empty = records_text(&Records::default(), 0, 0);
-        assert!(empty.contains("THE ARCHIVE IS EMPTY"), "{empty}");
-        assert!(empty.contains("FILE 0 UNWRITTEN"), "{empty}");
+        let empty = records_rows(&Records::default(), 0, 0);
+        let labels: Vec<&str> = empty.iter().filter_map(|r| r.label()).collect();
+        assert!(labels.iter().any(|l| l.contains("THE ARCHIVE IS EMPTY")), "{labels:?}");
 
         let mut records = Records::default();
         records.file(Report { subject: Subject::Crabs, claim: Claim::Lethal, author: 2, filed: 5 });
-        let filled = records_text(&records, 3, 0);
-        assert!(!filled.contains("THE ARCHIVE IS EMPTY"), "{filled}");
-        assert!(filled.contains("OPERATIVE 2"), "a report must be attributable: {filled}");
-        assert!(filled.contains("FILE 3 UNWRITTEN"), "{filled}");
+        let filled = records_rows(&records, 3, 0);
+        let printed = format!("{filled:?}");
+        assert!(!printed.contains("THE ARCHIVE IS EMPTY"));
+        assert!(printed.contains("OP 2"), "a report must be attributable: {printed}");
+    }
+
+    #[test]
+    fn each_archive_button_names_its_key_its_verb_and_its_count() {
+        // These are clickable now, so `docs/ui.md` §4.2's operability lens applies in both directions:
+        // the button must still state the key, and the key must still do what the button says.
+        for req in [ArchiveRequest::File, ArchiveRequest::Curate] {
+            let idle = archive_button_label(req, 0, 0);
+            let busy = archive_button_label(req, 3, 2);
+            for l in [&idle, &busy] {
+                assert!(!l.trim().is_empty());
+                let key = l.chars().next().expect("non-empty");
+                assert!(key.is_ascii_alphanumeric(), "{l} must lead with its key");
+            }
+            assert_ne!(idle, busy, "{req:?} reads the same whether or not there is work");
+            assert!(busy.contains(if req == ArchiveRequest::File { "3" } else { "2" }), "{busy}");
+        }
+    }
+
+    #[test]
+    fn an_idle_verb_says_which_nothing_it_is() {
+        // "Nothing to write up" and "nothing to disprove" are different situations with different
+        // responses, and FVS-L-1's rule is that an unmet condition is an INSTRUCTION. A shared
+        // greyed-out label would collapse them.
+        let file = archive_button_label(ArchiveRequest::File, 0, 0);
+        let curate = archive_button_label(ArchiveRequest::Curate, 0, 0);
+        assert!(file.contains("NOTHING UNWRITTEN"), "{file}");
+        assert!(curate.contains("NOTHING DISPROVEN"), "{curate}");
+        assert_ne!(file, curate);
+    }
+
+    #[test]
+    fn a_planted_report_with_nothing_disproven_names_the_route_out() {
+        // The endgame's instruction. A player staring at a signature belonging to nobody must be told
+        // the counter-play is an expedition, not a keypress they have failed to find.
+        let mut records = Records::default();
+        records.file(Report {
+            subject: Subject::Parasite,
+            claim: Claim::Harmless,
+            author: PHANTOM_AUTHOR,
+            filed: 1,
+        });
+        let rows = records_rows(&records, 0, 0);
+        let labels: Vec<&str> = rows.iter().filter_map(|r| r.label()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("GO AND SEE THE THING ITSELF")),
+            "the route out must be stated: {labels:?}"
+        );
     }
 }

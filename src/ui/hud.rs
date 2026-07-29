@@ -1,6 +1,9 @@
 //! In-game HUD (clear overlay). Reads collision-free sim state only:
-//! - **Squad roster strip** (bottom-left): one chip per [`Unit`] with its role letter, [`Outfit`]
-//!   colour, and live health.
+//! - **Squad roster strip** (bottom-left) — also the **selection readout**: one chip per [`Unit`]
+//!   with its role letter, [`Outfit`] colour, live health, a frame while selected, and a tag line
+//!   carrying control-group membership and queued-order count. It gained the last three when
+//!   `crate::selection` made selection real; under the old always-selected scheme there was nothing
+//!   for a chip to say about it.
 //! - **Boss bar** (top-centre): appears once the Smiley boss is engaged; shows HP and its hazard tier.
 //! - **Time/speed readout** (bottom-right): the [`GameSpeed`] rung, or `PAUSED`.
 //!
@@ -51,9 +54,54 @@ pub struct HudRoot;
 #[derive(Component)]
 pub struct RosterStripRoot;
 
+/// A chip's outfit-colour swatch — the one part of a roster chip that is **pure reinforcement**.
+///
+/// This is what `RosterDetail::Compact` actually removes. Before it existed, `Compact` was a lie:
+/// `apply_hud_settings` matched only `Hidden` vs everything else, so two of the three density rungs
+/// rendered identically while `H` cycled all three and the settings menu named all three.
+///
+/// It is the right thing to cut first. `docs/ui.md` §2 draws the rule from Iacovides et al. 2015 —
+/// what a lower density sheds is what competes for **attention and agency**, never information the
+/// run depends on. The swatch is decoration on top of a role letter that already identifies the
+/// operative (the whole argument in this module's header), so removing it costs no channel; the
+/// health bar and the letter stay at every visible rung, which is what keeps the §2 promise that a
+/// run is completable at the minimal preset.
+#[derive(Component)]
+pub struct RosterSwatch;
+
 /// The boss-bar container (shown only while the boss is engaged + `show_boss_bar`).
 #[derive(Component)]
 pub struct BossBarRoot;
+
+/// A roster chip, bound to the operative it describes.
+///
+/// The strip became the **selection readout** when `crate::selection` made selection real. Before
+/// that, every unit was permanently selected, so a chip could not say anything about selection —
+/// there was nothing to say.
+#[derive(Component)]
+pub struct RosterChipOf {
+    pub unit: Entity,
+}
+
+/// A chip's bottom line: control-group membership and queued orders.
+///
+/// **This line is not decoration — it is what makes control groups usable.** Cockburn, Gutwin, Scarr
+/// & Malacria 2014 (*Supporting Novice to Expert Transitions in User Interfaces*, ACM Comput. Surv.
+/// 47(2), DOI 10.1145/2659796) document the intramodal/intermodal failure this addresses: expert
+/// mechanisms exist and go unused because users plateau on the slow method, and no single moment
+/// hurts enough to justify switching. A `Ctrl+2` that produced **no visible effect whatsoever** is
+/// the worst case of that — the player cannot even confirm the binding took, so there is nothing to
+/// build a habit on. The label is the feedback that closes the loop.
+///
+/// It carries the queued-order count for the same reason: shift-right-click is otherwise a command
+/// with no acknowledgement, and `selection::MAX_QUEUED_ORDERS` is a cap the player must be able to
+/// see themselves approaching rather than discover by having an order silently refused.
+#[derive(Component)]
+pub struct RosterChipTag {
+    pub unit: Entity,
+    /// Stable squad index, which is what [`crate::selection::ControlGroups`] stores.
+    pub member: usize,
+}
 
 /// A health-bar fill node bound to the unit whose health it shows.
 #[derive(Component)]
@@ -77,6 +125,11 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
+        // `update_selection_marks` reads `ControlGroups` non-optionally. `SelectionPlugin` owns it and
+        // is harness-visible, so it is normally present — but a missing `Res<T>` is a panic in Bevy
+        // 0.19 (`docs/ui.md` §5, trap 2), and the rule is that the plugin registering a reader claims
+        // the resource. `init_resource` is idempotent, so the real one still wins.
+        app.init_resource::<crate::selection::ControlGroups>();
         app.add_systems(
             OnEnter(AppState::InGame),
             spawn_hud.after(layout::spawn_frame),
@@ -89,6 +142,7 @@ impl Plugin for HudPlugin {
             Update,
             (
                 update_health_fills,
+                update_selection_marks,
                 update_speed_text,
                 update_boss_bar,
                 cycle_density_key,
@@ -144,7 +198,7 @@ fn spawn_hud(
     theme: Res<UiTheme>,
     fonts: Res<FontAssets>,
     regions: Res<HudRegions>,
-    units: Query<(Entity, &Outfit, &RoleId), With<Unit>>,
+    units: Query<(Entity, &Outfit, &RoleId, &crate::squad::SquadMember), With<Unit>>,
 ) {
     // --- Boss bar (top-centre), hidden until engaged ---
     let boss = (
@@ -201,15 +255,23 @@ fn spawn_hud(
         ec.with_children(|strip| {
             // SORT-OK: presentation only. Chip order is cosmetic, nothing downstream reads it, and
             // this panel writes no state the sim or `snapshot_hash` can observe.
-            for (unit, outfit, role) in &units {
+            for (unit, outfit, role, member) in &units {
                 strip
                     .spawn((
+                        // The chip is now the SELECTION readout as well as the health readout, so it
+                        // is tagged with whose it is (see `RosterChipOf`).
+                        RosterChipOf { unit },
                         Node {
                             flex_direction: FlexDirection::Column,
                             align_items: AlignItems::Center,
                             row_gap: Val::Px(theme.space_xs),
+                            padding: UiRect::all(Val::Px(2.0)),
+                            border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(theme.radius)),
                             ..default()
                         },
+                        // Transparent until selected — `update_selection_marks` supplies the border.
+                        border_all(Color::NONE),
                         Pickable::IGNORE,
                     ))
                     .with_children(|chip| {
@@ -235,7 +297,10 @@ fn spawn_hud(
                                 Pickable::IGNORE,
                             ));
                         });
+                        // The outfit swatch — pure reinforcement, and therefore the first thing the
+                        // density preset drops (see `RosterSwatch`).
                         chip.spawn((
+                            RosterSwatch,
                             Node {
                                 width: Val::Px(28.0),
                                 height: Val::Px(3.0),
@@ -252,6 +317,13 @@ fn spawn_hud(
                                     Pickable::IGNORE,
                                 ));
                             });
+                        // Control-group membership and queued orders. This line is why the strip is
+                        // now a selection readout — see `RosterChipTag`.
+                        chip.spawn((
+                            RosterChipTag { unit, member: member.0 },
+                            text_colored(&theme, &fonts, "", theme.font_body * 0.7, theme.text_muted),
+                            Pickable::IGNORE,
+                        ));
                     });
             }
         });
@@ -284,6 +356,62 @@ fn spawn_hud(
 }
 
 /// Resize each bound health-fill node to its unit's current health fraction.
+/// What a chip's tag line says: which control groups the operative is in, and how many orders are
+/// queued behind their current one.
+///
+/// Pure, so the wording is testable without a world. Empty when there is nothing to report — a chip
+/// showing `-` or `0` for every operative all run long would be noise, and `docs/ui.md` §1.2 is
+/// explicit that noise is not neutral. That is the one case where saying nothing is right: this is a
+/// *supplement* to a chip that already reads (letter + health), not a panel that could look broken.
+pub fn chip_tag_text(groups: &[usize], queued: usize) -> String {
+    let mut parts = Vec::new();
+    if !groups.is_empty() {
+        // Digits only. At `font_body * 0.7` under a 28 px chip there is room for a couple of
+        // characters, and Rosenholtz's point applies to a chip read in peripheral vision too: gross
+        // shape survives, detail does not.
+        parts.push(groups.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(""));
+    }
+    if queued > 0 {
+        // `+N` rather than a bare count, so it reads as "more to come" rather than as a group number.
+        parts.push(format!("+{queued}"));
+    }
+    parts.join(" ")
+}
+
+/// Mark the selected operatives, and keep each chip's tag line current.
+///
+/// The border is the selection mark: **luminance and a frame, never a hue change**, the same encoding
+/// the verb chips use (`docs/ui.md` §1.3), so it is findable in peripheral vision while the player is
+/// looking at the world.
+fn update_selection_marks(
+    theme: Res<UiTheme>,
+    groups: Res<crate::selection::ControlGroups>,
+    selected: Query<(), With<crate::squad::Selected>>,
+    queues: Query<&crate::selection::OrderQueue>,
+    mut chips: Query<(&RosterChipOf, &mut BorderColor)>,
+    mut tags: Query<(&RosterChipTag, &mut Text)>,
+) {
+    for (chip, mut border) in &mut chips {
+        let want = if selected.contains(chip.unit) {
+            crate::ui::widgets::border_all(theme.accent)
+        } else {
+            // `Color::NONE`, not the panel border: an unselected chip must not read as a weakly
+            // selected one. Selection is binary and the mark has to be too.
+            crate::ui::widgets::border_all(Color::NONE)
+        };
+        if border.top != want.top {
+            *border = want;
+        }
+    }
+    for (tag, mut text) in &mut tags {
+        let queued = queues.get(tag.unit).map(|q| q.len()).unwrap_or(0);
+        let want = chip_tag_text(&groups.labels_for(tag.member), queued);
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+}
+
 fn update_health_fills(healths: Query<&Health>, mut fills: Query<(&HealthFillOf, &mut Node)>) {
     for (bound, mut node) in &mut fills {
         let frac = healths.get(bound.unit).map(Health::fraction).unwrap_or(0.0);
@@ -355,8 +483,8 @@ fn update_boss_bar(
 /// `H` cycles the roster-detail density preset (Full → Compact → Hidden → …). The `docs/ui.md` §2
 /// backbone made operable at the keyboard; the same values are exposed in the settings menu and
 /// persisted.
-fn cycle_density_key(keys: Res<ButtonInput<KeyCode>>, mut hud: ResMut<HudSettings>) {
-    if keys.just_pressed(KeyCode::KeyH) {
+fn cycle_density_key(actions: crate::input::Actions, mut hud: ResMut<HudSettings>) {
+    if actions.just_pressed(crate::input::Action::CycleHudDensity) {
         hud.roster_detail = match hud.roster_detail {
             RosterDetail::Full => RosterDetail::Compact,
             RosterDetail::Compact => RosterDetail::Hidden,
@@ -366,21 +494,103 @@ fn cycle_density_key(keys: Res<ButtonInput<KeyCode>>, mut hud: ResMut<HudSetting
 }
 
 /// Apply HUD-density settings to node visibility (runs only when settings change).
-fn apply_hud_settings(hud: Res<HudSettings>, mut roster: Query<&mut Node, With<RosterStripRoot>>) {
+///
+/// **Three rungs, three renderings.** `Hidden` drops the strip; `Compact` keeps the strip but drops
+/// each chip's [`RosterSwatch`]; `Full` shows everything. The `Compact` branch is the one that used
+/// to be missing — see [`RosterSwatch`] for why the swatch is the correct thing to shed.
+fn apply_hud_settings(
+    hud: Res<HudSettings>,
+    mut roster: Query<&mut Node, (With<RosterStripRoot>, Without<RosterSwatch>)>,
+    mut swatches: Query<&mut Node, (With<RosterSwatch>, Without<RosterStripRoot>)>,
+) {
     if !hud.is_changed() {
         return;
     }
     if let Ok(mut node) = roster.single_mut() {
-        node.display = match hud.roster_detail {
-            RosterDetail::Hidden => Display::None,
-            _ => Display::Flex,
-        };
+        node.display = strip_display(hud.roster_detail);
+    }
+    let want = swatch_display(hud.roster_detail);
+    for mut node in &mut swatches {
+        if node.display != want {
+            node.display = want;
+        }
+    }
+}
+
+/// Whether the roster strip itself is drawn.
+///
+/// Pure, so the density mapping is testable without an `App` — the codebase's standing idiom for UI
+/// logic, and the reason the missing `Compact` branch is now catchable by a unit test rather than by
+/// a player noticing that two of three presets look the same.
+fn strip_display(detail: RosterDetail) -> Display {
+    match detail {
+        RosterDetail::Hidden => Display::None,
+        RosterDetail::Compact | RosterDetail::Full => Display::Flex,
+    }
+}
+
+/// Whether a chip's outfit swatch is drawn. Exhaustive rather than `_`-terminated, so adding a
+/// fourth rung is a compile error here instead of a silent aliasing onto an existing one.
+fn swatch_display(detail: RosterDetail) -> Display {
+    match detail {
+        RosterDetail::Full => Display::Flex,
+        RosterDetail::Compact | RosterDetail::Hidden => Display::None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bound_control_group_is_visible_on_the_chip() {
+        // Cockburn et al. 2014's intermodal-transition failure, in miniature: a `Ctrl+2` with no
+        // visible effect gives the player nothing to confirm the binding on, so the habit never forms
+        // and the expert path stays unused however well it works.
+        assert_eq!(chip_tag_text(&[2], 0), "2");
+        assert_eq!(chip_tag_text(&[1, 3], 0), "13", "membership in several groups reads compactly");
+    }
+
+    #[test]
+    fn a_queued_order_reads_as_more_to_come_not_as_a_group_number() {
+        // `+2` and `2` must not be confusable: one is "two orders behind this one", the other is
+        // "control group two". Sharing a glyph would make the chip actively misleading.
+        assert_eq!(chip_tag_text(&[], 2), "+2");
+        assert_eq!(chip_tag_text(&[1], 2), "1 +2");
+        assert_ne!(chip_tag_text(&[2], 0), chip_tag_text(&[], 2));
+    }
+
+    #[test]
+    fn a_chip_with_nothing_to_report_says_nothing() {
+        // The one place silence is right. `docs/ui.md` §1.2 — a widget supporting no decision is
+        // noise, and a `-` or a `0` on all five chips for a whole run is exactly that. The chip still
+        // reads (role letter + health), so this is a supplement, not a panel that could look broken.
+        assert_eq!(chip_tag_text(&[], 0), "");
+    }
+
+    #[test]
+    fn all_three_density_rungs_look_different() {
+        // The bug this pins: `Compact` was a no-op. The applier matched `Hidden` vs `_`, so Full and
+        // Compact rendered identically while `H` cycled three states and the settings menu named
+        // three. A preset that changes nothing is worse than one that does not exist — the player
+        // presses the key, sees no change, and concludes the key is broken.
+        let rungs = [RosterDetail::Full, RosterDetail::Compact, RosterDetail::Hidden];
+        let render = |d| (strip_display(d), swatch_display(d));
+        for (i, a) in rungs.iter().enumerate() {
+            for b in &rungs[i + 1..] {
+                assert_ne!(render(*a), render(*b), "{a:?} and {b:?} render identically");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lower_density_never_hides_health() {
+        // `docs/ui.md` §2's non-negotiable: a lower preset must not break playability. Squad health
+        // is load-bearing, so the only thing `Compact` may shed is the decorative swatch — the strip
+        // (which carries the letter and the health bar) stays up.
+        assert_eq!(strip_display(RosterDetail::Compact), Display::Flex);
+        assert_eq!(swatch_display(RosterDetail::Compact), Display::None);
+    }
 
     #[test]
     fn every_role_has_a_distinct_letter() {

@@ -1,5 +1,14 @@
-//! Laser bolts fired from the player's blaster. Hold **Space** and the whole squad **auto-aims** at
-//! the nearest enemy it can currently *see* (fog-hidden enemies are not targeted). Aim is imperfect:
+//! Laser bolts fired from the player's blaster. **There is no fire key** — every unit shoots on its
+//! own at the fixed fire rate, auto-aiming at the nearest enemy it can currently *see* (fog-hidden
+//! enemies are not targeted). The player's control over shooting is the latched `HOLD FIRE` stance
+//! ([`WeaponsTight`]), which is a first-class containment verb precisely because *not* shooting is
+//! how several anomalies are captured.
+//!
+//! (This header used to say "Hold **Space** and the whole squad auto-aims". No `KeyCode::Space` has
+//! existed in this file for as long as the fire loop has; `Space` is now the pause key. The claim
+//! was load-bearing documentation for a key that did nothing.)
+//!
+//! Aim is imperfect:
 //! every bolt scatters inside a random cone, and that cone widens sharply while the unit is moving —
 //! so a maneuvering squad sprays wildly and enemies are hard to hit. Bolts despawn on a wall hit, a
 //! lifetime timeout, or when they strike an enemy's (small) capsule collider (a `MeshRayCast` against
@@ -67,7 +76,8 @@ pub(crate) struct LaserAssets {
 }
 
 /// Fixed-rate fire gate. Repeating: it ticks every frame and wraps every `behavior.laser.fire_interval`;
-/// a shot is emitted on each wrap tick while Space is held.
+/// a shot is emitted on each wrap tick, unconditionally — fire is automatic, and the only thing that
+/// suppresses it is [`WeaponsTight`].
 #[derive(Resource)]
 pub(crate) struct FireCooldown(Timer);
 

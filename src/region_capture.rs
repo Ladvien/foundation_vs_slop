@@ -133,6 +133,7 @@ struct Marquee;
 /// Kaaresoja 2015's 20–70 ms feedback window) and defers the actual capture to `run_pending_capture`.
 fn drive(
     keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<(Entity, &Window), With<PrimaryWindow>>,
     mut state: ResMut<RegionCapture>,
@@ -141,12 +142,14 @@ fn drive(
     mut commands: Commands,
 ) {
     let (win_entity, win) = *window;
-    // Accept Ctrl OR Super/Meta as the modifier: a Ctrl<->Meta remap (or a Cmd-key habit) still arms it.
-    let modifier = keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight)
-        || keys.pressed(KeyCode::SuperLeft)
-        || keys.pressed(KeyCode::SuperRight);
-    let toggle = modifier && keys.just_pressed(KeyCode::KeyP);
+    // The arm chord goes through the registry (`Mods::Ctrl` there accepts Super/Meta too, so a
+    // Ctrl<->Meta remap or a Cmd-key habit still arms it — the behaviour this file had inline).
+    let toggle = actions.just_pressed(crate::input::Action::DevRegionCapture);
+    // `Escape` and the bare-`P` diagnostic below stay RAW on purpose. Neither is a bindable action:
+    // Escape here is a modal cancel for a tool that has taken over the keyboard (the note box reads
+    // raw `KeyboardInput` events a few systems down), and the diagnostic exists precisely to report
+    // that a key arrived *without* its modifier — a question the registry cannot answer, since a
+    // chord that did not match is simply not an action.
     let cancel = keys.just_pressed(KeyCode::Escape);
     let cursor = win.cursor_position(); // logical px, `None` when off-window
 

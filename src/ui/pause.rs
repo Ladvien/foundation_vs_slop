@@ -40,11 +40,11 @@ impl Plugin for PauseMenuPlugin {
 /// `Esc` opens the pause overlay from play, or closes it from the overlay. Settings/roster have
 /// their own screens.
 fn toggle_pause(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     menu: Res<State<MenuState>>,
     mut next: ResMut<NextState<MenuState>>,
 ) {
-    if !keys.just_pressed(KeyCode::Escape) {
+    if !actions.just_pressed(crate::input::Action::PauseMenu) {
         return;
     }
     match menu.get() {
@@ -113,6 +113,17 @@ fn spawn_pause(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                     .observe(
                         |_: On<Activate>, mut next: ResMut<NextState<MenuState>>| {
                             next.set(MenuState::Settings);
+                        },
+                    );
+
+                // Controls
+                c.spawn(button_visual(&theme))
+                    .with_children(|b| {
+                        b.spawn(text(&theme, &fonts, "CONTROLS", theme.font_body));
+                    })
+                    .observe(
+                        |_: On<Activate>, mut next: ResMut<NextState<MenuState>>| {
+                            next.set(MenuState::Controls);
                         },
                     );
 

@@ -1,7 +1,31 @@
 //! Design tokens + fonts for the **surveillance-terminal / CRT** UI look.
 //!
-//! Everything visual routes through [`UiTheme`] so the aesthetic (phosphor green on near-black,
-//! bone-white text) and spacing live in one place.
+//! Everything visual routes through [`UiTheme`] so the aesthetic and spacing live in one place.
+//!
+//! # The palette is near-monochrome, and that is a rule, not a taste
+//!
+//! `docs/lore/2026-07-12-scp-color-language.md` sets two constraints this file now obeys. §6's core
+//! rule is **"Desaturation = reality. Saturation = anomaly"**, with baseline reality described as
+//! *"near-monochrome and slightly warm — like a photocopied document"*; §7's guardrail is **"Don't:
+//! Give the Foundation a house palette. It doesn't have one and shouldn't."** The UI used to be
+//! phosphor green on near-black, which was both a house palette and the most saturated surface on
+//! screen — so the game's loudest colour signal was spent on chrome.
+//!
+//! Two independent arguments say that was the wrong place to spend it:
+//!
+//! - *In-fiction*: §7 again — **"Make color mean deviation, not danger."** A colour reserved for
+//!   chrome cannot mean anything.
+//! - *Perceptual*: Wolfe, *Guided Search 6.0* (Psychon Bull Rev 2021, DOI 10.3758/s13423-020-01859-9)
+//!   — only a small set of features guide attention at all, and colour is one of them. Spending
+//!   saturation on a permanent background element burns the channel that could have pulled the eye
+//!   to a threat. Rosenholtz 2016 (DOI 10.1146/annurev-vision-082114-035733) adds the periphery half:
+//!   a screen-edge element is encoded as summary statistics — a colour blob — so its hue is doing
+//!   *more* work out there, not less.
+//!
+//! So every token below is warm-neutral (`red >= blue`, chroma under [`MAX_UI_CHROMA`]) and
+//! separation between them rides on **luminance**, the same encoding rule [`Hazard`] and
+//! `rows::Emphasis` already follow. [`UiTheme::anomaly`] holds the vacated saturation, reserved.
+//! Both invariants are unit-tested at the bottom of this file.
 //!
 //! **Threat never encodes as hue.** The SCP ACS Disruption scale is a *luminosity* scale — Dark →
 //! Vlam (candle) → Keneq (campfire) → Ekhi (sun) → Amida (the screen cannot hold it) — and
@@ -141,14 +165,29 @@ impl Hazard {
     }
 }
 
+/// Chroma ceiling for every token that describes **baseline reality** — the machine-checkable form
+/// of "the Foundation has no house palette" (see the module note).
+///
+/// Chroma is `max(r,g,b) - min(r,g,b)` in sRGB: a cheap saturation proxy that needs no colour-space
+/// conversion and is monotone in the thing being bounded. [`UiTheme::anomaly`], [`UiTheme::danger`]
+/// and [`UiTheme::warn`] are the three deliberate exemptions — they do not describe reality.
+pub const MAX_UI_CHROMA: f32 = 0.12;
+
 /// Central design tokens.
 #[derive(Resource, Clone)]
 pub struct UiTheme {
     pub bg: Color,
     pub panel: Color,
     pub panel_border: Color,
-    /// Phosphor accent (green) — the terminal's primary UI ink.
+    /// The terminal's primary ink — the **brightest** warm-neutral in the palette, so it separates
+    /// from [`UiTheme::text`] by luminance rather than by hue.
     pub accent: Color,
+    /// **Reserved saturation.** The one place the UI is allowed to be colourful, because colour here
+    /// means *deviation* (`docs/lore/2026-07-12-scp-color-language.md` §7), not danger and not
+    /// branding. This is the phosphor green the chrome used to be, now carrying meaning instead of
+    /// decorating. Nothing consumes it yet; the lore doc's Type system (§2) implies the hue may
+    /// eventually vary by anomaly class, so treat it as the *default* anomaly ink, not the only one.
+    pub anomaly: Color,
     /// Reserved for **destructive or irreversible** actions, not for threat (see [`Hazard`]).
     pub danger: Color,
     /// Reserved for **cautionary copy**, not for threat.
@@ -172,15 +211,19 @@ pub struct UiTheme {
 impl Default for UiTheme {
     fn default() -> Self {
         Self {
-            bg: Color::srgba(0.01, 0.03, 0.02, 0.86),
-            panel: Color::srgba(0.02, 0.06, 0.04, 0.74),
-            panel_border: Color::srgba(0.35, 0.85, 0.45, 0.55),
-            accent: Color::srgb(0.55, 1.0, 0.62),
+            // Warm-neutral throughout: `red >= green >= blue` by a hair, chroma well under
+            // `MAX_UI_CHROMA`. Separation is luminance — accent (brightest) > text > text_muted.
+            bg: Color::srgba(0.030, 0.028, 0.024, 0.86),
+            panel: Color::srgba(0.058, 0.054, 0.047, 0.74),
+            panel_border: Color::srgba(0.60, 0.58, 0.53, 0.55),
+            accent: Color::srgb(0.95, 0.93, 0.88),
+            // The vacated phosphor green. Exempt from the chroma ceiling by design — see the field.
+            anomaly: Color::srgb(0.55, 1.0, 0.62),
             danger: Color::srgb(0.95, 0.28, 0.22),
             warn: Color::srgb(0.98, 0.78, 0.28),
-            text: Color::srgb(0.86, 0.92, 0.86),
-            text_muted: Color::srgba(0.70, 0.82, 0.72, 0.75),
-            health_fill: Color::srgb(0.45, 0.95, 0.5),
+            text: Color::srgb(0.82, 0.80, 0.76),
+            text_muted: Color::srgba(0.62, 0.60, 0.57, 0.78),
+            health_fill: Color::srgb(0.80, 0.78, 0.73),
             health_back: Color::srgba(0.0, 0.0, 0.0, 0.6),
             space_xs: 3.0,
             space_sm: 6.0,
@@ -199,8 +242,10 @@ impl UiTheme {
     pub fn hazard_ink(&self, h: Hazard) -> Color {
         let t = h.intensity();
         let base = self.accent.to_linear();
-        // Lift luminance across the ramp, then desaturate toward white at the top so the last tier
-        // reads as overexposure rather than as "more green".
+        // Lift luminance across the ramp, then wash toward white at the top so the last tier reads
+        // as overexposure rather than as "more ink". Derived from `accent`, so the ramp desaturated
+        // with the rest of the palette — which it always should have been: the ACS Disruption scale
+        // is *how much light is getting out*, and light has no hue.
         let gain = 0.35 + 0.95 * t;
         let wash = (t - 0.75).max(0.0) * 4.0; // 0 until Ekhi, 1 at Amida
         let mix = |c: f32| (c * gain) * (1.0 - wash) + wash * 1.6;
@@ -220,7 +265,10 @@ impl UiTheme {
         } else if muted {
             self.text_muted
         } else {
-            Color::srgba(0.80, 0.88, 0.81, 0.92)
+            // Sits between `text` and `text_muted` in luminance and shares their chromaticity — a
+            // third rung on one ladder, not a third colour. Pinned by
+            // `rows::an_unmet_row_is_louder_than_a_met_one_without_changing_hue`.
+            Color::srgba(0.72, 0.70, 0.66, 0.92)
         }
     }
 }
@@ -246,7 +294,9 @@ impl Plugin for UiThemePlugin {
 ///
 /// `crate::ui::boot` gates `Boot → Title` on `body` being loaded, so no frame renders text before
 /// the atlas is ready.
-fn load_fonts(assets: Res<AssetServer>, mut fonts: ResMut<FontAssets>) {
+/// `pub(crate)` so a dev overlay outside `ui::` can order its own `Startup` spawn after the face is
+/// loaded, rather than reaching for `Handle::default()` (the tofu-prone 95-codepoint subset).
+pub(crate) fn load_fonts(assets: Res<AssetServer>, mut fonts: ResMut<FontAssets>) {
     // One face for both roles today. `display` stays a distinct handle so a display face can be
     // dropped in without touching any call site.
     let face: Handle<Font> = assets.load("fonts/FiraMono-Regular.ttf");
@@ -309,6 +359,98 @@ mod tests {
                 lum(lo)
             );
         }
+    }
+
+    /// sRGB chroma proxy — see [`MAX_UI_CHROMA`].
+    fn chroma(c: Color) -> f32 {
+        let c = c.to_srgba();
+        let hi = c.red.max(c.green).max(c.blue);
+        let lo = c.red.min(c.green).min(c.blue);
+        hi - lo
+    }
+
+    fn relative_luminance(c: Color) -> f32 {
+        let c = c.to_linear();
+        // Rec. 709.
+        0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue
+    }
+
+    #[test]
+    fn the_foundation_has_no_house_palette() {
+        // `docs/lore/2026-07-12-scp-color-language.md` §7, made machine-checkable. Every token that
+        // describes BASELINE REALITY stays near-monochrome, so saturation is free to mean anomaly
+        // (§6's core rule). This is the test that would have failed on the phosphor-green UI: its
+        // accent had a chroma of 0.45.
+        let t = UiTheme::default();
+        for (name, c) in [
+            ("bg", t.bg),
+            ("panel", t.panel),
+            ("panel_border", t.panel_border),
+            ("accent", t.accent),
+            ("text", t.text),
+            ("text_muted", t.text_muted),
+            ("health_fill", t.health_fill),
+            ("emphasis/normal", t.emphasis_ink(false, false)),
+        ] {
+            assert!(
+                chroma(c) <= MAX_UI_CHROMA,
+                "{name} has chroma {:.3} — reality is desaturated (max {MAX_UI_CHROMA})",
+                chroma(c)
+            );
+        }
+
+        // The three deliberate exemptions. Asserted *loud* rather than merely omitted, so deleting
+        // one from the list above can never quietly pass as "it was always neutral".
+        for (name, c) in [("anomaly", t.anomaly), ("danger", t.danger), ("warn", t.warn)] {
+            assert!(
+                chroma(c) > MAX_UI_CHROMA,
+                "{name} is the exemption — if it desaturates it has stopped carrying its meaning"
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_reality_is_slightly_warm() {
+        // The other half of §6's description: "near-monochrome and slightly warm — like a
+        // photocopied document". Chroma alone would accept a cold blue-gray, which reads as a
+        // computer display rather than as paper.
+        let t = UiTheme::default();
+        for (name, c) in [
+            ("bg", t.bg),
+            ("panel", t.panel),
+            ("panel_border", t.panel_border),
+            ("accent", t.accent),
+            ("text", t.text),
+            ("text_muted", t.text_muted),
+            ("health_fill", t.health_fill),
+        ] {
+            let c = c.to_srgba();
+            assert!(
+                c.red >= c.blue,
+                "{name} is cool ({:.3}R vs {:.3}B) — paper is warm, screens are cold",
+                c.red,
+                c.blue
+            );
+        }
+    }
+
+    #[test]
+    fn the_ink_ladder_separates_by_luminance_alone() {
+        // With hue gone, accent/text/muted have nothing BUT luminance to tell them apart. If two
+        // rungs converge the HUD loses a channel silently — the panel still renders, it just stops
+        // saying anything. (`rows.rs` pins the same property for `Emphasis`; this pins the tokens
+        // those rungs are built from.)
+        let t = UiTheme::default();
+        let (accent, text, muted) = (
+            relative_luminance(t.accent),
+            relative_luminance(t.text),
+            relative_luminance(t.text_muted),
+        );
+        assert!(accent > text, "accent {accent:.3} must outrank text {text:.3}");
+        assert!(text > muted, "text {text:.3} must outrank muted {muted:.3}");
+        // A step the eye can actually resolve, not a rounding difference.
+        assert!(accent - text > 0.05, "accent/text step is {:.3} — too fine to read", accent - text);
+        assert!(text - muted > 0.05, "text/muted step is {:.3} — too fine to read", text - muted);
     }
 
     #[test]

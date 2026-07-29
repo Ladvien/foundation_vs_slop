@@ -144,6 +144,9 @@ pub fn squad_think(
             // Whether this unit can smell the cyanide warning — gates what belief it perceives (an anosmic
             // unit reads the neutral prior, blind to a poison flip).
             &crate::health::CyanideSmell,
+            // The player's PUSH order (`squad::PushOrder`). `None` for every unit in the headless
+            // harness, which is what keeps the override below out of the deterministic core.
+            Option<&crate::squad::PushOrder>,
         ),
         With<Unit>,
     >,
@@ -170,7 +173,7 @@ pub fn squad_think(
     // the mutable unit query twice.
     let unit_snapshot: Vec<(Entity, Vec3, f32)> = units
         .iter()
-        .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _, _)| (e, t.translation, health_frac(h)))
+        .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
     let dt = time.delta_secs();
@@ -190,8 +193,10 @@ pub fn squad_think(
         infestation,
         mut facing_override,
         smell,
+        push,
     ) in &mut units
     {
+        let push_order = push.is_some();
         let pos = tf.translation;
 
         // Each cue is resolved to its nearest candidate WITHOUT a range filter, then admitted through a
@@ -344,6 +349,27 @@ pub fn squad_think(
             // A real decision. `squad_ai::trace` samples on this, NOT on `Changed<ActiveBehavior>` — the
             // unconditional `active.target` write below marks the component changed every tick.
             active.decision = active.decision.wrapping_add(1);
+        }
+
+        // **The player's PUSH order is authoritative** — the same rule, at the same seam, that the
+        // `MoveOrder` branch below states for movement. `squad_ai::role` gives the Gunman `Overwatch`
+        // at rank 4 and `Engage` at rank 2 on one shared gate ("a rank below so it holds by default"),
+        // so a gunman with a threat in sight always holds and the player could not ask it to close.
+        // This is that ask.
+        //
+        // Applied every tick rather than only at a decision point, so the order takes effect the
+        // instant it is given instead of on the next throttled think — a command with up to
+        // `squad_think_interval` of latency reads as a dropped input.
+        //
+        // Overriding here rather than adding a consideration to `Overwatch` is deliberate:
+        // `squad_ai::genome` encodes a repertoire by walking its considerations, so one more would
+        // grow the Gunman's genome and invalidate every archived behaviour elite. See
+        // `squad::PushOrder`.
+        //
+        // Determinism: `PushOrder` is inserted only by `selection::toggle_push_order`, which reads the
+        // mouse and keyboard, so no unit carries it headless and this branch never runs there.
+        if push_order && active.mode == Mode::Overwatch {
+            active.mode = Mode::Engage;
         }
 
         // The Researcher aims its warding beam. When its AI holds `Mode::Ward` (a photophobe is in range),

@@ -116,7 +116,6 @@ pub fn site_rows(
         Row::header("SITE-67 — THAUMIEL CURRICULUM"),
         Row::kv("CAPABILITIES DERIVED", format!("{derived}/{total}"))
             .push(Cell::Bar { frac: if total == 0 { 0.0 } else { derived as f32 / total as f32 } }),
-        Row::note("[TAB] SELECT SPECIMEN"),
     ];
     let goals = curriculum.goals();
     for subject in curriculum.progression() {
@@ -142,11 +141,14 @@ pub fn site_rows(
 /// *attach* order, which is not a total order, so cycling over it raw would visit specimens in an
 /// order that could differ between sessions.
 pub fn cycle_study_subject(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
+    mut requests: MessageReader<CycleSpecimenRequest>,
     mut studied: ResMut<StudySubject>,
     specimens: Query<(Entity, &Specimen)>,
 ) {
-    if !keys.just_pressed(KeyCode::Tab) {
+    // Drained, so an unread request cannot be redelivered next frame and skip a specimen.
+    let clicked = requests.read().count() > 0;
+    if !clicked && !actions.just_pressed(crate::input::Action::CycleSpecimen) {
         return;
     }
     let mut ordered: Vec<(u64, Entity)> =
@@ -164,7 +166,41 @@ pub fn cycle_study_subject(
     studied.0 = Some(next);
 }
 
-fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegions>) {
+/// A request to advance the studied specimen, from **either** input route — `Tab` or the panel button.
+///
+/// Routed as a message so [`cycle_specimen`] stays the single writer of [`StudySubject`], the
+/// discipline `selection::ArmRequest` set. Before this, `[TAB] SELECT SPECIMEN` was printed as a
+/// *note row* — text that looks like a control and is not one, which `ui::verb_bar`'s header calls
+/// out by name and `docs/ui.md` §4.2's operability lens forbids.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CycleSpecimenRequest;
+
+/// The clickable "select specimen" button. Spawned once, outside the `RowPanel` subtree, because
+/// `rows::sync_rows` despawns that subtree whenever the curriculum changes — which selecting a
+/// specimen does (see `site::review::BuyButton` for the same note).
+#[derive(Component)]
+pub struct CycleSpecimenButton;
+
+/// Its label node, so the count can be rewritten without respawning the button.
+#[derive(Component)]
+pub struct CycleSpecimenLabel;
+
+/// What the button reads. Pure, states its key, and names the count so "no specimens" is
+/// distinguishable from "the button is broken".
+pub fn cycle_button_label(held: usize) -> String {
+    let key = crate::input::key_name(
+        crate::input::Action::CycleSpecimen.default_binding().primary.key,
+    )
+    .unwrap_or("?");
+    if held == 0 {
+        // `docs/ui.md` §1.4 — name the state and the route out of it, never show a dead control.
+        format!("{key}  NO SPECIMEN ON THE SLAB — CONTAIN ONE FIRST")
+    } else {
+        format!("{key}  SELECT SPECIMEN  ({held} HELD)")
+    }
+}
+
+fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAssets>, regions: Res<HudRegions>) {
     let root = (
         SiteHudRoot,
         Node {
@@ -193,7 +229,71 @@ fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, regions: Res<HudRegi
             Node { flex_direction: FlexDirection::Column, ..default() },
             Pickable::IGNORE,
         ));
+        p.spawn((
+            CycleSpecimenButton,
+            bevy::ui_widgets::Button,
+            bevy::picking::hover::Hovered::default(),
+            Node {
+                padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_xs)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(theme.radius)),
+                margin: UiRect::top(Val::Px(theme.space_sm)),
+                ..default()
+            },
+            BackgroundColor(theme.panel),
+            border_all(theme.panel_border),
+        ))
+        .observe(|_: On<bevy::ui_widgets::Activate>, mut out: MessageWriter<CycleSpecimenRequest>| {
+            out.write(CycleSpecimenRequest);
+        })
+        .with_children(|b| {
+            b.spawn((
+                CycleSpecimenLabel,
+                crate::ui::widgets::text_colored(&theme, &fonts, "", theme.font_body, theme.text),
+                Pickable::IGNORE,
+            ));
+        });
     });
+}
+
+/// Keep the button's label and ink in step with how many specimens are held.
+fn update_cycle_button(
+    theme: Res<UiTheme>,
+    specimens: Query<(), With<Specimen>>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<CycleSpecimenLabel>>,
+    mut buttons: Query<
+        (&bevy::picking::hover::Hovered, &mut BackgroundColor, &mut BorderColor),
+        With<CycleSpecimenButton>,
+    >,
+) {
+    let held = specimens.iter().count();
+    let want = cycle_button_label(held);
+    for (mut text, mut color) in &mut labels {
+        if text.0 != want {
+            text.0 = want.clone();
+        }
+        // Luminance, never hue (`docs/ui.md` §1.3).
+        let ink = if held > 0 { theme.text } else { theme.text_muted };
+        if color.0 != ink {
+            color.0 = ink;
+        }
+    }
+    for (hovered, mut bg, mut border) in &mut buttons {
+        let want_bg = if hovered.0 && held > 0 {
+            theme.panel_border.with_alpha(0.16)
+        } else {
+            theme.panel
+        };
+        let want_border =
+            if held > 0 { theme.panel_border } else { theme.panel_border.with_alpha(0.25) };
+        if bg.0 != want_bg {
+            bg.0 = want_bg;
+        }
+        let want = border_all(want_border);
+        if border.top != want.top {
+            *border = want;
+        }
+    }
 }
 
 fn update_panel(
@@ -221,11 +321,13 @@ pub struct SiteHudPlugin;
 
 impl Plugin for SiteHudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
+        app.add_message::<CycleSpecimenRequest>()
+            .add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
             .add_systems(OnExit(AppState::Site), despawn_scoped::<SiteHudRoot>)
             .add_systems(
                 Update,
-                (cycle_study_subject, update_panel).run_if(in_state(AppState::Site)),
+                (cycle_study_subject, update_panel, update_cycle_button)
+                    .run_if(in_state(AppState::Site)),
             );
     }
 }
@@ -360,6 +462,24 @@ mod tests {
             name_of,
         ));
         assert!(held_only.contains("READY TO STUDY"), "{held_only}");
+    }
+
+    #[test]
+    fn the_specimen_button_states_its_key_and_which_nothing_it_is() {
+        // This used to be `Row::note("[TAB] SELECT SPECIMEN")` — a line of text styled like a control
+        // that could not be clicked. It is a real button now, so `docs/ui.md` §4.2's operability lens
+        // applies in both directions: it must still name the key, and an empty slab must say *why*
+        // rather than presenting a dead control.
+        let empty = cycle_button_label(0);
+        let held = cycle_button_label(3);
+        for l in [&empty, &held] {
+            assert!(!l.trim().is_empty());
+            assert!(l.starts_with("Tab"), "{l} must lead with its key");
+        }
+        assert!(empty.contains("NO SPECIMEN ON THE SLAB"), "{empty}");
+        assert!(empty.contains("CONTAIN ONE FIRST"), "the route out, not just the state: {empty}");
+        assert!(held.contains("3 HELD"), "{held}");
+        assert_ne!(empty, held);
     }
 
     #[test]

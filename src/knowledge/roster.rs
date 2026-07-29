@@ -28,7 +28,7 @@
 
 use bevy::prelude::*;
 
-use super::{Claim, Knowledge, Subject};
+use super::{Claim, Knowledge, Provenance, Subject};
 use crate::squad::{SquadMember, Unit};
 use crate::ui::state::{despawn_scoped, AppState, MenuState};
 
@@ -98,39 +98,49 @@ fn claim_word(c: Claim) -> &'static str {
     }
 }
 
-/// One operative's page.
+/// One operative's page, as rows.
 ///
 /// **Provenance and confidence are both printed**, and that is the requirement rather than decoration:
 /// FVS-O-5's whole counter-play is the player noticing that a belief is *hearsay* and going to verify
 /// it firsthand. A line that said only "Okafor thinks 1048-A is lethal" would hide the one field that
 /// makes a false belief actionable.
-pub fn roster_line(name: &str, knowledge: &Knowledge) -> String {
-    let mut out = format!("{name}\n");
+///
+/// Rows rather than a `\n`-joined `String`, and here the gain is the whole mechanic: a `Told` or `Read`
+/// belief is now **visibly** the loud row, because hearsay is the thing the player is meant to act on.
+/// With one `TextColor` for the entire screen, a rumour and a firsthand observation rendered
+/// identically and the player had to read every line for the word `Told`.
+pub fn roster_rows(name: &str, knowledge: &Knowledge) -> Vec<crate::ui::rows::Row> {
+    use crate::ui::rows::{Cell, Row};
+    let mut rows = vec![Row::header(name)];
     let mut any = false;
     for subject in Subject::ALL {
         for claim in Claim::ALL {
             let Some(b) = knowledge.of(subject, claim) else { continue };
             any = true;
-            out.push_str(&format!(
-                "  {:?} IS {} — {:?}, {:.0}%\n",
-                subject,
-                claim_word(claim),
-                b.provenance,
-                b.confidence * 100.0
-            ));
+            let label = format!("{:?} IS {}", subject, claim_word(claim));
+            let value = format!("{:?}", b.provenance);
+            // Hearsay is actionable; firsthand experience is settled. That is the distinction the
+            // emphasis carries, and it is the reason this screen exists.
+            let row = if b.provenance == Provenance::Firsthand {
+                Row::met(label, value)
+            } else {
+                Row::unmet(label, value)
+            };
+            rows.push(row.with_indent(1).push(Cell::Bar { frac: b.confidence }));
         }
     }
     if !any {
         // An operative who has met nothing is a real and distinct state — "unknown" is not "unsure"
         // (the Fisher point the whole model is built on), so it gets a sentence rather than a blank.
-        out.push_str("  NO FIELD EXPERIENCE ON RECORD\n");
+        rows.push(Row::note("NO FIELD EXPERIENCE ON RECORD").with_indent(1));
     }
-    out
+    rows
 }
 
-/// The whole screen.
-pub fn roster_text(table: &SquadKnowledge, names: &[String]) -> String {
-    let mut out = String::from("OPERATIVE ROSTER — WHAT THEY BELIEVE\n\n");
+/// The whole screen, as rows.
+pub fn roster_rows_all(table: &SquadKnowledge, names: &[String]) -> Vec<crate::ui::rows::Row> {
+    use crate::ui::rows::Row;
+    let mut rows = vec![Row::header("OPERATIVE ROSTER — WHAT THEY BELIEVE")];
     for (i, k) in table.members.iter().enumerate() {
         let unnamed = format!("OPERATIVE {i}");
         let name = names.get(i).unwrap_or(&unnamed);
@@ -138,10 +148,9 @@ pub fn roster_text(table: &SquadKnowledge, names: &[String]) -> String {
         if i >= names.len().max(1) && !k.knows_anything() {
             continue;
         }
-        out.push_str(&roster_line(name, k));
-        out.push('\n');
+        rows.extend(roster_rows(name, k));
     }
-    out
+    rows
 }
 
 impl Knowledge {
@@ -152,13 +161,12 @@ impl Knowledge {
 }
 
 fn toggle_roster(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     current: Res<State<MenuState>>,
     mut next: ResMut<NextState<MenuState>>,
 ) {
-    // `L` for roster — free, and mnemonic for the list. `set_if_neq` is not needed because the target
-    // always differs from the source of the branch.
-    if keys.just_pressed(KeyCode::KeyL) {
+    // `set_if_neq` is not needed because the target always differs from the source of the branch.
+    if actions.just_pressed(crate::input::Action::ToggleRoster) {
         match current.get() {
             MenuState::Closed => next.set(MenuState::Roster),
             MenuState::Roster => next.set(MenuState::Closed),
@@ -173,39 +181,89 @@ fn spawn_roster(
     fonts: Res<crate::ui::theme::FontAssets>,
     table: Res<SquadKnowledge>,
 ) {
-    let text = roster_text(&table, &[]);
+    // A scrim plus a centred bordered panel — the idiom every other overlay in this game uses
+    // (`ui::pause`, `ui::settings_menu`, `ui::controls_screen`). This screen used to be bare text at
+    // `PositionType::Absolute` with a hand-picked 20 px offset and **no background at all**, so the
+    // roster rendered directly over the live world and was frequently unreadable against it.
+    //
+    // It deliberately does *not* go into `ui::layout`'s region grid. That grid owns the nine HUD
+    // corners for `AppState::{InGame, Site}` panels; this is a blocking overlay at `Z_MENU`, and no
+    // overlay uses the grid — the frame does not even exist on some of the screens one can open from.
     commands
         .spawn((
             RosterScreenRoot,
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(theme.space_lg),
-                left: Val::Px(theme.space_lg),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            GlobalZIndex(crate::ui::theme::Z_MENU),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            GlobalZIndex(crate::ui::theme::Z_MENU_DIM),
         ))
         .with_children(|p| {
             p.spawn((
-                RosterReadout,
-                crate::ui::widgets::text_colored(&theme, &fonts, text, theme.font_body, theme.text),
-            ));
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(theme.space_lg)),
+                    row_gap: Val::Px(theme.space_xs),
+                    min_width: Val::Px(460.0),
+                    max_height: Val::Percent(78.0),
+                    ..default()
+                },
+                BackgroundColor(theme.panel),
+                crate::ui::widgets::border_all(theme.panel_border),
+                GlobalZIndex(crate::ui::theme::Z_MENU),
+            ))
+            .with_children(|panel| {
+                // Five operatives × every subject × every claim outgrows any screen, so it scrolls
+                // rather than running off the bottom edge.
+                let mut readout = panel.spawn((
+                    RosterReadout,
+                    crate::ui::rows::RowPanel::default(),
+                    bevy::ui_widgets::ScrollArea::default(),
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(theme.space_xs),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                ));
+                // Seed the first frame's content so the panel is never blank for a frame.
+                let rows = roster_rows_all(&table, &[]);
+                readout.with_children(|c| {
+                    crate::ui::rows::spawn_rows(c, &theme, &fonts, &rows);
+                });
+
+                panel.spawn(crate::ui::widgets::text_colored(
+                    &theme,
+                    &fonts,
+                    "A BELIEF MARKED Told OR Read IS HEARSAY — GO AND SEE FOR YOURSELF",
+                    theme.font_body * 0.85,
+                    theme.text_muted,
+                ));
+            });
         });
 }
 
 fn update_roster(
+    mut commands: Commands,
+    theme: Res<crate::ui::theme::UiTheme>,
+    fonts: Res<crate::ui::theme::FontAssets>,
     table: Res<SquadKnowledge>,
-    mut text_q: Query<&mut Text, With<RosterReadout>>,
+    mut panels: Query<(Entity, &mut crate::ui::rows::RowPanel), With<RosterReadout>>,
 ) {
     if !table.is_changed() {
         return;
     }
-    let line = roster_text(&table, &[]);
-    for mut t in &mut text_q {
-        if t.0 != line {
-            t.0 = line.clone();
-        }
+    let rows = roster_rows_all(&table, &[]);
+    for (entity, mut panel) in &mut panels {
+        // `sync_rows` is itself a no-op when the rows are unchanged, so this is guarded twice — once
+        // on the resource and once on the content. That is the same double guard the string version
+        // had (`is_changed` plus `if t.0 != line`), preserved.
+        crate::ui::rows::sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows.clone());
     }
 }
 
@@ -265,20 +323,64 @@ mod tests {
     fn the_roster_states_provenance_and_confidence_not_just_the_claim() {
         // FVS-O-5 depends on the player being able to see that a belief is HEARSAY. A line that only
         // said "believes 1048-A is lethal" would hide the field that makes a false belief actionable.
+        use crate::ui::rows::{Cell, Emphasis};
         let mut k = Knowledge::default();
         k.learn(Subject::BearCopies, Claim::Lethal, Provenance::Told, 3);
-        let line = roster_line("OKAFOR", &k);
-        assert!(line.contains("LETHAL"), "{line}");
-        assert!(line.contains("Told"), "provenance must be visible: {line}");
-        assert!(line.contains('%'), "confidence must be visible: {line}");
+        let rows = roster_rows("OKAFOR", &k);
+        let printed = format!("{rows:?}");
+        assert!(printed.contains("LETHAL"), "{printed}");
+        assert!(printed.contains("Told"), "provenance must be visible: {printed}");
+        // Confidence is a `Bar` now — a LENGTH rather than a percentage string. Cleveland & McGill's
+        // ordering puts length above colour and above text for magnitude, which is why `ui::rows`
+        // offers the cell at all (`docs/ui.md` §1.3).
+        assert!(
+            rows.iter().any(|r| r.cells.iter().any(|c| matches!(c, Cell::Bar { .. }))),
+            "confidence must be visible: {printed}"
+        );
+
+        // STRONGER than the string test it replaces: hearsay is now the LOUD row, not merely a word
+        // the player has to read for. That is FVS-O-5's whole counter-play made perceptible.
+        let belief = rows
+            .iter()
+            .find(|r| r.label().is_some_and(|l| l.contains("LETHAL")))
+            .expect("the belief is listed");
+        assert_eq!(belief.emphasis, Emphasis::Alert, "a rumour is the actionable row");
+
+        let mut firsthand = Knowledge::default();
+        firsthand.learn(Subject::BearCopies, Claim::Lethal, Provenance::Firsthand, 3);
+        let seen = roster_rows("OKAFOR", &firsthand);
+        let seen_row = seen
+            .iter()
+            .find(|r| r.label().is_some_and(|l| l.contains("LETHAL")))
+            .expect("the belief is listed");
+        assert_eq!(seen_row.emphasis, Emphasis::Muted, "experience is settled, so it recedes");
     }
 
     #[test]
     fn an_operative_who_has_met_nothing_says_so_rather_than_rendering_blank() {
         // "Never encountered" is a real state, distinct from "unsure" — the Fisher point the whole
         // model rests on. A blank page would read as a bug.
-        let line = roster_line("NDIAYE", &Knowledge::default());
-        assert!(line.contains("NO FIELD EXPERIENCE"), "{line}");
+        let rows = roster_rows("NDIAYE", &Knowledge::default());
+        let labels: Vec<&str> = rows.iter().filter_map(|r| r.label()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("NO FIELD EXPERIENCE")),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn the_whole_roster_names_every_staffed_operative_and_no_phantoms() {
+        // Trailing headroom in `SquadKnowledge::members` must not render as operatives who do not
+        // exist — a roster listing eight people for a squad of five is worse than one listing none.
+        let mut table = SquadKnowledge::default();
+        table.members[0].learn(Subject::Crabs, Claim::Lethal, Provenance::Firsthand, 1);
+        let rows = roster_rows_all(&table, &["OKAFOR".to_string()]);
+        let labels: Vec<&str> = rows.iter().filter_map(|r| r.label()).collect();
+        assert!(labels.contains(&"OKAFOR"));
+        assert!(
+            !labels.iter().any(|l| l.contains("OPERATIVE 4")),
+            "an unstaffed slot with no beliefs must not appear: {labels:?}"
+        );
     }
 
     #[test]

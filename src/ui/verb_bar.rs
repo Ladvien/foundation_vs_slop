@@ -49,6 +49,11 @@ pub struct VerbBarRoot;
 #[derive(Component)]
 pub struct ObjectiveReadout;
 
+/// The hover hint line, between the objective and the chips. One node, rewritten in place — the same
+/// reason the chip labels are: respawning would drop the hover state out from under the cursor.
+#[derive(Component)]
+pub struct VerbHint;
+
 /// A verb chip, tagged so the styler can find the armed one.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct VerbChip(pub Verb);
@@ -68,10 +73,19 @@ pub enum Verb {
     Quarantine,
     Cap,
     HoldFire,
+    /// The Engineer's sensor drone (`crate::sensor`) — the only thing that turns the minimap on.
+    /// Like [`Verb::HoldFire`] it is **not** an `ArmedTool`: there is nothing to aim, so pressing it
+    /// acts immediately rather than entering a modal state.
+    Sensor,
+    /// Advance to contact instead of holding (`squad::PushOrder`). A latched **stance** like
+    /// [`Verb::HoldFire`], and the only genuine order in the game — see `squad::PushOrder` for why
+    /// the twelve-mode order wheel this replaced was the wrong feature.
+    Push,
 }
 
 impl Verb {
-    pub const ALL: [Verb; 4] = [Verb::Device, Verb::Quarantine, Verb::Cap, Verb::HoldFire];
+    pub const ALL: [Verb; 6] =
+        [Verb::Device, Verb::Quarantine, Verb::Cap, Verb::HoldFire, Verb::Sensor, Verb::Push];
 
     /// Mirrors `selection::arm_tool_input`. `C`/`Z`/`X` are the free adjacent bottom-row cluster and
     /// `F` is free for fire discipline — see that function on why the choice is constrained.
@@ -81,6 +95,33 @@ impl Verb {
             Verb::Quarantine => 'Z',
             Verb::Cap => 'X',
             Verb::HoldFire => 'F',
+            Verb::Sensor => 'V',
+            Verb::Push => 'G',
+        }
+    }
+
+    /// One line saying what the verb *does* — shown while its chip is hovered.
+    ///
+    /// The chip labels are necessarily terse (`CAP NEST`, `QUARANTINE`), and nothing in the game
+    /// explained them. That matters against the one hard number in the controls literature:
+    /// Iacovides et al. 2015 had to drop **7 of 31** screened participants — all self-reported FPS
+    /// players — for "obviously struggling with the controls" inside 20 minutes.
+    ///
+    /// **Tooltips are for controls, not for readouts.** `ui::rows` reserves `Row::label()` for this
+    /// and nothing implements it, deliberately: `docs/ui.md` §1.4's rule is that a row states its
+    /// instruction *inline* (`RAISE OBSERVATION  >= 0.50  now 0.10`), and Llanos & Jørgensen 2011 is
+    /// explicit that information which is critical or continuously gauged is the wrong thing to
+    /// minimise. Hiding a containment clause behind a hover would undo both. A *verb*, by contrast,
+    /// has a meaning the player learns once and then never needs again — which is exactly what a
+    /// hover is for.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Verb::Device => "THROW A CAPTURE DEVICE AT AN ANOMALY. TAKES IT ALIVE.",
+            Verb::Quarantine => "BOUND A REGION. FOR OUTBREAKS THAT HAVE NO BODY TO CATCH.",
+            Verb::Cap => "SEAL A NEST. STOPS REINFORCEMENTS; YIELDS NOTHING.",
+            Verb::HoldFire => "STOP SHOOTING. SOME ANOMALIES ARE ONLY CONTAINED THIS WAY.",
+            Verb::Sensor => "AN ENGINEER DEPLOYS A DRONE. SHOWS THE MAP WHILE IT LASTS.",
+            Verb::Push => "THE SELECTION CLOSES ON WHAT IT SEES. THEY HOLD OTHERWISE.",
         }
     }
 
@@ -90,6 +131,8 @@ impl Verb {
             Verb::Quarantine => "QUARANTINE",
             Verb::Cap => "CAP NEST",
             Verb::HoldFire => "HOLD FIRE",
+            Verb::Sensor => "SENSOR",
+            Verb::Push => "ADVANCE",
         }
     }
 
@@ -100,6 +143,8 @@ impl Verb {
             Verb::Quarantine => ArmRequest::Toggle(ArmedTool::Quarantine),
             Verb::Cap => ArmRequest::Toggle(ArmedTool::Cap),
             Verb::HoldFire => ArmRequest::ToggleWeaponsTight,
+            Verb::Sensor => ArmRequest::DeploySensor,
+            Verb::Push => ArmRequest::TogglePush,
         }
     }
 
@@ -117,6 +162,12 @@ pub struct VerbBarPlugin;
 
 impl Plugin for VerbBarPlugin {
     fn build(&self, app: &mut App) {
+        // `update_chips` reads the sensor cooldown to print it on the chip, but `sensor::SensorPlugin`
+        // is windowed-only — and the UI-liveness test builds the harness app plus `UiPlugin` alone.
+        // A missing `Res<T>` is a PANIC in Bevy 0.19, not a skip (`docs/ui.md` §5, trap 2), so the
+        // plugin that registers the reader claims the resource. `init_resource` is idempotent, so the
+        // real one still wins wherever `SensorPlugin` is present.
+        app.init_resource::<crate::sensor::SensorCooldown>();
         app.add_systems(
             OnEnter(AppState::InGame),
             spawn_bar.after(layout::spawn_frame),
@@ -124,7 +175,8 @@ impl Plugin for VerbBarPlugin {
         .add_systems(OnExit(AppState::InGame), despawn_scoped::<VerbBarRoot>)
         .add_systems(
             Update,
-            (update_chips, style_chips, update_objective).run_if(in_state(AppState::InGame)),
+            (update_chips, style_chips, update_hint, update_objective)
+                .run_if(in_state(AppState::InGame)),
         );
     }
 }
@@ -161,6 +213,15 @@ fn spawn_bar(
         p.spawn((
             ObjectiveReadout,
             text_colored(&theme, &fonts, "", theme.font_body, theme.accent),
+            Pickable::IGNORE,
+        ));
+
+        // The hover hint. Muted and slightly smaller, because it is teaching rather than reporting —
+        // it must not compete with the objective line above it (`docs/ui.md` §2: what a lower density
+        // sheds first is what competes for attention).
+        p.spawn((
+            VerbHint,
+            text_colored(&theme, &fonts, "", theme.font_body * 0.85, theme.text_muted),
             Pickable::IGNORE,
         ));
 
@@ -211,13 +272,24 @@ fn spawn_bar(
 /// Pure, so the wording stays unit-testable without a UI tree. An exhausted verb still shows itself
 /// at `x0` rather than disappearing — a player who has run out must learn *that*, not wonder where
 /// the button went.
-fn chip_label(verb: Verb, charges: Option<u32>, tight: bool) -> String {
+fn chip_label(verb: Verb, charges: Option<u32>, tight: bool, cooldown: f32) -> String {
     let key = verb.key();
     match verb {
-        // Hold fire is a latched STANCE, not a spendable charge, so it reads on/off, never a count.
-        Verb::HoldFire => {
+        // Both stances are latched, not spendable, so they read on/off and never a count. `Push`
+        // shares HoldFire's arm because they are the same kind of thing — the `tight` flag carries
+        // whichever stance this chip is about (see `update_chips`).
+        Verb::HoldFire | Verb::Push => {
             let mark = if tight { "  \u{2022}" } else { "" };
             format!("{key}  {}{mark}", verb.name())
+        }
+        // The sensor states its COOLDOWN, because that is its price. `docs/ui.md` §1.4: an unmet
+        // condition is an instruction — so a cooling chip says how long, never just dims.
+        Verb::Sensor => {
+            if cooldown > 0.0 {
+                format!("{key}  {}  {}s", verb.name(), cooldown.ceil() as u32)
+            } else {
+                format!("{key}  {}", verb.name())
+            }
         }
         _ => match charges {
             Some(n) => format!("{key}  {} x{n}", verb.name()),
@@ -230,7 +302,9 @@ fn charges_for(verb: Verb, devices: u32, quarantines: u32) -> Option<u32> {
     match verb {
         Verb::Device => Some(devices),
         Verb::Quarantine => Some(quarantines),
-        Verb::Cap | Verb::HoldFire => None,
+        // Cap has no supply; HoldFire is a stance; the Sensor's cost is a COOLDOWN, not a charge
+        // (see `crate::sensor` on why it is time rather than an economy).
+        Verb::Cap | Verb::HoldFire | Verb::Sensor | Verb::Push => None,
     }
 }
 
@@ -238,10 +312,27 @@ fn update_chips(
     devices: Res<DeviceSupply>,
     quarantines: Res<QuarantineSupply>,
     tight: Res<WeaponsTight>,
+    sensor_cd: Res<crate::sensor::SensorCooldown>,
+    pushers: Query<(), (With<crate::squad::Unit>, With<crate::squad::PushOrder>)>,
     mut labels: Query<(&VerbChipLabel, &mut Text)>,
 ) {
+    // Any operative advancing lights the chip. It is a squad-wide readout of a per-unit order, which
+    // is honest at this altitude: the roster chips are where per-operative state lives.
+    let pushing = pushers.iter().next().is_some();
     for (label, mut text) in &mut labels {
-        let want = chip_label(label.0, charges_for(label.0, devices.0, quarantines.0), tight.0);
+        // Each stance reads its OWN latch. Passing `tight` for both would make ADVANCE mirror
+        // HOLD FIRE — two chips showing one state, which is worse than showing none.
+        let latched = match label.0 {
+            Verb::HoldFire => tight.0,
+            Verb::Push => pushing,
+            _ => false,
+        };
+        let want = chip_label(
+            label.0,
+            charges_for(label.0, devices.0, quarantines.0),
+            latched,
+            sensor_cd.0,
+        );
         if text.0 != want {
             text.0 = want;
         }
@@ -262,10 +353,16 @@ fn style_chips(
     tight: Res<WeaponsTight>,
     devices: Res<DeviceSupply>,
     quarantines: Res<QuarantineSupply>,
+    pushers: Query<(), (With<crate::squad::Unit>, With<crate::squad::PushOrder>)>,
     mut chips: Query<(&VerbChip, &Hovered, &mut BackgroundColor, &mut BorderColor)>,
     mut labels: Query<(&VerbChipLabel, &mut TextColor)>,
 ) {
-    let lit = |verb: Verb| verb.armed_by(*armed) || (verb == Verb::HoldFire && tight.0);
+    let pushing = pushers.iter().next().is_some();
+    let lit = |verb: Verb| {
+        verb.armed_by(*armed)
+            || (verb == Verb::HoldFire && tight.0)
+            || (verb == Verb::Push && pushing)
+    };
     let spent = |verb: Verb| charges_for(verb, devices.0, quarantines.0) == Some(0);
 
     for (chip, hovered, mut bg, mut border) in &mut chips {
@@ -340,6 +437,36 @@ fn objective_line(
     }
 }
 
+/// Which hint to show, given what is hovered and what is armed.
+///
+/// Pure, so the precedence is testable. **Hover wins over armed**, because a player moving the cursor
+/// along the bar is asking "what is this one?" — answering with the verb they already armed would make
+/// the line unusable for the thing it exists for. With neither, it is empty: `docs/ui.md` §1.2 —
+/// a widget that supports no decision is noise, and this one has nothing to say until it does.
+fn hint_text(hovered: Option<Verb>, armed: Option<Verb>) -> &'static str {
+    match hovered.or(armed) {
+        Some(v) => v.hint(),
+        None => "",
+    }
+}
+
+fn update_hint(
+    armed: Res<ArmedTool>,
+    chips: Query<(&VerbChip, &Hovered)>,
+    mut hints: Query<&mut Text, With<VerbHint>>,
+) {
+    // SORT-OK: at most one chip can be hovered at a time (they do not overlap), so `find` has a
+    // unique answer and there is no order to decide.
+    let hovered = chips.iter().find(|(_, h)| h.0).map(|(c, _)| c.0);
+    let armed_verb = Verb::ALL.iter().copied().find(|v| v.armed_by(*armed));
+    let want = hint_text(hovered, armed_verb);
+    for mut text in &mut hints {
+        if text.0 != want {
+            text.0 = want.to_string();
+        }
+    }
+}
+
 fn update_objective(
     win: Res<WinCondition>,
     phase: Res<State<RunPhase>>,
@@ -367,14 +494,14 @@ mod tests {
     #[test]
     fn an_exhausted_verb_still_shows_itself_at_zero() {
         // Hiding it would teach the player the verb does not exist rather than that it is spent.
-        assert!(chip_label(Verb::Device, Some(0), false).contains("DEVICE x0"));
-        assert!(chip_label(Verb::Quarantine, Some(0), false).contains("QUARANTINE x0"));
+        assert!(chip_label(Verb::Device, Some(0), false, 0.0).contains("DEVICE x0"));
+        assert!(chip_label(Verb::Quarantine, Some(0), false, 0.0).contains("QUARANTINE x0"));
     }
 
     #[test]
     fn hold_fire_reads_as_a_stance_not_a_charge() {
-        let off = chip_label(Verb::HoldFire, None, false);
-        let on = chip_label(Verb::HoldFire, None, true);
+        let off = chip_label(Verb::HoldFire, None, false, 0.0);
+        let on = chip_label(Verb::HoldFire, None, true, 0.0);
         assert!(off.contains("HOLD FIRE"));
         assert!(on.contains('\u{2022}'), "the latched stance is marked: {on}");
         assert_ne!(off, on);
@@ -387,8 +514,126 @@ mod tests {
         // The chip is clickable AND keyed. A chip that did not name its key would teach the mouse
         // player that the keyboard route does not exist.
         for v in Verb::ALL {
-            let l = chip_label(v, charges_for(v, 3, 1), false);
+            let l = chip_label(v, charges_for(v, 3, 1), false, 0.0);
             assert!(l.starts_with(v.key()), "{v:?} chip must lead with its key: {l}");
+        }
+    }
+
+    #[test]
+    fn a_cooling_sensor_says_how_long_rather_than_just_dimming() {
+        // `docs/ui.md` §1.4's strongest rule: an unmet condition is an INSTRUCTION. A chip that only
+        // greyed out would leave the player unable to tell "on cooldown" from "no Engineer selected"
+        // from "this verb is broken" — three different states with three different responses.
+        let ready = chip_label(Verb::Sensor, None, false, 0.0);
+        assert_eq!(ready, "V  SENSOR", "a ready sensor states no time");
+
+        let cooling = chip_label(Verb::Sensor, None, false, 7.2);
+        assert!(cooling.contains("SENSOR"), "still names the verb: {cooling}");
+        assert!(cooling.contains('8'), "rounds UP so it never promises early: {cooling}");
+        assert_ne!(ready, cooling);
+    }
+
+    #[test]
+    fn the_sensor_never_reads_as_a_charge() {
+        // Its cost is time, not a pool. An `x1` would advertise an economy that does not exist and
+        // send the player to the requisition screen looking for it.
+        for cd in [0.0_f32, 1.0, 29.0] {
+            let l = chip_label(Verb::Sensor, None, false, cd);
+            assert!(!l.contains(" x"), "{l} reads as a spendable charge");
+        }
+        assert_eq!(charges_for(Verb::Sensor, 9, 9), None);
+    }
+
+    #[test]
+    fn the_sensor_is_a_request_not_an_armed_tool() {
+        // Like HOLD FIRE and unlike the three containment verbs: there is nothing to aim, so pressing
+        // it must act immediately rather than entering a modal state the player has to escape.
+        assert_eq!(Verb::Sensor.request(), ArmRequest::DeploySensor);
+        for tool in [ArmedTool::None, ArmedTool::Device, ArmedTool::Quarantine, ArmedTool::Cap] {
+            assert!(!Verb::Sensor.armed_by(tool), "the sensor must never read as armed");
+        }
+    }
+
+    #[test]
+    fn hovering_a_chip_explains_it_and_hover_beats_armed() {
+        // The line exists so a player can ask "what is this one?" while moving along the bar. If the
+        // armed verb won, the answer would be the verb they already understand well enough to have
+        // chosen — which makes the line useless for its only job.
+        assert_eq!(hint_text(Some(Verb::Cap), None), Verb::Cap.hint());
+        assert_eq!(
+            hint_text(Some(Verb::Cap), Some(Verb::Device)),
+            Verb::Cap.hint(),
+            "hover must win over armed"
+        );
+        assert_eq!(hint_text(None, Some(Verb::Device)), Verb::Device.hint());
+    }
+
+    #[test]
+    fn the_hint_is_empty_when_there_is_nothing_to_explain() {
+        // `docs/ui.md` §1.2 — a widget supporting no decision is noise, and noise is not neutral. A
+        // permanent placeholder line under the objective would cost a row of attention for nothing.
+        assert_eq!(hint_text(None, None), "");
+    }
+
+    #[test]
+    fn every_verb_explains_itself_distinctly() {
+        // A shared or missing hint would teach the player that two verbs are the same thing — worse
+        // than no hint at all, because it is confidently wrong.
+        for (i, a) in Verb::ALL.iter().enumerate() {
+            let h = a.hint();
+            assert!(!h.trim().is_empty(), "{a:?} has no hint");
+            assert!(h.len() > 20, "{a:?}'s hint says too little to be worth the row: {h}");
+            for b in &Verb::ALL[i + 1..] {
+                assert_ne!(h, b.hint(), "{a:?} and {b:?} share a hint");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hint_says_what_the_verb_does_not_what_it_is_called() {
+        // A hint that only restated the chip label would be pure noise. Each one has to name an
+        // EFFECT — which is also FVS-L-1's copy rule (say the instruction, not the status) applied to
+        // teaching copy.
+        for v in Verb::ALL {
+            let h = v.hint();
+            assert_ne!(h, v.name(), "{v:?}'s hint just repeats its label");
+            assert!(
+                h.split_whitespace().count() >= 5,
+                "{v:?}'s hint is not a sentence: {h}"
+            );
+        }
+    }
+
+    #[test]
+    fn advance_reads_as_a_stance_not_a_charge() {
+        // Same contract HOLD FIRE has, and it must not drift from it: both are latched orders the
+        // player leaves on, not consumables. An `x1` would advertise an economy that does not exist.
+        let off = chip_label(Verb::Push, None, false, 0.0);
+        let on = chip_label(Verb::Push, None, true, 0.0);
+        assert!(off.contains("ADVANCE"));
+        assert!(on.contains('\u{2022}'), "the latched stance is marked: {on}");
+        assert_ne!(off, on);
+        assert!(!on.contains("ADVANCE x"), "never a count");
+        assert_eq!(charges_for(Verb::Push, 9, 9), None);
+    }
+
+    #[test]
+    fn the_two_stances_are_told_apart_by_their_own_latches() {
+        // `update_chips` used to pass `tight` for every stance. With two of them that would make
+        // ADVANCE mirror HOLD FIRE — two chips reporting one state, which is worse than reporting
+        // none, because it looks like information.
+        assert_ne!(
+            chip_label(Verb::HoldFire, None, true, 0.0),
+            chip_label(Verb::Push, None, true, 0.0),
+            "the two stances must not render identically when both are on"
+        );
+    }
+
+    #[test]
+    fn advance_is_a_request_not_an_armed_tool() {
+        assert_eq!(Verb::Push.request(), ArmRequest::TogglePush);
+        for tool in [ArmedTool::None, ArmedTool::Device, ArmedTool::Quarantine, ArmedTool::Cap] {
+            assert!(!Verb::Push.armed_by(tool), "a stance is never an armed tool");
         }
     }
 

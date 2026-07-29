@@ -887,7 +887,9 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
     use bevy::prelude::*;
     use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
     use foundation_vs_slop::time_control::SimBlocked;
+    use foundation_vs_slop::input::KeyBindings;
     use foundation_vs_slop::ui::containment_hud::ContainmentHudRoot;
+    use foundation_vs_slop::ui::controls_screen::{control_lines, ControlsRoot};
     use foundation_vs_slop::ui::hud::{BossBarRoot, HudRoot, RosterStripRoot, SpeedText};
     use foundation_vs_slop::ui::layout::{HudFrame, Region, RegionNode};
     use foundation_vs_slop::ui::pause::PauseRoot;
@@ -1008,6 +1010,35 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
     {
         let mut q = app.world_mut().query_filtered::<Entity, With<PauseRoot>>();
         assert!(q.iter(app.world()).next().is_some(), "pause overlay should spawn");
+    }
+
+    // The controls screen (`docs/ui.md` §1.5: extend this test when you add a screen). It carries
+    // the game's only complete statement of what the keys do, and a screen that silently fails to
+    // spawn renders NOTHING — the exact failure mode this whole test exists to catch.
+    app.world_mut()
+        .resource_mut::<NextState<MenuState>>()
+        .set(MenuState::Controls);
+    app.update();
+    app.update();
+    assert!(
+        app.world().resource::<SimBlocked>().0,
+        "the controls screen must block the sim like every other overlay"
+    );
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<ControlsRoot>>();
+        assert!(
+            q.iter(app.world()).next().is_some(),
+            "the controls screen should spawn"
+        );
+    }
+    // And it must actually have content. An empty list would still satisfy "the root spawned",
+    // which is precisely the kind of pass `docs/ui.md` §1.4 calls a bug that reads as a feature.
+    {
+        let bindings = app.world().resource::<KeyBindings>();
+        assert!(
+            control_lines(bindings).len() >= 20,
+            "the controls screen listed almost nothing — the registry is not reaching it"
+        );
     }
 }
 

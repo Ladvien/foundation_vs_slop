@@ -116,6 +116,46 @@ pub struct Outfit(pub Color);
 #[derive(Component)]
 pub struct Selected;
 
+/// **The player has ordered this operative to advance to contact** rather than hold.
+///
+/// # Why this is the one order worth having
+///
+/// The 2026-07-29 controls review set out to expose the squad-AI `Mode` vocabulary to the player as a
+/// twelve-item order wheel, and reading the repertoires killed that idea. Every role behaviour is
+/// gated on *applicability*, not on preference: `Ward` needs `PhotophobeBearingKnown`, `TendWounded`
+/// needs `AllyDownNearby`, `Examine` needs `HasUnexaminedNearby`. Ordering one of those when its gate
+/// is off does **nothing at all** — a control that silently does nothing is precisely the "magic
+/// results that are hard to debug" this project's first rule forbids. `Suppress` and `DeploySensor`
+/// are not even authored into a repertoire.
+///
+/// Exactly one genuine *preference* survives that filter, and it is a real gap. `squad_ai::role`
+/// gives the Gunman `Overwatch` at rank 4 and `Engage` at rank 2 **on the same gate**, with the
+/// comment "a rank below so it holds by default". So gunmen always hold, always did, and the player
+/// had no way to ask them to close. Itthipuripat et al. 2018 (DOI 10.1523/jneurosci.0440-18.2018)
+/// says the cost of options is *commitment time* rather than perception, so a small set of
+/// always-applicable orders beats a large set of mostly-inapplicable ones — this plus `HOLD FIRE` and
+/// the move order is three, which is that budget.
+///
+/// # Why a component and not a `Fact`
+///
+/// The obvious implementation is a consideration on `Overwatch` reading a new `Fact`. It would be
+/// bit-identical headless (multiplying a score by exactly `1.0`), but `squad_ai::genome` encodes a
+/// repertoire's free parameters **by walking its considerations in order** — so adding one grows the
+/// Gunman's genome by three params and invalidates every archived behaviour elite encoded against the
+/// old template. A player order is not a brain parameter, and paying that price to model it as one
+/// would be wrong twice.
+///
+/// So it overrides the decision instead, at the same seam and for the same stated reason
+/// `MoveOrder` overrides the AI's `DesiredMove` (`squad::unit_movement`, `squad_ai::perception`): the
+/// player's instruction is authoritative. Applied per-unit, so an order sticks to the operatives who
+/// received it rather than evaporating when the selection changes.
+///
+/// **Determinism.** Only `selection::toggle_push_order` inserts it, and that reads the mouse and
+/// keyboard — so no unit ever carries it in the headless harness, the override never fires there, and
+/// the pinned hash is untouched. Verified against the shipped golden.
+#[derive(Component)]
+pub struct PushOrder;
+
 /// An active move order: the shared flow field the unit follows toward the group's goal, plus a
 /// small amount of follower state. One `FlowField` is built per command and shared (`Arc`) by every
 /// unit in the selection, so hundreds of units cost one field build, not one A\* per unit.

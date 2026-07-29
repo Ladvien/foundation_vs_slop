@@ -330,6 +330,24 @@ If the antagonist is semiotic decay — meaning coming loose from things — the
 
 ## 9. Open questions
 
+> **§6's core rule is implemented in the UI as of 2026-07-29.** `src/ui/theme.rs` is now warm-neutral
+> throughout — chroma bounded by `MAX_UI_CHROMA`, `red >= blue`, and accent/text/muted separated by
+> **luminance** alone — with two tests standing in for the prose: `the_foundation_has_no_house_palette`
+> and `baseline_reality_is_slightly_warm`. The phosphor green the HUD used to be spent on chrome now
+> lives in `UiTheme::anomaly`, reserved and unused, which is what §7's *"make color mean deviation, not
+> danger"* actually requires. The ACS hazard ramp desaturated with it, and that was always correct:
+> Disruption is *how much light is getting out*, and light has no hue.
+>
+> Two independent arguments landed in the same place, which is the pattern this whole document keeps
+> producing. In-fiction: §6 and §7. Perceptually: Wolfe's *Guided Search 6.0* (2021) — colour is one of
+> the few features that can guide attention at all, so spending saturation on a permanent background
+> element burns the one channel that could have pulled the eye to a threat. See `docs/ui.md` §1.3.
+>
+> **This changes the answer to question 1 below.** With the UI desaturated, a saturation-driven Hume
+> meter no longer has to compete with the HUD for the same signal — the world can carry it alone, which
+> is the version that works. The question is now a *world-render* decision (`src/palette.rs`,
+> `src/vhs.rs`), not a UI one.
+
 1. **Is saturation the Hume meter?** (§6) If yes, the Scranton Reality Anchor visibly drains the world of color when you deploy it — the safety device that makes everything gray. That's a thesis statement, not a mechanic.
 2. **What's on the TICK whitelist?** If your combat specialist carries anti-psionic rounds with a friendly-fire whitelist, then somebody filled out that whitelist, and either the psionic is on it or they aren't.
 3. **Does the game ever go white?** Reserve Amida. Use it once.

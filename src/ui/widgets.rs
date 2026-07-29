@@ -83,7 +83,7 @@ pub fn style_menu_buttons(
 /// wire up or forget. `navigate` only allocates when a nav key is actually pressed (or once on open
 /// to seed focus), so idle frames do no work.
 pub fn menu_keyboard_nav(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     mut focus: ResMut<InputFocus>,
     mut visible: ResMut<InputFocusVisible>,
     nav: TabNavigation,
@@ -93,8 +93,10 @@ pub fn menu_keyboard_nav(
         return; // No menu open — nothing to navigate.
     }
 
-    let up = keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW);
-    let down = keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS);
+    // `Context::Menu` actions are the ones exempt from `input::Actions`' focus guard, which is the
+    // whole point: a focused menu button is precisely when navigation must keep working.
+    let up = actions.just_pressed(crate::input::Action::MenuUp);
+    let down = actions.just_pressed(crate::input::Action::MenuDown);
     if !up && !down {
         // Menu just opened with nothing focused yet: focus the first button so Enter is immediately
         // live, but leave the focus ring hidden (`visible` stays false) until the player actually
@@ -140,12 +142,12 @@ pub fn focus_hovered_menu_button(
 /// the main-row Enter or Space, so without this NumpadEnter would be silently dead on every menu.
 /// Fires the same [`Activate`] event `Button` would, targeted at the focused menu button.
 pub fn menu_activate_numpad_enter(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::input::Actions,
     focus: Res<InputFocus>,
     buttons: Query<(), With<MenuButton>>,
     mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::NumpadEnter) {
+    if !actions.just_pressed(crate::input::Action::MenuActivate) {
         return;
     }
     if let Some(entity) = focus.get() {
@@ -256,6 +258,9 @@ mod tests {
     /// order). Returns the app and the button entities in spawn order.
     fn menu_app(n: usize) -> (App, Vec<Entity>) {
         let mut app = App::new();
+        // `menu_keyboard_nav` reads the binding table through `input::Actions`, and a missing
+        // `Res<T>` is a *panic* in Bevy 0.19, not a skip — the trap `ui::theme` documents.
+        crate::input::claim_bindings(&mut app);
         app.init_resource::<InputFocus>()
             .init_resource::<InputFocusVisible>()
             .init_resource::<ButtonInput<KeyCode>>()
@@ -326,6 +331,9 @@ mod tests {
     fn no_menu_open_is_inert() {
         // With no MenuButtons, the global system must not touch focus (it runs every frame in-game).
         let mut app = App::new();
+        // `menu_keyboard_nav` reads the binding table through `input::Actions`, and a missing
+        // `Res<T>` is a *panic* in Bevy 0.19, not a skip — the trap `ui::theme` documents.
+        crate::input::claim_bindings(&mut app);
         app.init_resource::<InputFocus>()
             .init_resource::<InputFocusVisible>()
             .init_resource::<ButtonInput<KeyCode>>()

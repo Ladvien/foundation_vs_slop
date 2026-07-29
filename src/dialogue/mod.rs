@@ -6,11 +6,19 @@
 //! machine ([`runtime`]). Everything runs on `Update` — cosmetic, non-deterministic, and never
 //! registered in the headless harness, so it stays outside the pinned sim / `snapshot_hash`.
 //!
-//! Keeping the exchange in-world rather than on a screen HUD is a deliberate immersion choice: it is
-//! "spatial" UI in Fagerholt & Lorentzon's diegesis taxonomy, and removing non-diegetic screen
-//! elements measurably raises player involvement (Kennedy et al., *Removing the HUD*, 2015,
-//! DOI 10.1145/2793107.2793120). Speech vs thought are distinct channels (Gray's Comic-Strip
-//! Conversations); balloon color/emotion carries affect (An et al., *AniBalloons*, arXiv:2408.06294).
+//! Keeping the exchange in-world rather than on a screen HUD is a deliberate choice: it is "spatial"
+//! UI in Fagerholt & Lorentzon's diegesis taxonomy, and it puts the words next to the operative
+//! saying them, so the player never has to match a name in a corner to a body in the room.
+//!
+//! **That is the honest reason. The immersion claim this comment used to make is contested** — see
+//! `psi_vision`'s header for the full accounting. In short: Iacovides et al. 2015
+//! (DOI 10.1145/2793107.2793120) found HUD removal helped experts only and on two subscales, Llanos &
+//! Jørgensen 2011 found it helped nobody, and the one quantitative head-to-head attributes the win to
+//! precision and gaze co-location rather than to diegesis. Co-location is exactly what a balloon over
+//! the speaker's head buys, which is why the design survives losing the citation.
+//!
+//! Speech vs thought are distinct channels (Gray's Comic-Strip Conversations); balloon
+//! color/emotion carries affect (An et al., *AniBalloons*, arXiv:2408.06294).
 
 pub mod bubble;
 pub mod model;
