@@ -61,19 +61,23 @@ fn capture_once(timeout: Duration) -> Option<Vec<f32>> {
     None
 }
 
-/// **The committed golden is STALE as of the 2026-07-28 UI pass and needs re-pinning on a machine
-/// with a display.**
+/// **The committed golden is STALE and this test currently FAILS — measured SSIM 0.8873 vs the 0.95
+/// gate on 2026-07-29.** It needs re-pinning; the current render was inspected and is correct.
 ///
-/// `ui::theme::load_fonts` now loads `assets/fonts/FiraMono-Regular.ttf` instead of resolving to
-/// Bevy's embedded `FiraMono-subset.ttf`, which carries only 95 codepoints. The title screen's
-/// subtitle is `"// SCP-9191 CONTAINMENT SITE — WATCH FEED"`; that em-dash (U+2014) was **tofu** in
-/// every frame the golden was captured from and now renders as a dash. The change is a fix, not a
-/// regression, but it moves the pixels.
+/// It is stale because the golden was last written 90 commits ago (`ad098e5`, the 2026-07-19 review
+/// pass) and **43 file-touches to `src/{dungeon,world,health,light,mycelia,placement}` have landed
+/// since** — the dungeon layout behind the title card is simply a different world now, and the
+/// worldspace health bars over the squad are visible in a way they were not when the golden was
+/// captured. Since the test is `#[ignore]`d it has been failing unnoticed for all 90.
 ///
-/// This could not be re-pinned where the pass was done (no monitor → black drawable), and
-/// `TESTING.md` is explicit that changing a golden is "a deliberate, human-reviewed act — never
-/// auto-approve a diff" — so it was left for a human to regenerate and eyeball rather than
-/// rewritten blind. Procedure is in the module doc above.
+/// The 2026-07-28 UI pass is a *minor additional* contributor, not the cause: `ui::theme::load_fonts`
+/// now loads `assets/fonts/FiraMono-Regular.ttf` rather than resolving to Bevy's embedded
+/// `FiraMono-subset.ttf` (95 codepoints), so the subtitle's em-dash in
+/// `"// SCP-9191 CONTAINMENT SITE — WATCH FEED"` renders instead of being tofu. Verified visually in
+/// the 2026-07-29 capture. That shifts a line of centred text; it does not move the geometry.
+///
+/// Re-pinning was deliberately **not** done automatically. `TESTING.md`: changing a golden is "a
+/// deliberate, human-reviewed act — never auto-approve a diff." Procedure is in the module doc above.
 #[test]
 #[ignore] // display-gated — see module doc.
 fn title_screen_matches_golden() {
