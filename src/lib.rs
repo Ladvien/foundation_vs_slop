@@ -44,6 +44,11 @@ pub mod devshot;
 /// Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
 pub mod region_capture;
+/// Dev-only **rig tripwire**: warns, once per rig and by name, when a skinned character's joints come
+/// apart — the shape that renders as the stretched spikes a player captured on 2026-07-29 and could
+/// only describe as "Wtf? No ideae what this is." Debug-only, stripped from release like `devshot`.
+#[cfg(debug_assertions)]
+pub mod rig_watch;
 /// Dev-only performance overlay (FPS / frame-ms / entity-count / CPU / mem, toggled with F4) plus the
 /// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
@@ -423,6 +428,11 @@ pub fn run() {
     // out of the deterministic core and the shipped binary (see `perf_hud`).
     #[cfg(debug_assertions)]
     app.add_plugins(perf_hud::PerfHudPlugin);
+
+    // Dev-only skeleton tripwire. Reads joint transforms and logs; writes nothing, so it cannot reach
+    // the deterministic core. See `rig_watch` for why it watches joints rather than the mesh.
+    #[cfg(debug_assertions)]
+    app.add_plugins(rig_watch::RigWatchPlugin);
 
     // Dev-only Research Room editor/observation systems (`FVS_RESEARCH_ROOM=1`). Debug-only, all on
     // `Update`, never in the headless harness — outside the deterministic core and the shipped binary.
