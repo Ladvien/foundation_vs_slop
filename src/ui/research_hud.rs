@@ -18,7 +18,7 @@
 use bevy::prelude::*;
 
 use super::state::{despawn_scoped, AppState};
-use super::theme::{FontAssets, UiTheme, Z_MENU};
+use super::theme::{FontAssets, UiTheme, Z_PANEL};
 use super::widgets::text_colored;
 use crate::research::{
     rank_by_information_gain, Experiment, HiddenParam, ResearchPosterior, Researched,
@@ -70,7 +70,7 @@ fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                 row_gap: Val::Px(theme.space_xs),
                 ..default()
             },
-            GlobalZIndex(Z_MENU - 1),
+            GlobalZIndex(Z_PANEL),
         ))
         .with_children(|p| {
             p.spawn((ResearchReadout, text_colored(&theme, &fonts, "", theme.font_body, theme.text)));

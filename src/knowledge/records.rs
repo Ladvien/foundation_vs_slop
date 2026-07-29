@@ -270,7 +270,7 @@ fn spawn_panel(
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            GlobalZIndex(crate::ui::theme::Z_MENU - 1),
+            GlobalZIndex(crate::ui::theme::Z_PANEL),
         ))
         .with_children(|p| {
             p.spawn((

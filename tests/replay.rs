@@ -887,8 +887,11 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
     use bevy::prelude::*;
     use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
     use foundation_vs_slop::time_control::SimBlocked;
-    use foundation_vs_slop::ui::hud::{HudRoot, SpeedText};
+    use foundation_vs_slop::ui::containment_hud::ContainmentHudRoot;
+    use foundation_vs_slop::ui::hud::{BossBarRoot, HudRoot, RosterStripRoot, SpeedText};
+    use foundation_vs_slop::ui::layout::{HudFrame, Region, RegionNode};
     use foundation_vs_slop::ui::pause::PauseRoot;
+    use foundation_vs_slop::ui::verb_bar::VerbBarRoot;
     use foundation_vs_slop::ui::state::{AppState, MenuState};
     use foundation_vs_slop::ui::UiPlugin;
 
@@ -929,13 +932,67 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
         !app.world().resource::<SimBlocked>().0,
         "in-game with no menu open must unblock the sim"
     );
+    // The HUD is up. Asserted by its NAMED PARTS rather than by a root count: the elements live in
+    // three different layout regions, so "the HUD spawned" is three entities, and a count is the
+    // wrong oracle — it would pass for three copies of the boss bar and fail for a correct HUD.
     {
         let mut q = app.world_mut().query_filtered::<Entity, With<HudRoot>>();
-        assert_eq!(q.iter(app.world()).count(), 1, "HUD root should spawn on entering the game");
+        assert!(
+            q.iter(app.world()).count() >= 1,
+            "the HUD should spawn on entering the game"
+        );
+    }
+    for (name, present) in [
+        ("speed readout", {
+            let mut q = app.world_mut().query_filtered::<Entity, With<SpeedText>>();
+            q.iter(app.world()).next().is_some()
+        }),
+        ("squad roster strip", {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<Entity, With<RosterStripRoot>>();
+            q.iter(app.world()).next().is_some()
+        }),
+        ("boss bar", {
+            let mut q = app.world_mut().query_filtered::<Entity, With<BossBarRoot>>();
+            q.iter(app.world()).next().is_some()
+        }),
+    ] {
+        assert!(present, "HUD {name} should exist in game");
+    }
+
+    // LAYOUT liveness (`docs/ui.md` §1.5). Every panel is parented into a region of the 3×3 frame;
+    // a panel that failed to resolve its region would silently not render at all. Assert the frame
+    // is up and that all nine regions exist exactly once — the machine-checkable form of the
+    // overlap bug that had `containment_hud` and the roster strip drawing on top of each other.
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<HudFrame>>();
+        assert_eq!(q.iter(app.world()).count(), 1, "exactly one layout frame in game");
     }
     {
-        let mut q = app.world_mut().query_filtered::<Entity, With<SpeedText>>();
-        assert!(q.iter(app.world()).next().is_some(), "HUD speed readout should exist");
+        let mut q = app.world_mut().query::<&RegionNode>();
+        let mut seen: Vec<Region> = q.iter(app.world()).map(|r| r.0).collect();
+        assert_eq!(seen.len(), 9, "the frame should own nine regions");
+        for region in Region::ALL {
+            let n = seen.iter().filter(|r| **r == region).count();
+            assert_eq!(n, 1, "{region:?} should exist exactly once, found {n}");
+        }
+        seen.clear();
+    }
+    // Every in-game panel resolved into a region rather than vanishing.
+    for (name, present) in [
+        ("containment readout", {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<Entity, With<ContainmentHudRoot>>();
+            q.iter(app.world()).next().is_some()
+        }),
+        ("verb bar", {
+            let mut q = app.world_mut().query_filtered::<Entity, With<VerbBarRoot>>();
+            q.iter(app.world()).next().is_some()
+        }),
+    ] {
+        assert!(present, "{name} should be parented into a layout region");
     }
 
     // Open the pause menu → overlay spawns, sim blocks again.

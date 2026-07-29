@@ -25,7 +25,9 @@ pub mod site_hud;
 pub mod verb_bar;
 pub mod debrief;
 pub mod hud;
+pub mod layout;
 pub mod pause;
+pub mod rows;
 pub mod settings_menu;
 pub mod state;
 pub mod theme;
@@ -45,6 +47,9 @@ impl Plugin for UiPlugin {
             .add_plugins((
                 crate::settings::SettingsPlugin,
                 theme::UiThemePlugin,
+                // Owns the 3×3 region grid every panel is parented into. Must be added before the
+                // panel plugins so `OnEnter` ordering can name `layout::spawn_frame`.
+                layout::HudLayoutPlugin,
                 boot::BootScreenPlugin,
                 title::TitlePlugin,
                 warmup::WarmupScreenPlugin,

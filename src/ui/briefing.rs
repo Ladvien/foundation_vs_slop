@@ -28,8 +28,9 @@
 
 use bevy::prelude::*;
 
+use super::layout::{self, HudRegions, Region};
 use super::state::{despawn_scoped, AppState};
-use super::theme::{FontAssets, UiTheme, Z_MENU};
+use super::theme::{FontAssets, UiTheme};
 use crate::director::ExpeditionBriefing;
 
 /// Root marker, so the panel is despawned with the rest of the in-game UI.
@@ -77,24 +78,29 @@ fn spawn_briefing(
     mut commands: Commands,
     theme: Res<UiTheme>,
     fonts: Res<FontAssets>,
+    regions: Res<HudRegions>,
     briefing: Res<ExpeditionBriefing>,
 ) {
-    commands
-        .spawn((
-            BriefingRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(theme.space_lg),
-                left: Val::Px(theme.space_lg),
-                flex_direction: FlexDirection::Column,
-                ..default()
-            },
-            GlobalZIndex(Z_MENU - 1),
-        ))
-        .with_children(|p| {
-            // Through the shared widget rather than a hand-rolled bundle: `theme.scale` is the
-            // accessibility text-scale knob, and a panel that ignores it is a panel that stops being
-            // readable exactly for the players who turned it up.
+    let root = (
+        BriefingRoot,
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
+            ..default()
+        },
+        BackgroundColor(theme.panel),
+        super::widgets::border_all(theme.panel_border),
+        Pickable::IGNORE,
+    );
+    let Some(mut ec) = layout::panel_in(&mut commands, &regions, Region::TopLeft, root) else {
+        error!("briefing: no layout frame at spawn — the expedition framing is not shown");
+        return;
+    };
+    ec.with_children(|p| {
+            // Through the shared widget rather than a hand-rolled bundle: `widgets::text_colored`
+            // emits `FontSize::Rem`, which is what makes the accessibility text-scale reach this
+            // panel. A hand-rolled `FontSize::Px` bundle would stop being readable for exactly the
+            // players who turned the scale up.
             p.spawn(super::widgets::text_colored(
                 &theme,
                 &fonts,
@@ -113,8 +119,11 @@ impl Plugin for BriefingPlugin {
         // `OnEnter(RunState::Active)`, which lands before `Warmup` finishes, but reading it at `InGame`
         // means the panel cannot render a briefing for the *previous* expedition if a transition is
         // ever reordered.
-        app.add_systems(OnEnter(AppState::InGame), spawn_briefing)
-            .add_systems(OnExit(AppState::InGame), despawn_scoped::<BriefingRoot>);
+        app.add_systems(
+            OnEnter(AppState::InGame),
+            spawn_briefing.after(layout::spawn_frame),
+        )
+        .add_systems(OnExit(AppState::InGame), despawn_scoped::<BriefingRoot>);
     }
 }
 

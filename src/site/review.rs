@@ -176,7 +176,7 @@ fn spawn_panel(
                 row_gap: Val::Px(theme.space_xs),
                 ..default()
             },
-            GlobalZIndex(crate::ui::theme::Z_MENU - 1),
+            GlobalZIndex(crate::ui::theme::Z_PANEL),
         ))
         .with_children(|p| {
             p.spawn((

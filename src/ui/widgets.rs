@@ -173,22 +173,19 @@ pub fn clear_menu_focus_when_empty(
     }
 }
 
-/// A text bundle in the theme's body font/color at `px` (before `theme.scale`).
+/// A text bundle in the theme's body font/color at `px`.
 pub fn text(theme: &UiTheme, fonts: &FontAssets, s: impl Into<String>, px: f32) -> impl Bundle {
-    (
-        Text::new(s),
-        TextFont {
-            font: FontSource::Handle(fonts.body.clone()),
-            font_size: FontSize::Px(px * theme.scale),
-            ..default()
-        },
-        TextColor(theme.text),
-    )
+    text_colored(theme, fonts, s, px, theme.text)
 }
 
-/// A text bundle in an explicit color (e.g. accent/muted/danger).
+/// A text bundle in an explicit color (e.g. accent/muted/hazard ink).
+///
+/// `px` is the size at the default [`RemSize`](bevy::text::RemSize), but the emitted unit is
+/// **`Rem`, not `Px`** — that is what makes the accessibility text-scale a single resource write
+/// (`theme::apply_text_scale`) instead of a rebuild of every spawned label. Every text bundle in
+/// the game routes through here, so nothing can opt out of the scale by accident.
 pub fn text_colored(
-    theme: &UiTheme,
+    _theme: &UiTheme,
     fonts: &FontAssets,
     s: impl Into<String>,
     px: f32,
@@ -198,7 +195,7 @@ pub fn text_colored(
         Text::new(s),
         TextFont {
             font: FontSource::Handle(fonts.body.clone()),
-            font_size: FontSize::Px(px * theme.scale),
+            font_size: FontSize::Rem(px / super::theme::REM_BASE),
             ..default()
         },
         TextColor(color),

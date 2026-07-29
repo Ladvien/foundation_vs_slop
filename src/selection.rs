@@ -52,6 +52,22 @@ fn aim_tolerance(reach: f32) -> f32 {
     reach.max(AIM_TOLERANCE)
 }
 
+/// A request to arm a verb from a source that is **not** the keyboard — today, the clickable verb
+/// bar (`crate::ui::verb_bar`).
+///
+/// Routed as a message on purpose. [`arm_tool_input`] is the single writer of [`ArmedTool`], and a
+/// UI panel reaching in to write it directly would be a second writer with its own copy of the
+/// toggle-to-disarm rule and its own chance to forget the `DebugCaptureActive` stand-down. This is
+/// the same discipline `ui::debrief`'s F10 dev-victory follows: send the intent, let the one owner
+/// apply it.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmRequest {
+    /// Arm this verb, or disarm it if it is already armed.
+    Toggle(ArmedTool),
+    /// Flip the latched weapons-tight stance.
+    ToggleWeaponsTight,
+}
+
 pub struct SelectionPlugin;
 
 impl Plugin for SelectionPlugin {
@@ -61,6 +77,10 @@ impl Plugin for SelectionPlugin {
         // no match), which is the only reason the harness never hit the missing-resource panic `UiPlugin`
         // did — that is luck, not a contract, so claim the resource explicitly. `init_resource` is idempotent.
         app.init_resource::<crate::DebugCaptureActive>();
+        // Registered here rather than in `UiPlugin` because `arm_tool_input` (the READER) lives here
+        // and runs in the harness, where `UiPlugin` never exists. A message whose reader can run
+        // without its registration is a panic waiting for the first headless frame.
+        app.add_message::<ArmRequest>();
         // Order-issuing input runs in `RunFixedMainLoop` *before* the fixed step, not in `Update`. `Update`
         // runs after the fixed loop, so a `MoveOrder` inserted there wasn't seen by `unit_movement` (on
         // `FixedUpdate`) until the next frame — a one-frame lag. `BeforeFixedMainLoop` flushes the command
@@ -198,6 +218,7 @@ pub fn arm_tool_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     capture: Res<crate::DebugCaptureActive>,
+    mut requests: MessageReader<ArmRequest>,
     mut armed: ResMut<ArmedTool>,
     mut tight: ResMut<crate::laser::WeaponsTight>,
     mut sfx: MessageWriter<Sfx>,
@@ -207,12 +228,9 @@ pub fn arm_tool_input(
     }
     // Weapons tight is a latched stance, not a held key: containment holds run for seconds and asking
     // the player to hold a key through one would compete with the mouse.
-    if keys.just_pressed(KeyCode::KeyF) {
-        tight.0 = !tight.0;
-        sfx.write(Sfx::MoveOrder);
-    }
+    let mut toggle_tight = keys.just_pressed(KeyCode::KeyF);
 
-    let requested = if keys.just_pressed(KeyCode::KeyC) {
+    let mut requested = if keys.just_pressed(KeyCode::KeyC) {
         Some(ArmedTool::Device)
     } else if keys.just_pressed(KeyCode::KeyZ) {
         Some(ArmedTool::Quarantine)
@@ -221,6 +239,21 @@ pub fn arm_tool_input(
     } else {
         None
     };
+
+    // The clickable verb bar arrives here rather than writing `ArmedTool` itself, so this stays the
+    // single writer and the click and the key cannot diverge — clicking a chip *is* pressing its
+    // key, including the toggle-to-disarm behaviour and the `DebugCaptureActive` stand-down above.
+    for req in requests.read() {
+        match *req {
+            ArmRequest::Toggle(tool) => requested = Some(tool),
+            ArmRequest::ToggleWeaponsTight => toggle_tight = true,
+        }
+    }
+
+    if toggle_tight {
+        tight.0 = !tight.0;
+        sfx.write(Sfx::MoveOrder);
+    }
     if let Some(want) = requested {
         // Toggle: pressing the armed verb's own key puts it away.
         *armed = if *armed == want { ArmedTool::None } else { want };
