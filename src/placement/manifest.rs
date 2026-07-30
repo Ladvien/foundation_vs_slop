@@ -252,4 +252,33 @@ mod tests {
         let err = parse_manifest(&text).expect_err("more than the cap of Tiled items must be rejected");
         assert!(err.contains("Tiled"), "error should name the Tiled cap: {err}");
     }
+
+    /// Every `glb` path in the SHIPPED manifest resolves to a real file under `assets/`.
+    ///
+    /// The failure this catches is silent. A mistyped path is a perfectly valid manifest — it parses,
+    /// validates, and the solver happily places the item; Bevy then fails the asset load and the prop
+    /// simply never appears. Nothing asserts, and a room that is one chair short looks exactly like a
+    /// room the layout put one chair in. With ~130 hand-written paths that is a matter of time.
+    ///
+    /// Runs against `assets/config/config.ron` rather than a fixture, because the point is to check the
+    /// paths that actually ship.
+    #[test]
+    fn every_shipped_manifest_glb_exists_on_disk() {
+        let cfg = crate::config::load_game_config().expect("shipped game config must load");
+        let assets = std::path::Path::new("assets");
+        let missing: Vec<&str> = cfg
+            .placement
+            .furniture
+            .items
+            .iter()
+            .map(|i| i.glb.as_str())
+            .filter(|glb| !assets.join(glb).is_file())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "manifest rows point at {} file(s) that do not exist under assets/ — each would be placed \
+             by the solver and then silently fail to load: {missing:#?}",
+            missing.len()
+        );
+    }
 }

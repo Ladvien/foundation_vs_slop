@@ -180,6 +180,72 @@
                   category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.30),
                   affordances: ["emit", "screen"], height: 0.50 ),
 
+                // ---- Retro CRT televisions (assets/retro_tvs/, converted by scripts/import_retro_tvs.py).
+                // Every one carries a dedicated glass sub-mesh whose base_color clears
+                // `light::glow_screens`' predicate (green + blue > 3*red + 0.05, linear), so the CRT-snow
+                // shader and the ScreenLight actually attach — the conversion script ASSERTS that on its
+                // own output, because a miss is silent at runtime. Chassis is neutral so it can't be
+                // mistaken for the screen. Dimensions are measured, not estimated. ----
+                ( key: "crt_large", glb: "retro_tvs/retro_tv_large.glb",
+                  category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.56),
+                  affordances: ["emit", "screen"], height: 0.66 ),
+                ( key: "crt_a", glb: "retro_tvs/retro_tv_a.glb",
+                  category: "appliance", tags: ["living", "office"], role: Scatter(surface: "support"), footprint: (0.89, 0.89),
+                  affordances: ["emit", "screen"], height: 0.66 ),
+                ( key: "crt_b", glb: "retro_tvs/retro_tv_b.glb",
+                  category: "appliance", tags: ["bedroom", "office"], role: Scatter(surface: "support"), footprint: (0.51, 0.47),
+                  affordances: ["emit", "screen"], height: 0.45 ),
+
+                // ---- Tiny Living furniture (assets/tinyliving/, converted by scripts/blend_to_glb.py).
+                // Re-origined to base-centre at conversion, so every row's pivot is the default (0,0).
+                // Footprints are the exported X/Z extent in metres; heights the exported Y. ----
+                ( key: "armchair", glb: "tinyliving/lovely_armchair.glb",
+                  category: "seating", tags: ["living"], role: Freestanding, footprint: (0.82, 0.74),
+                  affordances: ["sit"], height: 1.03 ),
+                ( key: "loveseat", glb: "tinyliving/lovely_loveseat.glb",
+                  category: "seating", tags: ["living"], role: Freestanding, footprint: (1.83, 0.75),
+                  affordances: ["sit", "back_to_wall"], height: 0.91 ),
+                ( key: "dining_chair", glb: "tinyliving/lovely_dining_chair.glb",
+                  category: "seating", tags: ["dining", "kitchen"], role: Freestanding, footprint: (0.62, 0.66),
+                  affordances: ["sit"], height: 0.99 ),
+                ( key: "pouffe", glb: "tinyliving/modern_pouffe.glb",
+                  category: "seating", tags: ["living"], role: Tiled, footprint: (0.59, 0.60),
+                  affordances: ["sit"], height: 0.53 ),
+                ( key: "coffee_table", glb: "tinyliving/sir_cumference_coffee_table.glb",
+                  category: "table", tags: ["living"], role: Freestanding, footprint: (0.73, 0.73),
+                  surfaces: ["support"], height: 0.50 ),
+                ( key: "writing_desk", glb: "tinyliving/tiny_desk_for_tiny_living.glb",
+                  category: "table", tags: ["office", "bedroom"], role: Freestanding, footprint: (0.81, 0.85),
+                  affordances: ["back_to_wall"], surfaces: ["support", "worktop"], height: 1.00 ),
+                // 2.40 m — exactly WALL_HEIGHT, so it reads as a floor-to-ceiling unit rather than
+                // floating short of the ceiling the open-top view never shows anyway.
+                // `surfaces` is not optional here even though the piece is mostly enclosed shelving: an
+                // office room draws ONE freestanding piece, and every candidate it can draw must be able
+                // to host the scatter pass, or a room rolls up with nothing on any surface. (A bookcase
+                // holding objects is also just true.) `furnish_region_end_to_end_stacks_props_and_
+                // contains_furniture` pins exactly this.
+                ( key: "bookcase_tall", glb: "tinyliving/power_tower_bookcase.glb",
+                  category: "storage", tags: ["office", "living"], role: Freestanding, footprint: (0.85, 0.59),
+                  affordances: ["store", "back_to_wall"], surfaces: ["support"], height: 2.40 ),
+                ( key: "dresser_tall", glb: "tinyliving/power_tower_dresser.glb",
+                  category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (0.52, 0.53),
+                  affordances: ["store", "back_to_wall"], surfaces: ["support"], height: 1.51 ),
+                ( key: "dresser_stubby", glb: "tinyliving/stubby_cubby_dresser.glb",
+                  category: "storage", tags: ["bedroom"], role: Freestanding, footprint: (0.68, 0.85),
+                  affordances: ["store", "back_to_wall"], surfaces: ["support"], height: 1.36 ),
+                ( key: "tiered_shelf", glb: "tinyliving/tiered_shelf.glb",
+                  category: "storage", tags: ["living", "office"], role: Freestanding, footprint: (0.30, 0.78),
+                  affordances: ["store", "back_to_wall"], surfaces: ["support"], height: 1.04 ),
+                ( key: "vanity", glb: "tinyliving/the_sinkz_bathroom_vanity.glb",
+                  category: "appliance", tags: ["bathroom"], role: Freestanding, footprint: (0.65, 0.68),
+                  affordances: ["back_to_wall"], surfaces: ["worktop"], height: 1.37 ),
+                ( key: "lavatory", glb: "tinyliving/compact_lavatory.glb",
+                  category: "appliance", tags: ["bathroom"], role: Freestanding, footprint: (0.39, 0.74),
+                  affordances: ["back_to_wall"], height: 0.89 ),
+                ( key: "desk_lamp_modern", glb: "tinyliving/the_modern_desk_lamp.glb",
+                  category: "light", tags: ["decor"], role: Scatter(surface: "worktop"), footprint: (0.25, 0.24),
+                  affordances: ["emit"], height: 0.56 ),
+
                 // Office — a desk so "office"-tagged rooms (a generation-time room type) read as
                 // workspaces. A desk is a worktop (hosts a desk lamp), as well as a generic support.
                 // Footprint re-measured from the glb: the L-desk is 1.90 × 0.90 m and its origin sits at

@@ -1423,10 +1423,26 @@ mod tests {
         let reqs = furnish_region(&dungeon, &orch, &dungeon.regions[0], &parts, &density);
         assert!(!reqs.is_empty(), "the office room should be furnished");
 
-        // Phase 3: at least one scatter prop rests on the desk surface. Floor furniture sits at y≈0, the
-        // ceiling light at WALL_HEIGHT (2.4), a wall sconce at 1.8 — a rested prop is the only 0<y<1 case.
-        let on_surface = reqs.iter().filter(|r| r.pos.y > 0.05 && r.pos.y < 1.0).count();
-        assert!(on_surface >= 1, "a scatter prop should rest on the desk (found {on_surface})");
+        // Phase 3: at least one scatter prop rests on a support surface.
+        //
+        // Identified by manifest ROLE, not by a y-window. This used to assert `0.05 < y < 1.0`, reasoning
+        // that floor furniture sits at y≈0, a wall sconce at 1.8 and a ceiling light at WALL_HEIGHT — so a
+        // rested prop was the only sub-1 m case. That silently encoded "every support is a ~0.75 m desk",
+        // and it broke the moment the catalogue gained taller supports (a 2.40 m bookcase, a 1.04 m
+        // shelf): a correctly-rested prop landed above the window and the test reported a placement bug
+        // that did not exist. The exclusions the window was really making — sconces and ceiling lights —
+        // are `Anchor` role, so filtering by role states the intent directly and needs no magic numbers.
+        let scatter_glbs: HashSet<&str> = catalogue
+            .items
+            .iter()
+            .filter(|i| matches!(i.role, Role::Scatter { .. }))
+            .map(|i| i.glb.as_str())
+            .collect();
+        let on_surface = reqs
+            .iter()
+            .filter(|r| scatter_glbs.contains(r.glb.as_str()) && r.pos.y > 0.05)
+            .count();
+        assert!(on_surface >= 1, "a scatter prop should rest on a support (found {on_surface})");
 
         // Phase 1: every floor-level piece (y≈0) sits on real floor — nothing escaped into a wall/void.
         for r in &reqs {
