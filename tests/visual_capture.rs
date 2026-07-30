@@ -110,6 +110,24 @@ fn regenerate_golden_from_screenshot() {
 /// `assets/fonts/FiraMono-Regular.ttf` instead of resolving to Bevy's embedded 95-codepoint
 /// `FiraMono-subset.ttf`. That shifts a line of centred text; it does not move geometry.
 ///
+/// **Re-pinned 2026-07-30** after the relight (HDR + `Bloom`, an irradiance environment map replacing
+/// the flat ambient, directional cascade shadows), surface normal/ORM maps on the dungeon, and the
+/// Backrooms/Concrete biome split. Measured SSIM against the previous golden: **0.5403** — a real,
+/// intended change to the whole render, not a regression.
+///
+/// **Two traps cost real time here; both are avoidable.**
+///
+///  1. `cargo test ... -- --ignored` runs *both* ignored tests in this file, and
+///     [`regenerate_golden_from_screenshot`] silently re-pins from whatever `screenshot.png` happens to
+///     be lying in the crate root. Run them **by name**, never together, or the comparison grades
+///     itself against a golden the same invocation just overwrote.
+///  2. A stale game process will hand you the wrong scene. `pkill -f target/debug/foundation_vs_slop`
+///     matches its own wrapper shell and kills that instead of the game (`pkill -x foundation_vs_s`
+///     works — the name is truncated to 15 chars). A surviving `FVS_RESEARCH_ROOM=1` instance
+///     produced a *dungeon* capture that was then pinned as the "title screen"; the resulting 0.53
+///     scores looked exactly like a non-reproducible scene and were nothing of the kind. **Open the
+///     PNG and confirm you are looking at the title card before re-pinning.**
+///
 /// To re-pin again, use [`regenerate_golden_from_screenshot`] — and look at the frame first.
 #[test]
 #[ignore] // display-gated — see module doc.
