@@ -42,15 +42,20 @@ fn linear_texture(assets: &AssetServer, path: &'static str) -> Handle<Image> {
 /// tangent, so without this every map wired above would load, cost memory, and change nothing on
 /// screen — a failure with no error message anywhere.
 ///
-/// Failure panics naming the site, the codebase's convention for a structurally-impossible invariant
-/// (`sort_total!` does exactly this; `psi_vision::band_of` likewise). It cannot fire for these inputs —
-/// generation needs an indexed triangle list with positions, normals and UVs, which every mesh here
-/// has by construction — and `tangents_exist_for_every_dungeon_mesh` below pins that, so the branch is
-/// dead rather than lurking.
-fn with_tangents(mut mesh: Mesh, site: &str) -> Mesh {
+/// Returns `Err` rather than panicking. It cannot fire for these inputs — generation needs an indexed
+/// triangle list with positions, normals and UVs, which every mesh here has by construction, and
+/// `tangents_exist_for_every_dungeon_mesh` below pins that — but "cannot fire" is not a licence to
+/// panic in a shipped build, and `CLAUDE.md`'s rule is unconditional.
+///
+/// The error propagates out of `spawn_tiles` as a fallible system (`Result<(), BevyError>`, the
+/// pattern `mold.rs`/`mycelia` already use). That is deliberately *not* a degraded render path: if it
+/// ever fired, the dungeon would not spawn at all and Bevy would log the reason. An unrendered level
+/// is impossible to miss, which is the loud failure the one-path rule asks for — as against carrying on
+/// with untangented meshes, which would silently disable every normal map and look merely "a bit flat".
+fn with_tangents(mut mesh: Mesh, site: &str) -> Result<Mesh, BevyError> {
     mesh.generate_tangents()
-        .unwrap_or_else(|e| panic!("dungeon::render: tangent generation failed for {site}: {e}"));
-    mesh
+        .map_err(|e| BevyError::from(format!("dungeon::render: tangent generation failed for {site}: {e}")))?;
+    Ok(mesh)
 }
 
 /// Instantiate the dungeon as textured primitives: a Backrooms-carpet floor quad per floor
@@ -62,7 +67,7 @@ pub(crate) fn spawn_tiles(
     assets: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+) -> Result<(), BevyError> {
     // Shared materials + meshes (built once, reused for every tile). Both textures are
     // seamless, so the default sampler + [0,1] cuboid/plane UVs tile cleanly across cells.
     //
@@ -119,17 +124,22 @@ pub(crate) fn spawn_tiles(
     let floor_mesh = meshes.add(with_tangents(
         Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE).into(),
         "floor",
-    ));
+    )?);
     // One mesh per trimmed length — index by the number of ends [`edge_wall`] removed (0, 1 or 2). An
     // E/W slab is always index 0; only N/S slabs shorten, and only at a corner.
-    let wall_meshes: [Handle<Mesh>; 3] = std::array::from_fn(|trims| {
+    let wall_meshes: [Result<Handle<Mesh>, BevyError>; 3] = std::array::from_fn(|trims| {
         let len = TILE_SIZE - trims as f32 * WALL_THICKNESS;
-        meshes.add(with_tangents(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len)), "wall"))
+        with_tangents(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len)), "wall").map(|m| meshes.add(m))
     });
+    // `from_fn` cannot carry `?`, so the three results are collected and checked together.
+    let wall_meshes: [Handle<Mesh>; 3] = {
+        let [a, b, c] = wall_meshes;
+        [a?, b?, c?]
+    };
     // A corner post is a WALL_THICKNESS² column standing the full wall height, filling the vertex gap
     // where two perpendicular wall runs meet (see the post loop after the wall pass).
     let post_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
-    let wall_post = meshes.add(with_tangents(wall_mesh(post_size), "post"));
+    let wall_post = meshes.add(with_tangents(wall_mesh(post_size), "post")?);
 
     // One static half-space at y=0 catches every gib chunk (the whole floor is at y=0), so we don't
     // need a physics collider per floor tile — only the gib-chunk physics world uses these (see `gore`).
@@ -286,7 +296,7 @@ pub(crate) fn spawn_tiles(
     // cutaway gap. All four edges are spawned (the pose seeds E/S hidden at yaw=0); rotation reveals the
     // pair on whichever wall is currently full-height.
     let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
-    let header_mesh = meshes.add(with_tangents(wall_mesh(header_size), "doorway header"));
+    let header_mesh = meshes.add(with_tangents(wall_mesh(header_size), "doorway header")?);
     for region in &dungeon.regions {
         for op in &region.openings {
             // Open lanes stack +y for an E/W mouth and +x for an N/S mouth — the same axis the necking
@@ -308,6 +318,7 @@ pub(crate) fn spawn_tiles(
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -333,7 +344,7 @@ mod tests {
             cases.push(("wall", wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len))));
         }
         for (name, mesh) in cases {
-            let tangented = with_tangents(mesh, name);
+            let tangented = with_tangents(mesh, name).expect("dungeon meshes must produce tangents");
             assert!(
                 tangented.attribute(Mesh::ATTRIBUTE_TANGENT).is_some(),
                 "{name}: tangent generation reported success but attached no ATTRIBUTE_TANGENT — the \
