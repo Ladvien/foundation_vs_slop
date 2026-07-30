@@ -209,7 +209,9 @@ struct AudioAssets {
     watcher_reveal: Handle<AudioSource>,
     /// Dry insectoid chitter for the crab swarm (shared throttled voice, see `crab_squitter`).
     squitter: Handle<AudioSource>,
-    footsteps: [Handle<AudioSource>; 4],
+    /// Footstep variants per surface biome, indexed by `dungeon::Biome as usize` — the same indexing
+    /// `dungeon::FloorMaterials::pick` uses, so what you hear and what you see cannot drift apart.
+    footsteps: [[Handle<AudioSource>; 4]; 2],
     /// Sparse ambient one-shots (door creaks, water drips, a clock tick) for the randomized layer.
     ambient: [Handle<AudioSource>; 6],
     /// Footstep voice for a squad unit stepping into an Almond-Water pool — mud-footstep recordings
@@ -341,10 +343,20 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
             watcher_reveal: assets.load("audio/enemy/watcher_reveal.ogg"),
         squitter: assets.load("audio/enemy/squitter.ogg"),
         footsteps: [
-            assets.load("audio/foot/carpet_1.ogg"),
-            assets.load("audio/foot/carpet_2.ogg"),
-            assets.load("audio/foot/carpet_3.ogg"),
-            assets.load("audio/foot/carpet_4.ogg"),
+            // Biome::Backrooms — the shipped carpet set.
+            [
+                assets.load("audio/foot/carpet_1.ogg"),
+                assets.load("audio/foot/carpet_2.ogg"),
+                assets.load("audio/foot/carpet_3.ogg"),
+                assets.load("audio/foot/carpet_4.ogg"),
+            ],
+            // Biome::Concrete — hard-surface steps (horror_sfx_vol_1, see assets/audio/CREDITS.md).
+            [
+                assets.load("audio/foot/concrete_1.ogg"),
+                assets.load("audio/foot/concrete_2.ogg"),
+                assets.load("audio/foot/concrete_3.ogg"),
+                assets.load("audio/foot/concrete_4.ogg"),
+            ],
         ],
         ambient: [
             assets.load("audio/ambience/oneshot/creak_1.ogg"),
@@ -526,15 +538,24 @@ fn footsteps(
     assets: Res<AudioAssets>,
     bus: Res<AudioBus>,
     time: Res<Time>,
-    units: Query<&Velocity, With<Unit>>,
+    units: Query<(&Velocity, &Transform), With<Unit>>,
+    // Optional: the Site-67 hub has no `Dungeon`, and a missing `Res<T>` panics the system in Bevy 0.19
+    // rather than skipping it. Absent → the carpet set, which is what the hub is floored with.
+    dungeon: Option<Res<crate::dungeon::Dungeon>>,
     mut timer: Local<f32>,
     mut rng: Local<u32>,
     mut last: Local<usize>,
 ) {
-    let movers = units
-        .iter()
-        .filter(|v| v.0.length() >= FOOT_MIN_SPEED)
-        .count();
+    // Centroid of the walkers, not per-unit: this is deliberately ONE shared voice (see the density
+    // throttle below), so there is one surface to pick, and it is the one the squad is mostly on.
+    let mut centroid = Vec3::ZERO;
+    let mut movers = 0usize;
+    for (v, tf) in units.iter() {
+        if v.0.length() >= FOOT_MIN_SPEED {
+            centroid += tf.translation;
+            movers += 1;
+        }
+    }
     if movers == 0 {
         *timer = STRIDE; // idle → armed, so the next departure steps on its first frame
         return;
@@ -545,9 +566,16 @@ fn footsteps(
     *timer += time.delta_secs();
     if *timer >= interval {
         *timer = 0.0;
-        let idx = pick_variant(&mut rng, assets.footsteps.len(), &mut last);
+        let surface = match &dungeon {
+            // `world_to_cell` rather than dividing by `TILE_SIZE` here: a second world→cell conversion
+            // is a second path that can silently disagree with the one the dungeon actually uses.
+            Some(d) => d.biome(d.world_to_cell(centroid / movers as f32)) as usize,
+            None => crate::dungeon::Biome::Backrooms as usize,
+        };
+        let set = &assets.footsteps[surface];
+        let idx = pick_variant(&mut rng, set.len(), &mut last);
         commands.spawn((
-            AudioPlayer::new(assets.footsteps[idx].clone()),
+            AudioPlayer::new(set[idx].clone()),
             one_shot(FOOT_VOL * bus.sfx, jitter(&mut rng, 0.08)),
         ));
     }
