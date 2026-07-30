@@ -41,6 +41,8 @@
 //! that *is* authored is the containment rule, which lives in `config.ron`'s `containment:` slice like
 //! every other anomaly's.
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 
 use crate::containment::Quarantinable;
@@ -64,6 +66,23 @@ const SPAWN_MIN_DIST: i32 = 24;
 /// Slow on purpose. The morph is the tell that the thing in the corner *used to be someone*, and it
 /// only lands if the player is present while it happens rather than arriving after the fact.
 const MUTATION_SECS: f32 = 45.0;
+
+/// The bloom's animation graph + slot table, built once at `Startup`.
+///
+/// One clip: `scp610_idle`, the asset's "agitated tremor" (canon — infected seek contact even before
+/// pursuing). Without it the creature stands in its T-pose bind pose, which reads as a broken asset
+/// rather than as a stationary one.
+///
+/// A resource rather than per-spawn construction so every bloom clones one handle, and so the
+/// harness and the windowed build take the identical path.
+#[derive(Resource)]
+pub struct Scp610Anim {
+    graph: Handle<AnimationGraph>,
+    slots: Arc<[crate::anim::Slot]>,
+}
+
+/// glTF animation index for `scp610_idle`. Pinned by `tests/creature_clip_contract.rs`.
+const CLIP_IDLE: usize = 0;
 
 /// Marks an SCP-610 bloom.
 #[derive(Component)]
@@ -94,7 +113,7 @@ pub struct Scp610Plugin;
 
 impl Plugin for Scp610Plugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_systems(Startup, build_scp610_anim).add_systems(
             OnEnter(crate::session::RunState::Active),
             spawn_scp610_blooms.in_set(crate::session::RunBuild::Populate),
         );
@@ -108,9 +127,29 @@ impl Plugin for Scp610VisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            drive_mutation.distributive_run_if(in_state(crate::session::RunState::Active)),
+            (drive_mutation, drive_scp610_animation)
+                .distributive_run_if(in_state(crate::session::RunState::Active))
+                .after(crate::anim::PoseAttachSet),
         );
     }
+}
+
+/// `Startup`: build the one shared graph. Registered in the gameplay plugin, not the visuals one,
+/// because `BlendSource` is inserted **at spawn** — a component added later would churn the hashed
+/// archetype — so the resource has to exist wherever the spawner runs, harness included.
+fn build_scp610_anim(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    let (graph, nodes) = AnimationGraph::from_clips([
+        assets.load(GltfAssetLabel::Animation(CLIP_IDLE).from_asset(SCP610_GLB))
+    ]);
+    // `free`, not `gait`: the bloom never travels, so there is no ground distance to sync a stride
+    // against. Speed 1.0 — the clip is authored at 24 fps gameplay tempo (README 5).
+    let slots: Arc<[crate::anim::Slot]> =
+        nodes.iter().map(|&n| crate::anim::Slot::free(n, 1.0)).collect();
+    commands.insert_resource(Scp610Anim { graph: graphs.add(graph), slots });
 }
 
 /// The one shared builder — used by the seeded spawner and (later) the Research Room F6 palette, so a
@@ -123,6 +162,7 @@ pub fn spawn_scp610_at(
     pos: Vec3,
     rule: crate::containment::ContainmentRule,
     seq: &mut crate::containment::TargetSeq,
+    anim: &Scp610Anim,
 ) -> Entity {
     commands
         .spawn((
@@ -138,6 +178,9 @@ pub fn spawn_scp610_at(
             crate::ai::faction::Faction::Anomaly,
             Scp610Seed(seed),
             Scp610Mutation::default(),
+            // At spawn, never toggled: `anim::attach_pose_blenders` installs the `PoseBlender` on the
+            // streamed-in model's `AnimationPlayer` by walking up to the nearest `BlendSource`.
+            crate::anim::BlendSource { graph: anim.graph.clone(), slots: anim.slots.clone() },
             // Authored at real scale with its base at y=0, so no render scale and no Y offset.
             Transform::from_translation(pos),
             Visibility::Inherited,
@@ -169,6 +212,7 @@ fn spawn_scp610_blooms(
     dungeon: Res<crate::dungeon::Dungeon>,
     rules: Res<crate::containment::ContainmentRules>,
     mut seq: ResMut<crate::containment::TargetSeq>,
+    anim: Res<Scp610Anim>,
 ) {
     let spawn = dungeon.spawn;
 
@@ -203,6 +247,7 @@ fn spawn_scp610_blooms(
             dungeon.cell_center(cell),
             rules.0.scp610.clone(),
             &mut seq,
+            &anim,
         );
     }
 }
@@ -290,5 +335,18 @@ mod tests {
             "blooms span {span} of an available {full} — that is clustering, which is the bug this \
              replaced (raster order put all three in one corner)"
         );
+    }
+}
+
+/// Hold the single idle slot at full weight.
+///
+/// Trivial today because there is one clip, but it is the seam the rest of the roster grows through:
+/// when the bloom gains states, this is where `set_targets` picks between them.
+fn drive_scp610_animation(mut blooms: Query<&mut crate::anim::PoseBlender, With<Scp610>>) {
+    for mut blender in &mut blooms {
+        // A slot-count mismatch is a wiring bug, not a runtime condition — report, do not mask.
+        if let Err(e) = blender.set_targets(&[1.0]) {
+            warn_once!("scp610: pose blend rejected: {e}");
+        }
     }
 }
