@@ -204,7 +204,7 @@ struct AudioAssets {
     bone_snap: Handle<AudioSource>,
     /// Monster growls — round-robined (no immediate repeat) so a repeatedly-sighted enemy doesn't
     /// stamp the same clip (Böttcher & Serafin — sample variation is the first rung against repetition).
-    growls: [Handle<AudioSource>; 4],
+    growls: [Handle<AudioSource>; 8],
     /// Sharp horror sting for the watcher's mask-off reveal (see `watcher_stinger`).
     watcher_reveal: Handle<AudioSource>,
     /// Dry insectoid chitter for the crab swarm (shared throttled voice, see `crab_squitter`).
@@ -213,7 +213,7 @@ struct AudioAssets {
     /// `dungeon::FloorMaterials::pick` uses, so what you hear and what you see cannot drift apart.
     footsteps: [[Handle<AudioSource>; 4]; 2],
     /// Sparse ambient one-shots (door creaks, water drips, a clock tick) for the randomized layer.
-    ambient: [Handle<AudioSource>; 6],
+    ambient: [Handle<AudioSource>; 9],
     /// Footstep voice for a squad unit stepping into an Almond-Water pool — mud-footstep recordings
     /// (`audio/foot/mud_step_{1..8}.ogg`, horror_sfx_vol_2), randomly varied across 8 clips (plus pitch
     /// jitter) so a unit wading through doesn't stamp one clip (Böttcher & Serafin — sample variation is
@@ -339,6 +339,12 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
             assets.load("audio/enemy/growl_2.ogg"),
             assets.load("audio/enemy/growl_3.ogg"),
             assets.load("audio/enemy/growl_4.ogg"),
+            // 5-8 from horror_sfx_vol_1. The growl fires on the false->true edge of an enemy entering
+            // sight range, so on a busy level a player hears it constantly; 4 clips stamped audibly.
+            assets.load("audio/enemy/growl_5.ogg"),
+            assets.load("audio/enemy/growl_6.ogg"),
+            assets.load("audio/enemy/growl_7.ogg"),
+            assets.load("audio/enemy/growl_8.ogg"),
         ],
             watcher_reveal: assets.load("audio/enemy/watcher_reveal.ogg"),
         squitter: assets.load("audio/enemy/squitter.ogg"),
@@ -365,6 +371,12 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
             assets.load("audio/ambience/oneshot/drip_1.ogg"),
             assets.load("audio/ambience/oneshot/drip_2.ogg"),
             assets.load("audio/ambience/oneshot/clock.ogg"),
+            // 4-6 are the horror pack's door recordings. The ambient layer scatters one of these every
+            // 7-18 s somewhere around the squad, so it is the sound the player hears most of all; six
+            // clips was thin enough to notice the loop.
+            assets.load("audio/ambience/oneshot/creak_4.ogg"),
+            assets.load("audio/ambience/oneshot/creak_5.ogg"),
+            assets.load("audio/ambience/oneshot/creak_6.ogg"),
         ],
         splash: [
             assets.load("audio/foot/mud_step_1.ogg"),
