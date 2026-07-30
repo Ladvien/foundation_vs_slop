@@ -16,8 +16,16 @@ glTF channel packing: R = occlusion, G = roughness, B = metallic.
 
 - `concrete-diffuse.jpg`, `concrete-normal.png`, `concrete-orm.png`
 
-Source: **texturecan.com**, "Concrete Wall of Stacked Rectangular Stones" (Concrete 0031), via
+Source: **texturecan.com**, "Damaged Concrete with Deep Cracks" (Ground 0046), via
 `/mnt/codex_fs/game_assets/textures/pbr/`. License: **CC0** (texturecan publishes its library CC0).
+
+Replaced Concrete 0031 ("Concrete Wall of Stacked Rectangular Stones") on 2026-07-30. That one worked
+as a *zone* — clearly grey, clearly not the motel — but its stacked-stone pattern read as medieval
+cobblestone rather than a Foundation facility. Ground 0046 is a poured slab with deep cracks, and it is
+also near-perfectly neutral (mean srgb 0.518/0.518/0.517, chroma ~0.001) against the wallpaper's
+0.59/0.58/0.36. That maximises the *saturation* contrast between the two biomes, which is what
+`docs/lore/2026-07-12-scp-color-language.md` 6 actually asks of the reality layer — the concrete zone
+is the desaturated counterweight, so the less chroma it carries the better it does its job.
 Downscaled from the 2K release to 1024² to match the Backrooms set, and the separate AO + roughness
 maps packed into one ORM. Metallic is a hard 0 — concrete is a dielectric.
 
