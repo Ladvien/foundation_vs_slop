@@ -22,7 +22,7 @@ SCP-1048 only the rig).
 
 | | |
 |---|---|
-| File | `assets/scp610/scp-610.glb` — **~27.4 MiB**, self-contained |
+| File | `assets/scp610/scp-610.glb` — **4.9 MiB**, self-contained (was 27.4 MiB — see the note below) |
 | Generator | Khronos glTF Blender I/O (glTF 2.0 binary) |
 | Nodes | `scp610_rig` (Armature, 13 bones) → `scp610_mesh` (skinned mesh child) |
 | Mesh | **3,921 verts · 7,912 triangles** (ceiling `INFECTED_MAX_TRIS_N = 9000`) · 2 material slots |
@@ -31,6 +31,20 @@ SCP-1048 only the rig).
 | Units | metres, Y-up · base planted at **`y = 0`** |
 | Watertight | **yes** — 1 closed manifold island, 0 non-manifold edges (verified after a triangulation/bowtie fix during this build — see §6 note) |
 | Animations | **5**, all in-place (see §5) |
+
+**Recompressed 2026-07-30 (28.7 MB → 5.2 MB), geometry untouched.** 88% of the original file was a
+single 2048² **16-bit** PNG normal map (25.4 MB; the colour and roughness maps together are 1.1 MB) —
+35% of the game's entire `assets/` tree for a creature that spawns nowhere. At this game's fixed iso
+zoom SCP-610 is ~1.9 m tall and never exceeds a few hundred pixels, so 2K/16-bit was about an order of
+magnitude past what the screen can resolve; it is now 1024² 8-bit.
+
+Done with `scripts/glb_recompress_texture.py`, which rewrites the GLB container in place rather than
+round-tripping through Blender — **specifically to protect the contract in the table above.** An
+exporter is free to reorder animations, rename morph targets or retriangulate, any of which would
+silently break this asset for the sake of a texture change. Verified unchanged across the swap:
+15 nodes, 1 mesh, 1 skin, 13 joints, 171 accessors, 21,706 verts / 7,912 tris, the five clips **in
+order**, and the `mutation` morph target. The script asserts all of that on its own output and refuses
+to write if any of it moved.
 
 The `mutation` morph weight is the whole story: **0.0 = "still looks human"** (canon Stage 1 —
 the collapsed limb stubs are a few millimetres, anatomically invisible), **1.0 = full "animate
