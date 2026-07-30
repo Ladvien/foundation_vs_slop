@@ -222,16 +222,21 @@ fn drive_mutation(
     let dt = time.delta_secs();
     for (root, mut m) in &mut blooms {
         m.current = (m.current + m.rate_per_sec * dt).clamp(0.0, 1.0);
-        let Some(holder) = std::iter::once(root)
+        // EVERY descendant holding weights, not the first: the mesh has TWO primitives (body + eye),
+        // and Bevy gives each its own `MorphWeights`. Driving only the first turned half the creature.
+        let holders: Vec<Entity> = std::iter::once(root)
             .chain(children.iter_descendants(root))
-            .find(|e| weights.get(*e).is_ok())
-        else {
-            continue; // scene still streaming in
-        };
-        if let Ok(mut mw) = weights.get_mut(holder) {
-            // Target index 1 is `mutation`; index 0 is `Basis` and is never driven directly
-            // (`assets/scp610/README.md` §4).
-            if let Some(w) = mw.weights_mut().get_mut(1) {
+            .filter(|e| weights.get(*e).is_ok())
+            .collect();
+        for holder in holders {
+            let Ok(mut mw) = weights.get_mut(holder) else { continue };
+            // Index **0**, not 1. `assets/scp610/README.md` §4 says "index 1 is `mutation`, index 0 is
+            // Basis" — that is BLENDER shape-key numbering, where Basis is itself a key. glTF does not
+            // work that way: Basis is the base mesh and `targets` holds only the deltas, so the file
+            // carries exactly ONE target per primitive (verified: `targetNames: ['mutation']`,
+            // `targets` length 1). Writing index 1 was always a `None` and the morph never applied —
+            // three blooms authored at 0.0 / 0.5 / 1.0 rendered identically.
+            if let Some(w) = mw.weights_mut().first_mut() {
                 *w = m.current;
             }
         }
