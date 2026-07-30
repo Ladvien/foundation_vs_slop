@@ -264,6 +264,23 @@
                   category: "container", tags: ["hall", "office"], role: Tiled, footprint: (0.56, 0.56),
                   affordances: ["store"], height: 0.86 ),
 
+                // ---- Ozea hazard-station floor modules (assets/ozea/, scripts/fbx_to_glb.py).
+                // These are the ONLY pieces of that kit that fit: its floors measure exactly
+                // 1.00 x 1.00 m, matching TILE_SIZE. Its WALLS do not — 2.00 m tall against
+                // WALL_HEIGHT 2.4, and 2 m wide against a 1 m grid — and reaching 2.4 would need a
+                // 1.2x vertical scale that docs/artist_guide.md 2 forbids and that would stretch the
+                // panel detailing. So the corridor architecture stays as-is and only the floor plates
+                // land, as occasional Tiled props rather than a floor replacement (at 1 tile = 1 m a
+                // 192x192 level cannot afford 284-944 tris on every cell).
+                ( key: "floor_grate", glb: "ozea/floor_grate.glb",
+                  category: "decor", tags: ["hall", "office"], role: Tiled, footprint: (1.0, 1.0),
+                  affordances: ["decor"], height: 0.06 ),
+                // Recessed floor light: "emit" puts it in the gameplay LightField, so a lit floor plate
+                // is a real navigation cue for photophobic creatures, not just a bright patch.
+                ( key: "floor_light", glb: "ozea/floor_light.glb",
+                  category: "light", tags: ["hall"], role: Tiled, footprint: (1.0, 1.0),
+                  affordances: ["emit", "decor"], height: 0.06 ),
+
                 // Office — a desk so "office"-tagged rooms (a generation-time room type) read as
                 // workspaces. A desk is a worktop (hosts a desk lamp), as well as a generic support.
                 // Footprint re-measured from the glb: the L-desk is 1.90 × 0.90 m and its origin sits at
