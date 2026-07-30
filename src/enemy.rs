@@ -16,6 +16,7 @@
 //! child face) is what lets the face show while the capsule stays invisible.
 
 use bevy::pbr::{Material, MaterialPlugin};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -552,6 +553,7 @@ fn spawn_enemies(
                 SmileyFace,
                 Mesh3d(quad.clone()),
                 MeshMaterial3d(material),
+                NotShadowCaster, // camera-facing face billboard: casts no shadow (see world::setup_lighting)
                 Transform::from_translation(FACE_LOCAL),
                 Visibility::Inherited,
             ))
@@ -560,6 +562,7 @@ fn spawn_enemies(
                 AttackSphereFace,
                 Mesh3d(orb_quad.clone()),
                 MeshMaterial3d(attack_material),
+                NotShadowCaster, // camera-facing true-form billboard: casts no shadow (see world::setup_lighting)
                 Transform::from_translation(FACE_LOCAL),
                 Visibility::Hidden,
             ));
@@ -1224,6 +1227,7 @@ fn drain_lightning(
             LightningBolt { despawn_at: now + LIGHTNING_LIFE },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
+            NotShadowCaster, // emissive beam: casts no shadow (see world::setup_lighting)
             tf,
         ));
     }

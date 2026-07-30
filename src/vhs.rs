@@ -16,6 +16,11 @@
 //! RON and relaunch to change the look — there is no in-game panel.
 
 use bevy::core_pipeline::fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin};
+use bevy::core_pipeline::tonemapping::tonemapping;
+use bevy::core_pipeline::Core3dSystems;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::BoxedSystem;
+use bevy::post_process::bloom::bloom;
 use bevy::prelude::*;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
@@ -43,7 +48,21 @@ impl FullscreenMaterial for VhsSettings {
     fn fragment_shader() -> ShaderRef {
         "shaders/vhs.wgsl".into()
     }
-    // Defaults: runs in `Core3d`, `Core3dSystems::PostProcess`, before tonemapping.
+
+    /// Run **after** bloom, still inside `Core3dSystems::PostProcess` and before tonemapping.
+    ///
+    /// Both passes default into the same set with only a `.before(tonemapping)` edge, so once the camera
+    /// gained `Bloom` their relative order became unconstrained — and the two orders are visibly
+    /// different, not equivalent. Bloom-then-VHS is the physically honest one and the one the effect is
+    /// about: glare is what the *scene* does to light, tape artifacts are what the *recording medium*
+    /// does to the finished picture. Reverse it and the chroma split and scanlines get bloomed, which
+    /// smears the tape damage into a glow instead of laying it over the image.
+    fn schedule_configs(system: ScheduleConfigs<BoxedSystem>) -> ScheduleConfigs<BoxedSystem> {
+        system
+            .in_set(Core3dSystems::PostProcess)
+            .after(bloom)
+            .before(tonemapping)
+    }
 }
 
 /// Human-facing, RON-persisted tunables: the fade cycle timing plus each effect's strength. A field of

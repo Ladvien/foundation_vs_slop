@@ -9,6 +9,7 @@
 //! in Serious Games", IEEE Trans. Games 2018, DOI 10.1109/tg.2018.2791019).
 
 use bevy::pbr::{Material, MaterialPlugin};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -319,6 +320,7 @@ fn attach_health_bars(
             HealthBar { owner },
             Mesh3d(assets.quad.clone()),
             MeshMaterial3d(material),
+            NotShadowCaster, // worldspace HUD: casts no shadow (see world::setup_lighting)
             Transform::default(),
         ));
         commands.entity(owner).insert(HasHealthBar);

@@ -8,9 +8,13 @@
 // importance:
 //   1. A matte body (roughness ~0.92). Only the vein CORES go wet. A low roughness smeared across the whole
 //      sheet is precisely what makes a biofilm look like spilled liquid.
-//   2. Cavity AO into `diffuse_occlusion`. The scene's ambient is a bright UNIFORM fill (brightness 500),
-//      and uniform ambient ignores surface normals entirely — so without an occlusion term the filaments
-//      render flat no matter how hard we perturb the normal. This is the dial that makes the strands exist.
+//   2. Cavity AO into `diffuse_occlusion`. This was originally load-bearing for a different reason than it
+//      is now: the scene's ambient used to be a bright UNIFORM fill (brightness 500), and uniform ambient
+//      ignores surface normals entirely, so without an occlusion term the filaments rendered flat no matter
+//      how hard we perturbed the normal. The fill is now an irradiance environment map (`src/world.rs`) and
+//      DOES respond to the normal, so the perturbation carries its own weight — but cavity AO is still the
+//      dial that makes the strands read as recessed rather than merely tilted. Keep it; retune it lower if
+//      the strands now read as over-darkened.
 //   3. A dendritic, fbm-broken colony margin. Real fungal colonies have a feathery fractal advancing edge;
 //      a smooth iso-contour reads as the meniscus of a puddle.
 //   4. Filaments: fbm stretched ALONG the trail gradient's iso-contours, so strands run with the veins.

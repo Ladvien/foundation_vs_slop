@@ -36,11 +36,14 @@ use crate::util::{in_grid, row_major};
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LightingConfig {
-    /// Ambient fill brightness — the flat Backrooms fluorescent wash. Lower than the old hardcoded 500
-    /// so fixtures carve real contrast (dread/immersion rise as ambient falls — FDG 2014). Read by
-    /// [`crate::world::WorldPlugin`].
+    /// Residual uniform fill left *under* the environment map — the only remaining use of Bevy's flat
+    /// `GlobalAmbientLight`. It ran the whole ambient path at 500, then 200; it is now a small floor, and
+    /// [`env_brightness`] carries the fill instead. The reason is structural, not a taste call: a uniform
+    /// ambient term is added identically to every surface whatever its normal, so it can never shade
+    /// anything — it is precisely what made the scene read as clay. Kept non-zero only so a surface facing
+    /// away from every light does not crush to pure black. Read by [`crate::world::WorldPlugin`].
     pub ambient_brightness: f32,
-    /// Ambient fill colour (sRGB triple) — warm fluorescent.
+    /// Tint of that residual fill (sRGB triple) — warm fluorescent.
     pub ambient_color: [f32; 3],
     /// Directional key-light illuminance (lux) — a weak steep fill so low-poly tiles keep some shading.
     pub key_illuminance: f32,
@@ -111,6 +114,32 @@ pub struct LightingConfig {
     pub flashlight_spot_color: [f32; 3],
     /// Cosmetic spot light outer cone half-angle (radians) — the visible beam spread.
     pub flashlight_spot_outer_angle: f32,
+
+    // --- Image-based ambient + HDR display (see `crate::world`) ---
+    /// Intensity (cd/m²) of the generated environment map that supplies **normal-aware** ambient.
+    /// This replaced a flat [`ambient_brightness`] of 500→200: a uniform `GlobalAmbientLight` adds the
+    /// same term to every surface regardless of which way it faces, so nothing acquires form from the
+    /// fill and everything reads as clay. An irradiance environment map does depend on the normal, and
+    /// Ramamoorthi & Hanrahan 2001 (`10.1145/383259.383317`) is why a tiny one suffices: irradiance from
+    /// *any* environment is captured almost entirely by a low-order spherical-harmonic expansion, so a
+    /// 64² gradient cubemap carries essentially the same ambient signal as a full HDRI would.
+    pub env_brightness: f32,
+    /// Upward (+Y) end of the environment gradient, sRGB — the low-CRI fluorescent ceiling. Warm-neutral
+    /// by the palette rule (`docs/lore/2026-07-12-scp-color-language.md` §6: "Desaturation = reality").
+    pub env_sky_color: [f32; 3],
+    /// Downward (−Y) end of the environment gradient, sRGB — bounce off dark carpet/concrete. Darker and
+    /// less warm than the ceiling; the *difference* between the two ends is what shades a normal.
+    pub env_ground_color: [f32; 3],
+    /// Bloom strength on the HDR camera. The whole emissive layer (fixtures, TV static, laser bolts,
+    /// mycelia glow) was tuned *down* to survive an LDR camera that clipped anything above mid-grey;
+    /// this is what those values are now free to exceed.
+    pub bloom_intensity: f32,
+    /// Far edge of the directional key's shadow cascades, in metres. Interior scale — the Bevy default is
+    /// built for outdoor draw distances and would spend the whole shadow map on empty space.
+    pub shadow_max_distance: f32,
+    /// Depth of the first (sharpest) cascade, in metres. Roughly one large room, so the rooms the player
+    /// is actually looking at get the texel density.
+    pub shadow_first_cascade: f32,
 }
 
 /// The evolvable **gameplay** subset of [`LightingConfig`], as one value — so the world search can
@@ -190,6 +219,8 @@ pub fn validate_config(c: &LightingConfig) -> Result<(), String> {
         ("flashlight_edge_softness", c.flashlight_edge_softness),
         ("flashlight_spot_intensity", c.flashlight_spot_intensity),
         ("flashlight_spot_outer_angle", c.flashlight_spot_outer_angle),
+        ("env_brightness", c.env_brightness),
+        ("bloom_intensity", c.bloom_intensity),
     ] {
         if !(v.is_finite() && v >= 0.0) {
             return Err(format!("lighting.{name} must be finite and >= 0 (got {v})"));
@@ -229,10 +260,33 @@ pub fn validate_config(c: &LightingConfig) -> Result<(), String> {
         ("ambient_color", c.ambient_color),
         ("fixture_color", c.fixture_color),
         ("flashlight_spot_color", c.flashlight_spot_color),
+        ("env_sky_color", c.env_sky_color),
+        ("env_ground_color", c.env_ground_color),
     ] {
         if col.iter().any(|ch| !ch.is_finite() || *ch < 0.0) {
             return Err(format!("lighting.{name} channels must be finite and >= 0 (got {col:?})"));
         }
+    }
+    // Cascade splits: both positive, and the first cascade must sit inside the far edge. A first cascade
+    // beyond `shadow_max_distance` is not a degraded look, it is an inverted range — reject it at the door
+    // rather than let Bevy silently resolve it into a shadow map that covers nothing.
+    if !(c.shadow_max_distance.is_finite() && c.shadow_max_distance > 0.0) {
+        return Err(format!(
+            "lighting.shadow_max_distance must be finite and > 0 (got {})",
+            c.shadow_max_distance
+        ));
+    }
+    if !(c.shadow_first_cascade.is_finite() && c.shadow_first_cascade > 0.0) {
+        return Err(format!(
+            "lighting.shadow_first_cascade must be finite and > 0 (got {})",
+            c.shadow_first_cascade
+        ));
+    }
+    if c.shadow_first_cascade > c.shadow_max_distance {
+        return Err(format!(
+            "lighting.shadow_first_cascade ({}) exceeds shadow_max_distance ({})",
+            c.shadow_first_cascade, c.shadow_max_distance
+        ));
     }
     Ok(())
 }

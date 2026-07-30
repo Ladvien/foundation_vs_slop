@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use crate::ai::field::{FieldId, Stig};
@@ -1803,6 +1804,7 @@ pub(crate) fn parasite_burst(
                         Wound,
                         Mesh3d(wound_assets.disc.clone()),
                         MeshMaterial3d(wound_assets.mat.clone()),
+                        NotShadowCaster, // flat decal: casts no shadow (see world::setup_lighting)
                         Transform::from_translation(wound_local + Vec3::NEG_Z * 0.03)
                             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
                         Visibility::Inherited,

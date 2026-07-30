@@ -29,6 +29,7 @@
 //! Cosmetic and windowed-only: everything here runs on `Update` and touches nothing the pinned sim reads,
 //! so it can never enter `snapshot_hash`.
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use crate::ai::field::{FieldId, Stig, UNIT_THREAT_CHANNELS};
@@ -236,6 +237,7 @@ fn redraw_psi_vision(
             PsiCell,
             Mesh3d(assets.quad.clone()),
             MeshMaterial3d(assets.bands[mat].clone()),
+            NotShadowCaster, // unlit floor overlay: casts no shadow (see world::setup_lighting)
             Transform::from_xyz(p.x, HOVER, p.z)
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
             Visibility::Visible,

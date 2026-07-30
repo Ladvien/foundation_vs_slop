@@ -30,6 +30,7 @@ use std::collections::VecDeque;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use bevy::pbr::{Material, MaterialPlugin};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -880,6 +881,7 @@ fn drain_gore(
         commands.spawn((
             Mesh3d(assets.quad.clone()),
             MeshMaterial3d(spray),
+            NotShadowCaster, // camera-facing spray billboard: casts no shadow (see world::setup_lighting)
             Transform::from_translation(ev.pos + toward * 0.3)
                 .with_rotation(cam_rot)
                 .with_scale(Vec3::splat(quad_size)),
@@ -921,6 +923,7 @@ fn drain_gore(
             .spawn((
                 Mesh3d(assets.quad.clone()),
                 MeshMaterial3d(pool),
+                NotShadowCaster, // flat decal: casts no shadow (see world::setup_lighting)
                 Transform::from_translation(floor_pos)
                     .with_rotation(Quat::from_rotation_x(-FRAC_PI_2))
                     .with_scale(Vec3::splat(pool_size)),
@@ -1359,6 +1362,7 @@ fn spawn_wall_splatters(
             .spawn((
                 Mesh3d(assets.quad.clone()),
                 MeshMaterial3d(material),
+                NotShadowCaster, // flat decal: casts no shadow (see world::setup_lighting)
                 // `from_rotation_arc(Z, normal)` aims the quad face into the room; nudge off the wall
                 // to avoid z-fighting; taller than wide so it reads as running down.
                 Transform::from_translation(face + Vec3::Y * height + normal * push_off)
@@ -1467,7 +1471,13 @@ fn stamp_droplet_splat(
         normal: assets.blood_normal.clone(),
     });
     let id = commands
-        .spawn((Mesh3d(assets.quad.clone()), MeshMaterial3d(material), transform, BloodPool))
+        .spawn((
+            Mesh3d(assets.quad.clone()),
+            MeshMaterial3d(material),
+            NotShadowCaster, // flat decal: casts no shadow (see world::setup_lighting)
+            transform,
+            BloodPool,
+        ))
         .id();
     ring.0.push_back(id);
 }

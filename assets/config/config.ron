@@ -827,7 +827,9 @@
         // Emissive is held near 1.0 because the camera is LDR (no hdr, no Bloom) and the scene is
         // brightly lit (AmbientLight 500 + 2500-lux directional), so the default TonyMcMapface
         // tonemapper clips anything much brighter straight to white.
-        glow_gain: 1.35,        // multiplier on vein bioluminescence
+        glow_gain: 2.4,         // multiplier on vein bioluminescence. Was 1.35, capped by the LDR camera's
+                                // clip-to-white; the camera is HDR + Bloom now, so the veins can out-glow
+                                // the floor. Tune against a capture, not from this comment.
         intensity: 1.0,         // master opacity dial for the whole coating (0 = invisible)
         vein_lo: 3.0,           // trail value at which a vein begins to show
         vein_hi: 12.0,          // trail value at which a vein is fully lit (must exceed vein_lo)
@@ -1901,13 +1903,23 @@
     // read by `world::WorldPlugin` (also present in the headless harness — pure light data).
     // =============================================================================================
     lighting: (
-        ambient_brightness: 200.0,             // was a flat 500; dimmed so fixtures read as lit pools
-        ambient_color: (1.0, 0.98, 0.9),       // warm fluorescent white
-        key_illuminance: 2000.0,               // weak steep directional fill (lux)
+        ambient_brightness: 12.0,              // 500 -> 200 -> 12. This is now only a black-crush floor; the
+                                               // ambient fill itself moved to env_brightness below, because a
+                                               // uniform term is normal-blind and cannot shade anything.
+        ambient_color: (1.0, 0.98, 0.9),       // tint of that residual floor — warm fluorescent white
+        key_illuminance: 6000.0,               // steep directional KEY (lux). Was 2000, when it was a token
+                                               // fill under a 200-brightness uniform ambient and nothing cast
+                                               // shadows. It is now the game's only shadow caster, so it has
+                                               // to actually out-run the env fill — a shadow only subtracts
+                                               // the directional term, so key:fill is exactly the contrast
+                                               // ratio of every shadow on screen.
         fixture_intensity: 120000.0,           // per-fixture lumens (Bevy's default cinema light = 1e6)
         fixture_range: 7.0,                    // metres — area-of-effect cutoff, tuned with intensity
         fixture_color: (0.92, 1.0, 0.94),      // cool white, faint green cast (low-CRI halophosphate)
-        fixture_emissive: 2.2,                 // mesh-glow strength (LDR); the visible "light is on" cue
+        fixture_emissive: 4.0,                 // mesh-glow strength; the visible "light is on" cue. Was 2.2,
+                                               // chosen to stay under an LDR camera's clip to white. The camera
+                                               // is HDR now, so a lit tube can actually be brighter than paper
+                                               // and bloom off it — that is the whole point of the change.
         field_intensity: 1.0,                  // gameplay illuminance per fixture in the LightField (0..1-ish)
         photophobic_gain: 6.0,                 // idle crabs steer down the light gradient (toward dark) at this strength; committed/roused crabs (Muster/Rally/Latch/Carry) ignore it and flood the lit room — see crab_locomotion
         photophilic_gain: 14.0,                // light-seekers steer up the gradient (toolkit; no carrier yet)
@@ -1930,6 +1942,26 @@
         flashlight_spot_range: 12.0,           // cosmetic beam reach (metres)
         flashlight_spot_color: (1.0, 0.95, 0.8), // warm torch beam
         flashlight_spot_outer_angle: 0.6,      // cosmetic beam half-angle (radians, ~34deg)
+        // --- Image-based ambient + HDR display. The env map REPLACED the flat ambient fill (it is not a
+        // second path beside it): a uniform GlobalAmbientLight ignores surface normals by construction, so
+        // it could never shade anything. Ramamoorthi & Hanrahan 2001 is why 64px suffices — see light.rs.
+        env_brightness: 300.0,                 // cd/m^2 of the generated environment map. This is FILL, not key:
+                                               // at 900 it out-shone the directional and washed the operatives'
+                                               // pale gear to near-white.
+        // Near-NEUTRAL on purpose. The first pass used the old warm ambient_color (1.0, 0.98, 0.9) here, and the
+        // scene came back olive: backrooms-wall-diffuse is itself srgb(0.59,0.58,0.36) and the carpet
+        // (0.54,0.48,0.22), so warm light MULTIPLIES an already-yellow material and the result saturates —
+        // exactly what docs/ui.md 1.3 and the colour-language doc forbid ("saturation is reserved for
+        // anomalies"). Light carries no hue of its own here; the material's warmth is the only warmth.
+        // The faint warm-above / cool-below split is not decoration: it makes an upward-facing surface differ
+        // in HUE as well as value from a downward one, which is extra shading signal at zero added chroma.
+        env_sky_color: (0.90, 0.90, 0.88),     // +Y: fluorescent ceiling, a whisper warm
+        env_ground_color: (0.13, 0.14, 0.16),  // -Y: dark, faintly cool bounce off carpet/concrete. The GAP
+                                               // between the two ends is what shades a normal — flatten it and
+                                               // the clay look comes straight back.
+        bloom_intensity: 0.18,                 // HDR bloom; the emissive layer is now free to exceed 1.0
+        shadow_max_distance: 45.0,             // metres — interior scale, not Bevy's outdoor default
+        shadow_first_cascade: 12.0,            // metres — ~one large room gets the sharpest cascade
     ),
     // Almond Water (src/almond_water/) — a finite, self-regenerating heal resource that seeps from the
     // concrete and pools on the floor. Gameplay knobs drive the CPU field + consuming heal (harness-visible,

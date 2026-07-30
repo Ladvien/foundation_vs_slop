@@ -34,6 +34,7 @@
 //! actor to `liveness_violations`. It is spawned on `OnEnter(RunState::Active)`, not `FixedUpdate`, so
 //! it adds no node to the pinned schedule's linearisation.
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 /// A region the squad must occupy for [`crate::session::WinCondition::ExtractContained`] to resolve.
@@ -133,6 +134,7 @@ fn spawn_beacon(
         ExtractionBeacon,
         Mesh3d(column),
         MeshMaterial3d(material),
+        NotShadowCaster, // unlit translucent column: casts no shadow (see world::setup_lighting)
         Transform::from_translation(centre + Vec3::Y * (BEACON_HEIGHT * 0.5)),
     ));
     // A real light too, so the pad and the walls near it are lit — that is the part Marples measures

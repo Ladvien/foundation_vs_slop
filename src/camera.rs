@@ -4,11 +4,14 @@
 //! offset from it. It no longer follows any character (the squad is commanded by mouse; see
 //! `selection`).
 
-use bevy::camera::ScalingMode;
+use bevy::camera::{Hdr, ScalingMode};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::ShadowFilteringMethod;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::time::Real;
 
+use crate::config::GameConfig;
 use crate::input::Action;
 
 use std::f32::consts::TAU;
@@ -134,11 +137,21 @@ fn shake_noise(t: f32, seed: f32) -> f32 {
 
 /// Spawn the one persistent camera. Deliberately reads no `Dungeon`: it is created before any world
 /// exists (see the plugin note), and [`focus_camera_on_spawn`] aims it once there is one.
-fn setup_camera(mut commands: Commands, rig: Res<CameraRig>, mut view: ResMut<CameraView>) {
+fn setup_camera(
+    mut commands: Commands,
+    rig: Res<CameraRig>,
+    mut view: ResMut<CameraView>,
+    config: Res<GameConfig>,
+    mut images: ResMut<Assets<Image>>,
+) {
     // yaw = 0 ⇒ camera looks from (+X,+Z); seed the cutaway so the E/S near walls are already knee-high
     // on the first rendered frame (no startup squash animation).
     view.to_camera = Vec3::new(1.0, 0.0, 1.0);
     view.viewport_height = rig.height;
+    let cfg = &config.lighting;
+    // The ambient path. `crate::world` owns what the light *is* (and documents why it is an environment
+    // map rather than a flat fill); Bevy requires the component ride the camera, so it is attached here.
+    let env_map = images.add(crate::world::interior_env_cubemap(cfg));
     commands.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -147,6 +160,22 @@ fn setup_camera(mut commands: Commands, rig: Res<CameraRig>, mut view: ResMut<Ca
             },
             ..OrthographicProjection::default_3d()
         }),
+        // The camera was LDR, and that quietly capped the whole emissive layer: TonyMcMapface clips
+        // anything much above mid-grey straight to white, so `fixture_emissive`, the mycelia glow, the TV
+        // static and the laser bolts were each tuned *down* to stay under it and none of them could read
+        // as brighter than a sheet of paper. With `Hdr` they can, and `Bloom` is what turns that headroom
+        // into a visible halo around a lit tube.
+        Hdr,
+        Bloom { intensity: cfg.bloom_intensity, ..Bloom::NATURAL },
+        // The one shadow-casting light is the directional key (`world::setup_lighting`). `light.rs`'s
+        // note on the TV spotlight already diagnosed staircase artifacts and named filtering as a lever
+        // that was never actually pulled; this pulls it for every shadow in the game at once.
+        ShadowFilteringMethod::Gaussian,
+        GeneratedEnvironmentMapLight {
+            environment_map: env_map,
+            intensity: cfg.env_brightness,
+            ..default()
+        },
         Transform::from_translation(rig.focus + ISO_OFFSET).looking_at(rig.focus, Vec3::Y),
     ));
 }

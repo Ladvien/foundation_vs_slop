@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 
 use bevy::picking::Pickable;
 use bevy::picking::events::{Click, Out, Over, Pointer};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::time::Real;
 
@@ -324,6 +325,7 @@ fn present_current(
                             Pickable::default(),
                             Mesh3d(assets.quad.clone()),
                             MeshMaterial3d(mat),
+                            NotShadowCaster, // speech bubble: casts no shadow (see world::setup_lighting)
                             Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
                         ))
                         .observe(
@@ -520,6 +522,7 @@ fn release_bark(
         },
         Mesh3d(assets.quad.clone()),
         MeshMaterial3d(rendered.material),
+        NotShadowCaster, // speech bubble: casts no shadow (see world::setup_lighting)
         Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
     ));
 }
@@ -552,6 +555,7 @@ fn spawn_line_bubble(
         ConversationBubble,
         Mesh3d(assets.quad.clone()),
         MeshMaterial3d(rendered.material),
+        NotShadowCaster, // speech bubble: casts no shadow (see world::setup_lighting)
         Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
     ));
 }

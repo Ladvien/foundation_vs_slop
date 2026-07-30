@@ -19,6 +19,7 @@
 //! Balancing in Serious Games", IEEE Trans. Games 2018, DOI 10.1109/tg.2018.2791019). Only firing at
 //! enemies in live line of sight follows from RTS partial observability (see `fog` / `enemy`).
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use crate::ai::field::{sort_deposits, Deposit, FieldId, StigDeposits};
@@ -209,8 +210,9 @@ fn setup_laser_assets(
 ) {
     // Thin, long-on-Z bolt so `looking_to(forward)` (which aligns local −Z) points it along travel.
     let mesh = meshes.add(Cuboid::new(0.06, 0.06, 0.5));
-    // The project's first emissive material — a hot red-orange bolt. Values > 1 read as "glowing"
-    // even without bloom; add an HDR camera + Bloom later for a halo.
+    // The project's first emissive material — a hot red-orange bolt. The HDR camera + `Bloom` this note
+    // used to ask for now exist (`crate::camera::setup_camera`), so the bolt carries a real halo and its
+    // emissive is free to sit well above 1.0 (see `crate::palette::LASER_BOLT_EMISSIVE`).
     let material = materials.add(StandardMaterial {
         base_color: crate::palette::LASER_BOLT_BASE,
         emissive: crate::palette::LASER_BOLT_EMISSIVE, // red-dominant so it reads as a vivid bolt
@@ -398,6 +400,7 @@ pub(crate) fn fire_laser(
             },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
+            NotShadowCaster, // emissive bolt: casts no shadow (see world::setup_lighting)
             Transform::from_translation(muzzle).looking_to(forward, Vec3::Y),
             // Render-only: smooth fast bolt motion across the display refresh (see `lib::run`). Translation
             // only — bolts don't rotate in flight. Component + plugin from avian's interpolation integration.

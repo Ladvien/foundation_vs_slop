@@ -50,6 +50,7 @@ mod pipeline;
 pub mod species;
 mod testbed;
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::gpu_readback::Readback;
@@ -242,10 +243,14 @@ pub struct MyceliaConfig {
     pub hab_strength: f32,
 
     // ── Appearance ────────────────────────────────────────────────────────────────────────────────────
-    /// Multiplier on the veins' emissive bioluminescence. Held low because the camera is **LDR** (no `hdr`,
-    /// no `Bloom`) and the scene is brightly lit (`AmbientLight` brightness 500 + a 2500-lux directional),
-    /// so the default TonyMcMapface tonemapper clips anything much above mid-grey straight to white. Emissive
-    /// above ~1.0 stops reading as sickly phosphorescence and becomes a flat white tube.
+    /// Multiplier on the veins' emissive bioluminescence.
+    ///
+    /// This was held near 1.0 for a reason that no longer exists: the camera was **LDR**, so TonyMcMapface
+    /// clipped anything much above mid-grey straight to white and emissive above ~1.0 stopped reading as
+    /// sickly phosphorescence and became a flat white tube. The camera now carries `Hdr` + `Bloom`
+    /// (`crate::camera::setup_camera`) and the uniform ambient it was competing with dropped from 500 to a
+    /// residual (`crate::world`), so the veins can now out-glow the floor they sit on — which is what
+    /// bioluminescence in a dim corridor is supposed to do.
     pub glow_gain: f32,
     /// Master opacity dial for the whole coating (`0` = invisible, `1` = full).
     pub intensity: f32,
@@ -1160,6 +1165,7 @@ fn setup_mycelia(
         Name::new("mycelia_floor_overlay"),
         Mesh3d(mesh),
         MeshMaterial3d(material),
+        NotShadowCaster, // unlit floor overlay: casts no shadow (see world::setup_lighting)
         Transform::from_translation(center),
     ));
 

@@ -15,6 +15,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::pbr::{Material, MaterialPlugin};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
@@ -148,6 +149,7 @@ fn setup_puddle(
         Name::new("almond_water_puddle_overlay"),
         Mesh3d(mesh),
         MeshMaterial3d(material),
+        NotShadowCaster, // unlit floor overlay: casts no shadow (see world::setup_lighting)
         Transform::from_translation(center),
     ));
     commands.insert_resource(AlmondLevelImage(level));

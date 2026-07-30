@@ -21,6 +21,7 @@
 //! avatars into persistent operatives is FVS-G-3's job; this keeps the door open for it by index-keying
 //! them the same way `SquadMember` does.
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use super::layout::SiteLayout;
@@ -173,6 +174,7 @@ fn spawn_site_geometry(
         ApertureQuad,
         Mesh3d(quad),
         MeshMaterial3d(mat),
+        NotShadowCaster, // anomalous portal quad: casts no shadow (see world::setup_lighting)
         Transform::from_translation(door_at + Vec3::new(0.0, opening_h * 0.5, 0.02))
             .with_rotation(Quat::from_rotation_y(l.door.yaw.to_radians())),
     ));

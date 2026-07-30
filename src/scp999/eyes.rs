@@ -7,6 +7,7 @@
 //! a material uniform, so it never touches hashed `(Transform, Health)` state.
 
 use bevy::pbr::Material;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -123,6 +124,7 @@ pub(crate) fn attach_scp999_eyes(
                 },
                 Mesh3d(quad),
                 MeshMaterial3d(material),
+                NotShadowCaster, // camera-facing eye billboard: casts no shadow (see world::setup_lighting)
                 // Placeholder seat; `update_scp999_eyes` reseats it on the camera-facing side every frame.
                 Transform::from_translation(Vec3::Y * EYE_UP),
                 Visibility::Inherited,

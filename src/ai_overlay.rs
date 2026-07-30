@@ -11,6 +11,7 @@
 //! Cosmetic → `Update`, reusing the dialogue bubble's rasteriser and billboard tracker rather than growing
 //! a second one. Nothing here is read by the pinned sim, so it cannot enter `snapshot_hash`.
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use crate::ai::brain::ActiveBehavior;
@@ -133,6 +134,7 @@ fn sync_labels(
             AiLabel { text },
             Mesh3d(assets.quad.clone()),
             MeshMaterial3d(rendered.material),
+            NotShadowCaster, // debug label: casts no shadow (see world::setup_lighting)
             Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
         ));
     }

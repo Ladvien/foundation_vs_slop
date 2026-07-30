@@ -7,6 +7,7 @@
 //! future enemy hit / explosion can reuse it by pushing to the same queue.
 
 use bevy::pbr::{Material, MaterialPlugin};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -164,6 +165,7 @@ fn drain_impacts(
         commands.spawn((
             Mesh3d(assets.quad.clone()),
             MeshMaterial3d(material),
+            NotShadowCaster, // camera-facing spark billboard: casts no shadow (see world::setup_lighting)
             Transform::from_translation(pos + toward * 0.4)
                 .with_rotation(cam_rot)
                 .with_scale(Vec3::splat(settings.quad_size)),
