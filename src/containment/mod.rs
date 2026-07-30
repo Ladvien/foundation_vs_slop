@@ -54,6 +54,12 @@ pub struct ContainmentConfig {
     /// (`parasite::cure_infested_hosts`), not by driving a field. It still needs a rule so the research
     /// layer has one to read, and so `unmet()` has something to render if the HUD ever shows it.
     pub scp150: ContainmentRule,
+    /// SCP-610's area-denial rule — the first user of the [`area::Quarantine`] archetype.
+    ///
+    /// Unlike the others this is not a basin the player drives a field into: `tick_quarantine` opens
+    /// and closes the attempt on *geometry* (is the bloom inside a quarantine), and this rule is what
+    /// `tick_containment` then holds them to while it is open.
+    pub scp610: ContainmentRule,
     /// **Does an operative have to KNOW a procedure before the HUD will show it?** (FVS-O-2's benefit
     /// half.)
     ///

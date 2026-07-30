@@ -41,6 +41,22 @@ const MANCA_CLIP_COUNT: usize = 12;
 // here. Clip names are variant-prefixed (`scp1048_*`, `scp1048a_*`, …) precisely so all four can be
 // loaded simultaneously without animation-name collisions.
 
+const SCP610_GLB: &str = "assets/scp610/scp-610.glb";
+/// Clip index → name for SCP-610.
+///
+/// Pinned even though `src/scp610` wires **none** of them yet: the v1 bloom is stationary and plays no
+/// clip. The contract is what matters — `assets/scp610/README.md` §5 publishes this index→name table as
+/// the asset's promise, and the file was recompressed on 2026-07-30 (28.7 MB → 5.2 MB), which is
+/// exactly the kind of operation that can silently reorder animations. This is what proves it did not.
+const SCP610_WIRED: [(usize, &str); 5] = [
+    (0, "scp610_idle"),
+    (1, "scp610_chase_run"),
+    (2, "scp610_writhe_rage"),
+    (3, "scp610_lunge_attack"),
+    (4, "scp610_death"),
+];
+const SCP610_CLIP_COUNT: usize = 5;
+
 const SCP1048_GLB: &str = "assets/scp1048/scp-1048.glb";
 /// Clip index → name for the benign original. Every clip is wired.
 const SCP1048_WIRED: [(usize, &str); 5] = [
@@ -181,4 +197,9 @@ fn each_bear_variants_clips_carry_its_own_prefix() {
             assert_ne!(a, b, "two bear variants point at the same glb — one of them is unpinned");
         }
     }
+}
+
+#[test]
+fn scp610_clip_indices_still_name_the_clips_the_asset_promises() {
+    assert_wired(SCP610_GLB, SCP610_CLIP_COUNT, &SCP610_WIRED, "assets/scp610/README.md 5");
 }

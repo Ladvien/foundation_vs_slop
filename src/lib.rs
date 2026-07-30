@@ -58,6 +58,7 @@ pub mod perf_hud;
 /// / character can be dropped in, tuned, and screenshotted, and evolved elites witnessed. Debug-only,
 /// stripped from release like `devshot`/`region_capture`/`perf_hud`.
 #[cfg(debug_assertions)]
+pub mod scp610;
 pub mod research_room;
 pub mod dialogue;
 pub mod director;
@@ -307,6 +308,8 @@ pub fn run() {
                 // *builds* hostile copies mid-episode — all of it hashed, so the gameplay half is in
                 // `sim_harness` too. The cosmetic half (`Scp1048VisualsPlugin`) is windowed-only, below.
                 scp1048::Scp1048Plugin,
+                // Gameplay half — also registered in `sim_harness`, same split as the bear.
+                scp610::Scp610Plugin,
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,
@@ -347,6 +350,9 @@ pub fn run() {
                 // moved out of here because the harness wires the bear's blender but would then never
                 // drive it — see the note at its registration in `scp1048::Scp1048Plugin`.
                 scp1048::Scp1048VisualsPlugin,
+                // Cosmetic half: drives the `mutation` morph. Windowed-only — the weight is not
+                // hashed state and putting it in the sim would make it part of `snapshot_hash`.
+                scp610::Scp610VisualsPlugin,
                 // Site-67's presentation: geometry, avatars, the ASYNC door, specimen cells. Windowed
                 // ONLY — it spawns ~150 GLB scenes and nothing it creates carries `Health`, so it can
                 // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and

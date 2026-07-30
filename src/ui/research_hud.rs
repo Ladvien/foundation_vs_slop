@@ -198,6 +198,7 @@ pub fn subject_name(s: crate::knowledge::Subject) -> &'static str {
     use crate::knowledge::Subject;
     match s {
         Subject::Crabs => "DIMENSIONAL CRABS",
+        Subject::Flesh => "SCP-610",
         Subject::Parasite => "SCP-150",
         Subject::ComfortBlob => "SCP-999",
         Subject::BuilderBear => "SCP-1048",

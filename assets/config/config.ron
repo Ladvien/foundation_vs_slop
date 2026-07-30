@@ -1780,6 +1780,51 @@
                     ),
                 },
             ),
+            // SCP-610. Deliberately gives the player the containment doctrine as an ARGUMENT rather
+            // than a tooltip: the flesh cannot be persuaded or killed usefully, so the scene's job is to
+            // land "wall it off" as the only verb, and to make the mutation morph mean something by
+            // naming what the thing used to be before the player watches it finish turning.
+            "contact_flesh": (
+                start: "see",
+                nodes: {
+                    "see": Line(
+                        speaker: 3,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "Contact. It's not moving. I don't think it can.",
+                        next: Some("bio"),
+                    ),
+                    "bio": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "SCP-610. Look at the hands — that was a person this morning. It's still finishing.",
+                        next: Some("ask"),
+                    ),
+                    "ask": Choice(
+                        speaker: 0,
+                        prompt: "Call it.",
+                        options: [
+                            (text: "Burn it out.", next: "burn"),
+                            (text: "Cordon the room.", next: "cordon"),
+                        ],
+                    ),
+                    "burn": Line(
+                        speaker: 1,
+                        kind: Speech,
+                        emotion: Fear,
+                        text: "With what? Every piece you cut off is another one of it. Fire is how sites get lost.",
+                        next: Some("cordon"),
+                    ),
+                    "cordon": Line(
+                        speaker: 0,
+                        kind: Speech,
+                        emotion: Neutral,
+                        text: "Quarantine the room and hold the line. Quietly — it settles when we stop making noise.",
+                        next: None,
+                    ),
+                },
+            ),
             "contact_parasite": (
                 start: "see",
                 nodes: {
@@ -2241,6 +2286,28 @@
             ],
             hold_secs: 3.0,
             break_on_fail: Keep,
+        ),
+
+        // SCP-610, the flesh that hates. The FIRST user of the quarantine archetype: `tick_quarantine`
+        // opens and closes the attempt on geometry (is the bloom inside a Quarantine), and this rule is
+        // what it is held to while that is open. So the field conditions are about holding the cordon,
+        // not about coaxing the anomaly — 610 cannot be persuaded, only walled off.
+        //
+        // AtMost THREAT_ANOMALY: the bloom must be settled, not agitated — you seal a quiet site.
+        // AtMost NOISE_SQUAD: a cordon is a quiet, disciplined operation; a firefight inside it is not
+        // containment. Together they say "stop fighting and hold the line", which is the same
+        // stop-shooting-and-commit shape SCP-999 uses, stated on an area instead of a body.
+        //
+        // Reset, not Keep: a breached cordon is not partial progress. `tick_quarantine` already cancels
+        // outright when the bloom leaves the region; this makes an in-cordon failure equally decisive.
+        // Long hold — 12 s is the longest in the game, because area denial is the expensive verb.
+        scp610: (
+            requires: [
+                (channel: 6, sign: AtMost, threshold: 0.35),  // THREAT_ANOMALY — the site must be settled
+                (channel: 7, sign: AtMost, threshold: 0.20),  // NOISE_SQUAD    — hold the cordon quietly
+            ],
+            hold_secs: 12.0,
+            break_on_fail: Reset,
         ),
     ),
 

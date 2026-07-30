@@ -62,6 +62,7 @@ pub const AUTHORED: &[&str] = &[
     "contact_builder_bear",
     "contact_parasite",
     "contact_crabs",
+    "contact_flesh",
     // ── SCP-9191, seeded early so FVS-K-4 only has to choose the moment ────────────────────────
     "slop_first_sign",
     "slop_pattern",
@@ -245,6 +246,7 @@ pub fn on_squad_wipe(
 /// The conversation for meeting one kind of thing for the first time.
 fn contact_id(subject: Subject) -> Option<&'static str> {
     match subject {
+        Subject::Flesh => Some("contact_flesh"),
         Subject::ComfortBlob => Some("contact_comfort_blob"),
         Subject::BuilderBear => Some("contact_builder_bear"),
         Subject::Parasite => Some("contact_parasite"),

@@ -67,16 +67,22 @@ pub enum Subject {
     BearCopies,
     /// The smiley watcher.
     Watcher,
+    /// SCP-610, "the flesh that hates" — the area-denial infection bloom.
+    ///
+    /// **Appended, never inserted.** This enum's discriminants index saved beliefs in `SaveGame`, so
+    /// reordering it would silently reinterpret every operative's existing knowledge.
+    Flesh,
 }
 
 impl Subject {
-    pub const ALL: [Subject; 6] = [
+    pub const ALL: [Subject; 7] = [
         Subject::Crabs,
         Subject::Parasite,
         Subject::ComfortBlob,
         Subject::BuilderBear,
         Subject::BearCopies,
         Subject::Watcher,
+        Subject::Flesh,
     ];
 
     /// Dense index into [`Self::ALL`]. **Append-only**, like [`crate::research::HiddenParam::as_index`]
@@ -93,6 +99,7 @@ impl Subject {
             Subject::BuilderBear => 3,
             Subject::BearCopies => 4,
             Subject::Watcher => 5,
+            Subject::Flesh => 6,
         }
     }
 }

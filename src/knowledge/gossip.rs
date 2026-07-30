@@ -324,6 +324,11 @@ mod tests {
 /// names use. The dialogue layer only decides *when* to say it.
 pub fn line_for(subject: Subject, claim: Claim) -> &'static str {
     match (subject, claim) {
+        // SCP-610. "Lethal" is the one an operative learns firsthand and never unlearns; the
+        // Containable line names the actual procedure (cordon and hold) rather than a weapon.
+        (Subject::Flesh, Claim::Lethal) => "Don't let it touch you. That's all it wants.",
+        (Subject::Flesh, Claim::Harmless) => "It just sits there. It never came at us.",
+        (Subject::Flesh, Claim::Containable) => "You don't kill it. You wall the room off and wait.",
         (Subject::BearCopies, Claim::Lethal) => "The copies aren't like the bear. They'll kill you.",
         (Subject::BearCopies, Claim::Harmless) => "The copies never touched me.",
         (Subject::BearCopies, Claim::Containable) => "You out-stare the copies. They stop building.",
