@@ -496,8 +496,36 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 //
 // Re-pinned 2026-07-25 alongside `GOLDEN` — same three causes, same evidence (see the note there).
 // Was `0x244e3af59ff9d65a`.
+// Re-pinned 2026-07-30 for the furniture/TV import (16 rows added to `placement.furniture.items`).
+// The ACTOR golden did NOT move — the same blind-spot asymmetry recorded twice above.
+//
+// **Attributed by bisect, not by assumption**, because "I added content, so the content oracle moved"
+// is exactly the reasoning that buries a real regression. Running this test alone at each commit of
+// that landing:
+//
+//   relight (HDR/bloom/env-map/shadows/NotShadowCaster) ... PASS
+//   derived normal + ORM maps ......................... PASS
+//   surface biomes .................................... PASS
+//   furniture + TV import ............................. FAIL  <- moved here
+//   biome footsteps ................................... FAIL  (same value, inherited)
+//
+// So the render work never reached the simulation, and neither did the biome field — which is the
+// property its "pure function of (seed, cell), draws nothing from the carve RNG" design exists to have.
+//
+// The mechanism is the one this oracle is built to see: `PlacementPlugin` runs in the headless core, so
+// new catalogue rows change which furniture the solver picks; several of the new rows afford `"emit"`
+// (a desk lamp and three CRTs), which moves `LightEmitter` positions, which moves the `LightField`,
+// which moves photophobic crab steering, which moves the ALARM/THREAT deposits this hash folds.
+//
+// Value measured bit-stable across three fresh single-process runs. Was `0x60b5c51fcc20a281`.
+//
+// Unrelated and still open at the time of this re-pin:
+// `search_rollouts_of_mutants_are_reproducible_under_load` fails, and it fails at the commit BEFORE
+// this landing too (mutant #2 on world 0xa11ce there, mutant #3 on 0x5c09191 after) — a pre-existing
+// latent order-dependence, not something this landing introduced. Do not read this re-pin as having
+// addressed it.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x60b5c51fcc20a281;
+const GOLDEN_FIELD: u64 = 0xc95454f3ca28b71c;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]
