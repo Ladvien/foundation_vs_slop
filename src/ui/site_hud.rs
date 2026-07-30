@@ -187,11 +187,9 @@ pub struct CycleSpecimenLabel;
 
 /// What the button reads. Pure, states its key, and names the count so "no specimens" is
 /// distinguishable from "the button is broken".
-pub fn cycle_button_label(held: usize) -> String {
-    let key = crate::input::key_name(
-        crate::input::Action::CycleSpecimen.default_binding().primary.key,
-    )
-    .unwrap_or("?");
+pub fn cycle_button_label(held: usize, bindings: &crate::input::KeyBindings) -> String {
+    // The LIVE binding, not `default_binding()` — a rebound key must be the one printed.
+    let key = bindings.key_label(crate::input::Action::CycleSpecimen);
     if held == 0 {
         // `docs/ui.md` §1.4 — name the state and the route out of it, never show a dead control.
         format!("{key}  NO SPECIMEN ON THE SLAB — CONTAIN ONE FIRST")
@@ -259,6 +257,7 @@ fn spawn_panel(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
 /// Keep the button's label and ink in step with how many specimens are held.
 fn update_cycle_button(
     theme: Res<UiTheme>,
+    bindings: Res<crate::input::KeyBindings>,
     specimens: Query<(), With<Specimen>>,
     mut labels: Query<(&mut Text, &mut TextColor), With<CycleSpecimenLabel>>,
     mut buttons: Query<
@@ -267,7 +266,7 @@ fn update_cycle_button(
     >,
 ) {
     let held = specimens.iter().count();
-    let want = cycle_button_label(held);
+    let want = cycle_button_label(held, &bindings);
     for (mut text, mut color) in &mut labels {
         if text.0 != want {
             text.0 = want.clone();
@@ -470,8 +469,9 @@ mod tests {
         // that could not be clicked. It is a real button now, so `docs/ui.md` §4.2's operability lens
         // applies in both directions: it must still name the key, and an empty slab must say *why*
         // rather than presenting a dead control.
-        let empty = cycle_button_label(0);
-        let held = cycle_button_label(3);
+        let b = crate::input::KeyBindings::default();
+        let empty = cycle_button_label(0, &b);
+        let held = cycle_button_label(3, &b);
         for l in [&empty, &held] {
             assert!(!l.trim().is_empty());
             assert!(l.starts_with("Tab"), "{l} must lead with its key");

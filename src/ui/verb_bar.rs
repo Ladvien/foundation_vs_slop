@@ -87,17 +87,28 @@ impl Verb {
     pub const ALL: [Verb; 6] =
         [Verb::Device, Verb::Quarantine, Verb::Cap, Verb::HoldFire, Verb::Sensor, Verb::Push];
 
-    /// Mirrors `selection::arm_tool_input`. `C`/`Z`/`X` are the free adjacent bottom-row cluster and
-    /// `F` is free for fire discipline — see that function on why the choice is constrained.
-    pub fn key(self) -> char {
+    /// The registry action this verb is bound to. The chip's printed key is read from the **live**
+    /// `KeyBindings` through this — see [`Verb::key`].
+    pub fn action(self) -> crate::input::Action {
+        use crate::input::Action;
         match self {
-            Verb::Device => 'C',
-            Verb::Quarantine => 'Z',
-            Verb::Cap => 'X',
-            Verb::HoldFire => 'F',
-            Verb::Sensor => 'V',
-            Verb::Push => 'G',
+            Verb::Device => Action::ArmDevice,
+            Verb::Quarantine => Action::ArmQuarantine,
+            Verb::Cap => Action::ArmCap,
+            Verb::HoldFire => Action::ToggleHoldFire,
+            Verb::Sensor => Action::DeploySensor,
+            Verb::Push => Action::TogglePush,
         }
+    }
+
+    /// The key to print on the chip, from the live binding table.
+    ///
+    /// This used to be a hardcoded `match` returning `'C'`/`'Z'`/`'X'`/… — a second copy of the
+    /// binding, which meant a player who rebound ARM DEVICE to `T` still saw `C  DEVICE x3`. The chip
+    /// would have been telling them a key that does nothing, and
+    /// `every_verb_states_its_key` exists precisely to guarantee the opposite.
+    pub fn key(self, bindings: &crate::input::KeyBindings) -> char {
+        bindings.key_char(self.action())
     }
 
     /// One line saying what the verb *does* — shown while its chip is hovered.
@@ -272,8 +283,7 @@ fn spawn_bar(
 /// Pure, so the wording stays unit-testable without a UI tree. An exhausted verb still shows itself
 /// at `x0` rather than disappearing — a player who has run out must learn *that*, not wonder where
 /// the button went.
-fn chip_label(verb: Verb, charges: Option<u32>, tight: bool, cooldown: f32) -> String {
-    let key = verb.key();
+fn chip_label(verb: Verb, charges: Option<u32>, tight: bool, cooldown: f32, key: char) -> String {
     match verb {
         // Both stances are latched, not spendable, so they read on/off and never a count. `Push`
         // shares HoldFire's arm because they are the same kind of thing — the `tight` flag carries
@@ -314,6 +324,7 @@ fn update_chips(
     tight: Res<WeaponsTight>,
     sensor_cd: Res<crate::sensor::SensorCooldown>,
     pushers: Query<(), (With<crate::squad::Unit>, With<crate::squad::PushOrder>)>,
+    bindings: Res<crate::input::KeyBindings>,
     mut labels: Query<(&VerbChipLabel, &mut Text)>,
 ) {
     // Any operative advancing lights the chip. It is a squad-wide readout of a per-unit order, which
@@ -332,6 +343,7 @@ fn update_chips(
             charges_for(label.0, devices.0, quarantines.0),
             latched,
             sensor_cd.0,
+            label.0.key(&bindings),
         );
         if text.0 != want {
             text.0 = want;
@@ -494,14 +506,14 @@ mod tests {
     #[test]
     fn an_exhausted_verb_still_shows_itself_at_zero() {
         // Hiding it would teach the player the verb does not exist rather than that it is spent.
-        assert!(chip_label(Verb::Device, Some(0), false, 0.0).contains("DEVICE x0"));
-        assert!(chip_label(Verb::Quarantine, Some(0), false, 0.0).contains("QUARANTINE x0"));
+        assert!(chip_label(Verb::Device, Some(0), false, 0.0, 'C').contains("DEVICE x0"));
+        assert!(chip_label(Verb::Quarantine, Some(0), false, 0.0, 'Z').contains("QUARANTINE x0"));
     }
 
     #[test]
     fn hold_fire_reads_as_a_stance_not_a_charge() {
-        let off = chip_label(Verb::HoldFire, None, false, 0.0);
-        let on = chip_label(Verb::HoldFire, None, true, 0.0);
+        let off = chip_label(Verb::HoldFire, None, false, 0.0, 'F');
+        let on = chip_label(Verb::HoldFire, None, true, 0.0, 'F');
         assert!(off.contains("HOLD FIRE"));
         assert!(on.contains('\u{2022}'), "the latched stance is marked: {on}");
         assert_ne!(off, on);
@@ -513,10 +525,24 @@ mod tests {
     fn every_verb_states_its_key() {
         // The chip is clickable AND keyed. A chip that did not name its key would teach the mouse
         // player that the keyboard route does not exist.
+        let b = crate::input::KeyBindings::default();
         for v in Verb::ALL {
-            let l = chip_label(v, charges_for(v, 3, 1), false, 0.0);
-            assert!(l.starts_with(v.key()), "{v:?} chip must lead with its key: {l}");
+            let l = chip_label(v, charges_for(v, 3, 1), false, 0.0, v.key(&b));
+            assert!(l.starts_with(v.key(&b)), "{v:?} chip must lead with its key: {l}");
         }
+
+        // ...and the key it leads with is the LIVE one, not a hardcoded copy. Rebind and the chip
+        // must follow, or the bar is telling the player a key that does nothing.
+        let mut rebound = crate::input::KeyBindings::default();
+        rebound
+            .rebind(
+                Verb::Device.action(),
+                crate::input::Binding::one(crate::input::Chord::plain(bevy::prelude::KeyCode::KeyT)),
+            )
+            .expect("T is free");
+        assert_eq!(Verb::Device.key(&rebound), 'T');
+        let l = chip_label(Verb::Device, Some(3), false, 0.0, Verb::Device.key(&rebound));
+        assert!(l.starts_with('T'), "the chip must follow the rebind: {l}");
     }
 
     #[test]
@@ -524,10 +550,10 @@ mod tests {
         // `docs/ui.md` §1.4's strongest rule: an unmet condition is an INSTRUCTION. A chip that only
         // greyed out would leave the player unable to tell "on cooldown" from "no Engineer selected"
         // from "this verb is broken" — three different states with three different responses.
-        let ready = chip_label(Verb::Sensor, None, false, 0.0);
+        let ready = chip_label(Verb::Sensor, None, false, 0.0, 'V');
         assert_eq!(ready, "V  SENSOR", "a ready sensor states no time");
 
-        let cooling = chip_label(Verb::Sensor, None, false, 7.2);
+        let cooling = chip_label(Verb::Sensor, None, false, 7.2, 'V');
         assert!(cooling.contains("SENSOR"), "still names the verb: {cooling}");
         assert!(cooling.contains('8'), "rounds UP so it never promises early: {cooling}");
         assert_ne!(ready, cooling);
@@ -538,7 +564,7 @@ mod tests {
         // Its cost is time, not a pool. An `x1` would advertise an economy that does not exist and
         // send the player to the requisition screen looking for it.
         for cd in [0.0_f32, 1.0, 29.0] {
-            let l = chip_label(Verb::Sensor, None, false, cd);
+            let l = chip_label(Verb::Sensor, None, false, cd, 'V');
             assert!(!l.contains(" x"), "{l} reads as a spendable charge");
         }
         assert_eq!(charges_for(Verb::Sensor, 9, 9), None);
@@ -608,8 +634,8 @@ mod tests {
     fn advance_reads_as_a_stance_not_a_charge() {
         // Same contract HOLD FIRE has, and it must not drift from it: both are latched orders the
         // player leaves on, not consumables. An `x1` would advertise an economy that does not exist.
-        let off = chip_label(Verb::Push, None, false, 0.0);
-        let on = chip_label(Verb::Push, None, true, 0.0);
+        let off = chip_label(Verb::Push, None, false, 0.0, 'G');
+        let on = chip_label(Verb::Push, None, true, 0.0, 'G');
         assert!(off.contains("ADVANCE"));
         assert!(on.contains('\u{2022}'), "the latched stance is marked: {on}");
         assert_ne!(off, on);
@@ -623,8 +649,8 @@ mod tests {
         // ADVANCE mirror HOLD FIRE — two chips reporting one state, which is worse than reporting
         // none, because it looks like information.
         assert_ne!(
-            chip_label(Verb::HoldFire, None, true, 0.0),
-            chip_label(Verb::Push, None, true, 0.0),
+            chip_label(Verb::HoldFire, None, true, 0.0, 'F'),
+            chip_label(Verb::Push, None, true, 0.0, 'G'),
             "the two stances must not render identically when both are on"
         );
     }
@@ -639,10 +665,16 @@ mod tests {
 
     #[test]
     fn verb_keys_are_unique() {
+        let bindings = crate::input::KeyBindings::default();
         // Two verbs on one key would make one of them permanently unreachable from the keyboard.
         for (i, a) in Verb::ALL.iter().enumerate() {
             for b in &Verb::ALL[i + 1..] {
-                assert_ne!(a.key(), b.key(), "{a:?} and {b:?} share key {}", a.key());
+                assert_ne!(
+                    a.key(&bindings),
+                    b.key(&bindings),
+                    "{a:?} and {b:?} share key {}",
+                    a.key(&bindings)
+                );
             }
         }
     }

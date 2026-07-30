@@ -265,17 +265,27 @@ impl Plugin for SelectionPlugin {
             (
                 // Left button resolves the selection before the right button commands it, so a
                 // select-then-order in one frame does what it looks like.
-                selection_input.before(command_input),
-                control_group_input.before(command_input),
-                // While a dialogue exchange owns the left-click (choice picks / line advance), don't
-                // also issue move orders. `ConversationLock` exists only during a conversation and only
-                // in the windowed build (dialogue plugin), so the harness is unaffected — one owner of
-                // the click at a time (see `dialogue::runtime`).
                 //
-                // The same rule now governs the containment verbs: exactly ONE of these five may claim
-                // a given left-click, decided by `ArmedTool`. `command_input` keeps the unarmed case,
-                // so every input that worked before this change still does exactly what it did.
-                arm_tool_input.run_if(not(resource_exists::<ConversationLock>)),
+                // The `ConversationLock` guard is on these two as well, and it has to be: they are
+                // LEFT-click consumers, and a conversation owns the left click (`dialogue::runtime`
+                // reads it for line-advance and choice picks). Without it, clicking a dialogue bubble
+                // also resolved as a click on empty floor and silently cleared the whole selection.
+                selection_input.run_if(not(resource_exists::<ConversationLock>)),
+                control_group_input.run_if(not(resource_exists::<ConversationLock>)),
+                // **`command_input` runs BEFORE `arm_tool_input`, and the order is load-bearing.**
+                // Both read the right button — one to command, one to disarm — and Bevy evaluates a
+                // system's run conditions inline just before running it, *after* its `.chain()`
+                // dependency has finished. So with `arm_tool_input` first, its immediate
+                // `*armed = ArmedTool::None` made `resource_equals(ArmedTool::None)` pass on the very
+                // same frame, and one right-click both put the verb away and marched the selection to
+                // wherever the player happened to be aiming.
+                //
+                // Evaluating `command_input` while `ArmedTool` still holds the PRE-click value is what
+                // makes the two mutually exclusive: armed ⇒ skipped, then disarmed; unarmed ⇒ a move
+                // order, and `arm_tool_input`'s right-click branch is itself guarded on being armed.
+                //
+                // While a dialogue exchange owns the left-click, none of the verb consumers run either.
+                // Exactly ONE of them may claim a given left-click, decided by `ArmedTool`.
                 command_input
                     .run_if(not(resource_exists::<ConversationLock>))
                     .run_if(resource_equals(ArmedTool::None)),
@@ -288,6 +298,8 @@ impl Plugin for SelectionPlugin {
                 cap_nest_input
                     .run_if(not(resource_exists::<ConversationLock>))
                     .run_if(resource_equals(ArmedTool::Cap)),
+                // LAST of the right-button readers — see the ordering note on `command_input`.
+                arm_tool_input.run_if(not(resource_exists::<ConversationLock>)),
                 // A latched stance, so it is read wherever the other verb inputs are read.
                 toggle_push_order.run_if(not(resource_exists::<ConversationLock>)),
                 // Refill an emptied `MoveOrder` from the queue in the SAME schedule the orders are
@@ -362,6 +374,10 @@ fn selection_input(
     camera: Single<(&Camera, &GlobalTransform)>,
     armed: Res<ArmedTool>,
     capture: Res<crate::DebugCaptureActive>,
+    // Every interactive UI widget carries `Hovered` (the verb chips, the Site buttons, menu buttons);
+    // every readout is `Pickable::IGNORE` and so has none. That makes "is the cursor over a control?"
+    // answerable without a second hit-test of our own.
+    hovered_ui: Query<&bevy::picking::hover::Hovered>,
     units: Query<(Entity, &Transform, &SquadMember, Option<&RoleId>), With<Unit>>,
     selected: Query<Entity, With<Selected>>,
     mut marquee: ResMut<Marquee>,
@@ -371,6 +387,15 @@ fn selection_input(
     // The dev region-capture tool owns the mouse while armed, and a left-click belongs to the armed
     // verb (that is `throw_device_input` and friends), not to selection.
     if capture.0 || *armed != ArmedTool::None {
+        marquee.anchor = None;
+        return;
+    }
+    // **A click on a control is not a click on the world.** This system reads the raw mouse, so
+    // without the check a click on the SENSOR chip resolved as a click on empty floor and cleared the
+    // selection — and then the chip's own `ArmRequest` arrived to find nothing selected, so the verb
+    // it had just pressed could never succeed. Every pickable widget the player can hit is a `Button`
+    // with `Hovered`, so one query answers it for all of them.
+    if hovered_ui.iter().any(|h| h.0) {
         marquee.anchor = None;
         return;
     }
@@ -502,7 +527,7 @@ fn control_group_input(
     units: Query<(Entity, &SquadMember), With<Unit>>,
     selected: Query<Entity, With<Selected>>,
 ) {
-    if capture.0 || owned.0 {
+    if capture.0 || owned.any() {
         return;
     }
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
@@ -544,8 +569,13 @@ fn control_group_input(
     }
 
     let want = groups.get(slot);
-    if want.is_empty() {
-        return; // An unbound group is a no-op, not a "deselect everything" surprise.
+    // An unbound group is a no-op, not a "deselect everything" surprise — and so is a group whose
+    // operatives have all DIED. `ControlGroups` stores `SquadMember` indices, which outlive the
+    // entities, so `want` stays non-empty after `squad::despawn_dead_units` has removed everyone in
+    // it; the loop below would then match nobody and strip `Selected` from every survivor. Checking
+    // that the group still resolves to a live operative is what makes the guard mean what it says.
+    if want.is_empty() || !units.iter().any(|(_, m)| want.contains(&m.0)) {
+        return;
     }
     for (e, member) in &units {
         if want.contains(&member.0) {

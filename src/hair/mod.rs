@@ -5,24 +5,23 @@
 //! baked into the figurine rig. Every squad member shares the same `characters/valkyrie.glb` rig
 //! (recolored per outfit — see `squad::recolor_units`), so this applies to all five.
 //!
-//! Each clump is a short particle chain anchored to the `head` bone, integrated with semi-implicit
-//! Verlet (Misra, "Real-Time Dynamic Fur and Hair Simulation using Verlet Integration", IJSRP 2021,
-//! DOI 10.29322/ijsrp.11.02.2021.p11053 — the applied-games recipe this module follows most directly)
-//! and XPBD-compliant distance + bend constraints (Müller, Macklin, Chentanez, Jeschke & Kim,
-//! "Detailed Rigid Body Simulation with Extended Position Based Dynamics", CGF 2020, DOI
-//! 10.1111/cgf.14105 — the compliance parameter decouples perceived stiffness from iteration count
-//! and timestep, which matters running on variable-dt `Update` rather than fixed-dt). Substepped per
-//! Macklin, Storey, Lu, Terdiman, Chentanez, Jeschke & Müller, "Small Steps in Physics Simulation",
-//! MIG 2019, DOI 10.1145/3309486.3340247 — a few substeps with one relaxation pass each beats few
-//! substeps with many iterations, for both stability and cost. The bend constraint exists because a
-//! pure distance-constraint chain has nothing stopping it curling under gravity/wind (Ward et al.
-//! 2007's point about wisp bending stiffness). A full Kirchhoff elastic-rod solver (Bertails, Audoly,
-//! Cani, Querleux, Leroy & Lévêque, "Super-Helices for Predicting the Dynamics of Natural Hair",
-//! SIGGRAPH 2006, DOI 10.1145/1141911.1142012) was considered and rejected as overkill at this
-//! character/camera scale. The ribbon-billboard rendering follows Tariq & Bavoil, "Real Time Hair
-//! Simulation and Rendering on the GPU", SIGGRAPH 2008, DOI 10.1145/1401032.1401080 (camera-facing
-//! thin geometry for hair fins, to avoid the aliasing a true cylindrical cross-section would show at
-//! this scale).
+//! Each clump is a short particle chain anchored to the `head` bone. The solver lives in [`sim`] —
+//! **Dynamic Follow-The-Leader** (Müller, Kim & Chentanez, "Fast Simulation of Inextensible Hair and
+//! Fur", VRIPHYS 2012), which enforces inextensibility in a single root→tip projection pass and then
+//! applies the paper's velocity correction (Eq. 9) to cancel the momentum that bare FTL invents. It
+//! replaced a semi-implicit Verlet predictor with an XPBD *distance* constraint (Misra, IJSRP 2021,
+//! DOI 10.29322/ijsrp.11.02.2021.p11053; Müller, Macklin, Chentanez, Jeschke & Kim, CGF 2020, DOI
+//! 10.1111/cgf.14105), which could only *converge toward* the rest length and visibly stretched under
+//! load. The XPBD skip-1 **bend** constraint survived that swap — a chain that cannot stretch still
+//! has nothing stopping it curling under gravity/wind (Ward et al. 2007's point about wisp bending
+//! stiffness) — as did the substepping, per Macklin, Storey, Lu, Terdiman, Chentanez, Jeschke &
+//! Müller, "Small Steps in Physics Simulation", MIG 2019, DOI 10.1145/3309486.3340247. A full
+//! Kirchhoff elastic-rod solver (Bertails, Audoly, Cani, Querleux, Leroy & Lévêque, "Super-Helices
+//! for Predicting the Dynamics of Natural Hair", SIGGRAPH 2006, DOI 10.1145/1141911.1142012) was
+//! considered and rejected as overkill at this character/camera scale. The ribbon-billboard rendering
+//! follows Tariq & Bavoil, "Real Time Hair Simulation and Rendering on the GPU", SIGGRAPH 2008, DOI
+//! 10.1145/1401032.1401080 (camera-facing thin geometry for hair fins, to avoid the aliasing a true
+//! cylindrical cross-section would show at this scale).
 //!
 //! **Material: a direct Rust port of the character-asset generator's hair-card shader, not a custom
 //! one.** An earlier version of this module used a hand-rolled `ExtendedMaterial<StandardMaterial,
@@ -41,8 +40,16 @@
 //! Rendering and Shading", SIGGRAPH 2004, DOI 10.1145/1186223.1186408) rather than inventing a new
 //! look.
 //!
-//! Purely cosmetic: every system here is `Update`-scheduled only, `HairPlugin` is never registered in
-//! `sim_harness` (mirrors `mycelia::MyceliaPlugin`'s precedent, not `vhs::VhsPlugin`'s — see
+//! Purely cosmetic. The discovery/lifecycle pass runs on `Update`; the solve runs on **`PostUpdate`,
+//! after `TransformSystems::Propagate`**, which is the only place a *fresh* skeleton can be read —
+//! `bevy_animation`'s `advance_animations`/`animate_targets` are themselves `PostUpdate`
+//! (`docs/animation.md`'s schedule table). The superseded version ran everything on `Update` and so
+//! read a one-frame-stale pose: the scalp is skinned on the GPU from *this* frame's joint matrices
+//! while the roots came from *last* frame's, so the hair detached from the head by `v_head · dt` every
+//! frame — centimetres on a sprinting unit, on a strand that is ~25 cm long. `PostUpdate` is not
+//! `FixedUpdate`; `TESTING.md`'s rule is "if it would appear in `snapshot_hash`, it belongs on
+//! `FixedUpdate`", and nothing here can. `HairPlugin` is never registered in `sim_harness` (mirrors
+//! `mycelia::MyceliaPlugin`'s precedent, not `vhs::VhsPlugin`'s — see
 //! `lib::run`'s cosmetic-tuple comment), and every [`HairRig`] is a fully TOP-LEVEL entity — never a
 //! `Children`-descendant of `Unit` — so `autogib::bake_autogib`'s fracture-bounding-box DFS
 //! (`autogib.rs`, `bake_autogib`) can never walk into it. That DFS is what flipped held-in seed
@@ -54,9 +61,13 @@
 //! never touches `(&Transform, &Health)` — the only query `snapshot_hash` folds. Considered and
 //! rejected, not silently skipped.
 
+mod bind;
+mod sim;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use serde::{Deserialize, Serialize};
@@ -106,32 +117,6 @@ struct HeadBoneRef(Entity);
 #[derive(Component)]
 struct HasHairRig;
 
-/// One guide-hair clump (see the module doc's Ward et al. 2007 citation). `pos[0]`/`prev[0]` are the
-/// root, hard-pinned to the head bone every frame (inverse mass 0); the rest are simulated.
-struct HairClump {
-    pos: Vec<Vec3>,
-    prev: Vec<Vec3>,
-    /// Attachment point, in the head bone's local space, fixed at seed time.
-    root_local_offset: Vec3,
-    /// Initial growth direction, head-bone-local, fixed at seed time.
-    root_local_dir: Vec3,
-    /// Per-clump wind-phase offset (radians) so clumps don't sway in lockstep.
-    phase: f32,
-}
-
-impl HairClump {
-    fn new(segments: usize, root_local_offset: Vec3, root_local_dir: Vec3, phase: f32) -> Self {
-        let particles = segments + 1;
-        HairClump {
-            pos: vec![Vec3::ZERO; particles],
-            prev: vec![Vec3::ZERO; particles],
-            root_local_offset,
-            root_local_dir,
-            phase,
-        }
-    }
-}
-
 /// One squad member's simulated accent hair. **Must stay a fully top-level entity — never a
 /// `Children`-descendant of `Unit`, at any depth, including not a sibling of `FigurineModel`.**
 /// `bake_autogib`'s DFS (`autogib.rs`) starts at `Query<(&FigurineSource, &Children), With<Unit>>` and
@@ -142,13 +127,16 @@ impl HairClump {
 /// bare `commands.spawn(...)` carrying an owner back-reference, never `.with_children`.
 #[derive(Component)]
 struct HairRig {
-    /// Back-reference to the `FigurineModel` child that carries this rig's `HeadBoneRef`.
+    /// Back-reference to the `FigurineModel` child that carries this rig's `HeadBoneRef`. Its absence
+    /// is what retires this rig — see [`despawn_orphan_rigs`].
     figurine: Entity,
-    clumps: Vec<HairClump>,
+    clumps: Vec<sim::Guide>,
     /// This rig's ribbon mesh, mutated in place every frame via `Mesh::attribute_mut` — never rebuilt.
     mesh: Handle<Mesh>,
     /// False until `HeadBoneRef` resolves and the chain is initialized from its first live pose.
     seeded: bool,
+    /// Reused `p_i^old` buffer for the solver, so stepping a rig never allocates.
+    scratch: Vec<Vec3>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -164,13 +152,17 @@ pub struct HairSettings {
     pub segments_per_strand: usize,
     /// Per-segment rest length, world units (metres).
     pub rest_length: f32,
-    /// XPBD distance-constraint compliance (inverse stiffness; smaller = stiffer).
-    pub compliance: f32,
-    /// XPBD skip-1 anti-curl constraint compliance — looser than `compliance` on purpose (resists
-    /// coiling, not stretching).
+    /// XPBD skip-1 anti-curl constraint compliance (inverse stiffness; smaller = stiffer). This
+    /// resists coiling, not stretching — [`sim::ftl_pass`] owns length outright, which is why the
+    /// former `compliance` distance knob no longer exists.
     pub bend_compliance: f32,
-    /// Verlet velocity damping factor, `(0, 1]`.
+    /// Fraction of velocity RETAINED PER SECOND, `[0, 1]`. Applied as `damping.powf(h)` so 30 fps and
+    /// 240 fps settle identically. The superseded Verlet solver damped once per *substep*, so changing
+    /// `substeps` silently changed the look.
     pub damping: f32,
+    /// `s` in DFTL Eq. 9 (Müller et al. 2012 illustrate 0.9). 0 = raw FTL, which visibly gains energy;
+    /// 1 = the successor's correction is fully absorbed by its leader.
+    pub ftl_correction: f32,
     /// m/s^2 — a dedicated constant, deliberately NOT `main::GIB_GRAVITY` (hair is much lighter than
     /// a gib chunk and tuned independently).
     pub gravity: f32,
@@ -180,6 +172,9 @@ pub struct HairSettings {
     /// rad/s.
     pub wind_freq: f32,
     pub substeps: u32,
+    /// Per-particle speed ceiling, m/s. A numeric backstop, not a second solver path — see
+    /// [`sim::step_guide`]'s note on why it exists.
+    pub max_speed: f32,
     pub strand_width_root: f32,
     pub strand_width_tip: f32,
     /// Linear-RGB base tint, baked into the procedural strand texture (see [`build_strand_texture`]).
@@ -199,18 +194,14 @@ pub fn validate_hair(c: &HairSettings) -> Result<(), String> {
     if !(c.rest_length > 0.0 && c.rest_length.is_finite()) {
         return Err(format!("hair.rest_length must be > 0 and finite, got {}", c.rest_length));
     }
-    if !(c.compliance >= 0.0 && c.compliance.is_finite()) {
-        return Err(format!("hair.compliance must be >= 0 and finite, got {}", c.compliance));
-    }
-    if !(c.bend_compliance >= c.compliance && c.bend_compliance.is_finite()) {
-        return Err(format!(
-            "hair.bend_compliance ({}) must be finite and >= hair.compliance ({}) — bend must not \
-             out-stiffen the chain",
-            c.bend_compliance, c.compliance
-        ));
+    if !(c.bend_compliance >= 0.0 && c.bend_compliance.is_finite()) {
+        return Err(format!("hair.bend_compliance must be >= 0 and finite, got {}", c.bend_compliance));
     }
     if !(0.0..=1.0).contains(&c.damping) {
-        return Err(format!("hair.damping must be in [0,1], got {}", c.damping));
+        return Err(format!("hair.damping must be in [0,1] (fraction retained per second), got {}", c.damping));
+    }
+    if !(0.0..=1.0).contains(&c.ftl_correction) {
+        return Err(format!("hair.ftl_correction must be in [0,1], got {}", c.ftl_correction));
     }
     if !(c.gravity >= 0.0 && c.gravity.is_finite()) {
         return Err(format!("hair.gravity must be >= 0 and finite, got {}", c.gravity));
@@ -226,6 +217,9 @@ pub fn validate_hair(c: &HairSettings) -> Result<(), String> {
     }
     if !(1..=8).contains(&c.substeps) {
         return Err(format!("hair.substeps {} out of [1,8] (cost cap)", c.substeps));
+    }
+    if !(c.max_speed > 0.0 && c.max_speed.is_finite()) {
+        return Err(format!("hair.max_speed must be > 0 and finite, got {}", c.max_speed));
     }
     if !(c.strand_width_root > 0.0 && c.strand_width_root.is_finite()) {
         return Err(format!("hair.strand_width_root must be > 0 and finite, got {}", c.strand_width_root));
@@ -405,20 +399,33 @@ fn spawn_hair_rigs(
             // now sit at the crown/nape (local -Z, away from the face) and hang down-and-back.
             let root_local_offset = Vec3::new(spread, 0.15, -0.06);
             let root_local_dir = Vec3::new(0.0, -1.0, -0.12).normalize();
+            // Bound to the single `head` joint at full weight, expressed in the general four-influence
+            // form so the solver reads its root through `bind::eval_root` like every other groom will.
+            // This is exactly equivalent to the superseded `bone_tf.transform_point(offset)` — see
+            // `bind::tests::eval_root_follows_a_single_rigid_joint_exactly` — so it changes the code
+            // path without changing a pixel. Real triangle sampling over the `hair_cap_valkyrie`
+            // primitive replaces the hand-placed offset next.
+            let root_bind = bind::RootBind {
+                rest: root_local_offset,
+                normal: root_local_dir,
+                slots: [0; bind::INFLUENCES],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            };
             // Position-independent per-clump phase (this is unhashed cosmetic state, unlike
             // `CyanideSmell::id`, so a raw `Entity` index is fine here — it only needs to look varied
             // across clumps/units, not survive a determinism-sensitive tie-break).
             let seed = figurine.index_u32().wrapping_mul(0x9E37_79B1).wrapping_add(c as u32);
             let phase = crate::util::hash01_u32(seed) * std::f32::consts::TAU;
-            clumps.push(HairClump::new(settings.segments_per_strand, root_local_offset, root_local_dir, phase));
+            clumps.push(sim::Guide::new(settings.segments_per_strand, root_bind, phase));
         }
 
         let mesh_handle = meshes.add(build_hair_mesh(clump_count, settings.segments_per_strand));
 
         commands.spawn((
-            HairRig { figurine, clumps, mesh: mesh_handle.clone(), seeded: false },
+            HairRig { figurine, clumps, mesh: mesh_handle.clone(), seeded: false, scratch: Vec::new() },
             Mesh3d(mesh_handle),
             MeshMaterial3d(hair_assets.material.clone()),
+            NotShadowCaster, // alpha-masked ribbon strands: casts no shadow (see world::setup_lighting)
             Transform::IDENTITY,
         ));
         commands.entity(figurine).insert(HasHairRig);
@@ -459,94 +466,37 @@ fn build_hair_mesh(clumps: usize, segments: usize) -> Mesh {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Integration — semi-implicit Verlet predictor + XPBD-with-compliance constraint projection, 1
-// relaxation pass per substep (see the module doc's citations).
+// Integration lives in `sim` — DFTL + XPBD bend, pure math, GPU-free and unit-tested there.
 // ---------------------------------------------------------------------------------------------
 
-#[inline]
-fn inv_mass(i: usize) -> f32 {
-    if i == 0 { 0.0 } else { 1.0 }
-}
-
-/// Hand-rolled layered-sine ambient wind (no RNG crate, matching project convention) — a CPU force,
-/// not sampled from the shader-side `assets/shaders/noise.wgsl` library (that library is
-/// fragment/GPU-side; this is a `Update`-scheduled Rust force calculation, so a shader import doesn't
-/// apply here). Tip particles sway more than root particles since the tip is the free end.
-fn wind_accel(phase: f32, particle_idx: usize, elapsed: f32, s: &HairSettings) -> Vec3 {
-    let w = elapsed * s.wind_freq + phase;
-    let sway = (w.sin() + 0.4 * (w * 2.3 + phase).sin()) * s.wind_strength;
-    let tip_factor = (particle_idx as f32 / 4.0).min(1.0);
-    Vec3::new(sway, 0.15 * sway, sway * 0.7 * (w * 0.6).cos()) * tip_factor
-}
-
-/// Single XPBD relaxation pass for one distance constraint between `pos[i]` and `pos[j]` (Müller et
-/// al. 2020, eq. 4-6, single-iteration-per-substep form: the Lagrange multiplier resets to 0 each
-/// call, so `Δλ = -C / (w_i + w_j + α̃)`).
-fn xpbd_distance_correct(pos: &mut [Vec3], i: usize, j: usize, rest: f32, alpha_tilde: f32, inv_i: f32, inv_j: f32) {
-    let d = pos[j] - pos[i];
-    let len = d.length();
-    if len < 1.0e-6 {
-        return; // degenerate separation — skip rather than divide by ~0
-    }
-    let dir = d / len;
-    let c = len - rest;
-    let w_sum = inv_i + inv_j;
-    if w_sum <= 0.0 {
-        return; // both ends pinned, nothing to correct
-    }
-    let d_lambda = -c / (w_sum + alpha_tilde);
-    pos[i] -= inv_i * d_lambda * dir;
-    pos[j] += inv_j * d_lambda * dir;
-}
-
-/// Initialize a clump's chain hanging straight along its rest direction from the bone's first live
-/// pose — the seed tick after `HeadBoneRef` resolves, before any simulation runs.
-fn seed_clump(clump: &mut HairClump, bone_tf: &GlobalTransform, rest_length: f32) {
-    let root = bone_tf.transform_point(clump.root_local_offset);
-    let dir = (bone_tf.rotation() * clump.root_local_dir).normalize_or_zero();
-    for i in 0..clump.pos.len() {
-        let p = root + dir * (i as f32 * rest_length);
-        clump.pos[i] = p;
-        clump.prev[i] = p;
-    }
-}
-
-/// Advance one clump by one `Update` frame: pin the root to `root_world`, then run `settings.substeps`
-/// XPBD substeps (predict non-root particles under gravity + wind, then project the distance + bend
-/// constraints in fixed root→tip order — never via an ECS query, so no `sort_total!`/
-/// `sort_value_canonical`/`SORT-OK` annotation is needed anywhere in this module).
-fn step_clump(clump: &mut HairClump, root_world: Vec3, dt: f32, elapsed: f32, settings: &HairSettings) {
-    let substeps = settings.substeps.max(1);
-    let dt_sub = dt / substeps as f32;
-    let alpha_dist = settings.compliance / (dt_sub * dt_sub);
-    let alpha_bend = settings.bend_compliance / (dt_sub * dt_sub);
-    let gravity_accel = Vec3::NEG_Y * settings.gravity * settings.gravity_scale;
-
-    // The bone's `GlobalTransform` is sampled once per frame (animation only updates once per `Update`
-    // tick regardless), so the pin is the same position across this frame's substeps.
-    clump.pos[0] = root_world;
-    clump.prev[0] = root_world;
-
-    for _ in 0..substeps {
-        let n = clump.pos.len();
-        for i in 1..n {
-            let accel = gravity_accel + wind_accel(clump.phase, i, elapsed, settings);
-            let vel = (clump.pos[i] - clump.prev[i]) * settings.damping;
-            let new_pos = clump.pos[i] + vel + accel * dt_sub * dt_sub;
-            clump.prev[i] = clump.pos[i];
-            clump.pos[i] = new_pos;
-        }
-        for i in 0..n - 1 {
-            xpbd_distance_correct(&mut clump.pos, i, i + 1, settings.rest_length, alpha_dist, inv_mass(i), inv_mass(i + 1));
-        }
-        if n >= 3 {
-            for i in 0..n - 2 {
-                xpbd_distance_correct(&mut clump.pos, i, i + 2, 2.0 * settings.rest_length, alpha_bend, inv_mass(i), inv_mass(i + 2));
-            }
+/// Retire a rig whose figurine is gone, and only then.
+///
+/// This is the half the superseded version was missing entirely: `simulate_hair` did
+/// `let Ok(..) = head_refs.get(rig.figurine) else { continue }` — it *skipped* an orphaned rig instead
+/// of despawning it, so every `HairRig` leaked when its unit died and the `RunState::Idle → Active`
+/// world rebuild leaked five more per run. With four static squad members that leaks nothing visible;
+/// it stops being invisible the moment a groom is attached to anything that spawns and dies at
+/// runtime. Copied from `health::update_health_bars`' orphan branch, which is the verified pattern for
+/// a top-level entity holding an owner back-reference.
+///
+/// Ordering: every despawn path in the game lands strictly before `Update` — `despawn_dead_units` and
+/// `crab_despawn_dead` are on `FixedUpdate` (inside `RunFixedMainLoop`), and `DespawnOnExit` fires in
+/// `StateTransition`. So a rig whose owner died this frame is retired in this frame's `Update`, and the
+/// `PostUpdate` solve never sees it.
+fn despawn_orphan_rigs(mut commands: Commands, figurines: Query<(), With<FigurineModel>>, rigs: Query<(Entity, &HairRig)>) {
+    for (entity, rig) in &rigs {
+        if figurines.get(rig.figurine).is_err() {
+            commands.entity(entity).despawn();
         }
     }
 }
 
+/// Advance every rig by one frame.
+///
+/// Runs on `PostUpdate` after `TransformSystems::Propagate`, so `bone_tf` is *this* frame's pose — see
+/// the module doc for why the superseded `Update` placement was a one-frame lag rather than a saving.
+/// Guides are stepped in fixed root→tip order inside [`sim::step_guide`], never via an ECS query, so no
+/// `sort_total!`/`sort_value_canonical`/`SORT-OK` annotation is needed anywhere in this module.
 fn simulate_hair(
     time: Res<Time>,
     settings: Res<HairSettings>,
@@ -564,17 +514,27 @@ fn simulate_hair(
         let Ok(head_ref) = head_refs.get(rig.figurine) else { continue };
         let Ok(bone_tf) = bones.get(head_ref.0) else { continue };
 
+        // The joint palette, composed ONCE per rig rather than once per root: a groom's roots share far
+        // fewer joints than they have influences, and composing per root would multiply the sparse
+        // `GlobalTransform` lookups by four. Today's palette is one entry — the `head` bone — because
+        // the roots are still hand-placed in its local space; a mesh-bound groom will fill it from
+        // `SkinnedMesh::joints` x `inverse_bindposes`.
+        let palette = [bone_tf.affine()];
+
+        // Split the borrow: `clumps` and `scratch` are both fields of the same `Mut<HairRig>`.
+        let rig = &mut *rig;
         if !rig.seeded {
-            for clump in &mut rig.clumps {
-                seed_clump(clump, bone_tf, settings.rest_length);
+            for guide in &mut rig.clumps {
+                let f = bind::eval_root(&guide.bind, &palette);
+                sim::reseed(guide, f.pos, f.normal, settings.rest_length);
             }
             rig.seeded = true;
             continue; // start simulating from the next frame, once at rest
         }
 
-        for clump in &mut rig.clumps {
-            let root_world = bone_tf.transform_point(clump.root_local_offset);
-            step_clump(clump, root_world, dt, elapsed, &settings);
+        for guide in &mut rig.clumps {
+            let f = bind::eval_root(&guide.bind, &palette);
+            sim::step_guide(guide, f.pos, f.normal, dt, elapsed, &settings, &mut rig.scratch);
         }
     }
 }
@@ -654,30 +614,43 @@ impl Plugin for HairPlugin {
         // Required config — one path, no fallback. The `hair:` slice comes from the unified
         // `assets/config/config.ron`, loaded + validated once by `ConfigPlugin` (registered first).
         let settings = app.world().resource::<crate::config::GameConfig>().hair.clone();
-        app.insert_resource(settings).add_systems(Startup, setup_hair_assets).add_systems(
-            Update,
-            (locate_head_bone, spawn_hair_rigs, simulate_hair, update_hair_mesh).chain(),
-        );
+        app.insert_resource(settings)
+            .add_systems(Startup, setup_hair_assets)
+            // Discovery + lifecycle: command-heavy retry-each-frame passes, and `Update` is the first
+            // schedule after every despawn path in the game (see `despawn_orphan_rigs`).
+            .add_systems(Update, (despawn_orphan_rigs, locate_head_bone, spawn_hair_rigs).chain())
+            // The solve reads joint `GlobalTransform`s, which only exist for THIS frame after
+            // `TransformSystems::Propagate` — itself downstream of `bevy_animation`'s `PostUpdate`
+            // `animate_targets`. See the module doc.
+            .add_systems(
+                PostUpdate,
+                (simulate_hair, update_hair_mesh).chain().after(TransformSystems::Propagate),
+            );
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_settings() -> HairSettings {
+    /// The solver's own tests live in [`sim`] — it is pure math over slices, which is what lets the
+    /// whole thing run in the GPU-free `cargo test` hard gate. What is left here is the config
+    /// contract.
+    pub(super) fn test_settings() -> HairSettings {
         HairSettings {
             clumps_per_unit: 1,
             segments_per_strand: 5,
             rest_length: 0.05,
-            compliance: 0.0002,
             bend_compliance: 0.002,
-            damping: 0.96,
+            damping: 0.05,
+            ftl_correction: 0.9,
             gravity: 9.8,
             gravity_scale: 0.6,
             wind_strength: 0.0,
             wind_freq: 1.6,
             substeps: 4,
+            max_speed: 12.0,
             strand_width_root: 0.062,
             strand_width_tip: 0.010,
             tint: [0.25, 0.14, 0.08],
@@ -690,13 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn bend_compliance_below_compliance_is_rejected() {
-        let mut bad = test_settings();
-        bad.bend_compliance = bad.compliance * 0.5;
-        assert!(validate_hair(&bad).is_err(), "bend must not out-stiffen the primary chain");
-    }
-
-    #[test]
     fn tip_wider_than_root_is_rejected() {
         let mut bad = test_settings();
         bad.strand_width_tip = bad.strand_width_root * 2.0;
@@ -704,108 +670,88 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_clump_settles_without_stretching_past_rest_length() {
-        let settings = test_settings();
-        let n = settings.segments_per_strand + 1;
-        let mut clump = HairClump::new(settings.segments_per_strand, Vec3::ZERO, Vec3::NEG_Y, 0.0);
-        for i in 0..n {
-            let p = Vec3::NEG_Y * (i as f32 * settings.rest_length);
-            clump.pos[i] = p;
-            clump.prev[i] = p;
-        }
-        let root = Vec3::ZERO;
-        // Settle under gravity alone (no wind) for several seconds of simulated frames.
-        for _ in 0..300 {
-            step_clump(&mut clump, root, 1.0 / 60.0, 0.0, &settings);
-        }
-        assert_eq!(clump.pos[0], root, "root must stay pinned exactly at the bone");
-        for i in 0..n - 1 {
-            let len = (clump.pos[i + 1] - clump.pos[i]).length();
-            let rest = settings.rest_length;
-            assert!(
-                (len - rest).abs() < rest * 0.15,
-                "segment {i} length {len} strayed too far from rest {rest} after settling"
-            );
-        }
-        for p in &clump.pos {
-            assert!(p.is_finite(), "a settled clump must never produce NaN/Inf: {p:?}");
-        }
+    fn a_negative_bend_compliance_is_rejected() {
+        let mut bad = test_settings();
+        bad.bend_compliance = -1.0;
+        assert!(validate_hair(&bad).is_err(), "compliance is an inverse stiffness; negative is meaningless");
     }
 
-    /// A settled clump whose root then TELEPORTS must re-settle, not fly apart.
-    ///
-    /// This is the case the player hit: a squad unit is respawned by the `RunState::Idle → Active`
-    /// world rebuild, so its head bone jumps tens of metres in one frame. `step_clump` re-pins
-    /// `pos[0]` but leaves `pos[1..]` behind, and PBD derives velocity from `pos - prev` — so the
-    /// constraint yank that drags the chain across the gap is re-read as velocity on the next
-    /// substep, and the clump explodes into cards stretched across the level.
-    ///
-    /// Nothing re-seeds a diverged rig (`HairRig::seeded` is set once), so it never recovers —
-    /// which is why the artifact persisted across two captures 49 s apart.
+    /// `ftl_correction` outside [0,1] is not a taste question — it is `s` in DFTL Eq. 9, and a value
+    /// above 1 over-subtracts the successor's correction and drives the leader backwards.
     #[test]
-    fn a_teleported_root_re_settles_instead_of_exploding() {
-        let settings = test_settings();
-        let n = settings.segments_per_strand + 1;
-        let mut clump = HairClump::new(settings.segments_per_strand, Vec3::ZERO, Vec3::NEG_Y, 0.0);
-        for i in 0..n {
-            let p = Vec3::NEG_Y * (i as f32 * settings.rest_length);
-            clump.pos[i] = p;
-            clump.prev[i] = p;
+    fn an_out_of_range_ftl_correction_is_rejected() {
+        for bad_value in [-0.1, 1.5] {
+            let mut bad = test_settings();
+            bad.ftl_correction = bad_value;
+            assert!(validate_hair(&bad).is_err(), "ftl_correction {bad_value} must be rejected");
         }
-        // Settle at the origin first, so this starts from a healthy chain.
-        for _ in 0..120 {
-            step_clump(&mut clump, Vec3::ZERO, 1.0 / 60.0, 0.0, &settings);
-        }
-
-        // The rebuild: the head bone lands 80 units away in a single frame.
-        let far = Vec3::new(80.0, 0.0, 45.0);
-        for _ in 0..120 {
-            step_clump(&mut clump, far, 1.0 / 60.0, 0.0, &settings);
-        }
-
-        for (i, p) in clump.pos.iter().enumerate() {
-            assert!(p.is_finite(), "particle {i} is non-finite after a teleport: {p:?}");
-        }
-        // The whole point: a card is drawn between consecutive particles, so a segment far past its
-        // rest length IS the stretched spike in the capture.
-        for i in 0..n - 1 {
-            let len = (clump.pos[i + 1] - clump.pos[i]).length();
-            let rest = settings.rest_length;
-            assert!(
-                len < rest * 2.0,
-                "segment {i} is {len} long, {:.0}x its rest length {rest} — the chain exploded \
-                 instead of following the teleported root",
-                len / rest
-            );
-        }
-        // …and it must have actually followed the root, not merely stayed short somewhere else.
-        let tip_to_root = (clump.pos[n - 1] - far).length();
-        assert!(
-            tip_to_root < settings.rest_length * (n as f32) * 1.5,
-            "the chain did not follow its root: tip is {tip_to_root} from the bone"
-        );
     }
 
+    /// A zero speed ceiling would freeze the hair solid rather than merely cap it.
     #[test]
-    fn xpbd_distance_correct_pulls_a_stretched_pair_toward_rest_length() {
-        let mut pos = vec![Vec3::ZERO, Vec3::new(0.0, -1.0, 0.0)]; // 1.0 apart
-        let rest = 0.05;
-        let alpha_tilde = 0.0002 / (1.0_f32 / 60.0).powi(2);
-        for _ in 0..50 {
-            xpbd_distance_correct(&mut pos, 0, 1, rest, alpha_tilde, 0.0, 1.0);
-        }
-        let len = (pos[1] - pos[0]).length();
-        assert!((len - rest).abs() < rest * 0.2, "did not converge toward rest length, got {len}");
-        assert_eq!(pos[0], Vec3::ZERO, "an inv_mass-0 endpoint must never move");
+    fn a_non_positive_max_speed_is_rejected() {
+        let mut bad = test_settings();
+        bad.max_speed = 0.0;
+        assert!(validate_hair(&bad).is_err(), "max_speed must be > 0");
     }
 
-    #[test]
-    fn wind_accel_is_stronger_at_the_tip_than_the_root() {
-        let s = test_settings();
-        let mut s = s.clone();
-        s.wind_strength = 1.0;
-        let root = wind_accel(0.3, 0, 1.0, &s).length();
-        let tip = wind_accel(0.3, 5, 1.0, &s).length();
-        assert!(tip >= root, "tip (free end) should sway at least as much as the root, got root={root} tip={tip}");
+    /// A bare-`App`-with-one-system harness, following `anim::tests::harness`'s precedent. This is
+    /// deliberately NOT `HairPlugin`: registering the plugin would need `GameConfig`, `Startup` asset
+    /// bakes, and a render world, and `TESTING.md`'s plugin boundary is what keeps hair outside
+    /// `snapshot_hash`. One system in isolation is enough to pin its contract.
+    fn orphan_harness() -> App {
+        let mut app = App::new();
+        app.add_systems(Update, despawn_orphan_rigs);
+        app
     }
+
+    fn spawn_rig(app: &mut App, figurine: Entity) -> Entity {
+        app.world_mut()
+            .spawn(HairRig { figurine, clumps: Vec::new(), mesh: Handle::default(), seeded: true, scratch: Vec::new() })
+            .id()
+    }
+
+    /// The leak this module shipped with: `simulate_hair` skipped an orphaned rig with `continue`
+    /// instead of despawning it, so every `HairRig` outlived its unit and the `RunState::Idle → Active`
+    /// world rebuild leaked five more per run. Invisible with four static squad members; not invisible
+    /// the moment a groom is attached to anything that spawns and dies at runtime.
+    #[test]
+    fn a_rig_is_retired_when_its_figurine_despawns() {
+        let mut app = orphan_harness();
+        let figurine = app.world_mut().spawn(FigurineModel).id();
+        let rig = spawn_rig(&mut app, figurine);
+
+        app.update();
+        assert!(app.world().get_entity(rig).is_ok(), "a rig with a live figurine must survive");
+
+        app.world_mut().entity_mut(figurine).despawn();
+        app.update();
+        assert!(app.world().get_entity(rig).is_err(), "a rig whose figurine died must be despawned, not skipped");
+    }
+
+    /// Retiring one unit's rig must not touch its squadmates' — the sweep keys on each rig's own
+    /// back-reference, and getting that wrong would bald the whole squad when one member dies.
+    #[test]
+    fn retiring_one_rig_leaves_its_squadmates_alone() {
+        let mut app = orphan_harness();
+        let doomed = app.world_mut().spawn(FigurineModel).id();
+        let survivor = app.world_mut().spawn(FigurineModel).id();
+        let doomed_rig = spawn_rig(&mut app, doomed);
+        let survivor_rig = spawn_rig(&mut app, survivor);
+
+        app.world_mut().entity_mut(doomed).despawn();
+        app.update();
+
+        assert!(app.world().get_entity(doomed_rig).is_err(), "the dead unit's rig must go");
+        assert!(app.world().get_entity(survivor_rig).is_ok(), "the living unit's rig must stay");
+    }
+
+    // There is deliberately NO test here for "a rig pointed at a recycled entity id is still
+    // retired". That property holds because `Entity` carries a generation and `Query::get` rejects a
+    // stale one — a Bevy invariant, not this module's logic. Staging it would mean forcing the entity
+    // allocator to reuse an index on demand, which it does not promise to do (an attempt at this test
+    // failed on its own setup assertion, not on the behaviour), and a test that depends on allocator
+    // internals is brittle against every Bevy upgrade. The `sort_total!` panic message's warning that a
+    // raw `Entity` is never a safe *sort key* is a different concern: that is about ordering across
+    // separate `App` instances, whereas this is a same-world liveness check.
 }

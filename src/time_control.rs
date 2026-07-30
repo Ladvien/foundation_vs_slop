@@ -140,6 +140,20 @@ impl Plugin for TimeControlPlugin {
             // `read_speed_input` writes `UserPaused`; `compose_pause` then folds `UserPaused` +
             // `SimBlocked` into the single `GameSpeed::paused` write. `.chain()` keeps that order so
             // a key press and its resulting pause state land in the same frame.
+            // **Reset the player pause on run entry.** `UserPaused` is process-lifetime, and pressing
+            // `Space` at Site-67 (a natural "confirm" reflex) latched it with no readout anywhere to
+            // say so — `SpeedText` only exists `OnEnter(AppState::InGame)`. The next expedition then
+            // booted frozen, and orders appeared to do nothing. Run-scoped intent has to be cleared
+            // where the run begins.
+            .add_systems(
+                OnEnter(crate::session::RunState::Active),
+                |mut paused: ResMut<UserPaused>, mut speed: ResMut<GameSpeed>| {
+                    paused.0 = false;
+                    // Also drop an inspection rung back onto the player's ladder, so `Alt+9` in one
+                    // expedition cannot leave the next one running at ×64.
+                    speed.base = shipping_mult(DEFAULT_SHIPPING_POS).unwrap_or(1.0);
+                },
+            )
             .add_systems(Update, (read_speed_input, compose_pause).chain());
         #[cfg(debug_assertions)]
         app.add_systems(Update, read_inspection_ladder.before(compose_pause));

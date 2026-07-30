@@ -95,12 +95,15 @@ impl UserSettings {
     fn from_resources(
         hud: &HudSettings,
         acc: &AccessibilitySettings,
-        bindings: &crate::input::KeyBindings,
+        input: &crate::input::InputSettings,
     ) -> Self {
         Self {
             hud: hud.clone(),
             accessibility: acc.clone(),
-            input: crate::input::InputSettings::from_bindings(bindings),
+            // The **persisted** overrides, verbatim — never re-derived from the live `KeyBindings`.
+            // See `autosave_on_change` for why that distinction is the difference between preserving
+            // the player's file and destroying it.
+            input: input.clone(),
         }
     }
 }
@@ -154,18 +157,31 @@ fn load_or_seed() -> UserSettings {
     }
 }
 
-/// Persist the current settings resources whenever either changes. `is_changed()` fires once on
-/// insert too, which conveniently rewrites the file on first boot after a schema addition.
+/// Persist the current settings resources whenever one changes.
+///
+/// **It writes [`crate::input::InputSettings`], not the resolved [`crate::input::KeyBindings`]**, and
+/// that is a correctness requirement rather than a style choice. `to_bindings` may legitimately drop
+/// an override it cannot use — an unreadable key name, a table that is still self-contradictory — and
+/// substitute the shipped default. Deriving the file back from that resolved table erased the
+/// offending line **permanently on the next launch**: one typo in a hand-edited `user_settings.ron`
+/// and the entry was gone, with nothing but a log line the player never sees. The global rule is
+/// explicit that a path which cannot produce a usable result must fail loudly rather than write a
+/// degraded substitute to storage, and re-deriving was exactly that write.
+///
+/// So the persisted form is the source of truth for persistence, and the live table is downstream of
+/// it. **When an interactive remap screen lands it must update `InputSettings` too**, not only
+/// `KeyBindings`, or the rebind will not survive a restart. `KeyBindings` is deliberately *not* a
+/// trigger here: it changes on insert at startup, which is what fired the destructive write.
 fn autosave_on_change(
     hud: Res<HudSettings>,
     acc: Res<AccessibilitySettings>,
-    bindings: Res<crate::input::KeyBindings>,
+    input: Res<crate::input::InputSettings>,
 ) {
-    if !(hud.is_changed() || acc.is_changed() || bindings.is_changed()) {
+    if !(hud.is_changed() || acc.is_changed() || input.is_changed()) {
         return;
     }
     let Some(path) = settings_path() else { return };
-    write_settings(&path, &UserSettings::from_resources(&hud, &acc, &bindings));
+    write_settings(&path, &UserSettings::from_resources(&hud, &acc, &input));
 }
 
 /// Atomic write (tmp + rename) so a crash mid-write can't corrupt the settings file.
@@ -225,15 +241,18 @@ mod tests {
         use crate::input::{Action, Binding, Chord, KeyBindings};
         use bevy::prelude::KeyCode;
 
-        let mut bindings = KeyBindings::default();
-        bindings
-            .rebind(Action::ArmDevice, Binding::one(Chord::plain(KeyCode::KeyT)))
-            .expect("T is free");
-
+        // Written as the PERSISTED form, which is what `autosave_on_change` now saves — deriving the
+        // file back from a resolved `KeyBindings` is what used to erase a dropped override from disk.
         let saved = UserSettings::from_resources(
             &HudSettings::default(),
             &AccessibilitySettings::default(),
-            &bindings,
+            &crate::input::InputSettings {
+                overrides: vec![crate::input::StoredBinding {
+                    action: Action::ArmDevice.id().to_string(),
+                    primary: "T".to_string(),
+                    alternate: None,
+                }],
+            },
         );
         let text = ron::ser::to_string_pretty(&saved, ron::ser::PrettyConfig::default()).unwrap();
         let parsed: UserSettings = ron::from_str(&text).unwrap();

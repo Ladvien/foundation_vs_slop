@@ -190,7 +190,10 @@ fn report_events(
     boss: Query<(Entity, &crate::enemy::SmileyState)>,
     mut boss_was_angry: Local<bool>,
 ) {
-    // --- Run phase. Subjectless, because a phase is a fact about the run, not about a thing. ---
+    // --- Run phase FIRST, deliberately. `post_events` keeps the first qualifying event of the frame,
+    // and a phase change is the least recoverable beat here: it is subjectless, so it has no dedupe
+    // entry to retry from, and `*last_phase` advances once. An operative-critical beat that loses this
+    // race still reports on a later frame, because it is re-derived from live health every tick. ---
     if let Some(phase) = phase {
         let now = *phase.get();
         if *last_phase != Some(now) {
@@ -276,17 +279,27 @@ fn post_events(
 ) {
     // Every message is drained even when it does not qualify, or an unread one would be redelivered
     // next frame and eventually shown out of order.
+    // **FIRST qualifying event of the frame wins, and only it is marked reported.**
+    //
+    // This used to keep the LAST and mark EVERY admitted subject as reported, which quietly destroyed
+    // beats: two operatives crossing `CRITICAL_FRAC` on one frame (an explosion, a boss AoE, the first
+    // frame after the set is cleared) both got inserted into `seen`, only the second was shown, and the
+    // first could then never be shown again for the whole expedition — the notification this module
+    // exists to deliver, permanently swallowed.
+    //
+    // First-wins rather than last-wins because with one line the choice is which beat to *drop*, and
+    // dropping the later one is recoverable: its subject is still unseen, so it reports the next time
+    // it is noticed. `report_events` re-derives from live state every frame, so a critical operative
+    // keeps qualifying. Queueing is not an option — that is the scrolling log the alert budget
+    // (Ancker et al.) rules out.
     let mut posted: Option<GameEvent> = None;
     for event in events.read() {
-        if !admits(event, &seen.0) {
+        if posted.is_some() || !admits(event, &seen.0) {
             continue;
         }
         if let Some(e) = event.subject {
             seen.0.insert(e);
         }
-        // Last qualifying event of the frame wins. With one line there is no honest alternative:
-        // queueing would turn this into the scrolling log the alert budget rules out, and showing the
-        // first would mean a later, more urgent beat lost to an earlier trivial one.
         posted = Some(event.clone());
     }
     let Some(event) = posted else { return };

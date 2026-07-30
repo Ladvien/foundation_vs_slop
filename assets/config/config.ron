@@ -308,14 +308,23 @@
         clumps_per_unit: 8,
         segments_per_strand: 5,
         rest_length: 0.05,
-        compliance: 0.0002,
+        // No distance compliance any more: the DFTL pass (src/hair/sim.rs) projects segments to
+        // exactly rest_length in one root->tip sweep, so there is no stretch stiffness left to tune.
         bend_compliance: 0.002,
-        damping: 0.96,
+        // Fraction of velocity RETAINED PER SECOND, so this is frame-rate independent. The old
+        // Verlet solver's 0.96 was per SUBSTEP -- at 4 substeps of 1/60 s that worked out to ~5.5e-5
+        // per second, i.e. very heavily damped. 0.05 is a deliberate loosening now that the solver
+        // no longer needs damping to stay stable; tune by devshot.
+        damping: 0.05,
+        // `s` in DFTL Eq. 9. Mueller, Kim & Chentanez 2012 illustrate 0.9.
+        ftl_correction: 0.9,
         gravity: 9.8,
         gravity_scale: 0.6,
         wind_strength: 0.4,
         wind_freq: 1.6,
         substeps: 4,
+        // Per-particle speed ceiling, m/s -- a numeric backstop, not a second solver path.
+        max_speed: 12.0,
         // Matches HairCards.ROOT_W/TIP_W in the asset generator (scp_characters/hair.py) for a
         // consistent card width against the static valkyrie_hair card.
         strand_width_root: 0.062,

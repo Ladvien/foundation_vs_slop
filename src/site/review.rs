@@ -328,9 +328,13 @@ pub fn requisition_rows(standing: &O5Standing, held: &Requisitioned) -> Vec<crat
 /// What one buy button reads. Pure, and it **states its key** — the rule
 /// `verb_bar::every_verb_states_its_key` enforces for the containment verbs, extended to the Site so
 /// a mouse-driven player is not taught the keyboard route is absent, or the reverse.
-pub fn buy_button_label(item: Consumable, budget: u32) -> String {
+pub fn buy_button_label(
+    item: Consumable,
+    budget: u32,
+    bindings: &crate::input::KeyBindings,
+) -> String {
     let price = item.price();
-    let key = buy_key(item);
+    let key = buy_key(item, bindings);
     if budget >= price {
         format!("{key}  {} — {price}", item.label())
     } else {
@@ -341,15 +345,18 @@ pub fn buy_button_label(item: Consumable, budget: u32) -> String {
 
 /// The key each purchase is bound to, read from the registry so this label cannot drift from the
 /// binding the way the hardcoded `[B]`/`[N]`/`[M]` in the old string did.
-fn buy_key(item: Consumable) -> char {
-    let action = match item {
+fn buy_action(item: Consumable) -> crate::input::Action {
+    match item {
         Consumable::CaptureDevice => crate::input::Action::BuyCaptureDevice,
         Consumable::QuarantineCharge => crate::input::Action::BuyQuarantineCharge,
         Consumable::Medkit => crate::input::Action::BuyMedkit,
-    };
-    crate::input::key_name(action.default_binding().primary.key)
-        .and_then(|n| n.chars().next())
-        .unwrap_or('?')
+    }
+}
+
+/// The key a purchase prints, from the **live** table. It read `default_binding()` before, so a
+/// rebound key was never shown — the panel advertised the shipped letter and the real one was hidden.
+fn buy_key(item: Consumable, bindings: &crate::input::KeyBindings) -> char {
+    bindings.key_char(buy_action(item))
 }
 
 fn update_panel(
@@ -358,6 +365,7 @@ fn update_panel(
     fonts: Res<crate::ui::theme::FontAssets>,
     standing: Res<O5Standing>,
     held: Res<Requisitioned>,
+    bindings: Res<crate::input::KeyBindings>,
     mut panels: Query<(Entity, &mut crate::ui::rows::RowPanel), With<RequisitionReadout>>,
     mut labels: Query<(&BuyButtonLabel, &mut Text)>,
 ) {
@@ -366,7 +374,7 @@ fn update_panel(
         crate::ui::rows::sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows.clone());
     }
     for (label, mut text) in &mut labels {
-        let want = buy_button_label(label.0, standing.budget);
+        let want = buy_button_label(label.0, standing.budget, &bindings);
         if text.0 != want {
             text.0 = want;
         }
@@ -551,15 +559,16 @@ mod tests {
         // and the key is read from the registry, so it cannot drift from the binding the way the
         // hardcoded `[B]`/`[N]`/`[M]` in the old string could.
         for item in Consumable::ALL {
-            let rich = buy_button_label(item, 10_000);
-            let broke = buy_button_label(item, 0);
+            let b = crate::input::KeyBindings::default();
+            let rich = buy_button_label(item, 10_000, &b);
+            let broke = buy_button_label(item, 0, &b);
             for l in [&rich, &broke] {
                 assert!(!l.trim().is_empty());
                 assert!(l.contains(item.label()), "{l} does not name the item");
                 assert!(
-                    l.starts_with(buy_key(item)),
+                    l.starts_with(buy_key(item, &b)),
                     "{l} must lead with its key {}",
-                    buy_key(item)
+                    buy_key(item, &b)
                 );
             }
             // Unaffordable states the shortfall rather than only dimming.
@@ -573,7 +582,8 @@ mod tests {
         // A `?` here would mean `input::keyname` has no name for a key the registry binds — which is
         // also the condition under which that binding could not be persisted or shown on the controls
         // screen, so this catches all three at once.
-        let keys: Vec<char> = Consumable::ALL.iter().map(|i| buy_key(*i)).collect();
+        let b = crate::input::KeyBindings::default();
+        let keys: Vec<char> = Consumable::ALL.iter().map(|i| buy_key(*i, &b)).collect();
         for (i, a) in keys.iter().enumerate() {
             assert_ne!(*a, '?', "a purchase is bound to a key with no name");
             for b in &keys[i + 1..] {

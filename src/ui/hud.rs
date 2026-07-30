@@ -503,11 +503,21 @@ fn apply_hud_settings(
     mut roster: Query<&mut Node, (With<RosterStripRoot>, Without<RosterSwatch>)>,
     mut swatches: Query<&mut Node, (With<RosterSwatch>, Without<RosterStripRoot>)>,
 ) {
-    if !hud.is_changed() {
-        return;
-    }
+    // **No `is_changed()` early-out.** `HudSettings` is inserted once at plugin build, so it reports
+    // changed on the first `Update` frame and then only when the player writes it — but `spawn_hud`
+    // runs *later*, on every `OnEnter(AppState::InGame)`, and spawns each `RosterSwatch` with a
+    // default `Node` (`Display::Flex`). With the guard in place, a player who persisted COMPACT got
+    // the swatches back on every fresh expedition until they pressed `H`, which cycles them off the
+    // rung they chose. That is precisely the "presses the key, sees no change, concludes it is broken"
+    // failure this module's own density test is written against.
+    //
+    // Running unconditionally is cheap: two small queries, and every write below is guarded on the
+    // value actually differing, so an unchanged frame touches no `Node` and triggers no Taffy re-solve.
     if let Ok(mut node) = roster.single_mut() {
-        node.display = strip_display(hud.roster_detail);
+        let want = strip_display(hud.roster_detail);
+        if node.display != want {
+            node.display = want;
+        }
     }
     let want = swatch_display(hud.roster_detail);
     for mut node in &mut swatches {

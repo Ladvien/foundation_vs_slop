@@ -59,9 +59,15 @@ impl Plugin for UiPlugin {
                 warmup::WarmupScreenPlugin,
                 pause::PauseMenuPlugin,
                 // Nested rather than given their own slots: the top-level tuple is at Bevy's
-                // 15-element cap (`docs/ui.md` §5), and these two belong together anyway — both are
-                // Access-side surfaces that tell the player where things are.
+                // 15-element cap (`docs/ui.md` §5). Grouped because they are all Access-side
+                // surfaces — settings, keys, and where things are.
                 (
+                    // **Do not remove from this tuple.** `title.rs` and `pause.rs` both set
+                    // `TitleMenu::Settings` / `MenuState::Settings`, and with no plugin registered
+                    // those transitions despawn the pause overlay, spawn nothing, and leave the sim
+                    // frozen with neither Escape nor a button to get out — a soft-lock. It was
+                    // dropped once, by an edit that rewrote this tuple to respect the 15-element cap.
+                    settings_menu::SettingsMenuPlugin,
                     // The key list, reachable from both the title and the pause menu.
                     controls_screen::ControlsScreenPlugin,
                     // Edge markers for the extraction point and the selected operatives. The camera

@@ -286,18 +286,18 @@ pub fn records_rows(
 
 /// What one archive button reads. Pure, states its key, and **names the count** so the two verbs are
 /// distinguishable before they are pressed.
-pub fn archive_button_label(req: ArchiveRequest, unfiled: usize, disprovable: usize) -> String {
+pub fn archive_button_label(
+    req: ArchiveRequest,
+    unfiled: usize,
+    disprovable: usize,
+    bindings: &crate::input::KeyBindings,
+) -> String {
     let (action, verb, n) = match req {
-        ArchiveRequest::File => {
-            (crate::input::Action::FileFindings, "FILE", unfiled)
-        }
-        ArchiveRequest::Curate => {
-            (crate::input::Action::CurateArchive, "PULL", disprovable)
-        }
+        ArchiveRequest::File => (crate::input::Action::FileFindings, "FILE", unfiled),
+        ArchiveRequest::Curate => (crate::input::Action::CurateArchive, "PULL", disprovable),
     };
-    let key = crate::input::key_name(action.default_binding().primary.key)
-        .and_then(|k| k.chars().next())
-        .unwrap_or('?');
+    // The LIVE binding, not `default_binding()`.
+    let key = bindings.key_char(action);
     if n == 0 {
         // Never a bare disabled verb. Which *nothing* this is matters: nothing to write up is a
         // different instruction from nothing to disprove.
@@ -449,6 +449,7 @@ fn update_panel(
     fonts: Res<crate::ui::theme::FontAssets>,
     records: Res<Records>,
     table: Res<super::SquadKnowledge>,
+    bindings: Res<crate::input::KeyBindings>,
     mut panels: Query<(Entity, &mut crate::ui::rows::RowPanel), With<RecordsReadout>>,
     mut labels: Query<(&ArchiveButtonLabel, &mut Text)>,
 ) {
@@ -463,7 +464,7 @@ fn update_panel(
         crate::ui::rows::sync_rows(&mut commands, entity, &mut panel, &theme, &fonts, rows.clone());
     }
     for (label, mut text) in &mut labels {
-        let want = archive_button_label(label.0, unfiled, disprovable);
+        let want = archive_button_label(label.0, unfiled, disprovable, &bindings);
         if text.0 != want {
             text.0 = want;
         }
@@ -700,8 +701,9 @@ mod tests {
         // These are clickable now, so `docs/ui.md` §4.2's operability lens applies in both directions:
         // the button must still state the key, and the key must still do what the button says.
         for req in [ArchiveRequest::File, ArchiveRequest::Curate] {
-            let idle = archive_button_label(req, 0, 0);
-            let busy = archive_button_label(req, 3, 2);
+            let b = crate::input::KeyBindings::default();
+            let idle = archive_button_label(req, 0, 0, &b);
+            let busy = archive_button_label(req, 3, 2, &b);
             for l in [&idle, &busy] {
                 assert!(!l.trim().is_empty());
                 let key = l.chars().next().expect("non-empty");
@@ -717,8 +719,9 @@ mod tests {
         // "Nothing to write up" and "nothing to disprove" are different situations with different
         // responses, and FVS-L-1's rule is that an unmet condition is an INSTRUCTION. A shared
         // greyed-out label would collapse them.
-        let file = archive_button_label(ArchiveRequest::File, 0, 0);
-        let curate = archive_button_label(ArchiveRequest::Curate, 0, 0);
+        let b = crate::input::KeyBindings::default();
+        let file = archive_button_label(ArchiveRequest::File, 0, 0, &b);
+        let curate = archive_button_label(ArchiveRequest::Curate, 0, 0, &b);
         assert!(file.contains("NOTHING UNWRITTEN"), "{file}");
         assert!(curate.contains("NOTHING DISPROVEN"), "{curate}");
         assert_ne!(file, curate);

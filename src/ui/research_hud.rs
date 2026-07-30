@@ -157,6 +157,26 @@ fn param_row(p: HiddenParam, belief: f32, revealed: bool) -> Row {
     }
 }
 
+/// How many experiments are **actually on offer**: strictly positive expected information gain, capped
+/// at what the panel will render.
+///
+/// Shared by the panel and the RUN button so the two cannot disagree. They did: the button counted
+/// `rank_by_information_gain(..).len()` — every experiment in the battery, including the ones worth
+/// zero bits — so it read `RUN THE TOP TEST` while the panel right above it read
+/// `NO INFORMATIVE TEST REMAINS`. Two implementations of one question, and the one the player acts on
+/// was the wrong one.
+pub fn live_offers(experiments: &[Experiment], posterior: &ResearchPosterior) -> usize {
+    rank_by_information_gain(experiments, posterior)
+        .iter()
+        .take(OFFERED)
+        .filter(|&&i| {
+            experiments
+                .get(i)
+                .is_some_and(|e| e.expected_information_gain(posterior) > 0.0)
+        })
+        .count()
+}
+
 /// One offered experiment, with the reason it is offered.
 ///
 /// Bits, not a percentage: the quantity really is information, and rounding it to a percentage of
@@ -270,11 +290,9 @@ pub struct RunTestLabel;
 
 /// What the button reads. Pure, states its key, and distinguishes "nothing left to learn" from a dead
 /// control — `docs/ui.md` §1.4's rule that an unmet condition is an instruction.
-pub fn run_test_label(offers: usize) -> String {
-    let key = crate::input::key_name(
-        crate::input::Action::RunTopExperiment.default_binding().primary.key,
-    )
-    .unwrap_or("?");
+pub fn run_test_label(offers: usize, bindings: &crate::input::KeyBindings) -> String {
+    // The LIVE binding, not `default_binding()`.
+    let key = bindings.key_label(crate::input::Action::RunTopExperiment);
     if offers == 0 {
         format!("{key}  NO INFORMATIVE TEST REMAINS")
     } else {
@@ -285,6 +303,7 @@ pub fn run_test_label(offers: usize) -> String {
 /// Keep the run button's label and ink in step with whether a test is on offer.
 fn update_run_button(
     theme: Res<UiTheme>,
+    bindings: Res<crate::input::KeyBindings>,
     specimens: Query<(&crate::containment::Specimen, &ResearchPosterior, Option<&Researched>)>,
     studied: Res<crate::research::StudySubject>,
     curriculum: Res<crate::research::Curriculum>,
@@ -297,15 +316,20 @@ fn update_run_button(
     // "Is a test on offer" is derived the SAME way the panel derives it — through
     // `rank_by_information_gain` on the studied specimen — so the button cannot promise a test the
     // panel does not list, or refuse one it does.
+    // **The STUDIED specimen, resolved the same way `update_readout` resolves it.** This used to take
+    // `studied.0` as a mere presence check and then pick whichever un-researched specimen the ECS
+    // query happened to yield first, count `rank_by_information_gain(..).len()` rather than the offers
+    // with `bits > 0`, and never consult prerequisites. With two specimens held, the panel could read
+    // `NO INFORMATIVE TEST REMAINS` while this button read `R  RUN THE TOP TEST` and looked live —
+    // the exact thing its doc claims to prevent. The pick was also query-order dependent, so the label
+    // could differ between sessions with identical saves.
     let offers = studied
         .0
-        .and_then(|_| specimens.iter().find(|(_, _, done)| done.is_none()))
-        .map(|(spec, post, _)| {
-            let battery = curriculum.experiments(spec.subject);
-            rank_by_information_gain(&battery, post).len()
-        })
+        .and_then(|e| specimens.get(e).ok())
+        .filter(|(_, _, done)| done.is_none())
+        .map(|(spec, post, _)| live_offers(&curriculum.experiments(spec.subject), post))
         .unwrap_or(0);
-    let want = run_test_label(offers);
+    let want = run_test_label(offers, &bindings);
     for (mut text, mut color) in &mut labels {
         if text.0 != want {
             text.0 = want.clone();
@@ -406,8 +430,9 @@ mod tests {
         // The `[R] RUN THE TOP TEST` *header* was a control-looking row that could not be clicked.
         // Now the header names the section and this button carries the verb — so it must state the key
         // (operability, `docs/ui.md` §4.2) and name the exhausted state rather than going dead.
-        let none = run_test_label(0);
-        let some = run_test_label(2);
+        let b = crate::input::KeyBindings::default();
+        let none = run_test_label(0, &b);
+        let some = run_test_label(2, &b);
         for l in [&none, &some] {
             assert!(!l.trim().is_empty());
             assert!(l.starts_with('R'), "{l} must lead with its key");

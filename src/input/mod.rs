@@ -494,6 +494,28 @@ impl KeyBindings {
         self.0[action.index()]
     }
 
+    /// The single character a panel prints beside an action's name, from the **live** table.
+    ///
+    /// Every button label in the game used to read `Action::default_binding()` (or, in the verb bar, a
+    /// hardcoded `char`), so a player who rebound a key was shown the *shipped* one — told a key that
+    /// does nothing, which is worse than being told none. `'?'` when the chord has no single-character
+    /// name (`Tab`, `F6`, a modifier chord); callers wanting the full form use `Binding::label`.
+    pub fn key_char(&self, action: Action) -> char {
+        let chord = self.get(action).primary;
+        if chord.mods != Mods::None {
+            return '?';
+        }
+        key_name(chord.key)
+            .and_then(|n| if n.chars().count() == 1 { n.chars().next() } else { None })
+            .unwrap_or('?')
+    }
+
+    /// Short player-facing name of an action's primary chord, from the live table — `Tab`, `Ctrl+P`,
+    /// `F6`. For labels that are not single characters.
+    pub fn key_label(&self, action: Action) -> String {
+        self.get(action).primary.label().unwrap_or_else(|| "?".to_string())
+    }
+
     /// Rebind. Returns the action this chord already belongs to, without applying the change, if
     /// it would collide within a live context — the caller (the controls screen) shows that as
     /// `ALREADY BOUND TO <x>` rather than silently producing two owners for one key.
@@ -510,6 +532,30 @@ impl KeyBindings {
             }
         }
         self.0[action.index()] = binding;
+        Ok(())
+    }
+
+    /// Is the whole table self-consistent? `Err((a, b))` names the first pair sharing a chord whose
+    /// contexts can be live together.
+    ///
+    /// Separate from [`Self::rebind`] because they answer different questions. `rebind` asks "may this
+    /// one change go in?", which is right for an interactive remap screen. Loading a *file* needs
+    /// "is the finished table legal?", and asking the first question per entry rejects legal swaps.
+    pub fn validate(&self) -> Result<(), (Action, Action)> {
+        for (i, a) in Action::ALL.iter().enumerate() {
+            for b in &Action::ALL[i + 1..] {
+                if !a.context().overlaps(b.context()) {
+                    continue;
+                }
+                let clash = self
+                    .get(*a)
+                    .chords()
+                    .any(|ca| self.get(*b).chords().any(|cb| ca == cb));
+                if clash {
+                    return Err((*a, *b));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -570,9 +616,20 @@ pub struct InputSettings {
 }
 
 impl InputSettings {
-    /// Build the live table. A malformed or colliding override is **dropped with a warning**, not
-    /// applied and not fatal — this is user data, and `crate::settings` documents that a bad
-    /// settings file must never panic the game (unlike the fail-loud dev config).
+    /// Build the live table from the persisted overrides.
+    ///
+    /// **All overrides are applied first, then the result is validated once.** Applying them one at a
+    /// time against a table still holding the shipped defaults rejected any legal *swap*: writing
+    /// `arm_quarantine: "X"` and `arm_cap: "Z"` failed on both halves, because each collided with the
+    /// other's not-yet-replaced default. Both edits vanished and the keyboard silently reverted — and
+    /// since hand-editing the file is currently the only remap route that exists, that was the whole
+    /// feature.
+    ///
+    /// A file that is *still* self-contradictory after everything is applied falls back to the
+    /// defaults with a `warn!` naming the pair. That fallback is sanctioned here and nowhere else:
+    /// `crate::settings` documents that this file is **user data** and must never panic the game, the
+    /// way the fail-loud dev config deliberately does. What must not happen is the fallback being
+    /// written back over the player's file — see `settings::autosave_on_change`.
     pub fn to_bindings(&self) -> KeyBindings {
         let mut bindings = KeyBindings::default();
         for stored in &self.overrides {
@@ -580,6 +637,10 @@ impl InputSettings {
                 warn!("input: unknown action {:?} in settings; ignoring", stored.action);
                 continue;
             };
+            if !action.is_rebindable() {
+                warn!("input: {} is not rebindable; ignoring the override", stored.action);
+                continue;
+            }
             let Some(primary) = chord_from_label(&stored.primary) else {
                 warn!("input: unreadable key {:?} for {}; keeping default", stored.primary, stored.action);
                 continue;
@@ -594,14 +655,17 @@ impl InputSettings {
                 },
                 None => None,
             };
-            if let Err(clash) = bindings.rebind(action, Binding { primary, alternate }) {
-                warn!(
-                    "input: {} wants {} but it belongs to {}; keeping default",
-                    stored.action,
-                    stored.primary,
-                    clash.id()
-                );
-            }
+            // Written directly, collisions and all. `validate` below is what judges the finished table.
+            bindings.0[action.index()] = Binding { primary, alternate };
+        }
+        if let Err((a, b)) = bindings.validate() {
+            warn!(
+                "input: {} and {} end up sharing a key and can be live together; \
+                 falling back to the default keyboard (your settings file is NOT overwritten)",
+                a.id(),
+                b.id()
+            );
+            return KeyBindings::default();
         }
         bindings
     }
@@ -611,19 +675,54 @@ impl InputSettings {
     }
 }
 
-/// True while something else owns the keyboard: a focused menu button, or the dev note box taking
-/// raw text. [`Actions`] suppresses every non-[`Context::Menu`] action while it is set.
+/// The keys `bevy_ui_widgets::Button` activates a focused button on, and which therefore cannot also
+/// mean something else while a menu holds focus.
 ///
-/// **Why this is a resource and not read live inside [`Actions`].** `Actions` originally held
+/// `NumpadEnter` is deliberately absent: Bevy does *not* handle it (that is why
+/// [`Action::MenuActivate`] exists), so it is ours to bind freely.
+const BUTTON_ACTIVATION_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::Enter];
+
+/// Who currently owns the keyboard, and it is **two different conditions** that must not be conflated.
+///
+/// This started as one boolean, and that was a bug with a wide blast radius. Menu focus is set the
+/// moment *any* menu spawns (`ui::widgets::menu_keyboard_nav` seeds `InputFocus` onto the first
+/// button), so a single flag suppressing every non-[`Context::Menu`] action meant **Escape could open
+/// the pause menu but never close it**, F6 could open the Research Room palette but never close it,
+/// and the camera, pause and Ctrl+P capture all went dead behind any overlay. The guard was written to
+/// stop one `Space` both clicking a focused button and toggling the pause; it was doing far more.
+///
+/// The two conditions:
+///
+/// - [`Self::text_entry`] — the dev note box is taking **raw text**. Every keystroke is a character,
+///   so *every* non-menu action must stand down. This is the broad case, and it is rare.
+/// - [`Self::menu_focus`] — a menu button holds [`InputFocus`], so Bevy's `Button` will consume
+///   [`BUTTON_ACTIVATION_KEYS`] itself. Only actions bound to *those keys* conflict. Escape, F6 and
+///   Ctrl+P never did.
+///
+/// **Why a resource and not read live inside [`Actions`].** `Actions` originally held
 /// `Res<InputFocus>` directly, which made it unusable in the very systems that *drive* focus —
 /// `ui::widgets::menu_keyboard_nav` takes `ResMut<InputFocus>`, and Bevy rejects `Res` + `ResMut`
-/// of one resource in a single system (B0002). Computing the flag once, in one writer, removes the
+/// of one resource in a single system (B0002). Computing the flags once, in one writer, removes the
 /// conflict and gives the guard a single owner.
 ///
-/// The cost is that the flag is one frame old. That is harmless here: it only gates *non-menu*
-/// actions, and focus only appears when a menu opens — at which point the sim is already blocked.
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct KeyboardOwned(pub bool);
+/// The cost is that the flags are one frame old, which is harmless: focus only appears when a menu
+/// opens, and at that point the sim is already blocked.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardOwned {
+    /// Raw text entry is in progress. Suppresses every non-menu action.
+    pub text_entry: bool,
+    /// A menu button holds focus. Suppresses only [`BUTTON_ACTIVATION_KEYS`].
+    pub menu_focus: bool,
+}
+
+impl KeyboardOwned {
+    /// Is anything at all holding the keyboard? For consumers that read the mouse *and* keyboard and
+    /// simply want to stand down while a menu is up — `selection::control_group_input`, which must not
+    /// rebind a control group to a digit the player pressed while reading a menu.
+    pub fn any(&self) -> bool {
+        self.text_entry || self.menu_focus
+    }
+}
 
 /// Sole writer of [`KeyboardOwned`]. `PreUpdate`, so every `Update` reader sees this frame's value
 /// for the note box and last frame's for menu focus.
@@ -634,9 +733,12 @@ fn track_keyboard_owner(
     note_box: Option<Res<crate::NoteInputActive>>,
     mut owned: ResMut<KeyboardOwned>,
 ) {
-    let want = note_box.is_some() || focus.is_some_and(|f| f.get().is_some());
-    if owned.0 != want {
-        owned.0 = want;
+    let want = KeyboardOwned {
+        text_entry: note_box.is_some(),
+        menu_focus: focus.is_some_and(|f| f.get().is_some()),
+    };
+    if *owned != want {
+        *owned = want;
     }
 }
 
@@ -651,9 +753,24 @@ pub struct Actions<'w> {
 
 impl Actions<'_> {
     /// Menu actions are exempt from the guard — a focused button is precisely when menu navigation
-    /// must keep working.
+    /// must keep working. Everything else is judged against the *narrower* of the two conditions in
+    /// [`KeyboardOwned`]: raw text entry stops everything, but mere menu focus only stops the keys a
+    /// focused `Button` would consume.
     fn gated(&self, action: Action) -> bool {
-        action.context() != Context::Menu && self.owned.0
+        if action.context() == Context::Menu {
+            return false;
+        }
+        if self.owned.text_entry {
+            return true;
+        }
+        // Escape, F6, Ctrl+P and the camera keys are NOT activation keys, so a menu holding focus
+        // leaves them alone — which is what lets the key that opened an overlay also close it.
+        self.owned.menu_focus
+            && self
+                .bindings
+                .get(action)
+                .chords()
+                .any(|c| BUTTON_ACTIVATION_KEYS.contains(&c.key))
     }
 
     pub fn just_pressed(&self, action: Action) -> bool {

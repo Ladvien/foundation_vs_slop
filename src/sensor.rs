@@ -90,7 +90,17 @@ pub struct SensorPlugin;
 
 impl Plugin for SensorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SensorCooldown>().add_systems(
+        app.init_resource::<SensorCooldown>()
+            // **Reset on run entry.** `tick_cooldown` only runs while `RunState::Active`, so a
+            // cooldown left over from the end of one expedition froze at the Site and was carried into
+            // the next — the player pressed `V`, got `Invalid` and a counting-down chip, for no
+            // in-fiction reason and with no way to tell it from a bug. Run-scoped state has to be
+            // reset where the run begins.
+            .add_systems(
+                OnEnter(crate::session::RunState::Active),
+                |mut cd: ResMut<SensorCooldown>| cd.0 = 0.0,
+            )
+            .add_systems(
             Update,
             (tick_cooldown, deploy_sensor, expire_sensors)
                 .chain()
