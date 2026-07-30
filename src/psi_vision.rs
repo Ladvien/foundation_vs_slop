@@ -85,10 +85,17 @@ struct PsiCell;
 /// pheromonal STATE, not one undifferentiated heat: dread (what the squad fears), the muster ALARM bloom
 /// (why a pack is boiling toward a casualty — the beat that otherwise reads as scripted aggression), and
 /// the MEAT forage trails (where the swarm is drawn to feed). Order matches [`psi_group_channels`].
-const PSI_GROUP_HUES: [[f32; 3]; 3] = [
-    [0.9, 0.15, 0.9],  // dread — magenta
-    [1.0, 0.28, 0.06], // alarm — red
-    [0.15, 0.85, 0.5], // meat  — green
+/// Two of the three come from [`crate::palette`]'s GOC matrix rather than being spelled again here:
+/// dread **is** Type Magenta (the psionic's own type — `docs/lore/…-scp-color-language.md` §2) and the
+/// MEAT trail **is** Type Green. They used to be literals identical to those constants, referencing
+/// neither, which meant the psionic's sight and the world's colour language could silently disagree.
+///
+/// The alarm hue is deliberately NOT a GOC type: ALARM is a *squad* signal, not an anomaly
+/// classification, so borrowing `GOC_RED` (Type Red, regenerator) would assert something false.
+pub(crate) const PSI_GROUP_HUES: [[f32; 3]; 3] = [
+    crate::palette::GOC_MAGENTA_RGB, // dread — Type Magenta, psionic
+    [1.0, 0.28, 0.06],               // alarm — squad muster signal, not a GOC type
+    crate::palette::GOC_GREEN_RGB,   // meat  — Type Green
 ];
 
 /// The stigmergy channels each render group folds (by `max`). Group 0 stays exactly the old dread set (the
