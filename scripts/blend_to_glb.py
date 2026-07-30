@@ -71,13 +71,32 @@ def isolate(obj) -> None:
     bpy.context.view_layer.objects.active = obj
 
 
-def reorigin_to_base(obj) -> tuple[float, float, float]:
+def reorigin_to_base(obj, unit_scale: bool = False) -> tuple[float, float, float]:
     """Apply transforms, then move mesh data so base-centre sits at the world origin.
 
     Returns the object's `(x, y, z)` extent in metres *after* the move — Blender axes, so `z` is the
     height that becomes Bevy's `+Y`.
     """
     isolate(obj)
+    # Detach from any parent FIRST, keeping the world transform. `transform_apply` bakes only the
+    # object's OWN transform — a parented object keeps inheriting its parent's, so the "applied"
+    # result is still rotated. glTF is the case that bites: Blender's importer parents everything to
+    # a root empty carrying the Y-up -> Z-up conversion, so without this the acid barrels exported
+    # lying on their side (height on Y, 0.86, instead of Z) and the base-at-origin move below then
+    # planted a *side* face at y=0. A `.blend` with unparented objects never shows the bug.
+    if obj.parent is not None:
+        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+    if unit_scale:
+        # Keep the inherited ROTATION, discard the inherited SCALE. For packs whose mesh-local
+        # coordinates are already the intended metres and whose node chain carries only junk.
+        #
+        # The acid-barrel pack is the worked example: node 1 (an `.fbx` wrapper) scales by 0.01, node 4
+        # by 334.94, netting 3.3494 — a Sketchfab FBX round-trip artifact. Applied faithfully that
+        # yields a 2.87 m barrel; the raw POSITION accessor reads 0.5525 x 0.5525 x 0.8573, and a real
+        # 55-gallon drum is 0.851 m tall. So the mesh is authored correct and the chain is noise.
+        # Ignoring the parent entirely is NOT the fix — that chain also carries glTF's Y-up -> Z-up
+        # rotation, and dropping it exports the barrels lying on their side.
+        obj.scale = (1.0, 1.0, 1.0)
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
     # With transforms applied, local == world, so `bound_box` is the world AABB.
@@ -106,9 +125,42 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out", type=Path, required=True, help="staging output directory")
     ap.add_argument("--prefix-strip", default=None, help="drop this prefix from object names")
     ap.add_argument("--only", nargs="*", default=None, help="export only these object names")
+    ap.add_argument(
+        "--unit-scale",
+        action="store_true",
+        help="discard scale inherited from parent nodes, keeping their rotation. Use when a pack's "
+             "mesh-local coordinates are already the intended metres and its node chain carries junk "
+             "scale (common in Sketchfab FBX round-trips). Verify against the pack's own dimensions.",
+    )
+    ap.add_argument(
+        "--import-file",
+        type=Path,
+        default=None,
+        help="import this file into an EMPTY scene instead of using the opened .blend. Accepts "
+             ".gltf/.glb/.fbx/.obj — the same per-object re-origin and export path then applies, so a "
+             "multi-object scene in any of those formats splits the same way a .blend does.",
+    )
     args = ap.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.import_file is not None:
+        if not args.import_file.is_file():
+            print(f"error: no such file: {args.import_file}", file=sys.stderr)
+            return 1
+        # Start from empty, so nothing from the (irrelevant) opened .blend leaks into the export.
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        suffix = args.import_file.suffix.lower()
+        path = str(args.import_file)
+        if suffix in (".gltf", ".glb"):
+            bpy.ops.import_scene.gltf(filepath=path)
+        elif suffix == ".fbx":
+            bpy.ops.import_scene.fbx(filepath=path)
+        elif suffix == ".obj":
+            bpy.ops.wm.obj_import(filepath=path)
+        else:
+            print(f"error: unsupported import format {suffix!r}", file=sys.stderr)
+            return 1
 
     # Sorted by name so the output set — and the `_2`, `_3` de-duplication suffixes below, which are
     # assigned in iteration order — are a property of the source, not of Blender's unspecified
@@ -135,7 +187,7 @@ def main(argv: list[str]) -> int:
         else:
             seen[slug] = 0
 
-        extent = reorigin_to_base(obj)
+        extent = reorigin_to_base(obj, unit_scale=args.unit_scale)
         isolate(obj)
         dst = args.out / f"{slug}.glb"
         bpy.ops.export_scene.gltf(

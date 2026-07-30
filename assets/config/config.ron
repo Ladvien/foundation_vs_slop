@@ -246,6 +246,24 @@
                   category: "light", tags: ["decor"], role: Scatter(surface: "worktop"), footprint: (0.25, 0.24),
                   affordances: ["emit"], height: 0.56 ),
 
+                // ---- Hazard drums (assets/barrels/, converted by scripts/blend_to_glb.py --unit-scale).
+                // 0.55 x 0.55 x 0.86 m — a real 55-gallon drum is 0.851 m tall, which is how the pack's
+                // junk node scale (0.01 x 334.94, a Sketchfab FBX round-trip) was caught: applied
+                // faithfully it produced 2.87 m barrels. Tiled rather than Freestanding: drums line walls
+                // and cluster in service space, they are not laid out like furniture. ----
+                ( key: "barrel_acid", glb: "barrels/barrel_acid.glb",
+                  category: "container", tags: ["hall", "office"], role: Tiled, footprint: (0.56, 0.56),
+                  affordances: ["store"], height: 0.86 ),
+                ( key: "barrel_acid_b", glb: "barrels/barrel_acid_b.glb",
+                  category: "container", tags: ["hall"], role: Tiled, footprint: (0.56, 0.56),
+                  affordances: ["store"], height: 0.86 ),
+                ( key: "barrel_metal", glb: "barrels/barrel_metal.glb",
+                  category: "container", tags: ["hall", "kitchen"], role: Tiled, footprint: (0.56, 0.56),
+                  affordances: ["store"], height: 0.86 ),
+                ( key: "barrel_rusty", glb: "barrels/barrel_rusty.glb",
+                  category: "container", tags: ["hall", "office"], role: Tiled, footprint: (0.56, 0.56),
+                  affordances: ["store"], height: 0.86 ),
+
                 // Office — a desk so "office"-tagged rooms (a generation-time room type) read as
                 // workspaces. A desk is a worktop (hosts a desk lamp), as well as a generic support.
                 // Footprint re-measured from the glb: the L-desk is 1.90 × 0.90 m and its origin sits at

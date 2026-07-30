@@ -20,3 +20,16 @@ Source: **texturecan.com**, "Concrete Wall of Stacked Rectangular Stones" (Concr
 `/mnt/codex_fs/game_assets/textures/pbr/`. License: **CC0** (texturecan publishes its library CC0).
 Downscaled from the 2K release to 1024² to match the Backrooms set, and the separate AO + roughness
 maps packed into one ORM. Metallic is a hard 0 — concrete is a dielectric.
+
+## `assets/barrels/*.glb`
+
+Source: **acid-barrel-pack**, via `/mnt/codex_fs/game_assets/models/acid-barrel-pack/`
+(Sketchfab-sourced glTF). Split per-object and re-origined to base-centre by
+`scripts/blend_to_glb.py --unit-scale`.
+
+`--unit-scale` was needed, and finding out why is worth recording: the pack's node chain scales by
+0.01 (an `.fbx` wrapper, cm→m) and then by 334.94, netting 3.3494. Applied faithfully that yields a
+2.87 m barrel. The raw POSITION accessor reads 0.5525 × 0.5525 × 0.8573, and a real 55-gallon drum is
+0.851 m tall — so the mesh is authored correct and the node scale is round-trip noise. Ignoring the
+parent entirely is *not* the fix: that same chain carries glTF's Y-up → Z-up rotation, and dropping it
+exports the barrels lying on their side.
