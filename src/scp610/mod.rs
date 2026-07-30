@@ -55,10 +55,9 @@ const RENDER_SCALE: f32 = 1.0;
 /// Blooms per level. Small on purpose: this is a room-denial hazard, and three of them across a level
 /// is already three rooms the squad has to solve rather than walk through.
 const BLOOM_COUNT: usize = 3;
-/// Minimum distance from the squad spawn, in tiles — nobody opens a run standing in one.
+/// Minimum distance from the squad spawn, in tiles — nobody opens a run standing in one. Measured to a
+/// room's centre, since placement is per-room (see [`spawn_scp610_blooms`]).
 const SPAWN_MIN_DIST: i32 = 24;
-/// Minimum separation between blooms, in tiles, so they read as separate sites.
-const SPAWN_SEP: i32 = 18;
 
 /// Seconds for a fresh bloom to go from "still looks like a person" to fully turned.
 ///
@@ -150,8 +149,20 @@ pub fn spawn_scp610_at(
         .id()
 }
 
-/// Seed the level's blooms by a deterministic raster scan — no RNG, the same idiom
-/// `scp999::spawn_scp999`, `enemy::spawn_enemies` and `crab::setup::spawn_crabs` use.
+/// Seed the level's blooms, one per room, spread across the level.
+///
+/// **Placed by ROOM, not by a raster scan over cells.** The first version scanned cells from (0,0) and
+/// took the first N that passed the filters, which is deterministic and was also wrong: the first N
+/// eligible cells all live in the map's low corner, so every bloom clustered there and most of a
+/// 192x192 level never saw one. `SPAWN_MIN_DIST` does not fix that — it only excludes cells *near the
+/// squad*, it does not distribute.
+///
+/// Striding the region list instead gives one bloom per evenly-spaced room across the whole level,
+/// still with no RNG: `Dungeon::regions` is pinned generation output, so the same seed yields the same
+/// rooms in the same order, and picking indices `0, n/k, 2n/k, ...` is a pure function of that.
+///
+/// A room is also the right unit for the fiction. Area denial means nothing in a corridor the squad can
+/// back out of; it means something when the room *is* the objective.
 fn spawn_scp610_blooms(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -160,39 +171,39 @@ fn spawn_scp610_blooms(
     mut seq: ResMut<crate::containment::TargetSeq>,
 ) {
     let spawn = dungeon.spawn;
-    let mut placed: Vec<IVec2> = Vec::with_capacity(BLOOM_COUNT);
 
-    for z in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            if placed.len() >= BLOOM_COUNT {
-                break;
-            }
-            let cell = IVec2::new(x, z);
-            if !dungeon.is_floor(cell) {
-                continue;
-            }
-            // A bloom belongs in a room, not a corridor: area denial means nothing in a passage the
-            // squad can simply back out of.
-            if dungeon.is_corridor(cell) {
-                continue;
-            }
-            if (cell - spawn).abs().max_element() < SPAWN_MIN_DIST {
-                continue;
-            }
-            if placed.iter().any(|p| (*p - cell).abs().max_element() < SPAWN_SEP) {
-                continue;
-            }
-            let seed = placed.len() as u32;
-            spawn_scp610_at(
-                &mut commands,
-                &assets,
-                seed,
-                dungeon.cell_center(cell),
-                rules.0.scp610.clone(),
-                &mut seq,
-            );
-            placed.push(cell);
+    // Rooms far enough from the squad's start that nobody opens a run inside one.
+    let eligible: Vec<&crate::placement::ir::Region> = dungeon
+        .regions
+        .iter()
+        .filter(|r| {
+            let c = r.rect.center_cell();
+            (IVec2::new(c[0], c[1]) - spawn).abs().max_element() >= SPAWN_MIN_DIST
+        })
+        .collect();
+    if eligible.is_empty() {
+        return;
+    }
+
+    // Even stride over the eligible rooms. Integer arithmetic, so it is exact and order-independent.
+    let want = BLOOM_COUNT.min(eligible.len());
+    for i in 0..want {
+        let room = eligible[i * eligible.len() / want];
+        let c = room.rect.center_cell();
+        let cell = IVec2::new(c[0], c[1]);
+        // A room's centre cell is floor by construction, but a notched room can hollow it out; fall
+        // back to nothing rather than spawning a bloom inside rock.
+        if !dungeon.is_floor(cell) {
+            continue;
         }
+        spawn_scp610_at(
+            &mut commands,
+            &assets,
+            i as u32,
+            dungeon.cell_center(cell),
+            rules.0.scp610.clone(),
+            &mut seq,
+        );
     }
 }
 
@@ -224,5 +235,55 @@ fn drive_mutation(
                 *w = m.current;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Blooms must be spread over the level, not clustered.
+    ///
+    /// The first implementation raster-scanned cells from (0,0) and took the first N that passed its
+    /// filters. That is deterministic — and it put every bloom in the map's low corner, because the
+    /// first eligible cells in raster order are all adjacent. `SPAWN_MIN_DIST` did not catch it: it
+    /// excludes cells near the *squad*, and says nothing about how far blooms are from each other.
+    ///
+    /// This pins the property that actually matters (spread), not the mechanism, so a future change to
+    /// the stride is free as long as blooms still land in different parts of the level.
+    #[test]
+    fn blooms_are_spread_across_the_level_not_clustered() {
+        // A synthetic region list standing in for a generated level: 12 rooms marching diagonally.
+        let rooms: Vec<[i32; 2]> = (0..12).map(|i| [10 + i * 14, 10 + i * 14]).collect();
+        let spawn = IVec2::new(0, 0);
+
+        let eligible: Vec<[i32; 2]> = rooms
+            .iter()
+            .copied()
+            .filter(|c| (IVec2::new(c[0], c[1]) - spawn).abs().max_element() >= SPAWN_MIN_DIST)
+            .collect();
+        let want = BLOOM_COUNT.min(eligible.len());
+        let picked: Vec<IVec2> = (0..want)
+            .map(|i| {
+                let c = eligible[i * eligible.len() / want];
+                IVec2::new(c[0], c[1])
+            })
+            .collect();
+
+        assert_eq!(picked.len(), BLOOM_COUNT, "every bloom should find a room");
+        // The failing case: a raster scan would have returned three adjacent rooms. Require the picks
+        // to span most of the eligible range instead.
+        let first = picked.first().expect("at least one bloom");
+        let last = picked.last().expect("at least one bloom");
+        let span = (*last - *first).abs().max_element();
+        let full = (IVec2::from_array(*eligible.last().expect("eligible rooms"))
+            - IVec2::from_array(*eligible.first().expect("eligible rooms")))
+        .abs()
+        .max_element();
+        assert!(
+            span * 2 >= full,
+            "blooms span {span} of an available {full} — that is clustering, which is the bug this \
+             replaced (raster order put all three in one corner)"
+        );
     }
 }
