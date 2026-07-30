@@ -266,6 +266,10 @@ fn test_config() -> DungeonConfig {
         seed: 0x5C0_9191,
         max_attempts: 20,
         liminality: 1.0,
+        // Both biomes present, so any generation test that grows a surface assertion sees a mixed map
+        // rather than accidentally passing on a single-biome fixture.
+        biome_mix: 0.35,
+        biome_scale: 14.0,
         wfc_weights: WfcWeights {
             rock: 6.0,
             dead_end: 1.2,

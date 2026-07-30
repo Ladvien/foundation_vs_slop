@@ -203,6 +203,9 @@ fn update_los(
 fn apply_floor_fog(
     mut fog: ResMut<FogGrid>,
     mats: Res<FloorMaterials>,
+    // Needed for the cell's surface biome: the bright/dim pair is per-biome, so swapping on fog state
+    // alone would repaint a concrete floor as motel carpet the moment a unit looked at it.
+    dungeon: Res<Dungeon>,
     mut floors: Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>), (With<Tile>, Without<Wall>)>,
 ) {
     if !fog.dirty {
@@ -210,10 +213,8 @@ fn apply_floor_fog(
     }
     fog.dirty = false;
     for (tile, mut material) in &mut floors {
-        let want = match fog.vis[fog.index(tile.cell)] {
-            CellVis::Visible => &mats.bright,
-            CellVis::Explored | CellVis::Unseen => &mats.dim,
-        };
+        let visible = matches!(fog.vis[fog.index(tile.cell)], CellVis::Visible);
+        let want = mats.pick(dungeon.biome(tile.cell), visible);
         if material.0.id() != want.id() {
             material.0 = want.clone();
         }

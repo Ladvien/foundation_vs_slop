@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use avian3d::prelude::*;
+use bevy::image::ImageLoaderSettings;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,7 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
     wall_pos.x - cell_center.x > CAMERA_FACING_EPS || wall_pos.z - cell_center.z > CAMERA_FACING_EPS
 }
 
+mod biome;
 mod cutaway;
 mod config;
 mod layout;
@@ -82,6 +84,7 @@ mod tests;
 // the old single-file `dungeon` module still resolves. `pub` for the two surfaces other modules use
 // directly (config types, the cutaway components the camera drives); `pub(crate)` for the internals the
 // submodules share with each other.
+pub use biome::{biome_at, Biome};
 pub use config::*;
 pub use cutaway::*;
 pub(crate) use layout::*;
@@ -91,6 +94,20 @@ pub(crate) use rooms::*;
 // mapped onto textured primitives because the Kenney GLB UVs are palette-atlas points.
 const WALL_TEXTURE: &str = "textures/backrooms-wall-diffuse.png";
 const FLOOR_TEXTURE: &str = "textures/backrooms-carpet-diffuse.png";
+// Surface relief for the two diffuse maps above, derived from them by `scripts/derive_surface_maps.py`
+// (the CC0 set is diffuse-only; no height map was ever authored). `-orm` is the glTF/Bevy channel
+// packing: R = occlusion, G = roughness, B = metallic. Both are DATA, not pictures — see the
+// `is_srgb: false` load in `render::linear_texture` for why that distinction is load-bearing.
+const WALL_NORMAL_TEXTURE: &str = "textures/backrooms-wall-normal.png";
+const WALL_ORM_TEXTURE: &str = "textures/backrooms-wall-orm.png";
+const FLOOR_NORMAL_TEXTURE: &str = "textures/backrooms-carpet-normal.png";
+const FLOOR_ORM_TEXTURE: &str = "textures/backrooms-carpet-orm.png";
+// The Concrete biome (see `biome`). CC0 from texturecan via the asset library, downscaled to 1024² to
+// match the set above and ORM-packed. One material serves both wall and floor here — poured concrete
+// has no separate floor treatment, and that sameness is the point: it is what the motel biome is not.
+const CONCRETE_TEXTURE: &str = "textures/concrete-diffuse.jpg";
+const CONCRETE_NORMAL_TEXTURE: &str = "textures/concrete-normal.png";
+const CONCRETE_ORM_TEXTURE: &str = "textures/concrete-orm.png";
 
 /// Tags every spawned tile entity (floor or wall) with the fine grid cell it belongs to,
 /// so fog of war can reveal/hide a cell's geometry as a unit.
@@ -109,8 +126,21 @@ pub struct Wall;
 /// two handles exist, so fog swaps a handle rather than cloning a material per tile.
 #[derive(Resource)]
 pub struct FloorMaterials {
-    pub bright: Handle<StandardMaterial>,
-    pub dim: Handle<StandardMaterial>,
+    /// `[Backrooms, Concrete]` — indexed by [`Biome`] via [`FloorMaterials::pick`], never directly.
+    pub bright: [Handle<StandardMaterial>; 2],
+    pub dim: [Handle<StandardMaterial>; 2],
+}
+
+impl FloorMaterials {
+    /// The floor material for a cell's biome and current fog state.
+    ///
+    /// One accessor rather than four public handles: fog swaps material per tile every time visibility
+    /// changes, and a caller that picked `bright` while forgetting the biome would silently repaint a
+    /// concrete floor as carpet the moment a unit looked at it.
+    pub fn pick(&self, biome: Biome, visible: bool) -> &Handle<StandardMaterial> {
+        let set = if visible { &self.bright } else { &self.dim };
+        &set[biome as usize]
+    }
 }
 
 /// Sentinel in [`Dungeon::corridor_of`] for "this cell is not corridor floor".
@@ -132,6 +162,12 @@ pub struct Dungeon {
     /// infests whole runs, say — had no handle on one. This restores it: a corridor run is an edge index.
     /// Private, like `walkable`, and read through [`Dungeon::corridor_id`] / [`Dungeon::is_corridor`].
     corridor_of: Vec<u32>,
+    /// Surface-biome field parameters — `(seed, mix, scale)`, see [`crate::dungeon::biome_at`].
+    ///
+    /// Three scalars rather than a per-cell `Vec<Biome>` because the field is a *pure function* of
+    /// position and seed: storing it would be caching a hash. The seed is derived from the carve seed
+    /// but drawn from no RNG stream, so adding biomes shifted nothing in the pinned layout goldens.
+    biome_field: (u64, f32, f32),
 }
 
 pub struct DungeonPlugin;
@@ -214,6 +250,9 @@ impl Dungeon {
             spawn,
             regions,
             corridor_of,
+            // Its own hash off the config seed — NOT a draw from `rng`. Taking even one value from that
+            // stream would shift every subsequent carve draw and move the pinned goldens.
+            biome_field: (config.seed ^ 0xB10E_5EED, config.biome_mix, config.biome_scale),
         })
     }
 
@@ -288,6 +327,16 @@ impl Dungeon {
     /// Gated on `is_floor`, so a doorway cell the necking pass closed reports `None` even though the
     /// corridor pass had opened it. Corridors cross room interiors on their way between site centres; those
     /// crossing cells are room floor and report `None` too.
+    /// Which surface treatment renders at this cell. See [`crate::dungeon::biome_at`] for why this is a
+    /// pure function rather than stored per-cell state.
+    ///
+    /// Note it answers for *any* cell, walkable or not — a wall belongs to the biome of the cell it is
+    /// attached to, which is what keeps a room's walls and floor agreeing.
+    pub fn biome(&self, c: IVec2) -> Biome {
+        let (seed, mix, scale) = self.biome_field;
+        biome_at(seed, c, mix, scale)
+    }
+
     pub fn corridor_id(&self, c: IVec2) -> Option<u32> {
         if !self.is_floor(c) {
             return None;
@@ -430,6 +479,7 @@ impl Dungeon {
             width,
             height,
             corridor_of: vec![NO_CORRIDOR; walkable.len()],
+            biome_field: (0, 0.0, 14.0), // test fixture: single-biome, so callers see a stable surface
             walkable,
             spawn: IVec2::ZERO,
             regions: Vec::new(),
@@ -448,7 +498,15 @@ impl Dungeon {
     ) -> Self {
         assert_eq!(walkable.len(), width * height, "walkable mask size mismatch");
         assert_eq!(corridor_of.len(), width * height, "corridor mask size mismatch");
-        Dungeon { width, height, walkable, spawn: IVec2::ZERO, regions, corridor_of }
+        Dungeon {
+            width,
+            height,
+            walkable,
+            spawn: IVec2::ZERO,
+            regions,
+            corridor_of,
+            biome_field: (0, 0.0, 14.0), // test fixture: single-biome, so callers see a stable surface
+        }
     }
 
     /// Test-only accessor for the private [`Self::is_solid`] ground-truth wall test.

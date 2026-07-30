@@ -23,6 +23,36 @@ impl Plugin for DungeonRenderPlugin {
     }
 }
 
+/// Load a **non-colour** texture — a normal map or an ORM pack — with sRGB decoding switched off.
+///
+/// This is not a nicety. A normal map stores a unit vector per texel and an ORM pack stores three
+/// scalars; neither is a picture. Load one through the default sRGB path and every channel is pushed
+/// through the EOTF, which tilts normals toward +Z (relief flattens, and it flattens *most* where the
+/// slope is steepest) and lifts roughness/occlusion off their authored values. The failure is subtle
+/// enough to read as "the lighting is a bit off" rather than as a wrong-colour-space bug, so it is
+/// worth a named helper rather than an easily-dropped closure at four call sites.
+fn linear_texture(assets: &AssetServer, path: &'static str) -> Handle<Image> {
+    assets.load_with_settings(path, |s: &mut ImageLoaderSettings| s.is_srgb = false)
+}
+
+/// Attach MikkTSpace tangents, without which the normal maps above are **silently ignored**.
+///
+/// Bevy gates normal mapping on the `VERTEX_TANGENTS` shader def, which is set from the mesh having
+/// `ATTRIBUTE_TANGENT`. Bevy's primitive meshes (`Cuboid`, `Plane3d`) emit position/normal/UV and no
+/// tangent, so without this every map wired above would load, cost memory, and change nothing on
+/// screen — a failure with no error message anywhere.
+///
+/// Failure panics naming the site, the codebase's convention for a structurally-impossible invariant
+/// (`sort_total!` does exactly this; `psi_vision::band_of` likewise). It cannot fire for these inputs —
+/// generation needs an indexed triangle list with positions, normals and UVs, which every mesh here
+/// has by construction — and `tangents_exist_for_every_dungeon_mesh` below pins that, so the branch is
+/// dead rather than lurking.
+fn with_tangents(mut mesh: Mesh, site: &str) -> Mesh {
+    mesh.generate_tangents()
+        .unwrap_or_else(|e| panic!("dungeon::render: tangent generation failed for {site}: {e}"));
+    mesh
+}
+
 /// Instantiate the dungeon as textured primitives: a Backrooms-carpet floor quad per floor
 /// cell, wallpaper cuboid walls on perimeter edges (corner pairs as clean two-cuboid Ls,
 /// remaining single edges as straight walls). Tiles start hidden so fog reveals them.
@@ -35,44 +65,71 @@ pub(crate) fn spawn_tiles(
 ) {
     // Shared materials + meshes (built once, reused for every tile). Both textures are
     // seamless, so the default sampler + [0,1] cuboid/plane UVs tile cleanly across cells.
-    let wall_mat = materials.add(StandardMaterial {
-        base_color_texture: Some(assets.load(WALL_TEXTURE)),
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-        ..default()
-    });
-    let floor_mat = materials.add(StandardMaterial {
-        base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-        ..default()
-    });
-    // Dimmed twin of `floor_mat` — the "explored but not currently in a unit's line of sight"
-    // fog state. `base_color` tints the texture, so a dark cool grey remembers the terrain
-    // without lighting it up. The fog swaps floor tiles between these two (see `fog`).
-    let floor_mat_dim = materials.add(StandardMaterial {
-        base_color: crate::palette::DUNGEON_STONE,
-        base_color_texture: Some(assets.load(FLOOR_TEXTURE)),
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-        ..default()
-    });
+    //
+    // Each surface is diffuse + normal + ORM. The normal/ORM pair is what makes the relight land: an
+    // irradiance environment map (`crate::world`) shades by surface normal, so perturbing the normal per
+    // texel is what turns flat wallpaper into a surface. Under the old uniform `GlobalAmbientLight` these
+    // maps would have changed nothing, which is why the project never had any.
+    //
+    // `perceptual_roughness` stays as the fallback factor Bevy multiplies the ORM's green channel by;
+    // it is 1.0 here so the map alone decides, rather than the map being scaled by a second, invisible
+    // 0.95 that would make every reading 5% smoother than the file says.
+    // One surfacing helper, used for every biome × wall/floor × fog-state combination below, so a new
+    // biome is a table row rather than another block of six near-identical field assignments.
+    // `tint` is the fog dim (`None` = full brightness).
+    let mut surface = |diffuse: &'static str,
+                       normal: &'static str,
+                       orm: &'static str,
+                       tint: Option<Color>| {
+        materials.add(StandardMaterial {
+            base_color: tint.unwrap_or(Color::WHITE),
+            base_color_texture: Some(assets.load(diffuse)),
+            normal_map_texture: Some(linear_texture(&assets, normal)),
+            metallic_roughness_texture: Some(linear_texture(&assets, orm)),
+            occlusion_texture: Some(linear_texture(&assets, orm)),
+            perceptual_roughness: 1.0,
+            metallic: 0.0,
+            ..default()
+        })
+    };
+
+    // Wall materials, indexed by `Biome as usize` — the same indexing `FloorMaterials::pick` uses.
+    let wall_mats: [Handle<StandardMaterial>; 2] = [
+        surface(WALL_TEXTURE, WALL_NORMAL_TEXTURE, WALL_ORM_TEXTURE, None),
+        surface(CONCRETE_TEXTURE, CONCRETE_NORMAL_TEXTURE, CONCRETE_ORM_TEXTURE, None),
+    ];
+    // Floors, bright and dim. The dim twin is the "explored but not currently in a unit's line of
+    // sight" fog state: `base_color` tints the texture, so a dark cool grey remembers the terrain
+    // without lighting it up. The fog swaps floor tiles between the two (see `fog::apply_floor_fog`).
+    let dim = Some(crate::palette::DUNGEON_STONE);
+    let floor_bright: [Handle<StandardMaterial>; 2] = [
+        surface(FLOOR_TEXTURE, FLOOR_NORMAL_TEXTURE, FLOOR_ORM_TEXTURE, None),
+        surface(CONCRETE_TEXTURE, CONCRETE_NORMAL_TEXTURE, CONCRETE_ORM_TEXTURE, None),
+    ];
+    let floor_dim: [Handle<StandardMaterial>; 2] = [
+        surface(FLOOR_TEXTURE, FLOOR_NORMAL_TEXTURE, FLOOR_ORM_TEXTURE, dim),
+        surface(CONCRETE_TEXTURE, CONCRETE_NORMAL_TEXTURE, CONCRETE_ORM_TEXTURE, dim),
+    ];
+    // Tiles spawn bright; `fog::apply_floor_fog` dims them on the first visibility pass.
     commands.insert_resource(FloorMaterials {
-        bright: floor_mat.clone(),
-        dim: floor_mat_dim,
+        bright: floor_bright.clone(),
+        dim: floor_dim,
     });
 
-    let floor_mesh = meshes.add(Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE));
+    let floor_mesh = meshes.add(with_tangents(
+        Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE).into(),
+        "floor",
+    ));
     // One mesh per trimmed length — index by the number of ends [`edge_wall`] removed (0, 1 or 2). An
     // E/W slab is always index 0; only N/S slabs shorten, and only at a corner.
     let wall_meshes: [Handle<Mesh>; 3] = std::array::from_fn(|trims| {
         let len = TILE_SIZE - trims as f32 * WALL_THICKNESS;
-        meshes.add(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len)))
+        meshes.add(with_tangents(wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len)), "wall"))
     });
     // A corner post is a WALL_THICKNESS² column standing the full wall height, filling the vertex gap
     // where two perpendicular wall runs meet (see the post loop after the wall pass).
     let post_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
-    let wall_post = meshes.add(wall_mesh(post_size));
+    let wall_post = meshes.add(with_tangents(wall_mesh(post_size), "post"));
 
     // One static half-space at y=0 catches every gib chunk (the whole floor is at y=0), so we don't
     // need a physics collider per floor tile — only the gib-chunk physics world uses these (see `gore`).
@@ -160,7 +217,7 @@ pub(crate) fn spawn_tiles(
             spawn_tile(
                 cell,
                 floor_mesh.clone(),
-                floor_mat.clone(),
+                floor_bright[dungeon.biome(cell) as usize].clone(),
                 Transform::from_translation(dungeon.cell_center(cell)),
                 None,
                 Cutaway::None,
@@ -183,7 +240,7 @@ pub(crate) fn spawn_tiles(
                 spawn_tile(
                     cell,
                     wall_meshes[trims].clone(),
-                    wall_mat.clone(),
+                    wall_mats[dungeon.biome(cell) as usize].clone(),
                     transform,
                     Some(size),
                     Cutaway::Wall,
@@ -208,7 +265,9 @@ pub(crate) fn spawn_tiles(
                 spawn_tile(
                     home,
                     wall_post.clone(),
-                    wall_mat.clone(),
+                    // `home` is the post's owning cell — the same key the wall runs it joins use, so a
+                    // post never surfaces differently from the two walls meeting at it.
+                    wall_mats[dungeon.biome(home) as usize].clone(),
                     Transform::from_translation(centre),
                     Some(post_size),
                     Cutaway::Post(outward),
@@ -227,7 +286,7 @@ pub(crate) fn spawn_tiles(
     // cutaway gap. All four edges are spawned (the pose seeds E/S hidden at yaw=0); rotation reveals the
     // pair on whichever wall is currently full-height.
     let header_size = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
-    let header_mesh = meshes.add(wall_mesh(header_size));
+    let header_mesh = meshes.add(with_tangents(wall_mesh(header_size), "doorway header"));
     for region in &dungeon.regions {
         for op in &region.openings {
             // Open lanes stack +y for an E/W mouth and +x for an N/S mouth — the same axis the necking
@@ -241,12 +300,45 @@ pub(crate) fn spawn_tiles(
                 spawn_tile(
                     cell,
                     header_mesh.clone(),
-                    wall_mat.clone(),
+                    wall_mats[dungeon.biome(cell) as usize].clone(),
                     header_wall(cell, op.dir),
                     None,
                     Cutaway::Mounted,
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mesh that carries a normal-mapped dungeon material must be able to produce tangents.
+    ///
+    /// This pins the `expect` in [`with_tangents`] dead, and it guards a failure mode with no runtime
+    /// symptom: Bevy gates normal mapping on `ATTRIBUTE_TANGENT`, so a mesh that quietly lost its UVs
+    /// or its indices would not warn — the normal and ORM maps would simply stop doing anything, and
+    /// the surfaces would go back to looking flat with no error to grep for.
+    #[test]
+    fn tangents_exist_for_every_dungeon_mesh() {
+        let floor: Mesh = Plane3d::default().mesh().size(TILE_SIZE, TILE_SIZE).into();
+        let post = Vec3::new(WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS);
+        let header = Vec3::new(WALL_THICKNESS, WALL_HEIGHT - DOORWAY_HEIGHT, TILE_SIZE);
+        let mut cases: Vec<(&str, Mesh)> =
+            vec![("floor", floor), ("post", wall_mesh(post)), ("header", wall_mesh(header))];
+        // Every trim variant, because they are separate meshes built at separate lengths.
+        for trims in 0..3 {
+            let len = TILE_SIZE - trims as f32 * WALL_THICKNESS;
+            cases.push(("wall", wall_mesh(Vec3::new(WALL_THICKNESS, WALL_HEIGHT, len))));
+        }
+        for (name, mesh) in cases {
+            let tangented = with_tangents(mesh, name);
+            assert!(
+                tangented.attribute(Mesh::ATTRIBUTE_TANGENT).is_some(),
+                "{name}: tangent generation reported success but attached no ATTRIBUTE_TANGENT — the \
+                 normal + ORM maps wired in spawn_tiles would be silently ignored"
+            );
         }
     }
 }

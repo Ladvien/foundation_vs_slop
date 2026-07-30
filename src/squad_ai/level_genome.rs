@@ -39,6 +39,12 @@ const FACTORS: [(usize, usize); 4] = [(6, 32), (4, 48), (8, 24), (12, 16)];
 //    playable-but-different, never degenerate. Non-rock WFC weights and room weights are floored above
 //    zero so their sums are provably positive (the dungeon always has a floor set). ──
 const LIMINALITY: (f32, f32) = (0.0, 1.0);
+/// Concrete share of the surface-biome field. The full range is evolvable including the endpoints —
+/// a single-biome level is a legitimate point in the space, not a degenerate one.
+const BIOME_MIX: (f32, f32) = (0.0, 1.0);
+/// Zone period in tiles. Floor matches `dungeon::validate_config`'s `>= 4.0`, above which zones stop
+/// being zones; the ceiling is roughly a third of a large map, past which one biome simply wins.
+const BIOME_SCALE: (f32, f32) = (6.0, 40.0);
 const CORRIDOR_WIDTH: (i32, i32) = (1, 6);
 const CORRIDOR_EXTRA: (i32, i32) = (0, 6);
 // Doorway width as a fraction of each corridor's carved width (see `dungeon::doorway_width`). Lower
@@ -108,6 +114,11 @@ pub struct LevelGenome {
     /// Index into [`FACTORS`] — the coarse-block factorisation (few big blocks vs many small).
     pub block_factor: usize,
     pub liminality: f32,
+    /// Surface-biome field (`dungeon::biome`): concrete share, and zone size in tiles. Cosmetic in
+    /// isolation — but the biome selects the footstep set, so it is audible, and it changes what a
+    /// level *reads* as. Included per `CLAUDE.md`'s "wire every feature into RL/QD" rule.
+    pub biome_mix: f32,
+    pub biome_scale: f32,
     pub corridor_width: i32,
     /// Corridor width spread: `corridor_width_max = clamp(corridor_width + extra, cw, block)`.
     pub corridor_extra: i32,
@@ -228,6 +239,8 @@ pub fn authored(base: &LevelBase) -> LevelGenome {
     LevelGenome {
         block_factor,
         liminality: d.liminality,
+        biome_mix: d.biome_mix,
+        biome_scale: d.biome_scale,
         corridor_width,
         corridor_extra,
         doorway_ratio: d.doorway_ratio,
@@ -281,6 +294,8 @@ pub fn mutate(parent: &LevelGenome, sigma: f32, rng: &mut ChaCha8Rng) -> LevelGe
     LevelGenome {
         block_factor: mut_cat(parent.block_factor, FACTORS.len(), p, rng),
         liminality: mut_real(parent.liminality, LIMINALITY, sigma, rng),
+        biome_mix: mut_real(parent.biome_mix, BIOME_MIX, sigma, rng),
+        biome_scale: mut_real(parent.biome_scale, BIOME_SCALE, sigma, rng),
         corridor_width: mut_int(parent.corridor_width, CORRIDOR_WIDTH, sigma, rng),
         corridor_extra: mut_int(parent.corridor_extra, CORRIDOR_EXTRA, sigma, rng),
         doorway_ratio: mut_real(parent.doorway_ratio, DOORWAY_RATIO, sigma, rng),
@@ -394,6 +409,8 @@ pub fn decode(g: &LevelGenome, base: &LevelBase) -> Result<LevelPhenotype, Strin
         seed: base.dungeon.seed,
         max_attempts: base.dungeon.max_attempts,
         liminality: g.liminality.clamp(LIMINALITY.0, LIMINALITY.1),
+        biome_mix: g.biome_mix.clamp(BIOME_MIX.0, BIOME_MIX.1),
+        biome_scale: g.biome_scale.clamp(BIOME_SCALE.0, BIOME_SCALE.1),
         wfc_weights,
         room_types,
         notch,

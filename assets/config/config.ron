@@ -37,6 +37,14 @@
         // centred boxes, while staying liminal.
         liminality: 1.0,
 
+        // Surface biome (src/dungeon/biome.rs): which art treatment a tile renders with. A noise field
+        // over position, so zones interlock with an irregular frontier instead of meeting on a drawn line.
+        // Concrete is deliberately the minority — the Backrooms motel is the established look, and the
+        // concrete is its desaturated counterweight (docs/lore/2026-07-12-scp-color-language.md 6).
+        // Set biome_mix to 0.0 or 1.0 for a single-biome level; there is no separate "biomes off" path.
+        biome_mix: 0.35,        // approximate concrete share of the map
+        biome_scale: 14.0,      // zone period in tiles — several rooms across, so a zone reads as a stretch
+
         // The six coarse WFC prototype weights (shape distribution). Lowered `rock` (6→3) so fewer blocks
         // are empty void, and raised the junction prototypes (`tee`, `cross`) so the graph branches into
         // hubs instead of long linear runs — denser, more interconnected, less uniform, still liminal.

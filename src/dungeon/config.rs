@@ -74,6 +74,29 @@ pub struct DungeonConfig {
     /// so there is no behaviour change until a config opts in.
     #[serde(default)]
     pub topology: Topology,
+    /// Fraction of the map rendered as [`crate::dungeon::Biome::Concrete`] rather than Backrooms motel,
+    /// in `[0, 1]`. A threshold on a noise field, so it is the *approximate* realized share — `0.0` and
+    /// `1.0` are exact and are the supported way to get a single-biome level (there is no second code
+    /// path for "biomes off"). Evolvable: this is a level gene, see `squad_ai::level_genome`.
+    #[serde(default = "default_biome_mix")]
+    pub biome_mix: f32,
+    /// Zone size in tiles (= metres) — the noise lattice period. Roughly how far a player walks through
+    /// one surface treatment before the other becomes possible. Small values shred the map into patches
+    /// and defeat the point; validated `>= 4.0`.
+    #[serde(default = "default_biome_scale")]
+    pub biome_scale: f32,
+}
+
+/// Default concrete share. Minority on purpose: the Backrooms motel is the game's established look and
+/// the concrete is the counterweight, not a replacement.
+fn default_biome_mix() -> f32 {
+    0.35
+}
+
+/// Default zone period in tiles. ~14 m is several rooms across at `1 tile = 1 m`, so a zone reads as a
+/// stretch of the facility rather than as a differently-coloured room.
+fn default_biome_scale() -> f32 {
+    14.0
 }
 
 /// The six coarse WFC base-prototype weights, in `wfc::build_prototypes` order.
@@ -154,6 +177,17 @@ pub fn parse_config(text: &str) -> Result<DungeonConfig, String> {
 pub fn validate_config(cfg: &DungeonConfig) -> Result<(), String> {
     if cfg.coarse_w == 0 || cfg.coarse_h == 0 {
         return Err("coarse_w and coarse_h must be > 0".into());
+    }
+    if !(cfg.biome_mix.is_finite() && (0.0..=1.0).contains(&cfg.biome_mix)) {
+        return Err(format!("biome_mix must be a fraction in [0, 1] (got {})", cfg.biome_mix));
+    }
+    // Below ~4 tiles the noise lattice is finer than a small room, so the map shatters into per-tile
+    // patches — the confetti the biome field exists to avoid. Reject it rather than render it.
+    if !(cfg.biome_scale.is_finite() && cfg.biome_scale >= 4.0) {
+        return Err(format!(
+            "biome_scale must be finite and >= 4.0 tiles, or zones degenerate into per-tile noise (got {})",
+            cfg.biome_scale
+        ));
     }
     if cfg.block < 4 {
         return Err(format!("block must be >= 4 (got {})", cfg.block));
