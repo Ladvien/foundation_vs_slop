@@ -884,7 +884,17 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
-- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **FORK DECIDED 2026-07-30 — option (b); implementation still open**
+- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **DECIDED + IMPLEMENTED 2026-07-30 (`184c6cf`) — pending harness re-run and a look at a real frame**
+  > **Implemented as (b).** Three rules in `layout::resolve_biomes`: room floor takes the noise sampled
+  > once at the room's centre cell; a corridor inherits its lower-`RegionId` endpoint room; everything
+  > else (rock, walls, cells the necking pass shut) takes the nearest classified cell via one
+  > multi-source BFS — which is what finally makes `Dungeon::biome`'s "a wall belongs to the biome of
+  > the cell it is attached to" true *by construction*. `Dungeon` now stores `biome_of: Vec<Biome>`.
+  > **The original cause note below is wrong about the mechanism** — see the correction inside it.
+  > *Verified so far:* `cargo test` 935 lib / 0 failed, layout golden unmoved, 5 new tests including one
+  > that fails if the fixture stops reproducing the bug. **Not yet run against the harness suite**, and
+  > **not yet looked at in a frame** — the repo's own rule is that unit tests cannot see cross-layer
+  > drift, and "no room shows two surface treatments" is finally a judgement made by looking.
   > **Decision (user, 2026-07-30): (b) — corridors inherit one endpoint room.** Rooms sample the noise
   > at `rect.center_cell()`; a corridor takes the biome of its lower-`RegionId` endpoint. Chosen over
   > (a) because an independent corridor draw produces concrete → carpet → concrete sandwiches, which
@@ -905,6 +915,15 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   of the threshold *inside a single room*, which is exactly the reported symptom. The doc comment
   claims "a wall belongs to the biome of the cell it is attached to", and that holds only
   probabilistically, which is to say not at all.
+  > ⚠️ **The paragraph above is WRONG about the mechanism (corrected 2026-07-30 while implementing).**
+  > `render.rs` keys every wall slab on the floor cell that owns it (line 253 — the same `cell` as the
+  > floor tile at line 230), corner posts use `home` "the post's owning cell" (line 280), and lintels
+  > use the opening cell. **A tile and its own walls always agreed.** The real defect was cell-to-cell
+  > variation *across one room's floor*: the floor itself was split, and each wall faithfully followed
+  > whichever floor cell owned it. So the doc comment was not the lie this claimed — the render layer
+  > did honour attachment; the noise was simply finer-grained than a room.
+  > Why the shipped config shows it and `test_config` did not: shipped `block: 32` admits rooms ~30
+  > cells across against a 14-tile noise period, so one room spans two zones. `block: 16` does not.
   **Fix = sample per ZONE rather than per cell.** The fork, kept for the reasoning behind the pick:
   * **(a)** rooms sample the noise at `rect.center_cell()`; corridors get their own biome. Transition
     at every doorway — but a concrete → carpet corridor → concrete sandwich makes levels read *busier*,
