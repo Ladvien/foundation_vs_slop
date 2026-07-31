@@ -53,6 +53,13 @@ pub mod rig_watch;
 /// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
 pub mod perf_hud;
+/// Dev-only **spatial FPS probe** — samples frame time at 2 Hz, tags each sample with the dungeon cell
+/// the camera is looking at and the visible scene census there, and writes
+/// `debug_screenshots/fps_trace.csv` + `fps_hotspots.md`. `perf_hud` says the frame rate *now*; this
+/// says *where* it drops, which is the question a "it's slow in places" report actually asks.
+/// Debug-only, stripped from release like `perf_hud`.
+#[cfg(debug_assertions)]
+pub mod perf_probe;
 /// Dev-only **Research Room** (`FVS_RESEARCH_ROOM=1`): boots into the real WFC dungeon — the actual game,
 /// with every auto-spawner running natively — and arms an F6 spawn palette on top, so any creature / prop
 /// / character can be dropped in, tuned, and screenshotted, and evolved elites witnessed. Debug-only,
@@ -446,6 +453,11 @@ pub fn run() {
     // out of the deterministic core and the shipped binary (see `perf_hud`).
     #[cfg(debug_assertions)]
     app.add_plugins(perf_hud::PerfHudPlugin);
+
+    // Dev-only spatial FPS probe — the "radar for frame drops". Same gating and the same reason: it
+    // measures and writes files, touching no simulation state.
+    #[cfg(debug_assertions)]
+    app.add_plugins(perf_probe::PerfProbePlugin);
 
     // Dev-only skeleton tripwire. Reads joint transforms and logs; writes nothing, so it cannot reach
     // the deterministic core. See `rig_watch` for why it watches joints rather than the mesh.
