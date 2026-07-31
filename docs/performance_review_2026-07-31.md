@@ -35,6 +35,23 @@ multi-second timer, and N-25’s “CPU-bound” only excludes *fragment*-bound 
 amplitude multiplier. The 171 ms “hitch class” mostly dissolved: 20/20 cycles put their worst frame in
 the slow phase’s leading edge.
 
+### ✅ RESOLVED the same afternoon: it was never in the game
+
+Follow the trail below for the reasoning, but the answer is at the end of it: **the box's olmocr/vLLM
+OCR pipeline was consuming 82% of the GPU** (mean SM, peak 95%, autocorrelation **+0.622 at 11.0 s**,
+measured with the game not running), resident since 2026-07-29 17:56 — through every measurement of
+the investigation. With that pipeline stopped and the GPU verified idle, four 150 s runs of the same
+scene show **frame autocorrelation ≈0.00** (no cycle at all), a **worst frame of 4.58 ms** (the
+"171 ms hitch" class is gone), and a **median of 4.2 ms — ~238 fps**, against the 25-48 fps that
+prompted the whole investigation. FVS-N-24 is closed and archived as *not a defect in this codebase*;
+N-25's CPU-bound verdict was re-tested on the quiet box and **survives** (a 4× pixel cut moves frame
+time +1.8%), though every absolute number it reported was inflated ~2.4× by contention.
+
+The two standing lessons are procedural: **verify the GPU is idle before quoting any frame time from
+`big`**, and **run perf A/Bs as A-B-A with replicates** — the shadow A/B's single A→B pair reported a
+false "shadows off: −23% slow-phase" that the repeat baseline destroyed (the two baselines differed
+3.2× from each other).
+
 **That decisive test then ran, and killed the driver hypothesis** (16:18–16:21, 148 s, 307 clock
 samples vs 292 trace rows, ~12.8 cycles): the graphics clock is **flat across the phases** — 1802 MHz
 during slow-phase samples (mean 36.4 ms) vs 1818 MHz during fast ones (mean 5.9 ms), i.e. **−15 MHz

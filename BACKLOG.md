@@ -283,208 +283,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
   *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
   the same route. · *Deps:* — · *Touches:* `assets/characters/valkyrie.glb`, `tests/valkyrie_asset.rs` · *Reading:* — (no corpus resource)
-- **FVS-N-24 — A 171 ms frame hitch that steady-state geometry does not explain (FOUND 2026-07-30)** · M
-  Separate phenomenon from FVS-N-23 and **it will not be fixed by fixing that one**, which is the
-  reason it is filed apart. The same trace shows a sustained 25-48 fps (a budget problem, N-23) *and*
-  a **1% low of 8.7 fps with a worst frame of 171 ms** (a stall). A 171 ms hitch is not a triangle
-  count; the candidates are asset streaming, a GPU sync, or the mycelia compute pass.
-  *Investigate with:* `debug_screenshots/fps_trace.csv`'s `worst_ms` column against `t_secs` — a hitch
-  that coincides with entering a new region points at streaming, one that recurs on a fixed period
-  points at the compute pass. `--features bevy/trace_tracy` gives per-system attribution.
-  ⚠️ **Also observed: a degradation over TIME at a fixed viewpoint.** Two captures 13 s apart from the
-  identical camera position with identical resident geometry (590,869 tris) read 45.5 fps / 134 ms
-  worst, then 27.3 fps / 224 ms worst. Whatever this is, it is not geometry and not location.
-  > ### 📐 It is not a degradation — it is a ~11.8 s OSCILLATION. Measured 2026-07-30 from `fps_trace.csv`.
-  > The two captures above sampled opposite phases of a cycle, which is why it read as decay. Over the
-  > 44 s trace, `fps_local` swings between a **slow phase (mean 68.1 fps)** and a **fast phase (mean
-  > 146.0 fps)** — a **2.14×** swing — with slow-phase onsets at **4.6 s, 16.2 s, 28.4 s, 40.0 s**:
-  > intervals 11.6 / 12.2 / 11.6, **mean period 11.8 s over 3 clean cycles**. Slow phase ~4.6 s of each.
-  >
-  > **The scene is provably constant across the whole window** — same cell (80,112), same region 13,
-  > same biome, `vis_units` 5, `vis_hostiles` 0, `vis_props` 7, `vis_lights` 7, and `vis_tris` varying by
-  > **4 out of 413,364**. So this is neither geometry nor location nor entity count, and N-23 cannot
-  > touch it.
-  >
-  > **Host CPU frequency scaling is ruled out — by magnitude, not by period.** Sampled `/proc/cpuinfo`
-  > at 2 Hz for 42 s under sustained load: mean-of-core-means 4132 MHz, range 3639–4200, a **1.15×**
-  > swing. A 15% clock change cannot produce a 114% frame-time change even if perfectly correlated.
-  > *Whatever this is, it is in the application.*
-  >
-  > **Next step is per-system attribution, not more grepping.** `--features bevy/trace_tracy` over a
-  > fixed-camera run ≥ 3 cycles (≥ 40 s), then find the system whose cost has an 11.8 s period. Cheap
-  > ablation if Tracy is inconvenient: re-measure the same fixed camera with the mycelia plugin out —
-  > it owns the only GPU compute pass in the frame, which is the standing suspect for a periodic cost.
-  > *Ruled out already:* `MIN_APPEARANCE_RAMP_SECS = 12.0` (`mycelia/perceptual.rs:68`) is tantalisingly
-  > close to the period but is a `slew` **rate limiter**, not a periodic trigger — it produces a smooth
-  > ramp, not a cycle. `perf_probe`'s `HOTSPOT_EVERY_SECS = 10.0` is the wrong period and is one small
-  > file write.
-  > **Note the prior suspect does not fit.** FVS-N-13 leaks one dungeon *per expedition*; this cycles
-  > three times inside a single run at a fixed camera. N-13 is still a real leak — it is just not this.
-  > ### 📊 It runs during NORMAL PLAY, and it is what the player's "bad areas" actually were (2026-07-31)
-  > Re-measured from a 363 s *moving-camera* session (`fps_trace.csv`), not a fixed-camera capture:
-  > **23 consecutive cycles, median period 11.70 s** (mean 11.54, sd ≈ 0.3), slow phase mean 4.40 s,
-  > mean slow-phase frame time 44.9 ms against a vsync-locked 16.7 ms. Phase-locked across the whole
-  > map, independent of cell, region, biome and triangles.
-  >
-  > **So the hotspot table was ALIASING it, and that is now fixed at the source.** The "worst cells"
-  > were the cells the player happened to occupy when a slow phase fired: (114,140) ranked on
-  > **4 samples / 4 drops**, (117,147) on 8/8 — while (53,147) sat at **119 samples / 0 drops**.
-  > `MIN_SAMPLES_TO_RANK` is now **24 = one full cycle**, so no cell can be indicted by phase luck.
-  > Two probe-honesty corrections landed with it: `vis_props` was never culling-aware (prop roots are
-  > `WorldAssetRoot`s with **no `Aabb`**, so Bevy never frustum-culls them, and their visibility is a
-  > one-way reveal latch) — it is a *revealed-so-far* counter confounded with elapsed time, now named
-  > `rev_props`/`props↑` and documented in the report header. `vis_lights` is the only honestly
-  > culled density column in the file.
-  >
-  > **Correlations, measured (session 4, n=708):** `r(frame_ms, vis_tris) = −0.09` — triangles are
-  > ruled out a third independent way, after N-25's pixel A/B and an 82 ms frame at 6,694 visible
-  > triangles. Within slow-phase samples `r(frame_ms, vis_lights) = +0.49`, and it **survives**
-  > partial correlation against props (+0.43) and elapsed time (+0.45) while both of those collapse
-  > (+0.10, +0.16). Median frame time steps **35 ms → 81 ms** between the 12–17 and 18–23 visible-light
-  > buckets.
-  > ### 🎯 NARROWED 2026-07-31: it is NOT in the gameplay sim. Measured, not argued.
-  > The oscillation reproduces (autocorrelation **r = +0.66 at lag 11.5 s**, three independent runs)
-  > in `FVS_AUTORUN` measurement runs — and in those runs the **`Time<Virtual>` clock is frozen for
-  > the entire sampling window**. Instrumented directly: `advance_mold_time` logged virtual elapsed
-  > every 2 s and printed *nothing* for 63 s after `AppState::Warmup` exited, then began at
-  > `virtual=2.01s`. The freeze is the **intro conversation** — `MenuState::Conversation` is
-  > `is_blocking()`, so `sync_sim_blocked` → `GameSpeed::paused` → virtual time stops (the same
-  > mechanism FVS-N-22 records as "every screenshot that day was a capture of a paused game").
-  >
-  > So during those runs `FixedUpdate` is not advancing, the mold does not tick (**one** tick in a
-  > 98 s run against ~7 due at `sim_hz` 0.075), and the oscillation *continues regardless*. That
-  > **rules out the whole `FixedUpdate` sim** — stigmergy diffusion, mold, ORCA, `light_recompose`,
-  > almond-water — and with it the "FixedUpdate sub-step feedback loop" amplifier theory, which
-  > cannot amplify a schedule that is not running. The mycelia GPU compute pass is ruled out by the
-  > same measurement (no ticks ⇒ no dispatch ⇒ no readback).
-  > **The remaining search space is `Update`/`PostUpdate`/render-extract**, which is a much smaller
-  > file to read than "the application".
-  > ⚠️ **And this invalidates an assumption every perf run on this box has been making**, including
-  > N-25's: `FVS_AUTORUN` + a fixed camera does **not** measure a live game. It measures a paused one
-  > with a live renderer, for the first ~60 s after warmup. N-25's CPU-bound verdict still stands for
-  > the *renderer* (its A/B was pixel count, valid under any sim state) but its own caveat — "does not
-  > say which CPU system eats the frame when the swarm is live" — is now sharper than it looks: no
-  > measurement taken this way has ever had a live swarm. **Dismiss the intro conversation, or drive
-  > past it, before quoting any future number as gameplay performance.**
-  > ### 📡 CHARACTERIZED 2026-07-31 (afternoon): a free-running 11.60 s metronome, square, fixed-quantum,
-  > ### lights-gated — and the period is written nowhere in this repo. Prime suspect is BELOW the app.
-  > Trace forensics on the fresh 419 s capture set (6 fragments, cell (80,112), scripts preserved in the
-  > perf-review session log), independently reproducing the earlier numbers:
-  > * **One clock, no beating.** Pooled clean inter-onset intervals n=20: **11.605 s ± 0.196**; per-session
-  >   onset-grid fits P=11.53–11.65 with residual RMS ≤ 0.23 s and no consistent drift. FFT shows one
-  >   fundamental (11.6 s) plus its harmonic — no incommensurate second peak. **Phase persists through
-  >   SILENT beats**: twice a cycle produced ~zero amplitude and the next onset landed back on the same
-  >   grid (residuals ≤ 0.49 s). The trigger keeps running even when its work costs nothing visible.
-  > * **Square pulse, fixed quantum.** Onset rise ≈ 0.12 s (19/29 onsets have zero intermediate samples),
-  >   exit ≈ 0.39 s, flat top (−0.28 ms/s median in-phase slope). Slow-phase length 4.50 s ± 0.56 while the
-  >   period holds cv 0.017 — and a doubled 22.3 s gap (skipped beat) still carried a NORMAL 4.6 s slow
-  >   phase: a **fixed ~4.5 s quantum of work per firing**, not proportional scheduling.
-  > * **Amplitude is gated by visible lights; the period is gated by nothing.** S3's natural experiment at
-  >   constant ~413–434k tris: per-cycle delta **+7–9 ms at 7 visible lights, beat ABSENT (flat 6–7 ms
-  >   frames) at 0.2 lights** — while the clock kept phase — and +6 ms at 3.4. With the earlier 35→81 ms
-  >   step (12–17 vs 18–23 lights), amplitude tracks lights across 0–23; r(period, lights) ≈ 0. Nothing
-  >   else beats lights (hostiles +0.02, rev_props +0.16, tris +0.08). A **per-run modulator** also exists:
-  >   identical scenes sat at slow-phase 12.8 / 14.9 / 15.5 / ~16–19 ms across sessions, and two
-  >   census-invisible **super-beats** (8.7 s @ ~26 ms; 4.6 s @ 35 ms) plus one 24 s runaway occurred.
-  > * **The 171 ms hitch class mostly dissolves into this.** 20/20 cycles put their worst frame in the
-  >   first 40% of the slow phase (mean phase 0.12 ≈ 1.4 s after onset); exactly ONE non-boot 100 ms+
-  >   event in 419 s. Hitches are the slow phase's leading edge, not a separate periodic process.
-  > * **The period is authored nowhere.** Full sweep of src/ + config.ron time constants: nothing at
-  >   11.6 or 4.5 s (the 12.0 s hits are the ruled-out slew ramp, an event-gated containment hold, and an
-  >   event-gated sensor lifetime); every beat-pair landing in-window joins uncoupled subsystems with a
-  >   virtual-clock member — excluded wholesale by the frozen-sim reproduction. Period is fps-invariant
-  >   (same 11.6 s at median 76 and 148 fps) ⇒ time-based, not frame-count-based.
-  > * **The engine has no such timer either.** Sweep of vendored bevy_render/bevy_pbr/bevy_light/
-  >   bevy_asset/wgpu/wgpu-hal/avian3d 0.19/29-era sources: no multi-second cadence exists (no periodic
-  >   asset GC; TextureCache evicts after 3 unused frames; buffer/mesh allocators grow monotonically;
-  >   ECS check_change_ticks is ~hours). ⇒ the clock is either an *emergent* repo Update-space cadence
-  >   (none found carrying it) or **below the application: NVIDIA adaptive GPU clocking (PowerMizer /
-  >   GPU Boost) is the prime suspect** — a driver-side relaxation oscillator fits the frozen-sim
-  >   persistence, the per-run modulator, the silent beats (a downclock is invisible when in-view GPU
-  >   work ≈ 0), and the lights-scaled amplitude (cluster raster + shadow views + light extract are the
-  >   GPU work that scales with lights).
-  > * ⚠️ **Scope correction to N-25's verdict, load-bearing here:** the 4× pixel A/B rules out
-  >   *fragment-shading*-bound only. Shadow-map passes and the GPU clustering raster are
-  >   render-resolution-independent, and a downclocked GPU slows everything uniformly — all compatible
-  >   with "+4.1% from 4× fewer pixels". "CPU-bound" is unproven for the slow phase specifically.
-  > * Amplitude-mechanism candidates on the engine side (independent of who owns the clock): Bevy 0.19
-  >   re-renders every live shadow view every frame with no caching; entities with **no Aabb** are pushed
-  >   into every directional cascade unconditionally (`bevy_light-0.19.0/src/lib.rs:456-462`) — our prop
-  >   roots; each visible shadow spot adds a full all-meshes caster sweep; the caster-list rewrite marks
-  >   lights `Changed` every frame, re-extracting them wholesale. The ~20-30k per-tile dungeon entities
-  >   multiply all of it per view (2026-07-31 perf review, dungeon/render.rs:227 finding).
-  > * Verify any fix against the super-beats and the runaway, not just the median cycle.
-  > ### 🚫 GPU DRIVER CLOCKING IS RULED OUT — measured 2026-07-31 16:18-16:21. It is periodic GPU
-  > ### *work*, not periodic GPU *speed*.
-  > The zero-repo-change test ran: `nvidia-smi` at 2 Hz (`clocks.gr,clocks.sm,utilization.gpu,
-  > power.draw,temperature.gpu`) beside a 148 s `FVS_WINDOW=1280x720 FVS_AUTORUN=1` session — 307 clock
-  > samples against 292 `fps_trace.csv` rows, ~12.8 cycles, resampled onto a common 0.5 s grid
-  > (script: `correlate.py`, perf-review session log).
-  > * **The clock is FLAT across the phases.** Slow-phase samples (n=119, mean **36.4 ms**) ran at
-  >   **1802 MHz**; fast-phase samples (n=42, mean **5.9 ms**) at **1818 MHz** — a **−15 MHz (0.8%)**
-  >   difference across a **6.2× frame-time** difference. PowerMizer stepping down would cost hundreds
-  >   of MHz. Cross-correlation is weak at every lag: r = −0.126 at zero lag, best |r| = −0.213 at
-  >   +2.5 s. Power sat at ~279 W throughout — the GPU was never idling or parking.
-  > * **The oscillation is present in this run** (independent third capture): `frame_ms`
-  >   autocorrelation peaks at **11.5 s**, matching the established 11.60 s.
-  > * **`utilization.gpu` is the strongest periodic signal in the data — autocorrelation +0.440 at
-  >   11.5 s**, versus +0.167 for frame time and +0.137 for the clock, and it correlates positively
-  >   with frame time (r = +0.202). So during each slow phase the GPU is **busier**, at an unchanged
-  >   clock: something periodically submits MORE GPU work.
-  > ⇒ Suspect 1 (driver clocking) is dead; no `nvidia-smi -lgc` lock test is needed. The remaining
-  > candidates are the per-frame GPU work that scales with visible lights — Bevy 0.19's uncached
-  > shadow-view re-render, the never-frustum-culled prop roots pushed into every cascade, and the GPU
-  > cluster raster — i.e. exactly what the shadow A/B isolates. Note this session's profile differed
-  > from earlier ones (median 7.7 ms / 130 fps with a 281 ms worst frame, vs the earlier 68/146 fps
-  > bimodal), and it ran *past* the intro-conversation pause, so part of it was a live sim.
-  > ### 🛑 THE METRONOME IS NOT IN THE GAME. It is an EXTERNAL GPU TENANT on `big`. Measured 16:26-16:40.
-  > **Shadow A/B first (A-B-A, 3 × 150 s, both casters off — TV spots `light.rs:973` AND the
-  > directional key `world.rs:218`; lights still lit, only shadow-map rendering removed):**
-  > | run | median | p90 | slow-phase mean | frame acorr | peak lag |
-  > |---|---:|---:|---:|---:|---:|
-  > | A baseline | 7.8 ms | 85.5 ms | 55.1 ms | +0.610 | 11.0 s |
-  > | B **shadows off** | 7.6 ms | 33.4 ms | 27.9 ms | +0.138 | 11.5 s |
-  > | A2 baseline | 6.1 ms | 17.1 ms | 17.3 ms | +0.166 | 11.5 s |
-  >
-  > **INCONCLUSIVE, and the A-B-A design is the only reason we know that.** The two baselines
-  > disagree by more than the ablation moved anything (slow-phase 55.1 → 17.3 ms between A and A2, a
-  > 3.2× swing), and the *best* run of the three was a **baseline**. An A→B pair alone would have
-  > reported "shadows off: −23% slow-phase, confirmed!" — a false positive. Run-to-run variance here
-  > exceeds the effect being measured; **no shadow claim can be made from this data.**
-  > **What DID survive every condition: `utilization.gpu` periodicity — +0.550 (A), +0.509 (B, shadows
-  > OFF), +0.439 (A2), all at 11.5-12.0 s.** Removing every shadow caster in the game did not touch it.
-  > **So the cycle was measured with the game NOT RUNNING — and it is still there.** `nvidia-smi pmon`,
-  > 140 s, no game process:
-  > * **`VLLM::EngineCore` (pid 87093) — mean SM 82.2%, peak 95%, autocorrelation +0.622 at 11.0 s.**
-  > * Aggregate GPU sm% across all PIDs: mean 82.7%, peak lag 11.0 s, acorr +0.652.
-  > * Nothing else moves: `hs-distill-server` 0.0%, Xorg/Xwayland/firefox/kitty 0.0%.
-  > It is the box's **olmocr OCR pipeline** (`vllm serve allenai/olmOCR-2-7B-1025-FP8`, port 5801,
-  > 14.4 GB VRAM; `hs-distill-server` holds another 4.4 GB — 20.3 of 24.6 GB total), **resident since
-  > Wed 2026-07-29 17:56 — i.e. through EVERY measurement in the N-23/24/25/26 investigation.**
-  > A periodic external inference workload explains every property that made this mysterious:
-  > period authored nowhere in repo or engine ✓ · survives a frozen sim ✓ · survives shadows-off ✓ ·
-  > flat GPU clocks at ~279 W (the GPU is *busy*, never downclocked) ✓ · amplitude ∝ visible lights
-  > (contention is multiplicative on OUR GPU work) ✓ · **silent beats** when the camera faces an
-  > unlit corridor (our GPU work ≈ 0 ⇒ nothing to steal — this is the objection that wrongly demoted
-  > the "external process" theory) ✓ · per-run modulator = whatever the pipeline was doing ✓ ·
-  > phase-locked across cells/regions/biomes ✓ · fixed ~4.5 s quantum = one inference burst ✓ ·
-  > super-beats and the 24 s runaway = workload bursts ✓ · fps-invariant, time-based ✓.
-  > ### ⚠️ THIS PUTS FVS-N-25's "CPU-BOUND" VERDICT IN DOUBT — and everything gated on it.
-  > Under heavy external GPU contention a 4× pixel cut *would* barely move frame time, because the
-  > cost is waiting for GPU time slices rather than shading our own pixels. That is exactly the
-  > reading N-25 got (+4.1%) and read as "CPU-bound" — the verdict that **demoted N-23's mesh/material
-  > work and gated N-24**. N-26's flicker numbers (10.38 → 8.69 ms) were an internally consistent
-  > A/B/A on one afternoon and are less exposed, but no absolute frame time measured on this box
-  > since 2026-07-29 17:56 is trustworthy as "the game's performance".
-  *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Next:* **(1)** ~~driver-clock test~~ **RULED OUT**. **(2)** ~~shadow
-  A/B~~ **run — inconclusive, and shadows do NOT own the cadence**. **(3)** **QUIET-GPU RE-MEASURE —
-  the only thing worth doing next.** Stop the olmocr/vLLM pipeline (and any home-still conversion),
-  confirm `nvidia-smi pmon` shows an idle GPU, then re-run: the fixed-camera oscillation capture (is
-  the 11.6 s cycle simply GONE?), **N-25's pixel A/B** (does the game read GPU-bound on a quiet box?),
-  and only then the shadow/`Aabb` ablations, which deserve N≥5 repeats per condition given the
-  variance measured above. **(4)** `--features bevy/trace_tracy` if a real in-game cycle survives.
-  · *Reading:* [ABM]
 - **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
   `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
   every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
@@ -498,6 +296,13 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   | baseline | 10.38 ms |
   | `flicker_hum_depth: 0.0` (ablation) | 8.69 ms |
   | **visibility-gated hum, flicker still on at 0.06** | **8.60 ms** |
+  ⚠️⚠️ **Re-read those absolute numbers with FVS-N-24's resolution in hand (2026-07-31):** the box's
+  olmocr/vLLM tenant was consuming 82% of the GPU during this A/B, so the 10.38 / 8.69 / 8.60 ms
+  figures are contended-box numbers. On a quiet GPU the same scene renders at **~4.2 ms**. The A/B/A
+  structure and the *ordering* survive — the three runs were minutes apart under the same contention,
+  and `flicker_lights` is CPU-side work the tenant does not touch — so the fix is still a fix. What is
+  NOT supportable is quoting "10.38 → 8.60 ms" as this game's frame time, or the implied ~1.8 ms
+  saving as a fraction of a real frame. Re-measure on an idle GPU if the magnitude ever matters.
   ⚠️ **Condition, stated precisely** (N-24's narrowing found it, and it applies here too): all three
   runs sampled the window where the **intro conversation has the sim frozen**, so this is a
   renderer/`Update`-side comparison with a paused world. That does not weaken the result — the three
@@ -540,8 +345,29 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > this establishes the **renderer is not the constraint at that geometry**. It does *not* say
   > which CPU system eats the frame when the swarm is live. Re-run the same A/B on a LOADED scene
   > before extending the conclusion.
+  > ### ✅ RE-TESTED 2026-07-31 ON A QUIET GPU — the verdict SURVIVES, the numbers do NOT.
+  > FVS-N-24 (now archived, RESOLVED) found the box's olmocr/vLLM tenant eating **82% of the GPU**
+  > since 2026-07-29 17:56 — i.e. during the A/B above. Heavy GPU contention *mimics* a CPU-bound
+  > reading (you wait for time slices, so cutting pixels does not help), so this test was re-run with
+  > the pipeline stopped and the GPU verified idle: 4 × 150 s, interleaved 1280x720 / 640x360, first
+  > 10 s discarded, n≈277 each.
+  > | res | pixels | median frame | p99 | replicates |
+  > |---|---:|---:|---:|---|
+  > | 1280x720 | 0.92 Mpx | **4.19 ms** (238 fps) | 4.37-4.44 | 4.18 / 4.21 |
+  > | 640x360 | 0.23 Mpx | **4.27 ms** (234 fps) | 4.40-4.46 | 4.28 / 4.25 |
+  >
+  > **A 4× pixel cut moved frame time +1.8%, the low-res run again marginally *slower* — so the
+  > CPU-bound conclusion is CONFIRMED, now on an uncontended GPU and with replicates.** What changes
+  > is the scale: the same scene renders at **4.2 ms, not 9.94 ms**, so every absolute number in the
+  > table above was inflated ~2.4× by contention, and the "26-45 fps the player saw" was the OCR
+  > pipeline, not this game. The gate on FVS-N-23 therefore holds *more* firmly, not less: at 238 fps
+  > with 413k visible triangles, mesh decimation buys nothing measurable.
+  > ⚠️ Both A/Bs are ≤720p. They establish the renderer is not the constraint **at this window size**;
+  > they do not license extrapolating to 1440p/4K, where fragment cost grows and this test would need
+  > redoing at that resolution.
   > *Next:* `docs/perf_improvements_plan.md` aims at the CPU side and is therefore aimed correctly;
-  > `--features bevy/trace_tracy` for per-system attribution.
+  > `--features bevy/trace_tracy` for per-system attribution — though at a 4.2 ms frame with a
+  > 0.4 ms median→max spread, there is no longer an obvious performance problem to attribute.
   **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
   a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
   concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget
