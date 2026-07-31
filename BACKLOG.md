@@ -230,7 +230,16 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
   `ui::site_hud` works — not a reach into the in-game overlay stack.
   *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
-- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run (REPORTED FROM PLAY 2026-07-30)** · M
+- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run** · M · ⚠️ **CAUSE FOUND AND FIXED 2026-07-30 — NOT YET VERIFIED IN THE RUNNING GAME**
+  > **Root cause: `MeshPickingSettings::require_markers` defaults to `false`.** The backend ray-casts
+  > *every* mesh, and `Pickable` defaults to `should_block_lower: true` — so
+  > `containment::extraction`'s beacon, a decorative `Cylinder` light shaft standing exactly where the
+  > squad starts, was swallowing every click on the leader's choice bubbles. The player found it
+  > ("whatever the beam of light is at that the squad starts in, that intercepts the mouse").
+  > *Shipped:* picking is now opt-in (`require_markers: true` + `MeshPickingCamera` on the camera),
+  > which kills the whole class rather than patching one mesh; plus `1`-`9` to pick an option and
+  > `Enter`/`Space` to advance a line, since the bubbles were already LABELLED "1."/"2.".
+  > **Close this only after a windowed run confirms a Choice can actually be answered.**
   **Player report, with a region capture:** *"I can't click on these options."* Metadata confirms
   `App state: InGame`, `Menu/overlay: Conversation`, `Sim: frozen`. The expedition-start scene ends in
   a `Choice` node, a modal conversation freezes the sim (`dialogue/runtime.rs:4`), and choices
@@ -262,6 +271,71 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   and it is invisible if hover never fires — which is exactly the failing case.
   *Done when:* a `Choice` node can be answered in the shipped windowed build, and a run cannot reach
   a state where the sim is frozen with no way to unfreeze it. · *Deps:* — · *Touches:* `src/dialogue/runtime.rs`, `src/dialogue/bubble.rs` · *Reading:* — (no corpus resource)
+- **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls (MEASURED 2026-07-30)** · L · *determinism: moves goldens*
+  **Reported from play as "it drops to 26 FPS", with the barrels suspected.** The barrels are innocent:
+  **252 triangles each**, among the lightest assets shipped. Measured instead with the new
+  `perf_probe` (`src/perf_probe.rs`) over a real session:
+  * peak **visible** geometry `415,482` triangles;
+  * five Valkyries account for `5 x 82,436 = 412,180` of them;
+  * **everything else visible — 17 props, the dungeon, the lights — is 3,302 triangles.**
+
+  So 99.2% of rendered geometry is the squad. But the triangle count is only half of it:
+  `valkyrie.glb` carries **23 materials across 24 primitives**, and Bevy cannot batch across
+  materials — that is **115 draw calls per frame for the squad alone**. Four materials hold 76k of
+  the 82k triangles (`skin` 26,756 · `bodysuit` 24,436 · `gloves` 13,880 · `boots` 10,688); the other
+  19 hold ~6k between them, including **five belt hooks of 12 triangles each, each with its own
+  material**. That is a character authored for a cinematic close-up being drawn a few hundred pixels
+  tall at the shipped iso zoom.
+  *Fix:* decimate toward ~8k triangles and atlas the materials to 3-4 (≈10x geometry, 115 -> ~20 draw
+  calls). Asset-side work in `scp_characters`, **not** an engine change.
+  ⚠️ Re-pins `tests/valkyrie_asset.rs`'s contract and **moves the goldens** — the squad mesh is pinned
+  state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
+  *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
+  the same route. · *Deps:* — · *Touches:* `assets/characters/valkyrie.glb`, `tests/valkyrie_asset.rs` · *Reading:* — (no corpus resource)
+- **FVS-N-24 — A 171 ms frame hitch that steady-state geometry does not explain (FOUND 2026-07-30)** · M
+  Separate phenomenon from FVS-N-23 and **it will not be fixed by fixing that one**, which is the
+  reason it is filed apart. The same trace shows a sustained 25-48 fps (a budget problem, N-23) *and*
+  a **1% low of 8.7 fps with a worst frame of 171 ms** (a stall). A 171 ms hitch is not a triangle
+  count; the candidates are asset streaming, a GPU sync, or the mycelia compute pass.
+  *Investigate with:* `debug_screenshots/fps_trace.csv`'s `worst_ms` column against `t_secs` — a hitch
+  that coincides with entering a new region points at streaming, one that recurs on a fixed period
+  points at the compute pass. `--features bevy/trace_tracy` gives per-system attribution.
+  *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
+  behind it. · *Deps:* — · *Reading:* — (no corpus resource)
+- **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline*
+  The four items below add ~20 knobs to the genomes. **Adding a knob no descriptor can see makes the
+  archive worse, not better** — two genomes differing only in that knob land in the same cell, and the
+  winner is decided by evaluation luck. That is not a hypothetical: it is exactly FVS-N-21 (biome
+  genes against a level descriptor whose only axes are `furniture_per_room` and `infestation`), and it
+  is the mechanism that collapsed the policy archive once already.
+  *For each knob group, establish which descriptor axis moves when it moves.* If none does, decide
+  **remove / add-axis / couple** before landing the gene, using N-21's three-way framing.
+  ⚠️ Every genome length change also invalidates that population's baked archive — `audio_genome`
+  already went 15 -> 16 for FVS-K-1, and that re-bake is parked under H-1. Do not multiply that debt
+  without deciding it is worth paying. · *Deps:* — · *Reading:* **[QD]**, [ME], [QD-PCG]
+- **FVS-I-7 — Gore settings (6 knobs) are unevolved** · M · *determinism: offline*
+  Not in any genome, yet **a gore knob already tipped a 5/5 win into a wipe** — so it is a live
+  difficulty dial the offline search cannot see, which is precisely what `CLAUDE.md`'s "every feature
+  must evolve" rule exists to prevent. · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
+- **FVS-I-8 — `MetropolisWeights` (10+ knobs) are unevolved** · L · *determinism: offline*
+  The largest of the four, and the one most likely to fail I-6's audit: it shapes the *level*, and the
+  level descriptor has two axes. Run the audit before writing any encode/decode. · *Deps:* **I-6** · *Touches:* `src/placement/`, `src/squad_ai/world_genome.rs`
+- **FVS-I-9 — Perception tuning is unevolved** · M · *determinism: offline*
+  What agents can sense is a direct difficulty axis and is currently authored-only. · *Deps:* **I-6** · *Touches:* `src/ai/tuning.rs`, `src/squad_ai/world_genome.rs`
+- **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · *determinism: offline*
+  Spawn/breed cadence is the main pacing dial in the game and the search cannot touch it. Most likely
+  of the four to move a descriptor axis honestly (swarm density is already measured). · *Deps:* **I-6** · *Touches:* `src/crab/`, `src/parasite.rs`, `src/squad_ai/world_genome.rs`
+- **FVS-B-10 — Give the acoustic channels a player-facing payoff (stealth / noise discipline)** · L
+  `NOISE_SQUAD`/`NOISE_SWARM` propagate and are *perceived* (`unit_fear_of_din`, `crab_fear_of_din`,
+  `investigate_threshold`) but no player-facing verb reads them, so the whole acoustic layer is
+  machinery without a game attached.
+  **FVS-K-1 paid the first instalment**, which is why this is now a generalisation rather than a
+  greenfield design: SCP-610's containment rule caps `NOISE_SQUAD` at 0.20 — which is what finally
+  makes the existing `HOLD FIRE` verb load-bearing — and its drone deposits into `NOISE_SWARM`. So
+  both channels have exactly one consumer each and a proven shape to copy.
+  *Wanted:* movement/fire/verb choices that trade speed for quiet, and a HUD channel that makes the
+  din legible (the containment HUD already names channels, so the vocabulary exists).
+  · *Deps:* — · *Touches:* `src/audio_tuning.rs`, `src/squad.rs`, `src/ui/` · *Reading:* **[STIG]**, [STIG-AD], [PHERO-V]
 - **FVS-N-21 — The biome genes are invisible to the level descriptor (FOUND 2026-07-30, audit)** · S
   Q-3 added `biome_mix`/`biome_scale` to `LevelGenome` because `CLAUDE.md` requires wiring features into RL/QD. **Audit says the descriptor cannot see them.** `level_quality.rs:72` has exactly two axes — `furniture_per_room / 8` and `infestation / 0.5` — and biome moves neither: furniture keys on room *tags*, mould affinity keys on room *tags*, and `score()` never reads biome. Two genomes differing only in biome land in the same cell with the same fitness, so the winner is decided by whatever else differs, or by evaluation luck — which is materially worse while N-13 is live. This is the archive-collapse mechanism that already bit the policy archive once.
   **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid. · *Deps:* — · *Reading:* [QD]
@@ -438,6 +512,15 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG], [GOAP]
 **Done when:** the endgame trigger fires after a curriculum threshold; confrontation mechanics derive from the SCP-9191 generator theme; 173/096 are capturable via a new per-entity continuous-watch state (explicitly distinct from the ambient field); no shipped copy cites the deprecated semiotic-decay theming as canon.
 
+- **FVS-C-7 — A second gaze-reactive creature, via the ATTENTION sign-flip** · M
+  `ATTENTION` already drives SCP-1048's out-watch capture (a creature *suppressed* while watched). The
+  inverse — one that acts **only when not observed** — is the same channel with the condition flipped,
+  so it is architecturally free: no new primitive, no new field, no append to a hashed enum.
+  **Explicitly distinct from FVS-C-6.** C-6 needs a genuinely new per-entity, directional
+  continuous-watch state (facing vs a *specific* entity) and is XL; this one reads the existing
+  ambient field and is M. Doing this first is also the cheap way to prove the ambient/per-entity
+  distinction is real before paying for C-6.
+  · *Deps:* C-3 (shipped) · *Touches:* `src/ai/`, new creature module · *Reading:* [STIG], [GOAP]
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
   Add 173/096 **only after** the bespoke roster is proven. Each needs a **new** per-entity continuous-observation state (directional/facing check vs a *specific* entity), explicitly distinct from the ambient `ATTENTION` field — new engineering, not a sign-flip reuse.
   *Done when:* a per-entity `ObservedBy`/facing check drives 173/096 freeze/aggro; documented as separate from ATTENTION; capture rules authored on top. · *Deps:* C-1..C-5 shipped, E-*, F-*, M-1 · *Touches:* new watch module, `src/ai/`, `src/enemy.rs` · *Reading:* [GOAP]
@@ -695,6 +778,27 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
+- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M
+  Player: *"I don't like backrooms carpets and concrete walls. It should be one or the other. The
+  transition should be at a doorway."*
+  **Cause:** `Dungeon::biome()` evaluates `biome_at(seed, cell, mix, scale)` — value noise sampled
+  **per cell**. A wall cell and the floor cell it is attached to can therefore fall on opposite sides
+  of the threshold *inside a single room*, which is exactly the reported symptom. The doc comment
+  claims "a wall belongs to the biome of the cell it is attached to", and that holds only
+  probabilistically, which is to say not at all.
+  **Fix = sample per ZONE rather than per cell.** Open design fork, and it needs a decision because
+  the options differ in more than taste:
+  * **(a)** rooms sample the noise at `rect.center_cell()`; corridors get their own biome. Transition
+    at every doorway — but a concrete → carpet corridor → concrete sandwich makes levels read *busier*,
+    which is the opposite of the complaint.
+  * **(b)** corridors inherit one endpoint room (lower `RegionId`). Every transition still lands at a
+    doorway, corridors always match a neighbour, and `biome_scale` keeps a real meaning (how likely
+    adjacent rooms differ). **Smallest diff — no config, genome or archive change.**
+  * **(c)** one biome per level. Simplest to state, but it makes `biome_scale` **dead config**, which
+    should then be removed from `config.ron` + `world_genome` + `genome_coverage` rather than left as
+    decoration — a genome length change for a cosmetic result. Partly closes FVS-N-21.
+  *Done when:* no room shows two surface treatments, and every transition is crossed at a threshold.
+  · *Deps:* — · *Touches:* `src/dungeon/{mod,biome}.rs` · *Reading:* — (no corpus resource)
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.
