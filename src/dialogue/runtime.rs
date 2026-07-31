@@ -625,6 +625,190 @@ fn spawn_line_bubble(
 mod tests {
     use super::*;
 
+    /// Build the conversation **state machine** — and only it.
+    ///
+    /// [`present_current`] is deliberately absent: it spawns billboarded quads and needs
+    /// [`BubbleAssets`], an `Assets<Image>`/`Assets<StandardMaterial>` pair and a live `Leader`, none
+    /// of which exist in a GPU-free unit test. What it contributes to the graph is one boolean —
+    /// `presented` — which these tests set by hand at the point the presenter would have. So the
+    /// coverage claim is exact: this exercises *input → pick → node walk → teardown*, not rendering,
+    /// and **not mesh picking**.
+    fn machine() -> App {
+        let mut app = App::new();
+        app.add_message::<ChoicePicked>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Time<Real>>()
+            .init_resource::<NextState<MenuState>>()
+            .insert_resource(ConversationLock)
+            // Same order as `plugin()`: a digit pressed this frame must resolve this frame.
+            .add_systems(Update, (choice_hotkeys, resolve_choice, advance_line).chain());
+        app
+    }
+
+    /// One conversation: a two-option choice, each option landing on a terminal line.
+    fn script() -> DialogueScript {
+        use super::super::model::{Choice, Conversation};
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "ask".into(),
+            Node::Choice {
+                speaker: 0,
+                emotion: Emotion::Neutral,
+                prompt: "Orders?".into(),
+                options: vec![
+                    Choice { text: "Hold.".into(), next: "held".into() },
+                    Choice { text: "Advance.".into(), next: "moved".into() },
+                ],
+            },
+        );
+        for (id, text) in [("held", "Holding."), ("moved", "Moving up.")] {
+            nodes.insert(
+                id.into(),
+                Node::Line {
+                    speaker: 0,
+                    kind: BubbleKind::Speech,
+                    emotion: Emotion::Neutral,
+                    text: text.into(),
+                    next: None,
+                },
+            );
+        }
+        let mut conversations = std::collections::HashMap::new();
+        conversations.insert("t".into(), Conversation { start: "ask".into(), nodes });
+        DialogueScript { conversations }
+    }
+
+    /// Park the cursor on `node`, already presented — i.e. the state the player is looking at.
+    ///
+    /// `advance_at` is `INFINITY` throughout, which is not decoration: it is what `present_current`
+    /// writes for a choice, and it means **no test here can pass on the auto-advance timeout**. If a
+    /// key stops working, these fail rather than quietly falling through to the clock.
+    fn park(app: &mut App, node: &str) {
+        app.insert_resource(script());
+        app.insert_resource(Active {
+            conv: "t".into(),
+            node: node.into(),
+            presented: true,
+            advance_at: f32::INFINITY,
+        });
+    }
+
+    fn node_of(app: &App) -> Option<String> {
+        app.world().get_resource::<Active>().map(|a| a.node.clone())
+    }
+
+    /// Press `key`, run one frame, release. Bevy's own input system (which clears `just_pressed`)
+    /// is not registered here, so the release is manual.
+    fn tap(app: &mut App, key: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(key);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+    }
+
+    /// **FVS-L-7.** A modal conversation freezes the sim and a choice never auto-advances
+    /// (`advance_at = INFINITY`), so an *unanswerable* choice is an unrecoverable run — on the game's
+    /// opening beat. This walks the whole graph on the keyboard alone and asserts the sim is handed
+    /// back: cursor gone, lock gone, menu closed.
+    ///
+    /// What this does **not** prove: that the choice bubbles can be *clicked*. The reported bug was a
+    /// decorative light-shaft mesh swallowing the pointer, fixed by `require_markers` +
+    /// `MeshPickingCamera`; mesh picking needs a window and a pointer and is out of reach here. What
+    /// is proved is the property that made the bug a soft-lock rather than an annoyance — a player who
+    /// cannot click can always press `1`, and the run continues.
+    #[test]
+    fn the_keyboard_can_answer_a_choice_so_a_conversation_can_never_soft_lock() {
+        let mut app = machine();
+        park(&mut app, "ask");
+
+        tap(&mut app, KeyCode::Digit2);
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("moved"),
+            "'2' must take the second option"
+        );
+
+        // The presenter would put the new line on screen; stand in for it and read it.
+        if let Some(mut a) = app.world_mut().get_resource_mut::<Active>() {
+            a.presented = true;
+        }
+        tap(&mut app, KeyCode::Space);
+
+        assert!(
+            app.world().get_resource::<Active>().is_none(),
+            "the conversation cursor outlived the conversation"
+        );
+        assert!(
+            app.world().get_resource::<ConversationLock>().is_none(),
+            "the lock survived — `selection::command_input` would still be yielding the click"
+        );
+        assert!(
+            matches!(
+                app.world().resource::<NextState<MenuState>>(),
+                NextState::Pending(MenuState::Closed)
+            ),
+            "the sim was never unfrozen — this is the soft-lock"
+        );
+    }
+
+    /// The numpad row is a second *device*, not a second path: it writes the same `ChoicePicked`.
+    #[test]
+    fn the_numpad_picks_the_same_option_as_the_number_row() {
+        let mut app = machine();
+        park(&mut app, "ask");
+        tap(&mut app, KeyCode::Numpad1);
+        assert_eq!(node_of(&app).as_deref(), Some("held"));
+    }
+
+    /// An out-of-range digit is ignored, never clamped: pressing `5` on a two-option choice should do
+    /// nothing, not silently pick the last one.
+    #[test]
+    fn a_digit_past_the_last_option_does_nothing() {
+        let mut app = machine();
+        park(&mut app, "ask");
+        tap(&mut app, KeyCode::Digit5);
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("ask"),
+            "an unbound digit moved the conversation"
+        );
+    }
+
+    /// The trap `choice_hotkeys` guards with its `Node::Choice` check: a stray digit pressed during a
+    /// *line* must not queue a pick that lands on the next choice the player reaches. Left unguarded,
+    /// the player's first real choice would answer itself with whatever they had typed earlier.
+    #[test]
+    fn a_digit_pressed_during_a_line_does_not_answer_the_next_choice() {
+        let mut app = machine();
+        park(&mut app, "held"); // a Line node
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit2);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+
+        // That line ended the conversation (next: None). Start a fresh choice and run a quiet frame:
+        // nothing was queued, so the cursor must still be sitting on the choice.
+        park(&mut app, "ask");
+        app.insert_resource(ConversationLock);
+        app.update();
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("ask"),
+            "a digit typed during a line answered a later choice"
+        );
+    }
+
+    /// `Enter` reads a line as well as `Space` — with `advance_at` at infinity, only the key can.
+    #[test]
+    fn enter_advances_a_line() {
+        let mut app = machine();
+        park(&mut app, "held");
+        tap(&mut app, KeyCode::Enter);
+        assert!(
+            app.world().get_resource::<Active>().is_none(),
+            "Enter did not read the line"
+        );
+    }
+
     fn bark(text: &str) -> Bark {
         Bark {
             speaker: 0,
