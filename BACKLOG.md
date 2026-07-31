@@ -516,7 +516,11 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   capture-hostile world drops the squad and swarm candidates evaluated alongside it, which is precisely
   the coupling the scoping fix existed to remove. The constraint is correct; its *placement* still is
   not. Correcting it means letting the world candidate be rejected independently of its partners, which
-  changes what the co-evolution admits — so it wants a probe run, not a quick edit. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
+  changes what the co-evolution admits — so it wants a probe run, not a quick edit.
+  ✅ *Re-confirmed still live 2026-07-30* — `score_triple_compact` (`coevolve/search.rs:151-172`) runs
+  `containment_criterion` on both rollouts and returns `Ok(None)` for the **whole triple** on either
+  failure. Its own comment says the constraint is applied "HERE, at the world archive, and nowhere
+  else", which is true of where it is *evaluated* and not of what it *rejects*. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
 - **FVS-J-7 — The config mtime guard rejects `train apply`, the one process meant to rewrite config (FOUND 2026-07-28, review)** · S
   `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard against
   editing config during a test run. But `train apply` **writes** `config.ron` and then reloads it to
