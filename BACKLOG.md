@@ -366,9 +366,62 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > say which CPU system eats the frame when the swarm is live" — is now sharper than it looks: no
   > measurement taken this way has ever had a live swarm. **Dismiss the intro conversation, or drive
   > past it, before quoting any future number as gameplay performance.**
+  > ### 📡 CHARACTERIZED 2026-07-31 (afternoon): a free-running 11.60 s metronome, square, fixed-quantum,
+  > ### lights-gated — and the period is written nowhere in this repo. Prime suspect is BELOW the app.
+  > Trace forensics on the fresh 419 s capture set (6 fragments, cell (80,112), scripts preserved in the
+  > perf-review session log), independently reproducing the earlier numbers:
+  > * **One clock, no beating.** Pooled clean inter-onset intervals n=20: **11.605 s ± 0.196**; per-session
+  >   onset-grid fits P=11.53–11.65 with residual RMS ≤ 0.23 s and no consistent drift. FFT shows one
+  >   fundamental (11.6 s) plus its harmonic — no incommensurate second peak. **Phase persists through
+  >   SILENT beats**: twice a cycle produced ~zero amplitude and the next onset landed back on the same
+  >   grid (residuals ≤ 0.49 s). The trigger keeps running even when its work costs nothing visible.
+  > * **Square pulse, fixed quantum.** Onset rise ≈ 0.12 s (19/29 onsets have zero intermediate samples),
+  >   exit ≈ 0.39 s, flat top (−0.28 ms/s median in-phase slope). Slow-phase length 4.50 s ± 0.56 while the
+  >   period holds cv 0.017 — and a doubled 22.3 s gap (skipped beat) still carried a NORMAL 4.6 s slow
+  >   phase: a **fixed ~4.5 s quantum of work per firing**, not proportional scheduling.
+  > * **Amplitude is gated by visible lights; the period is gated by nothing.** S3's natural experiment at
+  >   constant ~413–434k tris: per-cycle delta **+7–9 ms at 7 visible lights, beat ABSENT (flat 6–7 ms
+  >   frames) at 0.2 lights** — while the clock kept phase — and +6 ms at 3.4. With the earlier 35→81 ms
+  >   step (12–17 vs 18–23 lights), amplitude tracks lights across 0–23; r(period, lights) ≈ 0. Nothing
+  >   else beats lights (hostiles +0.02, rev_props +0.16, tris +0.08). A **per-run modulator** also exists:
+  >   identical scenes sat at slow-phase 12.8 / 14.9 / 15.5 / ~16–19 ms across sessions, and two
+  >   census-invisible **super-beats** (8.7 s @ ~26 ms; 4.6 s @ 35 ms) plus one 24 s runaway occurred.
+  > * **The 171 ms hitch class mostly dissolves into this.** 20/20 cycles put their worst frame in the
+  >   first 40% of the slow phase (mean phase 0.12 ≈ 1.4 s after onset); exactly ONE non-boot 100 ms+
+  >   event in 419 s. Hitches are the slow phase's leading edge, not a separate periodic process.
+  > * **The period is authored nowhere.** Full sweep of src/ + config.ron time constants: nothing at
+  >   11.6 or 4.5 s (the 12.0 s hits are the ruled-out slew ramp, an event-gated containment hold, and an
+  >   event-gated sensor lifetime); every beat-pair landing in-window joins uncoupled subsystems with a
+  >   virtual-clock member — excluded wholesale by the frozen-sim reproduction. Period is fps-invariant
+  >   (same 11.6 s at median 76 and 148 fps) ⇒ time-based, not frame-count-based.
+  > * **The engine has no such timer either.** Sweep of vendored bevy_render/bevy_pbr/bevy_light/
+  >   bevy_asset/wgpu/wgpu-hal/avian3d 0.19/29-era sources: no multi-second cadence exists (no periodic
+  >   asset GC; TextureCache evicts after 3 unused frames; buffer/mesh allocators grow monotonically;
+  >   ECS check_change_ticks is ~hours). ⇒ the clock is either an *emergent* repo Update-space cadence
+  >   (none found carrying it) or **below the application: NVIDIA adaptive GPU clocking (PowerMizer /
+  >   GPU Boost) is the prime suspect** — a driver-side relaxation oscillator fits the frozen-sim
+  >   persistence, the per-run modulator, the silent beats (a downclock is invisible when in-view GPU
+  >   work ≈ 0), and the lights-scaled amplitude (cluster raster + shadow views + light extract are the
+  >   GPU work that scales with lights).
+  > * ⚠️ **Scope correction to N-25's verdict, load-bearing here:** the 4× pixel A/B rules out
+  >   *fragment-shading*-bound only. Shadow-map passes and the GPU clustering raster are
+  >   render-resolution-independent, and a downclocked GPU slows everything uniformly — all compatible
+  >   with "+4.1% from 4× fewer pixels". "CPU-bound" is unproven for the slow phase specifically.
+  > * Amplitude-mechanism candidates on the engine side (independent of who owns the clock): Bevy 0.19
+  >   re-renders every live shadow view every frame with no caching; entities with **no Aabb** are pushed
+  >   into every directional cascade unconditionally (`bevy_light-0.19.0/src/lib.rs:456-462`) — our prop
+  >   roots; each visible shadow spot adds a full all-meshes caster sweep; the caster-list rewrite marks
+  >   lights `Changed` every frame, re-extracting them wholesale. The ~20-30k per-tile dungeon entities
+  >   multiply all of it per view (2026-07-31 perf review, dungeon/render.rs:227 finding).
+  > * Verify any fix against the super-beats and the runaway, not just the median cycle.
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Next:* `--features bevy/trace_tracy` over ≥3 cycles, restricted to
-  `Update`/`PostUpdate`/extract per the narrowing above. · *Reading:* [ABM]
+  behind it. · *Deps:* N-25 · *Next:* **(1)** zero-change driver test: log `nvidia-smi -q -d
+  CLOCK,PERFORMANCE -lms 500` (or `dmon`) beside a ≥60 s fixed-camera run — a graphics clock
+  square-waving in phase with frame time at ~11.6 s confirms; then lock clocks (`nvidia-smi -lgc`) and
+  watch the oscillation vanish (or not). **(2)** shadow A/B at the same recipe (TV-spot
+  `shadow_maps_enabled: false`, illumination census unchanged) to size the shadow path's amplitude
+  share. **(3)** `--features bevy/trace_tracy` over ≥3 cycles remains the definitive attribution if
+  (1) is negative. · *Reading:* [ABM]
 - **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
   `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
   every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
