@@ -287,6 +287,32 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   ⚠️ **Also observed: a degradation over TIME at a fixed viewpoint.** Two captures 13 s apart from the
   identical camera position with identical resident geometry (590,869 tris) read 45.5 fps / 134 ms
   worst, then 27.3 fps / 224 ms worst. Whatever this is, it is not geometry and not location.
+  > ### 📐 It is not a degradation — it is a ~11.8 s OSCILLATION. Measured 2026-07-30 from `fps_trace.csv`.
+  > The two captures above sampled opposite phases of a cycle, which is why it read as decay. Over the
+  > 44 s trace, `fps_local` swings between a **slow phase (mean 68.1 fps)** and a **fast phase (mean
+  > 146.0 fps)** — a **2.14×** swing — with slow-phase onsets at **4.6 s, 16.2 s, 28.4 s, 40.0 s**:
+  > intervals 11.6 / 12.2 / 11.6, **mean period 11.8 s over 3 clean cycles**. Slow phase ~4.6 s of each.
+  >
+  > **The scene is provably constant across the whole window** — same cell (80,112), same region 13,
+  > same biome, `vis_units` 5, `vis_hostiles` 0, `vis_props` 7, `vis_lights` 7, and `vis_tris` varying by
+  > **4 out of 413,364**. So this is neither geometry nor location nor entity count, and N-23 cannot
+  > touch it.
+  >
+  > **Host CPU frequency scaling is ruled out — by magnitude, not by period.** Sampled `/proc/cpuinfo`
+  > at 2 Hz for 42 s under sustained load: mean-of-core-means 4132 MHz, range 3639–4200, a **1.15×**
+  > swing. A 15% clock change cannot produce a 114% frame-time change even if perfectly correlated.
+  > *Whatever this is, it is in the application.*
+  >
+  > **Next step is per-system attribution, not more grepping.** `--features bevy/trace_tracy` over a
+  > fixed-camera run ≥ 3 cycles (≥ 40 s), then find the system whose cost has an 11.8 s period. Cheap
+  > ablation if Tracy is inconvenient: re-measure the same fixed camera with the mycelia plugin out —
+  > it owns the only GPU compute pass in the frame, which is the standing suspect for a periodic cost.
+  > *Ruled out already:* `MIN_APPEARANCE_RAMP_SECS = 12.0` (`mycelia/perceptual.rs:68`) is tantalisingly
+  > close to the period but is a `slew` **rate limiter**, not a periodic trigger — it produces a smooth
+  > ramp, not a cycle. `perf_probe`'s `HOTSPOT_EVERY_SECS = 10.0` is the wrong period and is one small
+  > file write.
+  > **Note the prior suspect does not fit.** FVS-N-13 leaks one dungeon *per expedition*; this cycles
+  > three times inside a single run at a fixed camera. N-13 is still a real leak — it is just not this.
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
   behind it. · *Deps:* N-25 · *Reading:* [ABM]
 - **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
