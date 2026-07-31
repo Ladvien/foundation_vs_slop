@@ -619,21 +619,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   into that prior and become ceremony. Worth re-checking *after* H-5, not before.
   *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
   whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
-- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S
-  **The decision.** A missing or empty archive makes `CurriculumDirector::pick` return `None`, the
-  director does not fire, and the **authored** `config.ron` world plays. Claimed as one path rather than
-  a fallback: with nothing to sample there is no degraded substitute being written — the authored world
-  is the *right* expedition, not a consolation for a failed one.
-  **The reason to check rather than assert it:** that argument is exactly the shape a fallback uses to
-  justify itself, and this repo's rule is unusually strict ("no backup modes, no rollover behavior").
-  The honest test is whether the two paths can ever *disagree about what the player is playing* — if a
-  campaign can silently alternate between directed and authored worlds without the player being told,
-  it is a second path however it is framed.
-  *Falsify it:* delete the archive mid-campaign and check the player can tell. `pick_next_challenge`
-  currently `info!`s it, which is invisible in a shipped build.
-  *If wrong:* surface it in FVS-L-4's briefing — "AUTHORED UNIVERSE (no archive)" — so the state is
-  legible rather than silent. That is probably the right move regardless. · *Deps:* H-3, L-4 · *Reading:* — (no corpus resource)
-
 ---
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5

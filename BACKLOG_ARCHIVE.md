@@ -1271,6 +1271,30 @@ Split out 2026-07-30.
   If picking ever goes silently dead, `MeshPickingCamera` is the first thing to check.
   · *Touches:* `src/dialogue/{mod,runtime}.rs`, `src/camera.rs` · *Write-up:* `debug_screenshots/2026-07-30-dialogue-choice-softlock.md`
 
+- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S · ✅ **ANSWERED AND SHIPPED — found already done 2026-07-30**
+  **The answer is no, it was not — and the remedy is already in the tree.**
+  The claim under test: a missing archive makes `CurriculumDirector::pick` return `None`, the director
+  does not fire, and the authored `config.ron` world plays — asserted as one path rather than a fallback
+  because "with nothing to sample there is no degraded substitute being written". The spike's own
+  objection was that this is *exactly the shape a fallback uses to justify itself*, and that the honest
+  test is whether the player can **tell**.
+  They could not. `pick_next_challenge` only `info!`d it, which is invisible in a shipped build — and
+  `director.rs`'s own doc comment still says a caller with no archive "must **fall back**" while claiming
+  there is no second path, which is the tell.
+  **Shipped fix, verified present 2026-07-30:** the state is written to `ExpeditionBriefing`
+  (`director.rs:363`) and the panel says it in as many words — `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED`,
+  *"Baseline site conditions. Nothing has been tuned to you."* (`ui/briefing.rs:56`). Deliberately named
+  as a **universe**, in the same voice as the sampled case, so it reads as a legitimate expedition rather
+  than an error.
+  Pinned by `ui::briefing::tests::the_authored_world_says_so_in_as_many_words`, which cites the spike by
+  number and asserts both halves — that the unsampled case is legible, and that it still reads as a
+  briefing rather than an error. `BriefingPlugin` is registered (`lib.rs:449`) — checked, because
+  defined-but-never-registered is this repo's recurring bug and a silent panel would make the test
+  vacuous in the shipped build.
+  **So the framing survives, but only because it was made legible.** A path the player cannot perceive
+  is a second path however it is argued; the fix was not to remove a branch but to make the branch
+  announce itself. Worth keeping as the worked example of what "one path" costs when a branch is
+  genuinely justified. · *Deps:* H-3, L-4 (both shipped)
 - **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · ✅ **CLOSED 2026-07-30 — it was already evolved; the item was stale**
   Filed as "spawn/breed cadence is the main pacing dial in the game and the search cannot touch it."
   **That premise was false when written.** The FVS-I-6 descriptor audit found `world_genome` already
