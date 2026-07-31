@@ -1,6 +1,8 @@
 //! Tests for `fruit.rs` — moved out of the module file so the implementation reads without
 //! scrolling past them. Still a child module of the same parent, so `use super::*` resolves
 //! exactly as before; this is a pure move.
+// determinism-lint: off — this whole FILE is a `#[cfg(test)]` module (declared via `#[path]` in
+// fruit.rs:1287), which the lint's per-file scan cannot see; inputs here are hand-built, not queries.
 
 use super::*;
 use crate::camera::{MAX_ZOOM, MIN_ZOOM};

@@ -35,6 +35,11 @@ pub struct FogGrid {
     last_cells: Vec<IVec2>,
     /// Set the frame the visible set changed, so the floor-material pass only runs then.
     dirty: bool,
+    /// Cells whose `vis` state transitioned since `apply_floor_fog` last ran — the repaint touches only
+    /// these (via `cell_tiles`) instead of walking every floor tile on the map. May hold duplicates
+    /// across FixedUpdate sub-steps; the per-tile write is idempotent (a pure function of the cell's
+    /// final fog state + biome), so duplicates and iteration order are harmless.
+    changed_cells: Vec<IVec2>,
 }
 
 impl FogGrid {
@@ -45,6 +50,7 @@ impl FogGrid {
             cell_tiles: HashMap::new(),
             last_cells: Vec::new(),
             dirty: false,
+            changed_cells: Vec::new(),
         }
     }
 
@@ -153,9 +159,12 @@ fn update_los(
     fog.dirty = true;
 
     // Everything currently visible falls back to explored; LOS below re-lights what still shows.
-    for v in fog.vis.iter_mut() {
-        if *v == CellVis::Visible {
-            *v = CellVis::Explored;
+    // Index loop (not `iter_mut`) so each demoted cell can be recorded for the incremental repaint.
+    for i in 0..fog.vis.len() {
+        if fog.vis[i] == CellVis::Visible {
+            fog.vis[i] = CellVis::Explored;
+            fog.changed_cells
+                .push(IVec2::new((i % fog.width) as i32, (i / fog.width) as i32));
         }
     }
 
@@ -184,6 +193,9 @@ fn update_los(
                 let i = fog.index(c);
                 let was = fog.vis[i];
                 fog.vis[i] = CellVis::Visible;
+                if was != CellVis::Visible {
+                    fog.changed_cells.push(c);
+                }
                 // First sighting: reveal this cell's tiles (floor + walls) permanently.
                 if was == CellVis::Unseen && let Some(entities) = fog.cell_tiles.get(&c) {
                     for &entity in entities {
@@ -200,23 +212,40 @@ fn update_los(
 /// After a visibility change, tint floor tiles: bright where a unit currently sees them, dim where
 /// only explored. Walls are handled by the dungeon's knee-wall squash and stay lit once revealed, so
 /// this query is floor-only (`Without<Wall>`).
+///
+/// Repaints ONLY the cells `update_los` transitioned (via the `cell_tiles` index) — never the whole
+/// floor query, which on the 192×192 map is ~15-22k `Mut<MeshMaterial3d>` items per march step.
+/// Equivalent by construction: a tile the pass skips has an unchanged fog state, so the full walk
+/// would have re-derived the material it already has (the `id()` guard made it a no-op).
 fn apply_floor_fog(
     mut fog: ResMut<FogGrid>,
     mats: Res<FloorMaterials>,
     // Needed for the cell's surface biome: the bright/dim pair is per-biome, so swapping on fog state
     // alone would repaint a concrete floor as motel carpet the moment a unit looked at it.
     dungeon: Res<Dungeon>,
-    mut floors: Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>), (With<Tile>, Without<Wall>)>,
+    mut floors: Query<&mut MeshMaterial3d<StandardMaterial>, (With<Tile>, Without<Wall>)>,
 ) {
     if !fog.dirty {
         return;
     }
+    let fog = &mut *fog;
     fog.dirty = false;
-    for (tile, mut material) in &mut floors {
-        let visible = matches!(fog.vis[fog.index(tile.cell)], CellVis::Visible);
-        let want = mats.pick(dungeon.biome(tile.cell), visible);
-        if material.0.id() != want.id() {
-            material.0 = want.clone();
+    let changed = std::mem::take(&mut fog.changed_cells);
+    for cell in changed {
+        let Some(entities) = fog.cell_tiles.get(&cell) else {
+            continue; // cell with no spawned tiles (nothing to tint)
+        };
+        let visible = matches!(fog.vis[fog.index(cell)], CellVis::Visible);
+        let want = mats.pick(dungeon.biome(cell), visible);
+        for &entity in entities {
+            // Wall tiles in the index fail the `Without<Wall>` filter here by design — fog never
+            // touches wall materials.
+            let Ok(mut material) = floors.get_mut(entity) else {
+                continue;
+            };
+            if material.0.id() != want.id() {
+                material.0 = want.clone();
+            }
         }
     }
 }

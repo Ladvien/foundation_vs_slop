@@ -415,6 +415,9 @@ fn fracture(src: Soup, target: usize, min_extent: f32, seed: u32, impact_dir: Op
             .iter()
             .enumerate()
             .filter(|(i, _)| !unsplittable[*i])
+            // SORT-OK: `pieces` is a Vec built in deterministic order from authored mesh geometry —
+            // no query anywhere. An extent tie (or NaN → Equal) resolves to the last tied index,
+            // which is the same index every run.
             .max_by(|a, b| a.1.extent().partial_cmp(&b.1.extent()).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i);
         let Some(i) = pick else {

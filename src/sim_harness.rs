@@ -21,6 +21,14 @@ use std::sync::{Mutex, MutexGuard};
 /// otherwise-deterministic runs interfere (the same-seed hashes diverge). Each is individually
 /// reproducible — they must simply not overlap. Hold [`serial_guard`] for a harness `App`'s whole
 /// lifetime and determinism holds regardless of the test runner's `--test-threads`.
+///
+/// **Deliberately process-local, not machine-wide.** A cross-process lock (e.g. `flock` on a temp
+/// file) would close the multi-TARGET hole TESTING.md invariant 4 documents — but `evaluate::rollout`
+/// takes this guard for every episode, and the offline search's island/worker PROCESSES overlap those
+/// rollouts across processes on purpose (that overlap is the bake's entire parallelism). A machine-wide
+/// guard here would serialize the 24-worker bake to one rollout at a time. If the false-red insurance
+/// is ever wanted, it belongs at the test-suite layer (a lock the TEST binaries take once around their
+/// whole run), not inside the per-episode guard the workers share.
 static HARNESS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the harness serialization lock (see [`HARNESS_LOCK`]). Poison-tolerant: a panicking test still
@@ -943,6 +951,8 @@ pub fn containable_goal_cell(app: &mut App) -> Option<IVec2> {
         .into_iter()
         .map(|(id, _, pos)| (dungeon.world_to_cell(pos), id))
         // Quantise exactly as the hub tour does, so "nearest" means the same thing in both schedules.
+        // SORT-OK: total key — quantised distance², then the sim-minted `TargetId` (never reused, so
+        // no two candidates share one; see this fn's doc). Not an Entity id.
         .min_by_key(|(cell, id)| (((cell.as_vec2().distance_squared(from)) * 100.0) as i64, *id))
         .map(|(cell, _)| cell)
 }

@@ -202,7 +202,8 @@ struct SearchArgs {
     /// Default: the held-in set (`coevolve::HELD_IN_SEEDS`).
     #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
     seeds: Vec<u64>,
-    /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); capped useful at OPPONENTS (3).
+    /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); the batch emitter scales to
+    /// `batch × OPPONENTS` (48 at the default batch 16), so on a dedicated box size this at the core count.
     #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
     jobs: usize,
     /// Use the CMA-ME adaptive emitter (only honoured by `rl`). Shorthand for `--emitter cma-me`.
@@ -926,6 +927,8 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
 
     let Some(winner) = alive
         .iter()
+        // SORT-OK: `alive` is a Vec in island order (offline tool, no query). A fitness tie
+        // resolves to the last tied island — the same one every run of the same bake.
         .max_by(|x, y| x.best.unwrap_or(f32::MIN).total_cmp(&y.best.unwrap_or(f32::MIN)))
     else {
         return Err("no island winner".into());

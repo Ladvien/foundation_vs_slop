@@ -159,6 +159,8 @@ pub fn reveal_schedule(
         let Some(best) = experiments
             .iter()
             .filter(|x| x.expected_information_gain(&p) > 0.0)
+            // SORT-OK: `experiments` is a caller-ordered slice, no query. A gain tie resolves to
+            // the last tied element — the same one every run for the same slice.
             .max_by(|a, b| {
                 a.expected_information_gain(&p).total_cmp(&b.expected_information_gain(&p))
             })

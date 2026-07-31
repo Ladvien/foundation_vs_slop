@@ -180,6 +180,9 @@ where
                 .niches
                 .iter()
                 .enumerate()
+                // SORT-OK: `niches` is a Vec in creation order (offline search, no query). An lp
+                // tie — or NaN, mapped to Equal instead of panicking — resolves to the last tied
+                // index, the same one every run for the same archive.
                 .max_by(|a, b| a.1.lp.partial_cmp(&b.1.lp).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap_or(0);

@@ -194,6 +194,8 @@ impl MemoryStream {
         self.records
             .iter()
             .copied()
+            // SORT-OK: `records` is an append-ordered Vec (no query), so a score tie resolves to
+            // the last — i.e. most recently recorded — tied record, the same one every run.
             .max_by(|a, b| score(a, now).total_cmp(&score(b, now)))
     }
 }

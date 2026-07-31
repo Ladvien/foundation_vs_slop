@@ -873,6 +873,9 @@ pub(crate) fn ensure_leader(
     if !leaders.is_empty() {
         return;
     }
+    // SORT-OK: total key — SquadMember indices are assigned uniquely at spawn, so no two members
+    // share one and the min is the same operative regardless of query order. (Windowed-only anyway:
+    // see the fn doc — `Leader` stays out of the deterministic core.)
     if let Some((entity, _)) = members.iter().min_by_key(|(_, m)| m.0) {
         commands.entity(entity).insert(Leader);
     }

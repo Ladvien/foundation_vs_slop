@@ -118,6 +118,8 @@ impl MapElitesArchive {
 
     /// The single highest-fitness elite across the whole archive.
     pub fn best(&self) -> Option<&Elite> {
+        // SORT-OK: `cells` is a BTreeMap, so `values()` iterates in key order — a fitness tie
+        // resolves to the highest tied cell key, the same elite every run (no hash/query order).
         self.cells.values().max_by(|a, b| a.fitness.total_cmp(&b.fitness))
     }
 
