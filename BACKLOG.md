@@ -271,7 +271,14 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   and it is invisible if hover never fires — which is exactly the failing case.
   *Done when:* a `Choice` node can be answered in the shipped windowed build, and a run cannot reach
   a state where the sim is frozen with no way to unfreeze it. · *Deps:* — · *Touches:* `src/dialogue/runtime.rs`, `src/dialogue/bubble.rs` · *Reading:* — (no corpus resource)
-- **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls (MEASURED 2026-07-30)** · L · *determinism: moves goldens*
+- **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls** · L · *determinism: moves goldens* · ⛔ **DEMOTED 2026-07-30 — DO NOT DO THIS FOR PERFORMANCE**
+  > **FVS-N-25 measured the frame as CPU-bound**: a 4x pixel cut moved frame time +4.1%. Decimating
+  > these meshes would therefore buy ~nothing, while costing a golden re-pin and a
+  > `valkyrie_asset.rs` contract re-pin. The census below is a **budget**, not a cause — treating it
+  > as one was the mistake N-25 exists to have caught.
+  > It stays open on **asset-hygiene** grounds only (`CLAUDE.md`: "all our assets should be
+  > low-poly count"), at low priority, and it must not be cited as a performance fix unless a
+  > loaded-scene A/B reverses N-25.
   **Reported from play as "it drops to 26 FPS", with the barrels suspected.** The barrels are innocent:
   **252 triangles each**, among the lightest assets shipped. Measured instead with the new
   `perf_probe` (`src/perf_probe.rs`) over a real session:
@@ -323,7 +330,34 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   worst, then 27.3 fps / 224 ms worst. Whatever this is, it is not geometry and not location.
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
   behind it. · *Deps:* N-25 · *Reading:* [ABM]
-- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S
+- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
+  > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
+  > first 10 s discarded, 68 samples each):
+  >
+  > | run | pixels | mean fps | frame time | visible tris |
+  > |---|---:|---:|---:|---:|
+  > | full | 2.48 Mpx | 117.8 | **9.94 ms** | 413,364 |
+  > | half | 0.62 Mpx | 113.6 | **10.35 ms** | 413,364 |
+  >
+  > **A 4x cut in pixels moved frame time by +4.1% — i.e. not at all** (the half-res run was
+  > marginally *slower*, which is noise). At ~413k triangles on screen the renderer is not the
+  > constraint. **FVS-N-23's mesh decimation would buy approximately nothing**, and it would have
+  > cost a golden re-pin and a `valkyrie_asset.rs` re-pin to find that out.
+  >
+  > ⚠️ **The first attempt at this test LIED, and the failure is worth keeping.** It reported
+  > CPU-bound at 16.75 vs 16.82 ms — because both runs sat at exactly **60.0 fps median**, i.e.
+  > both were vsync-capped. A capped frame time measures the display, not the renderer, and two
+  > capped runs can only ever report "no difference". Measurement mode now forces
+  > `PresentMode::AutoNoVsync`. **Check the median for a suspiciously round cap before believing
+  > any frame-time comparison.**
+  >
+  > ⚠️ **Scope of the claim, stated precisely:** the probe run held ~118 fps where the player saw
+  > 26-45, with the same geometry but no live swarm (29 crabs, 5 mancae) and immature mycelia. So
+  > this establishes the **renderer is not the constraint at that geometry**. It does *not* say
+  > which CPU system eats the frame when the swarm is live. Re-run the same A/B on a LOADED scene
+  > before extending the conclusion.
+  > *Next:* `docs/perf_improvements_plan.md` aims at the CPU side and is therefore aimed correctly;
+  > `--features bevy/trace_tracy` for per-system attribution.
   **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
   a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
   concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget

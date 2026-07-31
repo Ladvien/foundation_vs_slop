@@ -208,12 +208,52 @@ pub fn run() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Foundation vs. Slop".into(),
-                // Launch borderless-fullscreen on the current monitor (fills the screen at the desktop
-                // resolution, no mode switch). `BorderlessFullscreen` over exclusive `Fullscreen` so
-                // alt-tab / the in-process `devshot` capture stay well-behaved.
-                mode: bevy::window::WindowMode::BorderlessFullscreen(
-                    bevy::window::MonitorSelection::Current,
-                ),
+                // `FVS_WINDOW=WxH` launches windowed at that exact pixel size instead of
+                // borderless-fullscreen. **It exists for one job: deciding whether a frame is CPU- or
+                // GPU-bound** (FVS-N-25), which is answered by rendering the identical scene at two
+                // pixel counts and seeing whether frame time follows. Without a way to change the
+                // pixel count, `perf_probe`'s frame times cannot distinguish "too much geometry" from
+                // "too much simulation", and the two have opposite fixes.
+                //
+                // A malformed value is a loud panic, not a silent fall-back to fullscreen: a
+                // measurement run that quietly used the wrong resolution would produce a confident
+                // wrong answer, which is worse than not running.
+                resolution: match std::env::var("FVS_WINDOW") {
+                    Ok(spec) => {
+                        // Parsed as one expression so the whole malformed case is a SINGLE panic site
+                        // (`tests/panic_budget.rs` counts them, and two sites for one typo is not worth
+                        // a point of budget).
+                        let parsed = spec.split_once(['x', 'X']).and_then(|(w, h)| {
+                            Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+                        });
+                        let (w, h) = parsed.unwrap_or_else(|| {
+                            panic!("FVS_WINDOW must look like 1720x720 (got {spec:?})")
+                        });
+                        bevy::window::WindowResolution::new(w, h)
+                    }
+                    Err(_) => default(),
+                },
+                // **Vsync OFF in measurement mode, and this is load-bearing.** The first attempt at
+                // the FVS-N-25 A/B returned "CPU-bound" with 16.75 ms vs 16.82 ms — because BOTH runs
+                // sat at exactly 60.0 fps median, i.e. both were vsync-capped and neither was
+                // stressed. A capped frame time is a measure of the display, not of the renderer, and
+                // comparing two capped runs can only ever report "no difference". Uncapped, the frame
+                // time is free to show what the work actually costs.
+                present_mode: if std::env::var("FVS_WINDOW").is_ok() {
+                    bevy::window::PresentMode::AutoNoVsync
+                } else {
+                    bevy::window::PresentMode::default()
+                },
+                mode: if std::env::var("FVS_WINDOW").is_ok() {
+                    bevy::window::WindowMode::Windowed
+                } else {
+                    // Launch borderless-fullscreen on the current monitor (fills the screen at the
+                    // desktop resolution, no mode switch). `BorderlessFullscreen` over exclusive
+                    // `Fullscreen` so alt-tab / the in-process `devshot` capture stay well-behaved.
+                    bevy::window::WindowMode::BorderlessFullscreen(
+                        bevy::window::MonitorSelection::Current,
+                    )
+                },
                 ..default()
             }),
             ..default()
