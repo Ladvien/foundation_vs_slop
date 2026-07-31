@@ -230,47 +230,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
   `ui::site_hud` works — not a reach into the in-game overlay stack.
   *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
-- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run** · M · ⚠️ **CAUSE FOUND AND FIXED 2026-07-30 — NOT YET VERIFIED IN THE RUNNING GAME**
-  > **Root cause: `MeshPickingSettings::require_markers` defaults to `false`.** The backend ray-casts
-  > *every* mesh, and `Pickable` defaults to `should_block_lower: true` — so
-  > `containment::extraction`'s beacon, a decorative `Cylinder` light shaft standing exactly where the
-  > squad starts, was swallowing every click on the leader's choice bubbles. The player found it
-  > ("whatever the beam of light is at that the squad starts in, that intercepts the mouse").
-  > *Shipped:* picking is now opt-in (`require_markers: true` + `MeshPickingCamera` on the camera),
-  > which kills the whole class rather than patching one mesh; plus `1`-`9` to pick an option and
-  > `Enter`/`Space` to advance a line, since the bubbles were already LABELLED "1."/"2.".
-  > **Close this only after a windowed run confirms a Choice can actually be answered.**
-  **Player report, with a region capture:** *"I can't click on these options."* Metadata confirms
-  `App state: InGame`, `Menu/overlay: Conversation`, `Sim: frozen`. The expedition-start scene ends in
-  a `Choice` node, a modal conversation freezes the sim (`dialogue/runtime.rs:4`), and choices
-  deliberately do not auto-advance (`active.advance_at = f32::INFINITY`). **So an unanswerable choice
-  is not a cosmetic bug — it is an unrecoverable soft-lock on the game's opening beat.**
-  This is the same defect FVS-C-1's landing commit already recorded from the other side: every
-  screenshot taken that day was of a paused game, and two captures four seconds apart were
-  byte-identical (full-frame RMSE 0). It was diagnosed then as "nobody answered the modal". The
-  player has now shown that they *cannot*.
-  **Ruled out by inspection (2026-07-30), so nobody repeats it:**
-  * `MeshPickingPlugin` **is** registered (`dialogue/mod.rs:73`), and the bubbles do carry
-    `Pickable::default()` plus a per-entity `On<Pointer<Click>>` observer writing `ChoicePicked`.
-  * `resolve_choice` has **no run condition** — it is a plain `Update` system in the chain, so a
-    written `ChoicePicked` would be consumed.
-  * The sim freeze is `SimBlocked`, which pauses `Time<Virtual>` only; `Update` and the picking
-    backend still run.
-  * No fullscreen UI swallows the pointer: `ui::layout::spawn_frame`'s root **and** its region nodes
-    are `Pickable::IGNORE`, and so is `blood_lens`. Nothing spawns a scrim on
-    `MenuState::Conversation`.
-  **Still open, in rough order of suspicion:** (a) the ray-cast culls backfaces for 3-D meshes
-  (`bevy_picking .../ray_cast/mod.rs:287` — `(false, false) => Backfaces::Cull`), and the bubble's
-  material sets `cull_mode: None`, so it can **render** from a side it cannot be **picked** from — the
-  failure would be invisible to the eye and total to the mouse; adding `RayCastBackfaces` to the
-  bubble entity is a one-line test of this. (b) press and release landing on different entities.
-  (c) a camera-ordering issue in which pointer→camera resolution picks the wrong camera.
-  **Whatever the cause, the fix needs a second half: a keyboard fallback is NOT the answer** (that
-  would be a second path), but the options render as ordinary speech bubbles with "1." / "2."
-  prefixes and *no affordance saying they are clickable*. The dim-until-hover tint is the only cue
-  and it is invisible if hover never fires — which is exactly the failing case.
-  *Done when:* a `Choice` node can be answered in the shipped windowed build, and a run cannot reach
-  a state where the sim is frozen with no way to unfreeze it. · *Deps:* — · *Touches:* `src/dialogue/runtime.rs`, `src/dialogue/bubble.rs` · *Reading:* — (no corpus resource)
 - **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls** · L · *determinism: moves goldens* · ⛔ **DEMOTED 2026-07-30 — DO NOT DO THIS FOR PERFORMANCE**
   > **FVS-N-25 measured the frame as CPU-bound**: a 4x pixel cut moved frame time +4.1%. Decimating
   > these meshes would therefore buy ~nothing, while costing a golden re-pin and a
@@ -380,7 +339,23 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is the standing candidate.
   *Done when:* the bound is named with the measurement that shows it, and N-23/N-24 are re-ordered
   behind that answer. · *Deps:* — · *Touches:* — · *Reading:* [ABM]
-- **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline*
+- **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline* · ✅ **STATIC AUDIT RUN 2026-07-30 → `docs/descriptor_audit.md`**
+  > **Read the audit before touching I-7..I-10 — it changes all four.** Headlines:
+  > * **I-10 is STALE** — `BreedingTuning` (7) and `ParasiteTuning` (14) are *already* decoded in
+  >   `world_genome.rs:452/490`, `respawn_interval` and `manca_count_max` included. Closed, archived.
+  > * **I-9 names the wrong file.** `src/ai/tuning.rs` is fully encoded already; the unevolved knobs are
+  >   `src/behavior_tuning.rs::PerceptionTuning`, of which `behavior_genome` covers only 2 of 13.
+  > * **I-8 fails** — all 15 `MetropolisWeights` knobs tune *arrangement*, the level archive bins on
+  >   *count* × mould. Needs your remove/add-axis/couple call.
+  > * **I-7 passes for a subset only** — ~8 sim-relevant knobs reach `deaths`; the ~22 cosmetic ones are
+  >   textbook N-21.
+  > ⚠️ **And one thing the audit surfaced that nobody chose:** `behavior_genome` (89 knobs, *squad*
+  > tuning) and `audio_genome` (16 knobs, acoustics) are **both** binned on `swarm_descriptor` — the
+  > *swarm's* aggression × persistence. The only bake that has ever landed on those axes filled **3 of 64
+  > cells**. Whether that descriptor is right for either population is a live question, and a descriptor
+  > choice is yours. It gates I-9.
+  > *Still unmeasured:* every "moves an axis" claim is a code-path argument. The settling test is an
+  > ablation per knob group — a search run, not a read.
   The four items below add ~20 knobs to the genomes. **Adding a knob no descriptor can see makes the
   archive worse, not better** — two genomes differing only in that knob land in the same cell, and the
   winner is decided by evaluation luck. That is not a hypothetical: it is exactly FVS-N-21 (biome
@@ -394,15 +369,42 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 - **FVS-I-7 — Gore settings (6 knobs) are unevolved** · M · *determinism: offline*
   Not in any genome, yet **a gore knob already tipped a 5/5 win into a wipe** — so it is a live
   difficulty dial the offline search cannot see, which is precisely what `CLAUDE.md`'s "every feature
-  must evolve" rule exists to prevent. · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
+  must evolve" rule exists to prevent.
+  > ✅ **Passes the audit — for a SUBSET only (2026-07-30).** `GoreSettings` is ~30 knobs and most are
+  > cosmetic (`spray_color_a/b`, `pool_color`, `pool_gloss`, `dry_time`, `wall_splat_size`, ...);
+  > encoding those is textbook N-21. Encode **only** the ~8 with a causal path to the world archive's
+  > `deaths` axis: `max_gibs`, `chunk_restitution`, `gib_friction`, `autogib_pieces_base`,
+  > `autogib_min_pieces`, `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. Say in the code why
+  > the cosmetics are excluded, so nobody "completes" the group later.
+  > The header count says "6 knobs"; the real sim-relevant count is ~8. Fix that when landing.
+  · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
 - **FVS-I-8 — `MetropolisWeights` (10+ knobs) are unevolved** · L · *determinism: offline*
   The largest of the four, and the one most likely to fail I-6's audit: it shapes the *level*, and the
-  level descriptor has two axes. Run the audit before writing any encode/decode. · *Deps:* **I-6** · *Touches:* `src/placement/`, `src/squad_ai/world_genome.rs`
-- **FVS-I-9 — Perception tuning is unevolved** · M · *determinism: offline*
-  What agents can sense is a direct difficulty axis and is currently authored-only. · *Deps:* **I-6** · *Touches:* `src/ai/tuning.rs`, `src/squad_ai/world_genome.rs`
-- **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · *determinism: offline*
-  Spawn/breed cadence is the main pacing dial in the game and the search cannot touch it. Most likely
-  of the four to move a descriptor axis honestly (swarm density is already measured). · *Deps:* **I-6** · *Touches:* `src/crab/`, `src/parasite.rs`, `src/squad_ai/world_genome.rs`
+  level descriptor has two axes. Run the audit before writing any encode/decode.
+  > ⛔ **IT FAILED THE AUDIT (2026-07-30).** All 15 knobs are either sampler settings (`iterations`,
+  > `temp_start/end`, `translate_sigma`, `rotate_prob`) or arrangement-quality weights (`w_overlap`,
+  > `w_wall`, `w_facing`, `w_group`, `coherence`, ...). The level archive bins on **clutter ×
+  > infestation** — clutter is `furniture_per_room`, a *count* set upstream by the grammar, and
+  > Metropolis decides *where* pieces go, never *how many*. **Zero of 15 move an axis.** This is N-21 at
+  > 15x scale.
+  > **Your call, three ways:** (1) **remove** — leave arrangement authored, cheapest, loses nothing the
+  > archive can reward; (2) **add an axis** — an arrangement-coherence descriptor, but that is a
+  > descriptor change and invalidates the level archive; (3) **couple** — encode only `coherence` and
+  > accept it rides fitness, not a descriptor.
+  · *Deps:* **I-6** · *Touches:* `src/placement/`, `src/squad_ai/level_genome.rs`
+- **FVS-I-9 — Perception tuning is unevolved** · M · *determinism: offline* · ⚠️ **RESCOPED 2026-07-30 by the I-6 audit**
+  What agents can sense is a direct difficulty axis and is currently authored-only.
+  > **The original *Touches* was wrong.** `src/ai/tuning.rs` is `AiTuning` — the 27 field-propagation
+  > knobs at the head of `world_genome`'s `BOUNDS`, i.e. **already fully evolved**. The genuinely
+  > unevolved knobs are `src/behavior_tuning.rs::PerceptionTuning`, of which `behavior_genome` encodes
+  > only 2 of 13 (`leash`, `squad_think_interval`). The 11 that are missing: `examine_sight(_release)`,
+  > `threat_sight(_release)`, `psi_sight(_release)`, `ward_sight(_release)`, `wounded_frac(_release)`,
+  > `leash_in`.
+  > **Blocked on the descriptor question, not just on I-6.** These are *squad* knobs and the behaviour
+  > archive bins on the *swarm's* aggression × persistence — second-order, which is how N-21 happens.
+  > **Encode constraint:** each `_sight`/`_sight_release` is a Schmitt band; `decode` must enforce
+  > `release >= sight` or the search produces chattering perception no descriptor can explain.
+  · *Deps:* **I-6** (+ the descriptor call) · *Touches:* `src/behavior_tuning.rs`, `src/squad_ai/behavior_genome.rs`
 - **FVS-B-10 — Give the acoustic channels a player-facing payoff (stealth / noise discipline)** · L
   `NOISE_SQUAD`/`NOISE_SWARM` propagate and are *perceived* (`unit_fear_of_din`, `crab_fear_of_din`,
   `investigate_threshold`) but no player-facing verb reads them, so the whole acoustic layer is
@@ -856,7 +858,20 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
-- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M
+- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **FORK DECIDED 2026-07-30 — option (b); implementation still open**
+  > **Decision (user, 2026-07-30): (b) — corridors inherit one endpoint room.** Rooms sample the noise
+  > at `rect.center_cell()`; a corridor takes the biome of its lower-`RegionId` endpoint. Chosen over
+  > (a) because an independent corridor draw produces concrete → carpet → concrete sandwiches, which
+  > read *busier* and are the opposite of the complaint; over (c) because one-biome-per-level makes
+  > `biome_scale` dead config, and dead config then has to come out of `config.ron` + `world_genome` +
+  > `genome_coverage` — a genome-length change bought for a cosmetic result.
+  > **No config, genome or archive change**, so this does not invalidate a bake.
+  > *Implementation note:* the whole change fits behind `Dungeon::biome()` (`src/dungeon/mod.rs:335`),
+  > which today forwards straight to `biome_at`. Its seven callers (`dungeon/render.rs` ×4,
+  > `fog.rs:217`, `audio.rs:693`, `perf_probe.rs:251`) are unaffected if the per-zone resolution
+  > happens inside that one function, and `corridor_of`/`NO_CORRIDOR` (`mod.rs:146,164`) already
+  > distinguishes corridor floor from room floor. Update the `biome()` doc comment while there — it
+  > currently claims walls agree with their room, which is the thing that was never true.
   Player: *"I don't like backrooms carpets and concrete walls. It should be one or the other. The
   transition should be at a doorway."*
   **Cause:** `Dungeon::biome()` evaluates `biome_at(seed, cell, mix, scale)` — value noise sampled
@@ -864,8 +879,7 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   of the threshold *inside a single room*, which is exactly the reported symptom. The doc comment
   claims "a wall belongs to the biome of the cell it is attached to", and that holds only
   probabilistically, which is to say not at all.
-  **Fix = sample per ZONE rather than per cell.** Open design fork, and it needs a decision because
-  the options differ in more than taste:
+  **Fix = sample per ZONE rather than per cell.** The fork, kept for the reasoning behind the pick:
   * **(a)** rooms sample the noise at `rect.center_cell()`; corridors get their own biome. Transition
     at every doorway — but a concrete → carpet corridor → concrete sandwich makes levels read *busier*,
     which is the opposite of the complaint.

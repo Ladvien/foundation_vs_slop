@@ -1227,6 +1227,67 @@ Split out 2026-07-30.
   registers it. · *Deps:* H-3
   Surface the director's chosen challenge as a Branch-universe briefing at run start.
   *Done when:* each expedition shows its sampled challenge framing. · *Deps:* H-3 · *Touches:* UI, director · *Reading:* [LPM], [QD-PCG]
+- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run** · M · ✅ **CLOSED 2026-07-30**
+  **Player report, with a region capture:** *"I can't click on these options."* Metadata confirmed
+  `App state: InGame`, `Menu/overlay: Conversation`, `Sim: frozen`. The expedition-start scene ends in
+  a `Choice` node, a modal conversation freezes the sim, and choices deliberately do not auto-advance
+  (`active.advance_at = f32::INFINITY`). **So an unanswerable choice was not a cosmetic bug — it was
+  an unrecoverable soft-lock on the game's opening beat.** Same defect FVS-C-1's landing commit had
+  recorded from the other side (every screenshot that day was of a paused game; two captures four
+  seconds apart were byte-identical, full-frame RMSE 0), diagnosed then as "nobody answered the
+  modal". The player showed that they *could not*.
+  **Root cause: `MeshPickingSettings::require_markers` defaults to `false`.** The backend ray-casts
+  *every* mesh, and `Pickable` defaults to `should_block_lower: true` — so `containment::extraction`'s
+  beacon, a decorative, unlit, 10%-alpha `Cylinder` light shaft standing exactly where the squad
+  starts, was swallowing every click on the leader's choice bubbles. The player found it ("whatever
+  the beam of light is at that the squad starts in, that intercepts the mouse"). The three standing
+  hypotheses at the time — backface culling on a `cull_mode: None` bubble, press/release landing on
+  different entities, camera-ordering in pointer→camera resolution — were **all wrong**, and are
+  recorded here because each is individually plausible and someone will re-derive them.
+  *Shipped 2026-07-30 (`d52c7d4`):* picking is opt-in (`require_markers: true` + `MeshPickingCamera`
+  on the camera), which kills the whole class rather than patching one mesh and leaving the trap armed
+  for the next decorative mesh near a bubble; plus `1`-`9`/numpad to pick an option and `Enter`/`Space`
+  to advance a line, since the bubbles were already LABELLED "1."/"2." — the keys a player would guess
+  were being advertised and not accepted.
+  **On the one-path rule, because this item originally forbade exactly what shipped.** The entry said
+  "a keyboard fallback is NOT the answer (that would be a second path)". It is not one: `choice_hotkeys`
+  writes the *same* `ChoicePicked` message the click observer writes, so everything downstream —
+  `resolve_choice`, the node walk, the teardown — stays a single path. Two input **devices** for one
+  action is not the branching CLAUDE.md forbids; a *degraded substitute* resolution path would have
+  been.
+  ✅ *Verified 2026-07-30:* five tests in `src/dialogue/runtime.rs::tests` drive the state machine on
+  the keyboard alone — a digit picks that option, numpad matches the number row, an out-of-range digit
+  is ignored rather than clamped, a digit typed during a *line* does not answer the next choice, and a
+  full walk ends with the cursor dropped, `ConversationLock` released and `MenuState::Closed` set.
+  `advance_at` is pinned at infinity throughout, so none can pass on the auto-advance timeout.
+  ⚠️ **The limit of that proof, stated because the item's original acceptance was wider.** "Done when"
+  read: *a `Choice` node can be answered in the shipped windowed build, and a run cannot reach a state
+  where the sim is frozen with no way to unfreeze it.* The **second** clause is measured. The first is
+  measured only for the keyboard: mesh picking needs a window and a pointer, and `DialoguePlugin` is
+  never registered in the headless harness (`src/dialogue/mod.rs:6-7`), so no automated test in this
+  repo can reach the click path. `require_markers` + `MeshPickingCamera` stand on source reading.
+  **Closed on the user's explicit call** that the keyboard evidence suffices — the property that made
+  this a soft-lock rather than an annoyance is that a player who cannot click can always press `1`.
+  If picking ever goes silently dead, `MeshPickingCamera` is the first thing to check.
+  · *Touches:* `src/dialogue/{mod,runtime}.rs`, `src/camera.rs` · *Write-up:* `debug_screenshots/2026-07-30-dialogue-choice-softlock.md`
+
+- **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · ✅ **CLOSED 2026-07-30 — it was already evolved; the item was stale**
+  Filed as "spawn/breed cadence is the main pacing dial in the game and the search cannot touch it."
+  **That premise was false when written.** The FVS-I-6 descriptor audit found `world_genome` already
+  decodes both structs the item names:
+  * `BreedingTuning` (7 knobs, `world_genome.rs:452`) — **`respawn_interval` is the nest breed rate
+    limiter**, plus `meat_per_crab`, `feed_gain`, `spawn_boost_max`, `spawn_boost_decay`, `hunger_rate`,
+    `hunger_sate_rate`.
+  * `ParasiteTuning` (14 knobs, `world_genome.rs:490`) — including **`initial_count`** and
+    **`manca_count_max`**, i.e. swarm population directly.
+  `world_genome`'s own header already documented both slices ("breeding 7 ... parasite 14") in its
+  `N = 138` accounting, so the evidence was sitting in the file the item pointed at.
+  **Worth the paragraph because closing it is worth real money:** it removes an M-sized item, a
+  genome-length change, and the archive re-bake debt that change would have added to FVS-H-1 — which is
+  already carrying `audio_genome`'s 15→16 growth from FVS-K-1.
+  Same staleness class as FVS-A-4 / O-2 / F-2 above: an item whose acceptance was met and which nobody
+  re-read. If a *specific* cadence knob is genuinely missing, re-file it naming that knob rather than the
+  whole group. · *Audit:* `docs/descriptor_audit.md`
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
 
