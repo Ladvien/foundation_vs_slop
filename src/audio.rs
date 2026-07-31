@@ -49,7 +49,16 @@ use crate::util::{next_u32, rand01, smoothstep};
 /// the foreground (weapons, gore, growls) reads clearly over them.
 const WIND_VOL: f32 = 0.22;
 const MUSIC_VOL: f32 = 0.32;
-const FOOT_VOL: f32 = 0.08;
+/// Footstep gain, **compensated for the spatial voice** (2026-07-31). The 0.08 this replaces was
+/// tuned for the old non-spatial one-shot — a flat 0.08 dead-centre in the mix. When FVS-K-1
+/// spatialised the voice, rodio's inverse-distance-*squared* law started applying on top:
+/// `gain × min(1/(SPATIAL_SCALE·D)², 1) × 0.75` (the 0.75 is rodio's equidistant-ear factor), which
+/// at an ordinary camera distance of D≈10 world units is a ×0.06 cut — footsteps landed ~−54 dBFS
+/// under a non-spatial wind bed at −35 dBFS, i.e. inaudible. 0.5 restores roughly the old flat-0.08
+/// loudness at D≈7 (0.5 × 1/(0.35·7)² × 0.75 ≈ 0.062) and is *louder* when the squad is centred,
+/// quieter when framed at the screen edge — which is the point of the spatialisation. Tuned by
+/// math, to be settled by ear.
+const FOOT_VOL: f32 = 0.5;
 /// A squad unit stepping into an Almond-Water pool — a muddy footfall, well under the world sounds (a
 /// background wet-foot cue, not a splash you'd notice over gunfire).
 const SPLASH_VOL: f32 = 0.10;
@@ -508,21 +517,26 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(a);
 }
 
-/// Park the spatial listener on the ground point under the camera focus, rotated with the camera, so
+/// Park the spatial listener on the ground point at the camera focus, rotated with the camera, so
 /// its local X (the ear axis) equals screen-right and the plane it hears is the plane the player sees.
 ///
-/// The iso camera sits ~20 units up at `focus + ISO_OFFSET`; a listener *on* the camera would hear
-/// everything ~20 units away (attenuation crushed, pan biased toward screen-forward). Recovering the
-/// ground focus as `camera_translation − ISO_OFFSET` puts "screen centre" at zero distance instead.
+/// The iso camera sits ~20 units up at `focus + yaw · ISO_OFFSET`; a listener *on* the camera would
+/// hear everything ~20 units away (attenuation crushed, pan biased toward screen-forward). The focus
+/// is read from [`CameraRig`] — the authoritative value the camera transform is built *from* — rather
+/// than recovered as `camera_translation − ISO_OFFSET`, which silently assumed yaw 0: one Q/E detent
+/// rotates the iso offset, and un-rotated recovery displaced the listener 24 world units sideways
+/// (≈ −37 dB on every spatial sound, permanently, until the player rotated back). Reading the rig also
+/// keeps the listener still under screen shake, which is a camera effect and not a head movement.
 /// `Single` cleanly skips the system when there's no unique camera/listener (headless spin-up, first
 /// frame) — no panic, no unwrap.
 fn sync_listener(
+    rig: Res<crate::camera::CameraRig>,
     camera: Single<&GlobalTransform, With<Camera3d>>,
     listener: Single<&mut Transform, (With<SpatialListener>, Without<Camera3d>)>,
 ) {
     let cam = camera.into_inner();
     let mut tf = listener.into_inner();
-    tf.translation = cam.translation() - crate::camera::ISO_OFFSET;
+    tf.translation = rig.focus;
     tf.rotation = cam.rotation();
 }
 
@@ -646,11 +660,20 @@ fn play_sfx(
     }
 }
 
+/// Seconds between footfalls for `movers` walking units. More boots on the ground ⇒ a shorter gap,
+/// but **sub-linearly** — see `MIN_STRIDE` for why reproducing the true event rate through one
+/// shared voice is what made a five-person squad read as an army. `sqrt` keeps the ordering (more
+/// walkers is always denser) while compressing the top end, and the floor keeps a full squad's
+/// patter from machine-gunning.
+fn footfall_interval(movers: usize) -> f32 {
+    (STRIDE / (movers as f32).sqrt()).max(MIN_STRIDE)
+}
+
 /// Squad footfalls from a single shared voice (never overlapping — that's what turned five units
-/// into an army). Density scales linearly with the number of units actually walking, so a full
-/// squad patters ~5× faster than a lone survivor and the sound audibly thins as members die. Kept
-/// quiet so it's floor texture under the action. Non-spatial: the squad is what the camera frames,
-/// so its footfalls belong at the centre rather than smeared across the stereo field.
+/// into an army). Density scales sub-linearly (`sqrt`) with the number of units actually walking,
+/// so a full squad patters faster than a lone survivor and the sound audibly thins as members die.
+/// Kept quiet so it's floor texture under the action. Spatial at the squad centroid since FVS-K-1
+/// (see the spawn below); `FOOT_VOL` carries the distance-law compensation that change required.
 fn footsteps(
     mut commands: Commands,
     assets: Res<AudioAssets>,
@@ -678,11 +701,7 @@ fn footsteps(
         *timer = STRIDE; // idle → armed, so the next departure steps on its first frame
         return;
     }
-    // More boots on the ground ⇒ a shorter gap between steps, but **sub-linearly** — see
-    // `MIN_STRIDE` for why reproducing the true event rate through one shared voice is what made a
-    // five-person squad read as an army. `sqrt` keeps the ordering (more walkers is always denser)
-    // while compressing the top end.
-    let interval = (STRIDE / (movers as f32).sqrt()).max(MIN_STRIDE);
+    let interval = footfall_interval(movers);
     *timer += time.delta_secs();
     if *timer >= interval {
         *timer = 0.0;
@@ -1095,4 +1114,28 @@ fn pick_variant(rng: &mut u32, len: usize, last: &mut usize) -> usize {
     }
     *last = idx;
     idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The footfall cadence contract behind two "sounds like an army" reports: a lone walker steps
+    /// at `STRIDE`, density rises sub-linearly, and the `MIN_STRIDE` floor caps a full squad.
+    #[test]
+    fn footfall_interval_is_floored_and_monotone() {
+        assert_eq!(footfall_interval(1), STRIDE);
+        // sqrt law between the endpoints: 2 walkers = STRIDE/sqrt(2), still above the floor.
+        assert!((footfall_interval(2) - STRIDE / 2f32.sqrt()).abs() < 1e-6);
+        // A full squad (and anything denser) sits exactly on the floor.
+        assert_eq!(footfall_interval(5), MIN_STRIDE);
+        assert_eq!(footfall_interval(100), MIN_STRIDE);
+        // Never faster than the floor, never slower with MORE walkers.
+        let mut prev = f32::INFINITY;
+        for movers in 1..=10 {
+            let i = footfall_interval(movers);
+            assert!(i >= MIN_STRIDE && i <= prev, "interval must fall monotonically to the floor");
+            prev = i;
+        }
+    }
 }

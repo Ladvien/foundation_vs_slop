@@ -3,8 +3,16 @@
 
 Source: **horror_sfx_vol_1 / "Concrete Footsteps"**, via `/mnt/codex_fs/game_assets/audio/sfx/`.
 Transcoded MP3 → mono Vorbis (`-q:a 4`) to match the shipped carpet set — the footstep system plays a
-single shared, non-spatialised voice (`audio::footsteps`), so stereo would have been discarded anyway.
+single shared voice (`audio::footsteps`, spatialised at the squad centroid since FVS-K-1), so stereo
+would have been discarded anyway.
 Selected by the surface biome under the walking squad's centroid (`dungeon::Biome`).
+
+**Re-cut 2026-07-31 (with `foot/mud_step_1..8.ogg`):** the transcodes above shipped as the full 7–8 s
+source recordings — ~15 footfalls each — while `audio::footsteps` fires one clip per footfall, so every
+step spawned a walking column. The exact bug the carpet set had already had trimmed out of it
+(2026-07-05 dev journal). Each file is now a single footfall cut from a *different* onset of its own
+source recording (variety survives), faded at 0.55 s, peak-normalised to the carpet set's ≈ −8 dBFS.
+`tests/audio_assets.rs` pins the single-footfall contract so a third untrimmed drop can't ship silently.
 
 ## `enemy/growl_5..8.ogg`, `ambience/oneshot/creak_4..6.ogg`
 

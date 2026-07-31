@@ -20,9 +20,10 @@ use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
 use crate::time_control::SimBlocked;
 
-/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt. `pub` so the
-/// audio spatial listener can recover the ground focus point (`camera_pos - ISO_OFFSET`) to anchor
-/// itself on the plane instead of ~20 units up at the camera (see `audio::sync_listener`).
+/// World-space camera offset from the focus point (rotated by the current yaw). Equal-ish axes give
+/// the iso tilt. The audio spatial listener anchors on the ground plane too, but reads `CameraRig::
+/// focus` directly rather than subtracting this — un-rotated recovery was wrong at every yaw detent
+/// but the first (see `audio::sync_listener`).
 pub const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
 /// Peak screen-shake offset (world units) at full trauma. Applied as `SHAKE_MAX * trauma²`.
 const SHAKE_MAX: f32 = 0.85;
