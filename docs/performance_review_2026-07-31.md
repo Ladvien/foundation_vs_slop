@@ -33,8 +33,17 @@ clock keeps phase); the period is authored nowhere in the repo, the vendored eng
 multi-second timer, and N-25’s “CPU-bound” only excludes *fragment*-bound — so the prime suspect is
 **NVIDIA adaptive GPU clocking**, with the engine’s uncached per-frame shadow/caster machinery as the
 amplitude multiplier. The 171 ms “hitch class” mostly dissolved: 20/20 cycles put their worst frame in
-the slow phase’s leading edge. **Decisive next test is zero-repo-change**: `nvidia-smi` clock logging
-beside a fixed-camera run, then a `-lgc` clock-lock A/B.
+the slow phase’s leading edge.
+
+**That decisive test then ran, and killed the driver hypothesis** (16:18–16:21, 148 s, 307 clock
+samples vs 292 trace rows, ~12.8 cycles): the graphics clock is **flat across the phases** — 1802 MHz
+during slow-phase samples (mean 36.4 ms) vs 1818 MHz during fast ones (mean 5.9 ms), i.e. **−15 MHz
+(0.8%) across a 6.2× frame-time swing**, with weak correlation at every lag (best |r| = 0.213). But
+**`utilization.gpu` carries the strongest periodicity in the whole dataset — autocorrelation +0.440 at
+11.5 s** (frame time +0.167, clock +0.137). So the GPU is periodically **busier at an unchanged
+clock**: this is periodic GPU *work*, not periodic GPU *speed*. The next test is therefore the
+**shadow A/B** (TV-spot shadows off, illumination census unchanged), paired with an
+`Aabb`-on-prop-roots A/B — the never-culled casters feed every cascade every frame [L1].
 
 ## Applied fixes (5 findings, 6 files, ~186 inserted lines, uncommitted)
 

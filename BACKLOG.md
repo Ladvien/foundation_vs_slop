@@ -414,14 +414,36 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   >   lights `Changed` every frame, re-extracting them wholesale. The ~20-30k per-tile dungeon entities
   >   multiply all of it per view (2026-07-31 perf review, dungeon/render.rs:227 finding).
   > * Verify any fix against the super-beats and the runaway, not just the median cycle.
+  > ### 🚫 GPU DRIVER CLOCKING IS RULED OUT — measured 2026-07-31 16:18-16:21. It is periodic GPU
+  > ### *work*, not periodic GPU *speed*.
+  > The zero-repo-change test ran: `nvidia-smi` at 2 Hz (`clocks.gr,clocks.sm,utilization.gpu,
+  > power.draw,temperature.gpu`) beside a 148 s `FVS_WINDOW=1280x720 FVS_AUTORUN=1` session — 307 clock
+  > samples against 292 `fps_trace.csv` rows, ~12.8 cycles, resampled onto a common 0.5 s grid
+  > (script: `correlate.py`, perf-review session log).
+  > * **The clock is FLAT across the phases.** Slow-phase samples (n=119, mean **36.4 ms**) ran at
+  >   **1802 MHz**; fast-phase samples (n=42, mean **5.9 ms**) at **1818 MHz** — a **−15 MHz (0.8%)**
+  >   difference across a **6.2× frame-time** difference. PowerMizer stepping down would cost hundreds
+  >   of MHz. Cross-correlation is weak at every lag: r = −0.126 at zero lag, best |r| = −0.213 at
+  >   +2.5 s. Power sat at ~279 W throughout — the GPU was never idling or parking.
+  > * **The oscillation is present in this run** (independent third capture): `frame_ms`
+  >   autocorrelation peaks at **11.5 s**, matching the established 11.60 s.
+  > * **`utilization.gpu` is the strongest periodic signal in the data — autocorrelation +0.440 at
+  >   11.5 s**, versus +0.167 for frame time and +0.137 for the clock, and it correlates positively
+  >   with frame time (r = +0.202). So during each slow phase the GPU is **busier**, at an unchanged
+  >   clock: something periodically submits MORE GPU work.
+  > ⇒ Suspect 1 (driver clocking) is dead; no `nvidia-smi -lgc` lock test is needed. The remaining
+  > candidates are the per-frame GPU work that scales with visible lights — Bevy 0.19's uncached
+  > shadow-view re-render, the never-frustum-culled prop roots pushed into every cascade, and the GPU
+  > cluster raster — i.e. exactly what the shadow A/B isolates. Note this session's profile differed
+  > from earlier ones (median 7.7 ms / 130 fps with a 281 ms worst frame, vs the earlier 68/146 fps
+  > bimodal), and it ran *past* the intro-conversation pause, so part of it was a live sim.
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Next:* **(1)** zero-change driver test: log `nvidia-smi -q -d
-  CLOCK,PERFORMANCE -lms 500` (or `dmon`) beside a ≥60 s fixed-camera run — a graphics clock
-  square-waving in phase with frame time at ~11.6 s confirms; then lock clocks (`nvidia-smi -lgc`) and
-  watch the oscillation vanish (or not). **(2)** shadow A/B at the same recipe (TV-spot
-  `shadow_maps_enabled: false`, illumination census unchanged) to size the shadow path's amplitude
-  share. **(3)** `--features bevy/trace_tracy` over ≥3 cycles remains the definitive attribution if
-  (1) is negative. · *Reading:* [ABM]
+  behind it. · *Deps:* N-25 · *Next:* **(1)** ~~driver-clock test~~ — **done 2026-07-31, RULED OUT**
+  (above). **(2)** shadow A/B at the same recipe (TV-spot `shadow_maps_enabled: false`, illumination
+  census unchanged) to size the shadow path's share — now the top candidate, and pair it with an
+  `Aabb`-on-prop-roots A/B since unculled casters feed every cascade every frame. **(3)**
+  `--features bevy/trace_tracy` over ≥3 cycles for definitive per-system attribution.
+  · *Reading:* [ABM]
 - **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
   `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
   every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
