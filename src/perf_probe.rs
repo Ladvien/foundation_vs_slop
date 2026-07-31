@@ -102,6 +102,9 @@ struct PerfProbe {
     /// Rolling frame times (seconds), newest last, trimmed to [`WINDOW_SECS`].
     frames: std::collections::VecDeque<f32>,
     since_sample: f32,
+    /// Frames observed since the last sample, and their summed time — the LOCAL window.
+    local_frames: usize,
+    local_dt: f32,
     since_hotspots: f32,
     elapsed: f32,
     cells: HashMap<(i32, i32), CellStat>,
@@ -114,6 +117,8 @@ impl Default for PerfProbe {
         Self {
             frames: std::collections::VecDeque::new(),
             since_sample: 0.0,
+            local_frames: 0,
+            local_dt: 0.0,
             since_hotspots: 0.0,
             elapsed: 0.0,
             cells: HashMap::new(),
@@ -187,6 +192,10 @@ fn sample(
     probe.push_frame(dt);
     probe.elapsed += dt;
     probe.since_sample += dt;
+    if dt.is_finite() && dt > 0.0 {
+        probe.local_frames += 1;
+        probe.local_dt += dt;
+    }
     probe.since_hotspots += dt;
     if probe.since_sample < SAMPLE_SECS {
         return;
@@ -194,6 +203,26 @@ fn sample(
     probe.since_sample = 0.0;
 
     let Some((mean_fps, low_fps, worst_dt)) = probe.stats() else { return };
+
+    // **The LOCAL rate — mean over just the last `SAMPLE_SECS`, not the 5 s window.**
+    //
+    // This column exists because the first real trace was uninterpretable without it. Every other
+    // field in a row (cell, biome, the whole visible census) describes *this instant*, while
+    // `fps_mean` describes the previous five seconds — so bucketing rows by, say, visible triangles
+    // and averaging `fps_mean` mixes each sample's scene with the frame times of wherever the player
+    // was standing five seconds earlier. It produced a flatly wrong reading (fewer triangles looked
+    // *slower*) purely from that lag.
+    //
+    // `fps_local` is the column to correlate against. `fps_mean` is the one to read as "how did the
+    // last few seconds feel". Both are kept: the smoothed one is what a player perceives, the local
+    // one is what the row actually measured.
+    let local_fps = if probe.local_frames > 0 && probe.local_dt > 0.0 {
+        probe.local_frames as f32 / probe.local_dt
+    } else {
+        mean_fps
+    };
+    probe.local_frames = 0;
+    probe.local_dt = 0.0;
 
     // Where the player is LOOKING, not where the camera is. `CameraRig::focus` is the rig's own
     // look-at point; the camera itself sits `ISO_OFFSET` (12, 12, 12) up and back from it, so its
@@ -246,12 +275,14 @@ fn sample(
         })
         .sum();
 
-    let dropped = mean_fps < DROP_FPS;
+    // On the LOCAL rate, so a drop is attributed to where it happened rather than trailing the
+    // player for five seconds after they leave.
+    let dropped = local_fps < DROP_FPS;
     if dropped {
         // Loud, with coordinates, so a drop is reported the moment it happens rather than only in a
         // file the player has to know to open.
         warn!(
-            "fps drop: {mean_fps:.1} fps (1% low {low_fps:.1}, worst {:.1} ms) at cell ({}, {}) \
+            "fps drop: {local_fps:.1} fps here ({mean_fps:.1} 5s mean, 1% low {low_fps:.1}, worst {:.1} ms) at cell ({}, {}) \
              region {region} biome {biome} — visible: {units} units, {hostiles} hostiles, {props} props, \
              {light_count} lights, {tris} tris",
             worst_dt * 1000.0,
@@ -263,7 +294,7 @@ fn sample(
     // Accumulate into the cell map for the aggregate.
     let stat = probe.cells.entry((cell.x, cell.y)).or_default();
     stat.samples += 1;
-    stat.total_dt += 1.0 / mean_fps;
+    stat.total_dt += 1.0 / local_fps;
     stat.worst_dt = stat.worst_dt.max(worst_dt);
     stat.units += units;
     stat.hostiles += hostiles;
@@ -284,13 +315,13 @@ fn sample(
         if need_header {
             let _ = writeln!(
                 f,
-                "t_secs,fps_mean,fps_1pct_low,worst_ms,cell_x,cell_y,region,biome,\
+                "t_secs,fps_local,fps_mean,fps_1pct_low,worst_ms,cell_x,cell_y,region,biome,\
                  vis_units,vis_hostiles,vis_props,vis_lights,vis_tris,drop"
             );
         }
         let _ = writeln!(
             f,
-            "{elapsed:.1},{mean_fps:.2},{low_fps:.2},{:.2},{},{},{region},{biome},\
+            "{elapsed:.1},{local_fps:.2},{mean_fps:.2},{low_fps:.2},{:.2},{},{},{region},{biome},\
              {units},{hostiles},{props},{light_count},{tris},{}",
             worst_dt * 1000.0,
             cell.x,
