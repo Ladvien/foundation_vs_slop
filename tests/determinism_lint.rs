@@ -44,6 +44,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 /// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
 const EXEMPT_FILES: &[&str] = &["src/util.rs"];
 
@@ -88,7 +90,9 @@ fn every_sort_declares_its_determinism_contract() {
             if test_mod.is_some_and(|t| i >= t) {
                 continue;
             }
-            let code = line.split("//").next().unwrap_or("");
+            // The shared literal-aware stripper (tests/common/source_scan.rs): a `//` inside a
+            // string is not a comment, and a `.sort()` quoted inside a message is not a sort.
+            let code = common::source_scan::code_portion(line);
             let is_ordering_site = code.contains(".sort_unstable_by_key(")
                 || code.contains(".sort_by_key(")
                 || code.contains(".sort_unstable_by(")

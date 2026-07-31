@@ -13,7 +13,11 @@
 //! Determinism (§4): one seeded `ChaCha8Rng` stream split into per-region sub-streams (via
 //! [`splitmix64`]) so regions solve independently and reproducibly regardless of ECS/thread order.
 
+// The `_tests.rs` NAME is load-bearing (the `mycelia/fruit_tests.rs` idiom): `tests/panic_budget.rs`
+// walks files independently, so this parent-module cfg gate is invisible to it — the filename is
+// what tells the scanner the file's panics are test expectations, not shipped crashes.
 #[cfg(test)]
+#[path = "acceptance_tests.rs"]
 mod acceptance;
 pub mod furnish;
 pub mod ir;
