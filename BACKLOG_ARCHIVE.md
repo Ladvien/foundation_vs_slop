@@ -1255,6 +1255,11 @@ Split out 2026-07-30.
   `resolve_choice`, the node walk, the teardown — stays a single path. Two input **devices** for one
   action is not the branching CLAUDE.md forbids; a *degraded substitute* resolution path would have
   been.
+  ✅ **FULL HARNESS SUITE GREEN 2026-07-30, 15/15 targets, run one at a time.** replay **19/19**
+  including the ~54 min `search_rollouts_of_mutants_are_reproducible_under_load` mutant guard; session
+  21/21, containment 20/20, liveness 10/10, search_calibration 5/5 — every baseline matched exactly.
+  Both goldens unmoved. So the four changes that had shipped on reasoning alone (this fix, the dialogue
+  hotkeys, the footstep rework and `perf_probe`) are now **measured**.
   ✅ *Verified 2026-07-30:* five tests in `src/dialogue/runtime.rs::tests` drive the state machine on
   the keyboard alone — a digit picks that option, numpad matches the number row, an out-of-range digit
   is ignored rather than clamped, a digit typed during a *line* does not answer the next choice, and a
