@@ -79,7 +79,14 @@ const HOTSPOT_EVERY_SECS: f32 = 10.0;
 const MAX_HOTSPOTS: usize = 25;
 /// A cell needs this many samples before it can be ranked. One unlucky sample during an asset load
 /// is not a hotspot, and without this the table fills with noise from cells you walked through once.
-const MIN_SAMPLES_TO_RANK: usize = 3;
+///
+/// **24 = one full FVS-N-24 cycle (~12 s at 2 Hz), and that is the load-bearing property.** At the
+/// original 3, the 2026-07-31 hotspot table was an aliasing artifact: the game-wide ~11.7 s
+/// oscillation collapses frame rate everywhere for ~4.4 s per cycle, so a cell walked through
+/// during a slow phase ranked as a "hotspot" on 3-of-3 slow samples while a cell occupied for a
+/// minute (119 samples, 0 drops) ranked clean. A cell can only be ranked once it has been observed
+/// across at least one whole cycle, so no cell can any longer be indicted by phase luck alone.
+const MIN_SAMPLES_TO_RANK: usize = 24;
 
 /// One aggregated dungeon cell.
 #[derive(Default, Clone)]
@@ -316,7 +323,7 @@ fn sample(
             let _ = writeln!(
                 f,
                 "t_secs,fps_local,fps_mean,fps_1pct_low,worst_ms,cell_x,cell_y,region,biome,\
-                 vis_units,vis_hostiles,vis_props,vis_lights,vis_tris,drop"
+                 vis_units,vis_hostiles,rev_props,vis_lights,vis_tris,drop"
             );
         }
         let _ = writeln!(
@@ -380,11 +387,16 @@ fn write_hotspots(probe: &PerfProbe) {
     );
     let _ = writeln!(
         md,
-        "Counts are **visible** (drawn) averages while standing in that cell.\n"
+        "Counts are **visible** (drawn) averages while standing in that cell — except `props↑`,\n\
+         which is **revealed-so-far**, not on-screen: prop roots are `WorldAssetRoot`s with no\n\
+         `Aabb`, so Bevy never frustum-culls them and their `ViewVisibility` is a one-way\n\
+         Hidden→Visible reveal latch. It only ever rises across a session; do not read a\n\
+         props↔fps correlation out of it (measured 2026-07-31: it is confounded with elapsed\n\
+         time, and collapses under partial correlation while `lights` survives).\n"
     );
     let _ = writeln!(
         md,
-        "| cell | mean fps | worst ms | samples | drops | units | hostiles | props | lights | tris |"
+        "| cell | mean fps | worst ms | samples | drops | units | hostiles | props↑ | lights | tris |"
     );
     let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for ((x, y), s) in ranked.iter().take(MAX_HOTSPOTS) {

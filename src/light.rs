@@ -1148,11 +1148,21 @@ fn attach_fixture_lights(
 fn flicker_lights(
     time: Res<Time>,
     config: Res<GameConfig>,
-    mut lights: Query<(&FixtureLight, &mut PointLight)>,
+    mut lights: Query<(&FixtureLight, &bevy::camera::visibility::ViewVisibility, &mut PointLight)>,
 ) {
     let t = time.elapsed_secs();
     let depth = config.lighting.flicker_hum_depth;
-    for (fl, mut light) in &mut lights {
+    for (fl, vis, mut light) in &mut lights {
+        // Off-screen fixtures don't shimmer. This is a purely cosmetic modulation (the gameplay
+        // `LightField` reads the steady brightness), and writing an unseen light's intensity marks
+        // it `Changed<PointLight>` — which re-runs its bounding-sphere insert and the GPU
+        // light-buffer extract for every fixture in the dungeon, every frame. Measured 2026-07-31
+        // (flicker_hum_depth 0.06 → 0.0 A/B, same seed/route): 10.38 → 8.69 ms median frame time,
+        // with ~120 fixtures resident and ~7 visible. A light scrolling into view resumes its hum
+        // on its next rendered frame, which is the first frame anyone could see it.
+        if !vis.get() {
+            continue;
+        }
         // Shallow steady ripple — the fluorescent shimmer.
         let hum = 1.0 - depth * (0.5 + 0.5 * (t * FLICKER_HUM_HZ + fl.phase).sin());
         let mult = if fl.failing {

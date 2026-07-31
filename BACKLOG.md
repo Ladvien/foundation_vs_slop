@@ -313,8 +313,84 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > file write.
   > **Note the prior suspect does not fit.** FVS-N-13 leaks one dungeon *per expedition*; this cycles
   > three times inside a single run at a fixed camera. N-13 is still a real leak — it is just not this.
+  > ### 📊 It runs during NORMAL PLAY, and it is what the player's "bad areas" actually were (2026-07-31)
+  > Re-measured from a 363 s *moving-camera* session (`fps_trace.csv`), not a fixed-camera capture:
+  > **23 consecutive cycles, median period 11.70 s** (mean 11.54, sd ≈ 0.3), slow phase mean 4.40 s,
+  > mean slow-phase frame time 44.9 ms against a vsync-locked 16.7 ms. Phase-locked across the whole
+  > map, independent of cell, region, biome and triangles.
+  >
+  > **So the hotspot table was ALIASING it, and that is now fixed at the source.** The "worst cells"
+  > were the cells the player happened to occupy when a slow phase fired: (114,140) ranked on
+  > **4 samples / 4 drops**, (117,147) on 8/8 — while (53,147) sat at **119 samples / 0 drops**.
+  > `MIN_SAMPLES_TO_RANK` is now **24 = one full cycle**, so no cell can be indicted by phase luck.
+  > Two probe-honesty corrections landed with it: `vis_props` was never culling-aware (prop roots are
+  > `WorldAssetRoot`s with **no `Aabb`**, so Bevy never frustum-culls them, and their visibility is a
+  > one-way reveal latch) — it is a *revealed-so-far* counter confounded with elapsed time, now named
+  > `rev_props`/`props↑` and documented in the report header. `vis_lights` is the only honestly
+  > culled density column in the file.
+  >
+  > **Correlations, measured (session 4, n=708):** `r(frame_ms, vis_tris) = −0.09` — triangles are
+  > ruled out a third independent way, after N-25's pixel A/B and an 82 ms frame at 6,694 visible
+  > triangles. Within slow-phase samples `r(frame_ms, vis_lights) = +0.49`, and it **survives**
+  > partial correlation against props (+0.43) and elapsed time (+0.45) while both of those collapse
+  > (+0.10, +0.16). Median frame time steps **35 ms → 81 ms** between the 12–17 and 18–23 visible-light
+  > buckets.
+  > ### 🎯 NARROWED 2026-07-31: it is NOT in the gameplay sim. Measured, not argued.
+  > The oscillation reproduces (autocorrelation **r = +0.66 at lag 11.5 s**, three independent runs)
+  > in `FVS_AUTORUN` measurement runs — and in those runs the **`Time<Virtual>` clock is frozen for
+  > the entire sampling window**. Instrumented directly: `advance_mold_time` logged virtual elapsed
+  > every 2 s and printed *nothing* for 63 s after `AppState::Warmup` exited, then began at
+  > `virtual=2.01s`. The freeze is the **intro conversation** — `MenuState::Conversation` is
+  > `is_blocking()`, so `sync_sim_blocked` → `GameSpeed::paused` → virtual time stops (the same
+  > mechanism FVS-N-22 records as "every screenshot that day was a capture of a paused game").
+  >
+  > So during those runs `FixedUpdate` is not advancing, the mold does not tick (**one** tick in a
+  > 98 s run against ~7 due at `sim_hz` 0.075), and the oscillation *continues regardless*. That
+  > **rules out the whole `FixedUpdate` sim** — stigmergy diffusion, mold, ORCA, `light_recompose`,
+  > almond-water — and with it the "FixedUpdate sub-step feedback loop" amplifier theory, which
+  > cannot amplify a schedule that is not running. The mycelia GPU compute pass is ruled out by the
+  > same measurement (no ticks ⇒ no dispatch ⇒ no readback).
+  > **The remaining search space is `Update`/`PostUpdate`/render-extract**, which is a much smaller
+  > file to read than "the application".
+  > ⚠️ **And this invalidates an assumption every perf run on this box has been making**, including
+  > N-25's: `FVS_AUTORUN` + a fixed camera does **not** measure a live game. It measures a paused one
+  > with a live renderer, for the first ~60 s after warmup. N-25's CPU-bound verdict still stands for
+  > the *renderer* (its A/B was pixel count, valid under any sim state) but its own caveat — "does not
+  > say which CPU system eats the frame when the swarm is live" — is now sharper than it looks: no
+  > measurement taken this way has ever had a live swarm. **Dismiss the intro conversation, or drive
+  > past it, before quoting any future number as gameplay performance.**
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Reading:* [ABM]
+  behind it. · *Deps:* N-25 · *Next:* `--features bevy/trace_tracy` over ≥3 cycles, restricted to
+  `Update`/`PostUpdate`/extract per the narrowing above. · *Reading:* [ABM]
+- **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
+  `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
+  every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
+  frame. Every write marks the light `Changed<PointLight>`, which re-runs Bevy's
+  `update_point_light_bounding_spheres` (a `commands.entity(e).insert(Sphere{..})` **per light per
+  frame**) and re-extracts the GPU light buffer — all CPU-side, which is why it survived N-25's
+  "4× fewer pixels changed nothing" verdict rather than contradicting it.
+  *Measured* (same seed and route, `FVS_WINDOW` + `FVS_AUTORUN`, vsync off, first 12 s discarded):
+  | run | median frame time |
+  |---|---:|
+  | baseline | 10.38 ms |
+  | `flicker_hum_depth: 0.0` (ablation) | 8.69 ms |
+  | **visibility-gated hum, flicker still on at 0.06** | **8.60 ms** |
+  ⚠️ **Condition, stated precisely** (N-24's narrowing found it, and it applies here too): all three
+  runs sampled the window where the **intro conversation has the sim frozen**, so this is a
+  renderer/`Update`-side comparison with a paused world. That does not weaken the result — the three
+  runs are apples-to-apples, and `flicker_lights` is an `Update` system that runs identically either
+  way — but the *absolute* frame times are not gameplay frame times. Re-measure past the conversation
+  before quoting them as such.
+  *Shipped:* the hum now skips fixtures whose `ViewVisibility` is false — ~120 resident, ~7 visible.
+  The gated build recovers the **full** benefit of disabling flicker outright *while keeping the
+  effect*, which is the result that makes this a fix rather than a trade. A light scrolling into view
+  resumes its hum on its next rendered frame — the first frame anyone could see it.
+  Landed alongside two per-frame whole-dungeon walks found in the same pass: `update_cutaway` eased
+  every wall tile's `Transform` forever (an exponential ease never *reaches* its target, and
+  `DerefMut` marks `Changed` regardless) — it now snaps and then skips; and `mycelia::coat_furniture`
+  walked every prop's glTF descendant tree every frame in every app state — a finished root is now
+  retired with a `MoldCoatDone` marker.
+  · *Deps:* — · *Touches:* `src/light.rs`, `src/dungeon/cutaway.rs`, `src/mycelia/mod.rs`, `src/perf_probe.rs`
 - **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
   > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
   > first 10 s discarded, 68 samples each):

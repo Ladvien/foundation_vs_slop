@@ -34,6 +34,14 @@ impl Plugin for CutawayPlugin {
 /// wall grows or shrinks over the same turn. Frame-rate independent via `1 − exp(−k·dt)`.
 const CUTAWAY_SMOOTHING: f32 = 9.0;
 
+/// Once a wall/decoration is this close to its target pose it is snapped exactly onto it, and from
+/// then on `update_cutaway` never touches its `Transform` again until the camera turns. Without the
+/// snap the exponential ease approaches but never *reaches* the target, so every wall tile in the
+/// dungeon (a 192×192 map's worth) was written — and marked `Changed<Transform>` — every frame
+/// forever, fanning out into transform propagation and render re-extraction for geometry that had
+/// visually settled seconds ago (FVS perf pass, 2026-07-31). Well under a pixel at any zoom.
+const CUTAWAY_SNAP: f32 = 2e-3;
+
 /// How a spawned tile participates in the cutaway: floors don't; walls squash to knee height on the
 /// near edge; wall-mounted lintels hide on the near edge; a corner post squashes like a wall but
 /// carries its own (diagonal) outward normal since it sits at a tile-corner vertex, not on an edge.
@@ -108,9 +116,19 @@ pub(crate) fn update_cutaway(
     let ease = 1.0 - (-CUTAWAY_SMOOTHING * time.delta_secs()).exp();
     for (wall, mut tf) in &mut walls {
         let (scale_y, y) = wall_pose(faces_camera(wall.outward, view.to_camera));
+        // Read through Deref (immutable) first: `Mut` only raises `Changed` on a *mutable* deref,
+        // so a settled wall must decide to skip before touching the transform at all.
         let (cur_scale, cur_y) = (tf.scale.y, tf.translation.y);
-        tf.scale.y = cur_scale + (scale_y - cur_scale) * ease;
-        tf.translation.y = cur_y + (y - cur_y) * ease;
+        if cur_scale == scale_y && cur_y == y {
+            continue; // settled — leave no Changed<Transform> behind
+        }
+        if (scale_y - cur_scale).abs() < CUTAWAY_SNAP && (y - cur_y).abs() < CUTAWAY_SNAP {
+            tf.scale.y = scale_y; // final write: land exactly on target so next frame skips
+            tf.translation.y = y;
+        } else {
+            tf.scale.y = cur_scale + (scale_y - cur_scale) * ease;
+            tf.translation.y = cur_y + (y - cur_y) * ease;
+        }
     }
     for (deco, mut tf) in &mut mounted {
         let target = if faces_camera(deco.outward, view.to_camera) {
@@ -119,7 +137,14 @@ pub(crate) fn update_cutaway(
             deco.base_scale
         };
         let cur = tf.scale;
-        tf.scale = cur + (target - cur) * ease;
+        if cur == target {
+            continue;
+        }
+        if (target - cur).abs().max_element() < CUTAWAY_SNAP {
+            tf.scale = target;
+        } else {
+            tf.scale = cur + (target - cur) * ease;
+        }
     }
 }
 

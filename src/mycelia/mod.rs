@@ -1372,6 +1372,11 @@ mod tests;
 #[derive(Component)]
 struct MoldCoated;
 
+/// Marks a prop **root** whose whole subtree has been coated, retiring it from `coat_furniture`'s
+/// per-frame descendant walk (see the comment inside that system for the cost this ends).
+#[derive(Component)]
+struct MoldCoatDone;
+
 /// Cache of `StandardMaterial` → coated `MoldWallMaterial`. A dungeon full of couches shares a handful of
 /// glTF materials; without this we would mint one extended material per mesh instance.
 #[derive(Resource, Default)]
@@ -1402,18 +1407,38 @@ fn coat_furniture(
     cfg: Res<MyceliaConfig>,
     images: Res<MoldImages>,
     control: Res<control::MoldControlImage>,
-    roots: Query<Entity, (With<crate::placement::PlacedIn>, Without<crate::light::LightEmitter>)>,
+    roots: Query<
+        Entity,
+        (
+            With<crate::placement::PlacedIn>,
+            Without<crate::light::LightEmitter>,
+            Without<MoldCoatDone>,
+        ),
+    >,
     children: Query<&Children>,
     painted: Query<&MeshMaterial3d<StandardMaterial>, Without<MoldCoated>>,
+    coated: Query<(), With<MoldCoated>>,
     std_materials: Res<Assets<StandardMaterial>>,
     mut wall_materials: ResMut<Assets<MoldWallMaterial>>,
     mut cache: ResMut<CoatedFurniture>,
 ) {
     for root in &roots {
+        // Retire a finished root from the query entirely: its glTF subtree has spawned (≥1 coated
+        // mesh proves that) and holds nothing left to coat. Without this the descendant walk below
+        // ran for EVERY prop in the dungeon EVERY frame forever — the `Without<MoldCoated>` filter
+        // skipped the per-leaf work but not the hierarchy traversal, which scaled with total props
+        // × subtree size in every app state (FVS perf pass, 2026-07-31). A root whose materials
+        // have not resolved yet coats nothing, stays un-`Done`, and is correctly retried.
+        let mut coated_any = false;
+        let mut uncoated_left = false;
         for entity in children.iter_descendants(root) {
+            if coated.contains(entity) {
+                coated_any = true;
+            }
             let Ok(mat) = painted.get(entity) else {
                 continue;
             };
+            uncoated_left = true;
             let id = mat.0.id();
             let coated = match cache.0.get(&id) {
                 Some(handle) => handle.clone(),
@@ -1438,6 +1463,9 @@ fn coat_furniture(
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
                 .insert((MeshMaterial3d(coated), MoldCoated));
+        }
+        if coated_any && !uncoated_left {
+            commands.entity(root).insert(MoldCoatDone);
         }
     }
 }
