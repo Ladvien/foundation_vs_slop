@@ -666,6 +666,110 @@ fn every_world_config_slice_reaches_the_game_config() {
 }
 
 #[test]
+fn every_director_dialled_slice_reaches_the_run_build() {
+    // The run-build sibling of the seam guard above, and the acceptance test for FVS-H-8.
+    //
+    // `director::pick_next_challenge` samples a cell from the level archive on `OnEnter(Active)` and
+    // writes four `GameConfig` fields — `dungeon`, `mycelia`, `placement.metropolis`,
+    // `placement.density`. Every consumer snapshotted its slice into a resource at **plugin-build**
+    // time and never read `GameConfig` again, so all four writes were dead: the log said a challenge
+    // was sampled, FVS-H-7's briefing announced `BRANCH UNIVERSE {seed} · SECTOR x,y`, and every
+    // expedition was the authored world. That is worse than a silent no-op — the player perceived a
+    // distinction that did not exist.
+    //
+    // The defect only exists on the SECOND expedition, which is why no existing test could see it: the
+    // first run's snapshot is correct by construction. So this drives a real campaign shape —
+    // expedition, `RETURN TO SITE`, expedition — and dials `GameConfig` between them exactly as the
+    // director does. `RunBuild::Config` is what makes the second run see it.
+    //
+    // Coverage, stated honestly: `dungeon` and `placement.density` are asserted directly, and
+    // `Dungeon::width` proves the dialled slice reached *generation* rather than merely a resource.
+    // `placement.metropolis` has no reader outside `Orchestrator`'s type-erased `Box<dyn Solver>`, so
+    // it is not asserted here — it is written by the same unconditional `resnapshot_placement_config`
+    // body as `Density`, so a `Density` pass means that system ran. `mycelia` cannot be asserted at
+    // all in this build: `MyceliaPlugin` is GPU/windowed-only and deliberately absent from the harness
+    // (`sim_harness.rs:402`), and its re-snapshot system lives inside that same plugin — resource and
+    // refresher live and die together.
+    use bevy::prelude::{NextState, State};
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::dungeon::{Dungeon, DungeonConfigRes};
+    use foundation_vs_slop::placement::furnish::Density;
+    use foundation_vs_slop::session::RunState;
+    let _serial = serial_guard();
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    // `begin_first_run` is `PostStartup`; the transition lands on the following frame.
+    step(&mut app, &cfg, 2);
+    assert_eq!(
+        app.world().resource::<State<RunState>>().get(),
+        &RunState::Active,
+        "the first expedition never started — the rest of this test would be vacuous"
+    );
+
+    let authored_rooms = app.world().resource::<Dungeon>().regions.len();
+    assert_eq!(
+        app.world().resource::<DungeonConfigRes>().0.coarse_w,
+        6,
+        "authored `coarse_w` moved; re-pick the dial below so it still differs"
+    );
+    assert_eq!(
+        app.world().resource::<Density>().0.wall_lights_per_room,
+        6,
+        "authored `wall_lights_per_room` moved; re-pick the dial below so it still differs"
+    );
+
+    // Dial `GameConfig` mid-campaign, the way `elite_overlay::apply_dim(Dim::Levels, …)` does.
+    //
+    // ⚠️ `coarse_w * block` MUST stay 192. That is not a style preference: `CONTROL_SIZE = 192` is the
+    // world extent the mycelia field and the dungeon both assume, `mycelia::habitat::build` refuses any
+    // other size loudly, and `level_genome::FACTORS` is *defined* as the four pairs that preserve it —
+    // so the archive can only ever trade block size against block count. Dialling `coarse_w` alone
+    // (the obvious way to write this test) produces a 256x192 dungeon no director pick can produce and
+    // panics `bake_mold`/`bake_almond_sources`. This moves `(6, 32)` -> `(8, 24)`: same 192 tiles per
+    // side, 36 room slots instead of 64 — a real archive cell, and a visibly different level.
+    {
+        let mut gc = app.world_mut().resource_mut::<GameConfig>();
+        gc.dungeon.coarse_w = 8;
+        gc.dungeon.coarse_h = 8;
+        gc.dungeon.block = 24;
+        gc.dungeon.doorway_ratio = 0.25;
+        gc.placement.density.wall_lights_per_room = 11;
+        gc.placement.metropolis.iterations += 1;
+    }
+
+    // `RETURN TO SITE`, then back through the ASYNC door — the transition pair `ui::debrief` drives.
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    step(&mut app, &cfg, 2);
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Active);
+    step(&mut app, &cfg, 2);
+
+    let dialled = &app.world().resource::<DungeonConfigRes>().0;
+    assert_eq!(
+        (dialled.coarse_w, dialled.block, dialled.doorway_ratio),
+        (8, 24, 0.25),
+        "the dialled `dungeon:` slice never reached `DungeonConfigRes` — the plugin-build snapshot is \
+         still winning, so every expedition is the authored world (FVS-H-8)"
+    );
+    assert_eq!(
+        app.world().resource::<Density>().0.wall_lights_per_room,
+        11,
+        "the dialled `placement.density` never reached `Density` — `resnapshot_placement_config` did \
+         not run, which also means `PlacementSolvers` still holds the authored Metropolis weights"
+    );
+
+    // The player-observable half: the dial has to reach *generation*, not just a resource. Room count,
+    // not extent — the extent is pinned at 192 (see the dial comment above), so the coarse
+    // factorisation is what a player actually sees change.
+    assert_ne!(
+        app.world().resource::<Dungeon>().regions.len(),
+        authored_rooms,
+        "the second expedition laid out the same rooms as the first despite a dialled coarse \
+         factorisation — a Branch universe that is the authored world with a different label"
+    );
+}
+
+#[test]
 fn a_mutated_world_config_changes_the_sim() {
     // The dual of the no-op test: a *mutated* world genome, installed the same way, must change
     // `snapshot_hash`. Proves the config actually reaches the running sim (crab fields/fear, combat,
