@@ -254,6 +254,175 @@ fn corridor_identity_is_deterministic() {
     assert_eq!(a.corridor_of, b.corridor_of, "same seed must paint the same runs");
 }
 
+/// A config whose biome noise period is **shorter than a room is wide** — the actual condition behind
+/// the reported bug, and the thing these tests must reproduce to mean anything.
+///
+/// **The shipped config hits it because its rooms are big, not because its noise is fine:** `block: 32`
+/// admits rooms ~30 cells across against `biome_scale: 14.0`, so one shipped room spans two or more
+/// zones and splits. `test_config` uses `block: 16` at the same scale, so its rooms fit inside a single
+/// zone and per-cell sampling never split one — measured, not assumed: with `test_config` every
+/// assertion below passed for free.
+///
+/// Shrinking the noise instead of growing the rooms reproduces the same ratio far more cheaply than
+/// carving a 192×192 map per test. Kept separate from `test_config` rather than tightening it, because
+/// `golden_dungeon_snapshot_is_stable` pins that fixture — and `biome_scale` draws no RNG, so this
+/// changes surfaces without moving a single carve decision.
+fn biome_test_config() -> DungeonConfig {
+    DungeonConfig {
+        biome_scale: 3.0,
+        ..test_config()
+    }
+}
+
+/// **FVS-Q-8.** The reported bug: *"I don't like backrooms carpets and concrete walls. It should be one
+/// or the other. The transition should be at a doorway."* Biome was sampled per cell, so a single room's
+/// floor straddled the noise threshold and rendered two surfaces at once.
+///
+/// A room's floor is every floor cell inside its rect that no corridor claimed — corridors are carved
+/// *through* room interiors, and those crossing cells are room floor by design.
+#[test]
+fn a_room_never_shows_two_surface_treatments() {
+    let d = Dungeon::generate(&biome_test_config()).expect("test config generates");
+    let mut checked = 0usize;
+    for region in &d.regions {
+        let mut seen: Option<(Biome, IVec2)> = None;
+        for y in region.rect.min[1]..region.rect.max[1] {
+            for x in region.rect.min[0]..region.rect.max[0] {
+                let c = IVec2::new(x, y);
+                if !d.is_floor(c) || d.corridor_id(c).is_some() {
+                    continue;
+                }
+                checked += 1;
+                match seen {
+                    None => seen = Some((d.biome(c), c)),
+                    Some((b, first)) => assert_eq!(
+                        d.biome(c),
+                        b,
+                        "region {} shows two surfaces: {first:?} is {b:?} but {c:?} is {:?}",
+                        region.id,
+                        d.biome(c)
+                    ),
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no room floor was examined — the assertion would be vacuous");
+
+    // ...and prove the fixture actually reproduces the bug, so the assertion above cannot quietly become
+    // vacuous if `biome_scale` or the room sizes drift. Re-sample the OLD per-cell rule over the same
+    // rooms: at least one room must come out split, or this test is passing for the wrong reason.
+    let (seed, mix, scale) = biome_field(&biome_test_config());
+    let split = d.regions.iter().any(|region| {
+        let mut seen: Option<Biome> = None;
+        for y in region.rect.min[1]..region.rect.max[1] {
+            for x in region.rect.min[0]..region.rect.max[0] {
+                let c = IVec2::new(x, y);
+                if !d.is_floor(c) || d.corridor_id(c).is_some() {
+                    continue;
+                }
+                let per_cell = biome_at(seed, c, mix, scale);
+                match seen {
+                    None => seen = Some(per_cell),
+                    Some(b) if b != per_cell => return true,
+                    Some(_) => {}
+                }
+            }
+        }
+        false
+    });
+    assert!(
+        split,
+        "per-cell sampling splits no room in this fixture, so the per-zone assertion proves nothing — \
+         lower `biome_scale` or grow the rooms until it reproduces the reported bug"
+    );
+}
+
+/// A wall belongs to the biome of the cell it is attached to. Before Q-8 that was a doc comment holding
+/// only probabilistically; the carver's BFS now makes it true by construction, so every rock cell
+/// touching a room's floor must agree with that floor.
+#[test]
+fn rock_agrees_with_the_floor_it_is_attached_to() {
+    let d = Dungeon::generate(&biome_test_config()).expect("test config generates");
+    let mut checked = 0usize;
+    for y in 0..d.height as i32 {
+        for x in 0..d.width as i32 {
+            let c = IVec2::new(x, y);
+            if d.is_floor(c) {
+                continue;
+            }
+            // Only rock with exactly one floor neighbour is unambiguous: a cell wedged between two
+            // different zones is genuinely a boundary and either answer is correct.
+            let floors: Vec<IVec2> = [IVec2::Y, IVec2::X, IVec2::NEG_Y, IVec2::NEG_X]
+                .iter()
+                .map(|d2| c + *d2)
+                .filter(|n| d.is_floor(*n))
+                .collect();
+            if floors.len() != 1 {
+                continue;
+            }
+            checked += 1;
+            assert_eq!(
+                d.biome(c),
+                d.biome(floors[0]),
+                "rock {c:?} does not match the only floor it touches, {:?}",
+                floors[0]
+            );
+        }
+    }
+    assert!(checked > 0, "no attached rock was examined — the assertion would be vacuous");
+}
+
+/// Option (b): a corridor inherits **one** endpoint room, so a passage never restripes mid-run. Whole
+/// corridor runs must therefore be uniform — that is what puts every transition at a doorway.
+#[test]
+fn each_corridor_run_carries_a_single_biome() {
+    let d = Dungeon::generate(&biome_test_config()).expect("test config generates");
+    let mut per_run: std::collections::HashMap<u32, (Biome, IVec2)> = std::collections::HashMap::new();
+    for y in 0..d.height as i32 {
+        for x in 0..d.width as i32 {
+            let c = IVec2::new(x, y);
+            let Some(id) = d.corridor_id(c) else { continue };
+            match per_run.get(&id) {
+                None => {
+                    per_run.insert(id, (d.biome(c), c));
+                }
+                Some(&(b, first)) => assert_eq!(
+                    d.biome(c),
+                    b,
+                    "corridor {id} changes surface: {first:?} is {b:?} but {c:?} is {:?}",
+                    d.biome(c)
+                ),
+            }
+        }
+    }
+    assert!(!per_run.is_empty(), "a connected dungeon must have corridor floor");
+}
+
+/// The per-zone rule must not collapse the map to one surface — that would "fix" the report by deleting
+/// the feature, and would make the three assertions above pass vacuously. `test_config`'s `biome_mix`
+/// is set to keep both present.
+#[test]
+fn the_map_still_carries_both_biomes() {
+    let d = Dungeon::generate(&biome_test_config()).expect("test config generates");
+    let mut seen = std::collections::HashSet::new();
+    for c in d.floor_cells() {
+        seen.insert(d.biome(c));
+    }
+    assert_eq!(
+        seen.len(),
+        2,
+        "expected both surfaces across the map, saw {seen:?} — biome_scale has stopped meaning anything"
+    );
+}
+
+/// Biome resolution is part of the carve, so it must be a pure function of the seed like everything else.
+#[test]
+fn biome_assignment_is_deterministic() {
+    let a = Dungeon::generate(&biome_test_config()).expect("generates");
+    let b = Dungeon::generate(&biome_test_config()).expect("generates");
+    assert_eq!(a.biome_of, b.biome_of, "same seed must paint the same surfaces");
+}
+
 /// A small, valid config for generation tests (avoids depending on the shipped RON's exact values).
 fn test_config() -> DungeonConfig {
     DungeonConfig {
