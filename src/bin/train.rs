@@ -1735,6 +1735,11 @@ fn apply_archive(
         }
     }
     std::fs::write(CONFIG_PATH, &cfg_text).map_err(|e| format!("{CONFIG_PATH}: write: {e}"))?;
+    // Declare the rewrite to the in-process mtime guard. This is the ONE process authorised to change
+    // `config.ron` while running, and step 4 immediately reloads it to recompute the goldens — without
+    // this, the bake tripped its own guard *after* the write, aborting in exactly the half-applied
+    // state the guard exists to prevent (FVS-J-7). The guard stays armed for every other load.
+    foundation_vs_slop::config::note_config_rewritten();
 
     // 4. Recompute the goldens from the freshly-baked config and compare them against the committed ones.
     //    (Env overlays are guaranteed unset above, so `deterministic_core` reproduces exactly what the replay

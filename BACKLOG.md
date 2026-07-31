@@ -597,24 +597,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `containment_criterion` on both rollouts and returns `Ok(None)` for the **whole triple** on either
   failure. Its own comment says the constraint is applied "HERE, at the world archive, and nowhere
   else", which is true of where it is *evaluated* and not of what it *rejects*. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
-- **FVS-J-7 — The config mtime guard rejects `train apply`, the one process meant to rewrite config (FOUND 2026-07-28, review)** · S
-  `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard against
-  editing config during a test run. But `train apply` **writes** `config.ron` and then reloads it to
-  verify, so it trips its own guard and aborts **with the file already rewritten**, which is the
-  half-baked state the guard exists to prevent.
-  ✅ *Re-confirmed still live 2026-07-30* — `CONFIG_FINGERPRINT` (`config.rs:184-205`) still errors on any
-  mtime change during a process. · *Deps:* — · *Touches:* `src/config.rs`, `src/bin/train.rs`
-- **FVS-J-8 — `repin_one` cannot re-pin a per-platform golden (FOUND 2026-07-28, review)** · S
-  `bake::repin_one` refuses a marker that appears twice, treating duplication as ambiguity. The
-  per-platform golden decision made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected, so each marker
-  now **literally appears twice** in `tests/replay.rs`. `train apply --repin-goldens` therefore fails at
-  the re-pin step every time. Two correct answers land in one file and the tool calls it ambiguous.
-  ✅ *Re-confirmed still live 2026-07-30* — `GOLDEN` and `GOLDEN_FIELD` each appear exactly **twice** in
-  `tests/replay.rs` (the `cfg(target_arch)` pair), and `bake::repin_one`'s duplicate rejection is still
-  pinned by its own test `repin_one_rejects_a_duplicated_golden`. So the tool's refusal is deliberate
-  behaviour meeting a file shape that postdates it — fixing it means teaching `repin_one` that two
-  `cfg`-selected definitions are one logical marker, not deleting the ambiguity check.
-  · *Deps:* J-3 · *Touches:* `src/bake.rs`
 - **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
   ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
   intermittently **because the bug is intermittent**. That is the test working.

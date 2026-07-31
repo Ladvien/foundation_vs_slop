@@ -1899,3 +1899,35 @@ Split out 2026-07-30.
   `the_shipped_config_shows_no_room_with_two_surface_treatments`, which walks **every** region of the
   shipped level; the frame corroborates it at one location rather than standing in for it.
   · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
+
+- **FVS-J-7 — The config mtime guard rejected `train apply`, the one process meant to rewrite config** · S · ✅ **FIXED 2026-07-31**
+  `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard
+  against editing config during a test run. But `train apply` **writes** `config.ron` and then
+  reloads it to recompute the goldens, so it tripped its own guard and aborted **with the file
+  already rewritten** — the half-baked state the guard exists to prevent.
+  *Shipped:* the fingerprint moved from a `OnceLock` to a `Mutex<Option<..>>` and gained
+  `config::note_config_rewritten()`, which `train.rs` calls immediately after its `std::fs::write`.
+  **Deliberately not a bypass flag.** The guard stays armed for every other load in the process and
+  an *unannounced* edit still fails exactly as loudly; what the guard actually cares about is
+  "did the file change behind this process's back", and an authorised rewrite that declares itself
+  is not that. One path — there is no "skip the check" mode.
+  · *Touches:* `src/config.rs`, `src/bin/train.rs`
+- **FVS-J-8 — `repin_one` could not re-pin a per-platform golden** · S · ✅ **FIXED 2026-07-31**
+  `bake::repin_one` refused any marker appearing twice, treating duplication as ambiguity. The
+  per-platform golden decision (2026-07-27) made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected,
+  so each marker **literally appears twice** in `tests/replay.rs` and `train apply --repin-goldens`
+  failed at the re-pin step every time.
+  *Shipped:* `repin_one` now resolves `cfg(target_arch)`-selected alternatives to the **one arm live
+  on this machine** and re-pins that. A bake measures on the box it runs on, so the arm re-pinned is
+  the arm that was measured — re-pinning the other would invent a number for a platform the process
+  never ran on, which is exactly what the aarch64 arm's deliberate `0` refuses to do.
+  **The ambiguity check was kept, not deleted**, as the entry required: two *unconditional*
+  declarations are still an error, and they now get a different message from the "all cfg-gated, none
+  live here" case, because those are different problems. The `cfg` reader is deliberately narrow
+  (`target_arch` plus a single `not(..)`) — anything richer refuses honestly rather than guessing
+  which hash to overwrite.
+  *Pinned by* `repin_one_repins_only_the_live_cfg_arm` (the pair is one golden; the other arm is left
+  untouched), the surviving `repin_one_rejects_a_duplicated_golden`, and
+  `the_shipped_replay_goldens_are_repinnable` — a **real-file** guard that would have caught this
+  originally, since the fixtures all predated the file shape that broke it.
+  · *Touches:* `src/bake.rs`
