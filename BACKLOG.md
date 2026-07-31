@@ -437,12 +437,53 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > cluster raster — i.e. exactly what the shadow A/B isolates. Note this session's profile differed
   > from earlier ones (median 7.7 ms / 130 fps with a 281 ms worst frame, vs the earlier 68/146 fps
   > bimodal), and it ran *past* the intro-conversation pause, so part of it was a live sim.
+  > ### 🛑 THE METRONOME IS NOT IN THE GAME. It is an EXTERNAL GPU TENANT on `big`. Measured 16:26-16:40.
+  > **Shadow A/B first (A-B-A, 3 × 150 s, both casters off — TV spots `light.rs:973` AND the
+  > directional key `world.rs:218`; lights still lit, only shadow-map rendering removed):**
+  > | run | median | p90 | slow-phase mean | frame acorr | peak lag |
+  > |---|---:|---:|---:|---:|---:|
+  > | A baseline | 7.8 ms | 85.5 ms | 55.1 ms | +0.610 | 11.0 s |
+  > | B **shadows off** | 7.6 ms | 33.4 ms | 27.9 ms | +0.138 | 11.5 s |
+  > | A2 baseline | 6.1 ms | 17.1 ms | 17.3 ms | +0.166 | 11.5 s |
+  >
+  > **INCONCLUSIVE, and the A-B-A design is the only reason we know that.** The two baselines
+  > disagree by more than the ablation moved anything (slow-phase 55.1 → 17.3 ms between A and A2, a
+  > 3.2× swing), and the *best* run of the three was a **baseline**. An A→B pair alone would have
+  > reported "shadows off: −23% slow-phase, confirmed!" — a false positive. Run-to-run variance here
+  > exceeds the effect being measured; **no shadow claim can be made from this data.**
+  > **What DID survive every condition: `utilization.gpu` periodicity — +0.550 (A), +0.509 (B, shadows
+  > OFF), +0.439 (A2), all at 11.5-12.0 s.** Removing every shadow caster in the game did not touch it.
+  > **So the cycle was measured with the game NOT RUNNING — and it is still there.** `nvidia-smi pmon`,
+  > 140 s, no game process:
+  > * **`VLLM::EngineCore` (pid 87093) — mean SM 82.2%, peak 95%, autocorrelation +0.622 at 11.0 s.**
+  > * Aggregate GPU sm% across all PIDs: mean 82.7%, peak lag 11.0 s, acorr +0.652.
+  > * Nothing else moves: `hs-distill-server` 0.0%, Xorg/Xwayland/firefox/kitty 0.0%.
+  > It is the box's **olmocr OCR pipeline** (`vllm serve allenai/olmOCR-2-7B-1025-FP8`, port 5801,
+  > 14.4 GB VRAM; `hs-distill-server` holds another 4.4 GB — 20.3 of 24.6 GB total), **resident since
+  > Wed 2026-07-29 17:56 — i.e. through EVERY measurement in the N-23/24/25/26 investigation.**
+  > A periodic external inference workload explains every property that made this mysterious:
+  > period authored nowhere in repo or engine ✓ · survives a frozen sim ✓ · survives shadows-off ✓ ·
+  > flat GPU clocks at ~279 W (the GPU is *busy*, never downclocked) ✓ · amplitude ∝ visible lights
+  > (contention is multiplicative on OUR GPU work) ✓ · **silent beats** when the camera faces an
+  > unlit corridor (our GPU work ≈ 0 ⇒ nothing to steal — this is the objection that wrongly demoted
+  > the "external process" theory) ✓ · per-run modulator = whatever the pipeline was doing ✓ ·
+  > phase-locked across cells/regions/biomes ✓ · fixed ~4.5 s quantum = one inference burst ✓ ·
+  > super-beats and the 24 s runaway = workload bursts ✓ · fps-invariant, time-based ✓.
+  > ### ⚠️ THIS PUTS FVS-N-25's "CPU-BOUND" VERDICT IN DOUBT — and everything gated on it.
+  > Under heavy external GPU contention a 4× pixel cut *would* barely move frame time, because the
+  > cost is waiting for GPU time slices rather than shading our own pixels. That is exactly the
+  > reading N-25 got (+4.1%) and read as "CPU-bound" — the verdict that **demoted N-23's mesh/material
+  > work and gated N-24**. N-26's flicker numbers (10.38 → 8.69 ms) were an internally consistent
+  > A/B/A on one afternoon and are less exposed, but no absolute frame time measured on this box
+  > since 2026-07-29 17:56 is trustworthy as "the game's performance".
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Next:* **(1)** ~~driver-clock test~~ — **done 2026-07-31, RULED OUT**
-  (above). **(2)** shadow A/B at the same recipe (TV-spot `shadow_maps_enabled: false`, illumination
-  census unchanged) to size the shadow path's share — now the top candidate, and pair it with an
-  `Aabb`-on-prop-roots A/B since unculled casters feed every cascade every frame. **(3)**
-  `--features bevy/trace_tracy` over ≥3 cycles for definitive per-system attribution.
+  behind it. · *Deps:* N-25 · *Next:* **(1)** ~~driver-clock test~~ **RULED OUT**. **(2)** ~~shadow
+  A/B~~ **run — inconclusive, and shadows do NOT own the cadence**. **(3)** **QUIET-GPU RE-MEASURE —
+  the only thing worth doing next.** Stop the olmocr/vLLM pipeline (and any home-still conversion),
+  confirm `nvidia-smi pmon` shows an idle GPU, then re-run: the fixed-camera oscillation capture (is
+  the 11.6 s cycle simply GONE?), **N-25's pixel A/B** (does the game read GPU-bound on a quiet box?),
+  and only then the shadow/`Aabb` ablations, which deserve N≥5 repeats per condition given the
+  variance measured above. **(4)** `--features bevy/trace_tracy` if a real in-game cycle survives.
   · *Reading:* [ABM]
 - **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
   `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
