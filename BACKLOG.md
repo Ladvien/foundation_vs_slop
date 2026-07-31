@@ -495,7 +495,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Fix is not in `director.rs`:* either the consumers must read `GameConfig` at world-build time, or the
   director must write the resources they actually read (`DungeonConfigRes`, `PlacementSolvers`,
   `Density`, `MyceliaConfig`). The second is smaller; the first is more honest about where config lives.
-  **An architectural call, which is why it is filed.** · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
+  **An architectural call, which is why it is filed.**
+  > ✅ **Re-confirmed still true 2026-07-30** (it is 2 days old; checked rather than assumed).
+  > `DungeonPlugin::build` does `app.world().resource::<GameConfig>().dungeon.clone()` into
+  > `DungeonConfigRes` at **plugin-build time**, and `generate_dungeon` takes `config: Res<DungeonConfigRes>`
+  > — so the director's `OnEnter(RunState::Active)` write to `gc.dungeon` is read by nobody. The
+  > *ordering* is fine (`pick_next_challenge` is `.before(RunBuild::World)`); it writes the wrong resource.
+  > ⚠️ **AND IT MAKES FVS-H-7'S BRIEFING ACTIVELY MISLEADING — this is new, and it raises the priority.**
+  > H-7 shipped a panel that distinguishes `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED` from
+  > `BRANCH UNIVERSE {seed} · SECTOR {x},{y}`. But while H-8 is live those two headings describe **the
+  > same dungeon**: the sampled cell is applied to a `GameConfig` nobody re-reads, so an expedition
+  > announced as a Branch universe is the authored world with a different label.
+  > H-7's whole point was that a path the player cannot perceive is a second path. H-8 turns that around
+  > into something worse — the player perceives a distinction that **does not exist**. Fixing H-8 fixes
+  > both; until it is fixed, the briefing overstates what the director did.
+  · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
 - **FVS-I-5 — `containment_criterion` still gates the squad and swarm archives (FOUND 2026-07-28, review)** · M · *determinism: offline*
   FVS-I-1's constraint was moved out of the shared `minimal_criterion` and into `coevolve/search.rs` —
   but it landed inside `score_triple_compact`, whose `None` **discards the whole triple**. So a

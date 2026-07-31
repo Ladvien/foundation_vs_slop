@@ -1294,7 +1294,13 @@ Split out 2026-07-30.
   **So the framing survives, but only because it was made legible.** A path the player cannot perceive
   is a second path however it is argued; the fix was not to remove a branch but to make the branch
   announce itself. Worth keeping as the worked example of what "one path" costs when a branch is
-  genuinely justified. · *Deps:* H-3, L-4 (both shipped)
+  genuinely justified.
+  ⚠️ **Closed, but read FVS-N-13's neighbour FVS-H-8 before trusting the panel.** While H-8 is live the
+  director's sampled config is written to a `GameConfig` nobody re-reads, so `BRANCH UNIVERSE …` and
+  `AUTHORED UNIVERSE …` currently label **the same dungeon**. H-7's defect was a distinction the player
+  could not perceive; H-8 leaves a distinction the player perceives that does not exist. The panel is
+  right and will start telling the truth the moment H-8 lands — it is not the panel that is broken.
+  · *Deps:* H-3, L-4 (both shipped)
 - **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · ✅ **CLOSED 2026-07-30 — it was already evolved; the item was stale**
   Filed as "spawn/breed cadence is the main pacing dial in the game and the search cannot touch it."
   **That premise was false when written.** The FVS-I-6 descriptor audit found `world_genome` already
