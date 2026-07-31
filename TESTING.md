@@ -428,7 +428,13 @@ CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves 
 - **`devshot` can't run inside the harness** — `Screenshot::primary_window()` needs a window, and the
   harness has none. So full SSIM visual-regression runs against the *windowed* game, in the display-gated
   `tests/visual_capture.rs` (`#[ignore]`d, since CI without a display/GPU can't run it):
-  `cargo test --features test-harness --test visual_capture -- --ignored`. It launches the game binary,
+  `cargo test --features test-harness --test visual_capture -- --ignored title_screen_matches_golden`.
+  > ⚠️ **Name the test.** A bare `-- --ignored` also runs `regenerate_golden_from_screenshot`, which is a
+  > *re-pinning tool, not a check*: it `expect`s a `screenshot.png` in the crate root and therefore
+  > **always fails when you have not just captured one**. The run then reports
+  > `test result: FAILED. 1 passed; 1 failed` while the golden it was supposed to check was green —
+  > which reads as a visual regression and is not one. (Measured 2026-07-30, doing exactly that.)
+  It launches the game binary,
   drives a `devshot` capture via the `screenshot.request` sentinel, decodes `screenshot.png` with the
   `image` dev-dependency, downscales to a monitor-independent 688×288, and asserts `ssim(shot, golden) ≥
   0.95` (best of a few frames, so a transient VHS-glitch frame can't fail a healthy run) against the

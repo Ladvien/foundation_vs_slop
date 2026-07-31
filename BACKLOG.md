@@ -917,58 +917,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
-- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **DECIDED + IMPLEMENTED 2026-07-30 (`184c6cf`) — pending harness re-run and a look at a real frame**
-  > **Implemented as (b).** Three rules in `layout::resolve_biomes`: room floor takes the noise sampled
-  > once at the room's centre cell; a corridor inherits its lower-`RegionId` endpoint room; everything
-  > else (rock, walls, cells the necking pass shut) takes the nearest classified cell via one
-  > multi-source BFS — which is what finally makes `Dungeon::biome`'s "a wall belongs to the biome of
-  > the cell it is attached to" true *by construction*. `Dungeon` now stores `biome_of: Vec<Biome>`.
-  > **The original cause note below is wrong about the mechanism** — see the correction inside it.
-  > *Verified so far:* `cargo test` 935 lib / 0 failed, layout golden unmoved, 5 new tests including one
-  > that fails if the fixture stops reproducing the bug. **Not yet run against the harness suite**, and
-  > **not yet looked at in a frame** — the repo's own rule is that unit tests cannot see cross-layer
-  > drift, and "no room shows two surface treatments" is finally a judgement made by looking.
-  > **Decision (user, 2026-07-30): (b) — corridors inherit one endpoint room.** Rooms sample the noise
-  > at `rect.center_cell()`; a corridor takes the biome of its lower-`RegionId` endpoint. Chosen over
-  > (a) because an independent corridor draw produces concrete → carpet → concrete sandwiches, which
-  > read *busier* and are the opposite of the complaint; over (c) because one-biome-per-level makes
-  > `biome_scale` dead config, and dead config then has to come out of `config.ron` + `world_genome` +
-  > `genome_coverage` — a genome-length change bought for a cosmetic result.
-  > **No config, genome or archive change**, so this does not invalidate a bake.
-  > *Implementation note:* the whole change fits behind `Dungeon::biome()` (`src/dungeon/mod.rs:335`),
-  > which today forwards straight to `biome_at`. Its seven callers (`dungeon/render.rs` ×4,
-  > `fog.rs:217`, `audio.rs:693`, `perf_probe.rs:251`) are unaffected if the per-zone resolution
-  > happens inside that one function, and `corridor_of`/`NO_CORRIDOR` (`mod.rs:146,164`) already
-  > distinguishes corridor floor from room floor. Update the `biome()` doc comment while there — it
-  > currently claims walls agree with their room, which is the thing that was never true.
-  Player: *"I don't like backrooms carpets and concrete walls. It should be one or the other. The
-  transition should be at a doorway."*
-  **Cause:** `Dungeon::biome()` evaluates `biome_at(seed, cell, mix, scale)` — value noise sampled
-  **per cell**. A wall cell and the floor cell it is attached to can therefore fall on opposite sides
-  of the threshold *inside a single room*, which is exactly the reported symptom. The doc comment
-  claims "a wall belongs to the biome of the cell it is attached to", and that holds only
-  probabilistically, which is to say not at all.
-  > ⚠️ **The paragraph above is WRONG about the mechanism (corrected 2026-07-30 while implementing).**
-  > `render.rs` keys every wall slab on the floor cell that owns it (line 253 — the same `cell` as the
-  > floor tile at line 230), corner posts use `home` "the post's owning cell" (line 280), and lintels
-  > use the opening cell. **A tile and its own walls always agreed.** The real defect was cell-to-cell
-  > variation *across one room's floor*: the floor itself was split, and each wall faithfully followed
-  > whichever floor cell owned it. So the doc comment was not the lie this claimed — the render layer
-  > did honour attachment; the noise was simply finer-grained than a room.
-  > Why the shipped config shows it and `test_config` did not: shipped `block: 32` admits rooms ~30
-  > cells across against a 14-tile noise period, so one room spans two zones. `block: 16` does not.
-  **Fix = sample per ZONE rather than per cell.** The fork, kept for the reasoning behind the pick:
-  * **(a)** rooms sample the noise at `rect.center_cell()`; corridors get their own biome. Transition
-    at every doorway — but a concrete → carpet corridor → concrete sandwich makes levels read *busier*,
-    which is the opposite of the complaint.
-  * **(b)** corridors inherit one endpoint room (lower `RegionId`). Every transition still lands at a
-    doorway, corridors always match a neighbour, and `biome_scale` keeps a real meaning (how likely
-    adjacent rooms differ). **Smallest diff — no config, genome or archive change.**
-  * **(c)** one biome per level. Simplest to state, but it makes `biome_scale` **dead config**, which
-    should then be removed from `config.ron` + `world_genome` + `genome_coverage` rather than left as
-    decoration — a genome length change for a cosmetic result. Partly closes FVS-N-21.
-  *Done when:* no room shows two surface treatments, and every transition is crossed at a threshold.
-  · *Deps:* — · *Touches:* `src/dungeon/{mod,biome}.rs` · *Reading:* — (no corpus resource)
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.

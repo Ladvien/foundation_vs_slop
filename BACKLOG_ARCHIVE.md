@@ -1844,3 +1844,48 @@ Split out 2026-07-30.
   Footsteps follow the surface under the walkers' centroid — one shared density-throttled voice, so one surface to pick — indexed by `Biome as usize`, the same indexing `FloorMaterials::pick` uses, so what you hear and what you see cannot drift apart. The two sounds heard most often were also the thinnest pools: growls 4 → 8, ambient one-shots 6 → 9.
 - **FVS-Q-6 — Concrete biome texture: three attempts, and why** · S · ✅ **LANDED 2026-07-30**
   `concrete_0031` read as medieval cobblestone; `ground_0046` was genuinely concrete but its crack network read as post-earthquake dry earth. `T_Plaster` is rendered screed — the surface a sublevel is actually finished in — desaturated to 12% at conversion (chroma 0.02 against the wallpaper's 0.23). The two biomes separate by **saturation, not hue**, which is what the colour-language doc asks of the reality layer.
+- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **LANDED 2026-07-30 (`184c6cf`), verified 2026-07-31**
+  Player: *"I don't like backrooms carpets and concrete walls. It should be one or the other. The
+  transition should be at a doorway."* Chosen fork: **(b)**, corridors inherit one endpoint room.
+  **The originally-filed cause was wrong about the mechanism, and the correction is the useful part.**
+  The item said a wall cell and the floor cell it is attached to could fall on opposite sides of the
+  noise threshold. They could not: `render.rs` keys every wall slab on the floor cell that owns it
+  (line 253 — the same `cell` as the floor tile at line 230), corner posts use `home` "the post's owning
+  cell", and lintels use the opening cell. **A tile and its own walls always agreed.** The real defect
+  was cell-to-cell variation *across one room's floor* — the floor was split, and each wall faithfully
+  followed whichever floor cell owned it. So `Dungeon::biome`'s doc comment was never the lie the item
+  called it; the render layer did honour attachment, and the noise was simply finer-grained than a room.
+  Why the shipped level showed it and the test fixture did not: shipped `block: 32` admits ~30-cell
+  rooms against a 14-tile noise period, so one room spans two zones. `test_config`'s `block: 16` does not.
+  *Shipped:* `layout::resolve_biomes` — three rules, one per cell class. **Room floor** takes the noise
+  sampled once at the room's centre cell; **corridor floor** takes its lower-`RegionId` endpoint room
+  (`min(a, b)`, free because `Region.id == si` and `layout.adjacency` holds site indices); **everything
+  else** — rock, walls, cells the necking pass shut — takes the nearest classified cell via one
+  multi-source BFS. That third rule is what finally makes "a wall belongs to the biome of the cell it is
+  attached to" true **by construction** rather than probabilistically. Room floor outranks a corridor
+  crossing it, free, because the corridor pass only claims cells the room pass had not already set.
+  `Dungeon` now stores `biome_of: Vec<Biome>`; the old "pure function of position, storing it would be
+  caching a hash" note died with the change, because a per-zone biome depends on which room owns the
+  cell and only the carver knows that. `Biome`'s own doc already said "it is stored per fine cell".
+  **Goldens did not move, structurally rather than luckily:** `biome_at` is a pure hash whose seed is
+  derived from the config seed rather than drawn from the carve stream, so moving the sample point from
+  every cell to one per room cannot shift a subsequent carve draw; and `snapshot_hash` folds only actor
+  `Transform`+`Health` while `field_hash` covers stigmergy — neither reads `Dungeon`.
+  ⚠️ **The first test pass was VACUOUS and that is worth remembering.** All three assertions passed for
+  free under `test_config`, whose noise is coarser than its rooms, so per-cell sampling never split one.
+  Fixed two ways: a `biome_test_config` (`biome_scale: 3.0`) that reproduces the condition, and an
+  anti-vacuity guard that re-samples the OLD per-cell rule and fails if it splits no room. The same
+  guard rides `the_shipped_config_shows_no_room_with_two_surface_treatments`, which is the one that
+  speaks about the game you actually play — it asserts both that the shipped level *did* split rooms
+  under the old rule and that none shows two treatments now.
+  *Verified 2026-07-31:* `cargo test` **973 passed / 0 failed**; full harness **15/15 targets**, one at
+  a time, replay **19/19 including the mutant guard** (3114 s); layout golden and both replay goldens
+  unmoved. 6 new tests.
+  *Grounding, and the contrast is the point:* **AutoBiomes** (Fischer, Dittmann, Weller & Zachmann,
+  *Vis. Comput.* 2020, doi 10.1007/s00371-020-01920-7) blends adjacent biomes through a convolution
+  kernel — correct for open terrain, where a transition is continuous and has no architectural feature
+  to hide the seam. An interior has one: the doorway. So this switch is deliberately **discrete** and
+  placed at the threshold. Room-as-unit-of-assignment is the standard dungeon-graph move surveyed by
+  **Viana & Dos Santos** (*J. Interact. Syst.* 2021, doi 10.5753/jis.2021.999).
+  *Left open:* a look at a real frame. Unit tests cannot see cross-layer drift, and "no room shows two
+  surface treatments" is finally a judgement made by looking. · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
