@@ -286,8 +286,26 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   19 hold ~6k between them, including **five belt hooks of 12 triangles each, each with its own
   material**. That is a character authored for a cinematic close-up being drawn a few hundred pixels
   tall at the shipped iso zoom.
-  *Fix:* decimate toward ~8k triangles and atlas the materials to 3-4 (≈10x geometry, 115 -> ~20 draw
-  calls). Asset-side work in `scp_characters`, **not** an engine change.
+  **Two more offenders, from the player's own Ctrl+P captures (resident totals: 590,869 triangles
+  across 554 primitives, tracked entities only — dungeon tiles are NOT counted):**
+
+  | asset | instances | triangles | prims | tris/instance |
+  |---|---:|---:|---:|---:|
+  | `characters/valkyrie.glb` | 5 | 412,344 | 127 | 82,468 |
+  | `scp150/scp-150.glb` | 5 | **86,410** | 35 | **17,282** |
+  | `dimensional_crab.glb` | 29 | 66,026 | 63 | 2,276 |
+  | `Wall Light.glb` | **120** | 7,200 | **240** | 60 |
+  | every barrel variant | 17 | 4,284 | 17 | 252 |
+
+  * **The mancae are the second-biggest cost in the game.** `scp-150.glb` is **17,282 triangles per
+    instance** — for a small parasite, five of which spawn. Proportionally that is worse than the
+    Valkyrie.
+  * **The wall lights are the biggest DRAW-CALL cost.** 120 instances × 2 primitives = **240
+    primitives for 7,200 triangles** — 43% of all primitives for 1.2% of the geometry. A 60-triangle
+    prop split across two draw calls, placed 120 times.
+  *Fix:* decimate the Valkyrie toward ~8k and atlas its materials to 3-4; decimate `scp-150`; merge
+  the wall light's two primitives into one. Asset-side work in `scp_characters`, **not** an engine
+  change. ⚠️ **Gated on FVS-N-25** — none of it is worth doing until the bottleneck side is known.
   ⚠️ Re-pins `tests/valkyrie_asset.rs`'s contract and **moves the goldens** — the squad mesh is pinned
   state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
   *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
@@ -300,8 +318,34 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Investigate with:* `debug_screenshots/fps_trace.csv`'s `worst_ms` column against `t_secs` — a hitch
   that coincides with entering a new region points at streaming, one that recurs on a fixed period
   points at the compute pass. `--features bevy/trace_tracy` gives per-system attribution.
+  ⚠️ **Also observed: a degradation over TIME at a fixed viewpoint.** Two captures 13 s apart from the
+  identical camera position with identical resident geometry (590,869 tris) read 45.5 fps / 134 ms
+  worst, then 27.3 fps / 224 ms worst. Whatever this is, it is not geometry and not location.
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* — · *Reading:* — (no corpus resource)
+  behind it. · *Deps:* N-25 · *Reading:* [ABM]
+- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S
+  **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
+  a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
+  concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget
+  (~48M `is_floor` calls/sec in the stigmergy diffusion stencil) and concludes "precompute the
+  neighbour table". **Both cannot be the bottleneck, and doing the wrong one first buys nothing** —
+  decimating meshes on a CPU-bound frame changes no number at all.
+  What the `perf_probe` measures is *frame time*, which is agnostic between them; the triangle and
+  primitive counts describe a budget, not a cause. Saying otherwise is reading a correlation into a
+  census.
+  *Cheapest decisive experiments, in order:*
+  1. **Halve the window resolution and re-measure the same route.** Frame time unchanged ⇒ CPU-bound;
+     frame time improves roughly with pixel count ⇒ GPU-bound. One run, no code.
+  2. `--features bevy/trace_tracy` for per-system attribution — the heavy sim systems already carry
+     `info_span!`s for exactly this.
+  3. Toggle `MyceliaPlugin` off and re-measure (it is a GPU compute pass, so it discriminates too).
+  ⚠️ Note the two captures taken **13 s apart from the identical camera position** with identical
+  resident geometry read **45.5 fps and 27.3 fps** (worst frame 134 ms then 224 ms). A degradation at
+  a fixed viewpoint with fixed geometry is not a geometry problem *at all* — it is time-dependent, and
+  FVS-N-13 (every expedition leaks a whole dungeon, tiles + Avian colliders, uncounted by the probe)
+  is the standing candidate.
+  *Done when:* the bound is named with the measurement that shows it, and N-23/N-24 are re-ordered
+  behind that answer. · *Deps:* — · *Touches:* — · *Reading:* [ABM]
 - **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline*
   The four items below add ~20 knobs to the genomes. **Adding a knob no descriptor can see makes the
   archive worse, not better** — two genomes differing only in that knob land in the same cell, and the
