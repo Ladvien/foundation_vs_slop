@@ -283,113 +283,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
   *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
   the same route. · *Deps:* — · *Touches:* `assets/characters/valkyrie.glb`, `tests/valkyrie_asset.rs` · *Reading:* — (no corpus resource)
-- **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
-  `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
-  every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
-  frame. Every write marks the light `Changed<PointLight>`, which re-runs Bevy's
-  `update_point_light_bounding_spheres` (a `commands.entity(e).insert(Sphere{..})` **per light per
-  frame**) and re-extracts the GPU light buffer — all CPU-side, which is why it survived N-25's
-  "4× fewer pixels changed nothing" verdict rather than contradicting it.
-  *Measured* (same seed and route, `FVS_WINDOW` + `FVS_AUTORUN`, vsync off, first 12 s discarded):
-  | run | median frame time |
-  |---|---:|
-  | baseline | 10.38 ms |
-  | `flicker_hum_depth: 0.0` (ablation) | 8.69 ms |
-  | **visibility-gated hum, flicker still on at 0.06** | **8.60 ms** |
-  ⚠️⚠️ **Re-read those absolute numbers with FVS-N-24's resolution in hand (2026-07-31):** the box's
-  olmocr/vLLM tenant was consuming 82% of the GPU during this A/B, so the 10.38 / 8.69 / 8.60 ms
-  figures are contended-box numbers. On a quiet GPU the same scene renders at **~4.2 ms**. The A/B/A
-  structure and the *ordering* survive — the three runs were minutes apart under the same contention,
-  and `flicker_lights` is CPU-side work the tenant does not touch — so the fix is still a fix. What is
-  NOT supportable is quoting "10.38 → 8.60 ms" as this game's frame time, or the implied ~1.8 ms
-  saving as a fraction of a real frame. Re-measure on an idle GPU if the magnitude ever matters.
-  ⚠️ **Condition, stated precisely** (N-24's narrowing found it, and it applies here too): all three
-  runs sampled the window where the **intro conversation has the sim frozen**, so this is a
-  renderer/`Update`-side comparison with a paused world. That does not weaken the result — the three
-  runs are apples-to-apples, and `flicker_lights` is an `Update` system that runs identically either
-  way — but the *absolute* frame times are not gameplay frame times. Re-measure past the conversation
-  before quoting them as such.
-  *Shipped:* the hum now skips fixtures whose `ViewVisibility` is false — ~120 resident, ~7 visible.
-  The gated build recovers the **full** benefit of disabling flicker outright *while keeping the
-  effect*, which is the result that makes this a fix rather than a trade. A light scrolling into view
-  resumes its hum on its next rendered frame — the first frame anyone could see it.
-  Landed alongside two per-frame whole-dungeon walks found in the same pass: `update_cutaway` eased
-  every wall tile's `Transform` forever (an exponential ease never *reaches* its target, and
-  `DerefMut` marks `Changed` regardless) — it now snaps and then skips; and `mycelia::coat_furniture`
-  walked every prop's glTF descendant tree every frame in every app state — a finished root is now
-  retired with a `MoldCoatDone` marker.
-  · *Deps:* — · *Touches:* `src/light.rs`, `src/dungeon/cutaway.rs`, `src/mycelia/mod.rs`, `src/perf_probe.rs`
-- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
-  > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
-  > first 10 s discarded, 68 samples each):
-  >
-  > | run | pixels | mean fps | frame time | visible tris |
-  > |---|---:|---:|---:|---:|
-  > | full | 2.48 Mpx | 117.8 | **9.94 ms** | 413,364 |
-  > | half | 0.62 Mpx | 113.6 | **10.35 ms** | 413,364 |
-  >
-  > **A 4x cut in pixels moved frame time by +4.1% — i.e. not at all** (the half-res run was
-  > marginally *slower*, which is noise). At ~413k triangles on screen the renderer is not the
-  > constraint. **FVS-N-23's mesh decimation would buy approximately nothing**, and it would have
-  > cost a golden re-pin and a `valkyrie_asset.rs` re-pin to find that out.
-  >
-  > ⚠️ **The first attempt at this test LIED, and the failure is worth keeping.** It reported
-  > CPU-bound at 16.75 vs 16.82 ms — because both runs sat at exactly **60.0 fps median**, i.e.
-  > both were vsync-capped. A capped frame time measures the display, not the renderer, and two
-  > capped runs can only ever report "no difference". Measurement mode now forces
-  > `PresentMode::AutoNoVsync`. **Check the median for a suspiciously round cap before believing
-  > any frame-time comparison.**
-  >
-  > ⚠️ **Scope of the claim, stated precisely:** the probe run held ~118 fps where the player saw
-  > 26-45, with the same geometry but no live swarm (29 crabs, 5 mancae) and immature mycelia. So
-  > this establishes the **renderer is not the constraint at that geometry**. It does *not* say
-  > which CPU system eats the frame when the swarm is live. Re-run the same A/B on a LOADED scene
-  > before extending the conclusion.
-  > ### ✅ RE-TESTED 2026-07-31 ON A QUIET GPU — the verdict SURVIVES, the numbers do NOT.
-  > FVS-N-24 (now archived, RESOLVED) found the box's olmocr/vLLM tenant eating **82% of the GPU**
-  > since 2026-07-29 17:56 — i.e. during the A/B above. Heavy GPU contention *mimics* a CPU-bound
-  > reading (you wait for time slices, so cutting pixels does not help), so this test was re-run with
-  > the pipeline stopped and the GPU verified idle: 4 × 150 s, interleaved 1280x720 / 640x360, first
-  > 10 s discarded, n≈277 each.
-  > | res | pixels | median frame | p99 | replicates |
-  > |---|---:|---:|---:|---|
-  > | 1280x720 | 0.92 Mpx | **4.19 ms** (238 fps) | 4.37-4.44 | 4.18 / 4.21 |
-  > | 640x360 | 0.23 Mpx | **4.27 ms** (234 fps) | 4.40-4.46 | 4.28 / 4.25 |
-  >
-  > **A 4× pixel cut moved frame time +1.8%, the low-res run again marginally *slower* — so the
-  > CPU-bound conclusion is CONFIRMED, now on an uncontended GPU and with replicates.** What changes
-  > is the scale: the same scene renders at **4.2 ms, not 9.94 ms**, so every absolute number in the
-  > table above was inflated ~2.4× by contention, and the "26-45 fps the player saw" was the OCR
-  > pipeline, not this game. The gate on FVS-N-23 therefore holds *more* firmly, not less: at 238 fps
-  > with 413k visible triangles, mesh decimation buys nothing measurable.
-  > ⚠️ Both A/Bs are ≤720p. They establish the renderer is not the constraint **at this window size**;
-  > they do not license extrapolating to 1440p/4K, where fragment cost grows and this test would need
-  > redoing at that resolution.
-  > *Next:* `docs/perf_improvements_plan.md` aims at the CPU side and is therefore aimed correctly;
-  > `--features bevy/trace_tracy` for per-system attribution — though at a 4.2 ms frame with a
-  > 0.4 ms median→max spread, there is no longer an obvious performance problem to attribute.
-  **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
-  a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
-  concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget
-  (~48M `is_floor` calls/sec in the stigmergy diffusion stencil) and concludes "precompute the
-  neighbour table". **Both cannot be the bottleneck, and doing the wrong one first buys nothing** —
-  decimating meshes on a CPU-bound frame changes no number at all.
-  What the `perf_probe` measures is *frame time*, which is agnostic between them; the triangle and
-  primitive counts describe a budget, not a cause. Saying otherwise is reading a correlation into a
-  census.
-  *Cheapest decisive experiments, in order:*
-  1. **Halve the window resolution and re-measure the same route.** Frame time unchanged ⇒ CPU-bound;
-     frame time improves roughly with pixel count ⇒ GPU-bound. One run, no code.
-  2. `--features bevy/trace_tracy` for per-system attribution — the heavy sim systems already carry
-     `info_span!`s for exactly this.
-  3. Toggle `MyceliaPlugin` off and re-measure (it is a GPU compute pass, so it discriminates too).
-  ⚠️ Note the two captures taken **13 s apart from the identical camera position** with identical
-  resident geometry read **45.5 fps and 27.3 fps** (worst frame 134 ms then 224 ms). A degradation at
-  a fixed viewpoint with fixed geometry is not a geometry problem *at all* — it is time-dependent, and
-  FVS-N-13 (every expedition leaks a whole dungeon, tiles + Avian colliders, uncounted by the probe)
-  is the standing candidate.
-  *Done when:* the bound is named with the measurement that shows it, and N-23/N-24 are re-ordered
-  behind that answer. · *Deps:* — · *Touches:* — · *Reading:* [ABM]
 - **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline* · ✅ **STATIC AUDIT RUN 2026-07-30 → `docs/descriptor_audit.md`**
   > **Read the audit before touching I-7..I-10 — it changes all four.** Headlines:
   > * **I-10 is STALE** — `BreedingTuning` (7) and `ParasiteTuning` (14) are *already* decoded in
@@ -462,6 +355,9 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > *Recommended order:* **D + B** first (neither touches the pinned core), then **A** if you want the
   > verb; hold **C** until N-13 and the re-pin question are settled, since it is the only one that moves
   > goldens and would land on top of a known live leak.
+  > ✅ **Half that hold is released (2026-07-31): N-13 is FIXED** (`fae5ef2`), so **C** would no longer
+  > land on a live dungeon leak. What still stands is the re-pin question — C adds per-agent
+  > `FixedUpdate` state and moves the goldens, which is a measure-and-re-pin either way.
   > **One finding worth keeping even if none of the options ship:** a stigmergy channel with a `deposit`
   > and an `evaporate` rate **is** Crytek's ADSR perception envelope (*Game AI Pro 1* ch. 31), except
   > spatial as well as temporal. What is missing is their *balanced peaks per event type* — footstep,
@@ -481,34 +377,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > harbour mould, which is exactly the `infestation` axis the descriptor already measures. Still your
   > call among the three — but option 3 is now the cheap one, not the clever one.
   · *Deps:* — · *Reading:* [QD]
-- **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save (FOUND 2026-07-30)** · S
-  C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
-- **FVS-H-8 — FVS-H-3's director is INERT: the elite overlay writes config nobody re-reads (FOUND 2026-07-28, review)** · M
-  `director::pick_next_challenge` calls `apply_dim(&mut gc, Dim::Levels, …)`, which writes `gc.dungeon`,
-  `gc.mycelia`, `gc.placement.metropolis` and `gc.placement.density`. **None is ever read again.**
-  `DungeonPlugin::build` copies `gc.dungeon` into `DungeonConfigRes` and `generate_dungeon` reads only
-  that; `PlacementPlugin` and `MyceliaPlugin` snapshot theirs the same way at plugin-build time.
-  So the log says a challenge was sampled and **every expedition is identical**. FVS-H-3 ships a
-  correct, tested selector wired to nothing — the exact "pure library, no caller" shape this backlog
-  names as its top process risk, one layer out.
-  *Fix is not in `director.rs`:* either the consumers must read `GameConfig` at world-build time, or the
-  director must write the resources they actually read (`DungeonConfigRes`, `PlacementSolvers`,
-  `Density`, `MyceliaConfig`). The second is smaller; the first is more honest about where config lives.
-  **An architectural call, which is why it is filed.**
-  > ✅ **Re-confirmed still true 2026-07-30** (it is 2 days old; checked rather than assumed).
-  > `DungeonPlugin::build` does `app.world().resource::<GameConfig>().dungeon.clone()` into
-  > `DungeonConfigRes` at **plugin-build time**, and `generate_dungeon` takes `config: Res<DungeonConfigRes>`
-  > — so the director's `OnEnter(RunState::Active)` write to `gc.dungeon` is read by nobody. The
-  > *ordering* is fine (`pick_next_challenge` is `.before(RunBuild::World)`); it writes the wrong resource.
-  > ⚠️ **AND IT MAKES FVS-H-7'S BRIEFING ACTIVELY MISLEADING — this is new, and it raises the priority.**
-  > H-7 shipped a panel that distinguishes `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED` from
-  > `BRANCH UNIVERSE {seed} · SECTOR {x},{y}`. But while H-8 is live those two headings describe **the
-  > same dungeon**: the sampled cell is applied to a `GameConfig` nobody re-reads, so an expedition
-  > announced as a Branch universe is the authored world with a different label.
-  > H-7's whole point was that a path the player cannot perceive is a second path. H-8 turns that around
-  > into something worse — the player perceives a distinction that **does not exist**. Fixing H-8 fixes
-  > both; until it is fixed, the briefing overstates what the director did.
-  · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
 - **FVS-I-5 — `containment_criterion` still gates the squad and swarm archives (FOUND 2026-07-28, review)** · M · *determinism: offline*
   FVS-I-1's constraint was moved out of the shared `minimal_criterion` and into `coevolve/search.rs` —
   but it landed inside `score_triple_compact`, whose `None` **discards the whole triple**. So a
@@ -605,33 +473,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* the divergent decision is named and fixed, **or** the failure is proven to be an artefact
   of oversubscription that cannot occur at shipped thread counts — with the measurement that shows it.
   · *Deps:* — · *Touches:* `src/squad_ai/evaluate.rs`, wherever the order-dependent decision lives · *Reading:* [ABM], [TEST-NT]
-- **FVS-H-5 — SPIKE: does `UNVISITED = INFINITY` starve the measured cells?** · S · *determinism: offline measurement*
-  **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
-  measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
-  there is no progress to measure — and the campaign never leaves where it started. [LPM]'s progress
-  niches have to be *discovered*.
-  **The risk it creates, and it is real:** the shipped `elites_levels.ron` has **55 occupied cells**. At
-  one expedition per pick that is 55 expeditions of pure exploration before the director exploits
-  anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
-  correct in principle and possibly far too patient at this archive size.
-  > ### 📐 MEASURED 2026-07-31 — starvation confirmed, and it is 6× worse than this entry guessed, exactly.
-  > Simulated through the real `pick`/`observe` path over a 55-cell archive (10 seeds, pinned by
-  > `director::tests::the_unvisited_bonus_starves_exploitation_at_the_shipped_archive_size`): the
-  > exploration phase is **exactly 330 expeditions on every seed** — not ~55. Two compounding terms
-  > the entry missed: a cell scores `UNVISITED` until it has **`HISTORY` = 6 readings** (two full
-  > windows), not one; and a cell leaves the infinite tie the moment it graduates, so no pick is ever
-  > "wasted" and the phase has the closed form **occupied-cells × HISTORY**. Against a 10–30
-  > expedition campaign, the director's exploitation phase is unreachable — in practice it is a
-  > **uniform random sampler** at this archive size.
-  > **Needs your ruling, not a drive-by fix** (interacts with H-6 and with H-8's inert-director
-  > call): the entry's own preferred remedy is a finite decaying optimistic prior, and the
-  > measurement adds a second lever it did not name — the 6-reading requirement is the bigger
-  > multiplier, so allowing a one-window (3-reading) provisional progress estimate would cut the
-  > floor from 330 to 165 even before touching the prior. Both change which cells a campaign sees;
-  > neither is observable while H-8 leaves the director's picks unread.
-  *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
-  *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
-  *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
 - **FVS-H-6 — SPIKE: `Option` vs `0.0` for an unmeasured cell — is the distinction load-bearing?** · S
   **The decision.** `CellHistory::learning_progress` returns `Option<f32>`, `None` until two full
   windows exist — *not* `0.0`. "No evidence" and "measured flat" are different states, and collapsing
@@ -642,8 +483,25 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `None` to `UNVISITED`. If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
   into that prior and become ceremony. Worth re-checking *after* H-5, not before.
   *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
-  whether any behaviour changes. If nothing does, simplify. *(Status 2026-07-31: H-5 is measured and
-  waiting on your remedy ruling — this stays parked behind that ruling, as designed.)* · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
+  whether any behaviour changes. If nothing does, simplify.
+  > ### 🔎 UNPARKED 2026-07-31 — H-5 shipped, and the spike's own prediction CAME TRUE. Needs your call.
+  > This entry predicted: *"If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
+  > into that prior and become ceremony."* It did. `interest()` is now
+  > `learning_progress().map_or(0.0, f32::abs) + optimism(readings)`, and the two states it distinguishes
+  > are **numerically identical**: a cell with `None` scores `0.0 + PRIOR/(1+n)`, and a cell measured
+  > genuinely flat scores `0.0 + PRIOR/(1+n)`. The reading count already carries every bit of what the
+  > `Option` was there to encode, so nothing downstream can observe the difference.
+  > **The falsification is therefore satisfied and the simplification is available** — `learning_progress`
+  > could return `f32` and `interest` lose its `map_or`.
+  > **Two reasons it is NOT being done unilaterally.** (1) [EPISTEMIC]'s Fisher argument — ignorance is
+  > not a uniform probability — is a *modelling* claim this repo deliberately mirrors in
+  > `knowledge::Knowledge::of`; collapsing it here makes the two diverge, and that is a house-style
+  > decision. (2) `learning_progress` is public API with its own asserted contract
+  > (`an_unmeasured_cell_is_not_a_flat_one`), so the `Option` is doing documentation work even where it
+  > does no arithmetic work.
+  > *Your call:* simplify to `f32`, or keep the `Option` as an intentional statement about ignorance and
+  > delete this spike. Either is defensible; leaving it undecided is the only bad option.
+  · *Deps:* H-3, H-5 (both shipped) · *Reading:* [EPISTEMIC], **[LPM]**
 ---
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
@@ -973,7 +831,13 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
 ## 7. Risks, decisions, and things to re-verify
 
-- **Top design risk — kill-vs-capture fitness conflict (I-1).** The live QD objective rewards spectacular kills; making captures valuable pulls the opposite way. Unresolved, the director (H-3) surfaces anti-loop content. A weighting/decomposition decision is required, not optional — and I-1 gates H-3.
+- ~~**Top design risk — kill-vs-capture fitness conflict (I-1).**~~ ✅ **RESOLVED 2026-07-27; this entry
+  was stale until 2026-07-31.** It read *"Unresolved … a weighting/decomposition decision is required"*
+  while `BACKLOG_ARCHIVE.md`'s FVS-I-1 recorded the design **and both code steps** landed four days
+  earlier. Corrected during the 2026-07-31 backlog review, which is itself the lesson this file keeps
+  re-learning: **a status marker is a claim someone made on a particular day.** The consequence was not
+  cosmetic — two items (**H-1**'s bake and **I-5**) were reading as gated behind I-1 and are in fact
+  unblocked, H-1's own "I-1 must land BEFORE this" being satisfied.
 - ~~**Determinism model is an unforced decision.**~~ ✅ **DECIDED 2026-07-27 (Director): PER-PLATFORM GOLDENS.**
   `f32` gameplay math is not guaranteed identical across instruction sets, so one hash cannot hold on
   both x86-64 and aarch64. Of the three options:

@@ -1305,7 +1305,58 @@ Split out 2026-07-30.
   `AUTHORED UNIVERSE …` currently label **the same dungeon**. H-7's defect was a distinction the player
   could not perceive; H-8 leaves a distinction the player perceives that does not exist. The panel is
   right and will start telling the truth the moment H-8 lands — it is not the panel that is broken.
+  ✅ **H-8 landed 2026-07-31. The panel now tells the truth.**
   · *Deps:* H-3, L-4 (both shipped)
+- **FVS-H-8 — FVS-H-3's director was INERT: the elite overlay wrote config nobody re-read** · M · ✅ **FIXED 2026-07-31**
+  `director::pick_next_challenge` sampled a cell from the level archive on `OnEnter(RunState::Active)`
+  and wrote four `GameConfig` fields — `dungeon`, `mycelia`, `placement.metropolis`,
+  `placement.density`. **All four consumers snapshotted their slice at plugin-build time and never read
+  `GameConfig` again, so all four writes were dead.** The log said a challenge was sampled and every
+  expedition was the authored world. FVS-H-3 shipped a correct, tested selector wired to nothing — this
+  backlog's own top process risk ("pure library, green tests, no caller"), one layer out.
+  **The ordering was never the problem** (`pick_next_challenge` was correctly `.before(RunBuild::World)`);
+  it wrote the right value to a resource nobody re-read.
+  *Shipped:* a new **`RunBuild::Config`** stage at the head of the run-build chain (`src/session/mod.rs`),
+  and one re-snapshot system per consumer, each living in the plugin that owns its resource so the
+  snapshot and the refresh cannot drift apart: `resnapshot_dungeon_config`,
+  `resnapshot_placement_config` (rebuilding the registry through the existing `build_solvers`, one
+  construction path), `resnapshot_mycelia_config`. `pick_next_challenge` re-points to
+  `.before(RunBuild::Config)`.
+  **A stage rather than a fix in `dungeon`, deliberately:** the item's two candidate remedies were "the
+  consumers read `GameConfig` at world-build time" and "the director writes the resources they read".
+  The second spreads knowledge of every consumer's internals into `director.rs`; the first was chosen in
+  the shape that keeps resources as the read surface, so any future slice the director learns to dial
+  has a defined place to be refreshed and the seam is named where the ordering lives.
+  `furnish::Manifest` is **not** refreshed — the director does not dial `placement.furniture`, and a
+  refresh with no writer is a path with no reason to exist.
+  *Pinned by* `replay::every_director_dialled_slice_reaches_the_run_build` — the run-build sibling of
+  FVS-I-7's `every_world_config_slice_reaches_the_game_config`. It drives a real campaign shape
+  (expedition → `RETURN TO SITE` → expedition), dials `GameConfig` between them the way `apply_dim`
+  does, and asserts the dial reached both the consumer resources **and** generation. **Verified
+  load-bearing**: with the two registrations removed it fails reporting the authored `(6, 32, 0.5)`
+  against the dialled `(8, 24, 0.25)`. The defect only ever existed on the *second* expedition — the
+  first run's snapshot is correct by construction — which is why no existing test could see it.
+  ⚠️ **A trap worth keeping, found by writing that test.** The obvious dial — bump `coarse_w` — produces
+  a 256x192 dungeon and panics `bake_mold`/`bake_almond_sources` via `mycelia::habitat`. That refusal is
+  **correct**: `CONTROL_SIZE = 192` is the world extent the mycelia field and the dungeon both assume,
+  and `level_genome::FACTORS` is *defined* as the four `(coarse, block)` pairs that preserve it, so no
+  real archive cell can produce a non-192 level. The test moves `(6, 32) → (8, 24)` instead. Nearly
+  filed as a latent product bug; it was an invalid dial.
+  *Goldens:* **unmoved**, as predicted — `RunBuild::Config` is an `OnEnter` stage, so no `FixedUpdate`
+  node was added to permute, and with no director write the re-snapshotted values are byte-identical to
+  the plugin-built ones. `deterministic_core_is_bit_identical` and `..._across_many_builds` (24 Apps)
+  both green.
+  ⚠️ **The damage was worse than "every expedition is identical", and this is worth stating.**
+  `record_expedition` credits the finished expedition to `director.current` — the sampled cell — so
+  while H-8 was live **every reading in every `CellHistory` was the authored world's outcome filed
+  under some other cell's name.** The director was not merely failing to vary the world; its entire
+  learning-progress signal was measurements of one level attributed to 55 different ones. Any archive
+  statistics gathered before this fix are meaningless and should not be compared against post-fix runs.
+  ➡️ **This makes FVS-H-5 load-bearing.** H-5 measured the director as a uniform random sampler for its
+  first **330** expeditions at the shipped 55-cell archive size. While H-8 was live that was theoretical
+  — nothing read the picks. It is now the director's actual behaviour, which sharpens the parked ruling
+  without blocking on it: a uniform sampler over a QD archive still beats "every expedition identical".
+  · *Deps:* H-3 · *Touches:* `src/session/mod.rs`, `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/mod.rs`, `src/mycelia/mod.rs`, `tests/replay.rs`
 - **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · ✅ **CLOSED 2026-07-30 — it was already evolved; the item was stale**
   Filed as "spawn/breed cadence is the main pacing dial in the game and the search cannot touch it."
   **That premise was false when written.** The FVS-I-6 descriptor audit found `world_genome` already
@@ -1323,6 +1374,207 @@ Split out 2026-07-30.
   Same staleness class as FVS-A-4 / O-2 / F-2 above: an item whose acceptance was met and which nobody
   re-read. If a *specific* cadence knob is genuinely missing, re-file it naming that knob rather than the
   whole group. · *Audit:* `docs/descriptor_audit.md`
+- **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
+  `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
+  every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
+  frame. Every write marks the light `Changed<PointLight>`, which re-runs Bevy's
+  `update_point_light_bounding_spheres` (a `commands.entity(e).insert(Sphere{..})` **per light per
+  frame**) and re-extracts the GPU light buffer — all CPU-side, which is why it survived N-25's
+  "4× fewer pixels changed nothing" verdict rather than contradicting it.
+  *Measured* (same seed and route, `FVS_WINDOW` + `FVS_AUTORUN`, vsync off, first 12 s discarded):
+  | run | median frame time |
+  |---|---:|
+  | baseline | 10.38 ms |
+  | `flicker_hum_depth: 0.0` (ablation) | 8.69 ms |
+  | **visibility-gated hum, flicker still on at 0.06** | **8.60 ms** |
+  ⚠️⚠️ **Re-read those absolute numbers with FVS-N-24's resolution in hand (2026-07-31):** the box's
+  olmocr/vLLM tenant was consuming 82% of the GPU during this A/B, so the 10.38 / 8.69 / 8.60 ms
+  figures are contended-box numbers. On a quiet GPU the same scene renders at **~4.2 ms**. The A/B/A
+  structure and the *ordering* survive — the three runs were minutes apart under the same contention,
+  and `flicker_lights` is CPU-side work the tenant does not touch — so the fix is still a fix. What is
+  NOT supportable is quoting "10.38 → 8.60 ms" as this game's frame time, or the implied ~1.8 ms
+  saving as a fraction of a real frame. Re-measure on an idle GPU if the magnitude ever matters.
+  ⚠️ **Condition, stated precisely** (N-24's narrowing found it, and it applies here too): all three
+  runs sampled the window where the **intro conversation has the sim frozen**, so this is a
+  renderer/`Update`-side comparison with a paused world. That does not weaken the result — the three
+  runs are apples-to-apples, and `flicker_lights` is an `Update` system that runs identically either
+  way — but the *absolute* frame times are not gameplay frame times. Re-measure past the conversation
+  before quoting them as such.
+  *Shipped:* the hum now skips fixtures whose `ViewVisibility` is false — ~120 resident, ~7 visible.
+  The gated build recovers the **full** benefit of disabling flicker outright *while keeping the
+  effect*, which is the result that makes this a fix rather than a trade. A light scrolling into view
+  resumes its hum on its next rendered frame — the first frame anyone could see it.
+  Landed alongside two per-frame whole-dungeon walks found in the same pass: `update_cutaway` eased
+  every wall tile's `Transform` forever (an exponential ease never *reaches* its target, and
+  `DerefMut` marks `Changed` regardless) — it now snaps and then skips; and `mycelia::coat_furniture`
+  walked every prop's glTF descendant tree every frame in every app state — a finished root is now
+  retired with a `MoldCoatDone` marker.
+  · *Deps:* — · *Touches:* `src/light.rs`, `src/dungeon/cutaway.rs`, `src/mycelia/mod.rs`, `src/perf_probe.rs`
+- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
+  > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
+  > first 10 s discarded, 68 samples each):
+  >
+  > | run | pixels | mean fps | frame time | visible tris |
+  > |---|---:|---:|---:|---:|
+  > | full | 2.48 Mpx | 117.8 | **9.94 ms** | 413,364 |
+  > | half | 0.62 Mpx | 113.6 | **10.35 ms** | 413,364 |
+  >
+  > **A 4x cut in pixels moved frame time by +4.1% — i.e. not at all** (the half-res run was
+  > marginally *slower*, which is noise). At ~413k triangles on screen the renderer is not the
+  > constraint. **FVS-N-23's mesh decimation would buy approximately nothing**, and it would have
+  > cost a golden re-pin and a `valkyrie_asset.rs` re-pin to find that out.
+  >
+  > ⚠️ **The first attempt at this test LIED, and the failure is worth keeping.** It reported
+  > CPU-bound at 16.75 vs 16.82 ms — because both runs sat at exactly **60.0 fps median**, i.e.
+  > both were vsync-capped. A capped frame time measures the display, not the renderer, and two
+  > capped runs can only ever report "no difference". Measurement mode now forces
+  > `PresentMode::AutoNoVsync`. **Check the median for a suspiciously round cap before believing
+  > any frame-time comparison.**
+  >
+  > ⚠️ **Scope of the claim, stated precisely:** the probe run held ~118 fps where the player saw
+  > 26-45, with the same geometry but no live swarm (29 crabs, 5 mancae) and immature mycelia. So
+  > this establishes the **renderer is not the constraint at that geometry**. It does *not* say
+  > which CPU system eats the frame when the swarm is live. Re-run the same A/B on a LOADED scene
+  > before extending the conclusion.
+  > ### ✅ RE-TESTED 2026-07-31 ON A QUIET GPU — the verdict SURVIVES, the numbers do NOT.
+  > FVS-N-24 (now archived, RESOLVED) found the box's olmocr/vLLM tenant eating **82% of the GPU**
+  > since 2026-07-29 17:56 — i.e. during the A/B above. Heavy GPU contention *mimics* a CPU-bound
+  > reading (you wait for time slices, so cutting pixels does not help), so this test was re-run with
+  > the pipeline stopped and the GPU verified idle: 4 × 150 s, interleaved 1280x720 / 640x360, first
+  > 10 s discarded, n≈277 each.
+  > | res | pixels | median frame | p99 | replicates |
+  > |---|---:|---:|---:|---|
+  > | 1280x720 | 0.92 Mpx | **4.19 ms** (238 fps) | 4.37-4.44 | 4.18 / 4.21 |
+  > | 640x360 | 0.23 Mpx | **4.27 ms** (234 fps) | 4.40-4.46 | 4.28 / 4.25 |
+  >
+  > **A 4× pixel cut moved frame time +1.8%, the low-res run again marginally *slower* — so the
+  > CPU-bound conclusion is CONFIRMED, now on an uncontended GPU and with replicates.** What changes
+  > is the scale: the same scene renders at **4.2 ms, not 9.94 ms**, so every absolute number in the
+  > table above was inflated ~2.4× by contention, and the "26-45 fps the player saw" was the OCR
+  > pipeline, not this game. The gate on FVS-N-23 therefore holds *more* firmly, not less: at 238 fps
+  > with 413k visible triangles, mesh decimation buys nothing measurable.
+  > ⚠️ Both A/Bs are ≤720p. They establish the renderer is not the constraint **at this window size**;
+  > they do not license extrapolating to 1440p/4K, where fragment cost grows and this test would need
+  > redoing at that resolution.
+  > *Next:* `docs/perf_improvements_plan.md` aims at the CPU side and is therefore aimed correctly;
+  > `--features bevy/trace_tracy` for per-system attribution — though at a 4.2 ms frame with a
+  > 0.4 ms median→max spread, there is no longer an obvious performance problem to attribute.
+  **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
+  a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
+  concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget
+  (~48M `is_floor` calls/sec in the stigmergy diffusion stencil) and concludes "precompute the
+  neighbour table". **Both cannot be the bottleneck, and doing the wrong one first buys nothing** —
+  decimating meshes on a CPU-bound frame changes no number at all.
+  What the `perf_probe` measures is *frame time*, which is agnostic between them; the triangle and
+  primitive counts describe a budget, not a cause. Saying otherwise is reading a correlation into a
+  census.
+  *Cheapest decisive experiments, in order:*
+  1. **Halve the window resolution and re-measure the same route.** Frame time unchanged ⇒ CPU-bound;
+     frame time improves roughly with pixel count ⇒ GPU-bound. One run, no code.
+  2. `--features bevy/trace_tracy` for per-system attribution — the heavy sim systems already carry
+     `info_span!`s for exactly this.
+  3. Toggle `MyceliaPlugin` off and re-measure (it is a GPU compute pass, so it discriminates too).
+  ⚠️ Note the two captures taken **13 s apart from the identical camera position** with identical
+  resident geometry read **45.5 fps and 27.3 fps** (worst frame 134 ms then 224 ms). A degradation at
+  a fixed viewpoint with fixed geometry is not a geometry problem *at all* — it is time-dependent, and
+  FVS-N-13 (every expedition leaks a whole dungeon, tiles + Avian colliders, uncounted by the probe)
+  is the standing candidate.
+  ⚠️ **That candidate is spent — N-13 was FIXED 2026-07-31** (`fae5ef2`, the tiles are `run_scoped()`
+  now). So the 45.5 → 27.3 fps decay at a fixed viewpoint is **unattributed again**, and the next
+  occurrence needs a fresh hypothesis rather than this one. Note also the two captures predate FVS-N-24,
+  which found the box's olmocr/vLLM tenant on the GPU throughout that period — a time-dependent decay at
+  a fixed viewpoint is exactly what an external tenant looks like. Re-measure on a verified-idle GPU
+  before treating it as a game defect at all.
+  *Done when:* the bound is named with the measurement that shows it, and N-23/N-24 are re-ordered
+  behind that answer. · *Deps:* — · *Touches:* — · *Reading:* [ABM]
+- **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save** · S · ✅ **RULED 2026-07-31 (Director): ACCEPTED AS NORMAL — no versioning, no migration**
+  C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
+  > **The ruling: a content addition resetting a campaign is acceptable at this stage.** The refusal is
+  > already correct behaviour rather than a bug — misreading saved beliefs is strictly worse than refusing
+  > to load them — and versioning would buy a migration step per future anomaly for a campaign nobody but
+  > the Director is keeping yet. Revisit when a campaign is worth preserving to someone else.
+  > **What the ruling does NOT excuse** is the cascade this entry records: deleting the save reset
+  > `ConversationsPlayed`, the one-shot intro replayed, and its `Choice` node froze the sim — which is why
+  > every screenshot that day captured a paused game. That is a separate defect from the save refusal and
+  > it is not closed by accepting the refusal. If it recurs, file it on its own terms.
+  · *Deps:* — · *Touches:* `src/knowledge/`, `src/persist.rs`
+- **FVS-H-5 — `UNVISITED = INFINITY` starved the measured cells** · S · ✅ **MEASURED, RULED AND FIXED 2026-07-31**
+  **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
+  measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
+  there is no progress to measure — and the campaign never leaves where it started. [LPM]'s progress
+  niches have to be *discovered*.
+  **The risk it creates, and it is real:** the shipped `elites_levels.ron` has **55 occupied cells**. At
+  one expedition per pick that is 55 expeditions of pure exploration before the director exploits
+  anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
+  correct in principle and possibly far too patient at this archive size.
+  > ### 📐 MEASURED 2026-07-31 — starvation confirmed, and it is 6× worse than this entry guessed, exactly.
+  > Simulated through the real `pick`/`observe` path over a 55-cell archive (10 seeds, pinned by
+  > `director::tests::the_unvisited_bonus_starves_exploitation_at_the_shipped_archive_size`): the
+  > exploration phase is **exactly 330 expeditions on every seed** — not ~55. Two compounding terms
+  > the entry missed: a cell scores `UNVISITED` until it has **`HISTORY` = 6 readings** (two full
+  > windows), not one; and a cell leaves the infinite tie the moment it graduates, so no pick is ever
+  > "wasted" and the phase has the closed form **occupied-cells × HISTORY**. Against a 10–30
+  > expedition campaign, the director's exploitation phase is unreachable — in practice it is a
+  > **uniform random sampler** at this archive size.
+  > **Needs your ruling, not a drive-by fix** (interacts with H-6): the entry's own preferred remedy
+  > is a finite decaying optimistic prior, and the measurement adds a second lever it did not name —
+  > the 6-reading requirement is the bigger multiplier, so allowing a one-window (3-reading)
+  > provisional progress estimate would cut the floor from 330 to 165 even before touching the prior.
+  > ### ⬆️ PRIORITY RAISED 2026-07-31: FVS-H-8 LANDED, so this is no longer theoretical.
+  > This entry previously closed with *"neither is observable while H-8 leaves the director's picks
+  > unread"* — true at the time, and no longer. H-8 shipped `RunBuild::Config`, so the director's
+  > sampled cell now reaches generation and **330 expeditions of uniform random sampling is the
+  > director's actual shipped behaviour**, not a property of a system nobody read.
+  > It is still not a blocker on H-8 — a uniform sampler over a QD archive beats "every expedition
+  > identical", and FVS-H-7's briefing now tells the truth either way. But the ruling this entry has
+  > been waiting for is now the difference between a curriculum and a shuffle.
+  *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
+  *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
+  *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
+  > ### ✅ REMEDY SHIPPED 2026-07-31 (Director's ruling: BOTH levers)
+  > Both terms the measurement identified were changed, and the second one is the one the original
+  > entry never named:
+  > * **`UNVISITED: f32 = INFINITY` → `PRIOR: f32 = 1.0`, decayed by visit count.** `interest()` is now
+  >   `|progress| + PRIOR/(1 + readings)`. This is textbook **count-based exploration** (Strehl &
+  >   Littman 2008, surveyed in Baker et al. 2019 `10.48550/arXiv.1909.07528` — which names this exact
+  >   failure: intrinsically-motivated agents "are incentivized to explore uniformly"). `PRIOR` is set
+  >   to the largest achievable real progress, so an untried cell still outranks every measured one
+  >   *except* a near-perfect competence swing — which is precisely the cell worth interrupting
+  >   exploration for.
+  > * **`MIN_READINGS` dropped from `HISTORY`(6) to `WINDOW`(3).** `learning_progress` now splits
+  >   whatever it has symmetrically (`w = min(n/2, WINDOW)`). At `n = HISTORY` the arithmetic is
+  >   byte-identical to before, so a fully-sampled cell is scored exactly as it always was; only the
+  >   warm-up changed from silent to provisional.
+  > **Re-measured, not predicted:** the flat-competence exploration floor is now exactly
+  > `cells × MIN_READINGS` = **165**, down from 330, pinned by the same test that measured the 330.
+  > **But the halved floor is the lesser half of the fix, and the entry should say so.** Under
+  > `INFINITY` exploration and exploitation ran in *sequence* — every untried cell beat every measured
+  > cell absolutely, so no cell could ever be revisited early, whatever it showed. They now
+  > **interleave**, which is the difference between a curriculum and a shuffle. Pinned separately by
+  > `a_cell_showing_real_progress_is_revisited_before_exploration_finishes`, because the
+  > constant-competence floor simulation cannot show it by construction.
+  > ⚠️ **This was only worth doing because FVS-H-8 landed first.** Until the director's picks reached
+  > the world, none of this was observable in play.
+  · *Deps:* H-3, H-8 · *Touches:* `src/director.rs` · *Reading:* **[LPM]**, [QD], Strehl & Littman 2008
+- **FVS-L-8 — The choice menu was drawn on top of the speaker's own line (FOUND + FIXED 2026-07-31)** · S
+  **Reported from real play**, via a Ctrl+P region capture: *"Text bubbles are overlapping"*, with
+  option `1. Burn it out.` drawn across the prompt bubble `Call it.`
+  **Root cause: two independent stacks over two different entities.** The prompt hangs off the
+  **speaker** (`spawn_line_bubble(owner, …, Vec2::ZERO)`); the clickable options are stacked over the
+  **leader**, from a bare `CHOICE_BASE = 0.15`. Neither column knew the other existed, and the common
+  case in play is that speaker and leader stand close — so both project into the same screen space and
+  collide. `Bubble.offset` existed only to stack one speaker's *own* options against each other.
+  **The two-owner split is deliberate and was kept** (Director's ruling): the line belongs to *them*,
+  the options belong to *you*. The fix is that the option stack now starts above the prompt's
+  **measured** height rather than a constant — `spawn_line_bubble` returns its rendered size, and
+  `offset_y` begins at `CHOICE_BASE + prompt_height`. A bubble's footprint is only known after
+  rasterisation (the text wraps), which is exactly why a constant could never have been right.
+  Vertical offsets are applied along **camera up** (`bubble::track_bubbles`), so clearing the prompt's
+  own height is precisely the screen-space separation required, at any camera angle. When the speaker
+  is far from the leader there was no overlap to fix and the options simply ride one bubble higher —
+  free, since they already float well above the leader's head.
+  *Determinism:* none — `src/dialogue/` is cosmetic and `Update`-only; no pinned state, goldens unmoved.
+  · *Deps:* — · *Touches:* `src/dialogue/runtime.rs` · *Reading:* — (no corpus resource)
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
 
