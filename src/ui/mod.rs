@@ -86,6 +86,9 @@ impl Plugin for UiPlugin {
                 debrief::DebriefPlugin,
                 // Reads *why* a containment is progressing or breaking (FVS-L-1).
                 containment_hud::ContainmentHudPlugin,
+                // ...and *where* it is happening (FVS-K-1). The panel names the rule; this draws the
+                // cordon, the held anomaly, and the breach the panel can only report by disappearing.
+                crate::containment::cordon::CordonFeedbackPlugin,
                 verb_bar::VerbBarPlugin,
                 research_hud::ResearchHudPlugin,
             site_hud::SiteHudPlugin,

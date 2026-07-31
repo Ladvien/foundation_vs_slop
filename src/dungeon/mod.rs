@@ -85,6 +85,21 @@ mod tests;
 // directly (config types, the cutaway components the camera drives); `pub(crate)` for the internals the
 // submodules share with each other.
 pub use biome::{biome_at, Biome};
+
+/// The surface-biome noise parameters `(seed, mix, scale)` for a config.
+///
+/// The seed is its own hash off the config seed — **not** a draw from the carve RNG. Taking even one
+/// value from that stream would shift every subsequent carve draw and move the pinned layout goldens,
+/// which is why biomes could be added without a re-pin in the first place.
+///
+/// One function so the carver and anything else asking the same question cannot drift apart.
+pub(crate) fn biome_field(config: &DungeonConfig) -> (u64, f32, f32) {
+    (
+        config.seed ^ 0xB10E_5EED,
+        config.biome_mix,
+        config.biome_scale,
+    )
+}
 pub use config::*;
 pub use cutaway::*;
 pub(crate) use layout::*;
@@ -146,6 +161,10 @@ impl FloorMaterials {
 /// Sentinel in [`Dungeon::corridor_of`] for "this cell is not corridor floor".
 const NO_CORRIDOR: u32 = u32::MAX;
 
+/// Sentinel in the carver's room-ownership map for "this cell was not claimed by any room's rect".
+/// Carve-local (see `layout::resolve_biomes`); the `Dungeon` never stores it.
+const NO_ROOM: u32 = u32::MAX;
+
 /// The realized dungeon on the fine grid: a walkability mask plus the player spawn.
 #[derive(Resource)]
 pub struct Dungeon {
@@ -162,12 +181,16 @@ pub struct Dungeon {
     /// infests whole runs, say — had no handle on one. This restores it: a corridor run is an edge index.
     /// Private, like `walkable`, and read through [`Dungeon::corridor_id`] / [`Dungeon::is_corridor`].
     corridor_of: Vec<u32>,
-    /// Surface-biome field parameters — `(seed, mix, scale)`, see [`crate::dungeon::biome_at`].
+    /// The surface treatment of every fine cell, resolved **per zone** at carve time.
     ///
-    /// Three scalars rather than a per-cell `Vec<Biome>` because the field is a *pure function* of
-    /// position and seed: storing it would be caching a hash. The seed is derived from the carve seed
-    /// but drawn from no RNG stream, so adding biomes shifted nothing in the pinned layout goldens.
-    biome_field: (u64, f32, f32),
+    /// This used to be three scalars `(seed, mix, scale)` re-sampled per cell on every read, on the
+    /// grounds that the field was a pure function of position and storing it would be caching a hash.
+    /// That reasoning died with FVS-Q-8: a per-zone biome is **not** a function of position alone — it
+    /// depends on which room or corridor owns the cell, which only the carver knows — so it is now
+    /// resolved once and stored. One byte per cell, and `Biome`'s own doc already anticipated it.
+    ///
+    /// See `layout::resolve_biomes` for the three rules and why the transition lands at a doorway.
+    biome_of: Vec<Biome>,
 }
 
 pub struct DungeonPlugin;
@@ -241,7 +264,8 @@ impl Dungeon {
         // The carve RNG is seeded here (separately from the coarse seed) and drawn only inside
         // `expand_to_fine`, in site order — so the Grid path stays byte-identical to the pre-refactor carve.
         let mut rng = seeded(config.seed ^ 0xC0FFEE);
-        let (walkable, regions, spawn, corridor_of) = expand_to_fine(&layout, config, &mut rng);
+        let (walkable, regions, spawn, corridor_of, biome_of) =
+            expand_to_fine(&layout, config, &mut rng)?;
 
         Ok(Dungeon {
             width: layout.width,
@@ -250,9 +274,7 @@ impl Dungeon {
             spawn,
             regions,
             corridor_of,
-            // Its own hash off the config seed — NOT a draw from `rng`. Taking even one value from that
-            // stream would shift every subsequent carve draw and move the pinned goldens.
-            biome_field: (config.seed ^ 0xB10E_5EED, config.biome_mix, config.biome_scale),
+            biome_of,
         })
     }
 
@@ -327,14 +349,30 @@ impl Dungeon {
     /// Gated on `is_floor`, so a doorway cell the necking pass closed reports `None` even though the
     /// corridor pass had opened it. Corridors cross room interiors on their way between site centres; those
     /// crossing cells are room floor and report `None` too.
-    /// Which surface treatment renders at this cell. See [`crate::dungeon::biome_at`] for why this is a
-    /// pure function rather than stored per-cell state.
+    /// Which surface treatment renders at this cell — a lookup into the per-zone map the carver
+    /// resolved (`layout::resolve_biomes`), not a per-cell noise sample.
     ///
-    /// Note it answers for *any* cell, walkable or not — a wall belongs to the biome of the cell it is
-    /// attached to, which is what keeps a room's walls and floor agreeing.
+    /// It answers for *any* cell, walkable or not: a wall belongs to the biome of the cell it is
+    /// attached to. **That is now true by construction** (the carver's BFS assigns every non-floor cell
+    /// from its nearest floor), where before FVS-Q-8 it held only probabilistically — which is exactly
+    /// how one room came to show carpet floor against concrete walls.
+    ///
+    /// Off-grid cells are reachable here — `perf_probe` asks about the camera's focus cell, which its own
+    /// comment notes can land off-map near an edge. Such a cell belongs to no zone, so it is **clamped
+    /// into the grid** rather than given a biome of its own: that is the same "take the nearest cell that
+    /// has one" rule the carver's BFS applies to rock, so there is one answer to "what surface is here".
     pub fn biome(&self, c: IVec2) -> Biome {
-        let (seed, mix, scale) = self.biome_field;
-        biome_at(seed, c, mix, scale)
+        let c = IVec2::new(
+            c.x.clamp(0, self.width.saturating_sub(1) as i32),
+            c.y.clamp(0, self.height.saturating_sub(1) as i32),
+        );
+        // `resolve_biomes` emits exactly one entry per cell and `generate` rejects a carve with no floor,
+        // so the `unwrap_or` arm is unreachable for any constructed `Dungeon`. It is here to keep this a
+        // total function without a panic, not as a second path — there is no state in which it is taken.
+        self.biome_of
+            .get(self.index(c))
+            .copied()
+            .unwrap_or(Biome::Backrooms)
     }
 
     pub fn corridor_id(&self, c: IVec2) -> Option<u32> {
@@ -479,7 +517,9 @@ impl Dungeon {
             width,
             height,
             corridor_of: vec![NO_CORRIDOR; walkable.len()],
-            biome_field: (0, 0.0, 14.0), // test fixture: single-biome, so callers see a stable surface
+            // Test fixture: single-biome, so callers see a stable surface. Matches the old
+            // `biome_field: (_, mix 0.0, _)`, which `biome_at` documents as an exact endpoint.
+            biome_of: vec![Biome::Backrooms; walkable.len()],
             walkable,
             spawn: IVec2::ZERO,
             regions: Vec::new(),
@@ -501,11 +541,11 @@ impl Dungeon {
         Dungeon {
             width,
             height,
+            biome_of: vec![Biome::Backrooms; walkable.len()], // fixture: single-biome, stable surface
             walkable,
             spawn: IVec2::ZERO,
             regions,
             corridor_of,
-            biome_field: (0, 0.0, 14.0), // test fixture: single-biome, so callers see a stable surface
         }
     }
 

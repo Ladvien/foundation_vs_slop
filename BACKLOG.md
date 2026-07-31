@@ -119,9 +119,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** [STIG], [STIG-AD], [UV-REV], [UV-FMRI], [ECS], [GOAP]
 **Done when:** SCP-610 is capturable via quarantine and reads as a "slop" instance; 999/1048/150 capturable via their rules; crab infestation clearable via nest-capping; the two crab-behavior forks are decided and documented.
 
-- **FVS-K-1 — SCP-610 content/FX pass** · M · *determinism: render = SSIM*
-  Audio/FX/flavor for wired 610, incl. color-language luminosity (color doc). Read it as an SCP-9191 "slop" instance.
-  *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]
+> **All items in this push have shipped** — see `BACKLOG_ARCHIVE.md`. FVS-K-1 (SCP-610's content/FX
+> pass) landed 2026-07-30 and closed the last of them.
 
 ---
 
@@ -192,6 +191,19 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **1325** (`MODE_COUNT` 25→29), so `NeuralPolicy::from_weights` rejects them loudly — as designed
   ("a stale archive is a re-train, not a resize"). The levels/audio/behavior runs also used held-in world
   `0xB0BA`, **retired 2026-07-19**. So this is closer to a first bake than a re-bake.
+  ⚠️ **The AUDIO archive is now stale for a third, structural reason (2026-07-30, FVS-K-1).**
+  `audio_genome::N` grew **15 → 16** (`flesh_drone_loudness`, SCP-610's continuous acoustic
+  stimulus). Archived genomes are fixed-length vectors, so the one bake that has ever landed —
+  `elites_audio.ron`, 2026-07-19 — cannot decode and `is_feasible` rejects it loudly, as designed
+  ("a stale archive is a re-train, not a resize"). Deliberately **not** re-baked at the time: this
+  item is sequenced behind FVS-I-1, and baking now would optimise against an objective I-1 then
+  invalidates — the exact mistake this entry already records one paragraph up.
+  ⚠️ **And that knob's `BOUNDS` ceiling is a correctness constraint, not a range guess.** SCP-610's
+  drone deposits `THREAT_ANOMALY` at the bloom's own position while its own containment rule caps
+  that channel at 0.35 *there*, so a loud enough bloom is an uncontainable one — the search can
+  delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
+  until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
+  Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
@@ -218,9 +230,244 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
   `ui::site_hud` works — not a reach into the in-game overlay stack.
   *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
+- **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls** · L · *determinism: moves goldens* · ⛔ **DEMOTED 2026-07-30 — DO NOT DO THIS FOR PERFORMANCE**
+  > **FVS-N-25 measured the frame as CPU-bound**: a 4x pixel cut moved frame time +4.1%. Decimating
+  > these meshes would therefore buy ~nothing, while costing a golden re-pin and a
+  > `valkyrie_asset.rs` contract re-pin. The census below is a **budget**, not a cause — treating it
+  > as one was the mistake N-25 exists to have caught.
+  > It stays open on **asset-hygiene** grounds only (`CLAUDE.md`: "all our assets should be
+  > low-poly count"), at low priority, and it must not be cited as a performance fix unless a
+  > loaded-scene A/B reverses N-25.
+  **Reported from play as "it drops to 26 FPS", with the barrels suspected.** The barrels are innocent:
+  **252 triangles each**, among the lightest assets shipped. Measured instead with the new
+  `perf_probe` (`src/perf_probe.rs`) over a real session:
+  * peak **visible** geometry `415,482` triangles;
+  * five Valkyries account for `5 x 82,436 = 412,180` of them;
+  * **everything else visible — 17 props, the dungeon, the lights — is 3,302 triangles.**
+
+  So 99.2% of rendered geometry is the squad. But the triangle count is only half of it:
+  `valkyrie.glb` carries **23 materials across 24 primitives**, and Bevy cannot batch across
+  materials — that is **115 draw calls per frame for the squad alone**. Four materials hold 76k of
+  the 82k triangles (`skin` 26,756 · `bodysuit` 24,436 · `gloves` 13,880 · `boots` 10,688); the other
+  19 hold ~6k between them, including **five belt hooks of 12 triangles each, each with its own
+  material**. That is a character authored for a cinematic close-up being drawn a few hundred pixels
+  tall at the shipped iso zoom.
+  **Two more offenders, from the player's own Ctrl+P captures (resident totals: 590,869 triangles
+  across 554 primitives, tracked entities only — dungeon tiles are NOT counted):**
+
+  | asset | instances | triangles | prims | tris/instance |
+  |---|---:|---:|---:|---:|
+  | `characters/valkyrie.glb` | 5 | 412,344 | 127 | 82,468 |
+  | `scp150/scp-150.glb` | 5 | **86,410** | 35 | **17,282** |
+  | `dimensional_crab.glb` | 29 | 66,026 | 63 | 2,276 |
+  | `Wall Light.glb` | **120** | 7,200 | **240** | 60 |
+  | every barrel variant | 17 | 4,284 | 17 | 252 |
+
+  * **The mancae are the second-biggest cost in the game.** `scp-150.glb` is **17,282 triangles per
+    instance** — for a small parasite, five of which spawn. Proportionally that is worse than the
+    Valkyrie.
+  * **The wall lights are the biggest DRAW-CALL cost.** 120 instances × 2 primitives = **240
+    primitives for 7,200 triangles** — 43% of all primitives for 1.2% of the geometry. A 60-triangle
+    prop split across two draw calls, placed 120 times.
+  *Fix:* decimate the Valkyrie toward ~8k and atlas its materials to 3-4; decimate `scp-150`; merge
+  the wall light's two primitives into one. Asset-side work in `scp_characters`, **not** an engine
+  change. ⚠️ **Gated on FVS-N-25** — none of it is worth doing until the bottleneck side is known.
+  ⚠️ Re-pins `tests/valkyrie_asset.rs`'s contract and **moves the goldens** — the squad mesh is pinned
+  state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
+  *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
+  the same route. · *Deps:* — · *Touches:* `assets/characters/valkyrie.glb`, `tests/valkyrie_asset.rs` · *Reading:* — (no corpus resource)
+- **FVS-N-24 — A 171 ms frame hitch that steady-state geometry does not explain (FOUND 2026-07-30)** · M
+  Separate phenomenon from FVS-N-23 and **it will not be fixed by fixing that one**, which is the
+  reason it is filed apart. The same trace shows a sustained 25-48 fps (a budget problem, N-23) *and*
+  a **1% low of 8.7 fps with a worst frame of 171 ms** (a stall). A 171 ms hitch is not a triangle
+  count; the candidates are asset streaming, a GPU sync, or the mycelia compute pass.
+  *Investigate with:* `debug_screenshots/fps_trace.csv`'s `worst_ms` column against `t_secs` — a hitch
+  that coincides with entering a new region points at streaming, one that recurs on a fixed period
+  points at the compute pass. `--features bevy/trace_tracy` gives per-system attribution.
+  ⚠️ **Also observed: a degradation over TIME at a fixed viewpoint.** Two captures 13 s apart from the
+  identical camera position with identical resident geometry (590,869 tris) read 45.5 fps / 134 ms
+  worst, then 27.3 fps / 224 ms worst. Whatever this is, it is not geometry and not location.
+  > ### 📐 It is not a degradation — it is a ~11.8 s OSCILLATION. Measured 2026-07-30 from `fps_trace.csv`.
+  > The two captures above sampled opposite phases of a cycle, which is why it read as decay. Over the
+  > 44 s trace, `fps_local` swings between a **slow phase (mean 68.1 fps)** and a **fast phase (mean
+  > 146.0 fps)** — a **2.14×** swing — with slow-phase onsets at **4.6 s, 16.2 s, 28.4 s, 40.0 s**:
+  > intervals 11.6 / 12.2 / 11.6, **mean period 11.8 s over 3 clean cycles**. Slow phase ~4.6 s of each.
+  >
+  > **The scene is provably constant across the whole window** — same cell (80,112), same region 13,
+  > same biome, `vis_units` 5, `vis_hostiles` 0, `vis_props` 7, `vis_lights` 7, and `vis_tris` varying by
+  > **4 out of 413,364**. So this is neither geometry nor location nor entity count, and N-23 cannot
+  > touch it.
+  >
+  > **Host CPU frequency scaling is ruled out — by magnitude, not by period.** Sampled `/proc/cpuinfo`
+  > at 2 Hz for 42 s under sustained load: mean-of-core-means 4132 MHz, range 3639–4200, a **1.15×**
+  > swing. A 15% clock change cannot produce a 114% frame-time change even if perfectly correlated.
+  > *Whatever this is, it is in the application.*
+  >
+  > **Next step is per-system attribution, not more grepping.** `--features bevy/trace_tracy` over a
+  > fixed-camera run ≥ 3 cycles (≥ 40 s), then find the system whose cost has an 11.8 s period. Cheap
+  > ablation if Tracy is inconvenient: re-measure the same fixed camera with the mycelia plugin out —
+  > it owns the only GPU compute pass in the frame, which is the standing suspect for a periodic cost.
+  > *Ruled out already:* `MIN_APPEARANCE_RAMP_SECS = 12.0` (`mycelia/perceptual.rs:68`) is tantalisingly
+  > close to the period but is a `slew` **rate limiter**, not a periodic trigger — it produces a smooth
+  > ramp, not a cycle. `perf_probe`'s `HOTSPOT_EVERY_SECS = 10.0` is the wrong period and is one small
+  > file write.
+  > **Note the prior suspect does not fit.** FVS-N-13 leaks one dungeon *per expedition*; this cycles
+  > three times inside a single run at a fixed camera. N-13 is still a real leak — it is just not this.
+  *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
+  behind it. · *Deps:* N-25 · *Reading:* [ABM]
+- **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
+  > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
+  > first 10 s discarded, 68 samples each):
+  >
+  > | run | pixels | mean fps | frame time | visible tris |
+  > |---|---:|---:|---:|---:|
+  > | full | 2.48 Mpx | 117.8 | **9.94 ms** | 413,364 |
+  > | half | 0.62 Mpx | 113.6 | **10.35 ms** | 413,364 |
+  >
+  > **A 4x cut in pixels moved frame time by +4.1% — i.e. not at all** (the half-res run was
+  > marginally *slower*, which is noise). At ~413k triangles on screen the renderer is not the
+  > constraint. **FVS-N-23's mesh decimation would buy approximately nothing**, and it would have
+  > cost a golden re-pin and a `valkyrie_asset.rs` re-pin to find that out.
+  >
+  > ⚠️ **The first attempt at this test LIED, and the failure is worth keeping.** It reported
+  > CPU-bound at 16.75 vs 16.82 ms — because both runs sat at exactly **60.0 fps median**, i.e.
+  > both were vsync-capped. A capped frame time measures the display, not the renderer, and two
+  > capped runs can only ever report "no difference". Measurement mode now forces
+  > `PresentMode::AutoNoVsync`. **Check the median for a suspiciously round cap before believing
+  > any frame-time comparison.**
+  >
+  > ⚠️ **Scope of the claim, stated precisely:** the probe run held ~118 fps where the player saw
+  > 26-45, with the same geometry but no live swarm (29 crabs, 5 mancae) and immature mycelia. So
+  > this establishes the **renderer is not the constraint at that geometry**. It does *not* say
+  > which CPU system eats the frame when the swarm is live. Re-run the same A/B on a LOADED scene
+  > before extending the conclusion.
+  > *Next:* `docs/perf_improvements_plan.md` aims at the CPU side and is therefore aimed correctly;
+  > `--features bevy/trace_tracy` for per-system attribution.
+  **This is not yet known, and both of the obvious plans assume opposite answers.** FVS-N-23 measured
+  a lopsided *geometry* budget (99% of visible triangles are the squad; 554 primitives resident) and
+  concludes "decimate the assets". `docs/perf_improvements_plan.md` measured a lopsided *CPU* budget
+  (~48M `is_floor` calls/sec in the stigmergy diffusion stencil) and concludes "precompute the
+  neighbour table". **Both cannot be the bottleneck, and doing the wrong one first buys nothing** —
+  decimating meshes on a CPU-bound frame changes no number at all.
+  What the `perf_probe` measures is *frame time*, which is agnostic between them; the triangle and
+  primitive counts describe a budget, not a cause. Saying otherwise is reading a correlation into a
+  census.
+  *Cheapest decisive experiments, in order:*
+  1. **Halve the window resolution and re-measure the same route.** Frame time unchanged ⇒ CPU-bound;
+     frame time improves roughly with pixel count ⇒ GPU-bound. One run, no code.
+  2. `--features bevy/trace_tracy` for per-system attribution — the heavy sim systems already carry
+     `info_span!`s for exactly this.
+  3. Toggle `MyceliaPlugin` off and re-measure (it is a GPU compute pass, so it discriminates too).
+  ⚠️ Note the two captures taken **13 s apart from the identical camera position** with identical
+  resident geometry read **45.5 fps and 27.3 fps** (worst frame 134 ms then 224 ms). A degradation at
+  a fixed viewpoint with fixed geometry is not a geometry problem *at all* — it is time-dependent, and
+  FVS-N-13 (every expedition leaks a whole dungeon, tiles + Avian colliders, uncounted by the probe)
+  is the standing candidate.
+  *Done when:* the bound is named with the measurement that shows it, and N-23/N-24 are re-ordered
+  behind that answer. · *Deps:* — · *Touches:* — · *Reading:* [ABM]
+- **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline* · ✅ **STATIC AUDIT RUN 2026-07-30 → `docs/descriptor_audit.md`**
+  > **Read the audit before touching I-7..I-10 — it changes all four.** Headlines:
+  > * **I-10 is STALE** — `BreedingTuning` (7) and `ParasiteTuning` (14) are *already* decoded in
+  >   `world_genome.rs:452/490`, `respawn_interval` and `manca_count_max` included. Closed, archived.
+  > * **I-9 names the wrong file.** `src/ai/tuning.rs` is fully encoded already; the unevolved knobs are
+  >   `src/behavior_tuning.rs::PerceptionTuning`, of which `behavior_genome` covers only 2 of 13.
+  > * **I-8 fails** — all 15 `MetropolisWeights` knobs tune *arrangement*, the level archive bins on
+  >   *count* × mould. Needs your remove/add-axis/couple call.
+  > * **I-7 passes for a subset only** — ~8 sim-relevant knobs reach `deaths`; the ~22 cosmetic ones are
+  >   textbook N-21.
+  > ⚠️ **And one thing the audit surfaced that nobody chose:** `behavior_genome` (89 knobs, *squad*
+  > tuning) and `audio_genome` (16 knobs, acoustics) are **both** binned on `swarm_descriptor` — the
+  > *swarm's* aggression × persistence. The only bake that has ever landed on those axes filled **3 of 64
+  > cells**. Whether that descriptor is right for either population is a live question, and a descriptor
+  > choice is yours. It gates I-9.
+  > *Still unmeasured:* every "moves an axis" claim is a code-path argument. The settling test is an
+  > ablation per knob group — a search run, not a read.
+  The four items below add ~20 knobs to the genomes. **Adding a knob no descriptor can see makes the
+  archive worse, not better** — two genomes differing only in that knob land in the same cell, and the
+  winner is decided by evaluation luck. That is not a hypothetical: it is exactly FVS-N-21 (biome
+  genes against a level descriptor whose only axes are `furniture_per_room` and `infestation`), and it
+  is the mechanism that collapsed the policy archive once already.
+  *For each knob group, establish which descriptor axis moves when it moves.* If none does, decide
+  **remove / add-axis / couple** before landing the gene, using N-21's three-way framing.
+  ⚠️ Every genome length change also invalidates that population's baked archive — `audio_genome`
+  already went 15 -> 16 for FVS-K-1, and that re-bake is parked under H-1. Do not multiply that debt
+  without deciding it is worth paying. · *Deps:* — · *Reading:* **[QD]**, [ME], [QD-PCG]
+- **FVS-I-7 — Gore settings (6 knobs) are unevolved** · M · *determinism: offline*
+  Not in any genome, yet **a gore knob already tipped a 5/5 win into a wipe** — so it is a live
+  difficulty dial the offline search cannot see, which is precisely what `CLAUDE.md`'s "every feature
+  must evolve" rule exists to prevent.
+  > ✅ **Passes the audit — for a SUBSET only (2026-07-30).** `GoreSettings` is ~30 knobs and most are
+  > cosmetic (`spray_color_a/b`, `pool_color`, `pool_gloss`, `dry_time`, `wall_splat_size`, ...);
+  > encoding those is textbook N-21. Encode **only** the ~8 with a causal path to the world archive's
+  > `deaths` axis: `max_gibs`, `chunk_restitution`, `gib_friction`, `autogib_pieces_base`,
+  > `autogib_min_pieces`, `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. Say in the code why
+  > the cosmetics are excluded, so nobody "completes" the group later.
+  > The header count says "6 knobs"; the real sim-relevant count is ~8. Fix that when landing.
+  · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
+- **FVS-I-8 — `MetropolisWeights` (10+ knobs) are unevolved** · L · *determinism: offline*
+  The largest of the four, and the one most likely to fail I-6's audit: it shapes the *level*, and the
+  level descriptor has two axes. Run the audit before writing any encode/decode.
+  > ⛔ **IT FAILED THE AUDIT (2026-07-30).** All 15 knobs are either sampler settings (`iterations`,
+  > `temp_start/end`, `translate_sigma`, `rotate_prob`) or arrangement-quality weights (`w_overlap`,
+  > `w_wall`, `w_facing`, `w_group`, `coherence`, ...). The level archive bins on **clutter ×
+  > infestation** — clutter is `furniture_per_room`, a *count* set upstream by the grammar, and
+  > Metropolis decides *where* pieces go, never *how many*. **Zero of 15 move an axis.** This is N-21 at
+  > 15x scale.
+  > **Your call, three ways:** (1) **remove** — leave arrangement authored, cheapest, loses nothing the
+  > archive can reward; (2) **add an axis** — an arrangement-coherence descriptor, but that is a
+  > descriptor change and invalidates the level archive; (3) **couple** — encode only `coherence` and
+  > accept it rides fitness, not a descriptor.
+  · *Deps:* **I-6** · *Touches:* `src/placement/`, `src/squad_ai/level_genome.rs`
+- **FVS-I-9 — Perception tuning is unevolved** · M · *determinism: offline* · ⚠️ **RESCOPED 2026-07-30 by the I-6 audit**
+  What agents can sense is a direct difficulty axis and is currently authored-only.
+  > **The original *Touches* was wrong.** `src/ai/tuning.rs` is `AiTuning` — the 27 field-propagation
+  > knobs at the head of `world_genome`'s `BOUNDS`, i.e. **already fully evolved**. The genuinely
+  > unevolved knobs are `src/behavior_tuning.rs::PerceptionTuning`, of which `behavior_genome` encodes
+  > only 2 of 13 (`leash`, `squad_think_interval`). The 11 that are missing: `examine_sight(_release)`,
+  > `threat_sight(_release)`, `psi_sight(_release)`, `ward_sight(_release)`, `wounded_frac(_release)`,
+  > `leash_in`.
+  > **Blocked on the descriptor question, not just on I-6.** These are *squad* knobs and the behaviour
+  > archive bins on the *swarm's* aggression × persistence — second-order, which is how N-21 happens.
+  > **Encode constraint:** each `_sight`/`_sight_release` is a Schmitt band; `decode` must enforce
+  > `release >= sight` or the search produces chattering perception no descriptor can explain.
+  · *Deps:* **I-6** (+ the descriptor call) · *Touches:* `src/behavior_tuning.rs`, `src/squad_ai/behavior_genome.rs`
+- **FVS-B-10 — Give the acoustic channels a player-facing payoff (stealth / noise discipline)** · L
+  `NOISE_SQUAD`/`NOISE_SWARM` propagate and are *perceived* (`unit_fear_of_din`, `crab_fear_of_din`,
+  `investigate_threshold`) but no player-facing verb reads them, so the whole acoustic layer is
+  machinery without a game attached.
+  **FVS-K-1 paid the first instalment**, which is why this is now a generalisation rather than a
+  greenfield design: SCP-610's containment rule caps `NOISE_SQUAD` at 0.20 — which is what finally
+  makes the existing `HOLD FIRE` verb load-bearing — and its drone deposits into `NOISE_SWARM`. So
+  both channels have exactly one consumer each and a proven shape to copy.
+  *Wanted:* movement/fire/verb choices that trade speed for quiet, and a HUD channel that makes the
+  din legible (the containment HUD already names channels, so the vocabulary exists).
+  > 📋 **Four costed options researched 2026-07-30 → `docs/noise_discipline_options.md`. Needs your pick.**
+  > **A** `MOVE QUIET` latched stance (S/M — copies the `HoldFire` non-`ArmedTool` shape exactly) ·
+  > **B** din meter in the HUD (S) · **C** graduated investigation, the Mafia III recognition model
+  > (M/L — **moves goldens**, new per-agent `FixedUpdate` state) · **D** tier the deposit peaks by event
+  > type (S).
+  > *Recommended order:* **D + B** first (neither touches the pinned core), then **A** if you want the
+  > verb; hold **C** until N-13 and the re-pin question are settled, since it is the only one that moves
+  > goldens and would land on top of a known live leak.
+  > **One finding worth keeping even if none of the options ship:** a stigmergy channel with a `deposit`
+  > and an `evaporate` rate **is** Crytek's ADSR perception envelope (*Game AI Pro 1* ch. 31), except
+  > spatial as well as temporal. What is missing is their *balanced peaks per event type* — footstep,
+  > bolt impact, shot and death currently deposit at rates set independently rather than as a ladder.
+  > And the repo's split of AI-hearing from audio playback (`sim_harness.rs:282`) is exactly what
+  > *Game AI Pro 4* ch. 16 (Mafia III) argues for — **validated, do not "unify" them.**
+  · *Deps:* — · *Touches:* `src/audio_tuning.rs`, `src/squad.rs`, `src/ui/` · *Reading:* **[STIG]**, [STIG-AD], [PHERO-V], + *Game AI Pro* 1 ch.31 / 4 ch.16, Grimshaw & Schott 10.26503/dl.v2007i1.313, Boonen & Mieritz 10.26503/dl.v2018i3.1051
 - **FVS-N-21 — The biome genes are invisible to the level descriptor (FOUND 2026-07-30, audit)** · S
   Q-3 added `biome_mix`/`biome_scale` to `LevelGenome` because `CLAUDE.md` requires wiring features into RL/QD. **Audit says the descriptor cannot see them.** `level_quality.rs:72` has exactly two axes — `furniture_per_room / 8` and `infestation / 0.5` — and biome moves neither: furniture keys on room *tags*, mould affinity keys on room *tags*, and `score()` never reads biome. Two genomes differing only in biome land in the same cell with the same fitness, so the winner is decided by whatever else differs, or by evaluation luck — which is materially worse while N-13 is live. This is the archive-collapse mechanism that already bit the policy archive once.
-  **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid. · *Deps:* — · *Reading:* [QD]
+  **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid.
+  > 💡 **FVS-Q-8 made option 3 materially cheaper (2026-07-30).** Biome is now resolved **per zone**: every
+  > cell of a room shares one treatment and a corridor inherits an endpoint room. So "concrete resists
+  > mould, carpet harbours it" is now a clean **per-room** property — `mould affinity keys on room tags`
+  > already, and biome is now the same shape as a room tag. Before Q-8 the coupling would have had to be
+  > written against a per-cell mosaic, where "this room is carpeted" was not a well-formed statement.
+  > It also raises the payoff: with rooms uniformly one biome, `biome_mix` shifts what fraction of *rooms*
+  > harbour mould, which is exactly the `infestation` axis the descriptor already measures. Still your
+  > call among the three — but option 3 is now the cheap one, not the clever one.
+  · *Deps:* — · *Reading:* [QD]
 - **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save (FOUND 2026-07-30)** · S
   C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
 - **FVS-N-13 — Dungeon tiles are not `run_scoped()`, so every expedition leaks a whole dungeon (FOUND 2026-07-28, review)** · M · *determinism: touches the pinned core*
@@ -248,24 +495,49 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Fix is not in `director.rs`:* either the consumers must read `GameConfig` at world-build time, or the
   director must write the resources they actually read (`DungeonConfigRes`, `PlacementSolvers`,
   `Density`, `MyceliaConfig`). The second is smaller; the first is more honest about where config lives.
-  **An architectural call, which is why it is filed.** · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
+  **An architectural call, which is why it is filed.**
+  > ✅ **Re-confirmed still true 2026-07-30** (it is 2 days old; checked rather than assumed).
+  > `DungeonPlugin::build` does `app.world().resource::<GameConfig>().dungeon.clone()` into
+  > `DungeonConfigRes` at **plugin-build time**, and `generate_dungeon` takes `config: Res<DungeonConfigRes>`
+  > — so the director's `OnEnter(RunState::Active)` write to `gc.dungeon` is read by nobody. The
+  > *ordering* is fine (`pick_next_challenge` is `.before(RunBuild::World)`); it writes the wrong resource.
+  > ⚠️ **AND IT MAKES FVS-H-7'S BRIEFING ACTIVELY MISLEADING — this is new, and it raises the priority.**
+  > H-7 shipped a panel that distinguishes `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED` from
+  > `BRANCH UNIVERSE {seed} · SECTOR {x},{y}`. But while H-8 is live those two headings describe **the
+  > same dungeon**: the sampled cell is applied to a `GameConfig` nobody re-reads, so an expedition
+  > announced as a Branch universe is the authored world with a different label.
+  > H-7's whole point was that a path the player cannot perceive is a second path. H-8 turns that around
+  > into something worse — the player perceives a distinction that **does not exist**. Fixing H-8 fixes
+  > both; until it is fixed, the briefing overstates what the director did.
+  · *Deps:* H-3 · *Touches:* `src/director.rs`, `src/dungeon/mod.rs`, `src/placement/`, `src/mycelia/`
 - **FVS-I-5 — `containment_criterion` still gates the squad and swarm archives (FOUND 2026-07-28, review)** · M · *determinism: offline*
   FVS-I-1's constraint was moved out of the shared `minimal_criterion` and into `coevolve/search.rs` —
   but it landed inside `score_triple_compact`, whose `None` **discards the whole triple**. So a
   capture-hostile world drops the squad and swarm candidates evaluated alongside it, which is precisely
   the coupling the scoping fix existed to remove. The constraint is correct; its *placement* still is
   not. Correcting it means letting the world candidate be rejected independently of its partners, which
-  changes what the co-evolution admits — so it wants a probe run, not a quick edit. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
+  changes what the co-evolution admits — so it wants a probe run, not a quick edit.
+  ✅ *Re-confirmed still live 2026-07-30* — `score_triple_compact` (`coevolve/search.rs:151-172`) runs
+  `containment_criterion` on both rollouts and returns `Ok(None)` for the **whole triple** on either
+  failure. Its own comment says the constraint is applied "HERE, at the world archive, and nowhere
+  else", which is true of where it is *evaluated* and not of what it *rejects*. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
 - **FVS-J-7 — The config mtime guard rejects `train apply`, the one process meant to rewrite config (FOUND 2026-07-28, review)** · S
   `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard against
   editing config during a test run. But `train apply` **writes** `config.ron` and then reloads it to
   verify, so it trips its own guard and aborts **with the file already rewritten**, which is the
-  half-baked state the guard exists to prevent. · *Deps:* — · *Touches:* `src/config.rs`, `src/bin/train.rs`
+  half-baked state the guard exists to prevent.
+  ✅ *Re-confirmed still live 2026-07-30* — `CONFIG_FINGERPRINT` (`config.rs:184-205`) still errors on any
+  mtime change during a process. · *Deps:* — · *Touches:* `src/config.rs`, `src/bin/train.rs`
 - **FVS-J-8 — `repin_one` cannot re-pin a per-platform golden (FOUND 2026-07-28, review)** · S
   `bake::repin_one` refuses a marker that appears twice, treating duplication as ambiguity. The
   per-platform golden decision made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected, so each marker
   now **literally appears twice** in `tests/replay.rs`. `train apply --repin-goldens` therefore fails at
   the re-pin step every time. Two correct answers land in one file and the tool calls it ambiguous.
+  ✅ *Re-confirmed still live 2026-07-30* — `GOLDEN` and `GOLDEN_FIELD` each appear exactly **twice** in
+  `tests/replay.rs` (the `cfg(target_arch)` pair), and `bake::repin_one`'s duplicate rejection is still
+  pinned by its own test `repin_one_rejects_a_duplicated_golden`. So the tool's refusal is deliberate
+  behaviour meeting a file shape that postdates it — fixing it means teaching `repin_one` that two
+  `cfg`-selected definitions are one logical marker, not deleting the ambiguity check.
   · *Deps:* J-3 · *Touches:* `src/bake.rs`
 - **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
   ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
@@ -314,6 +586,17 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   grounds; it must not become the reason this goes uninvestigated. **If this proves to be a live
   determinism bug, the split should be revisited** — a per-PR lane that cannot catch it is the exact
   gap FVS-J-5 exists to close.
+  **Data point 2026-07-30 (FVS-K-1), recorded because it is evidence and NOT because it exonerates
+  anything.** `session::the_wipe_paths_actors_and_fields_are_reproducible_under_load` — same family,
+  different test — failed **once**, during a sequential full-harness run with unrelated shell work
+  happening alongside it. It then passed **6/6** on re-runs: 4 idle, and 2 under a deliberate
+  14-busy-loop contention that was verifiably biting (runtime 55–77 s idle → 114–128 s loaded). The
+  full `session` target is 21/21.
+  Per this entry's own standing instruction, **that is not a clean bill of health** — an intermittent
+  detector failing intermittently is the detector working, and every one of those 6 passes was
+  measured under a *weaker* condition than the one that failed. It is logged so the next occurrence
+  has a predecessor to compare against: the distinguishing question is whether the divergence is
+  again **bimodal** (a flipped discrete decision) or a fresh hash each time (float drift).
   *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
   `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
   first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The
@@ -361,21 +644,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   into that prior and become ceremony. Worth re-checking *after* H-5, not before.
   *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
   whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
-- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S
-  **The decision.** A missing or empty archive makes `CurriculumDirector::pick` return `None`, the
-  director does not fire, and the **authored** `config.ron` world plays. Claimed as one path rather than
-  a fallback: with nothing to sample there is no degraded substitute being written — the authored world
-  is the *right* expedition, not a consolation for a failed one.
-  **The reason to check rather than assert it:** that argument is exactly the shape a fallback uses to
-  justify itself, and this repo's rule is unusually strict ("no backup modes, no rollover behavior").
-  The honest test is whether the two paths can ever *disagree about what the player is playing* — if a
-  campaign can silently alternate between directed and authored worlds without the player being told,
-  it is a second path however it is framed.
-  *Falsify it:* delete the archive mid-campaign and check the player can tell. `pick_next_challenge`
-  currently `info!`s it, which is invisible in a shipped build.
-  *If wrong:* surface it in FVS-L-4's briefing — "AUTHORED UNIVERSE (no archive)" — so the state is
-  legible rather than silent. That is probably the right move regardless. · *Deps:* H-3, L-4 · *Reading:* — (no corpus resource)
-
 ---
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
@@ -383,6 +651,15 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG], [GOAP]
 **Done when:** the endgame trigger fires after a curriculum threshold; confrontation mechanics derive from the SCP-9191 generator theme; 173/096 are capturable via a new per-entity continuous-watch state (explicitly distinct from the ambient field); no shipped copy cites the deprecated semiotic-decay theming as canon.
 
+- **FVS-C-7 — A second gaze-reactive creature, via the ATTENTION sign-flip** · M
+  `ATTENTION` already drives SCP-1048's out-watch capture (a creature *suppressed* while watched). The
+  inverse — one that acts **only when not observed** — is the same channel with the condition flipped,
+  so it is architecturally free: no new primitive, no new field, no append to a hashed enum.
+  **Explicitly distinct from FVS-C-6.** C-6 needs a genuinely new per-entity, directional
+  continuous-watch state (facing vs a *specific* entity) and is XL; this one reads the existing
+  ambient field and is M. Doing this first is also the cheap way to prove the ambient/per-entity
+  distinction is real before paying for C-6.
+  · *Deps:* C-3 (shipped) · *Touches:* `src/ai/`, new creature module · *Reading:* [STIG], [GOAP]
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
   Add 173/096 **only after** the bespoke roster is proven. Each needs a **new** per-entity continuous-observation state (directional/facing check vs a *specific* entity), explicitly distinct from the ambient `ATTENTION` field — new engineering, not a sign-flip reuse.
   *Done when:* a per-entity `ObservedBy`/facing check drives 173/096 freeze/aggro; documented as separate from ATTENTION; capture rules authored on top. · *Deps:* C-1..C-5 shipped, E-*, F-*, M-1 · *Touches:* new watch module, `src/ai/`, `src/enemy.rs` · *Reading:* [GOAP]

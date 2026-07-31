@@ -197,7 +197,7 @@ pub(crate) fn expand_to_fine(
     layout: &CoarseLayout,
     config: &DungeonConfig,
     rng: &mut impl DetRng,
-) -> (Vec<bool>, Vec<Region>, IVec2, Vec<u32>) {
+) -> Result<(Vec<bool>, Vec<Region>, IVec2, Vec<u32>, Vec<Biome>), String> {
     let (width, height) = (layout.width, layout.height);
     let mut walkable = vec![false; width * height];
     let t = 1.0 - config.liminality; // 0 at Backrooms (liminality 1), 1 at realistic (liminality 0)
@@ -223,6 +223,11 @@ pub(crate) fn expand_to_fine(
     // are drawn from the config's weighted room-type table (Merrell 2011); the room is block-centred at
     // liminality 1.0 and slides off-centre + grows toward its linked edges as liminality drops.
     let mut regions: Vec<Region> = Vec::new();
+    // Which room slot claimed each cell, or [`NO_ROOM`]. The room pass is the only place this is
+    // knowable — corridors are carved *through* room interiors afterwards, so "inside a room rect" stops
+    // being the same question as "room floor" the moment the corridor pass runs. Recorded here for the
+    // per-zone biome resolution (FVS-Q-8); see `resolve_biomes`.
+    let mut room_of = vec![NO_ROOM; width * height];
     for (si, site) in layout.sites.iter().enumerate() {
         let (bmin, bmax) = (site.bounds.min, site.bounds.max);
         let (bw, bh) = ((bmax[0] - bmin[0]) as usize, (bmax[1] - bmin[1]) as usize);
@@ -256,6 +261,10 @@ pub(crate) fn expand_to_fine(
         for y in oy..oy + rh {
             for x in ox..ox + rw {
                 walkable[y * width + x] = true;
+                // Sites own disjoint blocks and expansion is capped one cell short of the block wall, so
+                // two rooms cannot claim the same cell. Were that ever to change, the last site in carve
+                // order wins — deterministic, but it would want a rule rather than an accident.
+                room_of[y * width + x] = si as u32;
             }
         }
 
@@ -373,7 +382,139 @@ pub(crate) fn expand_to_fine(
     // The necking pass above may have un-set cells that the corridor pass opened. Their `corridor_of` entry
     // survives, which is harmless: every read goes through `is_corridor`/`corridor_id`, and both gate on
     // `is_floor` first. A necked-out doorway cell is simply not floor, so it is not a corridor cell either.
-    (walkable, regions, spawn, corridor_of)
+    let biome_of = resolve_biomes(layout, config, &walkable, &room_of, &corridor_of, &regions)?;
+    Ok((walkable, regions, spawn, corridor_of, biome_of))
+}
+
+/// Resolve the surface biome of every fine cell **per zone, not per cell** (FVS-Q-8).
+///
+/// The bug this replaces: [`biome_at`] was sampled at each cell independently, so a single room's floor
+/// straddled the threshold and rendered as carpet in one corner and concrete in the other. (The walls
+/// were never the problem — `render.rs` already keys each wall slab, corner post and lintel on the
+/// *floor cell that owns it*, so a tile and its own walls always agreed. The noise was simply
+/// finer-grained than a room.) Player, 2026-07-30: *"I don't like backrooms carpets and concrete walls.
+/// It should be one or the other. The transition should be at a doorway."*
+///
+/// The rule, one per cell class, in precedence order:
+/// * **Room floor** → the noise sampled once at that room's centre cell. One draw per room, so a room is
+///   uniform by construction rather than probabilistically.
+/// * **Corridor floor** → the biome of its lower-`RegionId` endpoint room. Every transition therefore
+///   lands at a doorway, a corridor always matches a neighbour, and `biome_scale` keeps its meaning (how
+///   likely two adjacent rooms differ) instead of becoming dead config.
+/// * **Everything else** — rock, walls, cells the necking pass shut — → the nearest classified cell, by
+///   one multi-source BFS. This is what finally makes [`Dungeon::biome`]'s "a wall belongs to the biome
+///   of the cell it is attached to" true *by construction* rather than probabilistically.
+///
+/// Room floor deliberately outranks corridor: corridors are carved straight through room interiors, and
+/// a passage crossing a hall must not restripe the hall. That precedence is free — the corridor pass only
+/// claims cells the room pass had not already set.
+///
+/// **Draws no RNG.** [`biome_at`] is a pure hash of `(seed, cell)` and the seed is derived from the config
+/// seed rather than taken from the carve stream, so moving the sample point from every cell to one cell
+/// per room cannot shift a single subsequent carve draw. The layout goldens are untouched by construction.
+///
+/// Contrast with the landscape literature, which blends: **AutoBiomes** (Fischer, Dittmann, Weller &
+/// Zachmann, *Vis. Comput.* 2020, doi 10.1007/s00371-020-01920-7) weights adjacent biomes through a
+/// convolution kernel, which is right for open terrain where a transition is continuous and has no
+/// architectural feature to hide the seam. An interior has one: the doorway. So the switch here is
+/// deliberately **discrete**, and placed at the threshold. Room-as-unit-of-assignment is the standard
+/// move in the dungeon-graph framing surveyed by Viana & Dos Santos (*J. Interact. Syst.* 2021,
+/// doi 10.5753/jis.2021.999).
+fn resolve_biomes(
+    layout: &CoarseLayout,
+    config: &DungeonConfig,
+    walkable: &[bool],
+    room_of: &[u32],
+    corridor_of: &[u32],
+    regions: &[Region],
+) -> Result<Vec<Biome>, String> {
+    let (width, height) = (layout.width, layout.height);
+    let (seed, mix, scale) = biome_field(config);
+
+    // One draw per room, at its centre cell — the sample point option (b) specifies.
+    let room_biome: Vec<Biome> = regions
+        .iter()
+        .map(|r| {
+            let c = r.rect.center_cell();
+            biome_at(seed, IVec2::new(c[0], c[1]), mix, scale)
+        })
+        .collect();
+
+    // `None` = "no zone of its own yet", resolved by the BFS below. Not a sentinel biome: a default here
+    // would be a silent second path, and an unresolved cell must stay visibly unresolved.
+    //
+    // A room or corridor index that does not resolve is a **carver bug**, not a cell to fill in: it means
+    // `room_of`/`corridor_of` disagrees with `regions`/`adjacency`. Both are in range by construction
+    // (`Region.id == si`, and `corridor_of` stores an index into `layout.adjacency`), but letting a failed
+    // lookup fall through to the BFS would turn that bug into a plausible-looking floor with a neighbour's
+    // surface — silent, and exactly the degraded substitute the one-path rule forbids. So it errors.
+    let mut out: Vec<Option<Biome>> = vec![None; width * height];
+    for (i, slot) in out.iter_mut().enumerate() {
+        if !walkable[i] {
+            continue;
+        }
+        if room_of[i] != NO_ROOM {
+            let r = room_of[i] as usize;
+            let b = room_biome.get(r).copied().ok_or_else(|| {
+                format!("dungeon: cell ({}, {}) claims room {r}, which has no region", i % width, i / width)
+            })?;
+            *slot = Some(b);
+        } else if corridor_of[i] != NO_CORRIDOR {
+            let e = corridor_of[i] as usize;
+            // Option (b): a corridor takes the biome of its LOWER-`RegionId` endpoint room, so a passage
+            // always matches one of the rooms it joins and the change of surface lands at a doorway.
+            let &(a, b) = layout.adjacency.get(e).ok_or_else(|| {
+                format!("dungeon: cell ({}, {}) claims corridor edge {e}, which is not in the adjacency graph", i % width, i / width)
+            })?;
+            let endpoint = a.min(b);
+            let biome = room_biome.get(endpoint).copied().ok_or_else(|| {
+                format!("dungeon: corridor edge {e} names endpoint room {endpoint}, which has no region")
+            })?;
+            *slot = Some(biome);
+        }
+    }
+
+    // Multi-source BFS out from every classified cell. Determinism comes from the enumeration order, not
+    // from a value sort: sources are seeded row-major and neighbours are visited in a fixed N,E,S,W order,
+    // so the first writer of any cell is a function of the grid alone. Nothing here reads an ECS query.
+    let mut frontier: std::collections::VecDeque<usize> = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| b.map(|_| i))
+        .collect();
+    if frontier.is_empty() {
+        return Err("dungeon: no cell could be assigned a biome — the carve produced no floor".into());
+    }
+    while let Some(i) = frontier.pop_front() {
+        let Some(here) = out[i] else { continue };
+        let (x, y) = ((i % width) as i32, (i / width) as i32);
+        for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                continue;
+            }
+            let n = ny as usize * width + nx as usize;
+            if out[n].is_none() {
+                out[n] = Some(here);
+                frontier.push_back(n);
+            }
+        }
+    }
+
+    // The BFS reaches every cell of a connected grid from a non-empty source set, so a `None` here means
+    // the grid is disconnected in a way the carve is supposed to have already rejected. Fail loud.
+    out.into_iter()
+        .enumerate()
+        .map(|(i, b)| {
+            b.ok_or_else(|| {
+                format!(
+                    "dungeon: cell ({}, {}) is unreachable from any floor, so it has no biome",
+                    i % width,
+                    i / width
+                )
+            })
+        })
+        .collect()
 }
 
 /// Doorway width (open lanes) for a corridor carved `cw` tiles wide, given the evolvable `ratio`.

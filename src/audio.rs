@@ -57,6 +57,26 @@ const SPLASH_VOL: f32 = 0.10;
 /// faint tick you feel more than hear, so a fidgety player isn't machine-gunned with pings.
 const UI_VOL: f32 = 0.12;
 
+/// The containment verbs. Placement is a UI confirm and sits with the other blips, but *above* them:
+/// the supply is one charge per expedition, so it is the least fidgety button in the game and does
+/// not need protecting from repetition. Seal and breach are world events and are mixed at world
+/// levels — breach loudest of the three, because it is the only one that is bad news.
+const CORDON_PLACE_VOL: f32 = 0.30;
+const CORDON_SEAL_VOL: f32 = 0.55;
+const CORDON_BREACH_VOL: f32 = 0.80;
+
+/// SCP-610's seething bed. Under the wind, like the watcher's pad: it is a presence cue, not an
+/// event, and a bloom denies a room for as long as the expedition lasts — an intrusive loop would be
+/// unbearable rather than unsettling.
+const FLESH_DRONE_VOL: f32 = 0.20;
+/// Seconds for the drone to travel its full range. Slower than the watcher's pad: the bloom does not
+/// move, so the only thing that changes this level is the player walking, and a bed that tracked
+/// footsteps tightly would read as a proximity meter rather than as a place.
+const FLESH_DRONE_FADE: f32 = 3.5;
+/// Distance at which a bloom is inaudible; the drone reaches full level at [`FLESH_DRONE_NEAR`].
+const FLESH_DRONE_FAR: f32 = 18.0;
+const FLESH_DRONE_NEAR: f32 = 4.0;
+
 /// Master volume — every sound in the game is multiplied by this (bevy `GlobalVolume`). 1.0 = full;
 /// drop it (e.g. 0.15) to keep the game quiet in the background when something else is playing.
 const MASTER_VOLUME: f32 = 1.0;
@@ -99,9 +119,23 @@ const AMBIENT_VOL: f32 = 0.4;
 /// the number of movers (see `footsteps`), so a full squad patters ~5× faster and the sound
 /// audibly thins as members die.
 const STRIDE: f32 = 0.5;
-/// Floor on the footfall interval, so even a full squad's patter never machine-guns into a crowd —
-/// caps a full five at ~4.5 steps/s (was 0.12 → ~8/s, which read as a mob).
-const MIN_STRIDE: f32 = 0.22;
+/// Floor on the footfall interval, so even a full squad's patter never machine-guns into a crowd.
+///
+/// **Raised 0.22 → 0.34 (2026-07-30), and the scaling made sub-linear with it — reported from play as
+/// "the footsteps sound like an army".** This is the second attempt at the same complaint (the first
+/// took it 0.12 → 0.22, ~8/s → ~4.5/s) and the first one under-corrected, so it is worth writing down
+/// what the target actually is rather than nudging the number again.
+///
+/// A walking human's cadence is ~2 steps/s. Five people walking together produce ~10/s in reality —
+/// but they are five *separate, spread-out, quieter* sources, and this system deliberately collapses
+/// them into **one shared voice** (see `footsteps`). Reproducing the real event *rate* through a
+/// single voice is what makes five people sound like fifty: the ear gets a marching column's density
+/// with none of its spatial spread. So the rate is compressed instead, and the *spread* is restored
+/// separately by spatialising the voice at the squad centroid.
+///
+/// With the `sqrt` law below: 1 walker → 2.0/s, 2 → 2.8/s, 3 → 3.0/s (clamped), 5 → 3.0/s. Still
+/// audibly thinner as the squad dies, which is the property the linear law existed to give.
+const MIN_STRIDE: f32 = 0.34;
 /// A unit is "walking" (and so contributes a footfall) once its planar speed clears this. Well
 /// under the `UNIT_SPEED = 6.0` cruise, but above ORCA jitter so a settled blob stays quiet.
 const FOOT_MIN_SPEED: f32 = 0.6;
@@ -171,6 +205,14 @@ pub enum Sfx {
     /// A squad unit stepped into a visible Almond-Water pool, at the unit. A muddy footfall — cosmetic,
     /// emitted only by the windowed step-splash trigger (never in the headless harness).
     SplashWater(Vec3),
+    /// The player spent a quarantine charge. (UI — non-spatial.) Distinct from [`Sfx::MoveOrder`],
+    /// which it used to borrow: the supply ships at **one** charge per expedition, so committing it
+    /// should not sound like a click on the floor.
+    CordonPlaced,
+    /// A cordon closed on an anomaly and the hold began, at the anomaly.
+    CordonSealed(Vec3),
+    /// A cordon broke — the anomaly left it and the hold was discarded — at the anomaly.
+    CordonBreached(Vec3),
 }
 
 impl Sfx {
@@ -180,7 +222,14 @@ impl Sfx {
     fn ducks(&self) -> bool {
         matches!(
             self,
-            Sfx::Fire(_) | Sfx::ImpactFlesh(_) | Sfx::EnemyDeath(_) | Sfx::UnitDeath(_)
+            Sfx::Fire(_)
+                | Sfx::ImpactFlesh(_)
+                | Sfx::EnemyDeath(_)
+                | Sfx::UnitDeath(_)
+                // A breach is the one containment event with a hard deadline attached — the hold is
+                // already gone by the time it plays, and 610's rule resets rather than pauses. It
+                // gets the bed out of the way for the same reason the watcher's reveal does.
+                | Sfx::CordonBreached(_)
         )
     }
 }
@@ -224,6 +273,12 @@ struct AudioAssets {
     music_combat: Handle<AudioSource>,
     /// Legato dark-ambient pad for the watcher's "uncanny calm" (see `watcher_pad`).
     watcher_calm: Handle<AudioSource>,
+    /// Deep wet seething bed for a nearby SCP-610 bloom (see `flesh_drone`).
+    flesh_drone: Handle<AudioSource>,
+    /// The three containment-cordon one-shots (`Sfx::Cordon*`).
+    cordon_place: Handle<AudioSource>,
+    cordon_seal: Handle<AudioSource>,
+    cordon_breach: Handle<AudioSource>,
 }
 
 /// Mix bus: relative group gains tuned in one place, plus a live sidechain `duck` envelope. Every
@@ -277,6 +332,12 @@ struct CombatMusic;
 /// the squad (see `watcher_pad`); gain-driven each frame like the other beds.
 #[derive(Component)]
 struct WatcherPad;
+/// Marker: the shared SCP-610 seething bed. One voice for every bloom on the level, gain-driven by
+/// proximity to the nearest one — the same "shared throttled voice" discipline `crab_squitter`
+/// follows, and for the same reason: three emitters standing still in three rooms would be three
+/// overlapping copies of one loop rather than a place sounding wrong.
+#[derive(Component)]
+struct FleshDrone;
 
 pub struct GameAudioPlugin;
 
@@ -299,6 +360,20 @@ impl Plugin for GameAudioPlugin {
                     growl_stinger,
                     watcher_stinger,
                     ambient_oneshots,
+                    // ⚠️ `update_music` and `watcher_pad` were DEFINED BUT NOT REGISTERED (found
+                    // 2026-07-30 while adding `flesh_drone`). Every forever-alive bed reads its gain
+                    // here each frame, so with `update_music` absent: the calm↔combat crossfade never
+                    // ran (combat music was spawned at gain 0 and stayed there — the game had no
+                    // combat music at all), and the wind and music beds never re-read `GlobalVolume`,
+                    // so `mute_when_background` could not silence them on an alt-tab. `watcher_pad`
+                    // likewise left `watcher_calm.ogg` playing at gain 0 for ever.
+                    //
+                    // This is the same failure `53fbcb3` records — "three more systems FVS-G-6's
+                    // sweep silently killed" — and these two were survivors of it. Both are `Update`
+                    // and windowed-only, so nothing they do can reach `snapshot_hash`.
+                    update_music,
+                    watcher_pad,
+                    flesh_drone,
                     mute_when_background,
                 ),
             );
@@ -392,6 +467,10 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         music_calm: assets.load("audio/music/calm.ogg"),
         music_combat: assets.load("audio/music/combat.ogg"),
         watcher_calm: assets.load("audio/music/watcher_calm.ogg"),
+        flesh_drone: assets.load("audio/enemy/flesh_drone.ogg"),
+        cordon_place: assets.load("audio/containment/cordon_place.ogg"),
+        cordon_seal: assets.load("audio/containment/cordon_seal.ogg"),
+        cordon_breach: assets.load("audio/containment/cordon_breach.ogg"),
     };
 
     // One spatial listener for the whole game. `sync_listener` parks it on the ground under the
@@ -418,6 +497,12 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
         AudioPlayer::new(a.watcher_calm.clone()),
         looped(0.0),
         WatcherPad,
+    ));
+    // SCP-610's seething bed, same shape: one shared voice, silent until a bloom is near.
+    commands.spawn((
+        AudioPlayer::new(a.flesh_drone.clone()),
+        looped(0.0),
+        FleshDrone,
     ));
     commands.insert_resource(MusicState { intensity: 0.0 });
     commands.insert_resource(a);
@@ -527,6 +612,27 @@ fn play_sfx(
                     one_shot_spatial(*pos, 0.7 * bus.sfx, jitter(&mut rng, 0.1)),
                 ));
             }
+            // Containment verbs. `CordonPlaced` is the player's own action so it stays a UI blip;
+            // the other two are things the WORLD did and are spatialized at the anomaly, because
+            // "which room just lost its cordon" is the question they exist to answer.
+            Sfx::CordonPlaced => {
+                commands.spawn((
+                    AudioPlayer::new(assets.cordon_place.clone()),
+                    one_shot(CORDON_PLACE_VOL * bus.ui, jitter(&mut rng, 0.03)),
+                ));
+            }
+            Sfx::CordonSealed(pos) => {
+                commands.spawn((
+                    AudioPlayer::new(assets.cordon_seal.clone()),
+                    one_shot_spatial(*pos, CORDON_SEAL_VOL * bus.sfx, jitter(&mut rng, 0.04)),
+                ));
+            }
+            Sfx::CordonBreached(pos) => {
+                commands.spawn((
+                    AudioPlayer::new(assets.cordon_breach.clone()),
+                    one_shot_spatial(*pos, CORDON_BREACH_VOL * bus.sfx, jitter(&mut rng, 0.03)),
+                ));
+            }
             Sfx::SplashWater(pos) => {
                 // A muddy footfall when a unit steps into a pool, randomly varied + pitch-jittered so
                 // wading doesn't stamp one clip. Cosmetic; does not duck the beds (see `Sfx::ducks`).
@@ -572,23 +678,32 @@ fn footsteps(
         *timer = STRIDE; // idle → armed, so the next departure steps on its first frame
         return;
     }
-    // More boots on the ground ⇒ proportionally shorter gap between steps, floored so it never
-    // machine-guns. ~0.5s/step for one survivor down to ~0.22s for a full five.
-    let interval = (STRIDE / movers as f32).max(MIN_STRIDE);
+    // More boots on the ground ⇒ a shorter gap between steps, but **sub-linearly** — see
+    // `MIN_STRIDE` for why reproducing the true event rate through one shared voice is what made a
+    // five-person squad read as an army. `sqrt` keeps the ordering (more walkers is always denser)
+    // while compressing the top end.
+    let interval = (STRIDE / (movers as f32).sqrt()).max(MIN_STRIDE);
     *timer += time.delta_secs();
     if *timer >= interval {
         *timer = 0.0;
+        let at = centroid / movers as f32;
         let surface = match &dungeon {
             // `world_to_cell` rather than dividing by `TILE_SIZE` here: a second world→cell conversion
             // is a second path that can silently disagree with the one the dungeon actually uses.
-            Some(d) => d.biome(d.world_to_cell(centroid / movers as f32)) as usize,
+            Some(d) => d.biome(d.world_to_cell(at)) as usize,
             None => crate::dungeon::Biome::Backrooms as usize,
         };
         let set = &assets.footsteps[surface];
         let idx = pick_variant(&mut rng, set.len(), &mut last);
         commands.spawn((
             AudioPlayer::new(set[idx].clone()),
-            one_shot(FOOT_VOL * bus.sfx, jitter(&mut rng, 0.08)),
+            // **Spatial at the squad centroid, not centred on the player.** The other half of the
+            // "sounds like an army" fix: a non-spatial voice puts every boot at zero distance and
+            // dead centre, which is the acoustic signature of being *in* the column rather than
+            // watching one from an isometric remove. Panning and distance attenuation put the squad
+            // where it visibly is — and the clips are mono anyway (`assets/audio/CREDITS.md` notes
+            // stereo would have been discarded), so nothing is lost by spatialising them.
+            one_shot_spatial(at, FOOT_VOL * bus.sfx, jitter(&mut rng, 0.08)),
         ));
     }
 }
@@ -759,6 +874,59 @@ fn watcher_pad(
     let duck_factor = 1.0 - bus.duck * DUCK_DEPTH;
     let g = Volume::Linear(WATCHER_PAD_VOL * *level * bus.ambience * duck_factor) * gv.volume;
     if let Ok(mut sink) = pad.single_mut() {
+        sink.set_volume(g);
+    }
+}
+
+/// SCP-610's seething bed: swell a deep wet drone as the squad closes on the nearest **visible**
+/// bloom, and fade it back out as they leave.
+///
+/// Unlike the watcher's pad this is not keyed on a behaviour — a bloom has no states, it is simply
+/// there — so the only input is distance. That is the point: it is the sound of a *place* being
+/// wrong, which is the whole of SCP-610's design (`src/scp610/mod.rs`, "terrain that is alive").
+///
+/// Gated on fog visibility for the same reason every other creature cue is: a bloom the squad has
+/// not found yet must not announce itself through a wall, or the drone becomes a detector and the
+/// room stops being a discovery.
+fn flesh_drone(
+    time: Res<Time<Real>>,
+    bus: Res<AudioBus>,
+    gv: Res<GlobalVolume>,
+    dungeon: Option<Res<Dungeon>>,
+    fog: Option<Res<FogGrid>>,
+    blooms: Query<&Transform, With<crate::scp610::Scp610>>,
+    units: Query<&Transform, With<Unit>>,
+    mut level: Local<f32>,
+    mut drone: Query<&mut AudioSink, With<FleshDrone>>,
+) {
+    // FVS-G-6, same as `watcher_pad`: at a cold boot to Site-67 there is no world to be near
+    // anything in, but audio must still run.
+    let (Some(dungeon), Some(fog)) = (dungeon, fog) else { return };
+
+    // Nearest visible bloom to any unit, as a 0..1 closeness. `fold` over an f32 rather than
+    // `min_by` so there is no ordering question at all — this is a reduction to a scalar and two
+    // blooms at equal distance give the identical answer either way.
+    let target = blooms
+        .iter()
+        .filter(|tf| fog.visible_at(dungeon.world_to_cell(tf.translation)))
+        .fold(0.0f32, |acc, tf| {
+            let nearest = units.iter().fold(f32::INFINITY, |d, u| {
+                d.min((tf.translation.xz() - u.translation.xz()).length())
+            });
+            acc.max(smoothstep(FLESH_DRONE_FAR, FLESH_DRONE_NEAR, nearest))
+        });
+
+    // Real time, so it neither freezes when the sim is paused nor races at high game speed.
+    let step = time.delta_secs() / FLESH_DRONE_FADE;
+    *level = if *level < target {
+        (*level + step).min(target)
+    } else {
+        (*level - step).max(target)
+    };
+
+    let duck_factor = 1.0 - bus.duck * DUCK_DEPTH;
+    let g = Volume::Linear(FLESH_DRONE_VOL * *level * bus.ambience * duck_factor) * gv.volume;
+    if let Ok(mut sink) = drone.single_mut() {
         sink.set_volume(g);
     }
 }

@@ -304,8 +304,30 @@ fn deterministic_core_is_bit_identical() {
 /// aarch64 is deliberately left **unpinned** rather than guessed. The `determinism-arm` CI lane exists
 /// to measure it; once it reports a stable value, fill it in here and that lane can stop being
 /// advisory. A `todo!()` would fail at runtime with no explanation, so the arm below explains itself.
+/// ### Re-pinned 2026-07-30 for FVS-K-1 — `0x3563f0f69281ce4c` → `0x9f7a0787fdcb487f`
+///
+/// **One cause, and it is the intended one: SCP-610 gained `Health`.** `snapshot_hash` folds
+/// `(&Transform, &Health)`, and until now a bloom had no `Health` at all — so the three blooms every
+/// level seeds were invisible to this oracle. FVS-K-1 made 610 killable (which is what makes "killing
+/// yields nothing" a player-reachable choice rather than an assertion), so three stationary
+/// Transform+Health rows now enter the fold.
+///
+/// Measured from a settled tree, and **reproducibility was verified before pinning, not after**:
+/// `deterministic_core_is_bit_identical` and `..._across_many_builds` were both green on this value
+/// first. That order matters — pinning a number and then checking it reproduces tells you nothing you
+/// did not already assume.
+///
+/// The other FVS-K-1 additions are accounted for individually and none of them reaches this hash:
+/// * the flesh/eye materials, the cordon gizmos and the audio are all `Update` and windowed-only, and
+///   the harness registers neither `Scp610VisualsPlugin` nor `UiPlugin`;
+/// * `deposit_flesh_drone` writes stigmergy, which is [`GOLDEN_FIELD`]'s business, not this one;
+/// * `kill_blooms` moves no actor while nothing damages a bloom in the pinned run.
+///
+/// Budget a re-pin for every future `FixedUpdate` addition regardless (see the M0 note below): a new
+/// schedule node permutes the linearisation of other unconstrained systems, and no ordering edge
+/// fixes it.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0x3563f0f69281ce4c;
+const GOLDEN: u64 = 0x9f7a0787fdcb487f;
 
 /// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
 /// message says exactly what to do.
@@ -524,8 +546,22 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 // this landing too (mutant #2 on world 0xa11ce there, mutant #3 on 0x5c09191 after) — a pre-existing
 // latent order-dependence, not something this landing introduced. Do not read this re-pin as having
 // addressed it.
+// ### Re-pinned 2026-07-30 for FVS-K-1 — `0xc95454f3ca28b71c` → `0x82d9fc45c7e06f63`
+//
+// **SCP-610 now radiates.** `scp610::deposit_flesh_drone` pushes `NOISE_SWARM` and `THREAT_ANOMALY`
+// every fixed tick from each living bloom, which is exactly the kind of thing this hash exists to
+// fold. Before FVS-K-1 a bloom was inert scenery: it deposited nothing, perceived nothing, and could
+// not be damaged, so neither golden could see it.
+//
+// The deposit is `rate * dt`, not a raw per-tick push — the 60× error that distinction guards against
+// is not hypothetical, it is what the first run of
+// `tests/containment.rs::the_loudest_evolvable_bloom_can_still_be_contained` caught. Had it shipped,
+// this hash would still have moved and looked equally "expected".
+//
+// Measured from a settled tree; `field_passes_are_bit_identical` is itself the reproducibility check,
+// and the two `deterministic_core_is_bit_identical*` tests were green on the same tree first.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0xc95454f3ca28b71c;
+const GOLDEN_FIELD: u64 = 0x82d9fc45c7e06f63;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]

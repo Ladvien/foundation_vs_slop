@@ -151,6 +151,10 @@ pub fn plugin(app: &mut App) {
             Update,
             (
                 open_conversation,
+                // Before `resolve_choice`, so a digit pressed this frame resolves this frame — the
+                // same in-order relationship the click observer already has (it writes in
+                // `PreUpdate`, during picking).
+                choice_hotkeys,
                 resolve_choice,
                 advance_line,
                 present_current,
@@ -362,6 +366,7 @@ fn advance_line(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     active: Option<ResMut<Active>>,
     script: Res<DialogueScript>,
     existing: Query<Entity, With<ConversationBubble>>,
@@ -382,8 +387,14 @@ fn advance_line(
         _ => return,
     };
     let clicked = mouse.just_pressed(MouseButton::Left);
+    // `Enter`/`Space` advance a line as well as a click. Not a fallback for a broken click path —
+    // both are first-class "I have read this" inputs, and a player whose hands are on the keyboard
+    // should not have to reach for the mouse to get through a briefing.
+    let keyed = keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(KeyCode::NumpadEnter)
+        || keys.just_pressed(KeyCode::Space);
     let timed_out = time.elapsed_secs() >= active.advance_at;
-    if !clicked && !timed_out {
+    if !clicked && !keyed && !timed_out {
         return;
     }
     match next {
@@ -394,6 +405,56 @@ fn advance_line(
         None => {
             drop(active);
             finish(&mut commands, &existing, &mut menu);
+        }
+    }
+}
+
+/// Number-key selection for the option bubbles: `1`..`9` (and the numpad row) pick that option.
+///
+/// The bubbles are already labelled `"1. …"` / `"2. …"` by [`present_current`], so the keys the
+/// player would guess were being *advertised* and not accepted.
+///
+/// **This writes the same [`ChoicePicked`] message the click observer writes** — it is a second
+/// *input device*, not a second resolution path. Everything downstream ([`resolve_choice`], the node
+/// walk, the teardown) stays one path, which is the property that matters; two ways to press one
+/// button is not the branching this codebase forbids.
+///
+/// An out-of-range digit is deliberately ignored rather than clamped: pressing `5` on a two-option
+/// choice should do nothing, not silently pick the last one.
+fn choice_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    active: Option<Res<Active>>,
+    script: Res<DialogueScript>,
+    mut picked: MessageWriter<ChoicePicked>,
+) {
+    let Some(active) = active else { return };
+    if !active.presented {
+        return;
+    }
+    // Only while a Choice is on screen — otherwise a stray `1` during a Line would queue a pick that
+    // `resolve_choice` would then apply to the *next* choice node.
+    let Some(Node::Choice { options, .. }) = script
+        .conversation(&active.conv)
+        .and_then(|c| c.nodes.get(&active.node))
+    else {
+        return;
+    };
+
+    const DIGITS: [(KeyCode, KeyCode); 9] = [
+        (KeyCode::Digit1, KeyCode::Numpad1),
+        (KeyCode::Digit2, KeyCode::Numpad2),
+        (KeyCode::Digit3, KeyCode::Numpad3),
+        (KeyCode::Digit4, KeyCode::Numpad4),
+        (KeyCode::Digit5, KeyCode::Numpad5),
+        (KeyCode::Digit6, KeyCode::Numpad6),
+        (KeyCode::Digit7, KeyCode::Numpad7),
+        (KeyCode::Digit8, KeyCode::Numpad8),
+        (KeyCode::Digit9, KeyCode::Numpad9),
+    ];
+    for (index, (row, numpad)) in DIGITS.iter().enumerate().take(options.len()) {
+        if keys.just_pressed(*row) || keys.just_pressed(*numpad) {
+            picked.write(ChoicePicked { index });
+            return; // one pick per frame, even if two keys land together
         }
     }
 }
@@ -563,6 +624,190 @@ fn spawn_line_bubble(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the conversation **state machine** — and only it.
+    ///
+    /// [`present_current`] is deliberately absent: it spawns billboarded quads and needs
+    /// [`BubbleAssets`], an `Assets<Image>`/`Assets<StandardMaterial>` pair and a live `Leader`, none
+    /// of which exist in a GPU-free unit test. What it contributes to the graph is one boolean —
+    /// `presented` — which these tests set by hand at the point the presenter would have. So the
+    /// coverage claim is exact: this exercises *input → pick → node walk → teardown*, not rendering,
+    /// and **not mesh picking**.
+    fn machine() -> App {
+        let mut app = App::new();
+        app.add_message::<ChoicePicked>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Time<Real>>()
+            .init_resource::<NextState<MenuState>>()
+            .insert_resource(ConversationLock)
+            // Same order as `plugin()`: a digit pressed this frame must resolve this frame.
+            .add_systems(Update, (choice_hotkeys, resolve_choice, advance_line).chain());
+        app
+    }
+
+    /// One conversation: a two-option choice, each option landing on a terminal line.
+    fn script() -> DialogueScript {
+        use super::super::model::{Choice, Conversation};
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "ask".into(),
+            Node::Choice {
+                speaker: 0,
+                emotion: Emotion::Neutral,
+                prompt: "Orders?".into(),
+                options: vec![
+                    Choice { text: "Hold.".into(), next: "held".into() },
+                    Choice { text: "Advance.".into(), next: "moved".into() },
+                ],
+            },
+        );
+        for (id, text) in [("held", "Holding."), ("moved", "Moving up.")] {
+            nodes.insert(
+                id.into(),
+                Node::Line {
+                    speaker: 0,
+                    kind: BubbleKind::Speech,
+                    emotion: Emotion::Neutral,
+                    text: text.into(),
+                    next: None,
+                },
+            );
+        }
+        let mut conversations = std::collections::HashMap::new();
+        conversations.insert("t".into(), Conversation { start: "ask".into(), nodes });
+        DialogueScript { conversations }
+    }
+
+    /// Park the cursor on `node`, already presented — i.e. the state the player is looking at.
+    ///
+    /// `advance_at` is `INFINITY` throughout, which is not decoration: it is what `present_current`
+    /// writes for a choice, and it means **no test here can pass on the auto-advance timeout**. If a
+    /// key stops working, these fail rather than quietly falling through to the clock.
+    fn park(app: &mut App, node: &str) {
+        app.insert_resource(script());
+        app.insert_resource(Active {
+            conv: "t".into(),
+            node: node.into(),
+            presented: true,
+            advance_at: f32::INFINITY,
+        });
+    }
+
+    fn node_of(app: &App) -> Option<String> {
+        app.world().get_resource::<Active>().map(|a| a.node.clone())
+    }
+
+    /// Press `key`, run one frame, release. Bevy's own input system (which clears `just_pressed`)
+    /// is not registered here, so the release is manual.
+    fn tap(app: &mut App, key: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(key);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+    }
+
+    /// **FVS-L-7.** A modal conversation freezes the sim and a choice never auto-advances
+    /// (`advance_at = INFINITY`), so an *unanswerable* choice is an unrecoverable run — on the game's
+    /// opening beat. This walks the whole graph on the keyboard alone and asserts the sim is handed
+    /// back: cursor gone, lock gone, menu closed.
+    ///
+    /// What this does **not** prove: that the choice bubbles can be *clicked*. The reported bug was a
+    /// decorative light-shaft mesh swallowing the pointer, fixed by `require_markers` +
+    /// `MeshPickingCamera`; mesh picking needs a window and a pointer and is out of reach here. What
+    /// is proved is the property that made the bug a soft-lock rather than an annoyance — a player who
+    /// cannot click can always press `1`, and the run continues.
+    #[test]
+    fn the_keyboard_can_answer_a_choice_so_a_conversation_can_never_soft_lock() {
+        let mut app = machine();
+        park(&mut app, "ask");
+
+        tap(&mut app, KeyCode::Digit2);
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("moved"),
+            "'2' must take the second option"
+        );
+
+        // The presenter would put the new line on screen; stand in for it and read it.
+        if let Some(mut a) = app.world_mut().get_resource_mut::<Active>() {
+            a.presented = true;
+        }
+        tap(&mut app, KeyCode::Space);
+
+        assert!(
+            app.world().get_resource::<Active>().is_none(),
+            "the conversation cursor outlived the conversation"
+        );
+        assert!(
+            app.world().get_resource::<ConversationLock>().is_none(),
+            "the lock survived — `selection::command_input` would still be yielding the click"
+        );
+        assert!(
+            matches!(
+                app.world().resource::<NextState<MenuState>>(),
+                NextState::Pending(MenuState::Closed)
+            ),
+            "the sim was never unfrozen — this is the soft-lock"
+        );
+    }
+
+    /// The numpad row is a second *device*, not a second path: it writes the same `ChoicePicked`.
+    #[test]
+    fn the_numpad_picks_the_same_option_as_the_number_row() {
+        let mut app = machine();
+        park(&mut app, "ask");
+        tap(&mut app, KeyCode::Numpad1);
+        assert_eq!(node_of(&app).as_deref(), Some("held"));
+    }
+
+    /// An out-of-range digit is ignored, never clamped: pressing `5` on a two-option choice should do
+    /// nothing, not silently pick the last one.
+    #[test]
+    fn a_digit_past_the_last_option_does_nothing() {
+        let mut app = machine();
+        park(&mut app, "ask");
+        tap(&mut app, KeyCode::Digit5);
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("ask"),
+            "an unbound digit moved the conversation"
+        );
+    }
+
+    /// The trap `choice_hotkeys` guards with its `Node::Choice` check: a stray digit pressed during a
+    /// *line* must not queue a pick that lands on the next choice the player reaches. Left unguarded,
+    /// the player's first real choice would answer itself with whatever they had typed earlier.
+    #[test]
+    fn a_digit_pressed_during_a_line_does_not_answer_the_next_choice() {
+        let mut app = machine();
+        park(&mut app, "held"); // a Line node
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit2);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+
+        // That line ended the conversation (next: None). Start a fresh choice and run a quiet frame:
+        // nothing was queued, so the cursor must still be sitting on the choice.
+        park(&mut app, "ask");
+        app.insert_resource(ConversationLock);
+        app.update();
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("ask"),
+            "a digit typed during a line answered a later choice"
+        );
+    }
+
+    /// `Enter` reads a line as well as `Space` — with `advance_at` at infinity, only the key can.
+    #[test]
+    fn enter_advances_a_line() {
+        let mut app = machine();
+        park(&mut app, "held");
+        tap(&mut app, KeyCode::Enter);
+        assert!(
+            app.world().get_resource::<Active>().is_none(),
+            "Enter did not read the line"
+        );
+    }
 
     fn bark(text: &str) -> Bark {
         Bark {

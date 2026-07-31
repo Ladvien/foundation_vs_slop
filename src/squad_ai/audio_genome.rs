@@ -30,14 +30,29 @@ use crate::ai::tuning::ChannelTuning;
 use crate::audio_tuning::{AcousticPerceptionTuning, AcousticStimulusTuning, AudioTuning};
 
 /// Number of knobs: 6 propagation (2 acoustic channels × {evaporate, diffuse, deposit_radius}) + 5
-/// per-event loudness (deposit amounts) + 4 perception (crab/unit din-fear, draw, investigate threshold).
-pub const N: usize = 15;
+/// per-event loudness (deposit amounts) + 1 continuous loudness (the SCP-610 bloom's drone) + 4
+/// perception (crab/unit din-fear, draw, investigate threshold).
+///
+/// ⚠️ **Growing this invalidates `assets/config/elites_audio.ron`.** Archived genomes are fixed-length
+/// vectors, so a 15-knob elite cannot decode into a 16-knob tuning and `is_feasible` rejects it
+/// loudly — which is the designed behaviour ("a stale archive is a re-train, not a resize",
+/// `BACKLOG.md` FVS-H-1). The re-bake is deliberately deferred to H-1 rather than run here: H-1 is
+/// itself sequenced behind FVS-I-1, and baking now would optimise against an objective I-1 then
+/// invalidates.
+pub const N: usize = 16;
 
 /// Hard `(min, max)` per knob, in the **same order** [`encode`] walks [`AudioTuning`]. Channel bounds match
 /// `world_genome` (evaporate never saturating, diffuse `< 1`, radius bounded); loudness is a deposit
 /// amount (`0` = silent stimulus is a legitimate point); the din-fear gains stay small like `SimTuning`'s
 /// fear gains; `crab_draw_to_din` spans `[0, 1]` (0 = no convergence, 1 = strong pull); the investigate
 /// threshold is a field-value gate. This table IS the primary feasibility gate.
+/// The loudest bloom the search may evolve.
+///
+/// Named and public because it is not merely a bound, it is a **contract with SCP-610's containment
+/// rule** — and the test that checks the contract has to be able to reach the number. See its row in
+/// [`BOUNDS`] and `tests/containment.rs::the_loudest_evolvable_bloom_can_still_be_contained`.
+pub const FLESH_DRONE_LOUDNESS_MAX: f32 = 0.8;
+
 static BOUNDS: [(f32, f32); N] = [
     // ── AcousticStimulusTuning: NOISE_SQUAD (evaporate, diffuse, deposit_radius) ──
     (0.05, 3.0), (0.0, 0.6), (0.5, 8.0),
@@ -49,6 +64,14 @@ static BOUNDS: [(f32, f32); N] = [
     (0.0, 3.0), // impact_flesh_loudness
     (0.0, 3.0), // enemy_death_loudness
     (0.0, 3.0), // unit_death_loudness
+    // ── continuous loudness ──
+    // `flesh_drone_loudness`, and its ceiling is **0.8 for a measured reason**, not by analogy with
+    // the per-event knobs above. `scp610::deposit_flesh_drone` spends `DREAD_PER_DIN` of this on
+    // THREAT_ANOMALY at the bloom's own position, and SCP-610's containment rule caps that channel at
+    // 0.35 there — so an unbounded knob lets the search evolve a bloom that cannot be contained,
+    // silently deleting the species' whole mechanic. Pinned by
+    // `scp610::tests::a_maximally_loud_bloom_is_still_containable`.
+    (0.0, FLESH_DRONE_LOUDNESS_MAX), // flesh_drone_loudness
     // ── AcousticPerceptionTuning ──
     (0.0, 0.5), // crab_fear_of_din
     (0.0, 0.5), // unit_fear_of_din
@@ -70,6 +93,7 @@ pub fn encode(a: &AudioTuning) -> AudioGenome {
     v.push(a.stimulus.impact_flesh_loudness);
     v.push(a.stimulus.enemy_death_loudness);
     v.push(a.stimulus.unit_death_loudness);
+    v.push(a.stimulus.flesh_drone_loudness);
     v.push(a.perception.crab_fear_of_din);
     v.push(a.perception.unit_fear_of_din);
     v.push(a.perception.crab_draw_to_din);
@@ -104,6 +128,7 @@ pub fn decode(g: &AudioGenome) -> Result<AudioTuning, String> {
             impact_flesh_loudness: f!(),
             enemy_death_loudness: f!(),
             unit_death_loudness: f!(),
+            flesh_drone_loudness: f!(),
         },
         perception: AcousticPerceptionTuning {
             crab_fear_of_din: f!(),

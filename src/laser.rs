@@ -115,6 +115,9 @@ pub enum TargetKind {
     /// The hostile SCP-1048 copies. The benign original carries no `LaserTarget` at all — it has no
     /// `Hostile`, so `fire_laser`'s query would never see it anyway.
     Bear = 5,
+    /// An SCP-610 bloom. Shootable, and killing it yields **nothing** — that is the point of it being
+    /// shootable at all (`src/scp610/mod.rs`).
+    Flesh = 6,
 }
 
 /// Build a stable, cross-species-unique [`LaserTarget::id`] from a spawn seed. See [`LaserTarget::id`].

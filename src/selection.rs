@@ -335,7 +335,11 @@ impl Plugin for SelectionPlugin {
 }
 
 /// Ground point under the cursor (y = 0 plane), or `None` if off-window / no camera ray.
-fn cursor_ground_point(window: &Window, camera: &Camera, cam_tf: &GlobalTransform) -> Option<Vec3> {
+pub(crate) fn cursor_ground_point(
+    window: &Window,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<Vec3> {
     let cursor = window.cursor_position()?;
     let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
     let dist = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))?;
@@ -942,7 +946,10 @@ pub fn place_quarantine_input(
     ));
     supply.0 -= 1;
     *armed = ArmedTool::None;
-    sfx.write(Sfx::MoveOrder);
+    // Its own cue, not the move-order tick it used to borrow. The supply is ONE charge per
+    // expedition (`config.ron: quarantine_supply`), so this is the least repeated and most
+    // consequential click in the game, and it should not sound like ordering someone to walk.
+    sfx.write(Sfx::CordonPlaced);
 }
 
 /// Cap the nest under the cursor (archetype 3).
@@ -998,7 +1005,7 @@ pub fn cap_nest_input(
 
 /// Nearest floor cell to `c` by an outward ring search, so a click on a wall/void still yields a
 /// reachable goal. Bounded by [`SNAP_MAX_RING`] so a click deep in the void fails loudly.
-fn nearest_floor(dungeon: &Dungeon, c: IVec2) -> Option<IVec2> {
+pub(crate) fn nearest_floor(dungeon: &Dungeon, c: IVec2) -> Option<IVec2> {
     if dungeon.is_floor(c) {
         return Some(c);
     }

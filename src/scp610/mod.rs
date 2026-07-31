@@ -14,6 +14,26 @@
 //! place), and `assets/scp610/README.md` §5 lists a rooted Stage-3 form as the asset's natural
 //! extension rather than a compromise.
 //!
+//! # It is killable, and killing it yields NOTHING
+//!
+//! FVS-K-1 gave it [`Health`], [`crate::enemy::Hostile`] and a [`crate::laser::LaserTarget`], which is
+//! the half of FVS-C-1's acceptance that never actually shipped. Without them `Health` would be a
+//! component nothing can reach — the "shipped a mechanism, nobody can reach it" failure `BACKLOG.md`
+//! names as its top process risk.
+//!
+//! It matters because it makes the game's central tension real for this species. The squad **shoots
+//! the bloom by default**, and the authored containment rule is `THREAT_ANOMALY ≤ 0.35` AND
+//! `NOISE_SQUAD ≤ 0.20` — so shooting it is precisely what stops you containing it. The counter-play
+//! is the `HOLD FIRE` verb, and the first-contact conversation already tells the player so in as many
+//! words: *"Quarantine the room and hold the line. Quietly — it settles when we stop making noise."*
+//! Kill it and you get a corpse; cordon it and you get a specimen.
+//!
+//! [`kill_blooms`] is deliberately **not** a despawn. Every other creature here dies through `autogib`
+//! fracture; 610 collapses on its own baked clip and stays, because a dead mass of flesh is still the
+//! terrain it always was. `assets/scp610/README.md` §5 says the clip exists for exactly this reason.
+//! There is no `Killed` marker: `containment::state`'s module doc is explicit that a marker with no
+//! reward hook is still *a place someone could branch*, and the reward lives only on `Contained`.
+//!
 //! That is also why it needs no `BrainId`, no `Mode`/`Fact` additions and no faction of its own — all
 //! of which are **append-only** enums whose discriminants index saved beliefs, mode distributions and
 //! archived RL policies. A creature that perceives nothing needs none of them. It carries
@@ -45,7 +65,10 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
+pub mod material;
+
 use crate::containment::Quarantinable;
+use crate::health::Health;
 
 /// The asset. Recompressed 28.7 MB → 5.2 MB (see `assets/scp610/README.md`); contract unchanged.
 const SCP610_GLB: &str = "scp610/scp-610.glb";
@@ -83,6 +106,30 @@ pub struct Scp610Anim {
 
 /// glTF animation index for `scp610_idle`. Pinned by `tests/creature_clip_contract.rs`.
 const CLIP_IDLE: usize = 0;
+/// glTF animation index for `scp610_death` — the controlled collapse. Pinned by the same test.
+///
+/// The other three clips (`chase_run`, `writhe_rage`, `lunge_attack`) stay unloaded on purpose: they
+/// are locomotion and attack animations for a creature that does neither. Loading a clip nothing can
+/// trigger would put a dead node in the graph and a dead slot in every bloom's blend weights.
+const CLIP_DEATH: usize = 4;
+
+/// Blend slots, in the order [`build_scp610_anim`] adds them. The array `set_targets` takes is
+/// positional, so these name the positions rather than leaving two bare literals in
+/// [`drive_scp610_animation`].
+const SLOT_IDLE: usize = 0;
+const SLOT_DEATH: usize = 1;
+const SLOT_COUNT: usize = 2;
+
+/// Hit points. High: killing a bloom should be a decision the player commits to and pays for in
+/// noise, not something a stray burst does on the way past. The squad's own containment rule caps
+/// `NOISE_SQUAD` at 0.20, so a sustained kill is self-evidently the opposite of a capture.
+const BLOOM_HP: f32 = 220.0;
+
+/// Bolt hit volume. A standing figure: `assets/scp610/README.md` §2 gives the grown envelope as
+/// 1.80 × 0.86 × 1.90 m, but most of that width is outflung mutant limbs rather than mass, so the
+/// capsule is sized to the torso the player is actually aiming at.
+const COLLIDER_R: f32 = 0.30;
+const COLLIDER_HALF_HEIGHT: f32 = 0.60;
 
 /// Marks an SCP-610 bloom.
 #[derive(Component)]
@@ -113,10 +160,56 @@ pub struct Scp610Plugin;
 
 impl Plugin for Scp610Plugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, build_scp610_anim).add_systems(
-            OnEnter(crate::session::RunState::Active),
-            spawn_scp610_blooms.in_set(crate::session::RunBuild::Populate),
-        );
+        app.add_systems(Startup, build_scp610_anim)
+            .add_systems(
+                OnEnter(crate::session::RunState::Active),
+                spawn_scp610_blooms.in_set(crate::session::RunBuild::Populate),
+            )
+            // `FixedUpdate`: both write stigmergy deposits and one removes components, all pinned
+            // state. `.before(AiSet::Deposits)` is the ordering every sibling deposit system uses
+            // (`enemy::deposit_anomaly_aura`, `scp1048::effects::deposit_bear_dread`,
+            // `parasite::deposit_manca_dread`) — the batch has to be complete before the drain runs.
+            //
+            // Chained so a corpse cannot radiate: `kill_blooms` retires the dead ones first, and
+            // `deposit_flesh_drone` then skips anything at zero health.
+            //
+            // Deliberately NOT `.after(HealthDamage)`. That reads as the obvious thing to want — see
+            // this tick's damage before deciding who died — but `HealthDamage` is a *set* with
+            // members on both sides of the deposit drain (`crab_jump` is one), so combining it with
+            // `.before(AiSet::Deposits)` makes the graph unsolvable and Bevy panics at schedule init:
+            // *"system set `HealthDamage` and system `crab_jump (in set HealthDamage)` have both
+            // `in_set` and `before`-`after` relationships"*. The cost of dropping it is that a bloom
+            // killed on tick N is retired on tick N+1 — one tick of a corpse still being shootable,
+            // which is deterministic and invisible.
+            .add_systems(
+                FixedUpdate,
+                (kill_blooms, deposit_flesh_drone)
+                    .chain()
+                    .before(crate::ai::AiSet::Deposits)
+                    .distributive_run_if(in_state(crate::session::RunState::Active)),
+            )
+            // ⚠️ **The pose driver belongs in the GAMEPLAY plugin, not the visuals one**, and this
+            // is the same argument `build_scp610_anim` above already makes: `BlendSource` is inserted
+            // at spawn, so `anim::attach_pose_blenders` gives every bloom a `PoseBlender` **in the
+            // headless harness too**. A blender whose driver was registered windowed-only is a
+            // blender with no driver at all there, and `PoseBlender::new` zeroes every weight — so
+            // its weights sum to 0 instead of 1.
+            //
+            // `liveness::every_wired_figurine_keeps_a_well_formed_pose_blend_through_a_live_run`
+            // asserts a partition of unity over EVERY blender in the world and caught exactly that.
+            // Every sibling already does it this way (`crab::drive_crab_animation`, `scp1048`,
+            // `parasite`) — 610 was the only one that put its driver in the cosmetic half.
+            //
+            // Still `Update`, never `FixedUpdate`, so it stays outside `snapshot_hash`
+            // (`docs/animation.md`: the animation layer is cosmetic by construction). Reading
+            // `Health` to pick idle-vs-death is a read, not a write.
+            .add_systems(
+                Update,
+                drive_scp610_animation
+                    .after(crate::anim::PoseAttachSet)
+                    .before(crate::anim::PoseBlendSet)
+                    .distributive_run_if(in_state(crate::session::RunState::Active)),
+            );
     }
 }
 
@@ -125,9 +218,23 @@ pub struct Scp610VisualsPlugin;
 
 impl Plugin for Scp610VisualsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_plugins((
+            MaterialPlugin::<material::Scp610FleshMaterial>::default(),
+            MaterialPlugin::<material::Scp610EyeMaterial>::default(),
+        ))
+        .add_systems(Startup, material::load_textures)
+        .add_systems(
             Update,
-            (drive_mutation, drive_scp610_animation)
+            (
+                // `drive_scp610_animation` is NOT here — it drives a component the harness also has,
+                // so it lives in the gameplay plugin. See the note there.
+                drive_mutation,
+                // Ordered after `drive_mutation` so the weight a bloom is showing this frame is the
+                // weight its shader is told about, not last frame's.
+                material::coat_blooms,
+                material::drive_disruption,
+            )
+                .chain()
                 .distributive_run_if(in_state(crate::session::RunState::Active))
                 .after(crate::anim::PoseAttachSet),
         );
@@ -142,13 +249,23 @@ fn build_scp610_anim(
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
+    // Order MUST match SLOT_IDLE / SLOT_DEATH — `set_targets` is positional.
     let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(CLIP_IDLE).from_asset(SCP610_GLB))
+        assets.load(GltfAssetLabel::Animation(CLIP_IDLE).from_asset(SCP610_GLB)),
+        assets.load(GltfAssetLabel::Animation(CLIP_DEATH).from_asset(SCP610_GLB)),
     ]);
     // `free`, not `gait`: the bloom never travels, so there is no ground distance to sync a stride
-    // against. Speed 1.0 — the clip is authored at 24 fps gameplay tempo (README 5).
+    // against. Speed 1.0 — the clips are authored at 24 fps gameplay tempo (README 5).
+    //
+    // The death clip is `free` like the idle, which means it LOOPS rather than playing once and
+    // holding. That is a real limitation of `anim::PoseBlender` — its whole design is that no clip is
+    // ever rewound or transitioned (`docs/animation.md`), so there is no "play once" in it. A slow
+    // collapse re-collapsing is far less wrong than a T-posed corpse, and the alternative would be
+    // `AnimationTransitions`, which `docs/animation.md` forbids on anything the blender drives
+    // because its `PostUpdate` pass stomps the weights.
     let slots: Arc<[crate::anim::Slot]> =
         nodes.iter().map(|&n| crate::anim::Slot::free(n, 1.0)).collect();
+    debug_assert_eq!(slots.len(), SLOT_COUNT, "slot table drifted from the SLOT_* constants");
     commands.insert_resource(Scp610Anim { graph: graphs.add(graph), slots });
 }
 
@@ -178,6 +295,18 @@ pub fn spawn_scp610_at(
             crate::ai::faction::Faction::Anomaly,
             Scp610Seed(seed),
             Scp610Mutation::default(),
+            material::Scp610Disruption::default(),
+            // Killable, and killing it yields nothing — see the module header. All three go on at
+            // spawn and only `Hostile`/`LaserTarget` are ever removed, once, by `kill_blooms`.
+            Health::new(BLOOM_HP),
+            crate::enemy::Hostile,
+            crate::laser::LaserTarget {
+                radius: COLLIDER_R,
+                half_height: COLLIDER_HALF_HEIGHT,
+                // From the spawn ordinal, never the `Entity` id (recycled) — the rule every other
+                // spawn site follows. `TargetKind` makes it unique across species.
+                id: crate::laser::target_id(crate::laser::TargetKind::Flesh, seed as u64),
+            },
             // At spawn, never toggled: `anim::attach_pose_blenders` installs the `PoseBlender` on the
             // streamed-in model's `AnimationPlayer` by walking up to the nearest `BlendSource`.
             crate::anim::BlendSource { graph: anim.graph.clone(), slots: anim.slots.clone() },
@@ -338,15 +467,137 @@ mod tests {
     }
 }
 
-/// Hold the single idle slot at full weight.
+/// Ease between the idle tremor and the death collapse.
 ///
-/// Trivial today because there is one clip, but it is the seam the rest of the roster grows through:
-/// when the bloom gains states, this is where `set_targets` picks between them.
-fn drive_scp610_animation(mut blooms: Query<&mut crate::anim::PoseBlender, With<Scp610>>) {
-    for mut blender in &mut blooms {
+/// Reads `Health` directly rather than a marker component: the blender only eases weights, so "dead"
+/// needs no state of its own here and adding a marker would churn the archetype for a cosmetic fact.
+fn drive_scp610_animation(
+    mut blooms: Query<(&mut crate::anim::PoseBlender, &Health), With<Scp610>>,
+) {
+    for (mut blender, health) in &mut blooms {
+        let dead = health.current <= 0.0;
+        let mut targets = [0.0; SLOT_COUNT];
+        targets[SLOT_IDLE] = if dead { 0.0 } else { 1.0 };
+        targets[SLOT_DEATH] = if dead { 1.0 } else { 0.0 };
         // A slot-count mismatch is a wiring bug, not a runtime condition — report, do not mask.
-        if let Err(e) = blender.set_targets(&[1.0]) {
+        if let Err(e) = blender.set_targets(&targets) {
             warn_once!("scp610: pose blend rejected: {e}");
         }
     }
+}
+
+/// How much `THREAT_ANOMALY` dread a bloom radiates per unit of `NOISE_SWARM` din.
+///
+/// **One gene, two channels, and the ratio is deliberately NOT evolvable.** How loud the thing is is
+/// a difficulty dial and belongs to the search (`audio_tuning::flesh_drone_loudness`); how much of
+/// that loudness lands as *dread* rather than as *noise* is the shape of this one creature, which is
+/// what this module's "tunables are constants here" header is about.
+///
+/// Well under 1.0 because the two channels are not symmetric in consequence. `NOISE_SWARM` is
+/// unconstrained — it feeds `unit_fear_of_din`, so a bloom simply makes the squad uneasy.
+/// `THREAT_ANOMALY` appears in **610's own containment rule** (`AtMost 0.35`, sampled at the bloom),
+/// so every unit of dread it emits is capacity taken from its own capture. That is a real tension and
+/// it is the intended one — a bloom is harder to contain the more of a presence it is — but it has to
+/// stay a tension rather than an impossibility.
+pub const DREAD_PER_DIN: f32 = 0.10;
+
+/// Radiate the bloom's presence into the shared fields, every fixed tick, for as long as it lives.
+///
+/// Continuous rather than per-event, because SCP-610 does not *do* anything — the whole species is
+/// "terrain that is alive", so its stimulus is a rate. Modelled on `scp1048::effects::deposit_bear_dread`,
+/// including the sort: overlapping deposit discs accumulate into the grid with a non-associative
+/// `f32 +=` that `drain_deposits` applies in batch order, so the batch is value-sorted before it goes
+/// out.
+///
+/// A dead bloom radiates nothing. It stops being a threat the moment it stops being alive, which is
+/// also what makes killing it a *legible* choice rather than a pointless one — the room does get
+/// quieter, you just do not get a specimen.
+fn deposit_flesh_drone(
+    time: Res<Time>,
+    blooms: Query<(&Transform, &Health), With<Scp610>>,
+    audio: Res<crate::audio_tuning::AudioTuning>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+) {
+    // **Per second, scaled by `dt` — not per tick.** Every other continuous depositor does this
+    // (`enemy::deposit_anomaly_aura`, `scp1048::effects::deposit_bear_dread`), and getting it wrong
+    // is not a subtle mis-tune: at 60 Hz a raw per-tick push is 60× the intended rate, which drove
+    // THREAT_ANOMALY to a steady state ~35× over 610's own containment threshold and made the
+    // species literally impossible to contain. Caught by
+    // `tests/containment.rs::the_loudest_evolvable_bloom_can_still_be_contained`, which is the
+    // entire reason that test exists.
+    let dt = time.delta_secs();
+    let din = audio.stimulus.flesh_drone_loudness * dt;
+    if din <= 0.0 {
+        return;
+    }
+    let dread = din * DREAD_PER_DIN;
+
+    let mut out: Vec<crate::ai::field::Deposit> = Vec::new();
+    for (tf, health) in &blooms {
+        if health.current <= 0.0 {
+            continue;
+        }
+        out.push(crate::ai::field::Deposit {
+            pos: tf.translation,
+            field: crate::ai::field::FieldId::NOISE_SWARM,
+            amount: din,
+        });
+        out.push(crate::ai::field::Deposit {
+            pos: tf.translation,
+            field: crate::ai::field::FieldId::THREAT_ANOMALY,
+            amount: dread,
+        });
+    }
+    // SORT-OK: `sort_deposits` takes the whole value, and two blooms at one position emit
+    // interchangeable deposits.
+    crate::ai::field::sort_deposits(&mut out);
+    deposits.0.extend(out);
+}
+
+/// A bloom whose health has run out: stop it being a target, and grant **nothing**.
+///
+/// Contrast `enemy::despawn_dead` and `crab::crab_despawn_dead`, which both despawn and gib. This one
+/// does neither. It leaves the corpse standing (collapsed, via [`drive_scp610_animation`]) because
+/// 610 is terrain, and it despawns nothing that a later cordon might have wanted — a dead bloom is
+/// simply a room the player spent ammunition and noise on and got no specimen for.
+///
+/// **There is no specimen path here, and that is enforced by the type system rather than by this
+/// function being careful.** The reward is an `on_add` hook on `containment::Contained`, so the only
+/// way to a `Specimen` is to become `Contained`. `tests/containment.rs` pins it from the outside.
+fn kill_blooms(
+    mut commands: Commands,
+    mut sfx: MessageWriter<crate::audio::Sfx>,
+    mut deposits: ResMut<crate::ai::field::StigDeposits>,
+    blooms: Query<(Entity, &Health, &Transform), (With<Scp610>, With<crate::enemy::Hostile>)>,
+    sim: Res<crate::sim::SimTuning>,
+) {
+    // Canonical order, for the same reason `enemy::despawn_dead` documents: the SCENT `Deposit`
+    // accumulates with a non-associative `f32 +=` that `drain_deposits` applies in batch order.
+    let mut dead: Vec<(Entity, Vec3)> = blooms
+        .iter()
+        .filter(|(_, hp, _)| hp.current <= 0.0)
+        .map(|(entity, _, tf)| (entity, tf.translation))
+        .collect();
+    // SORT-OK: two dead blooms at one position take identical side effects (same SCENT, same
+    // removal), so the payload does not distinguish them — interchangeable.
+    dead.sort_unstable_by_key(|(_, p)| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+
+    let mut scent: Vec<crate::ai::field::Deposit> = Vec::new();
+    for (entity, pos) in dead {
+        // A ton of dead flesh is the richest feeding site on the level. Same channel and amount every
+        // other death uses, so the swarm reads it the same way.
+        scent.push(crate::ai::field::Deposit {
+            pos,
+            field: crate::ai::field::FieldId::SCENT,
+            amount: sim.deposit.blood_scent,
+        });
+        sfx.write(crate::audio::Sfx::EnemyDeath(pos));
+        // Removed exactly once — the query requires `Hostile`, so a corpse cannot re-enter this loop.
+        commands
+            .entity(entity)
+            .remove::<crate::enemy::Hostile>()
+            .remove::<crate::laser::LaserTarget>();
+    }
+    crate::ai::field::sort_deposits(&mut scent);
+    deposits.0.extend(scent);
 }

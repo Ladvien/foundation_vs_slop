@@ -154,6 +154,11 @@ fn setup_camera(
     let env_map = images.add(crate::world::interior_env_cubemap(cfg));
     commands.spawn((
         Camera3d::default(),
+        // The one camera mesh picking is allowed to cast from. Required because
+        // `dialogue::plugin` sets `MeshPickingSettings::require_markers = true` — see there for the
+        // bug that forced it (a decorative light shaft was eating every click on the dialogue
+        // choices, and picking is opt-out by default).
+        bevy::picking::mesh_picking::MeshPickingCamera,
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: rig.height,

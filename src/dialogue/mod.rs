@@ -71,6 +71,32 @@ impl Plugin for DialoguePlugin {
         app.insert_resource(script)
             // 3D quads are only pickable with the mesh backend; UI picking (DefaultPlugins) isn't enough.
             .add_plugins(MeshPickingPlugin)
+            // ⚠️ **Mesh picking is OPT-IN here, and that is a bug fix, not a tidy-up.**
+            //
+            // `require_markers` defaults to `false`, which means the backend ray-casts **every mesh
+            // in the world** and — since `Pickable` defaults to `should_block_lower: true` — the
+            // nearest one silently swallows the pointer. Reported from play 2026-07-30: the choice
+            // bubbles could not be clicked, because `containment::extraction`'s extraction beacon is
+            // a `Cylinder` light shaft standing exactly where the squad starts, which is exactly
+            // where the leader's choice bubbles float. A decorative, `unlit`, 10%-alpha column that
+            // is not supposed to interact with anything was eating the click.
+            //
+            // That was a **soft-lock**: a modal conversation freezes the sim and choices never
+            // auto-advance, so an unclickable option is an unrecoverable run.
+            //
+            // Patching that one mesh with `Pickable::IGNORE` would have fixed the symptom and left
+            // the trap armed for the next decorative mesh anyone adds near a bubble. Requiring
+            // markers inverts it: nothing is pickable unless it says so. The only things in this game
+            // that want mesh picking are the choice bubbles (a repo-wide search for `Pointer<` finds
+            // no other consumer), and they already carry `Pickable`.
+            //
+            // The cost, stated because it is a real one: this also requires the camera to carry
+            // `MeshPickingCamera` (`camera.rs`), so a future second camera that needs picking must
+            // opt in too — and if picking ever goes dead, that marker is the first thing to check.
+            .insert_resource(bevy::picking::mesh_picking::MeshPickingSettings {
+                require_markers: true,
+                ..default()
+            })
             .add_systems(Update, bark_belief_tellings)
             .add_systems(Startup, bubble::setup_bubble_assets)
             .add_systems(

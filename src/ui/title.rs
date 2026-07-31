@@ -21,10 +21,17 @@ impl Plugin for TitlePlugin {
         // Keyboard navigation (Up/Down/W-S to move, Enter/Space/NumpadEnter to activate) and focus
         // cleanup are handled globally in `UiPlugin` for every menu screen — this screen only needs
         // to spawn its buttons inside a `TabGroup` (see `spawn_title`).
-        app.add_systems(OnEnter(AppState::Title), spawn_title).add_systems(
-            OnExit(AppState::Title),
-            super::state::despawn_scoped::<TitleRoot>,
-        );
+        app.add_systems(OnEnter(AppState::Title), spawn_title)
+            .add_systems(OnExit(AppState::Title), super::state::despawn_scoped::<TitleRoot>)
+            // `FVS_AUTORUN=1` presses NEW RUN for you. It exists so an unattended **measurement** run
+            // can reach live gameplay — `perf_probe` samples nothing useful on a title screen, and
+            // this box has no `xdotool` to click with.
+            //
+            // Deliberately NOT a shortcut that skips any of the transition: it performs exactly the
+            // two state sets the button's observer performs, so an auto-started run is the same run a
+            // player would get (same `RunSeed` advance, same warmup). A cheaper "jump straight to
+            // InGame" would measure a world that never existed.
+            .add_systems(OnEnter(AppState::Title), autorun.after(spawn_title));
     }
 }
 
@@ -134,4 +141,20 @@ fn spawn_title(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                     exit.write(AppExit::Success);
                 });
         });
+}
+
+/// Take the NEW RUN transition automatically when `FVS_AUTORUN=1`. See the registration note.
+fn autorun(
+    mut next: ResMut<NextState<AppState>>,
+    mut run: ResMut<NextState<crate::session::RunState>>,
+    cur_run: Res<State<crate::session::RunState>>,
+) {
+    if std::env::var("FVS_AUTORUN").as_deref() != Ok("1") {
+        return;
+    }
+    info!("title: FVS_AUTORUN=1 — starting a run without waiting for input");
+    if *cur_run.get() != crate::session::RunState::Active {
+        run.set(crate::session::RunState::Active);
+    }
+    next.set(AppState::Warmup);
 }

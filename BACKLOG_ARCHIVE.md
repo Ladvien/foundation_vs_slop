@@ -167,6 +167,80 @@ Split out 2026-07-30.
   secondary motion rather than as an error. **C-1 is blocked on that bug**, and so is FVS-K-1 behind it.
   Then: faction membership, field deposits/reads, drives, and a `ContainmentRule` consumed by the quarantine archetype (B-6).
   *Done when:* `scp610.glb` exists and loads; 610 spawns, participates in the shared substrate, is containable via quarantine; killable but yields nothing. · *Deps:* B-6, **610 asset export** · *Touches:* new `src/scp610/`, `src/ai/`, `src/ai/field.rs`, `assets/scp610/` · *Reading:* [STIG], [STIG-AD]
+- **FVS-K-1 — SCP-610 content/FX pass** · M · *determinism: render = SSIM* · ✅ **LANDED 2026-07-30**
+  *Done when:* 610 reads as slop; quarantine has readable feedback. Both met, plus the half of C-1's
+  acceptance ("killable but yields nothing") that had never actually shipped — 610 carried no `Health`.
+
+  **The asset was regenerated, and doing it exposed a non-determinism bug in the generator.** The item
+  was scoped as "add a `COLOR_0` bake and re-export". The re-export would not reproduce: eight headless
+  builds produced **five distinct `.glb` files** and two different triangle counts (7882 / 7912) from
+  identical inputs, and roughly one run in three died on `AssertionError: stub topology mismatch`. The
+  memory of this bug recorded it as "the two builds disagree by 2 vertices"; the counts were never
+  stable, so it was never two. Two causes upstream in `scp_characters`, both **an unordered iteration
+  deciding geometry** — the exact class `CLAUDE.md` devotes a section to:
+  * `monsters/infected.py::_find_patch` accumulated the attach patch into a `set` of `BMFace` proxies
+    and returned `list(patch)[:N]`. BMesh proxies hash on their C pointer, so order *and membership*
+    varied per process and differed between the collapsed and grown bmeshes. That list is handed to
+    `extrude_discrete_faces`, so it fixes each new face's `f.index` — which is the ID the tentacle
+    Geometry-Nodes graph's Random Value node keys its bump selection on. Unordered iteration was
+    literally choosing the topology.
+  * `_extrude_stub` passed a set-ordered vertex list to `bmesh.ops.pointmerge`, so *which* vertex
+    survived the tip weld varied. Invisible in the base mesh; it moved the `mutation` morph deltas,
+    which are per-index. This one only showed up after the first fix, as "same 7912 tris, five
+    different files, difference isolated to accessor 8".
+  Fixed upstream (BFS-ordered list; `sorted(..., key=index)`). **Six consecutive builds are now
+  byte-identical**, at the same 7,912 tris the contract already pinned — so the shipped asset had been
+  whichever mesh a lucky run happened to emit.
+
+  **`COLOR_0` stopped being neutral, and that is now load-bearing.** The old file shipped *three*
+  colour sets (a forced all-1.0 `COLOR_0` plus both stray Quaternius attributes at 0.9911–1.0) because
+  `export_all_vertex_colors` defaults `True`. `assets/scp610/README.md` §6 called that "checked,
+  confirmed benign" and warned not to assume it after a re-export — it was right. Export is now
+  **by name** (`export_vertex_color="NAME"`), the strays are deleted in the builder, and exactly one
+  attribute reaches the file. Consequence, measured: the mask is **0.0 at all 82 eye verts**, and Bevy
+  0.19 *assigns* `base_color = in.color`, so **both** material slots had to be replaced — a stock
+  `StandardMaterial` on the eye renders it pure black.
+
+  **The eye is where the research landed.** Kätsyri, Mäkäräinen, Förger & Takala 2015
+  (10.3389/fpsyg.2015.00390) find the strongest support of any uncanny-valley hypothesis they review —
+  **4 of 4 studies** — for perceptual mismatch between the realism levels of individual features, and
+  their canonical example is almost word for word this asset: *"clearly artificial eyes on an
+  otherwise fully human-like face."* SCP-610 already had that by accident of how the slot was
+  authored. `scp610_eye.wgsl` commits to it rather than blending it away. The second finding (H4b,
+  3 of 4: atypicality is *more* unsettling on a *more* humanlike base) is why the `mutation` morph
+  starts at a passing human and grows.
+
+  *Also shipped:* the flesh↔scar `ExtendedMaterial` (README §7 Tier 1, the `MoldFruitMaterial`
+  pattern); the ACS **luminosity** term — containment is darkness, a breach flares — hueless by rule;
+  all four cordon surfaces (armed preview, placed ring, held-anomaly mark, event-line beats), since
+  `place_quarantine_input` had been spawning an *invisible* 3 m circle for a supply of one charge; a
+  spatial flesh drone plus three cordon one-shots; `Health` + the baked `scp610_death` collapse (not
+  `autogib` — 610 is terrain and stays where it falls).
+
+  **Two bugs found next door, both fixed:**
+  * `ContainmentConfig::validate` **never validated `scp610`** — it had been missing since the rule was
+    added, so a malformed 610 rule would have loaded silently and failed later as "containment never
+    completes".
+  * `audio::update_music` and `audio::watcher_pad` were **defined but never registered**. The
+    calm↔combat crossfade never ran (combat music was spawned at gain 0 and stayed there — the game
+    had *no combat music*), the beds never re-read `GlobalVolume` so alt-tab could not mute them, and
+    the watcher's pad played silently for ever. Same failure `53fbcb3` records ("three more systems
+    FVS-G-6's sweep silently killed"); these two were survivors of it.
+
+  **The calibration test earned its place immediately.** 610's drone deposits `THREAT_ANOMALY` at its
+  own position and its own rule caps that channel at 0.35 there, so
+  `the_loudest_evolvable_bloom_can_still_be_contained` pins that the search cannot evolve an
+  uncontainable bloom. Its **first run failed** and caught a real defect: the deposit pushed the
+  per-second rate every tick instead of `rate * dt` — 60× — which would have shipped as "SCP-610 can
+  never be contained" with every other test green.
+  *Goldens re-pinned* (x86 only; aarch64 stays unpinned): `GOLDEN` `0x3563f0f69281ce4c` →
+  `0x9f7a0787fdcb487f` (Health puts three blooms into `snapshot_hash` for the first time),
+  `GOLDEN_FIELD` `0xc95454f3ca28b71c` → `0x82d9fc45c7e06f63` (the drone deposits). Reproducibility was
+  verified *before* pinning, not after.
+  *Deferred, deliberately:* `flesh_drone_loudness` grows `audio_genome::N` 15 → 16, so
+  `elites_audio.ron` is rejected loudly. The re-bake belongs to **FVS-H-1**, which is itself sequenced
+  behind FVS-I-1 — baking now would optimise against an objective I-1 then invalidates.
+  · *Deps:* C-1 · *Touches:* `src/scp610/`, `src/containment/cordon.rs`, `src/audio.rs`, `src/palette.rs`, `assets/shaders/scp610_{flesh,eye}.wgsl` · *Reading:* **[UV-REV]**, [UV-FMRI], [TEST-NT]
 - **FVS-C-2 — SCP-999 befriend-capture** · M · ✅ **LANDED 2026-07-26 — the first real capture in the game**
   *Shipped:* a new top-level `containment:` config slice authoring per-anomaly rules, `ContainmentRules` resource, and `Containment` attached at `spawn_scp999_at` (the shared builder, so a Research-Room F6 blob is byte-identical to a seeded one). Pinned end-to-end by `containment::scp999_is_captured_by_befriending_it_not_by_fighting`, which drives the **shipped** rule from `config.ron` — so the slice parsing, validating and being reachable is part of the test.
   **The rule, and why it is the right tutorial:** `THREAT_GUN AtMost 0.05` **and** `ATTENTION AtLeast 0.25`, held 4 s, `OnBreak::Keep`. Both clauses are satisfied by choosing *not* to fight — holster, and stay with it. That states the whole win-by-containing pivot in one creature, and it reads through the L-1 HUD as `LOWER GUNFIRE` / `RAISE OBSERVATION`. `Keep` (cumulative) rather than `Reset`: a nervous trigger finger should cost progress, not the run, on the first capture anyone performs.
@@ -1153,6 +1227,102 @@ Split out 2026-07-30.
   registers it. · *Deps:* H-3
   Surface the director's chosen challenge as a Branch-universe briefing at run start.
   *Done when:* each expedition shows its sampled challenge framing. · *Deps:* H-3 · *Touches:* UI, director · *Reading:* [LPM], [QD-PCG]
+- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run** · M · ✅ **CLOSED 2026-07-30**
+  **Player report, with a region capture:** *"I can't click on these options."* Metadata confirmed
+  `App state: InGame`, `Menu/overlay: Conversation`, `Sim: frozen`. The expedition-start scene ends in
+  a `Choice` node, a modal conversation freezes the sim, and choices deliberately do not auto-advance
+  (`active.advance_at = f32::INFINITY`). **So an unanswerable choice was not a cosmetic bug — it was
+  an unrecoverable soft-lock on the game's opening beat.** Same defect FVS-C-1's landing commit had
+  recorded from the other side (every screenshot that day was of a paused game; two captures four
+  seconds apart were byte-identical, full-frame RMSE 0), diagnosed then as "nobody answered the
+  modal". The player showed that they *could not*.
+  **Root cause: `MeshPickingSettings::require_markers` defaults to `false`.** The backend ray-casts
+  *every* mesh, and `Pickable` defaults to `should_block_lower: true` — so `containment::extraction`'s
+  beacon, a decorative, unlit, 10%-alpha `Cylinder` light shaft standing exactly where the squad
+  starts, was swallowing every click on the leader's choice bubbles. The player found it ("whatever
+  the beam of light is at that the squad starts in, that intercepts the mouse"). The three standing
+  hypotheses at the time — backface culling on a `cull_mode: None` bubble, press/release landing on
+  different entities, camera-ordering in pointer→camera resolution — were **all wrong**, and are
+  recorded here because each is individually plausible and someone will re-derive them.
+  *Shipped 2026-07-30 (`d52c7d4`):* picking is opt-in (`require_markers: true` + `MeshPickingCamera`
+  on the camera), which kills the whole class rather than patching one mesh and leaving the trap armed
+  for the next decorative mesh near a bubble; plus `1`-`9`/numpad to pick an option and `Enter`/`Space`
+  to advance a line, since the bubbles were already LABELLED "1."/"2." — the keys a player would guess
+  were being advertised and not accepted.
+  **On the one-path rule, because this item originally forbade exactly what shipped.** The entry said
+  "a keyboard fallback is NOT the answer (that would be a second path)". It is not one: `choice_hotkeys`
+  writes the *same* `ChoicePicked` message the click observer writes, so everything downstream —
+  `resolve_choice`, the node walk, the teardown — stays a single path. Two input **devices** for one
+  action is not the branching CLAUDE.md forbids; a *degraded substitute* resolution path would have
+  been.
+  ✅ **FULL HARNESS SUITE GREEN 2026-07-30, 15/15 targets, run one at a time.** replay **19/19**
+  including the ~54 min `search_rollouts_of_mutants_are_reproducible_under_load` mutant guard; session
+  21/21, containment 20/20, liveness 10/10, search_calibration 5/5 — every baseline matched exactly.
+  Both goldens unmoved. So the four changes that had shipped on reasoning alone (this fix, the dialogue
+  hotkeys, the footstep rework and `perf_probe`) are now **measured**.
+  ✅ *Verified 2026-07-30:* five tests in `src/dialogue/runtime.rs::tests` drive the state machine on
+  the keyboard alone — a digit picks that option, numpad matches the number row, an out-of-range digit
+  is ignored rather than clamped, a digit typed during a *line* does not answer the next choice, and a
+  full walk ends with the cursor dropped, `ConversationLock` released and `MenuState::Closed` set.
+  `advance_at` is pinned at infinity throughout, so none can pass on the auto-advance timeout.
+  ⚠️ **The limit of that proof, stated because the item's original acceptance was wider.** "Done when"
+  read: *a `Choice` node can be answered in the shipped windowed build, and a run cannot reach a state
+  where the sim is frozen with no way to unfreeze it.* The **second** clause is measured. The first is
+  measured only for the keyboard: mesh picking needs a window and a pointer, and `DialoguePlugin` is
+  never registered in the headless harness (`src/dialogue/mod.rs:6-7`), so no automated test in this
+  repo can reach the click path. `require_markers` + `MeshPickingCamera` stand on source reading.
+  **Closed on the user's explicit call** that the keyboard evidence suffices — the property that made
+  this a soft-lock rather than an annoyance is that a player who cannot click can always press `1`.
+  If picking ever goes silently dead, `MeshPickingCamera` is the first thing to check.
+  · *Touches:* `src/dialogue/{mod,runtime}.rs`, `src/camera.rs` · *Write-up:* `debug_screenshots/2026-07-30-dialogue-choice-softlock.md`
+
+- **FVS-H-7 — SPIKE: is "no archive → the authored world" genuinely one path?** · S · ✅ **ANSWERED AND SHIPPED — found already done 2026-07-30**
+  **The answer is no, it was not — and the remedy is already in the tree.**
+  The claim under test: a missing archive makes `CurriculumDirector::pick` return `None`, the director
+  does not fire, and the authored `config.ron` world plays — asserted as one path rather than a fallback
+  because "with nothing to sample there is no degraded substitute being written". The spike's own
+  objection was that this is *exactly the shape a fallback uses to justify itself*, and that the honest
+  test is whether the player can **tell**.
+  They could not. `pick_next_challenge` only `info!`d it, which is invisible in a shipped build — and
+  `director.rs`'s own doc comment still says a caller with no archive "must **fall back**" while claiming
+  there is no second path, which is the tell.
+  **Shipped fix, verified present 2026-07-30:** the state is written to `ExpeditionBriefing`
+  (`director.rs:363`) and the panel says it in as many words — `AUTHORED UNIVERSE — NO ARCHIVE SAMPLED`,
+  *"Baseline site conditions. Nothing has been tuned to you."* (`ui/briefing.rs:56`). Deliberately named
+  as a **universe**, in the same voice as the sampled case, so it reads as a legitimate expedition rather
+  than an error.
+  Pinned by `ui::briefing::tests::the_authored_world_says_so_in_as_many_words`, which cites the spike by
+  number and asserts both halves — that the unsampled case is legible, and that it still reads as a
+  briefing rather than an error. `BriefingPlugin` is registered (`lib.rs:449`) — checked, because
+  defined-but-never-registered is this repo's recurring bug and a silent panel would make the test
+  vacuous in the shipped build.
+  **So the framing survives, but only because it was made legible.** A path the player cannot perceive
+  is a second path however it is argued; the fix was not to remove a branch but to make the branch
+  announce itself. Worth keeping as the worked example of what "one path" costs when a branch is
+  genuinely justified.
+  ⚠️ **Closed, but read FVS-N-13's neighbour FVS-H-8 before trusting the panel.** While H-8 is live the
+  director's sampled config is written to a `GameConfig` nobody re-reads, so `BRANCH UNIVERSE …` and
+  `AUTHORED UNIVERSE …` currently label **the same dungeon**. H-7's defect was a distinction the player
+  could not perceive; H-8 leaves a distinction the player perceives that does not exist. The panel is
+  right and will start telling the truth the moment H-8 lands — it is not the panel that is broken.
+  · *Deps:* H-3, L-4 (both shipped)
+- **FVS-I-10 — Crab/parasite swarm cadence is unevolved** · M · ✅ **CLOSED 2026-07-30 — it was already evolved; the item was stale**
+  Filed as "spawn/breed cadence is the main pacing dial in the game and the search cannot touch it."
+  **That premise was false when written.** The FVS-I-6 descriptor audit found `world_genome` already
+  decodes both structs the item names:
+  * `BreedingTuning` (7 knobs, `world_genome.rs:452`) — **`respawn_interval` is the nest breed rate
+    limiter**, plus `meat_per_crab`, `feed_gain`, `spawn_boost_max`, `spawn_boost_decay`, `hunger_rate`,
+    `hunger_sate_rate`.
+  * `ParasiteTuning` (14 knobs, `world_genome.rs:490`) — including **`initial_count`** and
+    **`manca_count_max`**, i.e. swarm population directly.
+  `world_genome`'s own header already documented both slices ("breeding 7 ... parasite 14") in its
+  `N = 138` accounting, so the evidence was sitting in the file the item pointed at.
+  **Worth the paragraph because closing it is worth real money:** it removes an M-sized item, a
+  genome-length change, and the archive re-bake debt that change would have added to FVS-H-1 — which is
+  already carrying `audio_genome`'s 15→16 growth from FVS-K-1.
+  Same staleness class as FVS-A-4 / O-2 / F-2 above: an item whose acceptance was met and which nobody
+  re-read. If a *specific* cadence knob is genuinely missing, re-file it naming that knob rather than the
+  whole group. · *Audit:* `docs/descriptor_audit.md`
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
 
@@ -1674,3 +1844,58 @@ Split out 2026-07-30.
   Footsteps follow the surface under the walkers' centroid — one shared density-throttled voice, so one surface to pick — indexed by `Biome as usize`, the same indexing `FloorMaterials::pick` uses, so what you hear and what you see cannot drift apart. The two sounds heard most often were also the thinnest pools: growls 4 → 8, ambient one-shots 6 → 9.
 - **FVS-Q-6 — Concrete biome texture: three attempts, and why** · S · ✅ **LANDED 2026-07-30**
   `concrete_0031` read as medieval cobblestone; `ground_0046` was genuinely concrete but its crack network read as post-earthquake dry earth. `T_Plaster` is rendered screed — the surface a sublevel is actually finished in — desaturated to 12% at conversion (chroma 0.02 against the wallpaper's 0.23). The two biomes separate by **saturation, not hue**, which is what the colour-language doc asks of the reality layer.
+- **FVS-Q-8 — Biome is chosen PER CELL, so one room has carpet floor and concrete walls (REPORTED FROM PLAY 2026-07-30)** · M · ✅ **LANDED 2026-07-30 (`184c6cf`), verified 2026-07-31**
+  Player: *"I don't like backrooms carpets and concrete walls. It should be one or the other. The
+  transition should be at a doorway."* Chosen fork: **(b)**, corridors inherit one endpoint room.
+  **The originally-filed cause was wrong about the mechanism, and the correction is the useful part.**
+  The item said a wall cell and the floor cell it is attached to could fall on opposite sides of the
+  noise threshold. They could not: `render.rs` keys every wall slab on the floor cell that owns it
+  (line 253 — the same `cell` as the floor tile at line 230), corner posts use `home` "the post's owning
+  cell", and lintels use the opening cell. **A tile and its own walls always agreed.** The real defect
+  was cell-to-cell variation *across one room's floor* — the floor was split, and each wall faithfully
+  followed whichever floor cell owned it. So `Dungeon::biome`'s doc comment was never the lie the item
+  called it; the render layer did honour attachment, and the noise was simply finer-grained than a room.
+  Why the shipped level showed it and the test fixture did not: shipped `block: 32` admits ~30-cell
+  rooms against a 14-tile noise period, so one room spans two zones. `test_config`'s `block: 16` does not.
+  *Shipped:* `layout::resolve_biomes` — three rules, one per cell class. **Room floor** takes the noise
+  sampled once at the room's centre cell; **corridor floor** takes its lower-`RegionId` endpoint room
+  (`min(a, b)`, free because `Region.id == si` and `layout.adjacency` holds site indices); **everything
+  else** — rock, walls, cells the necking pass shut — takes the nearest classified cell via one
+  multi-source BFS. That third rule is what finally makes "a wall belongs to the biome of the cell it is
+  attached to" true **by construction** rather than probabilistically. Room floor outranks a corridor
+  crossing it, free, because the corridor pass only claims cells the room pass had not already set.
+  `Dungeon` now stores `biome_of: Vec<Biome>`; the old "pure function of position, storing it would be
+  caching a hash" note died with the change, because a per-zone biome depends on which room owns the
+  cell and only the carver knows that. `Biome`'s own doc already said "it is stored per fine cell".
+  **Goldens did not move, structurally rather than luckily:** `biome_at` is a pure hash whose seed is
+  derived from the config seed rather than drawn from the carve stream, so moving the sample point from
+  every cell to one per room cannot shift a subsequent carve draw; and `snapshot_hash` folds only actor
+  `Transform`+`Health` while `field_hash` covers stigmergy — neither reads `Dungeon`.
+  ⚠️ **The first test pass was VACUOUS and that is worth remembering.** All three assertions passed for
+  free under `test_config`, whose noise is coarser than its rooms, so per-cell sampling never split one.
+  Fixed two ways: a `biome_test_config` (`biome_scale: 3.0`) that reproduces the condition, and an
+  anti-vacuity guard that re-samples the OLD per-cell rule and fails if it splits no room. The same
+  guard rides `the_shipped_config_shows_no_room_with_two_surface_treatments`, which is the one that
+  speaks about the game you actually play — it asserts both that the shipped level *did* split rooms
+  under the old rule and that none shows two treatments now.
+  *Verified 2026-07-31:* `cargo test` **973 passed / 0 failed**; full harness **15/15 targets**, one at
+  a time, replay **19/19 including the mutant guard** (3114 s); layout golden and both replay goldens
+  unmoved. 6 new tests.
+  *Grounding, and the contrast is the point:* **AutoBiomes** (Fischer, Dittmann, Weller & Zachmann,
+  *Vis. Comput.* 2020, doi 10.1007/s00371-020-01920-7) blends adjacent biomes through a convolution
+  kernel — correct for open terrain, where a transition is continuous and has no architectural feature
+  to hide the seam. An interior has one: the doorway. So this switch is deliberately **discrete** and
+  placed at the threshold. Room-as-unit-of-assignment is the standard dungeon-graph move surveyed by
+  **Viana & Dos Santos** (*J. Interact. Syst.* 2021, doi 10.5753/jis.2021.999).
+  ✅ *Looked at a real frame, 2026-07-31* (`FVS_AUTORUN=1 FVS_WINDOW=1600x900`, devshot capture). Every
+  room in frame renders a **uniform** floor and uniform walls — the saturated Backrooms carpet against
+  its pale patterned wallpaper, with no patchwork inside any room, and the same holds for the corridor
+  running off to the right.
+  ⚠️ **Calibrate what that frame proves.** The camera never moved, and the probe logged exactly one zone
+  all run (`cell (80, 112) region 13 biome Backrooms`), so the capture shows *a room that is uniform* —
+  it does **not** show a Backrooms→Concrete transition landing at a doorway, which is the other half of
+  option (b). Keystroke injection is blocked in this environment, so panning to a Concrete zone was not
+  possible. The rigorous evidence for the whole-map claim is
+  `the_shipped_config_shows_no_room_with_two_surface_treatments`, which walks **every** region of the
+  shipped level; the frame corroborates it at one location rather than standing in for it.
+  · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
