@@ -346,13 +346,23 @@ pub struct LightField {
     dirty: bool,
     /// Peak cell illuminance of `cells` after the last compose — lets callers normalise to 0..1.
     peak: f32,
+    /// Row-major indices of the dungeon's floor cells, precomputed once (the `ai::field::Stig`
+    /// floor-cells idiom). Both writers (`bake`, `compose`) gate on `is_floor`, so rock cells hold
+    /// exactly 0.0 forever — the per-tick peak fold and `apply_mold_dim` scan only this list, which is
+    /// bit-identical to the full-grid scan, not an approximation (`fold_fingerprint` still folds the
+    /// WHOLE grid, so the field golden pins the rocks-are-zero invariant itself). Ref: Chilimbi, Hill &
+    /// Larus, "Cache-Conscious Structure Layout" (PLDI 1999) — restrict hot scans to the data that can
+    /// actually change.
+    floor_idx: Vec<usize>,
 }
 
 impl LightField {
     /// Empty field sized to the dungeon; starts `dirty` so the first `FixedUpdate` bakes the static base.
-    pub fn new(width: usize, height: usize) -> Self {
+    pub fn new(dungeon: &Dungeon) -> Self {
+        let (width, height) = (dungeon.width, dungeon.height);
         let n = width * height;
-        Self { width, height, base: vec![0.0; n], cells: vec![0.0; n], dirty: true, peak: 0.0 }
+        let floor_idx = dungeon.floor_cells().map(|c| row_major(c, width)).collect();
+        Self { width, height, base: vec![0.0; n], cells: vec![0.0; n], dirty: true, peak: 0.0, floor_idx }
     }
 
     /// Point read at a world position (query). Off-grid reads as 0 — the same contract as `Stig::sample`.
@@ -467,7 +477,9 @@ impl LightField {
                 }
             }
         }
-        self.peak = self.cells.iter().copied().fold(0.0f32, f32::max);
+        // Peak over floor cells only: rock cells are invariantly 0.0 and every cell is >= 0, so a max
+        // seeded at 0.0 cannot see them — bit-identical to the full-grid fold it replaces.
+        self.peak = self.floor_idx.iter().map(|&i| self.cells[i]).fold(0.0f32, f32::max);
     }
 
     /// Mark the field for recompute (Phase 4: a fixture switched on/off/failing).
@@ -487,9 +499,13 @@ impl LightField {
         if dim_light <= 0.0 {
             return;
         }
+        // Floor cells only (see `floor_idx`): dimming a rock cell is `0.0 * x == 0.0` and the peak fold
+        // ignores zeros, so skipping the ~50-60% rock cells is bit-identical to the full-grid pass.
         let mut peak = 0.0f32;
-        for (i, cell) in self.cells.iter_mut().enumerate() {
+        let Self { cells, floor_idx, .. } = self;
+        for &i in floor_idx.iter() {
             let b = biomass.get(i).copied().unwrap_or(0.0);
+            let cell = &mut cells[i];
             *cell *= (1.0 - dim_light * b).clamp(0.0, 1.0);
             peak = peak.max(*cell);
         }
@@ -659,7 +675,7 @@ pub(crate) fn apply_dynamic_lights(
 /// deterministic replay gate must cover its bake. Requires `Dungeon` at build (DungeonPlugin precedes it).
 /// Size this run's illuminance grid to its dungeon.
 fn size_light_field(mut commands: Commands, dungeon: Res<Dungeon>) {
-    commands.insert_resource(LightField::new(dungeon.width, dungeon.height));
+    commands.insert_resource(LightField::new(&dungeon));
 }
 
 pub struct LightFieldPlugin;
@@ -1148,11 +1164,21 @@ fn attach_fixture_lights(
 fn flicker_lights(
     time: Res<Time>,
     config: Res<GameConfig>,
-    mut lights: Query<(&FixtureLight, &mut PointLight)>,
+    mut lights: Query<(&FixtureLight, &bevy::camera::visibility::ViewVisibility, &mut PointLight)>,
 ) {
     let t = time.elapsed_secs();
     let depth = config.lighting.flicker_hum_depth;
-    for (fl, mut light) in &mut lights {
+    for (fl, vis, mut light) in &mut lights {
+        // Off-screen fixtures don't shimmer. This is a purely cosmetic modulation (the gameplay
+        // `LightField` reads the steady brightness), and writing an unseen light's intensity marks
+        // it `Changed<PointLight>` — which re-runs its bounding-sphere insert and the GPU
+        // light-buffer extract for every fixture in the dungeon, every frame. Measured 2026-07-31
+        // (flicker_hum_depth 0.06 → 0.0 A/B, same seed/route): 10.38 → 8.69 ms median frame time,
+        // with ~120 fixtures resident and ~7 visible. A light scrolling into view resumes its hum
+        // on its next rendered frame, which is the first frame anyone could see it.
+        if !vis.get() {
+            continue;
+        }
         // Shallow steady ripple — the fluorescent shimmer.
         let hum = 1.0 - depth * (0.5 + 0.5 * (t * FLICKER_HUM_HZ + fl.phase).sin());
         let mult = if fl.failing {
@@ -1308,7 +1334,7 @@ mod tests {
     #[test]
     fn fixture_lights_nearby_floor_with_falloff() {
         let d = corridor_with_wall();
-        let mut field = LightField::new(7, 1);
+        let mut field = LightField::new(&d);
         bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         let at = |x: i32| field.sample(&d, d.cell_center(IVec2::new(x, 0)));
         assert!((at(0) - 1.0).abs() < 1e-6, "peak illuminance at the fixture cell");
@@ -1319,7 +1345,7 @@ mod tests {
     #[test]
     fn walls_cast_light_shadow() {
         let d = corridor_with_wall();
-        let mut field = LightField::new(7, 1);
+        let mut field = LightField::new(&d);
         bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         let at = |x: i32| field.sample(&d, d.cell_center(IVec2::new(x, 0)));
         assert!(at(2) > 0.0, "cell before the wall is lit");
@@ -1332,8 +1358,8 @@ mod tests {
     fn bake_is_deterministic() {
         let d = corridor_with_wall();
         let fixtures = [(IVec2::new(0, 0), 1.0, 6.0), (IVec2::new(6, 0), 0.7, 6.0)];
-        let mut a = LightField::new(7, 1);
-        let mut b = LightField::new(7, 1);
+        let mut a = LightField::new(&d);
+        let mut b = LightField::new(&d);
         bake_static(&mut a, &d, &fixtures);
         bake_static(&mut b, &d, &fixtures);
         assert_eq!(a.cells, b.cells, "same (sorted) input → bit-identical field");
@@ -1342,7 +1368,7 @@ mod tests {
     #[test]
     fn gradient_points_toward_the_light() {
         let d = corridor_with_wall();
-        let mut field = LightField::new(7, 1);
+        let mut field = LightField::new(&d);
         bake_static(&mut field, &d, &[(IVec2::new(0, 0), 1.0, 6.0)]);
         // At cell (1,0) the light rises toward the fixture at x=0, so the +gradient (increasing light)
         // has negative x. A photophobic crab steers along -gradient (+x, into the dark); a photophilic
@@ -1356,7 +1382,7 @@ mod tests {
     #[test]
     fn flashlight_cone_lights_ahead_not_behind() {
         let d = Dungeon::from_walkable(7, 7, vec![true; 49]);
-        let mut field = LightField::new(7, 7);
+        let mut field = LightField::new(&d);
         field.bake(&d, &[]); // no fixtures → base is dark
         let cone = FlashlightCone {
             source: IVec2::new(3, 3),
@@ -1387,8 +1413,8 @@ mod tests {
             cone_cos: 0.7,
             edge_softness: 0.2,
         };
-        let mut a = LightField::new(7, 7);
-        let mut b = LightField::new(7, 7);
+        let mut a = LightField::new(&d);
+        let mut b = LightField::new(&d);
         a.bake(&d, &[(IVec2::new(0, 0), 1.0, 3.0)]);
         b.bake(&d, &[(IVec2::new(0, 0), 1.0, 3.0)]);
         a.compose(&d, &[cone()]);

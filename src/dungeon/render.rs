@@ -183,6 +183,13 @@ pub(crate) fn spawn_tiles(
             }
         }
         let mut entity = commands.spawn((
+            // Tiles belong to the RUN, not the process. `spawn_tiles` moved from `Startup` to
+            // `OnEnter(RunState::Active)` in the per-run migration and this tag was missed, so every
+            // expedition left its whole dungeon resident — floor tiles, wall slabs, lintels, corner
+            // posts **and their Avian static colliders** — and the next run generated a second map
+            // through the first: invisible walls from a dead dungeon that gib chunks bounced off, plus
+            // an unbounded entity/mesh/collider leak per expedition (FVS-N-13).
+            crate::session::run_scoped(),
             Tile { cell },
             Mesh3d(mesh),
             MeshMaterial3d(material),

@@ -1,12 +1,17 @@
-//! Shared test-side reader for binary glTF (`.glb`) containers — how the asset-contract tests
-//! (`tests/valkyrie_asset.rs`, `tests/creature_clip_contract.rs`) look at what a rig actually ships.
+//! Shared test-side helpers. The bulk of this file is the hand-rolled reader for binary glTF
+//! (`.glb`) containers — how the asset-contract tests (`tests/valkyrie_asset.rs`,
+//! `tests/creature_clip_contract.rs`) look at what a rig actually ships; [`source_scan`] carries the
+//! line-scanner the source lints share.
 //!
-//! Deliberately hand-rolled: pulling a glTF crate in as a dev-dependency to read a header would be a
-//! second, differently-behaved reader of an asset the engine already parses its own way.
+//! The glTF reader is deliberately hand-rolled: pulling a glTF crate in as a dev-dependency to read
+//! a header would be a second, differently-behaved reader of an asset the engine already parses its
+//! own way.
 //!
 //! Each integration-test crate compiles its own copy of this module and uses the subset it needs,
 //! hence the file-wide `dead_code` allowance.
 #![allow(dead_code)]
+
+pub mod source_scan;
 
 pub struct Glb {
     pub path: String,

@@ -163,6 +163,11 @@ pub struct WorldConfig {
     /// co-evolve the light the ecosystem steers on, rather than freezing it while evolving the mold's
     /// response to it. Visual knobs stay authored. Applied over `GameConfig::lighting`'s gameplay knobs.
     pub lighting: crate::light::LightingDynamics,
+    /// The evolvable **gameplay** gore dials (debris cap/settling, autogib fragment count and throw, and
+    /// the meat the crabs forage on) — FVS-I-7. A gore knob has already tipped a 5/5 win into a wipe, so
+    /// it is a live difficulty dial the offline search must be able to see. The ~22 cosmetic knobs stay
+    /// authored; see `gore::GoreDynamics` for why encoding them would make the archive worse.
+    pub gore: crate::gore::GoreDynamics,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
@@ -181,12 +186,33 @@ pub struct WorldConfig {
 /// So the diagnosis is mechanical now rather than remembered: the first load records the file's
 /// modification time, and a later load that sees a different one fails with *the actual problem*
 /// instead of a serde error about a field name.
-static CONFIG_FINGERPRINT: std::sync::OnceLock<Option<std::time::SystemTime>> =
-    std::sync::OnceLock::new();
+/// The outer `Option` is "not yet recorded"; the inner is the mtime (or `None` if the filesystem will
+/// not report one). A `Mutex` rather than a `OnceLock` because exactly one process — `train apply` —
+/// legitimately rewrites this file and must re-baseline; see [`note_config_rewritten`].
+static CONFIG_FINGERPRINT: std::sync::Mutex<Option<Option<std::time::SystemTime>>> =
+    std::sync::Mutex::new(None);
 
 /// The config file's mtime, or `None` if the filesystem will not say.
 fn config_mtime() -> Option<std::time::SystemTime> {
     std::fs::metadata(GAME_CONFIG_PATH).ok().and_then(|m| m.modified().ok())
+}
+
+/// Re-baseline the fingerprint onto the file as it stands **right now**.
+///
+/// Call this immediately after deliberately rewriting `config.ron` in-process. Exactly one caller
+/// qualifies: `train apply`, whose whole job is to bake an evolved elite into the shipped config and
+/// then reload it to recompute the goldens. Without this it tripped its own guard *after* the write
+/// (FVS-J-7) — aborting in precisely the half-written state the guard exists to prevent.
+///
+/// This is not a bypass and there is no "skip the check" flag: the guard stays armed for every other
+/// load in the process, and an *unannounced* edit still fails exactly as loudly. The distinction the
+/// guard actually cares about is "did someone change the file behind this process's back", and an
+/// authorised rewrite that declares itself is not that.
+pub fn note_config_rewritten() {
+    // Poisoning cannot corrupt this datum (it is a plain timestamp), so recover rather than panic —
+    // this crate does not unwrap.
+    let mut slot = CONFIG_FINGERPRINT.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some(config_mtime());
 }
 
 pub fn load_game_config() -> Result<GameConfig, String> {
@@ -194,9 +220,12 @@ pub fn load_game_config() -> Result<GameConfig, String> {
     // never trips — this is a diagnostic guard, and a filesystem that cannot report mtimes must not
     // become a reason the game refuses to start.
     let now = config_mtime();
-    let first = CONFIG_FINGERPRINT.get_or_init(|| now);
+    let first = {
+        let mut slot = CONFIG_FINGERPRINT.lock().unwrap_or_else(|e| e.into_inner());
+        *slot.get_or_insert(now)
+    };
     if let (Some(a), Some(b)) = (first, now) {
-        if a != &b {
+        if a != b {
             return Err(format!(
                 "{GAME_CONFIG_PATH} CHANGED WHILE THIS PROCESS WAS RUNNING. Every `App` built after \
                  the edit parses a file this binary was not compiled against, so any result from this \

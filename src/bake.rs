@@ -428,18 +428,102 @@ pub fn repin_replay(snap: u64, field: u64) -> Result<(), String> {
     std::fs::write(REPLAY_PATH, text).map_err(|e| format!("{REPLAY_PATH}: write: {e}"))
 }
 
-/// Replace the literal in the single `<marker><hex>;` declaration, leaving every other byte untouched.
+/// Replace the literal in the `<marker><hex>;` declaration for **this** architecture, leaving every
+/// other byte untouched.
+///
+/// # Why two declarations can be one golden
+///
+/// Goldens are **per-platform** (the 2026-07-27 Director decision: `f32` gameplay math is not
+/// identical across instruction sets, so one hash cannot hold on both x86-64 and aarch64). Each
+/// golden is therefore written as a `cfg(target_arch)`-selected pair, and the marker literally
+/// appears twice — which this function used to reject as ambiguity, failing every
+/// `train apply --repin-goldens` at the re-pin step (FVS-J-7's sibling, FVS-J-8).
+///
+/// **The duplicate check is kept, not deleted.** Two *unconditional* declarations of one golden is
+/// still an error; what is now understood is that `cfg`-selected alternatives are one logical
+/// declaration with one live arm. A bake measures on the machine it runs on, so the arm re-pinned is
+/// the arm that was measured — re-pinning the other would be inventing a number for a platform this
+/// process never ran on, which is precisely what the aarch64 arm's deliberate `0` refuses to do.
 pub fn repin_one(text: &str, marker: &str, value: u64) -> Result<String, String> {
-    let at = text.find(marker).ok_or_else(|| format!("{REPLAY_PATH}: no `{marker}`"))?;
-    if text[at + marker.len()..].contains(marker) {
-        // Two declarations of one golden is the duplication this function was built to stop needing.
-        return Err(format!("{REPLAY_PATH}: `{marker}` declared more than once — a golden has one home"));
-    }
+    let sites: Vec<usize> = text.match_indices(marker).map(|(i, _)| i).collect();
+    let at = match sites.len() {
+        0 => return Err(format!("{REPLAY_PATH}: no `{marker}`")),
+        1 => sites[0],
+        _ => {
+            // Each site must be cfg-gated, and exactly one gate may be live for this target.
+            let live: Vec<usize> =
+                sites.iter().copied().filter(|&at| cfg_arm_is_live_here(text, at)).collect();
+            match live.len() {
+                1 => live[0],
+                0 if !sites.iter().any(|&at| is_cfg_gated(text, at)) => {
+                    // Plain duplication — the ambiguity the check was built for, and still an error.
+                    return Err(format!(
+                        "{REPLAY_PATH}: `{marker}` declared more than once — a golden has one home"
+                    ));
+                }
+                0 => {
+                    return Err(format!(
+                        "{REPLAY_PATH}: `{marker}` is declared {} times, all `cfg`-gated, and NONE \
+                         is selected for this target ({}). A declaration this build cannot see is \
+                         one no bake can re-pin — measure on that platform and pin it there.",
+                        sites.len(),
+                        std::env::consts::ARCH,
+                    ));
+                }
+                n => {
+                    return Err(format!(
+                        "{REPLAY_PATH}: `{marker}` has {n} declarations live at once for this \
+                         target ({}) — a golden has one home. Unconditional duplicates are a real \
+                         ambiguity; only `cfg(target_arch)`-selected alternatives are one golden.",
+                        std::env::consts::ARCH,
+                    ));
+                }
+            }
+        }
+    };
     let val_start = at + marker.len();
     let end = text[val_start..]
         .find(';')
         .ok_or_else(|| format!("{REPLAY_PATH}: unterminated `{marker}`"))?;
     Ok(format!("{}0x{value:016x}{}", &text[..val_start], &text[val_start + end..]))
+}
+
+/// Does the `#[cfg(...)]` attribute immediately above the declaration at `at` select it on the
+/// architecture this binary is running on?
+///
+/// Deliberately narrow: it understands `target_arch` and a single `not(..)` wrapper, which is the
+/// whole vocabulary the per-platform goldens use. Anything richer returns `false` and surfaces as the
+/// "none is selected" error above — an honest refusal beats a guess about which hash to overwrite.
+fn cfg_arm_is_live_here(text: &str, at: usize) -> bool {
+    let Some(attr) = preceding_attr(text, at) else {
+        return false;
+    };
+    if !attr.starts_with("#[cfg(") {
+        return false;
+    }
+    let this_arch = format!("target_arch = \"{}\"", std::env::consts::ARCH);
+    let mentions_this_arch = attr.contains(&this_arch);
+    let negated = attr.contains("not(");
+    // `cfg(target_arch = "x86_64")` on x86_64 → live. `cfg(not(target_arch = "x86_64"))` → live only
+    // when this is NOT that arch.
+    if !attr.contains("target_arch") {
+        return false;
+    }
+    mentions_this_arch != negated
+}
+
+/// The nearest non-comment, non-blank line above `at` — where a `#[cfg(..)]` on the declaration sits.
+fn preceding_attr(text: &str, at: usize) -> Option<&str> {
+    text[..at]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("///") && !l.starts_with("//"))
+}
+
+/// Is this declaration `cfg`-gated at all? Distinguishes "per-platform pair" from plain duplication.
+fn is_cfg_gated(text: &str, at: usize) -> bool {
+    preceding_attr(text, at).is_some_and(|a| a.starts_with("#[cfg("))
 }
 
 /// Extract the hex literal after a `const X: u64 = ` marker, up to the `;`.
@@ -586,7 +670,41 @@ mod tests {
     fn repin_one_rejects_a_duplicated_golden() {
         let src = "const GOLDEN: u64 = 0x1;\nconst GOLDEN: u64 = 0x2;\n";
         let err = repin_one(src, SNAP_MARKER, 9).expect_err("two homes for one golden must be an error");
-        assert!(err.contains("more than once"), "{err}");
+        assert!(err.contains("one home"), "{err}");
+    }
+
+    /// The per-platform golden shape (FVS-J-8): the marker appears twice, but only one arm is live,
+    /// so this is ONE golden and the bake must re-pin the arm it actually measured on.
+    #[test]
+    fn repin_one_repins_only_the_live_cfg_arm() {
+        let this = std::env::consts::ARCH;
+        let src = format!(
+            "#[cfg(target_arch = \"{this}\")]\nconst GOLDEN: u64 = 0x1111111111111111;\n\n\
+             /// Not yet measured on the other architecture.\n\
+             #[cfg(not(target_arch = \"{this}\"))]\nconst GOLDEN: u64 = 0;\n"
+        );
+        let out = repin_one(&src, SNAP_MARKER, 0xabcd_ef01_2345_6789).expect("cfg pair is one golden");
+        assert!(out.contains("const GOLDEN: u64 = 0xabcdef0123456789;"), "live arm not re-pinned:\n{out}");
+        assert!(
+            out.contains("#[cfg(not(target_arch = \"") && out.contains("const GOLDEN: u64 = 0;"),
+            "the arm for the OTHER platform must be left alone — this bake never ran there:\n{out}"
+        );
+    }
+
+    /// The real-file guard: `train apply --repin-goldens` must be able to re-pin the goldens as they
+    /// are actually written today. This is the assertion that was red — the tool refused the shipped
+    /// file shape — so it is pinned against the file rather than a fixture.
+    #[test]
+    fn the_shipped_replay_goldens_are_repinnable() {
+        let text = std::fs::read_to_string(REPLAY_PATH).expect("read tests/replay.rs");
+        for marker in [SNAP_MARKER, FIELD_MARKER] {
+            let out = repin_one(&text, marker, 0xdead_beef_dead_beef)
+                .unwrap_or_else(|e| panic!("`{marker}` is not re-pinnable in the shipped file: {e}"));
+            assert!(
+                out.contains(&format!("{marker}0xdeadbeefdeadbeef;")),
+                "`{marker}` re-pin did not land"
+            );
+        }
     }
 
     #[test]

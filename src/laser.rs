@@ -305,6 +305,8 @@ pub(crate) fn fire_laser(
         let forward = (unit.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let mut best = f32::MAX;
         let mut target: Option<Vec3> = None;
+        // Hoisted out of the candidate scan: the shooter's own cell is loop-invariant.
+        let unit_cell = dungeon.world_to_cell(unit.translation);
         for (enemy, smiley) in &enemies {
             // Leave the uncanny watcher alone until it reveals itself: only target the smiley boss while
             // it is angry (unleashing). Crabs/nests have no `SmileyState`, so they stay fair game.
@@ -315,6 +317,17 @@ pub(crate) fn fire_laser(
             if !fog.visible_at(enemy_cell) {
                 continue; // can't shoot what the squad can't see
             }
+            // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
+            // by itself; a teammate whose front arc covers it can still pick it off). Runs BEFORE the
+            // Bresenham LOS walk below: all three gates are pure rejections, so their order changes
+            // per-tick cost only, never the accepted set — and this one dot product drops the ~half of
+            // fog-visible hostiles behind the shooter without paying a grid walk for them
+            // (cheap-tests-first; van den Berg et al., "Reciprocal n-Body Collision Avoidance", ISRR
+            // 2011 — per-agent cost is governed by how fast the candidate neighbor set is pruned).
+            let bearing = (enemy.translation - unit.translation).with_y(0.0);
+            if bearing.normalize_or(forward).dot(forward) < beh.laser.front_arc_cos {
+                continue;
+            }
             // `FogGrid` is filled by `fog::update_los` using `line_of_sight_reveal` — the LENIENT
             // corner rule, which exists so a corridor's own bounding wall doesn't leave picket-fence
             // gaps in the *reveal*. Targeting must not inherit that: a diagonal corner-peek is a real
@@ -324,13 +337,7 @@ pub(crate) fn fire_laser(
             // the squad burns its fire rate on an unhittable target. Test strict LOS from the
             // shooter's own cell rather than depending on whichever rule the fog happens to use;
             // `Dungeon::line_of_sight` is symmetric, so shooter↔target order is immaterial.
-            if !dungeon.line_of_sight(dungeon.world_to_cell(unit.translation), enemy_cell) {
-                continue;
-            }
-            // Front-arc gate: ignore anything behind the unit (a crab on its own back is unshootable
-            // by itself; a teammate whose front arc covers it can still pick it off).
-            let bearing = (enemy.translation - unit.translation).with_y(0.0);
-            if bearing.normalize_or(forward).dot(forward) < beh.laser.front_arc_cos {
+            if !dungeon.line_of_sight(unit_cell, enemy_cell) {
                 continue;
             }
             let d = enemy.translation.distance_squared(muzzle);
@@ -498,7 +505,16 @@ fn update_lasers(
         // take the nearest pierced one (deterministic, render-free — replaces the old `MeshRayCast`). A
         // hit damages that hostile, sprays FX at the strike point, and consumes the bolt.
         let mut best: Option<(Entity, f32, Vec3, u64)> = None;
+        // Conservative broad phase: bounding sphere of the motion segment vs bounding sphere of the
+        // capsule, with 1.0 m of slack so f32 rounding can never cull a true graze. Reject-only, so
+        // the hit set — and every deterministic tie-break downstream — is unchanged.
+        let seg_mid = (prev + now) * 0.5;
+        let seg_half = prev.distance(now) * 0.5;
         for (te, tt, tv) in &targets {
+            let reach = seg_half + tv.half_height + tv.radius + 1.0;
+            if tt.translation.distance_squared(seg_mid) > reach * reach {
+                continue;
+            }
             if let Some((s, point)) =
                 segment_capsule_hit(prev, now, tt.translation, tv.half_height, tv.radius)
             {

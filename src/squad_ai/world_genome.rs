@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 138;
+pub const N: usize = 146;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -228,6 +228,18 @@ static BOUNDS: [(f32, f32); N] = [
     //    the field, so fixtures simply stop contributing / idle crabs simply stop avoiding light.
     (0.0, 4.0),    // field_intensity (gameplay illuminance per fixture in the LightField; shipped 1.0)
     (0.0, 20.0),   // photophobic_gain (idle-crab push down the light gradient; shipped 6.0)
+    // ── GoreDynamics (FVS-I-7 — the 8 gore knobs with a causal path to the `deaths` axis; the ~22
+    //    cosmetic ones are deliberately NOT here, see `gore::GoreDynamics`). Integers ride as f32 and
+    //    are rounded in `decode`; the min/max pair is ordered there, since BOUNDS cannot express
+    //    "min <= max" and an inverted pair would mean a clamp that silently produces the wrong count.
+    (20.0, 600.0), // max_gibs (usize) — live physics-chunk cap before the oldest is recycled
+    (0.0, 1.0),    // chunk_restitution (0 = dead thud, 1 = perfectly elastic)
+    (0.0, 2.0),    // gib_friction (higher = slides less, settles sooner)
+    (2.0, 40.0),   // autogib_pieces_base (i32) — fragments at the reference extent
+    (1.0, 20.0),   // autogib_min_pieces (i32)
+    (4.0, 80.0),   // autogib_max_pieces (i32) — upper clamp bounds mesh + entity growth
+    (0.1, 3.0),    // autogib_speed_mult (fragment launch speed as a multiple of gib_speed)
+    (0.0, 20.0),   // meat_count (i32) — the food crabs forage on; feeds breeding, which feeds deaths
 ];
 
 /// A world's evolvable config, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin the layout.
@@ -242,6 +254,7 @@ pub fn encode(
     mold: &crate::mold::MoldConfig,
     almond: &AlmondWaterDynamics,
     lighting: &crate::light::LightingDynamics,
+    gore: &crate::gore::GoreDynamics,
 ) -> WorldGenome {
     let mut v = Vec::with_capacity(N);
     // AiTuning: channels in FieldId slot order, then rally.
@@ -373,6 +386,15 @@ pub fn encode(
     // LightingDynamics — the 2 evolvable gameplay light dials (in BOUNDS order); the visual knobs stay fixed.
     v.push(lighting.field_intensity);
     v.push(lighting.photophobic_gain);
+    // GoreDynamics — the 8 evolvable gore dials (in BOUNDS order); the ~22 cosmetic knobs stay fixed.
+    v.push(gore.max_gibs as f32);
+    v.push(gore.chunk_restitution);
+    v.push(gore.gib_friction);
+    v.push(gore.autogib_pieces_base as f32);
+    v.push(gore.autogib_min_pieces as f32);
+    v.push(gore.autogib_max_pieces as f32);
+    v.push(gore.autogib_speed_mult);
+    v.push(gore.meat_count as f32);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     WorldGenome(v)
 }
@@ -591,8 +613,32 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
     almond.belief_flip_lo = almond.belief_flip_lo.min(almond.belief_flip_hi);
     // LightingDynamics — the 2 evolved gameplay light dials (encode order).
     let lighting = crate::light::LightingDynamics { field_intensity: f!(), photophobic_gain: f!() };
+    // GoreDynamics. Integers round rather than truncate, so a mutation that nudges 5.0 -> 4.98 does not
+    // silently drop a meat chunk. `min`/`max` are ordered AFTER rounding: `BOUNDS` clamps each knob
+    // independently and cannot express the relation, and `gore::validate_settings` rejects an inverted
+    // pair loudly — so a search that produced one would abort the rollout rather than evolve.
+    let gore = {
+        let max_gibs = f!().round().max(0.0) as usize;
+        let chunk_restitution = f!();
+        let gib_friction = f!();
+        let autogib_pieces_base = f!().round() as i32;
+        let a = f!().round() as i32;
+        let b = f!().round() as i32;
+        let autogib_speed_mult = f!();
+        let meat_count = f!().round().max(0.0) as i32;
+        crate::gore::GoreDynamics {
+            max_gibs,
+            chunk_restitution,
+            gib_friction,
+            autogib_pieces_base,
+            autogib_min_pieces: a.min(b),
+            autogib_max_pieces: a.max(b),
+            autogib_speed_mult,
+            meat_count,
+        }
+    };
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
-    Ok(WorldConfig { ai, sim, mold, almond, lighting })
+    Ok(WorldConfig { ai, sim, mold, almond, lighting, gore })
 }
 
 /// The shipped world as a genome — the band origin for [`mutate`] and the co-evolution's baseline.
@@ -603,6 +649,7 @@ pub fn authored() -> WorldGenome {
         &crate::mold::MoldConfig::default(),
         &AlmondWaterDynamics::default(),
         &crate::light::LightingDynamics::default(),
+        &crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default()),
     )
 }
 
@@ -728,6 +775,7 @@ mod tests {
                 &crate::mold::MoldConfig::default(),
                 &almond,
                 &crate::light::LightingDynamics::default(),
+                &crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default()),
             );
             base.0
                 .iter()
@@ -764,5 +812,92 @@ mod tests {
         wc.lighting.apply_to(&mut lighting_cfg);
         crate::light::validate_config(&lighting_cfg)
             .expect("the loader must accept the decoded lighting slice");
+    }
+}
+
+#[cfg(test)]
+mod gore_gene_tests {
+    use super::*;
+
+    /// FVS-I-7: the 8 gore dials are actually in the genome and survive a round trip. The failure this
+    /// guards is the one FVS-I-6 named — a knob that is *documented* as evolved but is not encoded.
+    #[test]
+    fn the_gore_dials_round_trip_through_the_genome() {
+        let shipped = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+        let decoded = decode(&authored()).expect("the authored genome decodes");
+        assert_eq!(decoded.gore, shipped, "the authored genome must decode to the shipped gore dials");
+    }
+
+    /// Each dial must be individually reachable: perturbing it has to move a DISTINCT flat index, or
+    /// the search cannot address it. Probing (rather than hardcoding indices) means a BOUNDS/encode
+    /// reorder cannot silently stale this test — the same discipline as the belief-deadband probe.
+    #[test]
+    fn every_encoded_gore_dial_occupies_its_own_knob() {
+        let base = authored();
+        let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
+            let mut g = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+            perturb(&mut g);
+            let probed = encode(
+                &AiTuning::default(),
+                &SimTuning::default(),
+                &crate::mold::MoldConfig::default(),
+                &AlmondWaterDynamics::default(),
+                &crate::light::LightingDynamics::default(),
+                &g,
+            );
+            base.0
+                .iter()
+                .zip(&probed.0)
+                .position(|(a, b)| a != b)
+                .expect("a perturbed gore dial must move some knob")
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, idx) in [
+            ("max_gibs", idx_of(|g| g.max_gibs = 321)),
+            ("chunk_restitution", idx_of(|g| g.chunk_restitution = 0.123)),
+            ("gib_friction", idx_of(|g| g.gib_friction = 1.234)),
+            ("autogib_pieces_base", idx_of(|g| g.autogib_pieces_base = 23)),
+            ("autogib_min_pieces", idx_of(|g| g.autogib_min_pieces = 3)),
+            ("autogib_max_pieces", idx_of(|g| g.autogib_max_pieces = 37)),
+            ("autogib_speed_mult", idx_of(|g| g.autogib_speed_mult = 1.77)),
+            ("meat_count", idx_of(|g| g.meat_count = 9)),
+        ] {
+            assert!(seen.insert(idx), "gore dial {name} shares knob {idx} with another dial");
+        }
+        assert_eq!(seen.len(), 8, "all 8 gore dials must be independently addressable");
+    }
+
+    /// `BOUNDS` clamps each knob independently and cannot express `min <= max`, so an ordinary
+    /// mutation can invert the autogib piece clamp. `decode` orders the pair — without it the search
+    /// could hand the game a config `gore::validate_settings` rejects, aborting the rollout.
+    #[test]
+    fn decode_orders_an_inverted_autogib_clamp() {
+        let base = authored();
+        let idx_of = |perturb: fn(&mut crate::gore::GoreDynamics)| {
+            let mut g = crate::gore::GoreDynamics::from_config(&crate::gore::GoreSettings::default());
+            perturb(&mut g);
+            let probed = encode(
+                &AiTuning::default(),
+                &SimTuning::default(),
+                &crate::mold::MoldConfig::default(),
+                &AlmondWaterDynamics::default(),
+                &crate::light::LightingDynamics::default(),
+                &g,
+            );
+            base.0.iter().zip(&probed.0).position(|(a, b)| a != b).expect("index")
+        };
+        let min_idx = idx_of(|g| g.autogib_min_pieces = 3);
+        let max_idx = idx_of(|g| g.autogib_max_pieces = 37);
+
+        let mut g = base;
+        g.0[min_idx] = 30.0; // inverted: min > max, which per-knob mutation can produce
+        g.0[max_idx] = 8.0;
+        let decoded = decode(&g).expect("an inverted clamp still decodes").gore;
+        assert_eq!(decoded.autogib_min_pieces, 8);
+        assert_eq!(decoded.autogib_max_pieces, 30);
+        let mut settings = crate::gore::GoreSettings::default();
+        decoded.apply_to(&mut settings);
+        crate::gore::validate_settings(&settings)
+            .expect("a decoded genome must always produce a config the validator accepts");
     }
 }

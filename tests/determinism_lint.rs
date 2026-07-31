@@ -1,4 +1,5 @@
-//! **Source lint: every sort in the sim must declare its determinism contract.**
+//! **Source lint: every sort — and every `min_by`/`max_by` pick — in the sim must declare its
+//! determinism contract.**
 //!
 //! GPU-free, no `App` — this runs in the `cargo test` hard gate, so it blocks on every push.
 //!
@@ -29,10 +30,21 @@
 //! * A raw `sort*` with a `SORT-OK: <reason>` comment within the preceding 4 lines — for sorts whose input
 //!   never comes from an ECS query (seeded generators, fixed constant tables, pure geometry).
 //!
-//! An unannotated raw sort fails this test. That is the point: the author must state which case they are in,
-//! and "I did not think about it" is not one of the three.
+//! A **`min_by`/`max_by` pick is a sort with one winner** and makes the identical mistake in one line: a
+//! tied key hands the decision to iteration order. Same contract, adapted — either the comparator is total
+//! (chain `.then(...)` on a unique key, or compare the WHOLE value so a tie means the winners are
+//! interchangeable), or the input's iteration order is itself deterministic (a `Vec`, a range, a
+//! `BTreeMap` — never a `Query` or `HashMap`) — and the `SORT-OK:` states which. This family was invisible
+//! to the lint for its first months, and the tree leaned on the gap: one `SORT-OK` sat above a `.min_by`
+//! the matcher never read (decorative), and the containment-throw origin picked by distance over a
+//! `Query` with no tiebreak at all.
+//!
+//! An unannotated raw sort or pick fails this test. That is the point: the author must state which case
+//! they are in, and "I did not think about it" is not one of the three.
 
 use std::path::{Path, PathBuf};
+
+mod common;
 
 /// `util.rs` defines the sanctioned helpers, so its own `sort_unstable_by_key` calls ARE the primitives.
 const EXEMPT_FILES: &[&str] = &["src/util.rs"];
@@ -78,14 +90,22 @@ fn every_sort_declares_its_determinism_contract() {
             if test_mod.is_some_and(|t| i >= t) {
                 continue;
             }
-            let code = line.split("//").next().unwrap_or("");
-            let is_sort = code.contains(".sort_unstable_by_key(")
+            // The shared literal-aware stripper (tests/common/source_scan.rs): a `//` inside a
+            // string is not a comment, and a `.sort()` quoted inside a message is not a sort.
+            let code = common::source_scan::code_portion(line);
+            let is_ordering_site = code.contains(".sort_unstable_by_key(")
                 || code.contains(".sort_by_key(")
                 || code.contains(".sort_unstable_by(")
                 || code.contains(".sort_by(")
                 || code.contains(".sort_unstable()")
-                || code.contains(".sort()");
-            if !is_sort {
+                || code.contains(".sort()")
+                // A min/max pick is a sort with one winner: the same tie hands the same decision to
+                // iteration order (module doc, "a sort with one winner").
+                || code.contains(".min_by(")
+                || code.contains(".max_by(")
+                || code.contains(".min_by_key(")
+                || code.contains(".max_by_key(");
+            if !is_ordering_site {
                 continue;
             }
             // Annotated? Look back a few lines for the escape hatch.
@@ -99,7 +119,7 @@ fn every_sort_declares_its_determinism_contract() {
 
     assert!(
         offenders.is_empty(),
-        "\n{} unannotated raw sort(s) — each must declare its determinism contract:\n\n{}\n\n\
+        "\n{} unannotated raw sort(s)/pick(s) — each must declare its determinism contract:\n\n{}\n\n\
          Pick one:\n  \
            * `sort_total!(&mut v, |x| key)` — the key is a TOTAL order (checked at runtime under \
              test-harness/debug; a tie panics naming the site). Use when order is load-bearing: a greedy \
@@ -109,7 +129,10 @@ fn every_sort_declares_its_determinism_contract() {
              identical. (Sorting by a prefix is exactly how the ORCA / drink-contention / boss-cull bugs \
              happened.)\n  \
            * `// SORT-OK: <reason>` above the sort — the input never comes from an ECS query (a seeded \
-             generator, a constant table, pure geometry).\n\n\
+             generator, a constant table, pure geometry).\n  \
+           * For a `.min_by`/`.max_by` pick: make the comparator TOTAL (chain `.then(...)` on a unique \
+             key, or compare the whole value so tied winners are interchangeable) or show the iteration \
+             order is deterministic (Vec/range/BTreeMap, never Query/HashMap) — then `// SORT-OK: <which>`.\n\n\
          Why this is a hard gate, not a style nit: ECS query order is NOT stable across `App` instances, so \
          a sort that falls through to it makes the sim irreproducible — and a search scoring against an \
          irreproducible sim is optimizing noise. See docs/rl/2026-07-16-search-rollout-nondeterminism.md\n",

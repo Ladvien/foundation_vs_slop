@@ -446,17 +446,17 @@ fn selection_input(
     let Some(point) = cursor_ground_point(&window, camera, cam_tf) else {
         return;
     };
-    // SORT-OK: a nearest-pick over a handful of units where the *winner* is all that matters and a
-    // tie means two operatives occupy one point — impossible under ORCA, and harmless if it ever
-    // happened (either is a defensible answer to "the one I clicked"). Not a shared budget, not a
-    // counter, not an RNG draw.
     let picked = units
         .iter()
         .map(|(e, tf, member, role)| {
             ((tf.translation - point).length(), e, member.0, role.copied())
         })
         .filter(|(d, _, _, _)| *d <= PICK_RADIUS)
-        .min_by(|a, b| a.0.total_cmp(&b.0));
+        // SORT-OK: total key — distance, then SquadMember index (unique per operative). A distance
+        // tie IS reachable: wall-clamped operatives hold bit-identical coordinates (the measured
+        // case in tests/determinism_lint.rs's header) — this pick's previous justification claimed
+        // ties were "impossible under ORCA", the exact argument shape that lint exists to refuse.
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
 
     let Some((_, entity, _, role)) = picked else {
         // Empty ground: clear, unless the player is adding.
@@ -886,9 +886,16 @@ pub fn throw_device_input(
         .iter()
         .filter(|(_, hp)| hp.current > 0.0)
         .map(|(tf, _)| tf.translation)
+        // SORT-OK: total by the whole value — distance, then the position bits themselves.
+        // Equidistant flanks resolve on coordinates rather than query order; bit-identical
+        // coordinates mean the same origin, where either winner is the same throw. (Previously
+        // unannotated with no tiebreak: a reachable tie handed the throw origin to ECS order.)
         .min_by(|a, b| {
             let (da, db) = ((a.xz() - point.xz()).length(), (b.xz() - point.xz()).length());
             da.total_cmp(&db)
+                .then(a.x.total_cmp(&b.x))
+                .then(a.y.total_cmp(&b.y))
+                .then(a.z.total_cmp(&b.z))
         })
     else {
         return;

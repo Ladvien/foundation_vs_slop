@@ -204,6 +204,13 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
   until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
   Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
+  ⚠️ **The WORLD genome is now a fourth, independent staleness reason (2026-07-31, FVS-I-7).**
+  `world_genome::N` grew **138 → 146** (`gore::GoreDynamics` — the 8 gore dials with a causal path to
+  the `deaths` axis). Archived genomes are fixed-length vectors, so any world genome written before
+  this cannot decode. Nothing shipped is invalidated *because nothing shipped exists* — this entry
+  already records that `elites_world.ron` has never been produced at any canonical path — but the
+  bake must run against **N=146**, and a stale world archive found lying around is a re-train, not a
+  resize.
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
@@ -313,8 +320,84 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   > file write.
   > **Note the prior suspect does not fit.** FVS-N-13 leaks one dungeon *per expedition*; this cycles
   > three times inside a single run at a fixed camera. N-13 is still a real leak — it is just not this.
+  > ### 📊 It runs during NORMAL PLAY, and it is what the player's "bad areas" actually were (2026-07-31)
+  > Re-measured from a 363 s *moving-camera* session (`fps_trace.csv`), not a fixed-camera capture:
+  > **23 consecutive cycles, median period 11.70 s** (mean 11.54, sd ≈ 0.3), slow phase mean 4.40 s,
+  > mean slow-phase frame time 44.9 ms against a vsync-locked 16.7 ms. Phase-locked across the whole
+  > map, independent of cell, region, biome and triangles.
+  >
+  > **So the hotspot table was ALIASING it, and that is now fixed at the source.** The "worst cells"
+  > were the cells the player happened to occupy when a slow phase fired: (114,140) ranked on
+  > **4 samples / 4 drops**, (117,147) on 8/8 — while (53,147) sat at **119 samples / 0 drops**.
+  > `MIN_SAMPLES_TO_RANK` is now **24 = one full cycle**, so no cell can be indicted by phase luck.
+  > Two probe-honesty corrections landed with it: `vis_props` was never culling-aware (prop roots are
+  > `WorldAssetRoot`s with **no `Aabb`**, so Bevy never frustum-culls them, and their visibility is a
+  > one-way reveal latch) — it is a *revealed-so-far* counter confounded with elapsed time, now named
+  > `rev_props`/`props↑` and documented in the report header. `vis_lights` is the only honestly
+  > culled density column in the file.
+  >
+  > **Correlations, measured (session 4, n=708):** `r(frame_ms, vis_tris) = −0.09` — triangles are
+  > ruled out a third independent way, after N-25's pixel A/B and an 82 ms frame at 6,694 visible
+  > triangles. Within slow-phase samples `r(frame_ms, vis_lights) = +0.49`, and it **survives**
+  > partial correlation against props (+0.43) and elapsed time (+0.45) while both of those collapse
+  > (+0.10, +0.16). Median frame time steps **35 ms → 81 ms** between the 12–17 and 18–23 visible-light
+  > buckets.
+  > ### 🎯 NARROWED 2026-07-31: it is NOT in the gameplay sim. Measured, not argued.
+  > The oscillation reproduces (autocorrelation **r = +0.66 at lag 11.5 s**, three independent runs)
+  > in `FVS_AUTORUN` measurement runs — and in those runs the **`Time<Virtual>` clock is frozen for
+  > the entire sampling window**. Instrumented directly: `advance_mold_time` logged virtual elapsed
+  > every 2 s and printed *nothing* for 63 s after `AppState::Warmup` exited, then began at
+  > `virtual=2.01s`. The freeze is the **intro conversation** — `MenuState::Conversation` is
+  > `is_blocking()`, so `sync_sim_blocked` → `GameSpeed::paused` → virtual time stops (the same
+  > mechanism FVS-N-22 records as "every screenshot that day was a capture of a paused game").
+  >
+  > So during those runs `FixedUpdate` is not advancing, the mold does not tick (**one** tick in a
+  > 98 s run against ~7 due at `sim_hz` 0.075), and the oscillation *continues regardless*. That
+  > **rules out the whole `FixedUpdate` sim** — stigmergy diffusion, mold, ORCA, `light_recompose`,
+  > almond-water — and with it the "FixedUpdate sub-step feedback loop" amplifier theory, which
+  > cannot amplify a schedule that is not running. The mycelia GPU compute pass is ruled out by the
+  > same measurement (no ticks ⇒ no dispatch ⇒ no readback).
+  > **The remaining search space is `Update`/`PostUpdate`/render-extract**, which is a much smaller
+  > file to read than "the application".
+  > ⚠️ **And this invalidates an assumption every perf run on this box has been making**, including
+  > N-25's: `FVS_AUTORUN` + a fixed camera does **not** measure a live game. It measures a paused one
+  > with a live renderer, for the first ~60 s after warmup. N-25's CPU-bound verdict still stands for
+  > the *renderer* (its A/B was pixel count, valid under any sim state) but its own caveat — "does not
+  > say which CPU system eats the frame when the swarm is live" — is now sharper than it looks: no
+  > measurement taken this way has ever had a live swarm. **Dismiss the intro conversation, or drive
+  > past it, before quoting any future number as gameplay performance.**
   *Done when:* the stall is named, and either fixed or shown to be unavoidable with the measurement
-  behind it. · *Deps:* N-25 · *Reading:* [ABM]
+  behind it. · *Deps:* N-25 · *Next:* `--features bevy/trace_tracy` over ≥3 cycles, restricted to
+  `Update`/`PostUpdate`/extract per the narrowing above. · *Reading:* [ABM]
+- **FVS-N-26 — The fluorescent hum dirtied EVERY point light EVERY frame (FIXED 2026-07-31)** · S
+  `flicker_lights` (`src/light.rs`) wrote `PointLight.intensity` for every fixture in the dungeon on
+  every frame — the `!=` guard could not help, because a sine at `FLICKER_HUM_HZ` genuinely moves each
+  frame. Every write marks the light `Changed<PointLight>`, which re-runs Bevy's
+  `update_point_light_bounding_spheres` (a `commands.entity(e).insert(Sphere{..})` **per light per
+  frame**) and re-extracts the GPU light buffer — all CPU-side, which is why it survived N-25's
+  "4× fewer pixels changed nothing" verdict rather than contradicting it.
+  *Measured* (same seed and route, `FVS_WINDOW` + `FVS_AUTORUN`, vsync off, first 12 s discarded):
+  | run | median frame time |
+  |---|---:|
+  | baseline | 10.38 ms |
+  | `flicker_hum_depth: 0.0` (ablation) | 8.69 ms |
+  | **visibility-gated hum, flicker still on at 0.06** | **8.60 ms** |
+  ⚠️ **Condition, stated precisely** (N-24's narrowing found it, and it applies here too): all three
+  runs sampled the window where the **intro conversation has the sim frozen**, so this is a
+  renderer/`Update`-side comparison with a paused world. That does not weaken the result — the three
+  runs are apples-to-apples, and `flicker_lights` is an `Update` system that runs identically either
+  way — but the *absolute* frame times are not gameplay frame times. Re-measure past the conversation
+  before quoting them as such.
+  *Shipped:* the hum now skips fixtures whose `ViewVisibility` is false — ~120 resident, ~7 visible.
+  The gated build recovers the **full** benefit of disabling flicker outright *while keeping the
+  effect*, which is the result that makes this a fix rather than a trade. A light scrolling into view
+  resumes its hum on its next rendered frame — the first frame anyone could see it.
+  Landed alongside two per-frame whole-dungeon walks found in the same pass: `update_cutaway` eased
+  every wall tile's `Transform` forever (an exponential ease never *reaches* its target, and
+  `DerefMut` marks `Changed` regardless) — it now snaps and then skips; and `mycelia::coat_furniture`
+  walked every prop's glTF descendant tree every frame in every app state — a finished root is now
+  retired with a `MoldCoatDone` marker.
+  · *Deps:* — · *Touches:* `src/light.rs`, `src/dungeon/cutaway.rs`, `src/mycelia/mod.rs`, `src/perf_probe.rs`
 - **FVS-N-25 — Establish whether the game is CPU- or GPU-bound BEFORE optimising either (GATES N-23/N-24)** · S · ✅ **ANSWERED 2026-07-30: CPU-BOUND**
   > **Measured.** Identical scene and seed at two pixel counts (`FVS_WINDOW`, `FVS_AUTORUN`, vsync off,
   > first 10 s discarded, 68 samples each):
@@ -392,18 +475,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   ⚠️ Every genome length change also invalidates that population's baked archive — `audio_genome`
   already went 15 -> 16 for FVS-K-1, and that re-bake is parked under H-1. Do not multiply that debt
   without deciding it is worth paying. · *Deps:* — · *Reading:* **[QD]**, [ME], [QD-PCG]
-- **FVS-I-7 — Gore settings (6 knobs) are unevolved** · M · *determinism: offline*
-  Not in any genome, yet **a gore knob already tipped a 5/5 win into a wipe** — so it is a live
-  difficulty dial the offline search cannot see, which is precisely what `CLAUDE.md`'s "every feature
-  must evolve" rule exists to prevent.
-  > ✅ **Passes the audit — for a SUBSET only (2026-07-30).** `GoreSettings` is ~30 knobs and most are
-  > cosmetic (`spray_color_a/b`, `pool_color`, `pool_gloss`, `dry_time`, `wall_splat_size`, ...);
-  > encoding those is textbook N-21. Encode **only** the ~8 with a causal path to the world archive's
-  > `deaths` axis: `max_gibs`, `chunk_restitution`, `gib_friction`, `autogib_pieces_base`,
-  > `autogib_min_pieces`, `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. Say in the code why
-  > the cosmetics are excluded, so nobody "completes" the group later.
-  > The header count says "6 knobs"; the real sim-relevant count is ~8. Fix that when landing.
-  · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
 - **FVS-I-8 — `MetropolisWeights` (10+ knobs) are unevolved** · L · *determinism: offline*
   The largest of the four, and the one most likely to fail I-6's audit: it shapes the *level*, and the
   level descriptor has two axes. Run the audit before writing any encode/decode.
@@ -470,20 +541,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   · *Deps:* — · *Reading:* [QD]
 - **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save (FOUND 2026-07-30)** · S
   C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
-- **FVS-N-13 — Dungeon tiles are not `run_scoped()`, so every expedition leaks a whole dungeon (FOUND 2026-07-28, review)** · M · *determinism: touches the pinned core*
-  `dungeon::render::spawn_tiles` moved from `Startup` to `OnEnter(RunState::Active)` in the per-run
-  migration, but its tile entities never gained `session::run_scoped()`. The only `run_scoped()` in the
-  file is on the ground half-space. So floor tiles, wall slabs, lintels, corner posts — **and their
-  Avian static colliders** — survive the run.
-  **Play run 1 → RETURN TO SITE → run 2** and a different map generates at the same origin while run 1's
-  entire tile set is still resident: two interpenetrating dungeons, invisible run-1 walls that gib
-  chunks bounce off, and an unbounded entity/mesh/collider leak of one dungeon per expedition.
-  `session::run_scoped`'s own doc names dungeon tiles as a carrier; the migration simply missed them.
-  `tests/session.rs::leaving_and_re_entering_a_run_builds_a_fresh_different_world` only counts `Unit`,
-  which is why nothing caught it.
-  ⚠️ **Adding the tag WILL move the goldens** — it changes what exists in the pinned world — so this
-  needs a deliberate measure-and-re-pin, not a drive-by edit. That is the only reason it is filed rather
-  than fixed. · *Deps:* — · *Touches:* `src/dungeon/render.rs`, `src/gore.rs`, `src/mycelia/` · *Reading:* [ECS]
 - **FVS-H-8 — FVS-H-3's director is INERT: the elite overlay writes config nobody re-reads (FOUND 2026-07-28, review)** · M
   `director::pick_next_challenge` calls `apply_dim(&mut gc, Dim::Levels, …)`, which writes `gc.dungeon`,
   `gc.mycelia`, `gc.placement.metropolis` and `gc.placement.density`. **None is ever read again.**
@@ -521,24 +578,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `containment_criterion` on both rollouts and returns `Ok(None)` for the **whole triple** on either
   failure. Its own comment says the constraint is applied "HERE, at the world archive, and nowhere
   else", which is true of where it is *evaluated* and not of what it *rejects*. · *Deps:* I-1 · *Touches:* `src/squad_ai/coevolve/search.rs`
-- **FVS-J-7 — The config mtime guard rejects `train apply`, the one process meant to rewrite config (FOUND 2026-07-28, review)** · S
-  `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard against
-  editing config during a test run. But `train apply` **writes** `config.ron` and then reloads it to
-  verify, so it trips its own guard and aborts **with the file already rewritten**, which is the
-  half-baked state the guard exists to prevent.
-  ✅ *Re-confirmed still live 2026-07-30* — `CONFIG_FINGERPRINT` (`config.rs:184-205`) still errors on any
-  mtime change during a process. · *Deps:* — · *Touches:* `src/config.rs`, `src/bin/train.rs`
-- **FVS-J-8 — `repin_one` cannot re-pin a per-platform golden (FOUND 2026-07-28, review)** · S
-  `bake::repin_one` refuses a marker that appears twice, treating duplication as ambiguity. The
-  per-platform golden decision made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected, so each marker
-  now **literally appears twice** in `tests/replay.rs`. `train apply --repin-goldens` therefore fails at
-  the re-pin step every time. Two correct answers land in one file and the tool calls it ambiguous.
-  ✅ *Re-confirmed still live 2026-07-30* — `GOLDEN` and `GOLDEN_FIELD` each appear exactly **twice** in
-  `tests/replay.rs` (the `cfg(target_arch)` pair), and `bake::repin_one`'s duplicate rejection is still
-  pinned by its own test `repin_one_rejects_a_duplicated_golden`. So the tool's refusal is deliberate
-  behaviour meeting a file shape that postdates it — fixing it means teaching `repin_one` that two
-  `cfg`-selected definitions are one logical marker, not deleting the ambiguity check.
-  · *Deps:* J-3 · *Touches:* `src/bake.rs`
 - **FVS-J-6 — Rollout determinism breaks under CI-grade contention, and this box cannot reproduce it (FOUND 2026-07-28)** · M · *determinism: THE core invariant*
   ⚠️ **Do not close this as a flake.** Non-determinism *is* intermittent; a test that detects it fails
   intermittently **because the bug is intermittent**. That is the test working.
@@ -597,6 +636,23 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   measured under a *weaker* condition than the one that failed. It is logged so the next occurrence
   has a predecessor to compare against: the distinguishing question is whether the divergence is
   again **bimodal** (a flipped discrete decision) or a fresh hash each time (float drift).
+  **Data point 2026-07-31, same test, same family — logged, not dismissed.**
+  `session::the_wipe_paths_actors_and_fields_are_reproducible_under_load` failed **once** during a
+  multi-target harness run (`session nav liveness containment squad`) that was sharing the box with a
+  concurrent `cargo check --all-targets`. It then passed **2/2** on re-runs: once idle (82 s) and once
+  under a deliberate 14-busy-loop load that was verifiably biting (115 s).
+  Per this entry's standing instruction that is **not** an exoneration — both passes were measured
+  under a *different* condition than the failure, and the specific condition that failed (a full
+  24-core compile running alongside the harness) is arguably closer to the CI oversubscription this
+  item is actually about than a busy-loop generator is. **A concurrent `cargo` build is worth adding
+  to the reproduction recipe.**
+  ⚠️ **And the divergence detail was LOST, which is my error and the reason this data point is weaker
+  than the two above it.** The run piped the harness through `grep -E "^test |test result|FAILED"`, so
+  the panic body — the one that prints the distinct `(snapshot, field)` hash pairs — was filtered away
+  before it was ever written down. **The distinguishing question this entry exists to answer** (is the
+  divergence *bimodal*, i.e. a flipped discrete decision, or a fresh hash each time, i.e. float drift?)
+  **could not be asked of this occurrence.** Never filter a harness run's stderr to the summary lines;
+  capture the whole thing and grep the file afterwards.
   *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
   `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
   first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The
@@ -607,20 +663,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* the divergent decision is named and fixed, **or** the failure is proven to be an artefact
   of oversubscription that cannot occur at shipped thread counts — with the measurement that shows it.
   · *Deps:* — · *Touches:* `src/squad_ai/evaluate.rs`, wherever the order-dependent decision lives · *Reading:* [ABM], [TEST-NT]
-- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · *determinism: offline measurement*
-  **The decision, made 2026-07-28 in FVS-H-3.** `CellHistory::interest` takes `|progress|`, so a cell the
-  player is getting rapidly **worse** at is as interesting as one they are mastering — both mean the
-  difficulty is live rather than settled. Signed progress would make the director *flee* anything going
-  badly, which is the opposite of a curriculum.
-  **Why it is a spike and not a settled fact:** [LPM] defines CPM over the *derivative* of competence
-  without committing to a sign, because a robot setting its own goals and a game pacing a player are not
-  the same problem. A player on a losing streak may experience "the game keeps sending me back to the
-  thing beating me" as punishment rather than as a curriculum — the failure mode absolute progress
-  invites and signed progress cannot have.
-  *Falsify it:* play (or replay) a campaign that deliberately declines, and check whether the director
-  parks in the declining cell. Measure how many consecutive expeditions it takes to leave.
-  *If wrong:* half-wave rectify — weight gains fully and losses partially — rather than flipping to
-  pure signed, which would reintroduce the flee behaviour. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]
 - **FVS-H-5 — SPIKE: does `UNVISITED = INFINITY` starve the measured cells?** · S · *determinism: offline measurement*
   **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
   measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
@@ -630,6 +672,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   one expedition per pick that is 55 expeditions of pure exploration before the director exploits
   anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
   correct in principle and possibly far too patient at this archive size.
+  > ### 📐 MEASURED 2026-07-31 — starvation confirmed, and it is 6× worse than this entry guessed, exactly.
+  > Simulated through the real `pick`/`observe` path over a 55-cell archive (10 seeds, pinned by
+  > `director::tests::the_unvisited_bonus_starves_exploitation_at_the_shipped_archive_size`): the
+  > exploration phase is **exactly 330 expeditions on every seed** — not ~55. Two compounding terms
+  > the entry missed: a cell scores `UNVISITED` until it has **`HISTORY` = 6 readings** (two full
+  > windows), not one; and a cell leaves the infinite tie the moment it graduates, so no pick is ever
+  > "wasted" and the phase has the closed form **occupied-cells × HISTORY**. Against a 10–30
+  > expedition campaign, the director's exploitation phase is unreachable — in practice it is a
+  > **uniform random sampler** at this archive size.
+  > **Needs your ruling, not a drive-by fix** (interacts with H-6 and with H-8's inert-director
+  > call): the entry's own preferred remedy is a finite decaying optimistic prior, and the
+  > measurement adds a second lever it did not name — the 6-reading requirement is the bigger
+  > multiplier, so allowing a one-window (3-reading) provisional progress estimate would cut the
+  > floor from 330 to 165 even before touching the prior. Both change which cells a campaign sees;
+  > neither is observable while H-8 leaves the director's picks unread.
   *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
   *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
   *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
@@ -643,7 +700,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `None` to `UNVISITED`. If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
   into that prior and become ceremony. Worth re-checking *after* H-5, not before.
   *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
-  whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
+  whether any behaviour changes. If nothing does, simplify. *(Status 2026-07-31: H-5 is measured and
+  waiting on your remedy ruling — this stays parked behind that ruling, as designed.)* · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
 ---
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5

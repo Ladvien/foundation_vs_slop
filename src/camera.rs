@@ -20,9 +20,10 @@ use crate::dungeon::Dungeon;
 use crate::juice::Trauma;
 use crate::time_control::SimBlocked;
 
-/// World-space camera offset from the focus point. Equal-ish axes give the iso tilt. `pub` so the
-/// audio spatial listener can recover the ground focus point (`camera_pos - ISO_OFFSET`) to anchor
-/// itself on the plane instead of ~20 units up at the camera (see `audio::sync_listener`).
+/// World-space camera offset from the focus point (rotated by the current yaw). Equal-ish axes give
+/// the iso tilt. The audio spatial listener anchors on the ground plane too, but reads `CameraRig::
+/// focus` directly rather than subtracting this — un-rotated recovery was wrong at every yaw detent
+/// but the first (see `audio::sync_listener`).
 pub const ISO_OFFSET: Vec3 = Vec3::new(12.0, 12.0, 12.0);
 /// Peak screen-shake offset (world units) at full trauma. Applied as `SHAKE_MAX * trauma²`.
 const SHAKE_MAX: f32 = 0.85;
@@ -47,6 +48,13 @@ const ROTATION_STEPS: u32 = 4;
 /// Exponential-smoothing rate for the yaw ease toward `target_yaw`; higher = snappier settle.
 /// Frame-rate independent via `1 − exp(−k·dt)` (Holmér, "Lerp smoothing is broken", 2023).
 const ROTATE_SMOOTHING: f32 = 9.0;
+/// Ease rate for a `glide_to` focus pull (dialog framing, recenter) — same Holmér construction as
+/// the yaw, but deliberately gentler than `ROTATE_SMOOTHING`: the player asked for the view to move
+/// to the dialog "without jarring", and a 9.0 pull across half a map reads as a yank.
+const GLIDE_SMOOTHING: f32 = 4.0;
+/// A glide within this of its goal (world units) snaps exactly and clears — well under a pixel at
+/// any zoom, and the exact-landing-then-skip shape keeps the ease from asymptoting forever.
+const GLIDE_SNAP: f32 = 0.02;
 
 /// Screen-aligned "into the scene" ground direction (camera forward flattened). Panning uses this
 /// so "up" scrolls away from the camera, not along a world axis.
@@ -71,6 +79,12 @@ pub struct CameraRig {
     yaw: f32,
     /// Snapped goal yaw. Q/E step it by `TAU / ROTATION_STEPS`; rapid taps accumulate.
     target_yaw: f32,
+    /// When set, `drive_camera` glides `focus` toward this ground point (eased on real time, so it
+    /// works while a conversation freezes the sim) and clears it on arrival. **Any manual pan input
+    /// clears it immediately** — the glide never fights the player. Writers: the dialogue runtime
+    /// (frame the current speaker — the player-requested "move the view to the dialog, don't jar")
+    /// and `Action::CameraRecenter`.
+    pub glide_to: Option<Vec3>,
 }
 
 /// Published each frame for the dungeon's view-relative wall cutaway. `to_camera` is the horizontal
@@ -109,6 +123,7 @@ impl Plugin for CameraPlugin {
             height: VIEWPORT_HEIGHT,
             yaw: 0.0,
             target_yaw: 0.0,
+            glide_to: None,
         })
         .init_resource::<CameraView>()
         // The camera OUTLIVES a run — the title screen needs one, and `DespawnOnExit` would take it
@@ -127,6 +142,20 @@ impl Plugin for CameraPlugin {
             drive_camera.after(crate::ui::state::sync_sim_blocked),
             );
     }
+}
+
+/// One frame of a `glide_to` focus pull: returns the new focus and whether it has arrived (at which
+/// point the caller clears the goal). Split out of [`drive_camera`] so the "never jars the player"
+/// property is unit-testable without an `App` — the ease is frame-rate independent, so the path taken
+/// is the same at 30 fps and 240 fps, and no single frame can teleport more than the remaining
+/// distance.
+pub fn glide_step(focus: Vec3, goal: Vec3, dt: f32) -> (Vec3, bool) {
+    let delta = goal - focus;
+    if delta.length() <= GLIDE_SNAP {
+        return (goal, true);
+    }
+    let ease = 1.0 - (-GLIDE_SMOOTHING * dt).exp();
+    (focus + delta * ease, false)
 }
 
 /// Smooth pseudo-noise in `[-1, 1]` from two detuned sines — a cheap Perlin stand-in for shake so the
@@ -191,6 +220,9 @@ fn setup_camera(
 /// a run) rather than for per-frame motion.
 pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, With<Camera3d>>) {
     rig.focus = focus;
+    // A glide aimed in the previous place (a conversation mid-flight when the run ended, say) must
+    // not drag the camera back across the new one.
+    rig.glide_to = None;
     for mut t in cams.iter_mut() {
         *t = Transform::from_translation(focus + ISO_OFFSET).looking_at(focus, Vec3::Y);
     }
@@ -233,11 +265,12 @@ fn drive_camera(
 
     // Recentre on the squad. The rig deliberately follows nothing — that is what makes it an RTS
     // camera rather than a third-person one — but "follows nothing" and "cannot find them again"
-    // are different things, and only the first is a design choice. `rig.focus` is eased toward by
-    // the transform build below, so this is a smooth pull rather than a teleport.
+    // are different things, and only the first is a design choice. Routed through the glide so it
+    // is a smooth pull rather than a teleport (writing `rig.focus` directly WAS a teleport — the
+    // transform below is rebuilt from it the same frame).
     if actions.just_pressed(Action::CameraRecenter) {
         if let Some(anchor) = anchor.filter(|a| a.valid) {
-            rig.focus = anchor.pos;
+            rig.glide_to = Some(anchor.pos);
         }
     }
 
@@ -298,11 +331,27 @@ fn drive_camera(
     }
     if let Some(dir) = pan.try_normalize() {
         rig.focus += dir * PAN_SPEED * dt;
+        rig.glide_to = None; // manual input wins instantly — the glide never fights the player
     }
     // Middle-mouse drag to pull the map around.
     if mouse_buttons.pressed(MouseButton::Middle) {
         let d = mouse_motion.delta;
-        rig.focus += (-d.x * screen_right + d.y * screen_forward) * DRAG_SCALE;
+        if d != Vec2::ZERO {
+            rig.focus += (-d.x * screen_right + d.y * screen_forward) * DRAG_SCALE;
+            rig.glide_to = None;
+        }
+    }
+
+    // Glide toward a requested framing (dialog speaker, recenter). On REAL time: the dialogue
+    // overlay freezes the virtual clock, and gliding to a conversation is this feature's whole
+    // point (player capture 2026-07-31: "move the game window where the dialog is happening —
+    // don't jar the player, though").
+    if let Some(goal) = rig.glide_to {
+        let (next, arrived) = glide_step(rig.focus, goal, dt);
+        rig.focus = next;
+        if arrived {
+            rig.glide_to = None;
+        }
     }
 
     // Trauma² screen shake (Eiserloh, GDC 2016): offset the whole view so the iso angle is kept,
@@ -327,5 +376,76 @@ fn drive_camera(
         ortho.scaling_mode = ScalingMode::FixedVertical {
             viewport_height: rig.height,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dialog glide must *never jar the player* (the request that motivated it): it approaches
+    /// monotonically, never overshoots, and no single frame jumps the whole gap.
+    #[test]
+    fn a_glide_approaches_without_teleporting_or_overshooting() {
+        let goal = Vec3::new(40.0, 0.0, 30.0);
+        let mut focus = Vec3::ZERO;
+        let start_dist = (goal - focus).length();
+        let dt = 1.0 / 60.0;
+
+        let (first, arrived) = glide_step(focus, goal, dt);
+        assert!(!arrived, "a half-map glide cannot complete in one frame");
+        let first_step = (first - focus).length();
+        assert!(
+            first_step < start_dist * 0.5,
+            "one frame moved {first_step} of {start_dist} — that is a teleport, not a glide"
+        );
+
+        // Monotone approach, and it does terminate.
+        let mut prev = start_dist;
+        let mut frames = 0;
+        loop {
+            let (next, done) = glide_step(focus, goal, dt);
+            let d = (goal - next).length();
+            assert!(d <= prev + 1e-6, "glide moved away from its goal ({prev} -> {d})");
+            prev = d;
+            focus = next;
+            frames += 1;
+            if done {
+                break;
+            }
+            assert!(frames < 10_000, "glide never converged");
+        }
+        assert_eq!(focus, goal, "an arrived glide lands EXACTLY on target, so the caller can clear it");
+        // ~4.0/s ease over 40 units: well under a second of travel, not an instant cut.
+        assert!((30..600).contains(&frames), "glide took {frames} frames at 60fps — check GLIDE_SMOOTHING");
+    }
+
+    /// Frame-rate independence (Holmér 2023): the same elapsed time travels the same distance whether
+    /// it arrives as one long frame or several short ones. Without this the camera would drift
+    /// further per second on a fast machine — exactly the class of bug the yaw ease already avoids.
+    #[test]
+    fn glide_travel_does_not_depend_on_frame_rate() {
+        let goal = Vec3::new(20.0, 0.0, 0.0);
+        let far = {
+            let mut f = Vec3::ZERO;
+            for _ in 0..4 {
+                f = glide_step(f, goal, 1.0 / 240.0).0;
+            }
+            f
+        };
+        let near = glide_step(Vec3::ZERO, goal, 1.0 / 60.0).0;
+        assert!(
+            (far - near).length() < 0.05,
+            "4 frames at 240fps ({far:?}) must match 1 frame at 60fps ({near:?})"
+        );
+    }
+
+    /// An already-framed speaker must not restart the ease — it reports arrival immediately.
+    #[test]
+    fn a_glide_to_where_we_already_are_is_already_done() {
+        let at = Vec3::new(5.0, 0.0, -3.0);
+        let (next, arrived) = glide_step(at, at, 1.0 / 60.0);
+        assert!(arrived);
+        assert_eq!(next, at);
     }
 }

@@ -412,13 +412,6 @@ struct Droplet {
     despawn_at: f32,
 }
 
-/// Precomputed unit volumes of the meat-chunk meshes (parallel to `GoreAssets.meat_meshes`), so a
-/// chunk's carry weight can be computed at spawn without re-reading the mesh. Empty until the GLB loads.
-#[derive(Resource, Default)]
-struct MeatVolumes {
-    unit: Vec<f32>,
-}
-
 /// FIFO of live blood-pool entities so the oldest can be recycled once the cap is exceeded.
 #[derive(Resource, Default)]
 struct PoolRing(VecDeque<Entity>);
@@ -600,13 +593,11 @@ impl Plugin for GorePlugin {
             .init_resource::<PoolRing>()
             .init_resource::<GibRing>()
             .init_resource::<GibSeq>()
-            .init_resource::<MeatVolumes>()
             .insert_resource(settings)
             .add_systems(Startup, setup_gore_assets)
             .add_systems(
                 Update,
                 (
-                    compute_meat_volumes,
                     drain_gore,
                     update_droplets,
                     confine_gibs,
@@ -617,32 +608,6 @@ impl Plugin for GorePlugin {
                 ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );
     }
-}
-
-/// Once the meat-chunk GLB meshes have loaded, compute each one's unit volume (signed-tetrahedron sum)
-/// so meat chunks can be weighed at spawn. Runs each frame until filled, then is a cheap no-op.
-fn compute_meat_volumes(
-    assets: Option<Res<GoreAssets>>,
-    meshes: Res<Assets<Mesh>>,
-    mut volumes: ResMut<MeatVolumes>,
-) {
-    let Some(assets) = assets else { return };
-    if !volumes.unit.is_empty() || assets.meat_meshes.is_empty() {
-        return;
-    }
-    // Only fill once every mesh has resolved (they load a few frames after startup, before any death).
-    let mut unit = Vec::with_capacity(assets.meat_meshes.len());
-    for handle in &assets.meat_meshes {
-        let Some(mesh) = meshes.get(handle) else { return };
-        let Some(v) = crate::autogib::mesh_signed_volume(mesh) else {
-            return;
-        };
-        unit.push(v);
-    }
-    if crate::ai::diag::AI_DIAG {
-        info!("gore: meat unit volumes = {unit:?}");
-    }
-    volumes.unit = unit;
 }
 
 fn setup_gore_assets(
@@ -699,12 +664,11 @@ fn drain_gore(
     dungeon: Res<Dungeon>,
     real: Res<Time<Real>>,
     // Grouped into one tuple param to stay under Bevy's 16-param-per-system cap.
-    (mut trauma, mut hitstop, mut blood_lens, cache, volumes, fog): (
+    (mut trauma, mut hitstop, mut blood_lens, cache, fog): (
         ResMut<Trauma>,
         ResMut<Hitstop>,
         ResMut<BloodLens>,
         Res<AutogibCache>,
-        Res<MeatVolumes>,
         Res<crate::fog::FogGrid>,
     ),
     camera: Single<&GlobalTransform, With<Camera3d>>,
@@ -824,7 +788,6 @@ fn drain_gore(
                 &assets,
                 &settings,
                 &mut gib_ring,
-                &volumes,
                 ev.pos,
                 seed,
                 gib_seq.0,
@@ -1152,13 +1115,11 @@ fn spawn_fragments(
 /// viscera on the floor. Registered in [`GibRing`] so [`cap_gib_chunks`] bounds the total. Runs for
 /// any death (squad + enemy). The meat meshes are normalized to ~1 unit, so a chunk of half-extent
 /// `half` renders at child scale `half*2` over a `half`-sized box collider.
-#[allow(clippy::too_many_arguments)]
 fn spawn_meat_chunks(
     commands: &mut Commands,
     assets: &GoreAssets,
     settings: &GoreSettings,
     gib_ring: &mut GibRing,
-    volumes: &MeatVolumes,
     origin: Vec3,
     seed: u32,
     // Monotonic per-death ordinal from `GibSeq` — see `GibKey`.
@@ -1204,26 +1165,21 @@ fn spawn_meat_chunks(
         } else {
             assets.meat_meshes[idx].clone()
         };
-        // Carry weight = density × world mesh volume. The chunk mesh is the unit mesh scaled by 2*half,
-        // so volume = unit_volume × (2*half)³. Falls back to the box volume until the GLB volumes load.
+        // Carry weight = density × a FIXED unit volume × the chunk's world scale (2·half)³.
+        //
+        // Determinism constraint — do not "improve" this back to a measured per-mesh volume: a volume
+        // computed from the loaded GLB fills ASYNCHRONOUSLY, so at the tick a chunk spawns it is
+        // present in one same-seed run and still a fallback in another — a nondeterministic weight
+        // that flips the crab crew's `committed >= weight` lift gate and breaks the physics-free
+        // replay hash. The fixed 0.3 is the measured GLB range's (~0.1–0.5) midpoint; per-chunk
+        // variety still comes from `half`. (The `MeatVolumes` resource that once measured the real
+        // volumes is deleted: weights must never read it, and its other claimed consumer — "the
+        // visual scale" — never existed; the scale is `Vec3::splat(half * 2.0)` below.)
         let side = (2.0 * half).powi(3);
-        // Sanitize the mesh volume at the door: a degenerate GLB can compute a NaN/inf/≤0 volume, and
-        // `f32::clamp` passes a NaN operand straight through (NaN < min and NaN > max are both false),
-        // so an unguarded NaN would yield a NaN weight that no crew's `Σcapacity ≥ weight` check can
-        // ever satisfy — the chunk would litter the floor forever, denying the nest that food. Treat a
-        // non-finite / non-positive volume exactly like an un-loaded one: fall back to the unit box.
-        // Determinism: the per-mesh GLB volume (`volumes.unit`) is filled ASYNCHRONOUSLY, so at the tick a
-        // chunk spawns it is present in one same-seed run and still the 1.0 fallback in another — a
-        // nondeterministic weight that flips the crab crew's `committed >= weight` lift gate and breaks
-        // the physics-free replay hash. Use a fixed unit-volume fraction (the ~0.1–0.5 GLB range's
-        // midpoint) so weight depends only on the deterministic chunk `side`; the per-chunk size variety
-        // still comes from `half`. `volumes` stays wired for the (hash-free) visual scale.
-        let _ = volumes;
         let unit_vol = 0.3;
-        // Clamp to the same liftable band as fragments. Without it, an un-loaded `unit_vol` fallback
-        // (1.0 vs the real ~0.1-0.5, before the GLB volumes finish computing) or an oversized chunk
-        // yields a weight no crew can gather enough capacity to lift — the chunk then sits stuck until
-        // the crew times out and the food is wasted.
+        // Clamp to the same liftable band as fragments: an oversized chunk would otherwise weigh more
+        // than any crew can gather capacity for — it would sit stuck until the crew times out and the
+        // food is wasted.
         let weight = (MEAT_DENSITY * unit_vol * side).clamp(FRAG_WEIGHT_MIN, FRAG_WEIGHT_MAX);
         if crate::ai::diag::AI_DIAG {
             info!("gore: meat chunk idx={idx} half={half:.3} weight={weight:.2}");
@@ -1656,6 +1612,73 @@ fn despawn_gore(
 /// (`crate::config::load_game_config`) on the `gore:` slice of the master `GameConfig` — one path, no
 /// fallback. `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which panics when
 /// `min > max`; reject an inverted pair loudly at the door instead of crashing later mid-combat.
+/// The **evolvable** slice of [`GoreSettings`] — the knobs with a causal path to the world archive's
+/// `deaths` descriptor axis. Same subset-type shape as [`crate::light::LightingDynamics`] and
+/// [`crate::almond_water::AlmondWaterDynamics`], and for the same reason.
+///
+/// # Why only these eight (FVS-I-7, scoped by the FVS-I-6 descriptor audit)
+///
+/// `GoreSettings` is ~30 knobs and **most of them are cosmetic**: `spray_color_a/b`, `pool_color`,
+/// `pool_gloss`, `dry_time`, `wall_splat_size`, every `droplet_*`, `spray_*`, `meat_size`,
+/// `pool_size_*`. Encoding those would be textbook FVS-N-21 — a gene no descriptor can see makes the
+/// archive *worse*, not better: two genomes differing only in it land in the same cell and the winner
+/// is decided by evaluation luck. They are excluded deliberately, and this comment exists so nobody
+/// later "completes" the group by adding them.
+///
+/// What is left is the set that changes what the *simulation* does after a death:
+/// * `max_gibs` caps live physics chunks — the recycle point, so it bounds how much debris the swarm
+///   can be pathing around at once;
+/// * `chunk_restitution` / `gib_friction` decide where debris comes to rest;
+/// * the four `autogib_*` dials set how many fragments a unit crunch produces and how hard they are
+///   thrown;
+/// * `meat_count` is the food the crabs actually forage on (`crab::assign_meat_targets`), which is the
+///   most direct link of all — it feeds `breeding`, and breeding feeds `deaths`.
+///
+/// A gore knob has already tipped a 5/5 win into a wipe, which is why this is a live difficulty dial
+/// the offline search must be able to see (`CLAUDE.md`: every feature evolves).
+///
+/// The integer knobs are carried as `f32` here because the genome is a flat `Vec<f32>`; `decode`
+/// rounds them back, and `BOUNDS` keeps them in the authored range.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoreDynamics {
+    pub max_gibs: usize,
+    pub chunk_restitution: f32,
+    pub gib_friction: f32,
+    pub autogib_pieces_base: i32,
+    pub autogib_min_pieces: i32,
+    pub autogib_max_pieces: i32,
+    pub autogib_speed_mult: f32,
+    pub meat_count: i32,
+}
+
+impl GoreDynamics {
+    /// Read the evolvable slice out of a full settings block.
+    pub fn from_config(c: &GoreSettings) -> Self {
+        Self {
+            max_gibs: c.max_gibs,
+            chunk_restitution: c.chunk_restitution,
+            gib_friction: c.gib_friction,
+            autogib_pieces_base: c.autogib_pieces_base,
+            autogib_min_pieces: c.autogib_min_pieces,
+            autogib_max_pieces: c.autogib_max_pieces,
+            autogib_speed_mult: c.autogib_speed_mult,
+            meat_count: c.meat_count,
+        }
+    }
+
+    /// Overwrite the evolvable knobs of a full settings block, leaving every cosmetic knob authored.
+    pub fn apply_to(&self, c: &mut GoreSettings) {
+        c.max_gibs = self.max_gibs;
+        c.chunk_restitution = self.chunk_restitution;
+        c.gib_friction = self.gib_friction;
+        c.autogib_pieces_base = self.autogib_pieces_base;
+        c.autogib_min_pieces = self.autogib_min_pieces;
+        c.autogib_max_pieces = self.autogib_max_pieces;
+        c.autogib_speed_mult = self.autogib_speed_mult;
+        c.meat_count = self.meat_count;
+    }
+}
+
 pub fn validate_settings(settings: &GoreSettings) -> Result<(), String> {
     if settings.autogib_min_pieces > settings.autogib_max_pieces {
         return Err(format!(

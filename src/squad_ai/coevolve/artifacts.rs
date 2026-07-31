@@ -116,6 +116,9 @@ pub struct WorldEliteDoc {
     pub almond: crate::almond_water::AlmondWaterDynamics,
     /// The evolvable gameplay subset of `lighting` (`LightingDynamics`) — likewise not the full config.
     pub lighting: crate::light::LightingDynamics,
+    /// The evolvable gameplay subset of `gore` (`GoreDynamics`, FVS-I-7) — the 8 dials with a causal
+    /// path to the `deaths` axis. The ~22 cosmetic knobs are not evolved and stay shipped.
+    pub gore: crate::gore::GoreDynamics,
 }
 
 /// Decode every world elite for review/commit — each is a readable diff of the shipped world's dials.
@@ -134,6 +137,7 @@ pub fn world_archive_doc(pop: &Population<WorldGenome>) -> Result<ArchiveDoc<Wor
             mold: wc.mold,
             almond: wc.almond,
             lighting: wc.lighting,
+            gore: wc.gore,
         });
     }
     Ok(ArchiveDoc {

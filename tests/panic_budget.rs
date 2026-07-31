@@ -20,6 +20,11 @@
 //!
 //! * **Test code** — a test asserting via `unwrap` is expressing an expectation, not shipping a crash.
 //!   Both whole test files (`tests.rs`, `*_tests.rs`) and inline `#[cfg(test)]` modules are skipped.
+//!   **A test module split into its own file must be NAMED `*_tests.rs`** (declared via
+//!   `#[cfg(test)] #[path = "..._tests.rs"] mod …;` — the `mycelia/fruit_tests.rs` idiom): the
+//!   scanner walks files independently, so a parent-module `#[cfg(test)]` gate is invisible to it and
+//!   the file counts as shipped code. `placement/acceptance.rs` sat miscounted that way for a month —
+//!   8 phantom sites, ~30% of the whole budget.
 //! * **`sim_harness.rs`** — the harness is test infrastructure; it is `#[cfg(feature = "test-harness")]`
 //!   and never reaches a shipped binary. It is also *deliberately* panicky: several of its asserts exist
 //!   to fail loudly when a determinism precondition is violated.
@@ -28,6 +33,8 @@
 //! Everything else — the whole simulation — is in the budget.
 
 use std::path::{Path, PathBuf};
+
+mod common;
 
 /// Files whose panics are not shipped game code. See the module docs.
 const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
@@ -46,6 +53,14 @@ const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
 /// than produce an anomaly that captures itself or can never be caught. Raising the budget here is the
 /// reviewable act this lint exists to force; the alternative (silently defaulting a broken rule) is the
 /// bug class `config::GameConfig`'s docs are written against.
+///
+/// **27 → 27 (2026-07-31, review §C7):** same number, recomposed — a wash that hid two miscounts.
+/// (a) `placement/acceptance.rs` was test-only (parent-module `#[cfg(test)]` gate) but scanned as
+/// shipped code: renamed `acceptance_tests.rs`, −8 phantom sites — previously the single largest
+/// "contributor". (b) The `assert!` family now counts (panics identically in release; `debug_assert*`
+/// still exempt) and string-literal contents are blanked by the shared stripper: +8 real sites the
+/// budget had never seen. Measured, not derived — the printed per-file list below the test shows the
+/// current composition.
 const BUDGET: usize = 27;
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -107,17 +122,34 @@ fn strip_test_modules(src: &str) -> String {
     out.join("\n")
 }
 
-/// Count panic sites on a line, ignoring anything inside a `//` comment (docs quote `unwrap` constantly).
+/// Count panic sites on a line, ignoring comments and string-literal contents (docs and error
+/// messages quote `unwrap` constantly) — via the literal-aware stripper the determinism lint shares.
+///
+/// The `assert!` family counts: it panics identically in release, and the module header's claim that
+/// "everything else is in the budget" was false while it didn't. The `debug_assert!` family does NOT
+/// count (compiled out of release) — and each `debug_assert*!(` occurrence textually *contains* its
+/// `assert*!(` pattern, so the debug hits are subtracted rather than special-cased in the matcher.
 fn count_panics(line: &str) -> usize {
-    let code = match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
-    };
-    ["\
-.unwrap()", ".expect(", "panic!(", "unreachable!(", "todo!(", "unimplemented!("]
+    let code = common::source_scan::code_portion(line);
+    let panics: usize = [
+        ".unwrap()",
+        ".expect(",
+        "panic!(",
+        "unreachable!(",
+        "todo!(",
+        "unimplemented!(",
+        "assert!(",
+        "assert_eq!(",
+        "assert_ne!(",
+    ]
+    .iter()
+    .map(|pat| code.matches(pat).count())
+    .sum();
+    let debug: usize = ["debug_assert!(", "debug_assert_eq!(", "debug_assert_ne!("]
         .iter()
         .map(|pat| code.matches(pat).count())
-        .sum()
+        .sum();
+    panics.saturating_sub(debug)
 }
 
 #[test]
@@ -156,6 +188,11 @@ fn the_panic_budget_does_not_grow() {
         );
     }
 
+    // Visible under `-- --nocapture`: the current measurement, so a re-pin never needs a guess.
+    println!("panic budget: {total} shipped sites (budget {BUDGET})");
+    for (n, f) in worst.iter().take(8) {
+        println!("  {n:>4}  {f}");
+    }
     assert!(
         total >= BUDGET.saturating_sub(5),
         "panic budget is stale: {total} sites against a budget of {BUDGET}. Panic sites were removed — \

@@ -60,12 +60,17 @@ pub mod perf_hud;
 /// Debug-only, stripped from release like `perf_hud`.
 #[cfg(debug_assertions)]
 pub mod perf_probe;
+/// SCP-610 ("the flesh that hates") — quarantine gameplay content, registered in the shipped plugin
+/// list AND the headless harness, so this declaration must stay unconditional. Take care inserting
+/// near it: a module declared between a `#[cfg]` attribute and its target module steals the gate —
+/// exactly that stripped this module from release (with four live references) while silently
+/// un-gating the Research Room into the shipped binary.
+pub mod scp610;
 /// Dev-only **Research Room** (`FVS_RESEARCH_ROOM=1`): boots into the real WFC dungeon — the actual game,
 /// with every auto-spawner running natively — and arms an F6 spawn palette on top, so any creature / prop
 /// / character can be dropped in, tuned, and screenshotted, and evolved elites witnessed. Debug-only,
 /// stripped from release like `devshot`/`region_capture`/`perf_hud`.
 #[cfg(debug_assertions)]
-pub mod scp610;
 pub mod research_room;
 pub mod dialogue;
 pub mod director;

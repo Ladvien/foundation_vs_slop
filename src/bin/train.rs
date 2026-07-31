@@ -202,7 +202,8 @@ struct SearchArgs {
     /// Default: the held-in set (`coevolve::HELD_IN_SEEDS`).
     #[arg(long, value_delimiter = ',', value_parser = parse_seed)]
     seeds: Vec<u64>,
-    /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); capped useful at OPPONENTS (3).
+    /// Rollout worker processes for co-evolution (`evolve`/`evolve3`); the batch emitter scales to
+    /// `batch × OPPONENTS` (48 at the default batch 16), so on a dedicated box size this at the core count.
     #[arg(long, default_value_t = 1, value_parser = parse_pos_usize)]
     jobs: usize,
     /// Use the CMA-ME adaptive emitter (only honoured by `rl`). Shorthand for `--emitter cma-me`.
@@ -926,6 +927,8 @@ fn run_islands(kind: SearchKind, a: SearchArgs) -> Result<(), String> {
 
     let Some(winner) = alive
         .iter()
+        // SORT-OK: `alive` is a Vec in island order (offline tool, no query). A fitness tie
+        // resolves to the last tied island — the same one every run of the same bake.
         .max_by(|x, y| x.best.unwrap_or(f32::MIN).total_cmp(&y.best.unwrap_or(f32::MIN)))
     else {
         return Err("no island winner".into());
@@ -1659,7 +1662,7 @@ fn apply_archive(
             touched.push("src/behavior_tuning.rs".into());
         }
         Dim::World => {
-            // All four slices `world_genome` encodes, matching `apply_dim(Dim::World)`. If the permanent
+            // All six slices `world_genome` encodes, matching `apply_dim(Dim::World)`. If the permanent
             // bake spliced fewer slices than the runtime overlay applies, one elite would mean two different
             // games — and its archived fitness would match neither.
             use foundation_vs_slop::almond_water::AlmondWaterDynamics;
@@ -1680,6 +1683,15 @@ fn apply_archive(
                 "almond_water",
                 &ron_slice(&AlmondWaterDynamics::from_config(&base.almond_water))?,
                 &ron_slice(&AlmondWaterDynamics::from_config(&gc.almond_water))?,
+            )?;
+            // Same subset trick for `gore:` — only the 8 dials with a causal path to the `deaths` axis
+            // evolve (FVS-I-7); the ~22 cosmetic knobs are authored and must survive the bake untouched.
+            use foundation_vs_slop::gore::GoreDynamics;
+            cfg_text = splice_block(
+                &cfg_text,
+                "gore",
+                &ron_slice(&GoreDynamics::from_config(&base.gore))?,
+                &ron_slice(&GoreDynamics::from_config(&gc.gore))?,
             )?;
             // Same subset trick for `lighting:` — only the two gameplay dials evolve; the visual knobs are
             // authored and must survive the bake untouched.
@@ -1735,6 +1747,11 @@ fn apply_archive(
         }
     }
     std::fs::write(CONFIG_PATH, &cfg_text).map_err(|e| format!("{CONFIG_PATH}: write: {e}"))?;
+    // Declare the rewrite to the in-process mtime guard. This is the ONE process authorised to change
+    // `config.ron` while running, and step 4 immediately reloads it to recompute the goldens — without
+    // this, the bake tripped its own guard *after* the write, aborting in exactly the half-applied
+    // state the guard exists to prevent (FVS-J-7). The guard stays armed for every other load.
+    foundation_vs_slop::config::note_config_rewritten();
 
     // 4. Recompute the goldens from the freshly-baked config and compare them against the committed ones.
     //    (Env overlays are guaranteed unset above, so `deterministic_core` reproduces exactly what the replay

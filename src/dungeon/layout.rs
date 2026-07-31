@@ -166,6 +166,8 @@ pub(crate) fn grid_layout(
     let center = Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0);
     let spawn_slot = (0..cw * ch)
         .filter(|&i| kept[i])
+        // SORT-OK: iteration over a fixed index range, no query. A distance tie (symmetric layouts
+        // make equidistant slots real) resolves to the lowest index — the same slot every run.
         .min_by(|&a, &b| {
             let pa = Vec2::new((a % cw) as f32, (a / cw) as f32);
             let pb = Vec2::new((b % cw) as f32, (b / cw) as f32);
@@ -779,6 +781,8 @@ fn build_graph_layout(
 
     let center = Vec2::new(width as f32 / 2.0, height as f32 / 2.0);
     let spawn_site = (0..sites.len())
+        // SORT-OK: iteration over a fixed index range into `sites` (a Vec), no query. A distance
+        // tie resolves to the lowest site index — the same site every run.
         .min_by(|&a, &b| {
             let pa = Vec2::new(sites[a].center.x as f32, sites[a].center.y as f32);
             let pb = Vec2::new(sites[b].center.x as f32, sites[b].center.y as f32);

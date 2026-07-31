@@ -219,6 +219,7 @@ fn open_conversation(
     menu.set(MenuState::Conversation);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn present_current(
     mut commands: Commands,
     time: Res<Time<Real>>,
@@ -230,6 +231,8 @@ fn present_current(
     existing: Query<Entity, With<ConversationBubble>>,
     members: Query<(Entity, &SquadMember), With<Unit>>,
     leader: Query<Entity, (With<Unit>, With<Leader>)>,
+    speaker_pos: Query<&GlobalTransform, With<Unit>>,
+    mut rig: ResMut<crate::camera::CameraRig>,
 ) {
     let Some(mut active) = active else {
         return;
@@ -272,6 +275,13 @@ fn present_current(
                     text,
                     Vec2::ZERO,
                 );
+                // Frame the speaker: glide (never snap) the camera to whoever is talking, per node
+                // so a mid-conversation speaker change re-aims. Player capture 2026-07-31 — "move
+                // the game window where the dialog is happening; don't jar the player, though."
+                // Manual pan input cancels the glide in `drive_camera`, so it cannot fight the player.
+                if let Ok(tf) = speaker_pos.get(owner) {
+                    rig.glide_to = Some(tf.translation());
+                }
             }
             active.advance_at = time.elapsed_secs() + dwell_secs(text);
         }
@@ -294,6 +304,11 @@ fn present_current(
                     prompt,
                     Vec2::ZERO,
                 );
+                // Same glide as the Line arm: the choice prompt (and its clickable options, stacked
+                // over the leader nearby) must be on screen to be answerable at all.
+                if let Ok(tf) = speaker_pos.get(owner) {
+                    rig.glide_to = Some(tf.translation());
+                }
             }
             // Clickable option bubbles stacked above the leader.
             if let Ok(leader_e) = leader.single() {

@@ -1899,3 +1899,116 @@ Split out 2026-07-30.
   `the_shipped_config_shows_no_room_with_two_surface_treatments`, which walks **every** region of the
   shipped level; the frame corroborates it at one location rather than standing in for it.
   · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
+
+- **FVS-J-7 — The config mtime guard rejected `train apply`, the one process meant to rewrite config** · S · ✅ **FIXED 2026-07-31**
+  `config::CONFIG_FINGERPRINT` errors if `config.ron`'s mtime changes mid-process — a good guard
+  against editing config during a test run. But `train apply` **writes** `config.ron` and then
+  reloads it to recompute the goldens, so it tripped its own guard and aborted **with the file
+  already rewritten** — the half-baked state the guard exists to prevent.
+  *Shipped:* the fingerprint moved from a `OnceLock` to a `Mutex<Option<..>>` and gained
+  `config::note_config_rewritten()`, which `train.rs` calls immediately after its `std::fs::write`.
+  **Deliberately not a bypass flag.** The guard stays armed for every other load in the process and
+  an *unannounced* edit still fails exactly as loudly; what the guard actually cares about is
+  "did the file change behind this process's back", and an authorised rewrite that declares itself
+  is not that. One path — there is no "skip the check" mode.
+  · *Touches:* `src/config.rs`, `src/bin/train.rs`
+- **FVS-J-8 — `repin_one` could not re-pin a per-platform golden** · S · ✅ **FIXED 2026-07-31**
+  `bake::repin_one` refused any marker appearing twice, treating duplication as ambiguity. The
+  per-platform golden decision (2026-07-27) made `GOLDEN`/`GOLDEN_FIELD` `cfg(target_arch)`-selected,
+  so each marker **literally appears twice** in `tests/replay.rs` and `train apply --repin-goldens`
+  failed at the re-pin step every time.
+  *Shipped:* `repin_one` now resolves `cfg(target_arch)`-selected alternatives to the **one arm live
+  on this machine** and re-pins that. A bake measures on the box it runs on, so the arm re-pinned is
+  the arm that was measured — re-pinning the other would invent a number for a platform the process
+  never ran on, which is exactly what the aarch64 arm's deliberate `0` refuses to do.
+  **The ambiguity check was kept, not deleted**, as the entry required: two *unconditional*
+  declarations are still an error, and they now get a different message from the "all cfg-gated, none
+  live here" case, because those are different problems. The `cfg` reader is deliberately narrow
+  (`target_arch` plus a single `not(..)`) — anything richer refuses honestly rather than guessing
+  which hash to overwrite.
+  *Pinned by* `repin_one_repins_only_the_live_cfg_arm` (the pair is one golden; the other arm is left
+  untouched), the surviving `repin_one_rejects_a_duplicated_golden`, and
+  `the_shipped_replay_goldens_are_repinnable` — a **real-file** guard that would have caught this
+  originally, since the fixtures all predated the file shape that broke it.
+  · *Touches:* `src/bake.rs`
+- **FVS-N-13 — Dungeon tiles were not `run_scoped()`, so every expedition leaked a whole dungeon** · M · ✅ **FIXED 2026-07-31**
+  `dungeon::render::spawn_tiles` moved from `Startup` to `OnEnter(RunState::Active)` in the per-run
+  migration, and its tile entities never gained `session::run_scoped()`. The only `run_scoped()` in
+  the file was on the ground half-space. So floor tiles, wall slabs, lintels, corner posts — **and
+  their Avian static colliders** — survived the run: play run 1 → RETURN TO SITE → run 2 and a
+  different map generated at the same origin with run 1's entire tile set still resident. Two
+  interpenetrating dungeons, invisible run-1 walls that gib chunks bounce off, and an unbounded
+  entity/mesh/collider leak of one dungeon per expedition.
+  *Shipped:* the tag, at the one `commands.spawn` every tile goes through.
+  > ### 📐 The predicted golden movement DID NOT HAPPEN — and the prediction is why this sat unfixed
+  > This entry said *"Adding the tag WILL move the goldens — it changes what exists in the pinned
+  > world … this needs a deliberate measure-and-re-pin, not a drive-by edit. That is the only reason
+  > it is filed rather than fixed."* **Measured 2026-07-31: both `deterministic_core_is_bit_identical`
+  > and `..._across_many_builds` are green, unchanged.** A `DespawnOnExit` component on tile entities
+  > adds no schedule node and touches no actor `Transform`/`Health` or stigmergy grid, so it reaches
+  > neither `snapshot_hash` nor `field_hash`.
+  > This refines Push 8's rule, which is stated in terms of *resources* and *systems*: **adding a
+  > component to non-actor entities is hash-neutral too**; what is not neutral is adding an unordered
+  > `FixedUpdate` system. The cost of the wrong prediction was a real leak left live for three days on
+  > the strength of an unmeasured claim — the same lesson this backlog keeps recording, this time
+  > about a *pessimistic* guess rather than an optimistic one.
+  *Pinned by* `session::leaving_and_re_entering_a_run_builds_a_fresh_different_world`, extended to
+  count `Tile` entities: it now asserts the tile set is empty after leaving a run, and that two
+  expeditions in, the world holds one dungeon's worth of tiles rather than two. Counting only `Unit`
+  is exactly what let this hide — units despawned correctly the whole time.
+  · *Touches:* `src/dungeon/render.rs`, `tests/session.rs`
+- **FVS-I-7 — Gore settings were unevolved** · M · *determinism: offline* · ✅ **LANDED 2026-07-31**
+  Not in any genome, yet **a gore knob had already tipped a 5/5 win into a wipe** — a live difficulty
+  dial the offline search could not see, which is exactly what `CLAUDE.md`'s "every feature must
+  evolve" rule exists to prevent.
+  *Shipped:* `gore::GoreDynamics`, the same subset-type shape as `LightingDynamics` /
+  `AlmondWaterDynamics`, carrying the **8** dials the FVS-I-6 audit approved: `max_gibs`,
+  `chunk_restitution`, `gib_friction`, `autogib_pieces_base`, `autogib_min_pieces`,
+  `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. `WorldGenome::N` **138 → 146**.
+  Wired end-to-end rather than as a pure library (this backlog's top process risk): `BOUNDS`,
+  `encode`, `decode`, `WorldConfig`, `elite_overlay::apply_dim` + its `WorldEntry`,
+  `coevolve::artifacts::WorldEliteDoc`, and a `gore` splice in `train apply` so a bake writes the
+  subset back to `config.ron` with the cosmetic knobs untouched.
+  **The ~22 cosmetic knobs are deliberately excluded and the code says why** (`spray_*`, `pool_*`,
+  `droplet_*`, `dry_time`, `wall_splat_size`, `meat_size`, the colours) — encoding them would be
+  textbook FVS-N-21: a gene no descriptor can see makes the archive *worse*, because two genomes
+  differing only in it land in the same cell and the winner is decided by evaluation luck. The old
+  header said "6 knobs"; the real sim-relevant count is 8, corrected on landing.
+  **`decode` orders the autogib min/max pair.** `BOUNDS` clamps each knob independently and cannot
+  express `min <= max`, so ordinary per-knob mutation can invert the clamp — and
+  `gore::validate_settings` rejects an inverted pair loudly, which would abort the rollout rather
+  than evolve. Integers round rather than truncate, so a nudge of 5.0 → 4.98 does not silently drop
+  a meat chunk.
+  *Pinned by* three new tests: the authored genome decodes to the shipped dials; each of the 8 dials
+  occupies its **own** flat knob (probed, not hardcoded, so a `BOUNDS`/`encode` reorder cannot stale
+  it); and an inverted clamp decodes to an ordered pair that `validate_settings` accepts.
+  `tests/genome_coverage.rs` moves `gore` from `Gap` to `World` and its `KNOWN_GAPS` **ratchet drops
+  1 → 0** — every gameplay slice of `config.ron` is now owned by a search or explicitly exempt.
+  ⚠️ **Adds to the re-bake debt parked under FVS-H-1**, as that item's warning requires: the world
+  genome's length changed, so any archived world genome is a fixed-length vector that no longer
+  decodes. No world archive has ever completed (H-1 records that `elites_world.ron` does not exist at
+  any canonical path), so nothing shipped is invalidated — but the H-1 bake must run against N=146.
+  · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`, `src/config.rs`, `src/elite_overlay.rs`,
+  `src/squad_ai/coevolve/artifacts.rs`, `src/bin/train.rs`, `tests/genome_coverage.rs`
+- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · ✅ **MEASURED 2026-07-31 — the decision stands, with its cost now quantified**
+  **The decision (2026-07-28, FVS-H-3):** `CellHistory::interest` takes `|progress|`, so a cell the
+  player is getting rapidly worse at is as interesting as one they are mastering. Signed progress
+  would make the director *flee* anything going badly — the opposite of a curriculum.
+  **The falsification run** (simulated through the real `pick` path; pinned by
+  `director::tests::a_declining_cell_holds_the_director_until_the_decline_bottoms_out`): with one
+  mastered cell and one in steady decline (0.1 competence lost per expedition from 0.5), the director
+  returns to the declining cell **10 consecutive times — the entire ride to the floor** — and leaves
+  only once the player has flatlined at competence 0 for a full window (interest → 0, then a 50/50
+  tie with the mastered cell). So the H-4 failure mode is real and now has a number: on a losing
+  streak the game *does* keep sending the player back to the thing beating them, for as long as the
+  losing continues; the escape hatch exists but only at the bottom.
+  **Why the decision still stands:** that behaviour is the designed reading — a decline in progress
+  IS live difficulty — and the alternative (signed) fails harder in the measured sim: it would have
+  abandoned the declining cell immediately, which is the flee behaviour the decision was made to
+  avoid. The half-wave-rectify option (gains full weight, losses partial) remains the documented
+  remedy **if playtesting reads the parking as punishment** — that is a feel judgment no simulation
+  settles, which is why the remedy is recorded rather than applied.
+  Note the practical scope: while FVS-H-5's exploration starvation is live (330 expeditions before
+  any exploitation at the shipped archive size), neither this parking nor any other progress-driven
+  behaviour is reachable in a real campaign — H-5's ruling gates when this measurement starts to
+  matter in play. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]
