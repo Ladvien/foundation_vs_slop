@@ -254,6 +254,63 @@ fn corridor_identity_is_deterministic() {
     assert_eq!(a.corridor_of, b.corridor_of, "same seed must paint the same runs");
 }
 
+/// **The one that speaks about the shipped game.** Everything else in this group runs on a fixture; this
+/// asserts the property the player actually reported, on the config they actually play, and it is the
+/// test that would have been red before FVS-Q-8.
+///
+/// Kept separate from the fixture tests because it is doing a different job: those pin the *rule*, this
+/// pins that the rule reaches the shipped level. It also carries the same anti-vacuity guard — if the
+/// shipped `block`/`biome_scale` ever drift to where per-cell sampling stops splitting a room, this fails
+/// loudly rather than passing for free.
+#[test]
+fn the_shipped_config_shows_no_room_with_two_surface_treatments() {
+    let config = crate::config::load_game_config()
+        .expect("shipped config.ron must be valid")
+        .dungeon;
+    let d = Dungeon::generate(&config).expect("shipped config generates");
+
+    let mut split_under_old_rule = 0usize;
+    let (seed, mix, scale) = biome_field(&config);
+    for region in &d.regions {
+        let mut zoned: Option<Biome> = None;
+        let mut per_cell_seen: Option<Biome> = None;
+        let mut per_cell_split = false;
+        for y in region.rect.min[1]..region.rect.max[1] {
+            for x in region.rect.min[0]..region.rect.max[0] {
+                let c = IVec2::new(x, y);
+                if !d.is_floor(c) || d.corridor_id(c).is_some() {
+                    continue;
+                }
+                // The property under test.
+                match zoned {
+                    None => zoned = Some(d.biome(c)),
+                    Some(b) => assert_eq!(
+                        d.biome(c),
+                        b,
+                        "SHIPPED config: region {} still shows two surface treatments at {c:?}",
+                        region.id
+                    ),
+                }
+                // ...and what the old per-cell rule would have done to this same room.
+                let old = biome_at(seed, c, mix, scale);
+                match per_cell_seen {
+                    None => per_cell_seen = Some(old),
+                    Some(b) if b != old => per_cell_split = true,
+                    Some(_) => {}
+                }
+            }
+        }
+        if per_cell_split {
+            split_under_old_rule += 1;
+        }
+    }
+    assert!(
+        split_under_old_rule > 0,
+        "per-cell sampling splits no room in the SHIPPED config, so this proves nothing — the reported \
+         bug is no longer reproducible from `block`/`biome_scale` and this test needs re-deriving"
+    );
+}
+
 /// A config whose biome noise period is **shorter than a room is wide** — the actual condition behind
 /// the reported bug, and the thing these tests must reproduce to mean anything.
 ///

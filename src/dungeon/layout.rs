@@ -442,21 +442,36 @@ fn resolve_biomes(
 
     // `None` = "no zone of its own yet", resolved by the BFS below. Not a sentinel biome: a default here
     // would be a silent second path, and an unresolved cell must stay visibly unresolved.
+    //
+    // A room or corridor index that does not resolve is a **carver bug**, not a cell to fill in: it means
+    // `room_of`/`corridor_of` disagrees with `regions`/`adjacency`. Both are in range by construction
+    // (`Region.id == si`, and `corridor_of` stores an index into `layout.adjacency`), but letting a failed
+    // lookup fall through to the BFS would turn that bug into a plausible-looking floor with a neighbour's
+    // surface — silent, and exactly the degraded substitute the one-path rule forbids. So it errors.
     let mut out: Vec<Option<Biome>> = vec![None; width * height];
     for (i, slot) in out.iter_mut().enumerate() {
         if !walkable[i] {
             continue;
         }
-        *slot = if room_of[i] != NO_ROOM {
-            room_biome.get(room_of[i] as usize).copied()
+        if room_of[i] != NO_ROOM {
+            let r = room_of[i] as usize;
+            let b = room_biome.get(r).copied().ok_or_else(|| {
+                format!("dungeon: cell ({}, {}) claims room {r}, which has no region", i % width, i / width)
+            })?;
+            *slot = Some(b);
         } else if corridor_of[i] != NO_CORRIDOR {
-            layout
-                .adjacency
-                .get(corridor_of[i] as usize)
-                .and_then(|&(a, b)| room_biome.get(a.min(b)).copied())
-        } else {
-            None
-        };
+            let e = corridor_of[i] as usize;
+            // Option (b): a corridor takes the biome of its LOWER-`RegionId` endpoint room, so a passage
+            // always matches one of the rooms it joins and the change of surface lands at a doorway.
+            let &(a, b) = layout.adjacency.get(e).ok_or_else(|| {
+                format!("dungeon: cell ({}, {}) claims corridor edge {e}, which is not in the adjacency graph", i % width, i / width)
+            })?;
+            let endpoint = a.min(b);
+            let biome = room_biome.get(endpoint).copied().ok_or_else(|| {
+                format!("dungeon: corridor edge {e} names endpoint room {endpoint}, which has no region")
+            })?;
+            *slot = Some(biome);
+        }
     }
 
     // Multi-source BFS out from every classified cell. Determinism comes from the enumeration order, not
