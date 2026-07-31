@@ -1887,5 +1887,15 @@ Split out 2026-07-30.
   to hide the seam. An interior has one: the doorway. So this switch is deliberately **discrete** and
   placed at the threshold. Room-as-unit-of-assignment is the standard dungeon-graph move surveyed by
   **Viana & Dos Santos** (*J. Interact. Syst.* 2021, doi 10.5753/jis.2021.999).
-  *Left open:* a look at a real frame. Unit tests cannot see cross-layer drift, and "no room shows two
-  surface treatments" is finally a judgement made by looking. · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
+  ✅ *Looked at a real frame, 2026-07-31* (`FVS_AUTORUN=1 FVS_WINDOW=1600x900`, devshot capture). Every
+  room in frame renders a **uniform** floor and uniform walls — the saturated Backrooms carpet against
+  its pale patterned wallpaper, with no patchwork inside any room, and the same holds for the corridor
+  running off to the right.
+  ⚠️ **Calibrate what that frame proves.** The camera never moved, and the probe logged exactly one zone
+  all run (`cell (80, 112) region 13 biome Backrooms`), so the capture shows *a room that is uniform* —
+  it does **not** show a Backrooms→Concrete transition landing at a doorway, which is the other half of
+  option (b). Keystroke injection is blocked in this environment, so panning to a Concrete zone was not
+  possible. The rigorous evidence for the whole-map claim is
+  `the_shipped_config_shows_no_room_with_two_surface_treatments`, which walks **every** region of the
+  shipped level; the frame corroborates it at one location rather than standing in for it.
+  · *Touches:* `src/dungeon/{layout,mod,tests}.rs`
