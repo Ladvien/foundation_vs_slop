@@ -151,6 +151,10 @@ pub fn plugin(app: &mut App) {
             Update,
             (
                 open_conversation,
+                // Before `resolve_choice`, so a digit pressed this frame resolves this frame — the
+                // same in-order relationship the click observer already has (it writes in
+                // `PreUpdate`, during picking).
+                choice_hotkeys,
                 resolve_choice,
                 advance_line,
                 present_current,
@@ -362,6 +366,7 @@ fn advance_line(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     active: Option<ResMut<Active>>,
     script: Res<DialogueScript>,
     existing: Query<Entity, With<ConversationBubble>>,
@@ -382,8 +387,14 @@ fn advance_line(
         _ => return,
     };
     let clicked = mouse.just_pressed(MouseButton::Left);
+    // `Enter`/`Space` advance a line as well as a click. Not a fallback for a broken click path —
+    // both are first-class "I have read this" inputs, and a player whose hands are on the keyboard
+    // should not have to reach for the mouse to get through a briefing.
+    let keyed = keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(KeyCode::NumpadEnter)
+        || keys.just_pressed(KeyCode::Space);
     let timed_out = time.elapsed_secs() >= active.advance_at;
-    if !clicked && !timed_out {
+    if !clicked && !keyed && !timed_out {
         return;
     }
     match next {
@@ -394,6 +405,56 @@ fn advance_line(
         None => {
             drop(active);
             finish(&mut commands, &existing, &mut menu);
+        }
+    }
+}
+
+/// Number-key selection for the option bubbles: `1`..`9` (and the numpad row) pick that option.
+///
+/// The bubbles are already labelled `"1. …"` / `"2. …"` by [`present_current`], so the keys the
+/// player would guess were being *advertised* and not accepted.
+///
+/// **This writes the same [`ChoicePicked`] message the click observer writes** — it is a second
+/// *input device*, not a second resolution path. Everything downstream ([`resolve_choice`], the node
+/// walk, the teardown) stays one path, which is the property that matters; two ways to press one
+/// button is not the branching this codebase forbids.
+///
+/// An out-of-range digit is deliberately ignored rather than clamped: pressing `5` on a two-option
+/// choice should do nothing, not silently pick the last one.
+fn choice_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    active: Option<Res<Active>>,
+    script: Res<DialogueScript>,
+    mut picked: MessageWriter<ChoicePicked>,
+) {
+    let Some(active) = active else { return };
+    if !active.presented {
+        return;
+    }
+    // Only while a Choice is on screen — otherwise a stray `1` during a Line would queue a pick that
+    // `resolve_choice` would then apply to the *next* choice node.
+    let Some(Node::Choice { options, .. }) = script
+        .conversation(&active.conv)
+        .and_then(|c| c.nodes.get(&active.node))
+    else {
+        return;
+    };
+
+    const DIGITS: [(KeyCode, KeyCode); 9] = [
+        (KeyCode::Digit1, KeyCode::Numpad1),
+        (KeyCode::Digit2, KeyCode::Numpad2),
+        (KeyCode::Digit3, KeyCode::Numpad3),
+        (KeyCode::Digit4, KeyCode::Numpad4),
+        (KeyCode::Digit5, KeyCode::Numpad5),
+        (KeyCode::Digit6, KeyCode::Numpad6),
+        (KeyCode::Digit7, KeyCode::Numpad7),
+        (KeyCode::Digit8, KeyCode::Numpad8),
+        (KeyCode::Digit9, KeyCode::Numpad9),
+    ];
+    for (index, (row, numpad)) in DIGITS.iter().enumerate().take(options.len()) {
+        if keys.just_pressed(*row) || keys.just_pressed(*numpad) {
+            picked.write(ChoicePicked { index });
+            return; // one pick per frame, even if two keys land together
         }
     }
 }

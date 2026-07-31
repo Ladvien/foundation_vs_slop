@@ -61,11 +61,76 @@ fn marquee_fill() -> Color {
     Color::srgba(0.0, 0.9, 1.0, 0.12)
 }
 
+/// Seconds of frame-time history the capture reports over. Five, because that is what a player means
+/// by "it drops here": long enough to span a stutter and short enough to still describe *this* spot
+/// rather than the walk that led to it.
+const FPS_WINDOW_SECS: f32 = 5.0;
+
+/// Rolling frame-time history, in seconds per frame, newest last.
+///
+/// **Deliberately self-contained rather than read from `DiagnosticsStore`.** Bevy's
+/// `FrameTimeDiagnosticsPlugin` keeps 20 samples by default — a third of a second at 60 fps — which
+/// cannot answer "what was the average over the last five seconds", and raising its history would
+/// couple this dev tool to `perf_hud`'s registration of that plugin. This is ~15 lines and owns its
+/// own window.
+///
+/// On `Time<Real>`, so a frozen sim (this tool freezes the frame while the player types) does not
+/// poison the history with zero-length virtual frames.
+#[derive(Resource, Default)]
+struct FpsWindow {
+    frames: std::collections::VecDeque<f32>,
+}
+
+impl FpsWindow {
+    fn push(&mut self, dt: f32) {
+        // Guard the first frame and any pathological pause: a zero or non-finite dt is not a frame.
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        self.frames.push_back(dt);
+        let mut total: f32 = self.frames.iter().sum();
+        while total > FPS_WINDOW_SECS && self.frames.len() > 1 {
+            if let Some(oldest) = self.frames.pop_front() {
+                total -= oldest;
+            }
+        }
+    }
+
+    /// `(mean fps, 1% low fps, worst frame ms, sample count)`.
+    ///
+    /// Mean **frame time** inverted, not the mean of per-frame FPS values — averaging FPS
+    /// over-weights fast frames and flatters a stuttering capture, which is the opposite of what this
+    /// is for. The 1% low is the standard companion: a mean of 60 with a 1% low of 12 is a very
+    /// different experience from a flat 55, and only the pair distinguishes them.
+    fn stats(&self) -> Option<(f32, f32, f32, usize)> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let n = self.frames.len();
+        let mean_dt = self.frames.iter().sum::<f32>() / n as f32;
+        let mut sorted: Vec<f32> = self.frames.iter().copied().collect();
+        // SORT-OK: a plain descending sort of f32 frame times for a percentile; this is a dev-tool
+        // readout and touches no simulation state.
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let worst_count = (n / 100).max(1);
+        let low_dt = sorted[..worst_count].iter().sum::<f32>() / worst_count as f32;
+        Some((1.0 / mean_dt, 1.0 / low_dt, sorted[0] * 1000.0, n))
+    }
+}
+
+fn sample_fps(time: Res<Time<Real>>, mut window: ResMut<FpsWindow>) {
+    window.push(time.delta_secs());
+}
+
 pub struct RegionCapturePlugin;
 
 impl Plugin for RegionCapturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RegionCapture>()
+            .init_resource::<FpsWindow>()
+            // Unconditional and un-gated: the window must already be full when the player decides to
+            // capture, so it cannot be sampled only while armed.
+            .add_systems(Update, sample_fps)
             .add_systems(
                 Update,
                 // Ordered: read input & advance the state machine, sync the on-screen marquee to match,
@@ -278,6 +343,10 @@ fn run_pending_capture(
         // not a module constant, so it cannot be hardcoded in `classify` like the others.
         Option<&WorldAssetRoot>,
     )>,
+    children: Query<&Children>,
+    meshes_of: Query<&Mesh3d>,
+    meshes: Res<Assets<Mesh>>,
+    fps: Res<FpsWindow>,
 ) {
     let Phase::Pending {
         min,
@@ -362,6 +431,10 @@ fn run_pending_capture(
         menu.as_deref(),
         &assets,
         &ents,
+        &children,
+        &meshes_of,
+        &meshes,
+        &fps,
     );
 
     spawn_note_box(&mut commands, &theme, &fonts);
@@ -445,6 +518,44 @@ struct NoteBoxRoot;
 #[derive(Component)]
 struct NoteBoxText;
 
+/// Triangles in one mesh, as the GPU draws it: indexed meshes report `indices / 3`, non-indexed
+/// `vertices / 3`.
+fn mesh_triangles(mesh: &Mesh) -> usize {
+    match mesh.indices() {
+        Some(indices) => indices.len() / 3,
+        None => mesh.count_vertices() / 3,
+    }
+}
+
+/// Total triangles an entity draws, including every descendant.
+///
+/// A spawned glTF is a *tree* — `valkyrie.glb` alone is 24 primitives under a scene root — so the
+/// count that matters to a player asking "why is this slow" is the whole subtree, not the one mesh
+/// (usually none) sitting on the entity the gameplay component is attached to.
+///
+/// Returns `(triangles, primitive count)`; primitives are draw calls, and a low-poly asset split
+/// across many of them can cost more than a heavier one in a single batch.
+fn subtree_triangles(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes_of: &Query<&Mesh3d>,
+    meshes: &Assets<Mesh>,
+) -> (usize, usize) {
+    let mut tris = 0usize;
+    let mut prims = 0usize;
+    for e in std::iter::once(root).chain(children.iter_descendants(root)) {
+        let Ok(handle) = meshes_of.get(e) else { continue };
+        // A mesh still streaming in is counted as zero rather than skipped silently — the primitive
+        // tally still moves, so a capture taken mid-load reads as "many prims, few tris" instead of
+        // looking like a cheap scene.
+        prims += 1;
+        if let Some(mesh) = meshes.get(&handle.0) {
+            tris += mesh_triangles(mesh);
+        }
+    }
+    (tris, prims)
+}
+
 /// Type + source-asset label for a tracked gameplay entity, or `None` for everything else (child meshes,
 /// UI, gizmos) so the "entities in region" list stays signal, not noise. The asset strings mirror the
 /// module-private `*_GLB` path constants in `squad`/`crab`/`parasite` (kept private there; duplicated here
@@ -496,6 +607,9 @@ fn ground_under(camera: &Camera, cam_tf: &GlobalTransform, pixel: Vec2) -> Optio
 
 /// Cap on the per-region entity list so a box over a swarm can't produce a wall of text.
 const MAX_ENTITIES_LISTED: usize = 40;
+/// Rows in the per-asset geometry table. The tail is always the cheap assets, and the whole point of
+/// the table is naming the expensive ones.
+const MAX_ASSETS_LISTED: usize = 12;
 
 /// Build the `## Capture` / `## Scene` / `## Entities in region` markdown (everything but the player's note),
 /// snapshotting the scene as it was in the captured frame.
@@ -527,12 +641,32 @@ fn build_metadata(
         // not a module constant, so it cannot be hardcoded in `classify` like the others.
         Option<&WorldAssetRoot>,
     )>,
+    children: &Query<&Children>,
+    meshes_of: &Query<&Mesh3d>,
+    meshes: &Assets<Mesh>,
+    fps: &FpsWindow,
 ) -> String {
     let campos = cam_tf.translation();
 
     // One pass: tally scene-wide counts and collect the tracked entities that project inside the box.
     let mut counts = [0usize; 5]; // unit, enemy, crab, manca, nest
-    let mut inbox: Vec<(f32, Entity, &'static str, String, Vec3, Vec2, String, String)> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut inbox: Vec<(
+        f32,
+        Entity,
+        &'static str,
+        String,
+        Vec3,
+        Vec2,
+        String,
+        String,
+        usize,
+        usize,
+    )> = Vec::new();
+    // Triangles and primitives per source asset, summed over every instance — the table that answers
+    // "which asset is costing me the frame", which a per-entity list alone does not.
+    let mut by_asset: std::collections::HashMap<String, (usize, usize, usize)> =
+        std::collections::HashMap::new();
     for (ent, gt, name, unit, enemy, crab, manca, nest, placed, scene) in ents {
         let prop = placed.is_some();
         counts[0] += unit as usize;
@@ -545,6 +679,16 @@ fn build_metadata(
         else {
             continue;
         };
+        // Counted for EVERY tracked entity, not only the ones inside the box: the asset budget is a
+        // property of the loaded scene, and an off-screen instance costs exactly as much to keep
+        // resident. (Bevy frustum-culls the draw, but the mesh, its material and its entity are all
+        // still there — and `FVS-N-13` means a leaked previous dungeon would show up here too.)
+        let (tris, prims) = subtree_triangles(ent, children, meshes_of, meshes);
+        let slot = by_asset.entry(asset.clone()).or_insert((0, 0, 0));
+        slot.0 += tris;
+        slot.1 += prims;
+        slot.2 += 1;
+
         let world = gt.translation();
         let Ok(screen) = camera.world_to_viewport(cam_tf, world) else {
             continue; // behind the camera or otherwise unprojectable
@@ -556,7 +700,18 @@ fn build_metadata(
         // The region a prop was placed into — makes "these twelve sconces are spread across ten
         // different rooms" self-evident in the report instead of something to be inferred.
         let region = placed.map(|p| format!(" · region {:?}", p.0)).unwrap_or_default();
-        inbox.push((campos.distance(world), ent, kind, name, world, screen, asset, region));
+        inbox.push((
+            campos.distance(world),
+            ent,
+            kind,
+            name,
+            world,
+            screen,
+            asset,
+            region,
+            tris,
+            prims,
+        ));
     }
     // Nearest first; entity id breaks ties into a total order.
     // SORT-OK: dev-only debug-report ordering, never touches pinned sim state.
@@ -634,14 +789,62 @@ fn build_metadata(
         counts[0], counts[1], counts[2], counts[3], counts[4]
     );
 
+    // ── Performance ───────────────────────────────────────────────────────────────────────────────
+    // The whole point of a "it drops to 26 fps HERE" report is that the number travels with the
+    // place. Mean and 1% low together, because either alone is misleading: a 60 mean with a 12 low
+    // is a stutter, and a flat 30 is a budget problem, and they want opposite fixes.
+    let _ = writeln!(md, "\n## Performance\n");
+    match fps.stats() {
+        Some((mean, low, worst_ms, n)) => {
+            let _ = writeln!(
+                md,
+                "- FPS over the last {FPS_WINDOW_SECS:.0}s: **{mean:.1} mean** · {low:.1} 1% low · worst frame {worst_ms:.1} ms ({n} frames)"
+            );
+            let _ = writeln!(md, "- Mean frame time: {:.2} ms", 1000.0 / mean);
+        }
+        None => {
+            let _ = writeln!(md, "- FPS: (no frames sampled yet)");
+        }
+    }
+
+    // The asset budget. Sorted heaviest-first and capped, so the report names the suspect instead of
+    // leaving it to be inferred from a flat entity list.
+    let mut assets_by_cost: Vec<(String, (usize, usize, usize))> = by_asset.into_iter().collect();
+    // SORT-OK: dev-only report ordering — triangles descending, asset path breaks ties into a total
+    // order. Touches no pinned state.
+    assets_by_cost.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+    let scene_tris: usize = assets_by_cost.iter().map(|(_, v)| v.0).sum();
+    let scene_prims: usize = assets_by_cost.iter().map(|(_, v)| v.1).sum();
+    let _ = writeln!(
+        md,
+        "- Tracked-entity geometry resident: **{scene_tris} triangles** across {scene_prims} primitives"
+    );
+    let _ = writeln!(
+        md,
+        "\n_(tracked gameplay entities only — dungeon tiles, props' own tiles, gizmos and UI are not counted)_\n"
+    );
+    let _ = writeln!(md, "| asset | instances | triangles | prims | tris/instance |");
+    let _ = writeln!(md, "|---|---:|---:|---:|---:|");
+    for (asset, (tris, prims, n)) in assets_by_cost.iter().take(MAX_ASSETS_LISTED) {
+        let per = if *n > 0 { tris / n } else { 0 };
+        let _ = writeln!(md, "| `{asset}` | {n} | {tris} | {prims} | {per} |");
+    }
+    if assets_by_cost.len() > MAX_ASSETS_LISTED {
+        let _ = writeln!(
+            md,
+            "| … {} more assets | | | | |",
+            assets_by_cost.len() - MAX_ASSETS_LISTED
+        );
+    }
+
     let _ = writeln!(md, "\n## Entities in region ({total_in})\n");
     if inbox.is_empty() {
         let _ = writeln!(md, "_(no tracked gameplay entity projects inside the box)_");
     } else {
-        for (dist, _idx, kind, name, world, screen, asset, region) in &inbox {
+        for (dist, _idx, kind, name, world, screen, asset, region, tris, prims) in &inbox {
             let _ = writeln!(
                 md,
-                "- **{kind}**{name} · asset `{asset}` · world=({:.2}, {:.2}, {:.2}) · screen=({:.0}, {:.0}) · dist={dist:.1}{region}",
+                "- **{kind}**{name} · asset `{asset}` · **{tris} tris / {prims} prims** · world=({:.2}, {:.2}, {:.2}) · screen=({:.0}, {:.0}) · dist={dist:.1}{region}",
                 world.x, world.y, world.z, screen.x, screen.y
             );
         }
