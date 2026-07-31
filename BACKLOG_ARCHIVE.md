@@ -167,6 +167,80 @@ Split out 2026-07-30.
   secondary motion rather than as an error. **C-1 is blocked on that bug**, and so is FVS-K-1 behind it.
   Then: faction membership, field deposits/reads, drives, and a `ContainmentRule` consumed by the quarantine archetype (B-6).
   *Done when:* `scp610.glb` exists and loads; 610 spawns, participates in the shared substrate, is containable via quarantine; killable but yields nothing. · *Deps:* B-6, **610 asset export** · *Touches:* new `src/scp610/`, `src/ai/`, `src/ai/field.rs`, `assets/scp610/` · *Reading:* [STIG], [STIG-AD]
+- **FVS-K-1 — SCP-610 content/FX pass** · M · *determinism: render = SSIM* · ✅ **LANDED 2026-07-30**
+  *Done when:* 610 reads as slop; quarantine has readable feedback. Both met, plus the half of C-1's
+  acceptance ("killable but yields nothing") that had never actually shipped — 610 carried no `Health`.
+
+  **The asset was regenerated, and doing it exposed a non-determinism bug in the generator.** The item
+  was scoped as "add a `COLOR_0` bake and re-export". The re-export would not reproduce: eight headless
+  builds produced **five distinct `.glb` files** and two different triangle counts (7882 / 7912) from
+  identical inputs, and roughly one run in three died on `AssertionError: stub topology mismatch`. The
+  memory of this bug recorded it as "the two builds disagree by 2 vertices"; the counts were never
+  stable, so it was never two. Two causes upstream in `scp_characters`, both **an unordered iteration
+  deciding geometry** — the exact class `CLAUDE.md` devotes a section to:
+  * `monsters/infected.py::_find_patch` accumulated the attach patch into a `set` of `BMFace` proxies
+    and returned `list(patch)[:N]`. BMesh proxies hash on their C pointer, so order *and membership*
+    varied per process and differed between the collapsed and grown bmeshes. That list is handed to
+    `extrude_discrete_faces`, so it fixes each new face's `f.index` — which is the ID the tentacle
+    Geometry-Nodes graph's Random Value node keys its bump selection on. Unordered iteration was
+    literally choosing the topology.
+  * `_extrude_stub` passed a set-ordered vertex list to `bmesh.ops.pointmerge`, so *which* vertex
+    survived the tip weld varied. Invisible in the base mesh; it moved the `mutation` morph deltas,
+    which are per-index. This one only showed up after the first fix, as "same 7912 tris, five
+    different files, difference isolated to accessor 8".
+  Fixed upstream (BFS-ordered list; `sorted(..., key=index)`). **Six consecutive builds are now
+  byte-identical**, at the same 7,912 tris the contract already pinned — so the shipped asset had been
+  whichever mesh a lucky run happened to emit.
+
+  **`COLOR_0` stopped being neutral, and that is now load-bearing.** The old file shipped *three*
+  colour sets (a forced all-1.0 `COLOR_0` plus both stray Quaternius attributes at 0.9911–1.0) because
+  `export_all_vertex_colors` defaults `True`. `assets/scp610/README.md` §6 called that "checked,
+  confirmed benign" and warned not to assume it after a re-export — it was right. Export is now
+  **by name** (`export_vertex_color="NAME"`), the strays are deleted in the builder, and exactly one
+  attribute reaches the file. Consequence, measured: the mask is **0.0 at all 82 eye verts**, and Bevy
+  0.19 *assigns* `base_color = in.color`, so **both** material slots had to be replaced — a stock
+  `StandardMaterial` on the eye renders it pure black.
+
+  **The eye is where the research landed.** Kätsyri, Mäkäräinen, Förger & Takala 2015
+  (10.3389/fpsyg.2015.00390) find the strongest support of any uncanny-valley hypothesis they review —
+  **4 of 4 studies** — for perceptual mismatch between the realism levels of individual features, and
+  their canonical example is almost word for word this asset: *"clearly artificial eyes on an
+  otherwise fully human-like face."* SCP-610 already had that by accident of how the slot was
+  authored. `scp610_eye.wgsl` commits to it rather than blending it away. The second finding (H4b,
+  3 of 4: atypicality is *more* unsettling on a *more* humanlike base) is why the `mutation` morph
+  starts at a passing human and grows.
+
+  *Also shipped:* the flesh↔scar `ExtendedMaterial` (README §7 Tier 1, the `MoldFruitMaterial`
+  pattern); the ACS **luminosity** term — containment is darkness, a breach flares — hueless by rule;
+  all four cordon surfaces (armed preview, placed ring, held-anomaly mark, event-line beats), since
+  `place_quarantine_input` had been spawning an *invisible* 3 m circle for a supply of one charge; a
+  spatial flesh drone plus three cordon one-shots; `Health` + the baked `scp610_death` collapse (not
+  `autogib` — 610 is terrain and stays where it falls).
+
+  **Two bugs found next door, both fixed:**
+  * `ContainmentConfig::validate` **never validated `scp610`** — it had been missing since the rule was
+    added, so a malformed 610 rule would have loaded silently and failed later as "containment never
+    completes".
+  * `audio::update_music` and `audio::watcher_pad` were **defined but never registered**. The
+    calm↔combat crossfade never ran (combat music was spawned at gain 0 and stayed there — the game
+    had *no combat music*), the beds never re-read `GlobalVolume` so alt-tab could not mute them, and
+    the watcher's pad played silently for ever. Same failure `53fbcb3` records ("three more systems
+    FVS-G-6's sweep silently killed"); these two were survivors of it.
+
+  **The calibration test earned its place immediately.** 610's drone deposits `THREAT_ANOMALY` at its
+  own position and its own rule caps that channel at 0.35 there, so
+  `the_loudest_evolvable_bloom_can_still_be_contained` pins that the search cannot evolve an
+  uncontainable bloom. Its **first run failed** and caught a real defect: the deposit pushed the
+  per-second rate every tick instead of `rate * dt` — 60× — which would have shipped as "SCP-610 can
+  never be contained" with every other test green.
+  *Goldens re-pinned* (x86 only; aarch64 stays unpinned): `GOLDEN` `0x3563f0f69281ce4c` →
+  `0x9f7a0787fdcb487f` (Health puts three blooms into `snapshot_hash` for the first time),
+  `GOLDEN_FIELD` `0xc95454f3ca28b71c` → `0x82d9fc45c7e06f63` (the drone deposits). Reproducibility was
+  verified *before* pinning, not after.
+  *Deferred, deliberately:* `flesh_drone_loudness` grows `audio_genome::N` 15 → 16, so
+  `elites_audio.ron` is rejected loudly. The re-bake belongs to **FVS-H-1**, which is itself sequenced
+  behind FVS-I-1 — baking now would optimise against an objective I-1 then invalidates.
+  · *Deps:* C-1 · *Touches:* `src/scp610/`, `src/containment/cordon.rs`, `src/audio.rs`, `src/palette.rs`, `assets/shaders/scp610_{flesh,eye}.wgsl` · *Reading:* **[UV-REV]**, [UV-FMRI], [TEST-NT]
 - **FVS-C-2 — SCP-999 befriend-capture** · M · ✅ **LANDED 2026-07-26 — the first real capture in the game**
   *Shipped:* a new top-level `containment:` config slice authoring per-anomaly rules, `ContainmentRules` resource, and `Containment` attached at `spawn_scp999_at` (the shared builder, so a Research-Room F6 blob is byte-identical to a seeded one). Pinned end-to-end by `containment::scp999_is_captured_by_befriending_it_not_by_fighting`, which drives the **shipped** rule from `config.ron` — so the slice parsing, validating and being reachable is part of the test.
   **The rule, and why it is the right tutorial:** `THREAT_GUN AtMost 0.05` **and** `ATTENTION AtLeast 0.25`, held 4 s, `OnBreak::Keep`. Both clauses are satisfied by choosing *not* to fight — holster, and stay with it. That states the whole win-by-containing pivot in one creature, and it reads through the L-1 HUD as `LOWER GUNFIRE` / `RAISE OBSERVATION`. `Keep` (cumulative) rather than `Reset`: a nervous trigger finger should cost progress, not the run, on the first capture anyone performs.

@@ -2193,6 +2193,12 @@
             impact_flesh_loudness: 0.15307344,
             enemy_death_loudness: 0.9537805,
             unit_death_loudness: 0.7733592,
+            // Continuous, not per-event: an SCP-610 bloom seethes for as long as it is alive. A
+            // FIXED FRACTION of this is also spent on THREAT_ANOMALY at the bloom's own position
+            // (`scp610::DREAD_PER_DIN`), which its containment rule caps at 0.35 — so the gene's
+            // ceiling in `audio_genome::BOUNDS` is what stops the search evolving an uncontainable
+            // bloom. See that table.
+            flesh_drone_loudness: 0.35,
         ),
         perception: (
             // Sound-as-perception ON (FIX 2): din-response gains ship positive so a firefight shapes the

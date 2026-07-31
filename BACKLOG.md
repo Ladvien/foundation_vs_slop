@@ -119,9 +119,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** [STIG], [STIG-AD], [UV-REV], [UV-FMRI], [ECS], [GOAP]
 **Done when:** SCP-610 is capturable via quarantine and reads as a "slop" instance; 999/1048/150 capturable via their rules; crab infestation clearable via nest-capping; the two crab-behavior forks are decided and documented.
 
-- **FVS-K-1 — SCP-610 content/FX pass** · M · *determinism: render = SSIM*
-  Audio/FX/flavor for wired 610, incl. color-language luminosity (color doc). Read it as an SCP-9191 "slop" instance.
-  *Done when:* 610 reads as slop; quarantine has readable feedback. · *Deps:* C-1 · *Touches:* `src/scp610/`, FX · *Reading:* [UV-REV], [UV-FMRI], [TEST-NT]
+> **All items in this push have shipped** — see `BACKLOG_ARCHIVE.md`. FVS-K-1 (SCP-610's content/FX
+> pass) landed 2026-07-30 and closed the last of them.
 
 ---
 
@@ -192,6 +191,19 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   **1325** (`MODE_COUNT` 25→29), so `NeuralPolicy::from_weights` rejects them loudly — as designed
   ("a stale archive is a re-train, not a resize"). The levels/audio/behavior runs also used held-in world
   `0xB0BA`, **retired 2026-07-19**. So this is closer to a first bake than a re-bake.
+  ⚠️ **The AUDIO archive is now stale for a third, structural reason (2026-07-30, FVS-K-1).**
+  `audio_genome::N` grew **15 → 16** (`flesh_drone_loudness`, SCP-610's continuous acoustic
+  stimulus). Archived genomes are fixed-length vectors, so the one bake that has ever landed —
+  `elites_audio.ron`, 2026-07-19 — cannot decode and `is_feasible` rejects it loudly, as designed
+  ("a stale archive is a re-train, not a resize"). Deliberately **not** re-baked at the time: this
+  item is sequenced behind FVS-I-1, and baking now would optimise against an objective I-1 then
+  invalidates — the exact mistake this entry already records one paragraph up.
+  ⚠️ **And that knob's `BOUNDS` ceiling is a correctness constraint, not a range guess.** SCP-610's
+  drone deposits `THREAT_ANOMALY` at the bloom's own position while its own containment rule caps
+  that channel at 0.35 *there*, so a loud enough bloom is an uncontainable one — the search can
+  delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
+  until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
+  Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
@@ -218,6 +230,38 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
   `ui::site_hud` works — not a reach into the in-game overlay stack.
   *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
+- **FVS-L-7 — A modal conversation's CHOICE options cannot be answered, and it soft-locks the run (REPORTED FROM PLAY 2026-07-30)** · M
+  **Player report, with a region capture:** *"I can't click on these options."* Metadata confirms
+  `App state: InGame`, `Menu/overlay: Conversation`, `Sim: frozen`. The expedition-start scene ends in
+  a `Choice` node, a modal conversation freezes the sim (`dialogue/runtime.rs:4`), and choices
+  deliberately do not auto-advance (`active.advance_at = f32::INFINITY`). **So an unanswerable choice
+  is not a cosmetic bug — it is an unrecoverable soft-lock on the game's opening beat.**
+  This is the same defect FVS-C-1's landing commit already recorded from the other side: every
+  screenshot taken that day was of a paused game, and two captures four seconds apart were
+  byte-identical (full-frame RMSE 0). It was diagnosed then as "nobody answered the modal". The
+  player has now shown that they *cannot*.
+  **Ruled out by inspection (2026-07-30), so nobody repeats it:**
+  * `MeshPickingPlugin` **is** registered (`dialogue/mod.rs:73`), and the bubbles do carry
+    `Pickable::default()` plus a per-entity `On<Pointer<Click>>` observer writing `ChoicePicked`.
+  * `resolve_choice` has **no run condition** — it is a plain `Update` system in the chain, so a
+    written `ChoicePicked` would be consumed.
+  * The sim freeze is `SimBlocked`, which pauses `Time<Virtual>` only; `Update` and the picking
+    backend still run.
+  * No fullscreen UI swallows the pointer: `ui::layout::spawn_frame`'s root **and** its region nodes
+    are `Pickable::IGNORE`, and so is `blood_lens`. Nothing spawns a scrim on
+    `MenuState::Conversation`.
+  **Still open, in rough order of suspicion:** (a) the ray-cast culls backfaces for 3-D meshes
+  (`bevy_picking .../ray_cast/mod.rs:287` — `(false, false) => Backfaces::Cull`), and the bubble's
+  material sets `cull_mode: None`, so it can **render** from a side it cannot be **picked** from — the
+  failure would be invisible to the eye and total to the mouse; adding `RayCastBackfaces` to the
+  bubble entity is a one-line test of this. (b) press and release landing on different entities.
+  (c) a camera-ordering issue in which pointer→camera resolution picks the wrong camera.
+  **Whatever the cause, the fix needs a second half: a keyboard fallback is NOT the answer** (that
+  would be a second path), but the options render as ordinary speech bubbles with "1." / "2."
+  prefixes and *no affordance saying they are clickable*. The dim-until-hover tint is the only cue
+  and it is invisible if hover never fires — which is exactly the failing case.
+  *Done when:* a `Choice` node can be answered in the shipped windowed build, and a run cannot reach
+  a state where the sim is frozen with no way to unfreeze it. · *Deps:* — · *Touches:* `src/dialogue/runtime.rs`, `src/dialogue/bubble.rs` · *Reading:* — (no corpus resource)
 - **FVS-N-21 — The biome genes are invisible to the level descriptor (FOUND 2026-07-30, audit)** · S
   Q-3 added `biome_mix`/`biome_scale` to `LevelGenome` because `CLAUDE.md` requires wiring features into RL/QD. **Audit says the descriptor cannot see them.** `level_quality.rs:72` has exactly two axes — `furniture_per_room / 8` and `infestation / 0.5` — and biome moves neither: furniture keys on room *tags*, mould affinity keys on room *tags*, and `score()` never reads biome. Two genomes differing only in biome land in the same cell with the same fitness, so the winner is decided by whatever else differs, or by evaluation luck — which is materially worse while N-13 is live. This is the archive-collapse mechanism that already bit the policy archive once.
   **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid. · *Deps:* — · *Reading:* [QD]
@@ -314,6 +358,17 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   grounds; it must not become the reason this goes uninvestigated. **If this proves to be a live
   determinism bug, the split should be revisited** — a per-PR lane that cannot catch it is the exact
   gap FVS-J-5 exists to close.
+  **Data point 2026-07-30 (FVS-K-1), recorded because it is evidence and NOT because it exonerates
+  anything.** `session::the_wipe_paths_actors_and_fields_are_reproducible_under_load` — same family,
+  different test — failed **once**, during a sequential full-harness run with unrelated shell work
+  happening alongside it. It then passed **6/6** on re-runs: 4 idle, and 2 under a deliberate
+  14-busy-loop contention that was verifiably biting (runtime 55–77 s idle → 114–128 s loaded). The
+  full `session` target is 21/21.
+  Per this entry's own standing instruction, **that is not a clean bill of health** — an intermittent
+  detector failing intermittently is the detector working, and every one of those 6 passes was
+  measured under a *weaker* condition than the one that failed. It is logged so the next occurrence
+  has a predecessor to compare against: the distinguishing question is whether the divergence is
+  again **bimodal** (a flipped discrete decision) or a fresh hash each time (float drift).
   *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
   `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
   first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The

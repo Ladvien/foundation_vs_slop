@@ -74,6 +74,26 @@ pub const OUTFITS: [Color; 5] = [
 /// was never what made it visible.
 pub const SELECTION_RING: Color = Color::srgb(0.96, 0.94, 0.88);
 
+/// The containment cordon, in three states that differ by **luminance alone**.
+///
+/// Same argument as [`SELECTION_RING`], applied to the one verb that had no visual at all: a
+/// quarantine used to spawn a bare `Quarantine + Transform` with no mesh, so the player spent a
+/// 50-budget charge — and the supply is **one** per expedition — on an invisible 3 m circle.
+///
+/// Hue would be the obvious way to say armed / placed / holding, and it is the wrong one twice over.
+/// `docs/lore/2026-07-12-scp-color-language.md` §7 reserves colour for *deviation*, and a cordon is
+/// the most Foundation object in the game — it is the bureaucracy winning. `docs/ui.md` §1.3 puts
+/// status on luminance so it survives red-green colour-vision deficiency. So all three are the same
+/// warm neutral at three brightnesses, and the ramp means "how much is this cordon doing":
+/// dim while you are still aiming it, mid once it is down, bright while it is actually holding
+/// something. That is the same direction as the anomaly's own luminosity ramp running the other way
+/// (`assets/shaders/scp610_flesh.wgsl`) — the cordon brightens as the thing inside it goes dark.
+pub const CORDON_ARMED: Color = Color::srgb(0.38, 0.37, 0.34);
+/// A placed cordon with nothing inside it.
+pub const CORDON_IDLE: Color = Color::srgb(0.62, 0.60, 0.56);
+/// A placed cordon that is holding an anomaly right now.
+pub const CORDON_HOLDING: Color = Color::srgb(0.98, 0.96, 0.90);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GOC damage-type matrix — the rival's color language for anomalous entities (§3).
 // Magenta = Psionic, Blue = Thaumaturge, Yellow = Polymorph, Red = Regenerator,

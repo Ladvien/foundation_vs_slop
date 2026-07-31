@@ -40,6 +40,18 @@ pub struct AcousticStimulusTuning {
     pub enemy_death_loudness: f32,
     /// Deposit amount for a unit death.
     pub unit_death_loudness: f32,
+    /// Per-second deposit for a living SCP-610 bloom — the sound of the thing seething.
+    ///
+    /// Unlike every other knob here this is **continuous, not per-event**: a bloom does not do
+    /// anything, it simply is, so its stimulus is a rate rather than a one-shot amount.
+    ///
+    /// ⚠️ **Its upper [`crate::squad_ai::audio_genome::BOUNDS`] is load-bearing, not a formality.**
+    /// `scp610::deposit_flesh_drone` spends a fixed fraction of this on `THREAT_ANOMALY` as well, and
+    /// SCP-610's own containment rule requires `THREAT_ANOMALY ≤ 0.35` **sampled at the bloom's own
+    /// position**. So a bloom loud enough is a bloom that can never be contained — the search would
+    /// be free to delete the species' entire mechanic. `scp610::tests::a_maximally_loud_bloom_is_still_containable`
+    /// pins the bound against the authored threshold.
+    pub flesh_drone_loudness: f32,
 }
 
 /// How strongly each faction reacts to the *other* faction's din. Fear pulls toward `Flee`; the
@@ -88,6 +100,7 @@ impl Default for AudioTuning {
                 impact_flesh_loudness: 0.15307344,
                 enemy_death_loudness: 0.9537805,
                 unit_death_loudness: 0.7733592,
+                flesh_drone_loudness: 0.35,
             },
             perception: AcousticPerceptionTuning {
                 crab_fear_of_din: 0.35405704,
@@ -143,6 +156,7 @@ pub fn validate_tuning(t: &AudioTuning) -> Result<(), String> {
     non_negative("stimulus.impact_flesh_loudness", t.stimulus.impact_flesh_loudness)?;
     non_negative("stimulus.enemy_death_loudness", t.stimulus.enemy_death_loudness)?;
     non_negative("stimulus.unit_death_loudness", t.stimulus.unit_death_loudness)?;
+    non_negative("stimulus.flesh_drone_loudness", t.stimulus.flesh_drone_loudness)?;
     non_negative("perception.crab_fear_of_din", t.perception.crab_fear_of_din)?;
     non_negative("perception.unit_fear_of_din", t.perception.unit_fear_of_din)?;
     non_negative("perception.crab_draw_to_din", t.perception.crab_draw_to_din)?;

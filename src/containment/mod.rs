@@ -20,6 +20,9 @@
 use bevy::prelude::*;
 
 pub mod area;
+/// Windowed-only feedback for the quarantine verb. Not registered by [`ContainmentPlugin`] — it is
+/// presentation, and the harness must never see a `Gizmos` system.
+pub mod cordon;
 pub mod device;
 pub mod extraction;
 pub mod rule;
@@ -79,7 +82,13 @@ impl ContainmentConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.scp999.validate().map_err(|e| format!("containment.scp999: {e}"))?;
         self.scp1048.validate().map_err(|e| format!("containment.scp1048: {e}"))?;
-        self.scp150.validate().map_err(|e| format!("containment.scp150: {e}"))
+        self.scp150.validate().map_err(|e| format!("containment.scp150: {e}"))?;
+        // ⚠️ `scp610` was MISSING here from the day it was added (found 2026-07-30, FVS-K-1). Every
+        // other rule was validated at load and 610's was not, so a malformed 610 rule — an unknown
+        // channel, a non-finite threshold, a zero hold — would have loaded silently and failed later
+        // as "containment never completes", which is the hardest possible symptom to trace back to a
+        // typo in a config file. One path, no fallback: it fails at the loader like its siblings.
+        self.scp610.validate().map_err(|e| format!("containment.scp610: {e}"))
     }
 }
 pub use device::{ContainmentDevice, HeldBy, Holding};

@@ -995,3 +995,122 @@ fn a_planted_lie_reaches_the_squad_and_firsthand_experience_undoes_it() {
     assert_eq!(pulled, 1, "purging must report what it pulled");
     assert!(app.world().resource::<Records>().filed.is_empty());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FVS-K-1 — SCP-610: the drone must not eat its own capture, and killing must yield nothing.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// **The calibration guard for `audio_genome`'s `flesh_drone_loudness` ceiling.**
+///
+/// SCP-610 radiates `THREAT_ANOMALY` continuously (`scp610::deposit_flesh_drone`), and its own
+/// authored rule requires `THREAT_ANOMALY ≤ 0.35` **sampled at its own position**. Those two facts
+/// point in opposite directions, deliberately — a bloom is harder to contain the more of a presence
+/// it is. This pins that it stays a *tension* rather than an impossibility, at the loudest bloom the
+/// offline search is allowed to evolve.
+///
+/// Without this, `squad_ai::audio_search` is free to raise the knob until 610 can never be contained,
+/// which would delete the species' entire mechanic while every unit test stayed green — and the
+/// search would be *rewarded* for it, because a capture-hostile world scores well on a fitness that
+/// does not know about captures (FVS-I-1).
+///
+/// Deposits are driven directly rather than by spawning a bloom, to isolate the field question from
+/// squad AI: a real bloom is `Hostile`, so a live squad would shoot it, make noise, and fail the
+/// rule's *other* clause for reasons that have nothing to do with the drone.
+#[test]
+fn the_loudest_evolvable_bloom_can_still_be_contained() {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 5);
+
+    let rule = app
+        .world()
+        .resource::<foundation_vs_slop::containment::ContainmentRules>()
+        .0
+        .scp610
+        .clone();
+    let hold_secs = rule.hold_secs;
+    let (target, pos) = spawn_target(&mut app, rule);
+
+    // The worst case the search can reach, as a PER-SECOND rate — then scaled by the fixed timestep
+    // exactly as `deposit_flesh_drone` does. Depositing the raw rate every tick instead is a 60×
+    // error, and it is the error this test caught the first time it ran.
+    let per_second = foundation_vs_slop::squad_ai::audio_genome::FLESH_DRONE_LOUDNESS_MAX
+        * foundation_vs_slop::scp610::DREAD_PER_DIN;
+    let dread = per_second / 60.0;
+
+    app.world_mut().get_mut::<Containment>(target).expect("containment").begin();
+
+    // Long enough to reach the channel's steady state AND complete the 12 s hold on top of it. 60 Hz
+    // fixed tick, so this is ~25 s of game time against a 0.4/s evaporation constant.
+    let max_ticks = (hold_secs * 120.0) as u32 + 600;
+    for _ in 0..max_ticks {
+        app.world_mut().resource_mut::<StigDeposits>().0.push(Deposit {
+            field: FieldId::THREAT_ANOMALY,
+            pos,
+            amount: dread,
+        });
+        step(&mut app, &cfg, 1);
+        if phase(&app, target) == Phase::Contained {
+            break;
+        }
+    }
+
+    assert_eq!(
+        phase(&app, target),
+        Phase::Contained,
+        "a bloom at the search's loudest permitted drone ({dread} THREAT_ANOMALY/tick) never \
+         completes its own capture — lower `audio_genome::FLESH_DRONE_LOUDNESS_MAX` or \
+         `scp610::DREAD_PER_DIN`, or raise the authored threshold in config.ron"
+    );
+}
+
+/// **Killing SCP-610 yields nothing** — the half of FVS-C-1's acceptance that never shipped, because
+/// 610 had no `Health` at all until FVS-K-1 gave it one.
+///
+/// The invariant is structural rather than careful: the reward is an `on_add` hook on `Contained`, so
+/// there is no second path to a `Specimen`. This checks it from the outside anyway, because "no
+/// second path exists" is exactly the kind of claim that stops being true quietly.
+#[test]
+fn killing_a_bloom_grants_no_specimen() {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 5);
+
+    let bloom = {
+        let world = app.world_mut();
+        let mut q = world
+            .query_filtered::<Entity, With<foundation_vs_slop::scp610::Scp610>>();
+        q.iter(world).next().expect("the level must seed SCP-610 blooms")
+    };
+    let before = specimen_count(&mut app);
+
+    // Kill it the only way anything dies here: run its health to zero.
+    {
+        let mut health = app
+            .world_mut()
+            .get_mut::<foundation_vs_slop::health::Health>(bloom)
+            .expect("FVS-K-1 gave every bloom Health");
+        health.current = 0.0;
+    }
+    step(&mut app, &cfg, 5);
+
+    assert_eq!(
+        specimen_count(&mut app),
+        before,
+        "killing an anomaly must bank NOTHING — that is the pivot the whole backlog is built on"
+    );
+    assert!(
+        app.world().get::<Contained>(bloom).is_none(),
+        "a corpse must never carry the terminal capture marker"
+    );
+    assert!(
+        app.world().get::<foundation_vs_slop::enemy::Hostile>(bloom).is_none(),
+        "`kill_blooms` must retire the corpse as a target, or bolts keep hitting it forever"
+    );
+    assert!(
+        app.world().get::<Transform>(bloom).is_some(),
+        "the bloom must NOT be despawned — 610 is terrain, and it collapses in place (README §5)"
+    );
+}
