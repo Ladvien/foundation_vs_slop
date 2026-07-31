@@ -497,30 +497,6 @@ fn triangle_indices(mesh: &Mesh, vertex_count: usize) -> Vec<[u32; 3]> {
 /// relative to the character root). Robust to arbitrary layouts: missing `NORMAL` → synthesized flat
 /// normals; missing `UV_0` → zero-filled; `U16`/`U32`/non-indexed all handled. Returns `false`
 /// (+`warn!`) if the mesh has no `Float32x3` positions or isn't a triangle list.
-/// Signed-tetrahedron volume of a triangle mesh (divergence theorem): `Σ a·(b×c) / 6` over every
-/// triangle, returned as a magnitude. Used to weigh gib chunks (`weight = density × volume`, see
-/// `gore`). `None` if the mesh lacks `Float32x3` positions or isn't a triangle list (one path, no
-/// fallback). Assumes a closed, consistently-wound surface — the meat-chunk meshes are.
-pub(crate) fn mesh_signed_volume(mesh: &Mesh) -> Option<f32> {
-    let VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)? else {
-        return None;
-    };
-    if mesh.primitive_topology() != PrimitiveTopology::TriangleList {
-        return None;
-    }
-    let p: Vec<Vec3> = positions.iter().map(|v| Vec3::from_array(*v)).collect();
-    let tris = triangle_indices(mesh, p.len());
-    let mut vol = 0.0f32;
-    for t in &tris {
-        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
-        if a >= p.len() || b >= p.len() || c >= p.len() {
-            continue;
-        }
-        vol += p[a].dot(p[b].cross(p[c]));
-    }
-    Some((vol / 6.0).abs())
-}
-
 fn append_mesh(soup: &mut Soup, mesh: &Mesh, xform: Mat4, interior: bool) -> bool {
     let Some(VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
         warn!("autogib: sub-mesh has no Float32x3 POSITION; skipping it");
