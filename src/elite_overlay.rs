@@ -263,7 +263,7 @@ pub fn apply_dim(gc: &mut GameConfig, dim: Dim, spec: &str) -> Result<String, St
             e.lighting.apply_to(&mut gc.lighting); // ditto — visual light knobs stay authored
             e.gore.apply_to(&mut gc.gore); // ditto — the ~22 cosmetic gore knobs stay authored
             format!(
-                "world (ai_tuning+sim+mold+almond_water+lighting) <- {spec} (cell {cell:?}, fitness {fit:.3})"
+                "world (ai_tuning+sim+mold+almond_water+lighting+gore) <- {spec} (cell {cell:?}, fitness {fit:.3})"
             )
         }
         Dim::Audio => {

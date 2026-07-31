@@ -1659,7 +1659,7 @@ fn apply_archive(
             touched.push("src/behavior_tuning.rs".into());
         }
         Dim::World => {
-            // All four slices `world_genome` encodes, matching `apply_dim(Dim::World)`. If the permanent
+            // All six slices `world_genome` encodes, matching `apply_dim(Dim::World)`. If the permanent
             // bake spliced fewer slices than the runtime overlay applies, one elite would mean two different
             // games — and its archived fitness would match neither.
             use foundation_vs_slop::almond_water::AlmondWaterDynamics;

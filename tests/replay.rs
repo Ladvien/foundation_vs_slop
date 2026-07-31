@@ -619,6 +619,53 @@ fn authored_world_config_override_is_a_noop() {
 }
 
 #[test]
+fn every_world_config_slice_reaches_the_game_config() {
+    // Seam guard for the class FVS-I-7 fell into: the gore slice was wired through encode/decode,
+    // `apply_dim`, the artifacts doc, and the `train apply` splice — every seam except the ONE that scores
+    // rollouts (`build_headless_app`'s `cfg.config` block) — so a world search would have assigned fitness
+    // to the 8 gore genes against the authored slice. The behavioural pair above cannot see that shape:
+    // `a_mutated_world_config_changes_the_sim` mutates every slice at once, so the hash moves on the wired
+    // slices and the dropped one hides. This test perturbs ONE representative knob per `WorldConfig` slice
+    // and asserts each individually arrives in `GameConfig` — a slice wired everywhere but the seam fails
+    // here, not in a five-hour bake. For gore it also checks the `GoreSettings` resource `GorePlugin`
+    // cloned out of `gc.gore` at plugin build (the copy the systems actually read), pinning the
+    // seam-before-plugin ordering the apply relies on.
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::gore::{GoreDynamics, GoreSettings};
+    use foundation_vs_slop::squad_ai::world_genome::{authored, decode};
+    let _serial = serial_guard();
+
+    let mut w = decode(&authored()).expect("the authored world genome decodes");
+    // Exact-in-f32 nudges, small enough to sit inside every slice validator's range.
+    w.ai.fields.scent.evaporate += 0.0625;
+    w.sim.fear.per_crab += 0.0625;
+    w.mold.growth += 0.0625;
+    w.almond.strong_seep += 0.0625;
+    w.lighting.field_intensity += 0.0625;
+    w.gore.max_gibs += 7;
+
+    let cfg = SimConfig::deterministic_core().with_world_config(w.clone());
+    let app = build_headless_app(&cfg);
+
+    let gc = app.world().resource::<GameConfig>();
+    assert_eq!(gc.ai_tuning.fields.scent.evaporate, w.ai.fields.scent.evaporate, "ai slice never applied at the seam");
+    assert_eq!(gc.sim.fear.per_crab, w.sim.fear.per_crab, "sim slice never applied at the seam");
+    assert_eq!(gc.mold.growth, w.mold.growth, "mold slice never applied at the seam");
+    assert_eq!(gc.almond_water.strong_seep, w.almond.strong_seep, "almond slice never applied at the seam");
+    assert_eq!(gc.lighting.field_intensity, w.lighting.field_intensity, "lighting slice never applied at the seam");
+    assert_eq!(
+        GoreDynamics::from_config(&gc.gore),
+        w.gore,
+        "gore slice never applied at the seam"
+    );
+    assert_eq!(
+        GoreDynamics::from_config(app.world().resource::<GoreSettings>()),
+        w.gore,
+        "`GorePlugin` cloned `gc.gore` before the seam wrote it — the seam-before-plugins ordering regressed"
+    );
+}
+
+#[test]
 fn a_mutated_world_config_changes_the_sim() {
     // The dual of the no-op test: a *mutated* world genome, installed the same way, must change
     // `snapshot_hash`. Proves the config actually reaches the running sim (crab fields/fear, combat,

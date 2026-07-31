@@ -354,6 +354,11 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // the field on FixedUpdate and is in this harness, so these move the trajectory; the cosmetic
         // `LightingPlugin` is not, so the visual knobs would be inert here anyway.
         w.lighting.apply_to(&mut gc.lighting);
+        // Same: only the 8 sim-relevant gore dials (FVS-I-7) — debris cap, autogib fragment count/throw,
+        // and the meat the crabs forage on. `GorePlugin` (registered below) clones `gc.gore` at plugin
+        // build, i.e. AFTER this seam, so this write is what a rollout's gib economy is scored against.
+        // Guarded by `every_world_config_slice_reaches_the_game_config` (tests/replay.rs).
+        w.gore.apply_to(&mut gc.gore);
     }
     if let Some(b) = cfg.behavior {
         // Same seam: install the evolved `behavior:` slice before `AiPlugin` reads `gc.behavior` into the
