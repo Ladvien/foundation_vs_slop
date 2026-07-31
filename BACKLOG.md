@@ -441,10 +441,33 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   both channels have exactly one consumer each and a proven shape to copy.
   *Wanted:* movement/fire/verb choices that trade speed for quiet, and a HUD channel that makes the
   din legible (the containment HUD already names channels, so the vocabulary exists).
-  · *Deps:* — · *Touches:* `src/audio_tuning.rs`, `src/squad.rs`, `src/ui/` · *Reading:* **[STIG]**, [STIG-AD], [PHERO-V]
+  > 📋 **Four costed options researched 2026-07-30 → `docs/noise_discipline_options.md`. Needs your pick.**
+  > **A** `MOVE QUIET` latched stance (S/M — copies the `HoldFire` non-`ArmedTool` shape exactly) ·
+  > **B** din meter in the HUD (S) · **C** graduated investigation, the Mafia III recognition model
+  > (M/L — **moves goldens**, new per-agent `FixedUpdate` state) · **D** tier the deposit peaks by event
+  > type (S).
+  > *Recommended order:* **D + B** first (neither touches the pinned core), then **A** if you want the
+  > verb; hold **C** until N-13 and the re-pin question are settled, since it is the only one that moves
+  > goldens and would land on top of a known live leak.
+  > **One finding worth keeping even if none of the options ship:** a stigmergy channel with a `deposit`
+  > and an `evaporate` rate **is** Crytek's ADSR perception envelope (*Game AI Pro 1* ch. 31), except
+  > spatial as well as temporal. What is missing is their *balanced peaks per event type* — footstep,
+  > bolt impact, shot and death currently deposit at rates set independently rather than as a ladder.
+  > And the repo's split of AI-hearing from audio playback (`sim_harness.rs:282`) is exactly what
+  > *Game AI Pro 4* ch. 16 (Mafia III) argues for — **validated, do not "unify" them.**
+  · *Deps:* — · *Touches:* `src/audio_tuning.rs`, `src/squad.rs`, `src/ui/` · *Reading:* **[STIG]**, [STIG-AD], [PHERO-V], + *Game AI Pro* 1 ch.31 / 4 ch.16, Grimshaw & Schott 10.26503/dl.v2007i1.313, Boonen & Mieritz 10.26503/dl.v2018i3.1051
 - **FVS-N-21 — The biome genes are invisible to the level descriptor (FOUND 2026-07-30, audit)** · S
   Q-3 added `biome_mix`/`biome_scale` to `LevelGenome` because `CLAUDE.md` requires wiring features into RL/QD. **Audit says the descriptor cannot see them.** `level_quality.rs:72` has exactly two axes — `furniture_per_room / 8` and `infestation / 0.5` — and biome moves neither: furniture keys on room *tags*, mould affinity keys on room *tags*, and `score()` never reads biome. Two genomes differing only in biome land in the same cell with the same fitness, so the winner is decided by whatever else differs, or by evaluation luck — which is materially worse while N-13 is live. This is the archive-collapse mechanism that already bit the policy archive once.
-  **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid. · *Deps:* — · *Reading:* [QD]
+  **Three ways out:** remove the genes (biome is an authored art choice, and `docs/animation.md` already establishes cosmetic-only systems as a documented exception); add a third descriptor axis (the archive is 2-D — expensive for a cosmetic dial); or **couple biome to something the descriptor already measures** — concrete resists mould, carpet harbours it — which makes `biome_mix` move the `infestation` axis with no archive change and is lore-plausible. Leaving it as-is is the one option to avoid.
+  > 💡 **FVS-Q-8 made option 3 materially cheaper (2026-07-30).** Biome is now resolved **per zone**: every
+  > cell of a room shares one treatment and a corridor inherits an endpoint room. So "concrete resists
+  > mould, carpet harbours it" is now a clean **per-room** property — `mould affinity keys on room tags`
+  > already, and biome is now the same shape as a room tag. Before Q-8 the coupling would have had to be
+  > written against a per-cell mosaic, where "this room is carpeted" was not a well-formed statement.
+  > It also raises the payoff: with rooms uniformly one biome, `biome_mix` shifts what fraction of *rooms*
+  > harbour mould, which is exactly the `infestation` axis the descriptor already measures. Still your
+  > call among the three — but option 3 is now the cheap one, not the clever one.
+  · *Deps:* — · *Reading:* [QD]
 - **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save (FOUND 2026-07-30)** · S
   C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
 - **FVS-N-13 — Dungeon tiles are not `run_scoped()`, so every expedition leaks a whole dungeon (FOUND 2026-07-28, review)** · M · *determinism: touches the pinned core*
