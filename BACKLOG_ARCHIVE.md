@@ -1990,3 +1990,25 @@ Split out 2026-07-30.
   any canonical path), so nothing shipped is invalidated — but the H-1 bake must run against N=146.
   · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`, `src/config.rs`, `src/elite_overlay.rs`,
   `src/squad_ai/coevolve/artifacts.rs`, `src/bin/train.rs`, `tests/genome_coverage.rs`
+- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · ✅ **MEASURED 2026-07-31 — the decision stands, with its cost now quantified**
+  **The decision (2026-07-28, FVS-H-3):** `CellHistory::interest` takes `|progress|`, so a cell the
+  player is getting rapidly worse at is as interesting as one they are mastering. Signed progress
+  would make the director *flee* anything going badly — the opposite of a curriculum.
+  **The falsification run** (simulated through the real `pick` path; pinned by
+  `director::tests::a_declining_cell_holds_the_director_until_the_decline_bottoms_out`): with one
+  mastered cell and one in steady decline (0.1 competence lost per expedition from 0.5), the director
+  returns to the declining cell **10 consecutive times — the entire ride to the floor** — and leaves
+  only once the player has flatlined at competence 0 for a full window (interest → 0, then a 50/50
+  tie with the mastered cell). So the H-4 failure mode is real and now has a number: on a losing
+  streak the game *does* keep sending the player back to the thing beating them, for as long as the
+  losing continues; the escape hatch exists but only at the bottom.
+  **Why the decision still stands:** that behaviour is the designed reading — a decline in progress
+  IS live difficulty — and the alternative (signed) fails harder in the measured sim: it would have
+  abandoned the declining cell immediately, which is the flee behaviour the decision was made to
+  avoid. The half-wave-rectify option (gains full weight, losses partial) remains the documented
+  remedy **if playtesting reads the parking as punishment** — that is a feel judgment no simulation
+  settles, which is why the remedy is recorded rather than applied.
+  Note the practical scope: while FVS-H-5's exploration starvation is live (330 expeditions before
+  any exploitation at the shipped archive size), neither this parking nor any other progress-driven
+  behaviour is reachable in a real campaign — H-5's ruling gates when this measurement starts to
+  matter in play. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]

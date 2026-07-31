@@ -315,6 +315,98 @@ mod tests {
         assert_eq!(d.cells.len(), 1);
     }
 
+    /// **FVS-H-5's falsification, run as arithmetic.** The spike asked: does `UNVISITED = INFINITY`
+    /// starve the measured cells at the shipped archive size? Measured answer: yes, and by an order
+    /// of magnitude more than the entry guessed.
+    ///
+    /// The entry estimated "55 expeditions of pure exploration" (one visit per occupied cell). The
+    /// real rule is **6× worse, and exactly so**: a cell scores `UNVISITED` until it has
+    /// **`HISTORY` = 6** readings (not one — `learning_progress` needs two full windows), and a cell
+    /// leaves the infinite tie the moment it graduates, so every pick necessarily lands on a
+    /// still-unmeasured cell and none is ever "wasted". The exploration phase is therefore not
+    /// stochastic at all: it is **exactly `cells × HISTORY` expeditions, on every seed**. This
+    /// simulation drives the REAL `pick`/`observe` path over a 55-cell archive and counts
+    /// expeditions until every cell is measured — i.e. until the first pick that can possibly
+    /// exploit learning progress.
+    #[test]
+    fn the_unvisited_bonus_starves_exploitation_at_the_shipped_archive_size() {
+        // 55 = the occupied-cell count of the shipped `elites_levels.ron` the H-5 entry cites.
+        let candidates: Vec<(usize, usize)> = (0..55).map(|i| (i / 8, i % 8)).collect();
+        let mut runs = Vec::new();
+        for trial in 0..10u64 {
+            let mut d = CurriculumDirector::default();
+            let mut expeditions = 0u64;
+            loop {
+                let cell = d
+                    .pick(&candidates, trial.wrapping_mul(0x9E37_79B9) ^ expeditions)
+                    .expect("candidates are non-empty");
+                d.cells.entry(key(cell)).or_default().observe(0.5);
+                expeditions += 1;
+                let all_measured = candidates
+                    .iter()
+                    .all(|c| d.cells.get(&key(*c)).is_some_and(|h| h.learning_progress().is_some()));
+                if all_measured {
+                    break;
+                }
+                assert!(expeditions < 20_000, "exploration never completed — rule change?");
+            }
+            runs.push(expeditions);
+        }
+        // Measured 2026-07-31: exactly 330 on all 10 seeds — 55 cells × HISTORY(6), the closed form
+        // — against a campaign of perhaps 10-30 expeditions. The director's exploitation phase is
+        // unreachable in any real campaign at this archive size; until then it is, in effect, a
+        // uniform random sampler. If a future change (finite prior, fewer required readings) moves
+        // this number in EITHER direction, this test should fail so FVS-H-5 gets re-measured.
+        assert!(
+            runs.iter().all(|&e| e == 55 * HISTORY as u64),
+            "exploration phase is no longer exactly cells×HISTORY ({runs:?}) — \
+             re-measure FVS-H-5 and update its entry"
+        );
+    }
+
+    /// **FVS-H-4's falsification, run as arithmetic.** The spike asked: does absolute progress make
+    /// the director *park* in a cell the player is steadily losing at ("the game keeps sending me
+    /// back to the thing beating me")? Measured answer: yes — for exactly as long as the decline is
+    /// still steepening or moving, and it leaves within one window of the player flatlining.
+    ///
+    /// That is both halves of the H-4 entry at once: the parking IS the designed reading (a cell the
+    /// player is getting worse at is live, not settled), and the exit exists but only at the floor —
+    /// the director stops returning once the player is fully crushed (progress → 0 at competence 0),
+    /// not before. Whether that reads as "curriculum" or "punishment" is a playtest judgment; this
+    /// pins what the rule DOES so that judgment is made about the real behaviour.
+    #[test]
+    fn a_declining_cell_holds_the_director_until_the_decline_bottoms_out() {
+        let mut d = CurriculumDirector::default();
+        // One mastered cell (settled, interest 0) and one in steady decline (interest |Δ| = 0.3).
+        d.cells.insert(key((0, 0)), history(&[1.0; HISTORY]));
+        d.cells.insert(key((1, 1)), history(&[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]));
+        let candidates = [(0, 0), (1, 1)];
+        let mut consecutive = 0u32;
+        let mut level = 0.5f32;
+        loop {
+            let pick = d.pick(&candidates, consecutive as u64).expect("two candidates");
+            if pick != (1, 1) {
+                break;
+            }
+            consecutive += 1;
+            // The player keeps losing: competence falls 0.1 per expedition until the floor.
+            level = (level - 0.1).max(0.0);
+            if let Some(h) = d.cells.get_mut(&key((1, 1))) {
+                h.observe(level);
+            }
+            assert!(consecutive < 100, "the director NEVER leaves a declining cell — worse than H-4 feared");
+        }
+        // Measured 2026-07-31: 10 consecutive returns while the decline runs 0.5 → 0.0 and the
+        // window drains to all-zeros (interest stays ≥ 0.1 the whole way down), then the first
+        // non-(1,1) pick comes only from the 50/50 tie once BOTH cells sit at interest 0. So the
+        // director rides a losing streak all the way to the floor — never longer (the escape is
+        // real), and never shorter (there is no early mercy).
+        assert!(
+            (10..=30).contains(&consecutive),
+            "expected the full ride down plus at most a few ties, got {consecutive}"
+        );
+    }
+
     #[test]
     fn competence_reads_the_councils_terms_but_answers_a_different_question() {
         // A flawless run outscores a wipe, and extraction is the hinge for both readers.

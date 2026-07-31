@@ -663,20 +663,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Done when:* the divergent decision is named and fixed, **or** the failure is proven to be an artefact
   of oversubscription that cannot occur at shipped thread counts — with the measurement that shows it.
   · *Deps:* — · *Touches:* `src/squad_ai/evaluate.rs`, wherever the order-dependent decision lives · *Reading:* [ABM], [TEST-NT]
-- **FVS-H-4 — SPIKE: is ABSOLUTE competence progress right, or should it be signed?** · S · *determinism: offline measurement*
-  **The decision, made 2026-07-28 in FVS-H-3.** `CellHistory::interest` takes `|progress|`, so a cell the
-  player is getting rapidly **worse** at is as interesting as one they are mastering — both mean the
-  difficulty is live rather than settled. Signed progress would make the director *flee* anything going
-  badly, which is the opposite of a curriculum.
-  **Why it is a spike and not a settled fact:** [LPM] defines CPM over the *derivative* of competence
-  without committing to a sign, because a robot setting its own goals and a game pacing a player are not
-  the same problem. A player on a losing streak may experience "the game keeps sending me back to the
-  thing beating me" as punishment rather than as a curriculum — the failure mode absolute progress
-  invites and signed progress cannot have.
-  *Falsify it:* play (or replay) a campaign that deliberately declines, and check whether the director
-  parks in the declining cell. Measure how many consecutive expeditions it takes to leave.
-  *If wrong:* half-wave rectify — weight gains fully and losses partially — rather than flipping to
-  pure signed, which would reintroduce the flee behaviour. · *Deps:* H-3 · *Reading:* **[LPM]**, [GRIP]
 - **FVS-H-5 — SPIKE: does `UNVISITED = INFINITY` starve the measured cells?** · S · *determinism: offline measurement*
   **The decision.** An unvisited cell scores `f32::INFINITY`, so every cell is tried once before any
   measured cell is revisited. Without it a pure-progress rule can never choose a cell with no history —
@@ -686,6 +672,21 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   one expedition per pick that is 55 expeditions of pure exploration before the director exploits
   anything it learned — which may be longer than an entire campaign. Optimism under uncertainty is
   correct in principle and possibly far too patient at this archive size.
+  > ### 📐 MEASURED 2026-07-31 — starvation confirmed, and it is 6× worse than this entry guessed, exactly.
+  > Simulated through the real `pick`/`observe` path over a 55-cell archive (10 seeds, pinned by
+  > `director::tests::the_unvisited_bonus_starves_exploitation_at_the_shipped_archive_size`): the
+  > exploration phase is **exactly 330 expeditions on every seed** — not ~55. Two compounding terms
+  > the entry missed: a cell scores `UNVISITED` until it has **`HISTORY` = 6 readings** (two full
+  > windows), not one; and a cell leaves the infinite tie the moment it graduates, so no pick is ever
+  > "wasted" and the phase has the closed form **occupied-cells × HISTORY**. Against a 10–30
+  > expedition campaign, the director's exploitation phase is unreachable — in practice it is a
+  > **uniform random sampler** at this archive size.
+  > **Needs your ruling, not a drive-by fix** (interacts with H-6 and with H-8's inert-director
+  > call): the entry's own preferred remedy is a finite decaying optimistic prior, and the
+  > measurement adds a second lever it did not name — the 6-reading requirement is the bigger
+  > multiplier, so allowing a one-window (3-reading) provisional progress estimate would cut the
+  > floor from 330 to 165 even before touching the prior. Both change which cells a campaign sees;
+  > neither is observable while H-8 leaves the director's picks unread.
   *Falsify it:* count expeditions-to-first-revisit on a real campaign against expected campaign length.
   *If wrong:* the standard fixes are a decaying optimistic prior (finite, not `INFINITY`) or sampling a
   *subset* of cells per campaign. Prefer the first — it keeps one mechanism. · *Deps:* H-3 · *Reading:* **[LPM]**, [QD]
@@ -699,7 +700,8 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   `None` to `UNVISITED`. If FVS-H-5 replaces `INFINITY` with a finite prior, the `Option` may collapse
   into that prior and become ceremony. Worth re-checking *after* H-5, not before.
   *Falsify it:* after H-5 lands, try `learning_progress() -> f32` with the prior folded in and see
-  whether any behaviour changes. If nothing does, simplify. · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
+  whether any behaviour changes. If nothing does, simplify. *(Status 2026-07-31: H-5 is measured and
+  waiting on your remedy ruling — this stays parked behind that ruling, as designed.)* · *Deps:* H-3, H-5 · *Reading:* [EPISTEMIC], **[LPM]**
 ---
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
