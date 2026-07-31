@@ -1262,6 +1262,92 @@ fn dramatic_burst_is_live_and_deterministic() {
     assert_eq!(a, b, "the dramatic host-burst must be bit-reproducible across same-seed runs");
 }
 
+/// **FVS-J-6 fast reproducer** — the one known-red cell of
+/// `search_rollouts_of_mutants_are_reproducible_under_load`, pinned: mutant #3 (drawn 4th from the
+/// fixed mutant-rng stream) on world `0x5C09191`, whose bimodal snapshot pair has reproduced
+/// byte-identically across commits. The full guard costs ~25 min and, by libtest name order, reports
+/// this red ~35-50 min into the pass; this one cell reports it in ~2-3 min and the `a0_` prefix sorts
+/// it FIRST in the binary. Ordering tests by failure-detection yield per unit cost is the Spieker et
+/// al. result ("Reinforcement Learning for Automatic Test Case Prioritization and Selection in
+/// Continuous Integration", ISSTA 2017, doi:10.1145/3092703.3092709). Breadth is NOT lost: the full
+/// guard below runs unchanged; when FVS-J-6 closes, this stays as a cheap first-in-line canary for
+/// the same class of regression. Same 8-busy-thread load environment as the full guard — the load is
+/// part of the failing recipe, not decoration.
+///
+/// Do NOT add `serial_guard()`: `rollout` takes it internally and the guard is not reentrant.
+#[test]
+fn a0_fvs_j6_mutant3_on_world_0x5c09191_reproduces() {
+    use foundation_vs_slop::squad_ai::coevolve::{
+        brains_of, mutate_squad_feasible, mutate_swarm_feasible, SquadGenome, SwarmGenome, Templates,
+    };
+    use foundation_vs_slop::squad_ai::evaluate::rollout;
+    use foundation_vs_slop::squad_ai::world_genome;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The pinned red cell of the full guard (constants' rationale lives there).
+    const MUTANT_INDEX: usize = 3;
+    const REPS: usize = 3;
+    const TICKS: u32 = 7200;
+    const SEED: u64 = 0x5C09191;
+    const MUTANT_RNG_SEED: u64 = 0x6D07A17;
+
+    let t = Templates::authored();
+    let mut rng = foundation_vs_slop::rng::seeded(MUTANT_RNG_SEED);
+    // The mutant stream is sequential: reproducing mutant #3 means drawing #0-#2 first, exactly as the
+    // full guard does — the draw loop below must stay byte-for-byte in step with the guard's.
+    let mut genomes = Vec::new();
+    for _ in 0..=MUTANT_INDEX {
+        let squad = mutate_squad_feasible(&t, &SquadGenome::authored(&t), &mut rng)
+            .expect("feasible squad mutant");
+        let swarm = mutate_swarm_feasible(&t, &SwarmGenome::authored(&t), &mut rng)
+            .expect("feasible swarm mutant");
+        let world = world_genome::mutate(&world_genome::authored(), 0.15, &mut rng)
+            .expect("feasible world mutant");
+        genomes.push((squad, swarm, world));
+    }
+    let (squad, swarm, world) = &genomes[MUTANT_INDEX];
+    let wc = world_genome::decode(world).expect("world mutant decodes");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    let mut seen: Vec<(u64, usize)> = Vec::new();
+    for _ in 0..REPS {
+        let brains = brains_of(&t, squad, swarm).expect("brains from mutant");
+        let r = rollout(brains, Some(wc.clone()), None, None, SEED, TICKS);
+        let key = (r.snapshot, r.trace.decisions.len());
+        if !seen.contains(&key) {
+            seen.push(key);
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    assert!(
+        seen.len() == 1,
+        "FVS-J-6 reproduced in the pinned cell: mutant #{MUTANT_INDEX} (rng seed \
+         {MUTANT_RNG_SEED:#x}) on world {SEED:#x} gave {} distinct (snapshot, decisions) outcomes \
+         {seen:x?}. The full mutant guard later in this binary carries the breadth; localize with the \
+         `trace_episode`/`row_trace` tooling its failure message names.",
+        seen.len()
+    );
+}
+
 /// **The mutant guard** — same-seed reproducibility of the rollouts the SEARCH actually evaluates.
 ///
 /// Its sibling `search_rollouts_are_reproducible_under_load` runs the **authored** genome, and that is the
