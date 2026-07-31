@@ -1931,3 +1931,29 @@ Split out 2026-07-30.
   `the_shipped_replay_goldens_are_repinnable` — a **real-file** guard that would have caught this
   originally, since the fixtures all predated the file shape that broke it.
   · *Touches:* `src/bake.rs`
+- **FVS-N-13 — Dungeon tiles were not `run_scoped()`, so every expedition leaked a whole dungeon** · M · ✅ **FIXED 2026-07-31**
+  `dungeon::render::spawn_tiles` moved from `Startup` to `OnEnter(RunState::Active)` in the per-run
+  migration, and its tile entities never gained `session::run_scoped()`. The only `run_scoped()` in
+  the file was on the ground half-space. So floor tiles, wall slabs, lintels, corner posts — **and
+  their Avian static colliders** — survived the run: play run 1 → RETURN TO SITE → run 2 and a
+  different map generated at the same origin with run 1's entire tile set still resident. Two
+  interpenetrating dungeons, invisible run-1 walls that gib chunks bounce off, and an unbounded
+  entity/mesh/collider leak of one dungeon per expedition.
+  *Shipped:* the tag, at the one `commands.spawn` every tile goes through.
+  > ### 📐 The predicted golden movement DID NOT HAPPEN — and the prediction is why this sat unfixed
+  > This entry said *"Adding the tag WILL move the goldens — it changes what exists in the pinned
+  > world … this needs a deliberate measure-and-re-pin, not a drive-by edit. That is the only reason
+  > it is filed rather than fixed."* **Measured 2026-07-31: both `deterministic_core_is_bit_identical`
+  > and `..._across_many_builds` are green, unchanged.** A `DespawnOnExit` component on tile entities
+  > adds no schedule node and touches no actor `Transform`/`Health` or stigmergy grid, so it reaches
+  > neither `snapshot_hash` nor `field_hash`.
+  > This refines Push 8's rule, which is stated in terms of *resources* and *systems*: **adding a
+  > component to non-actor entities is hash-neutral too**; what is not neutral is adding an unordered
+  > `FixedUpdate` system. The cost of the wrong prediction was a real leak left live for three days on
+  > the strength of an unmeasured claim — the same lesson this backlog keeps recording, this time
+  > about a *pessimistic* guess rather than an optimistic one.
+  *Pinned by* `session::leaving_and_re_entering_a_run_builds_a_fresh_different_world`, extended to
+  count `Tile` entities: it now asserts the tile set is empty after leaving a run, and that two
+  expeditions in, the world holds one dungeon's worth of tiles rather than two. Counting only `Unit`
+  is exactly what let this hide — units despawned correctly the whole time.
+  · *Touches:* `src/dungeon/render.rs`, `tests/session.rs`

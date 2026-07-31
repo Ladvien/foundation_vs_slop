@@ -230,7 +230,19 @@ fn leaving_and_re_entering_a_run_builds_a_fresh_different_world() {
         let mut q = world.query_filtered::<bevy::prelude::Entity, bevy::prelude::With<Unit>>();
         q.iter(world).count()
     };
+    // Counting ONLY units is what let FVS-N-13 hide: the dungeon's tiles (and their Avian static
+    // colliders) were never `run_scoped()`, so every expedition left a whole map resident and the
+    // next one generated *through* it — invisible walls a gib chunk bounces off. Units despawned
+    // correctly the whole time, so this test passed while the leak grew.
+    let tile_count = |app: &mut bevy::prelude::App| {
+        let world = app.world_mut();
+        let mut q = world
+            .query_filtered::<bevy::prelude::Entity, bevy::prelude::With<foundation_vs_slop::dungeon::Tile>>();
+        q.iter(world).count()
+    };
     assert_eq!(unit_count(&mut app), 5, "the first run is populated");
+    let first_tiles = tile_count(&mut app);
+    assert!(first_tiles > 0, "the first run built a dungeon");
 
     // Leave the run — what `RETURN TO SITE` / `QUIT TO TITLE` do.
     app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
@@ -241,11 +253,25 @@ fn leaving_and_re_entering_a_run_builds_a_fresh_different_world() {
         0,
         "leaving a run must despawn its entities — that is `run_scoped()` doing its job"
     );
+    assert_eq!(
+        tile_count(&mut app),
+        0,
+        "leaving a run must despawn its DUNGEON too (FVS-N-13). A surviving tile set means the next \
+         expedition generates a second map through the first one, colliders and all."
+    );
 
     // Start a new one — what `NEW RUN` does.
     app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Active);
     step(&mut app, &cfg, 2);
     assert_eq!(unit_count(&mut app), 5, "a new run must re-populate");
+    let second_tiles = tile_count(&mut app);
+    assert!(second_tiles > 0, "a new run must build its own dungeon");
+    // The decisive shape: two expeditions in, the world holds ONE dungeon's worth of tiles, not two.
+    assert!(
+        second_tiles < first_tiles * 2,
+        "expedition 2 resident tiles ({second_tiles}) approach two dungeons ({first_tiles} each) — \
+         the run-1 map is still resident"
+    );
     assert_eq!(run_outcome(&mut app), RunOutcome::Undecided, "a new run starts undecided");
     assert!(run_ticks(&mut app) <= 2, "a new run restarts its clock, got {}", run_ticks(&mut app));
 

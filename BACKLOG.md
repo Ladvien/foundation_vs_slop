@@ -546,20 +546,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   · *Deps:* — · *Reading:* [QD]
 - **FVS-N-22 — Appending a `knowledge::Subject` invalidates every campaign save (FOUND 2026-07-30)** · S
   C-1's `Subject::Flesh` broke save loading: `persist` refuses with *"Expected an array of length 7 but found 6"*. The refusal is **correct** — misreading saved beliefs would be worse — but every existing campaign breaks on any content addition, and the failure cascades in a way that cost real time here: deleting the save reset `ConversationsPlayed`, so the one-shot intro replayed every launch, and its `Choice` node froze the sim indefinitely (`dialogue/runtime.rs:4`), which made **every screenshot taken that day a capture of a paused game**. Needs a ruling: accept as normal for content additions, or version the save and migrate.
-- **FVS-N-13 — Dungeon tiles are not `run_scoped()`, so every expedition leaks a whole dungeon (FOUND 2026-07-28, review)** · M · *determinism: touches the pinned core*
-  `dungeon::render::spawn_tiles` moved from `Startup` to `OnEnter(RunState::Active)` in the per-run
-  migration, but its tile entities never gained `session::run_scoped()`. The only `run_scoped()` in the
-  file is on the ground half-space. So floor tiles, wall slabs, lintels, corner posts — **and their
-  Avian static colliders** — survive the run.
-  **Play run 1 → RETURN TO SITE → run 2** and a different map generates at the same origin while run 1's
-  entire tile set is still resident: two interpenetrating dungeons, invisible run-1 walls that gib
-  chunks bounce off, and an unbounded entity/mesh/collider leak of one dungeon per expedition.
-  `session::run_scoped`'s own doc names dungeon tiles as a carrier; the migration simply missed them.
-  `tests/session.rs::leaving_and_re_entering_a_run_builds_a_fresh_different_world` only counts `Unit`,
-  which is why nothing caught it.
-  ⚠️ **Adding the tag WILL move the goldens** — it changes what exists in the pinned world — so this
-  needs a deliberate measure-and-re-pin, not a drive-by edit. That is the only reason it is filed rather
-  than fixed. · *Deps:* — · *Touches:* `src/dungeon/render.rs`, `src/gore.rs`, `src/mycelia/` · *Reading:* [ECS]
 - **FVS-H-8 — FVS-H-3's director is INERT: the elite overlay writes config nobody re-reads (FOUND 2026-07-28, review)** · M
   `director::pick_next_challenge` calls `apply_dim(&mut gc, Dim::Levels, …)`, which writes `gc.dungeon`,
   `gc.mycelia`, `gc.placement.metropolis` and `gc.placement.density`. **None is ever read again.**
