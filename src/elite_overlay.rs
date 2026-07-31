@@ -70,6 +70,7 @@ struct WorldEntry {
     mold: MoldConfig,
     almond: AlmondWaterDynamics,
     lighting: LightingDynamics,
+    gore: crate::gore::GoreDynamics,
 }
 #[derive(Deserialize)]
 struct AudioEntry {
@@ -260,6 +261,7 @@ pub fn apply_dim(gc: &mut GameConfig, dim: Dim, spec: &str) -> Result<String, St
             gc.mold = e.mold;
             e.almond.apply_to(&mut gc.almond_water); // evolvable gameplay knobs only
             e.lighting.apply_to(&mut gc.lighting); // ditto — visual light knobs stay authored
+            e.gore.apply_to(&mut gc.gore); // ditto — the ~22 cosmetic gore knobs stay authored
             format!(
                 "world (ai_tuning+sim+mold+almond_water+lighting) <- {spec} (cell {cell:?}, fitness {fit:.3})"
             )
@@ -350,15 +352,20 @@ mod tests {
         almond.strong_seep = 12.5;
         almond.heal_rate = 7.25;
         let lighting = LightingDynamics { field_intensity: 2.5, photophobic_gain: 11.0 };
+        let mut gore = crate::gore::GoreDynamics::from_config(&gc.gore);
+        gore.meat_count = 11;
+        gore.autogib_speed_mult = 1.625;
 
         let doc = format!(
             "(resolution: 8, coverage: 1, qd_score: 1.0, elites: [(cell: (0, 0), total_deaths: 0.0, \
-             total_lives: 0.0, fitness: 0.5, ai: {}, sim: {}, mold: {}, almond: {}, lighting: {})])",
+             total_lives: 0.0, fitness: 0.5, ai: {}, sim: {}, mold: {}, almond: {}, lighting: {}, \
+             gore: {})])",
             ron::to_string(&ai).expect("ser ai"),
             ron::to_string(&sim).expect("ser sim"),
             ron::to_string(&mold).expect("ser mold"),
             ron::to_string(&almond).expect("ser almond"),
             ron::to_string(&lighting).expect("ser lighting"),
+            ron::to_string(&gore).expect("ser gore"),
         );
         // pid-unique so two concurrent runs of this test binary (a CI matrix or an overlapping local `cargo
         // test`) don't race on one shared /tmp path — one reading a half-written or already-removed file.
@@ -378,6 +385,11 @@ mod tests {
             "almond dynamics did not land — the original 16-knob drop"
         );
         assert_eq!(LightingDynamics::from_config(&gc.lighting), lighting, "lighting did not land");
+        assert_eq!(
+            crate::gore::GoreDynamics::from_config(&gc.gore),
+            gore,
+            "gore dynamics did not land — the FVS-I-7 slice"
+        );
         assert!(desc.contains("cell (0, 0)"), "the description should name the cell: {desc}");
     }
 

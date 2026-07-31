@@ -91,10 +91,13 @@ fn ledger() -> BTreeMap<&'static str, (Coverage, &'static str)> {
         (
             "gore",
             (
-                Coverage::Gap,
-                "FVS-I-2's headline example. `autogib_*` is un-evolved and it has already cost a \
-                 5/5-win -> wipe regression, because chunk counts reach `crab::assign_meat_targets` \
-                 and therefore the sim. This is a real gap, not an exemption.",
+                Coverage::World,
+                "FVS-I-7, landed 2026-07-31: the 8 dials with a causal path to the world archive's \
+                 `deaths` axis are `gore::GoreDynamics` in the world genome (`max_gibs`, \
+                 `chunk_restitution`, `gib_friction`, the four `autogib_*`, `meat_count`). The ~22 \
+                 cosmetic knobs are deliberately NOT encoded, scoped by the FVS-I-6 audit -- a gene \
+                 no descriptor can see makes the archive worse (FVS-N-21), so `spray_*`, `pool_*`, \
+                 `droplet_*`, `dry_time`, `meat_size` and the colours stay authored.",
             ),
         ),
         ("hair", (Coverage::Cosmetic, "strand rendering only")),
@@ -155,7 +158,9 @@ fn the_known_gaps_are_counted_so_they_cannot_quietly_grow() {
     // A ratchet, exactly like `tests/panic_budget.rs`. Un-evolved gameplay knobs are a real debt; the
     // useful property is not "there are none" (there is one, and closing it is its own work) but that
     // adding another is a deliberate, reviewable act rather than an accident.
-    const KNOWN_GAPS: usize = 1;
+    // Was 1 (`gore`) until FVS-I-7 encoded the 8 sim-relevant gore dials on 2026-07-31 — the ratchet
+    // tightening, which is the direction this test exists to allow.
+    const KNOWN_GAPS: usize = 0;
     let gaps: Vec<&str> = ledger()
         .iter()
         .filter(|(_, (c, _))| *c == Coverage::Gap)

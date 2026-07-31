@@ -204,6 +204,13 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
   until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
   Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
+  ⚠️ **The WORLD genome is now a fourth, independent staleness reason (2026-07-31, FVS-I-7).**
+  `world_genome::N` grew **138 → 146** (`gore::GoreDynamics` — the 8 gore dials with a causal path to
+  the `deaths` axis). Archived genomes are fixed-length vectors, so any world genome written before
+  this cannot decode. Nothing shipped is invalidated *because nothing shipped exists* — this entry
+  already records that `elites_world.ron` has never been produced at any canonical path — but the
+  bake must run against **N=146**, and a stale world archive found lying around is a re-train, not a
+  resize.
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
@@ -468,18 +475,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   ⚠️ Every genome length change also invalidates that population's baked archive — `audio_genome`
   already went 15 -> 16 for FVS-K-1, and that re-bake is parked under H-1. Do not multiply that debt
   without deciding it is worth paying. · *Deps:* — · *Reading:* **[QD]**, [ME], [QD-PCG]
-- **FVS-I-7 — Gore settings (6 knobs) are unevolved** · M · *determinism: offline*
-  Not in any genome, yet **a gore knob already tipped a 5/5 win into a wipe** — so it is a live
-  difficulty dial the offline search cannot see, which is precisely what `CLAUDE.md`'s "every feature
-  must evolve" rule exists to prevent.
-  > ✅ **Passes the audit — for a SUBSET only (2026-07-30).** `GoreSettings` is ~30 knobs and most are
-  > cosmetic (`spray_color_a/b`, `pool_color`, `pool_gloss`, `dry_time`, `wall_splat_size`, ...);
-  > encoding those is textbook N-21. Encode **only** the ~8 with a causal path to the world archive's
-  > `deaths` axis: `max_gibs`, `chunk_restitution`, `gib_friction`, `autogib_pieces_base`,
-  > `autogib_min_pieces`, `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. Say in the code why
-  > the cosmetics are excluded, so nobody "completes" the group later.
-  > The header count says "6 knobs"; the real sim-relevant count is ~8. Fix that when landing.
-  · *Deps:* **I-6** · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`
 - **FVS-I-8 — `MetropolisWeights` (10+ knobs) are unevolved** · L · *determinism: offline*
   The largest of the four, and the one most likely to fail I-6's audit: it shapes the *level*, and the
   level descriptor has two axes. Run the audit before writing any encode/decode.
@@ -641,6 +636,23 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   measured under a *weaker* condition than the one that failed. It is logged so the next occurrence
   has a predecessor to compare against: the distinguishing question is whether the divergence is
   again **bimodal** (a flipped discrete decision) or a fresh hash each time (float drift).
+  **Data point 2026-07-31, same test, same family — logged, not dismissed.**
+  `session::the_wipe_paths_actors_and_fields_are_reproducible_under_load` failed **once** during a
+  multi-target harness run (`session nav liveness containment squad`) that was sharing the box with a
+  concurrent `cargo check --all-targets`. It then passed **2/2** on re-runs: once idle (82 s) and once
+  under a deliberate 14-busy-loop load that was verifiably biting (115 s).
+  Per this entry's standing instruction that is **not** an exoneration — both passes were measured
+  under a *different* condition than the failure, and the specific condition that failed (a full
+  24-core compile running alongside the harness) is arguably closer to the CI oversubscription this
+  item is actually about than a busy-loop generator is. **A concurrent `cargo` build is worth adding
+  to the reproduction recipe.**
+  ⚠️ **And the divergence detail was LOST, which is my error and the reason this data point is weaker
+  than the two above it.** The run piped the harness through `grep -E "^test |test result|FAILED"`, so
+  the panic body — the one that prints the distinct `(snapshot, field)` hash pairs — was filtered away
+  before it was ever written down. **The distinguishing question this entry exists to answer** (is the
+  divergence *bimodal*, i.e. a flipped discrete decision, or a fresh hash each time, i.e. float drift?)
+  **could not be asked of this occurrence.** Never filter a harness run's stderr to the summary lines;
+  capture the whole thing and grep the file afterwards.
   *Investigate with the tools the failure message names:* `evaluate::trace_episode` on the printed
   `(mutant, world)` pair — it folds snapshot + field + gib hashes — then `evaluate::row_trace` at the
   first divergent tick, **multiset** diff (a set difference lies when tied actors share a row). The

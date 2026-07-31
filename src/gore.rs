@@ -1656,6 +1656,73 @@ fn despawn_gore(
 /// (`crate::config::load_game_config`) on the `gore:` slice of the master `GameConfig` — one path, no
 /// fallback. `bake_autogib` feeds these straight into `i32::clamp(min, max)`, which panics when
 /// `min > max`; reject an inverted pair loudly at the door instead of crashing later mid-combat.
+/// The **evolvable** slice of [`GoreSettings`] — the knobs with a causal path to the world archive's
+/// `deaths` descriptor axis. Same subset-type shape as [`crate::light::LightingDynamics`] and
+/// [`crate::almond_water::AlmondWaterDynamics`], and for the same reason.
+///
+/// # Why only these eight (FVS-I-7, scoped by the FVS-I-6 descriptor audit)
+///
+/// `GoreSettings` is ~30 knobs and **most of them are cosmetic**: `spray_color_a/b`, `pool_color`,
+/// `pool_gloss`, `dry_time`, `wall_splat_size`, every `droplet_*`, `spray_*`, `meat_size`,
+/// `pool_size_*`. Encoding those would be textbook FVS-N-21 — a gene no descriptor can see makes the
+/// archive *worse*, not better: two genomes differing only in it land in the same cell and the winner
+/// is decided by evaluation luck. They are excluded deliberately, and this comment exists so nobody
+/// later "completes" the group by adding them.
+///
+/// What is left is the set that changes what the *simulation* does after a death:
+/// * `max_gibs` caps live physics chunks — the recycle point, so it bounds how much debris the swarm
+///   can be pathing around at once;
+/// * `chunk_restitution` / `gib_friction` decide where debris comes to rest;
+/// * the four `autogib_*` dials set how many fragments a unit crunch produces and how hard they are
+///   thrown;
+/// * `meat_count` is the food the crabs actually forage on (`crab::assign_meat_targets`), which is the
+///   most direct link of all — it feeds `breeding`, and breeding feeds `deaths`.
+///
+/// A gore knob has already tipped a 5/5 win into a wipe, which is why this is a live difficulty dial
+/// the offline search must be able to see (`CLAUDE.md`: every feature evolves).
+///
+/// The integer knobs are carried as `f32` here because the genome is a flat `Vec<f32>`; `decode`
+/// rounds them back, and `BOUNDS` keeps them in the authored range.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoreDynamics {
+    pub max_gibs: usize,
+    pub chunk_restitution: f32,
+    pub gib_friction: f32,
+    pub autogib_pieces_base: i32,
+    pub autogib_min_pieces: i32,
+    pub autogib_max_pieces: i32,
+    pub autogib_speed_mult: f32,
+    pub meat_count: i32,
+}
+
+impl GoreDynamics {
+    /// Read the evolvable slice out of a full settings block.
+    pub fn from_config(c: &GoreSettings) -> Self {
+        Self {
+            max_gibs: c.max_gibs,
+            chunk_restitution: c.chunk_restitution,
+            gib_friction: c.gib_friction,
+            autogib_pieces_base: c.autogib_pieces_base,
+            autogib_min_pieces: c.autogib_min_pieces,
+            autogib_max_pieces: c.autogib_max_pieces,
+            autogib_speed_mult: c.autogib_speed_mult,
+            meat_count: c.meat_count,
+        }
+    }
+
+    /// Overwrite the evolvable knobs of a full settings block, leaving every cosmetic knob authored.
+    pub fn apply_to(&self, c: &mut GoreSettings) {
+        c.max_gibs = self.max_gibs;
+        c.chunk_restitution = self.chunk_restitution;
+        c.gib_friction = self.gib_friction;
+        c.autogib_pieces_base = self.autogib_pieces_base;
+        c.autogib_min_pieces = self.autogib_min_pieces;
+        c.autogib_max_pieces = self.autogib_max_pieces;
+        c.autogib_speed_mult = self.autogib_speed_mult;
+        c.meat_count = self.meat_count;
+    }
+}
+
 pub fn validate_settings(settings: &GoreSettings) -> Result<(), String> {
     if settings.autogib_min_pieces > settings.autogib_max_pieces {
         return Err(format!(

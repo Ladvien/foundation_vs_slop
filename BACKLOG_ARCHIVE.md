@@ -1957,3 +1957,36 @@ Split out 2026-07-30.
   expeditions in, the world holds one dungeon's worth of tiles rather than two. Counting only `Unit`
   is exactly what let this hide — units despawned correctly the whole time.
   · *Touches:* `src/dungeon/render.rs`, `tests/session.rs`
+- **FVS-I-7 — Gore settings were unevolved** · M · *determinism: offline* · ✅ **LANDED 2026-07-31**
+  Not in any genome, yet **a gore knob had already tipped a 5/5 win into a wipe** — a live difficulty
+  dial the offline search could not see, which is exactly what `CLAUDE.md`'s "every feature must
+  evolve" rule exists to prevent.
+  *Shipped:* `gore::GoreDynamics`, the same subset-type shape as `LightingDynamics` /
+  `AlmondWaterDynamics`, carrying the **8** dials the FVS-I-6 audit approved: `max_gibs`,
+  `chunk_restitution`, `gib_friction`, `autogib_pieces_base`, `autogib_min_pieces`,
+  `autogib_max_pieces`, `autogib_speed_mult`, `meat_count`. `WorldGenome::N` **138 → 146**.
+  Wired end-to-end rather than as a pure library (this backlog's top process risk): `BOUNDS`,
+  `encode`, `decode`, `WorldConfig`, `elite_overlay::apply_dim` + its `WorldEntry`,
+  `coevolve::artifacts::WorldEliteDoc`, and a `gore` splice in `train apply` so a bake writes the
+  subset back to `config.ron` with the cosmetic knobs untouched.
+  **The ~22 cosmetic knobs are deliberately excluded and the code says why** (`spray_*`, `pool_*`,
+  `droplet_*`, `dry_time`, `wall_splat_size`, `meat_size`, the colours) — encoding them would be
+  textbook FVS-N-21: a gene no descriptor can see makes the archive *worse*, because two genomes
+  differing only in it land in the same cell and the winner is decided by evaluation luck. The old
+  header said "6 knobs"; the real sim-relevant count is 8, corrected on landing.
+  **`decode` orders the autogib min/max pair.** `BOUNDS` clamps each knob independently and cannot
+  express `min <= max`, so ordinary per-knob mutation can invert the clamp — and
+  `gore::validate_settings` rejects an inverted pair loudly, which would abort the rollout rather
+  than evolve. Integers round rather than truncate, so a nudge of 5.0 → 4.98 does not silently drop
+  a meat chunk.
+  *Pinned by* three new tests: the authored genome decodes to the shipped dials; each of the 8 dials
+  occupies its **own** flat knob (probed, not hardcoded, so a `BOUNDS`/`encode` reorder cannot stale
+  it); and an inverted clamp decodes to an ordered pair that `validate_settings` accepts.
+  `tests/genome_coverage.rs` moves `gore` from `Gap` to `World` and its `KNOWN_GAPS` **ratchet drops
+  1 → 0** — every gameplay slice of `config.ron` is now owned by a search or explicitly exempt.
+  ⚠️ **Adds to the re-bake debt parked under FVS-H-1**, as that item's warning requires: the world
+  genome's length changed, so any archived world genome is a fixed-length vector that no longer
+  decodes. No world archive has ever completed (H-1 records that `elites_world.ron` does not exist at
+  any canonical path), so nothing shipped is invalidated — but the H-1 bake must run against N=146.
+  · *Touches:* `src/gore.rs`, `src/squad_ai/world_genome.rs`, `src/config.rs`, `src/elite_overlay.rs`,
+  `src/squad_ai/coevolve/artifacts.rs`, `src/bin/train.rs`, `tests/genome_coverage.rs`

@@ -1681,6 +1681,15 @@ fn apply_archive(
                 &ron_slice(&AlmondWaterDynamics::from_config(&base.almond_water))?,
                 &ron_slice(&AlmondWaterDynamics::from_config(&gc.almond_water))?,
             )?;
+            // Same subset trick for `gore:` — only the 8 dials with a causal path to the `deaths` axis
+            // evolve (FVS-I-7); the ~22 cosmetic knobs are authored and must survive the bake untouched.
+            use foundation_vs_slop::gore::GoreDynamics;
+            cfg_text = splice_block(
+                &cfg_text,
+                "gore",
+                &ron_slice(&GoreDynamics::from_config(&base.gore))?,
+                &ron_slice(&GoreDynamics::from_config(&gc.gore))?,
+            )?;
             // Same subset trick for `lighting:` — only the two gameplay dials evolve; the visual knobs are
             // authored and must survive the bake untouched.
             cfg_text = splice_block(

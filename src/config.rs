@@ -163,6 +163,11 @@ pub struct WorldConfig {
     /// co-evolve the light the ecosystem steers on, rather than freezing it while evolving the mold's
     /// response to it. Visual knobs stay authored. Applied over `GameConfig::lighting`'s gameplay knobs.
     pub lighting: crate::light::LightingDynamics,
+    /// The evolvable **gameplay** gore dials (debris cap/settling, autogib fragment count and throw, and
+    /// the meat the crabs forage on) — FVS-I-7. A gore knob has already tipped a 5/5 win into a wipe, so
+    /// it is a live difficulty dial the offline search must be able to see. The ~22 cosmetic knobs stay
+    /// authored; see `gore::GoreDynamics` for why encoding them would make the archive worse.
+    pub gore: crate::gore::GoreDynamics,
 }
 
 /// Read, parse, and validate the unified config. One path: any read, parse, or per-slice validation
