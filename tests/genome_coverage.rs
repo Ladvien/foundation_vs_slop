@@ -8,10 +8,17 @@
 //!
 //! # What this checks, and what it deliberately does not
 //!
-//! Per-*knob* drift inside an already-evolved slice is **already** caught, and by something stronger
-//! than a lint: `world_genome::authored_round_trips_exactly` asserts `decode ∘ encode` is the identity
-//! on the shipped config, so a field added to `SimTuning` without a matching `encode`/`BOUNDS`/`decode`
-//! entry fails immediately. The audio and behavior genomes carry the same guard.
+//! Per-*knob* drift inside an already-**encoded struct** is caught by something stronger than a lint:
+//! `world_genome::authored_round_trips_exactly` asserts `decode ∘ encode` is the identity on the
+//! shipped config, so a field added to `SimTuning` without a matching `encode`/`BOUNDS`/`decode` entry
+//! fails immediately. The audio and behavior genomes carry the same guard.
+//!
+//! ⚠️ **"Encoded struct" is narrower than "evolved slice", and the difference is where this test used
+//! to overstate itself.** A slice can be owned by a search while a whole sub-struct inside it is in no
+//! genome at all — and then there is no round-trip to break either, because nothing round-trips it.
+//! `placement` is classified `Level` and its 15 `MetropolisWeights` are encoded nowhere; `behavior` is
+//! classified `Behavior` and 11 of 13 `PerceptionTuning` knobs are likewise absent. Both are real and
+//! tracked, and both were invisible here while the headline said "0 gaps". See [`partials`].
 //!
 //! What nothing catches is the **coarser** drift: a whole config slice appearing that no genome touches
 //! at all. Nobody notices, because there is no round-trip to break — the slice simply is not in one.
@@ -49,6 +56,62 @@ enum Coverage {
     Objective,
     /// Un-evolved and it probably should not be. Listed so the gap is visible and counted.
     Gap,
+    /// **Owned by a search, but a named sub-struct inside it is not encoded.**
+    ///
+    /// This variant exists because the ledger was **slice-deep, and its headline read stronger than
+    /// the truth**: every slice was classified, `KNOWN_GAPS` was 0, and "0 gaps" therefore reported
+    /// full coverage while two whole sub-structs — 15 Metropolis weights and 11 of 13 perception
+    /// knobs — were unevolved and tracked in the backlog. Nothing here was wrong; it was the
+    /// *granularity* that made a true statement misleading. Found by the 2026-07-31 codebase review.
+    ///
+    /// The honest invariant is not "no gaps" but **"no UNCLASSIFIED gaps, and N known partials"**.
+    Partial,
+}
+
+/// One partially-covered slice: `(evolved, total, what is missing, tracking item)`.
+///
+/// ⚠️ **These counts are hand-recorded, not machine-derived, and that is a deliberate limit.** The
+/// obvious mechanical version — count leaf knobs in `config.ron` per slice and assert the number —
+/// was considered and rejected: `placement.furniture` is an asset *catalogue* whose leaf count moves
+/// every time an artist adds a prop, so the test would fail on art changes that have nothing to do
+/// with evolution. A test that cries wolf on unrelated work gets suppressed, which is worse than the
+/// overstatement it replaced. Struct field counts are also not derivable without reflection
+/// (`GoreSettings` has 6 top-level fields and ~30 leaf knobs through nesting), so there is no cheap
+/// honest automation here.
+///
+/// What this DOES buy: the numbers and their tracking items are stated where the coverage claim is
+/// made, so the headline can no longer read as completeness, and
+/// [`the_known_partials_are_counted_so_they_cannot_quietly_grow`] ratchets the count.
+struct Partial {
+    slice: &'static str,
+    evolved: usize,
+    total: usize,
+    missing: &'static str,
+    tracked_as: &'static str,
+}
+
+/// The partial-coverage register. Counted 2026-07-31 against the structs named in `missing`.
+fn partials() -> Vec<Partial> {
+    vec![
+        Partial {
+            slice: "placement",
+            evolved: 0,
+            total: 15,
+            missing: "`placement::solvers::metropolis::MetropolisWeights` — every knob, none encoded",
+            tracked_as: "FVS-I-8 (which FAILED the FVS-I-6 descriptor audit: the level archive bins on \
+                         clutter x infestation, and all 15 knobs tune ARRANGEMENT, never counts — so \
+                         encoding them as-is would be FVS-N-21 at 15x scale)",
+        },
+        Partial {
+            slice: "behavior",
+            evolved: 2,
+            total: 13,
+            missing: "`behavior_tuning::PerceptionTuning` — only `leash` and `squad_think_interval` \
+                      are encoded; the 11 Schmitt-band sight knobs are not",
+            tracked_as: "FVS-I-9 (blocked on the same descriptor question: these are SQUAD knobs and \
+                         the behaviour archive bins on the SWARM's aggression x persistence)",
+        },
+    ]
 }
 
 /// The ledger. **Every top-level slice of `config.ron` must appear here.**
@@ -154,12 +217,61 @@ fn the_ledger_does_not_describe_slices_that_no_longer_exist() {
 }
 
 #[test]
+fn the_known_partials_are_counted_so_they_cannot_quietly_grow() {
+    // The companion ratchet to `the_known_gaps_are_counted…`, and the reason that test's `0` no longer
+    // reads as "everything is evolved". A slice can be owned by a search and still have a whole
+    // sub-struct outside it; before FVS-C5 that was invisible here and visible only in the backlog.
+    //
+    // Raise this ONLY with a `Partial` entry that names what is missing and what tracks it. Lower it
+    // when a search actually encodes the sub-struct — that is the ratchet tightening.
+    const KNOWN_PARTIALS: usize = 2;
+    let p = partials();
+    let names: Vec<&str> = p.iter().map(|x| x.slice).collect();
+    assert_eq!(
+        p.len(),
+        KNOWN_PARTIALS,
+        "partially-evolved slices changed: {names:?}. Closing one? Lower KNOWN_PARTIALS. Adding one? \
+         It needs a `Partial` entry naming the sub-struct and its tracking item."
+    );
+
+    for x in &p {
+        assert!(
+            x.evolved < x.total,
+            "{} is listed as partial but {} of {} knobs are evolved — if coverage is complete, delete \
+             the entry and lower KNOWN_PARTIALS",
+            x.slice,
+            x.evolved,
+            x.total
+        );
+        assert!(!x.missing.trim().is_empty(), "{} must name what is missing", x.slice);
+        assert!(!x.tracked_as.trim().is_empty(), "{} must name its tracking item", x.slice);
+        // A partial must be a slice the ledger says a search OWNS. A partial on a cosmetic or
+        // objective slice is a contradiction: nothing is supposed to evolve there at all.
+        let (coverage, _) = ledger()[x.slice];
+        assert!(
+            matches!(
+                coverage,
+                Coverage::World | Coverage::Level | Coverage::Audio | Coverage::Behavior
+            ),
+            "{} is listed as partially evolved but the ledger classifies it as {coverage:?}",
+            x.slice
+        );
+    }
+}
+
+#[test]
 fn the_known_gaps_are_counted_so_they_cannot_quietly_grow() {
     // A ratchet, exactly like `tests/panic_budget.rs`. Un-evolved gameplay knobs are a real debt; the
     // useful property is not "there are none" (there is one, and closing it is its own work) but that
     // adding another is a deliberate, reviewable act rather than an accident.
     // Was 1 (`gore`) until FVS-I-7 encoded the 8 sim-relevant gore dials on 2026-07-31 — the ratchet
     // tightening, which is the direction this test exists to allow.
+    //
+    // ⚠️ **`0` here means "no slice is wholly un-owned". It does NOT mean everything is evolved.**
+    // Coverage is slice-deep, so a search can own a slice while a whole sub-struct inside it goes
+    // unencoded — which is true of two slices today. See [`partials`] and
+    // `the_known_partials_are_counted_so_they_cannot_quietly_grow` for the knob-level picture; this
+    // number alone overstated coverage until that register was added (2026-07-31 review, C5).
     const KNOWN_GAPS: usize = 0;
     let gaps: Vec<&str> = ledger()
         .iter()
