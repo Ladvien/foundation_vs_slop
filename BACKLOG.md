@@ -169,51 +169,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[QD-PCG]**, [QD], [ME], [QD-OEE], [LPM]
 **Done when:** the retrained archive loads at MODE_COUNT 29; I-1's ablation shows capture-favoring seeds are selectable; successive expeditions receive archive-sampled challenges tuned toward intermediate difficulty, reproducibly.
 
-- **FVS-H-1 — Retrain stale RL policy archive (PREREQUISITE)** · L · *determinism: offline; harness-gated*
-  Archives are stale/rejected because MODE_COUNT grew 25→29 (SCP-1048); a multi-hour retrain is required before any live selection is trustworthy.
-  ⚠️ **Escalated 2026-07-26 by FVS-B-8.** The synthetic player in `evaluate::run_episode` now performs a
-  containment beat, which changes **every rollout trajectory** — so `sweep_prior` must be recomputed and
-  every baked world/policy/level archive is stale for a *second*, independent reason. This was accepted
-  deliberately (the alternative was a feature the offline search cannot see, which CLAUDE.md forbids and
-  TESTING.md invariant 11 explains the cost of). Re-bake before trusting any elite overlay.
-  ⚠️ **SEQUENCED 2026-07-27 — I-1 must land BEFORE this, not merely before H-3.** The backlog said "I-1
-  must land before H-3". That is too weak: **every** search phase scores through `surprise::fitness`, so
-  retraining first bakes an archive optimised against an objective that ignores captures, and I-1 then
-  invalidates it. Measured cost of getting this wrong: a full `cargo train all` is realistically a
-  **12–20 h** job on this box (from the last real run's logs: `rl` 5 h 38 m across 12 islands, `audio`
-  ~4 h, `levels` ~74 s). Doing H-1 first pays that twice. Run `cargo train bench` for this machine's real
-  projection before committing the night.
-  ⚠️ **The archives are staler than "stale" (audited 2026-07-27).** `elites_squad.ron`,
-  `elites_swarm.ron`, `elites_world.ron`, `elites_behavior.ron` and `elites_poet.ron` **do not exist at
-  any canonical path** — `evolve3` has never completed, and the 2026-07-19 `behavior` island run was
-  killed at gen 10–14 of 30 (1 of 24 islands produced an archive). Exactly **one** bake has ever landed
-  (`audio`, 2026-07-19). The policy archives that do exist carry **1225** weights where this build needs
-  **1325** (`MODE_COUNT` 25→29), so `NeuralPolicy::from_weights` rejects them loudly — as designed
-  ("a stale archive is a re-train, not a resize"). The levels/audio/behavior runs also used held-in world
-  `0xB0BA`, **retired 2026-07-19**. So this is closer to a first bake than a re-bake.
-  ⚠️ **The AUDIO archive is now stale for a third, structural reason (2026-07-30, FVS-K-1).**
-  `audio_genome::N` grew **15 → 16** (`flesh_drone_loudness`, SCP-610's continuous acoustic
-  stimulus). Archived genomes are fixed-length vectors, so the one bake that has ever landed —
-  `elites_audio.ron`, 2026-07-19 — cannot decode and `is_feasible` rejects it loudly, as designed
-  ("a stale archive is a re-train, not a resize"). Deliberately **not** re-baked at the time: this
-  item is sequenced behind FVS-I-1, and baking now would optimise against an objective I-1 then
-  invalidates — the exact mistake this entry already records one paragraph up.
-  ⚠️ **And that knob's `BOUNDS` ceiling is a correctness constraint, not a range guess.** SCP-610's
-  drone deposits `THREAT_ANOMALY` at the bloom's own position while its own containment rule caps
-  that channel at 0.35 *there*, so a loud enough bloom is an uncontainable one — the search can
-  delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
-  until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
-  Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
-  ⚠️ **The WORLD genome is now a fourth, independent staleness reason (2026-07-31, FVS-I-7).**
-  `world_genome::N` grew **138 → 146** (`gore::GoreDynamics` — the 8 gore dials with a causal path to
-  the `deaths` axis). Archived genomes are fixed-length vectors, so any world genome written before
-  this cannot decode. Nothing shipped is invalidated *because nothing shipped exists* — this entry
-  already records that `elites_world.ron` has never been produced at any canonical path — but the
-  bake must run against **N=146**, and a stale world archive found lying around is a re-train, not a
-  resize.
-  *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
-  `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
-  *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
 - **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls** · L · *determinism: moves goldens* · ⛔ **DEMOTED 2026-07-30 — DO NOT DO THIS FOR PERFORMANCE**
   > **FVS-N-25 measured the frame as CPU-bound**: a 4x pixel cut moved frame time +4.1%. Decimating
   > these meshes would therefore buy ~nothing, while costing a golden re-pin and a
@@ -260,6 +215,35 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   state, and swapping it re-perturbs the held-in seed calibration. Budget a measure-and-re-pin.
   *Done when:* the squad is no longer the dominant term in `vis_tris`, measured by the same probe on
   the same route. · *Deps:* — · *Touches:* `assets/characters/valkyrie.glb`, `tests/valkyrie_asset.rs` · *Reading:* — (no corpus resource)
+- **FVS-N-28 — The AUDIO archive collapsed to 3 of 64 cells AGAIN, reproducibly (MEASURED 2026-08-01)** · M · *determinism: offline*
+  The overnight chain baked `audio` for **2 h 54 m** across 24 islands. Every island produced an elite,
+  and the resulting archive occupies **3 of 64 cells**.
+  **That is not a new number.** The 2026-07-28 descriptor sweep measured the audio archive at *exactly*
+  `3/64` and filed it on the degeneracy watchlist. Two independent bakes, months of genome change apart
+  (`audio_genome::N` grew 15 → 16 for SCP-610's drone in between), landing on the same three cells is a
+  **structural** result, not sampling luck — which is the strongest evidence yet that the pairing, not
+  the search, is wrong.
+  **The suspect is the one FVS-I-6's audit already named and nobody has ruled on:** `audio_genome`
+  (16 acoustic knobs) is binned on `swarm_descriptor` — the *swarm's* aggression × persistence. Acoustic
+  knobs move what agents *hear*; the descriptor measures what the swarm *does*. Two genomes differing
+  only in acoustics land in the same cell and the winner is decided by evaluation luck, which is the
+  archive-collapse mechanism this repo has now hit three times (policy archive, biome genes, this).
+  ⚠️ **Do not ship `elites_audio.candidate.ron`.** A 3-cell archive is not a QD archive; sampling it
+  gives the director three acoustic worlds. The bake was not wasted — it is the measurement — but the
+  artefact is not usable and re-baking without changing the descriptor will produce 3 cells again.
+  *Done when:* the audio genome is binned on a descriptor its knobs can move, and a bake fills a
+  materially larger share of the archive. · *Deps:* **I-6** (the descriptor call is yours) · *Touches:* `src/squad_ai/audio_genome.rs`, the descriptor · *Reading:* **[QD]**, [ME], [QD-PCG]
+- **FVS-N-29 — The LEVELS objective is near-saturated: most elites score ~1.0 (FOUND 2026-08-01)** · S · *determinism: offline*
+  The same chain baked `levels` in **83 s** (24 islands, 24/24 produced elites, **61 of 64 cells** — a
+  genuinely healthy archive by coverage). But the fitness spread is the problem: **two elites at exactly
+  `1.0`** and a long clump at `0.98`–`0.997`.
+  A static objective most of the population maxes has no gradient left to climb, so further search
+  buys diversity of *descriptor* but not of *quality*, and "best fitness" stops discriminating between
+  levels. Coverage looking excellent is exactly what hides this — 61/64 reads as success.
+  Worth checking before the director is tuned against these numbers, since as of FVS-H-8 the sampled
+  cell now actually reaches the world.
+  *Done when:* the objective either discriminates across the archive's top band, or is documented as
+  deliberately saturating with the reason. · *Deps:* — · *Touches:* `src/squad_ai/level_quality.rs` · *Reading:* [QD-PCG], [ME]
 - **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline* · ✅ **STATIC AUDIT RUN 2026-07-30 → `docs/descriptor_audit.md`**
   > **Read the audit before touching I-7..I-10 — it changes all four.** Headlines:
   > * **I-10 is STALE** — `BreedingTuning` (7) and `ParasiteTuning` (14) are *already* decoded in

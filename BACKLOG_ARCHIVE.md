@@ -1636,6 +1636,68 @@ Split out 2026-07-30.
   registered them twice, making their `SystemTypeSet` ambiguous and breaking every existing
   `.before(carry_gibs)`. Only building the real `FixedUpdate` schedule surfaces this class.
   · *Deps:* — · *Touches:* `src/gore.rs`, `src/crab/mod.rs` · *Reading:* [TEST-OW], [ABM]
+- **FVS-H-1 — Retrain stale RL policy archive (PREREQUISITE)** · L · ✅ **BAKED 2026-08-01 — acceptance MET, pending your apply**
+  Archives are stale/rejected because MODE_COUNT grew 25→29 (SCP-1048); a multi-hour retrain is required before any live selection is trustworthy.
+  ⚠️ **Escalated 2026-07-26 by FVS-B-8.** The synthetic player in `evaluate::run_episode` now performs a
+  containment beat, which changes **every rollout trajectory** — so `sweep_prior` must be recomputed and
+  every baked world/policy/level archive is stale for a *second*, independent reason. This was accepted
+  deliberately (the alternative was a feature the offline search cannot see, which CLAUDE.md forbids and
+  TESTING.md invariant 11 explains the cost of). Re-bake before trusting any elite overlay.
+  ⚠️ **SEQUENCED 2026-07-27 — I-1 must land BEFORE this, not merely before H-3.** The backlog said "I-1
+  must land before H-3". That is too weak: **every** search phase scores through `surprise::fitness`, so
+  retraining first bakes an archive optimised against an objective that ignores captures, and I-1 then
+  invalidates it. Measured cost of getting this wrong: a full `cargo train all` is realistically a
+  **12–20 h** job on this box (from the last real run's logs: `rl` 5 h 38 m across 12 islands, `audio`
+  ~4 h, `levels` ~74 s). Doing H-1 first pays that twice. Run `cargo train bench` for this machine's real
+  projection before committing the night.
+  ⚠️ **The archives are staler than "stale" (audited 2026-07-27).** `elites_squad.ron`,
+  `elites_swarm.ron`, `elites_world.ron`, `elites_behavior.ron` and `elites_poet.ron` **do not exist at
+  any canonical path** — `evolve3` has never completed, and the 2026-07-19 `behavior` island run was
+  killed at gen 10–14 of 30 (1 of 24 islands produced an archive). Exactly **one** bake has ever landed
+  (`audio`, 2026-07-19). The policy archives that do exist carry **1225** weights where this build needs
+  **1325** (`MODE_COUNT` 25→29), so `NeuralPolicy::from_weights` rejects them loudly — as designed
+  ("a stale archive is a re-train, not a resize"). The levels/audio/behavior runs also used held-in world
+  `0xB0BA`, **retired 2026-07-19**. So this is closer to a first bake than a re-bake.
+  ⚠️ **The AUDIO archive is now stale for a third, structural reason (2026-07-30, FVS-K-1).**
+  `audio_genome::N` grew **15 → 16** (`flesh_drone_loudness`, SCP-610's continuous acoustic
+  stimulus). Archived genomes are fixed-length vectors, so the one bake that has ever landed —
+  `elites_audio.ron`, 2026-07-19 — cannot decode and `is_feasible` rejects it loudly, as designed
+  ("a stale archive is a re-train, not a resize"). Deliberately **not** re-baked at the time: this
+  item is sequenced behind FVS-I-1, and baking now would optimise against an objective I-1 then
+  invalidates — the exact mistake this entry already records one paragraph up.
+  ⚠️ **And that knob's `BOUNDS` ceiling is a correctness constraint, not a range guess.** SCP-610's
+  drone deposits `THREAT_ANOMALY` at the bloom's own position while its own containment rule caps
+  that channel at 0.35 *there*, so a loud enough bloom is an uncontainable one — the search can
+  delete a species' whole mechanic and be *rewarded* for it, because the fitness cannot see captures
+  until I-1 lands. Pinned by `containment::the_loudest_evolvable_bloom_can_still_be_contained`.
+  Re-check it if the ceiling, `scp610::DREAD_PER_DIN` or the authored threshold ever move.
+  ⚠️ **The WORLD genome is now a fourth, independent staleness reason (2026-07-31, FVS-I-7).**
+  `world_genome::N` grew **138 → 146** (`gore::GoreDynamics` — the 8 gore dials with a causal path to
+  the `deaths` axis). Archived genomes are fixed-length vectors, so any world genome written before
+  this cannot decode. Nothing shipped is invalidated *because nothing shipped exists* — this entry
+  already records that `elites_world.ron` has never been produced at any canonical path — but the
+  bake must run against **N=146**, and a stale world archive found lying around is a re-train, not a
+  resize.
+  *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
+  `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
+  *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
+  > ### ✅ THE BAKE RAN, AND ITS ACCEPTANCE IS MET
+  > `scripts/overnight_bakes.sh`, 24 islands, 2026-07-31 21:57 → 2026-08-01 02:28 (**4 h 30 m**, finished
+  > naturally rather than hitting its cap). Both clauses of *Done when*:
+  > * **"retrained archive loads at current MODE_COUNT"** — the genomes carry **1325** weights, which is
+  >   exactly what this build needs (the rejected archives carried 1225). Verified through the REAL
+  >   loader, not by arithmetic: `FVS_POLICY_ELITE=…candidate.ron` on the shipped binary logs
+  >   `overlaid policy <- … (cell (7, 2), fitness 0.226)` instead of the loud width refusal.
+  > * **"non-degenerate policies"** — **57 of 64 cells** occupied with 57 distinct fitness values, and
+  >   **24 of 24 islands produced elites**. Read that against this entry's own history: exactly one bake
+  >   had ever landed, and the killed 2026-07-19 behaviour run produced an archive on **1 of 24** islands.
+  > **NOT applied.** The chain ran with no `--apply`, so `config.ron`, the goldens and the tracked elites
+  > are untouched and the winner sits at `assets/config/elites_policy.candidate.ron`. Shipping it is a
+  > human act (`FVS_POLICY_ELITE=…`, or `train apply`), deliberately left to the Director.
+  > ⚠️ **The re-bake debt this entry tracks is only PARTLY paid.** `levels` and `audio` also ran (see
+  > below); `evolve3` — the world/squad/swarm archives, which have never completed — did not, and the
+  > world genome has since grown to **N=151** (FVS-C-7's watch feed, on branch `fvs-c7-watch-feed`).
+  · *Deps:* I-1 (landed) · *Touches:* `src/squad_ai/`, `bin/train.rs`, `scripts/overnight_bakes.sh`
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
 
