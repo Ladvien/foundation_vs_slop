@@ -26,33 +26,47 @@ no assets pointed at them, so the code path exists and never executes. Those com
 
 ---
 
-## Tier 0 — behaviour the grammar already supports, assets already in-repo, only DATA missing
+## Tier 0 — RETRACTED, and the retraction is the useful part
 
-**This is the highest-ratio work on the page: no new files, no new code, no licence questions.**
+**The first draft of this plan led with "every doorway is an empty hole — pure manifest data, no
+engine change". Both halves were wrong.** Checked before building, which is the only reason it did not
+become a day of work against the grain of the game.
 
-### 0.1 Doorways are unfurnished (`Anchor(host: Opening)`)
+### It is deliberate, not an oversight
 
-The placement grammar supports four anchor hosts — `Ceiling | Wall | Opening | Floor`. The manifest
-authors **two** (`Ceiling` ×1, `Wall` ×1). `Opening` and `Floor` have **zero entries**.
+`src/placement/furnish.rs:531`:
 
-Meanwhile `assets/kenney_prototype-kit/Models/GLB format/` — already in the repo, already licensed —
-ships `door-rotate`, `door-sliding-double`, `door-sliding-double-round`, `door-sliding-double-wide`,
-`door-garage` and more, among 145 GLBs.
+> `// No doors — the Backrooms look leaves every opening as a bare doorway (the dungeon still frames`
+> `// each with a header lintel, so it reads as a doorway, just without a door).`
 
-So every doorway in every level is an empty hole, and the code that would furnish it runs against an
-empty candidate set. **Adding manifest rows turns doors on.** And doors are not decoration — they are
-the geometry the quarantine cordon, line-of-sight, and the ambient `ATTENTION` field all key off, so
-this widens *behaviour* immediately: a closed door is a LOS break, which is the containment verb for
-the watch feed.
+Empty openings are **authored art direction**. The same judgement as the dungeon's saturated olive:
+a deliberate choice that reads as a bug to anyone who did not make it. Adding doors is a request to
+reverse it, and that is the Director's call, not a gap to fill.
 
-### 0.2 `Anchor(host: Floor)` — freestanding fixtures
+### And it is not data-only either
 
-Same shape. The Kenney kit has columns, crates and indicators; `sci-fi-capsule` (7 meshes) and
-`sci-fi-lab-machine` (6 meshes) are the Site-appropriate versions.
+The `Opening` host *is* implemented in the pure layer — `solvers/constraint.rs` maps it to
+`region.openings` and `solver.rs` registers it. But the Bevy spawn pass partitions roles into
+`ceiling / wall_lights / tiled / freestanding / scatter` (`furnish.rs:405-427`) and has **no partition
+for `Opening` or `Floor`**. So manifest rows alone spawn nothing; both hosts want a placement pass
+mirroring the wall-sconce one.
 
-**Estimated cost for Tier 0: an afternoon of manifest authoring, zero engine change.**
+### What survives
 
----
+The claim underneath is still real, and it is *newer than the art decision*: a closed door is a
+line-of-sight break, LOS is what the ambient `ATTENTION` field reads, and `ATTENTION` became a
+**containment verb** on 2026-08-01 (the watch feed is contained by looking away). So doors would now
+be a gameplay lever, not only set dressing — an argument that did not exist when "no doors" was
+decided.
+
+**That is worth re-asking, not silently overriding.** If the answer is still no, `cover`-affordance
+props in Tier 1 buy much of the same LOS behaviour without touching the Backrooms look.
+
+### The genuinely data-only work
+
+Three roles — `Tiled`, `Scatter`, `Freestanding` — are fully implemented and kit-agnostic, and they
+hold 40 of the 41 manifest items. **Adding props to those is pure data with no engine change**, which
+is what Tier 2 below is. That is where "cheapest first" actually points.
 
 ## Tier 1 — widen the AFFORDANCE vocabulary (data + small code)
 
@@ -153,14 +167,14 @@ standardises on it, and the file counts above triple-count.
 
 ## Recommended order
 
-1. **Tier 0 — doors and floor anchors.** Free (data only, assets in-repo), and it turns on a LOS/cover
-   layer that the containment verbs already read. Do this first regardless of anything else.
+1. **Tier 2 — Ozea into the lab room type** (and the other kits into their room characters). The
+   genuinely data-only work, on three roles that are already implemented and kit-agnostic.
 2. **Tier 4 — concrete + mould PBR.** One kit swap, largest visual delta per hour, unblocks Push 11.
-3. **Tier 2 — Ozea into the lab room type.** The Site finally looks like a Foundation site.
-4. **Tier 1 — `readable` + `keyed` affordances.** Connects props to the knowledge and Site systems,
+3. **Tier 1 — `readable` + `keyed` affordances.** Connects props to the knowledge and Site systems,
    which is behaviour rather than dressing.
-5. **Tier 5 — audio for acoustic stage 2**, alongside that build.
-6. **Tier 3 — SCP-079** as the next anomaly.
+4. **Tier 5 — audio for acoustic stage 2**, alongside that build.
+5. **Tier 3 — SCP-079** as the next anomaly.
+6. **Doors — only if the Director reverses the Backrooms call** (see Tier 0).
 
 ## What this plan deliberately does not propose
 
