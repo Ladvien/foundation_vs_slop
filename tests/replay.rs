@@ -1566,6 +1566,214 @@ fn search_rollouts_of_mutants_are_reproducible_under_load() {
     );
 }
 
+/// **The localizer for the two `*_reproducible_under_load` detectors above (FVS-J-6).** `#[ignore]`d:
+/// it costs CI nothing and exists for the day one of them goes red.
+///
+/// This replaces `zz_localize_g0`, which was deleted for good reason — it ran 25 full episodes under
+/// load on EVERY harness run, cost **1172 s ≈ 19.5 min** (28% of the lane), and a lane nobody will
+/// wait for never gets promoted to a gate. The mistake would be to conclude a localizer is not worth
+/// having; the right shape is one that is written, reviewed, and *dormant*. When J-6 last recurred the
+/// replacement had never been written, so the investigation started from nothing twice.
+///
+/// # Running it
+///
+/// The detector prints the pair, e.g. `mutant #3 (rng seed 0x6d07a17) on world 0x5c09191`. Set
+/// `MUTANT_INDEX` / `WORLD_SEED` to match, then:
+///
+/// ```text
+/// cargo test --features test-harness --test replay localize_rollout_divergence \
+///     -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// # Why it is built this way
+///
+/// * **One run, one record.** It uses `row_trace` (every tick) rather than `trace_episode` to bisect
+///   and *then* a fresh `row_trace` to diff. The first divergent tick VARIES between runs — this is a
+///   race that can fire at several points — so bisecting with one sample set and diffing with another
+///   compares two unrelated pairs, and the diff then shows accumulated drift rather than the
+///   originating change. `TickProbe::RowTrace`'s own doc comment records that lesson; this honours it.
+/// * **MULTISET diff, not set difference.** `snapshot_rows` sorts by WHOLE row, so two actors that are
+///   bit-identical in everything hashed occupy interchangeable slots. A set difference reports nothing
+///   when a value merely moves between two tied actors, and reports spurious "changes" when a tie
+///   reorders. Counting occurrences is the only honest comparison.
+/// * **Load well past the detector's 8 threads.** The failure is CI-only; the runner is a strictly
+///   harsher probe than this 24-core box, because 8 busy-loops on 2-4 cores is 2-4x oversubscription
+///   and here it is mild. Reproducing locally needs that oversubscription emulated, which is the
+///   cheapest first experiment this box can actually run. **A concurrent `cargo` build is also worth
+///   trying** — the 2026-07-31 occurrence happened alongside a full 24-core compile, which is arguably
+///   closer to the real condition than a busy-loop generator.
+///
+/// A clean result is **not** an exoneration: every local pass so far was measured under a weaker
+/// condition than the one that failed. Raise `LOAD_THREADS`, then say so.
+#[test]
+#[ignore = "diagnostic: run by hand when a *_reproducible_under_load detector goes red"]
+fn localize_rollout_divergence() {
+    use foundation_vs_slop::squad_ai::coevolve::{
+        brains_of, mutate_squad_feasible, mutate_swarm_feasible, SquadGenome, SwarmGenome, Templates,
+    };
+    use foundation_vs_slop::squad_ai::evaluate::row_trace;
+    use foundation_vs_slop::squad_ai::world_genome;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // ── Set these from the detector's failure message ──────────────────────────────────────────
+    /// Must match `search_rollouts_of_mutants_are_reproducible_under_load`, or mutant #N is a
+    /// different genome and this localizes nothing.
+    const MUTANT_RNG_SEED: u64 = 0x6D07A17;
+    let mutant_index: usize = env_or("FVS_LOCALIZE_MUTANT", 3);
+    let world_seed: u64 = env_or("FVS_LOCALIZE_WORLD", 0x5C09191);
+    // Full episode length, matching the detector. Reduce for a cheap smoke of this harness itself.
+    let ticks: u32 = env_or("FVS_LOCALIZE_TICKS", 7200);
+    // Replicates. More than the detector's 3 — a localizer wants the split to actually occur.
+    let reps: usize = env_or("FVS_LOCALIZE_REPS", 6);
+    // Deliberately far above the detector's 8, to emulate CI oversubscription.
+    let load_threads: usize = env_or("FVS_LOCALIZE_THREADS", 24);
+
+    // Env-tunable rather than recompiled, because the *first* thing this entry tells you to do is
+    // raise the thread count until the failure reproduces — an edit-rebuild cycle per attempt on a
+    // Bevy tree is the reason that experiment never got run.
+    //
+    // Runtime, stated only as far as it was actually measured: `TICKS=600 REPS=2 THREADS=4` runs in
+    // **5.2 s**. The full defaults (6 x 7200 ticks under 24 threads) are ~36x that work before
+    // contention and have NOT been timed end-to-end — budget generously rather than trusting an
+    // extrapolation, which this repo has been burned by twice.
+    fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+        std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    }
+
+    // ⚠️ **NO `serial_guard()` here, and that is load-bearing.** `evaluate.rs:400` takes it for each
+    // `App`'s lifetime inside the rollout path, and it is a non-reentrant `MutexGuard` — so a guard
+    // held by the test deadlocks the first `row_trace` call, silently and forever. The detectors above
+    // omit it for the same reason. Caught by running this diagnostic rather than merely compiling it:
+    // shipped untested it would have hung on the one day someone needed it, during a red CI.
+
+    // Draw the mutant set exactly as the detector does — same calls, same order, same seed — so index
+    // N here IS index N there. Any divergence in this loop makes the whole exercise meaningless.
+    let t = Templates::authored();
+    let mut rng = foundation_vs_slop::rng::seeded(MUTANT_RNG_SEED);
+    let mut genomes = Vec::new();
+    for _ in 0..=mutant_index {
+        let squad = mutate_squad_feasible(&t, &SquadGenome::authored(&t), &mut rng)
+            .expect("feasible squad mutant");
+        let swarm = mutate_swarm_feasible(&t, &SwarmGenome::authored(&t), &mut rng)
+            .expect("feasible swarm mutant");
+        let world = world_genome::mutate(&world_genome::authored(), 0.15, &mut rng)
+            .expect("feasible world mutant");
+        genomes.push((squad, swarm, world));
+    }
+    let (squad, swarm, world) = &genomes[mutant_index];
+    let wc = world_genome::decode(world).expect("world mutant decodes");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..load_threads)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    eprintln!(
+        "localizer: mutant #{mutant_index} (seed {MUTANT_RNG_SEED:#x}) on world {world_seed:#x}, \
+         {reps} reps x {ticks} ticks under {load_threads} busy threads"
+    );
+    let mut traces: Vec<Vec<Vec<[u32; 5]>>> = Vec::new();
+    for rep in 0..reps {
+        let brains = brains_of(&t, squad, swarm).expect("brains from mutant");
+        let mut out = Vec::new();
+        row_trace(brains, Some(wc.clone()), world_seed, ticks, &mut out);
+        eprintln!("  rep {rep}: {} ticks recorded", out.len());
+        traces.push(out);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    // Group the replicates by their FULL trace. Two groups == the bimodal signature J-6 recorded:
+    // the same two outcomes across separate CI runs, which is a flipped discrete decision rather than
+    // accumulated float drift (drift gives a fresh result every time).
+    let mut groups: Vec<(usize, &Vec<Vec<[u32; 5]>>)> = Vec::new();
+    for tr in &traces {
+        match groups.iter_mut().find(|(_, g)| *g == tr) {
+            Some((n, _)) => *n += 1,
+            None => groups.push((1, tr)),
+        }
+    }
+    eprintln!("localizer: {} distinct trace(s) over {reps} reps", groups.len());
+    if groups.len() < 2 {
+        eprintln!(
+            "localizer: NO DIVERGENCE at {load_threads} threads. This is NOT an exoneration — it is a \
+             weaker condition than the CI failure. Raise load_threads, or re-run with a concurrent \
+             `cargo build --all-targets` alongside (the 2026-07-31 occurrence looked like that)."
+        );
+        return;
+    }
+
+    // First tick where any two groups disagree. Both traces index tick t at [t - 1].
+    let (a, b) = (groups[0].1, groups[1].1);
+    let split = (0..a.len().min(b.len()))
+        .find(|&i| a[i] != b[i])
+        .expect("groups differ, so some recorded tick must differ");
+    eprintln!(
+        "localizer: FIRST DIVERGENT TICK = {} (group sizes {} vs {})",
+        split + 1,
+        groups[0].0,
+        groups[1].0
+    );
+
+    // Multiset diff at that tick. Rows are [x, y, z, hp, hp_max] as f32 bit patterns.
+    let count = |rows: &Vec<[u32; 5]>| {
+        let mut m: BTreeMap<[u32; 5], i64> = BTreeMap::new();
+        for r in rows {
+            *m.entry(*r).or_default() += 1;
+        }
+        m
+    };
+    let (ca, cb) = (count(&a[split]), count(&b[split]));
+    let show = |r: &[u32; 5]| {
+        format!(
+            "pos({:.4}, {:.4}, {:.4}) hp {:.3}/{:.3}",
+            f32::from_bits(r[0]),
+            f32::from_bits(r[1]),
+            f32::from_bits(r[2]),
+            f32::from_bits(r[3]),
+            f32::from_bits(r[4])
+        )
+    };
+    eprintln!("localizer: rows only in A (or more numerous):");
+    for (row, n) in &ca {
+        let d = n - cb.get(row).copied().unwrap_or(0);
+        if d > 0 {
+            eprintln!("  +{d}  {}", show(row));
+        }
+    }
+    eprintln!("localizer: rows only in B (or more numerous):");
+    for (row, n) in &cb {
+        let d = n - ca.get(row).copied().unwrap_or(0);
+        if d > 0 {
+            eprintln!("  +{d}  {}", show(row));
+        }
+    }
+    eprintln!(
+        "localizer: A had {} actors, B had {}. An equal count with positions differing in the LOW BITS \
+         is float drift; a differing count, or a large positional jump, is a flipped discrete decision \
+         — look for a gameplay choice keyed on ECS query order that moves or damages an actor WITHOUT \
+         writing a stigmergy field (J-6's field hashes matched across the split).",
+        a[split].len(),
+        b[split].len()
+    );
+
+    panic!("localizer: divergence reproduced and reported above — see stderr for the first split tick");
+}
+
 /// **Reproduce the RETURN-TO-SITE crash** — the transition a player reported panicking (2026-07-28).
 ///
 /// # What the report showed
