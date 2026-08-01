@@ -38,7 +38,11 @@ use crate::util::{rand01, smoothstep};
 /// How many enemies to place at startup. Exactly one — a single boss smiley that is as strong as a
 /// whole pack combined (see `START_HP` / `CONTACT_DPS`). There is no respawn, so this is one for the
 /// whole run.
-const ENEMY_COUNT: usize = 1;
+pub(crate) const ENEMY_COUNT: usize = 1;
+
+/// This species' key in [`crate::placement::anomalies::AnomalySites`] — the shared level-wide placement
+/// pass that decides where every anomaly goes (and keeps them off each other).
+pub(crate) const ANOMALY_KEY: &str = "smiley";
 // Momentum charge (steering with acceleration + heading persistence; Wang, Kearney, Cremer &
 // Willemsen, "Steering Behaviors for Autonomous Vehicles in Virtual Environments", IEEE VR 2006,
 // DOI 10.1109/vr.2005.69). An enemy crawls at `boss.min_speed`, and while it holds a roughly-straight
@@ -83,7 +87,7 @@ const WALL_PUSH_GAIN: f32 = 2.0;
 const FACE_CAMERA_OFFSET: f32 = 0.7;
 /// Only floor cells at least this far (tiles) from the squad spawn are candidate enemy positions,
 /// and accepted enemies are kept at least `SPAWN_SEP` apart so they don't stack.
-const MIN_SPAWN_DIST: f32 = 4.0;
+pub(crate) const MIN_SPAWN_DIST: f32 = 4.0;
 const SPAWN_SEP: f32 = 3.0;
 // Glance strength (`boss.look_amount`) and grin-on-sight band (`boss.sight_near`/`boss.sight_far`):
 // `smile` ramps to a big toothy grin (≈1) as the nearest unit closes inside `sight_near` tiles and
@@ -434,38 +438,18 @@ fn spawn_enemies(
     mut attack_materials: ResMut<Assets<AttackSphereMaterial>>,
     sim: Res<SimTuning>,
     beh: Res<crate::behavior_tuning::BehaviorTuning>,
+    sites: Res<crate::placement::anomalies::AnomalySites>,
 ) {
     let capsule = meshes.add(Capsule3d::new(CAPSULE_RADIUS, CAPSULE_LENGTH));
     let quad = meshes.add(Rectangle::new(FACE_SIZE, FACE_SIZE));
     // The "true form" reads bigger than the face — a swelling orb when the mask drops.
     let orb_quad = meshes.add(Rectangle::new(FACE_SIZE * 1.6, FACE_SIZE * 1.6));
 
-    // Greedily pick floor cells far from spawn and spread apart (deterministic — no RNG).
-    let mut chosen: Vec<IVec2> = Vec::new();
-    'scan: for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let cell = IVec2::new(x, y);
-            if !dungeon.is_floor(cell) {
-                continue;
-            }
-            if (cell - dungeon.spawn).as_vec2().length() < MIN_SPAWN_DIST {
-                continue;
-            }
-            if chosen
-                .iter()
-                .any(|c| (*c - cell).as_vec2().length() < SPAWN_SEP)
-            {
-                continue;
-            }
-            chosen.push(cell);
-            if chosen.len() >= ENEMY_COUNT {
-                break 'scan;
-            }
-        }
-    }
-
+    // Sites come from the shared level-wide pass (`placement::anomalies`). It applied `MIN_SPAWN_DIST`
+    // and kept the boss clear of every OTHER anomaly — the thing this local scan could not do, and why
+    // the boss used to share a corner with 610, 1048 and 1048-A. It warns on its own shortfall.
+    let chosen: Vec<IVec2> = sites.get(ANOMALY_KEY).to_vec();
     if chosen.is_empty() {
-        warn!("enemy: no floor cell far enough from spawn to place any enemy");
         return;
     }
 

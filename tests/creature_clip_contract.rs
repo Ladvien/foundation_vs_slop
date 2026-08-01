@@ -44,10 +44,16 @@ const MANCA_CLIP_COUNT: usize = 12;
 const SCP610_GLB: &str = "assets/scp610/scp-610.glb";
 /// Clip index → name for SCP-610.
 ///
-/// Pinned even though `src/scp610` wires **none** of them yet: the v1 bloom is stationary and plays no
-/// clip. The contract is what matters — `assets/scp610/README.md` §5 publishes this index→name table as
-/// the asset's promise, and the file was recompressed on 2026-07-30 (28.7 MB → 5.2 MB), which is
-/// exactly the kind of operation that can silently reorder animations. This is what proves it did not.
+/// All five are pinned though `src/scp610` wires only **two** — index 0 (`idle`, a `Slot::free` tremor)
+/// and index 4 (`death`, a `Slot::one_shot` collapse). The stationary bloom neither travels nor strikes,
+/// so `chase_run`/`writhe_rage`/`lunge_attack` have nothing to trigger them; see the `CLIP_DEATH` doc in
+/// `src/scp610/mod.rs` for why loading them would not fix the T-pose either (measured 2026-08-01 — every
+/// clip but `chase_run`/`lunge_attack` holds the arms at the bind pose).
+///
+/// The contract is what matters — `assets/scp610/README.md` §5 publishes this index→name table as the
+/// asset's promise, and the file was recompressed on 2026-07-30 (28.7 MB → 5.2 MB), which is exactly the
+/// kind of operation that can silently reorder animations. This is what proves it did not, and it is
+/// what makes the two indices above safe to hardcode.
 const SCP610_WIRED: [(usize, &str); 5] = [
     (0, "scp610_idle"),
     (1, "scp610_chase_run"),

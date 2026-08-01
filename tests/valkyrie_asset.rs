@@ -73,6 +73,23 @@ const LOWER_BODY_BONES: [&str; 14] = [
 /// One 24 fps frame.
 const FRAME: f32 = 1.0 / 24.0;
 
+/// Triangle ceiling for the whole figurine, across every primitive.
+///
+/// The rig was **decimated on 2026-08-01**: 82,436 → 5,271 triangles, a 15.6× cut, and the hair cap
+/// (`valkyrie_body.001`, materials `hair_cap_valkyrie`/`hair_cards_valkyrie`) was dropped with it —
+/// which also took the rig's only two textures, since nothing else sampled them.
+///
+/// This matters more than a normal asset budget because **five of these are resident every frame** and
+/// the squad was by a wide margin the scene's largest geometry cost: the player's own debug captures
+/// put `characters/valkyrie.glb` at 412,344 of ~500,000 tracked triangles — over 80% of the scene, for
+/// five characters. At the new count the same five cost ~26,000.
+///
+/// The ceiling is generous (double the shipped count) because it exists to catch a *category* error —
+/// a re-export that forgets to decimate, silently handing back 15× the geometry — not to police normal
+/// authoring drift. Nothing fails loudly when a mesh gets heavier; the frame just gets slower, which is
+/// exactly the kind of regression this file exists to make noisy.
+const TRIANGLE_BUDGET: usize = 11_000;
+
 #[test]
 fn wired_clip_indices_still_name_the_clips_squad_expects() {
     let glb = Glb::load(GLB);
@@ -173,5 +190,53 @@ fn the_locomotion_clips_are_still_authored_in_place() {
                  from a measured cycle distance that assumes none."
             );
         }
+    }
+}
+
+/// The rig stays decimated, and the hair cap stays gone.
+///
+/// Two assertions with one cause. See [`TRIANGLE_BUDGET`] for why a silent un-decimation is worth a
+/// test: five figurines are resident every frame, and nothing about a heavier mesh fails — it just
+/// costs frame time nobody attributes to an asset re-export weeks later.
+#[test]
+fn the_rig_stays_decimated_and_capless() {
+    let glb = Glb::load(GLB);
+
+    let meshes = glb.json["meshes"].as_array().expect("meshes");
+    let accessors = glb.json["accessors"].as_array().expect("accessors");
+    let mut tris = 0usize;
+    for mesh in meshes {
+        for prim in mesh["primitives"].as_array().expect("primitives") {
+            // Indexed geometry is the norm here; fall back to the vertex count for a non-indexed prim
+            // rather than skipping it, so an unindexed re-export cannot slip past the budget.
+            let acc = prim["indices"]
+                .as_u64()
+                .or_else(|| prim["attributes"]["POSITION"].as_u64())
+                .expect("primitive has neither indices nor POSITION") as usize;
+            tris += accessors[acc]["count"].as_u64().expect("accessor count") as usize / 3;
+        }
+    }
+    assert!(
+        tris <= TRIANGLE_BUDGET,
+        "the valkyrie rig is {tris} triangles, over the {TRIANGLE_BUDGET} budget. Five of these are \
+         resident every frame — at the pre-decimation 82,436 they were over 80% of the whole scene's \
+         geometry. Was this re-exported without the decimate step?"
+    );
+
+    // The hair cap went with the decimation, and with it the rig's only two textures — `src/hair/`
+    // supplies hair as simulated wisps anchored to the `head` bone instead. It never read this mesh
+    // (see `hair::mod`'s note that real triangle sampling over `hair_cap_valkyrie` is still future
+    // work), so its removal is a look change, not a wiring one. Asserted so a re-export that quietly
+    // reinstates the cap shows up as a test failure rather than as double hair in a capture.
+    let material_names: Vec<&str> = glb.json["materials"]
+        .as_array()
+        .map(|ms| ms.iter().filter_map(|m| m["name"].as_str()).collect())
+        .unwrap_or_default();
+    for banned in ["hair_cap_valkyrie", "hair_cards_valkyrie"] {
+        assert!(
+            !material_names.contains(&banned),
+            "material `{banned}` is back in the rig — the baked hair cap was deliberately removed on \
+             2026-08-01, and `src/hair/` now grows the hair. Two sets of hair will z-fight."
+        );
     }
 }

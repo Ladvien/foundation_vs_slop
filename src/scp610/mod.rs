@@ -79,10 +79,14 @@ const RENDER_SCALE: f32 = 1.0;
 
 /// Blooms per level. Small on purpose: this is a room-denial hazard, and three of them across a level
 /// is already three rooms the squad has to solve rather than walk through.
-const BLOOM_COUNT: usize = 3;
+pub(crate) const BLOOM_COUNT: usize = 3;
+
+/// This species' key in [`crate::placement::anomalies::AnomalySites`] — the shared level-wide placement
+/// pass that decides where every anomaly goes (and keeps them off each other).
+pub(crate) const ANOMALY_KEY: &str = "scp610";
 /// Minimum distance from the squad spawn, in tiles — nobody opens a run standing in one. Measured to a
 /// room's centre, since placement is per-room (see [`spawn_scp610_blooms`]).
-const SPAWN_MIN_DIST: i32 = 24;
+pub(crate) const SPAWN_MIN_DIST: i32 = 24;
 
 /// Seconds for a fresh bloom to go from "still looks like a person" to fully turned.
 ///
@@ -111,6 +115,15 @@ const CLIP_IDLE: usize = 0;
 /// The other three clips (`chase_run`, `writhe_rage`, `lunge_attack`) stay unloaded on purpose: they
 /// are locomotion and attack animations for a creature that does neither. Loading a clip nothing can
 /// trigger would put a dead node in the graph and a dead slot in every bloom's blend weights.
+///
+/// **Wiring them would not fix the T-pose either — measured, 2026-08-01.** Decoding the GLB's rotation
+/// channels, every clip in the file holds all eight arm/leg bones at exactly 2 keyframes with **zero**
+/// spread — i.e. pinned to the node's rest rotation, which `assets/scp610/README.md` §2 says *is* the
+/// T-pose — except `chase_run` and `lunge_attack` (`upper_arm_*`, 15-17 keys, spread 0.37-0.65). Those
+/// two are precisely the behaviours a stationary, non-attacking bloom does not have. `writhe_rage` moves
+/// only `head` and the three `mutant_limb_*` (spread 0.34-0.42) and leaves the arms spread wide, so
+/// loading it would buy limb thrash on top of an unchanged T-pose. The arms are an **asset** defect and
+/// have to be re-authored in `scp_characters`; do not go looking for a wiring fix here again.
 const CLIP_DEATH: usize = 4;
 
 /// Blend slots, in the order [`build_scp610_anim`] adds them. The array `set_targets` takes is
@@ -254,17 +267,24 @@ fn build_scp610_anim(
         assets.load(GltfAssetLabel::Animation(CLIP_IDLE).from_asset(SCP610_GLB)),
         assets.load(GltfAssetLabel::Animation(CLIP_DEATH).from_asset(SCP610_GLB)),
     ]);
-    // `free`, not `gait`: the bloom never travels, so there is no ground distance to sync a stride
-    // against. Speed 1.0 — the clips are authored at 24 fps gameplay tempo (README 5).
+    // Idle is `free`, not `gait`: the bloom never travels, so there is no ground distance to sync a
+    // stride against. Speed 1.0 — the clips are authored at 24 fps gameplay tempo (README 5).
     //
-    // The death clip is `free` like the idle, which means it LOOPS rather than playing once and
-    // holding. That is a real limitation of `anim::PoseBlender` — its whole design is that no clip is
-    // ever rewound or transitioned (`docs/animation.md`), so there is no "play once" in it. A slow
-    // collapse re-collapsing is far less wrong than a T-posed corpse, and the alternative would be
-    // `AnimationTransitions`, which `docs/animation.md` forbids on anything the blender drives
-    // because its `PostUpdate` pass stomps the weights.
-    let slots: Arc<[crate::anim::Slot]> =
-        nodes.iter().map(|&n| crate::anim::Slot::free(n, 1.0)).collect();
+    // Death is `one_shot`. It used to be `free` like the idle, and the comment here claimed the blender
+    // had no "play once" — that was wrong: `Playback::OneShot` has existed alongside `Free`/`Gait` all
+    // along (`parasite`'s BurrowOut and `scp1048`'s `fire_gun` both use it), and it is exactly the
+    // no-rewind-no-transition primitive `docs/animation.md` allows. `RepeatAnimation::Never` means the
+    // clip runs through once and then holds its final frame, so the corpse stays collapsed. As `free`
+    // it looped, and a bloom re-collapsed every 1.29 s forever — the player's 2026-08-01 report,
+    // "SCP-610 just keeps falling over and over again". Still no `AnimationTransitions` anywhere near
+    // the blender, which `docs/animation.md` forbids because its `PostUpdate` pass stomps the weights.
+    let slots: Arc<[crate::anim::Slot]> = Arc::from(
+        [
+            crate::anim::Slot::free(nodes[SLOT_IDLE], 1.0),
+            crate::anim::Slot::one_shot(nodes[SLOT_DEATH], 1.0),
+        ]
+        .as_slice(),
+    );
     debug_assert_eq!(slots.len(), SLOT_COUNT, "slot table drifted from the SLOT_* constants");
     commands.insert_resource(Scp610Anim { graph: graphs.add(graph), slots });
 }
@@ -321,20 +341,31 @@ pub fn spawn_scp610_at(
         .id()
 }
 
-/// Seed the level's blooms, one per room, spread across the level.
+/// Seed the level's blooms at the sites the shared level-wide pass solved for this species.
 ///
-/// **Placed by ROOM, not by a raster scan over cells.** The first version scanned cells from (0,0) and
-/// took the first N that passed the filters, which is deterministic and was also wrong: the first N
-/// eligible cells all live in the map's low corner, so every bloom clustered there and most of a
-/// 192x192 level never saw one. `SPAWN_MIN_DIST` does not fix that — it only excludes cells *near the
-/// squad*, it does not distribute.
+/// # Two placement bugs, and why the second needed the shared pass
 ///
-/// Striding the region list instead gives one bloom per evenly-spaced room across the whole level,
-/// still with no RNG: `Dungeon::regions` is pinned generation output, so the same seed yields the same
-/// rooms in the same order, and picking indices `0, n/k, 2n/k, ...` is a pure function of that.
+/// The first version scanned cells from (0,0) and took the first N past the filters — deterministic,
+/// and wrong: the first eligible cells in raster order are all adjacent, so every bloom clustered in the
+/// map's low corner and most of a 192² level never saw one.
 ///
-/// A room is also the right unit for the fiction. Area denial means nothing in a corridor the squad can
-/// back out of; it means something when the room *is* the objective.
+/// The fix then was to stride the region list, one bloom per evenly-spaced room. That distributed the
+/// blooms *relative to each other* and left the real problem standing: bloom `i = 0` took `eligible[0]`,
+/// the lowest-index room, which is still the corner — and nothing anywhere knew that SCP-999, SCP-1048,
+/// the boss and the crab nests were each independently choosing that same corner by the same logic. The
+/// player caught the result (2026-08-01): *"610, 1048, and 1048-A, and Smiley are all bundled in the
+/// corner."* Its own regression test could not catch it either, because it asserted the *span* of the
+/// three blooms on a synthetic diagonal room list — a property that stays true while all three sit in
+/// one corner of a real level next to four other anomalies.
+///
+/// Placement now lives in `placement::anomalies`: one pass for the whole roster, cross-species spacing,
+/// and best-candidate selection so there is no scan order left for a corner to win.
+///
+/// **This gives up "one bloom per room".** That was the right unit for the fiction — area denial means
+/// nothing in a corridor the squad can back out of — and a cell-based pass does not guarantee it. What
+/// replaces it is `anomaly_separation` (18 tiles shipped, comfortably past a large room's diagonal),
+/// which achieves the same thing the fiction actually wanted, spread across the whole roster rather than
+/// within one species.
 fn spawn_scp610_blooms(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -342,33 +373,9 @@ fn spawn_scp610_blooms(
     rules: Res<crate::containment::ContainmentRules>,
     mut seq: ResMut<crate::containment::TargetSeq>,
     anim: Res<Scp610Anim>,
+    sites: Res<crate::placement::anomalies::AnomalySites>,
 ) {
-    let spawn = dungeon.spawn;
-
-    // Rooms far enough from the squad's start that nobody opens a run inside one.
-    let eligible: Vec<&crate::placement::ir::Region> = dungeon
-        .regions
-        .iter()
-        .filter(|r| {
-            let c = r.rect.center_cell();
-            (IVec2::new(c[0], c[1]) - spawn).abs().max_element() >= SPAWN_MIN_DIST
-        })
-        .collect();
-    if eligible.is_empty() {
-        return;
-    }
-
-    // Even stride over the eligible rooms. Integer arithmetic, so it is exact and order-independent.
-    let want = BLOOM_COUNT.min(eligible.len());
-    for i in 0..want {
-        let room = eligible[i * eligible.len() / want];
-        let c = room.rect.center_cell();
-        let cell = IVec2::new(c[0], c[1]);
-        // A room's centre cell is floor by construction, but a notched room can hollow it out; fall
-        // back to nothing rather than spawning a bloom inside rock.
-        if !dungeon.is_floor(cell) {
-            continue;
-        }
+    for (i, &cell) in sites.get(ANOMALY_KEY).iter().enumerate() {
         spawn_scp610_at(
             &mut commands,
             &assets,
@@ -471,11 +478,20 @@ mod tests {
 ///
 /// Reads `Health` directly rather than a marker component: the blender only eases weights, so "dead"
 /// needs no state of its own here and adding a marker would churn the archetype for a cosmetic fact.
+///
+/// The death slot is a one-shot, so it needs firing on the **edge** into death rather than every frame
+/// (re-triggering restarts the clip, which is what sustained fire wants for a recoil and is exactly the
+/// re-collapsing loop we are fixing here). `PoseBlender::target_weight` is the driver's own one-frame
+/// memory of what it last asked for, so the edge is detectable without a second copy of the state —
+/// the `parasite::drive_manca_animation` idiom, and the reason that accessor exists.
 fn drive_scp610_animation(
     mut blooms: Query<(&mut crate::anim::PoseBlender, &Health), With<Scp610>>,
 ) {
     for (mut blender, health) in &mut blooms {
         let dead = health.current <= 0.0;
+        if dead && blender.target_weight(SLOT_DEATH) == 0.0 {
+            blender.trigger(SLOT_DEATH);
+        }
         let mut targets = [0.0; SLOT_COUNT];
         targets[SLOT_IDLE] = if dead { 0.0 } else { 1.0 };
         targets[SLOT_DEATH] = if dead { 1.0 } else { 0.0 };

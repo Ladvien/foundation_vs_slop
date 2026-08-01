@@ -49,6 +49,10 @@ pub(crate) use foraging::*;
 /// Total crabs across the level, split into `CRAB_CLUSTERS` nests in far rooms.
 pub(crate) const CRAB_COUNT: usize = 40;
 pub(crate) const CRAB_CLUSTERS: usize = 4;
+
+/// This species' key in [`crate::placement::anomalies::AnomalySites`] — the shared level-wide placement
+/// pass that decides where every anomaly goes (and keeps them off each other).
+pub(crate) const ANOMALY_KEY: &str = "crab_nest";
 /// The first this-many clusters are seeded directly on wall faces, so wall-climbing is always visible
 /// (the rest start on the floor and mount walls opportunistically as the field pulls them).
 pub(crate) const CRAB_WALL_CLUSTERS: usize = 2;
@@ -73,6 +77,18 @@ pub(crate) const CRAB_MODEL_Y: f32 = 0.275;
 /// blood on a real hit — a near-miss now passes cleanly instead of registering on an oversized hitbox.
 /// Scales in lockstep with `CRAB_RENDER_SCALE` (2.5× when the model grew 0.06→0.15).
 pub(crate) const CRAB_COLLIDER_R: f32 = 0.30;
+
+/// Where an SCP-150 gestation lump sits on a crab, in the (unscaled) root's local space.
+///
+/// The model's mesh bounds are local y −2.064..0.887; at `CRAB_RENDER_SCALE` under `CRAB_MODEL_Y` that is
+/// world **−0.035..0.408**, so the carapace tops out at 0.408. The shared 0.45 the lump used to sit at
+/// therefore floated it clear of the shell — the gap the player boxed on 2026-08-01. 0.36 seats it just
+/// inside the carapace so the swelling bulges out of the shell instead of hovering over it. Cosmetic;
+/// tune by devshot like the seat constants above.
+pub(crate) const CRAB_LUMP_SEAT: Vec3 = Vec3::new(0.0, 0.36, 0.0);
+/// Lump size/shape on a crab: the reference `parasite::LUMP_R` (0.09) cut to ≈0.063 and squashed wide, so
+/// it reads as a swelling pressing up through a ≈0.46 m shell rather than a ball stuck to it.
+pub(crate) const CRAB_LUMP_SCALE: Vec3 = Vec3::new(0.90, 0.55, 0.80);
 
 /// The unit's body approximated as a vertical cylinder the crabs cling to (radius, climbable height).
 pub(crate) const UNIT_BODY_RADIUS: f32 = 0.33;

@@ -44,7 +44,12 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 156;
+/// **156 → 157 on 2026-08-01** for `sim.anomaly_separation`, the cross-species anomaly spacing the new
+/// shared placement pass introduced (`placement::anomalies`). Growing `N` invalidates the world archive
+/// exactly as `audio_genome`'s 15 → 16 did for FVS-K-1 — a stored elite is a vector of the old length
+/// and cannot be decoded against the new `BOUNDS`. That re-bake is the known price; it is recorded here
+/// rather than discovered by whoever next loads `elites_world.ron`.
+pub const N: usize = 157;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -220,6 +225,26 @@ static BOUNDS: [(f32, f32); N] = [
                    //   bit-exact no-op, so the search may legitimately choose "this mechanic is off";
                    //   capped at 1.0, where a confident firsthand Lethal belief nearly doubles fear,
                    //   which is already enough to break a containment hold.
+    (6.0, 30.0),   // anomaly_separation — minimum tiles between ANY two anomalies, across species
+                   //   (`placement::anomalies`). Difficulty: packed anomalies make one wing lethal and
+                   //   the rest empty; spread ones make the whole level live. Floored at 6 rather than
+                   //   0 because below ~8 the corner-bundling this pass exists to end starts coming
+                   //   back (a hall can hold three), and a search that can rediscover the bug is not
+                   //   exploring difficulty — it is exploring a regression. Capped at 30 because past
+                   //   there a 192² level starts failing to place the crab nests at all, and the pass
+                   //   warns rather than degrading; an unplaceable roster is not a harder world.
+                   //
+                   //   **The descriptor can see this one, and that is why it lives HERE.** The N-21 /
+                   //   N-24 trap is a gene no descriptor axis moves (`biome_mix` in the LEVEL archive,
+                   //   whose axes are structural — `furniture_per_room` and `infestation` — and which
+                   //   biome cannot touch). This archive's axes are `world_descriptor`'s measured
+                   //   OUTCOMES, total deaths × total lives, and where the anomalies sit relative to
+                   //   each other changes what the squad meets, when, and how much of it survives.
+                   //   That is a real coupling rather than a hoped-for one, so this gene needs no new
+                   //   axis. ⚠️ It is still a *prediction*: confirm with `train probe` that the
+                   //   deaths/lives spread actually widens across this range before trusting it —
+                   //   FVS-N-13 is the standing reminder that a confident claim about golden movement
+                   //   cuts both ways.
     // ── MoldConfig (the CPU reaction-diffusion gameplay mold — dynamics + couplings the ecosystem search
     //    co-evolves with combat, since mold shapes light/healing). substeps/seed_v/light_ref stay fixed
     //    (structural/calibration), so only the 6 gameplay dials evolve. `diffuse` capped < 0.25 (stable step).
@@ -398,6 +423,7 @@ pub fn encode(
     v.push(sim.containment.extraction_radius);
     v.push(sim.containment.out_watch_threshold);
     v.push(sim.belief_fear_gain);
+    v.push(sim.anomaly_separation);
     // MoldConfig — the 6 evolvable gameplay dials (in BOUNDS order); substeps/seed_v/light_ref stay fixed.
     v.push(mold.growth);
     v.push(mold.diffuse);
@@ -633,6 +659,7 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             out_watch_threshold: f!(),
         },
         belief_fear_gain: f!(),
+        anomaly_separation: f!(),
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.
     let mold = crate::mold::MoldConfig {

@@ -60,6 +60,7 @@ pub(crate) fn spawn_crabs(
     mut seq: ResMut<CrabSpawnSeq>,
     sim: Res<SimTuning>,
     beh: Res<BehaviorTuning>,
+    sites: Res<crate::placement::anomalies::AnomalySites>,
 ) {
     // Shared handles via the one builder the Research Room also uses. The collider mesh is added before
     // the scene loads (same order as the old inline construction), so the deterministic handle IDs are
@@ -71,31 +72,11 @@ pub(crate) fn spawn_crabs(
     // Keep the shared handles so the reproduction system can birth new crabs at runtime.
     commands.insert_resource(crab_assets);
 
-    // Greedily pick far, spread-apart nest seeds (deterministic, like `enemy::spawn_enemies`).
-    let mut seeds: Vec<IVec2> = Vec::new();
-    'scan: for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let cell = IVec2::new(x, y);
-            if !dungeon.is_floor(cell) {
-                continue;
-            }
-            if (cell - dungeon.spawn).as_vec2().length() < CRAB_MIN_SPAWN_DIST {
-                continue;
-            }
-            if seeds
-                .iter()
-                .any(|c| (*c - cell).as_vec2().length() < CRAB_CLUSTER_SEP)
-            {
-                continue;
-            }
-            seeds.push(cell);
-            if seeds.len() >= CRAB_CLUSTERS {
-                break 'scan;
-            }
-        }
-    }
+    // Nest seeds come from the shared level-wide pass (`placement::anomalies`), which applied
+    // `CRAB_MIN_SPAWN_DIST` and — the part this local scan could not do — kept the nests clear of every
+    // OTHER anomaly rather than only of other nests. It warns on its own shortfall.
+    let seeds: Vec<IVec2> = sites.get(ANOMALY_KEY).to_vec();
     if seeds.is_empty() {
-        warn!("crab: no floor cell far enough from spawn to place a nest");
         return;
     }
 
@@ -318,7 +299,10 @@ pub(crate) fn spawn_crab_on_patch(
     // SCP-150 host state: a crab is also a parasitizable host (the three-body web — parasite ↔ crab ↔
     // squad). Always-present + inert until infested, added here so `nest_reproduce`'s bred crabs inherit
     // it too; a flipped field never splits the hashed crab archetype.
-    ec.insert(crate::parasite::host_infestation_bundle());
+    ec.insert(crate::parasite::host_infestation_bundle(
+        crate::crab::CRAB_LUMP_SEAT,
+        crate::crab::CRAB_LUMP_SCALE,
+    ));
     if is_scout {
         ec.insert(Scout::new(rand_seed));
     }

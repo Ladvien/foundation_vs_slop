@@ -1028,8 +1028,16 @@ impl Plugin for MyceliaPlugin {
         // Reads `MoldStep`, so it must observe the flag `advance_mold_time` set this frame.
         .add_systems(Update, gate_coarse_readback.after(advance_mold_time))
         // Surface coating — walls and furniture take on mold. Cosmetic, and independent of the
-        // simulation that decides *how much* mold there is.
+        // simulation that decides *how much* mold there is. Both coat per distinct base material via the
+        // shared `CoatedFurniture` cache, so a wall keeps the biome material `dungeon::render` gave it.
         .add_systems(Update, (coat_walls, coat_furniture))
+        // The cache keys on `AssetId<StandardMaterial>`, and the dungeon mints its wall materials per run;
+        // clearing here (a `StateTransition`, so always ahead of the `Update` coaters) keeps dead keys from
+        // accumulating one pair per expedition. See `reset_coated_cache`.
+        .add_systems(
+            OnEnter(crate::session::RunState::Active),
+            reset_coated_cache.in_set(crate::session::RunBuild::Config),
+        )
         // Plugins add plugins. Each of these was already a `build(app)` free function — the seams were
         // found long ago; this only makes the boundary something the type system and the registration
         // site both state. `GrazingPlugin` is the one that matters most: it is the sole part of this
@@ -1332,8 +1340,8 @@ fn gate_coarse_readback(
     Ok(())
 }
 
-/// Swap every wall's `StandardMaterial` for a mold-aware [`MoldWallMaterial`], once, as soon as the dungeon
-/// has spawned its tiles.
+/// Swap each wall's `StandardMaterial` for a mold-aware [`MoldWallMaterial`] that preserves **that wall's
+/// own** base, as the dungeon spawns its tiles.
 ///
 /// Doing it here rather than in `dungeon::spawn_tiles` keeps `dungeon` from having to know that `mycelia`
 /// exists — the alternative would be an ordering dependency where the dungeon reads a `MoldImages` resource
@@ -1342,52 +1350,85 @@ fn gate_coarse_readback(
 ///
 /// Safe because nothing else reads wall materials: the fog reveals walls via `Visibility`, and its
 /// material-swap query is explicitly floor-only (`Without<Wall>`).
+///
+/// # Per-wall, not per-map — biome made the old assumption false
+///
+/// This used to read the base off `walls.iter().next()` and stamp that one extended material onto every
+/// wall in the dungeon, justified by a comment reading "every wall shares one `StandardMaterial` handle".
+/// That was true before biomes. `dungeon::render::spawn_tiles` now builds **two** wall materials —
+/// `wall_mats[0]` the Backrooms wallpaper, `wall_mats[1]` the Foundation concrete — and keys each slab on
+/// `dungeon.biome(cell)`, so a room and its own walls agree by construction (`layout::resolve_biomes`).
+/// Reading one arbitrary wall therefore let **ECS query order pick the entire level's wall treatment**, and
+/// repainted every Backrooms room's wallpaper with whichever biome happened to be enumerated first. The
+/// player's 2026-08-01 capture is a carpeted corridor walled in concrete: correct floors, one wrong wall
+/// material everywhere. That is `CLAUDE.md`'s "ECS query order decides nothing" rule, in the render layer.
+///
+/// Keying the coated material by its **base handle** — sharing [`CoatedFurniture`] with `coat_furniture`,
+/// which already had this right — mints one extended material per distinct base and leaves the biome's
+/// decision intact.
+///
+/// # No run-latch
+///
+/// The old `Local<bool>` also outlived the run. Tiles are `run_scoped()` and `spawn_tiles` moved to
+/// `OnEnter(RunState::Active)` (FVS-N-13), so every expedition after the first spawned fresh walls that the
+/// latched system never looked at — no mold on any wall from run 2 onward. `Without<MoldCoated>` retires
+/// each wall individually instead, so the query empties on its own and refills when the next run's tiles
+/// spawn.
 fn coat_walls(
     mut commands: Commands,
-    mut done: Local<bool>,
     cfg: Res<MyceliaConfig>,
     images: Res<MoldImages>,
     control: Res<control::MoldControlImage>,
     std_materials: Res<Assets<StandardMaterial>>,
     mut wall_materials: ResMut<Assets<MoldWallMaterial>>,
-    walls: Query<(Entity, &MeshMaterial3d<StandardMaterial>), With<Wall>>,
+    mut cache: ResMut<CoatedFurniture>,
+    walls: Query<(Entity, &MeshMaterial3d<StandardMaterial>), (With<Wall>, Without<MoldCoated>)>,
 ) {
-    if *done {
-        return;
-    }
-    // Every wall shares one `StandardMaterial` handle, so read the base off whichever we see first and
-    // build a single extended material for all of them. If the tiles haven't spawned yet, try again next
-    // frame — this system disables itself the moment it succeeds.
-    let Some((_, first)) = walls.iter().next() else {
-        return;
-    };
-    let Some(base) = std_materials.get(&first.0) else {
-        return;
-    };
-
-    let coated = wall_materials.add(MoldWallMaterial {
-        base: base.clone(),
-        extension: material::MoldWallExt::new(
-            &cfg,
-            images.display.clone(),
-            control.dynamic.clone(),
-        ),
-    });
-
-    for (entity, _) in &walls {
+    for (entity, mat) in &walls {
+        let id = mat.0.id();
+        let coated = match cache.0.get(&id) {
+            Some(handle) => handle.clone(),
+            None => {
+                // The material may not have resolved yet; leave the wall uncoated and retry next frame.
+                let Some(base) = std_materials.get(&mat.0) else {
+                    continue;
+                };
+                let handle = wall_materials.add(MoldWallMaterial {
+                    base: base.clone(),
+                    extension: material::MoldWallExt::new(
+                        &cfg,
+                        images.display.clone(),
+                        control.dynamic.clone(),
+                    ),
+                });
+                cache.0.insert(id, handle.clone());
+                handle
+            }
+        };
         commands
             .entity(entity)
             .remove::<MeshMaterial3d<StandardMaterial>>()
-            .insert(MeshMaterial3d(coated.clone()));
+            .insert((MeshMaterial3d(coated), MoldCoated));
     }
-    *done = true;
+}
+
+/// Drop the coated-material cache at the start of each run.
+///
+/// The dungeon's wall materials are minted per run (`materials.add` inside `dungeon::render::spawn_tiles`,
+/// which is `run_scoped()`), so their `AssetId`s die with the run. Without this the cache would accumulate
+/// two dead keys per expedition, each pinning a `MoldWallMaterial` that nothing can ever reference again —
+/// the same per-expedition growth FVS-N-13 was about, just smaller. Furniture keys are asset-server handles
+/// and simply re-mint on first sight, so clearing costs one extended material per glTF material per run.
+fn reset_coated_cache(mut cache: ResMut<CoatedFurniture>) {
+    cache.0.clear();
 }
 
 #[cfg(test)]
 mod tests;
 
-/// Marks a mesh whose `StandardMaterial` has already been swapped for a mold-aware one, so `coat_furniture`
-/// never reprocesses it.
+/// Marks a mesh whose `StandardMaterial` has already been swapped for a mold-aware one, so neither
+/// [`coat_walls`] nor [`coat_furniture`] reprocesses it. On a wall this is also what replaces the old
+/// run-outliving `Local<bool>` latch: retirement is per entity, so the next run's fresh tiles are coated.
 #[derive(Component)]
 struct MoldCoated;
 
@@ -1397,7 +1438,9 @@ struct MoldCoated;
 struct MoldCoatDone;
 
 /// Cache of `StandardMaterial` → coated `MoldWallMaterial`. A dungeon full of couches shares a handful of
-/// glTF materials; without this we would mint one extended material per mesh instance.
+/// glTF materials; without this we would mint one extended material per mesh instance. Shared with
+/// [`coat_walls`], where it is what keeps each biome's wall material distinct instead of collapsing the map
+/// onto one. Cleared per run by [`reset_coated_cache`].
 #[derive(Resource, Default)]
 struct CoatedFurniture(std::collections::HashMap<AssetId<StandardMaterial>, Handle<MoldWallMaterial>>);
 

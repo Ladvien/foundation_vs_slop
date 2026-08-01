@@ -757,6 +757,19 @@
         // Evolvable, bounds 0.0..1.0: what a belief MEANS is not an evolvable objective, but how much
         // it COSTS you is exactly difficulty. The search may legitimately choose 0 (the mechanic off).
         belief_fear_gain: 0.4,
+
+        // Minimum distance in TILES between any two anomalies, ACROSS species — the one knob the
+        // shared placement pass adds (`src/placement/anomalies.rs`).
+        //
+        // 18.0 against a 192-tile map: comfortably more than a large room's diagonal, so two anomalies
+        // cannot share a room and generally cannot share adjacent ones, while still admitting well
+        // over the ~10 sites the roster needs. Below ~8 the old bundling reappears (a hall can hold
+        // three); above ~30 the level starts failing to place the crab nests and the pass warns.
+        //
+        // Evolvable, bounds 6.0..30.0: packed anomalies make one wing lethal and the rest empty,
+        // spread ones make the whole level live — difficulty, which is what the world genome explores.
+        anomaly_separation: 18.0,
+
         containment: (
             device_supply: 3,          // enough to miss twice and still make the tutorial capture
             device_reach: 2.5,         // a deliberate approach, not a cross-room snipe

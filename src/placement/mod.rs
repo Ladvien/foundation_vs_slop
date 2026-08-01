@@ -19,6 +19,7 @@
 #[cfg(test)]
 #[path = "acceptance_tests.rs"]
 mod acceptance;
+pub mod anomalies;
 pub mod furnish;
 pub mod ir;
 pub mod manifest;
@@ -110,6 +111,15 @@ impl Plugin for PlacementPlugin {
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
         app.add_systems(OnEnter(crate::session::RunState::Active), furnish::furnish_regions.in_set(crate::session::RunBuild::Populate));
+        // Where every anomaly goes, decided ONCE for the whole level so separation is cross-species.
+        // `RunBuild::Grids` is after `World` (the `Dungeon` exists) and before `Populate` (nothing has
+        // spawned), so each species' spawner reads the table with no per-spawner ordering edge — see
+        // `anomalies` for the corner-clustering bug this replaces.
+        app.init_resource::<anomalies::AnomalySites>();
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            anomalies::build_anomaly_sites.in_set(crate::session::RunBuild::Grids),
+        );
         // Refresh the dialled half of the `placement:` slice from `GameConfig` before `furnish_regions`
         // reads it (FVS-H-8). `RunBuild::Config` is chained ahead of `Populate`, so no extra edge.
         app.add_systems(

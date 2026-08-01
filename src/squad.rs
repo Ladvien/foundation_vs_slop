@@ -241,6 +241,19 @@ struct Recolored;
 /// eyeballed offset stay calibrated. Uniform, so the slung rifle and the autogib fragments stay
 /// proportional. Collision (`UNIT_HALF_EXTENTS`) stays narrower than the visual on purpose — see below.
 const FIGURINE_SCALE: f32 = 1.13;
+/// Where an SCP-150 gestation lump sits on a unit, in the unit root's local space.
+///
+/// **Pre-`FIGURINE_SCALE`**, because the lump is a child of the unit root and that root carries the 1.13.
+/// The figurine's mesh spans world y −0.284..1.820, so the sternum is around world 1.15 → local
+/// `1.15 / 1.13 ≈ 1.02`. The shared 0.45 this replaced landed at world 0.51 — mid-thigh — despite being
+/// documented as "upper body / chest area". A chestburster wants the chest. Cosmetic; tune by devshot.
+///
+/// Unchanged by the 2026-08-01 decimation: that removed the hair cap, which only lowered the mesh's
+/// **top** (local 1.634 → 1.611, world 1.846 → 1.820). The torso it seats against did not move.
+const UNIT_LUMP_SEAT: Vec3 = Vec3::new(0.0, 1.02, 0.16);
+/// Lump size/shape on a unit: the reference `parasite::LUMP_R` (0.09) held near full and squashed wide,
+/// giving a ≈9 cm swelling once the root's 1.13 is applied — fist-sized under the ribs of a 1.85 m figure.
+const UNIT_LUMP_SCALE: Vec3 = Vec3::new(1.15, 0.80, 0.95);
 /// Square collision half-extent. Sized well under the narrowest walkable channel so units don't
 /// wedge/catch in 1-tile doorways: a doorway walled on both sides has `TILE - 2·WALL_THICKNESS = 0.72`
 /// of clear width, and a 0.44-wide unit leaves ~0.14 m of slack per side to slide through cleanly. Well
@@ -828,7 +841,10 @@ pub(crate) fn spawn_unit(
         Transform::from_translation(pos).with_scale(Vec3::splat(FIGURINE_SCALE)),
         avian3d::prelude::TransformInterpolation,
     ));
-    unit.insert(crate::parasite::host_infestation_bundle());
+    unit.insert(crate::parasite::host_infestation_bundle(
+        UNIT_LUMP_SEAT,
+        UNIT_LUMP_SCALE,
+    ));
     // FVS-O-1b: what this operative knows. A SECOND `insert` because the bundle above is already at
     // Bevy's 15-element tuple cap — the same idiom the infestation bundle uses. A **value field present
     // from spawn**, never a marker toggled on acquisition, so learning something cannot split the

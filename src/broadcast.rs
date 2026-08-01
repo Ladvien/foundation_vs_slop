@@ -91,6 +91,29 @@ pub struct BroadcastSeq(pub u64);
 /// So: rank every eligible cell by distance from spawn and take the NEAREST, which is what a minimum
 /// actually means. Screens are then kept `SCREEN_SEPARATION` apart so they do not stack into one
 /// room, since two screens in one place is one screen with a spare.
+///
+/// # The screen is WALL-MOUNTED, and that is the second bug this shape prevents
+///
+/// The first version dropped the TV on the floor cell centre with an identity rotation. Both halves of
+/// that were wrong, and the player captured it (2026-08-01, *"This TV is poking through the wall and
+/// doesn't fit the aesthetic"*):
+///
+/// * **It clipped the wall, always.** `retro_tv_large.glb` measures 0.881 m wide, and a walled cell
+///   offers `0.5·TILE_SIZE − WALL_THICKNESS` = **0.36 m** of clear floor from its centre against a
+///   half-width of **0.44 m**. Not luck — geometry. Every screen that landed in a walled cell poked
+///   ~0.08 m through.
+/// * **It faced world +Z regardless of the room.** An identity quat on a prop whose whole point is
+///   being *looked at* meant the screen could stare into the wall behind it.
+///
+/// Meanwhile `placement::furnish` already solves exactly this for wall sconces, and the fix is to place
+/// the screen the way it places them: off [`Dungeon::wall_faces_near`], seated on the wall's inner
+/// plane, yawed by the wall's inward normal. A bracket-mounted CRT high on a corridor wall is also what
+/// the anomaly wants to be — a thing you walk under and catch out of the corner of your eye — rather
+/// than furniture someone left in a hallway.
+///
+/// Camera-facing walls (`-X`/`-Z` inward normals) are skipped for the same reason `furnish::wall_runs`
+/// skips them: those walls are cut down to knee height for the isometric view, so anything mounted at
+/// head height on one would hang in the cutaway gap.
 fn spawn_screens(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
@@ -131,19 +154,32 @@ fn spawn_screens(
         if placed.len() >= cfg.count {
             break;
         }
-        let pos = dungeon.cell_center(IVec2::new(x, y));
-        if placed.iter().any(|p| p.distance(pos) < SCREEN_SEPARATION) {
+        let cell = IVec2::new(x, y);
+        let center = dungeon.cell_center(cell);
+        if placed.iter().any(|p| p.distance(center) < SCREEN_SEPARATION) {
             continue;
         }
-        spawn_screen_at(&mut commands, pos, &scene, &rules, &mut targets);
-        placed.push(pos);
+        // A cell with no mountable wall is simply not a candidate — the screen needs something to hang
+        // on. Skipping is right here (unlike a silent degraded placement): the scan continues outward
+        // and the shortfall warning below still fires if the level genuinely cannot hold the count.
+        let Some((face, normal)) = mountable_wall(&dungeon, center) else {
+            continue;
+        };
+        spawn_screen_at(
+            &mut commands,
+            screen_transform(face, normal),
+            &scene,
+            &rules,
+            &mut targets,
+        );
+        placed.push(center);
     }
     if placed.len() < cfg.count {
         // Loud, not silent: a level that cannot hold the authored count is a content fact worth
         // seeing, and a screen that quietly did not spawn is the failure mode this whole item is about.
         warn!(
             "watch feed: placed {} of {} screens — no further floor cell {SCREEN_SEPARATION} m clear \
-             of the others and past spawn_min_dist",
+             of the others, past spawn_min_dist, and carrying a non-camera-facing wall to mount on",
             placed.len(),
             cfg.count
         );
@@ -153,10 +189,58 @@ fn spawn_screens(
 /// Minimum spacing between screens, in metres. Two screens in one room is one screen with a spare.
 const SCREEN_SEPARATION: f32 = 20.0;
 
-/// Spawn one screen at `pos`. `pub` so the Research Room dev palette can place one by hand.
+/// Height of the screen's **base** up the wall. `retro_tv_large.glb` is 0.656 m tall and origined at its
+/// base centre, so the set top lands at 2.06 m under a [`crate::dungeon::WALL_HEIGHT`] of 2.4 — clear of
+/// a ~1.85 m operative's head, and low enough to still read on screen in the isometric view.
+const SCREEN_MOUNT_HEIGHT: f32 = 1.40;
+
+/// Half the set's depth (measured: local Z spans ±0.281), plus the same 0.02 m skin `furnish` insets
+/// sconces by. Seats the chassis back flush on the wall plane without z-fighting it.
+const SCREEN_WALL_INSET: f32 = 0.281 + 0.02;
+
+/// Pick the wall face this cell's screen mounts on, or `None` if it has none worth mounting on.
+///
+/// Deterministic by construction: [`Dungeon::wall_faces_near`] emits faces in a fixed E/W/N/S order
+/// decided by cell geometry alone — no RNG, no ECS query — so taking the first survivor is a total
+/// order already. Camera-facing walls are filtered for the cutaway reason in [`spawn_screens`]' docs.
+fn mountable_wall(dungeon: &Dungeon, center: Vec3) -> Option<(Vec3, Vec3)> {
+    dungeon
+        .wall_faces_near(center)
+        .into_iter()
+        .find(|&(_, normal)| {
+            !(crate::dungeon::SHORT_CAMERA_WALLS && crate::dungeon::is_camera_facing(normal))
+        })
+}
+
+/// Seat a screen on a wall face: lifted to [`SCREEN_MOUNT_HEIGHT`], pushed [`SCREEN_WALL_INSET`] into
+/// the room along the wall's inward `normal`, and yawed so the glass faces the room.
+///
+/// The yaw is `atan2(normal.x, normal.z)`, which maps the model's local +Z onto the inward normal —
+/// and local +Z **is** the screen direction for this kit (`light::attach_screen_lights` documents it:
+/// the spotlight there adds a PI flip precisely because Bevy's spot axis is −Z while the glass faces
+/// +Z). Same expression `furnish` yaws its wall anchors by, so a kit swap that changes the convention
+/// breaks both in the same direction rather than one silently.
+fn screen_transform(face: Vec3, normal: Vec3) -> Transform {
+    Transform::from_translation(
+        face.with_y(SCREEN_MOUNT_HEIGHT) + normal * SCREEN_WALL_INSET,
+    )
+    .with_rotation(Quat::from_rotation_y(normal.x.atan2(normal.z)))
+}
+
+/// Spawn one screen with an already-seated `transform`.
+///
+/// `pub` for the Research Room dev palette, which does **not** call it yet (checked 2026-08-01:
+/// `src/research_room/` names nothing in this module). Kept public and documented as the one way to
+/// place a screen, so the palette wires to this rather than growing a second spawn path.
+///
+/// Takes a whole `Transform` rather than a bare position because a screen's **yaw is load-bearing** —
+/// it is an anomaly you contain by looking away from, so which way the glass points is gameplay, not
+/// dressing. Callers build one with [`screen_transform`] from a wall face; the dev palette may pass its
+/// own. The old `pos: Vec3` signature could only ever produce the identity rotation that had every
+/// screen facing world +Z.
 pub fn spawn_screen_at(
     commands: &mut Commands,
-    pos: Vec3,
+    transform: Transform,
     scene: &Handle<WorldAsset>,
     rules: &crate::containment::ContainmentRules,
     seq: &mut crate::containment::TargetSeq,
@@ -175,7 +259,7 @@ pub fn spawn_screen_at(
             // `Containment` but no id would show a rule in the records and be unselectable in play —
             // the "shipped, tested, unreachable" shape this repo keeps catching.
             seq.next(),
-            Transform::from_translation(pos),
+            transform,
             crate::session::run_scoped(),
             WorldAssetRoot(scene.clone()),
         ))

@@ -16,18 +16,37 @@ glTF channel packing: R = occlusion, G = roughness, B = metallic.
 
 - `concrete-diffuse.jpg`, `concrete-normal.png`, `concrete-orm.png`
 
-Source: **texturecan.com**, "Damaged Concrete with Deep Cracks" (Ground 0046), via
-`/mnt/codex_fs/game_assets/textures/pbr/`. License: **CC0** (texturecan publishes its library CC0).
+Source: **ambientCG**, "Concrete 028" (https://ambientcg.com/view?id=Concrete028), 1K-JPG release.
+License: **CC0 1.0** — public domain; ambientCG publishes its whole library CC0.
 
-Replaced Concrete 0031 ("Concrete Wall of Stacked Rectangular Stones") on 2026-07-30. That one worked
-as a *zone* — clearly grey, clearly not the motel — but its stacked-stone pattern read as medieval
-cobblestone rather than a Foundation facility. Ground 0046 is a poured slab with deep cracks, and it is
-also near-perfectly neutral (mean srgb 0.518/0.518/0.517, chroma ~0.001) against the wallpaper's
-0.59/0.58/0.36. That maximises the *saturation* contrast between the two biomes, which is what
-`docs/lore/2026-07-12-scp-color-language.md` 6 actually asks of the reality layer — the concrete zone
-is the desaturated counterweight, so the less chroma it carries the better it does its job.
-Downscaled from the 2K release to 1024² to match the Backrooms set, and the separate AO + roughness
-maps packed into one ORM. Metallic is a hard 0 — concrete is a dielectric.
+Board-formed architectural concrete: vertical plank seams, panel joints and pour staining. Unlike the
+two sets above this one ships **authored** AO, roughness and normal maps, so `concrete-normal.png` is
+its `NormalGL` (OpenGL/glTF convention, which is what Bevy wants) converted to PNG, and
+`concrete-orm.png` packs its real AO + roughness rather than relief inferred from luminance. No use of
+`scripts/derive_surface_maps.py` here — that script exists for diffuse-only sources. `-orm` is the
+glTF channel packing: R = occlusion, G = roughness, B = metallic. Metallic is a hard 0 — concrete is
+a dielectric.
+
+The diffuse is **grey-world channel-balanced** (each channel scaled to the common mean) to strip a
+faint warm cast, taking chroma 0.031 → 0.001. A channel balance rather than a saturation crush,
+because crushing saturation would also flatten the pour staining that makes it read as concrete.
+
+**Replaced Ground 0046 on 2026-08-01.** Player: *"I still have backrooms carpet with 'concrete' walls
+(looks more like marble)."* They were right, and measurement backs it: Ground 0046 shipped at mean
+srgb 0.599/0.595/0.579 with an albedo standard deviation of just **0.019** — a pale, almost featureless
+wash, which is what reads as polished stone. Concrete 028 is 0.395/0.395/0.394 with sd **0.030**: 33%
+darker and 58% more surface variation, with real board structure instead of a smooth field.
+
+> Note for whoever measures next: the numbers this file previously quoted for Ground 0046
+> (0.518/0.518/0.517, chroma ~0.001) do **not** match the shipped 1024² JPEG, which measures
+> 0.599/0.595/0.579, chroma 0.020. They were presumably taken from the 2K source before the downscale
+> and JPEG pass. The figures above are measured on the files as they ship.
+
+The desaturation rationale still holds and is why the balance step exists: per
+`docs/lore/2026-07-12-scp-color-language.md` §6 the concrete zone is the **desaturated counterweight**
+to the Backrooms yellow (wallpaper 0.591/0.584/0.362, chroma 0.229; carpet chroma 0.317), so the less
+chroma it carries the better it does its job. At chroma 0.001 this set is *more* neutral than the one
+it replaces, so the biome contrast is preserved while the value contrast improves.
 
 ## `assets/barrels/*.glb`
 
