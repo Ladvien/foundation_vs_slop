@@ -212,7 +212,7 @@ pub const LURE_DEFAULT: LureTuning = LureTuning {
 /// drifts into a false green.
 pub const BROADCAST_DEFAULT: BroadcastTuning = BroadcastTuning {
     count: 2,
-    watch_threshold: 0.30,
+    watch_threshold: 0.006,
     charge_rate: 0.14,
     decay_rate: 0.10,
     spawn_min_dist: 16.0,

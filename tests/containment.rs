@@ -1322,3 +1322,101 @@ fn the_swarm_learns_the_trick_so_each_lure_is_quieter() {
         amounts
     );
 }
+
+/// **FVS-N-30's probe, and then its guard.** Does the watch feed ever fire in PASSIVE play?
+///
+/// The mechanic is already proven by `watching_the_feed_makes_it_generate_and_ignoring_it_stops`,
+/// which floods `ATTENTION` deliberately. That is the right test for "does the rule work" and the
+/// wrong one for "will a player ever see it" — and the second question is the one a golden going
+/// backwards exposed: the feed had been charging to full inside the golden window, a two-node
+/// scheduling nudge stopped it, and nothing noticed because no test asserted the mechanism fires.
+///
+/// So this runs the real squad on the held-in seeds with nobody scripting attention, and asserts the
+/// feed reaches full charge at least once. It is the difference between a shipped anomaly and a prop.
+#[test]
+fn the_watch_feed_fires_in_passive_play_on_the_held_in_seeds() {
+    use foundation_vs_slop::broadcast::BroadcastScreen;
+    use foundation_vs_slop::squad_ai::coevolve::HELD_IN_SEEDS;
+    let _serial = serial_guard();
+
+    let mut report = Vec::new();
+    for seed in HELD_IN_SEEDS {
+        let mut cfg = SimConfig::deterministic_core();
+        cfg.dungeon_seed = Some(seed);
+        let mut app = build_headless_app(&cfg);
+        let mut peak = 0.0f32;
+        let mut peak_att = 0.0f32;
+        let mut peak_self = 0.0f32;
+        let mut nearest = f32::MAX;
+        let mut fired = 0usize;
+        // 3600 ticks = 60 s of passive play — twice the golden window, still well inside one
+        // expedition. If the feed cannot fire in a minute of ordinary play it will not fire at all.
+        for _ in 0..60 {
+            step(&mut app, &cfg, 60);
+            let world = app.world_mut();
+            let mut q = world.query::<(&BroadcastScreen, &Transform)>();
+            let seen: Vec<(f32, Vec3)> =
+                q.iter(world).map(|(s, tf)| (s.charge, tf.translation)).collect();
+            for (charge, _) in &seen {
+                peak = peak.max(*charge);
+            }
+            // The INPUT, not just the output: what ambient ATTENTION does a screen's cell actually
+            // reach? That separates "the squad never looks" from "the threshold is unreachable".
+            let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+            let stig = app.world().resource::<foundation_vs_slop::ai::field::Stig>();
+            for (_, pos) in &seen {
+                peak_att = peak_att.max(stig.sample(
+                    foundation_vs_slop::ai::field::FieldId::ATTENTION,
+                    dungeon,
+                    *pos,
+                ));
+            }
+            // Calibration: what does ATTENTION reach where the squad IS? That is the field's real
+            // dynamic range in play, and it is the number both thresholds should be set against.
+            let world = app.world_mut();
+            let mut uq2 = world.query_filtered::<&Transform, With<foundation_vs_slop::squad::Unit>>();
+            let upos: Vec<Vec3> = uq2.iter(world).map(|t| t.translation).collect();
+            let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+            let stig = app.world().resource::<foundation_vs_slop::ai::field::Stig>();
+            for u in &upos {
+                peak_self = peak_self.max(stig.sample(
+                    foundation_vs_slop::ai::field::FieldId::ATTENTION,
+                    dungeon,
+                    *u,
+                ));
+            }
+            // And how close did the squad ever get? A screen they never approach cannot be watched.
+            let world = app.world_mut();
+            let mut uq = world.query_filtered::<&Transform, With<foundation_vs_slop::squad::Unit>>();
+            let units: Vec<Vec3> = uq.iter(world).map(|t| t.translation).collect();
+            for (_, pos) in &seen {
+                for u in &units {
+                    nearest = nearest.min(u.distance(*pos));
+                }
+            }
+            // Read the screens' own counters — see `BroadcastScreen::emissions` for why this is not
+            // inferred from the charge curve.
+            let world = app.world_mut();
+            let mut q = world.query::<&BroadcastScreen>();
+            fired = q.iter(world).map(|s| s.emissions as usize).sum();
+        }
+        report.push(format!(
+            "seed {seed:#x}: peak charge {peak:.3}, peak ATTENTION {peak_att:.3} (threshold {:.4}), \
+             nearest squad approach {nearest:.1} m, ATTENTION at squad {peak_self:.3}, emissions {fired}",
+            app.world().resource::<foundation_vs_slop::sim::SimTuning>().broadcast.watch_threshold
+        ));
+    }
+    let line = report.join("\n  ");
+    eprintln!("watch-feed passive activation:\n  {line}");
+    // EVERY seed, not merely one: an anomaly that shows up on a third of levels is still a prop on
+    // the other two. This is the guard that FVS-N-30 existed for — the mechanic was proven by a test
+    // that flooded attention by hand, and nothing asserted it fires when nobody is helping it.
+    assert!(
+        report.iter().all(|r| !r.contains("emissions 0")),
+        "the watch feed never generated on at least one held-in seed — it is a prop there, not an \
+         anomaly:\n  {line}\n\nCheck placement first (a screen the squad never approaches cannot be \
+         watched), then `watch_threshold` against the field's MEASURED range — ~1.4 at a squad \
+         member's own cell, ~0.01 at 14 m. It is steeply local; do not set this by analogy with \
+         SCP-1048's containment bar, which is a 'standing on it' number."
+    );
+}

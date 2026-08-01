@@ -134,9 +134,12 @@ static BOUNDS: [(f32, f32); N] = [
     //    ~22 cosmetic gore knobs were not.
     (0.0, 4.0),    // count (usize) — screens seeded; 0 is legal here (a level without the anomaly is
                    //   a real point in the space, unlike scp999 where the mechanic needs an instance)
-    (0.05, 0.80),  // watch_threshold — ambient ATTENTION at which the feed has an audience. Floored
-                   //   above zero so a feed is never permanently on, and capped below 1.0 so it is
-                   //   never unreachable; `decode` orders it against the containment ceiling.
+    // watch_threshold. RANGE CORRECTED 2026-08-01 from (0.05, 0.80), which was set by analogy with
+    // SCP-1048's containment bar and put the whole band ABOVE anything the field reaches at a
+    // screen: measured, ambient ATTENTION is ~1.4 at a squad member's own cell and ~0.01 at 14 m, so
+    // the old range meant "never watched" for every genome in it. The search would have spent its
+    // whole budget on an inert anomaly. Now spans the band that actually discriminates.
+    (0.0, 0.05),
     (0.01, 1.00),  // charge_rate (emissions per second of sustained attention)
     (0.01, 1.00),  // decay_rate (charge lost per second while ignored)
     (4.0, 40.0),   // spawn_min_dist — same floor/cap reasoning as scp999's above

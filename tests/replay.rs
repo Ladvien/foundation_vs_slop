@@ -371,8 +371,33 @@ fn deterministic_core_is_bit_identical() {
 /// `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops`, which floods attention
 /// deliberately; that test is unaffected and still green. This is a balance finding, not a
 /// correctness one — but it means a player may never see the anomaly do anything.
+///
+/// ## Re-pinned a THIRD time 2026-08-01 — and this one is a real gameplay change (FVS-N-30)
+///
+/// `0x9f7a0787fdcb487f` -> `0x4d170fd316e6e5bf` (actors), `0x82d9fc45c7e06f63` ->
+/// `0x8145db22fc83542c` (fields). Unlike the two re-pins above — both pure schedule-node
+/// permutation — this one is the watch feed **actually working for the first time**.
+///
+/// Measured, not inferred (`containment::the_watch_feed_fires_in_passive_play_on_the_held_in_seeds`):
+///
+/// | | before | after |
+/// |---|---|---|
+/// | nearest squad approach to a screen | 101-137 m | 13.8-15.0 m |
+/// | peak ambient ATTENTION at a screen | 0.000 | 0.007-0.012 |
+/// | emissions in 60 s of passive play | 0, 0, 0 | 14, 7, 14 |
+///
+/// Two authoring bugs, both invisible to every existing test:
+///  1. **Placement.** `spawn_screens` took the FIRST floor cells past `spawn_min_dist` in raster
+///     scan order — i.e. the map corner. A minimum distance consumed in scan order is a *maximum*
+///     distance in disguise. Now ranks eligible cells by distance and takes the nearest.
+///  2. **Threshold scale.** `watch_threshold` was 0.30, copied by analogy from SCP-1048's 0.45
+///     containment bar. The ATTENTION field measures ~1.4 at a squad member's own cell and ~0.01 at
+///     14 m — it is steeply local, so 0.30 means "standing on it". Both the threshold and the
+///     containment ceiling were re-derived from that measurement, and the genome BOUNDS were widened
+///     for the same reason: the old `(0.05, 0.80)` put *every* genome in the inert region, so a
+///     world search would have spent its entire budget on an anomaly that never fires.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0x9f7a0787fdcb487f;
+const GOLDEN: u64 = 0x4d170fd316e6e5bf;
 
 /// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
 /// message says exactly what to do.
@@ -608,7 +633,7 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 /// Re-pinned 2026-08-01 alongside [`GOLDEN`], twice in one day — see there for why the second
 /// re-pin went back to this file's pre-watch-feed value, and what that implies about the feed.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x82d9fc45c7e06f63;
+const GOLDEN_FIELD: u64 = 0x8145db22fc83542c;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]

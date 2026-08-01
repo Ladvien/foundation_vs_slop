@@ -54,6 +54,11 @@ use crate::sim::SimTuning;
 pub struct BroadcastScreen {
     /// Progress toward the next emission, in `[0, 1]`. Rises while watched, falls while ignored.
     pub charge: f32,
+    /// How many creatures this screen has generated. Honest instrumentation rather than a derived
+    /// guess: the first attempt to measure activation inferred it from "charge is low now and was
+    /// high once", which counts idle windows, not firings, and reported 50 emissions where there
+    /// were two. A counter that increments where the spawn happens cannot be misread.
+    pub emissions: u32,
 }
 
 /// Monotonic seed source for crabs this anomaly generates.
@@ -64,10 +69,28 @@ pub struct BroadcastScreen {
 #[derive(Resource, Default, Debug)]
 pub struct BroadcastSeq(pub u64);
 
-/// Deterministic placement, mirroring `scp999::spawn_scp999`'s cell scan.
+/// Deterministic placement: the floor cells **just past** `spawn_min_dist`, spread apart.
 ///
-/// A screen is *found*, not handed over: `spawn_min_dist` keeps it away from the squad's entry so the
-/// player meets it after committing to the level.
+/// A screen is *found*, not handed over — `spawn_min_dist` keeps it off the squad's doorstep. But
+/// "past the minimum" has to mean *just* past it, and the first draft got that wrong in a way that
+/// made the whole anomaly invisible.
+///
+/// # The bug this shape exists to prevent (FVS-N-30)
+///
+/// The first version mirrored `scp999::spawn_scp999`'s raster scan and took the FIRST cells
+/// satisfying the minimum — i.e. scanning from `y=0, x=0`, the corner of the map. Measured on the
+/// held-in seeds: the squad's closest approach across 60 s of passive play was **101-137 m**, ambient
+/// `ATTENTION` at a screen peaked at **0.000**, and the feed never charged at all. A minimum distance
+/// consumed in scan order is a *maximum* distance in disguise.
+///
+/// SCP-999 survives the same idiom only because it **moves** — it oozes toward the most-anxious
+/// member, so it finds the squad even when it spawns in a corner. A static anomaly cannot, and
+/// copying a mobile creature's placement was the mistake. (999's `spawn_min_dist` is equally not
+/// doing what its name says; noted rather than changed here, since for 999 it is cosmetic.)
+///
+/// So: rank every eligible cell by distance from spawn and take the NEAREST, which is what a minimum
+/// actually means. Screens are then kept `SCREEN_SEPARATION` apart so they do not stack into one
+/// room, since two screens in one place is one screen with a spare.
 fn spawn_screens(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
@@ -83,24 +106,52 @@ fn spawn_screens(
     let scene: Handle<WorldAsset> =
         assets.load(GltfAssetLabel::Scene(0).from_asset("retro_tvs/retro_tv_large.glb"));
 
-    let mut placed = 0usize;
-    'scan: for y in 0..dungeon.height as i32 {
+    // Every eligible cell, keyed by distance from spawn. The key carries the cell coords so it is a
+    // stable TOTAL order: many cells share a distance (they lie on a ring), and `sort_total!` would
+    // otherwise panic on the tie — correctly, since raster order deciding which of two equidistant
+    // cells gets the screen is exactly the ECS-order dependence the determinism rules forbid.
+    let mut eligible: Vec<(u32, i32, i32)> = Vec::new();
+    for y in 0..dungeon.height as i32 {
         for x in 0..dungeon.width as i32 {
             let cell = IVec2::new(x, y);
             if !dungeon.is_floor(cell) {
                 continue;
             }
-            if (cell - dungeon.spawn).as_vec2().length() < cfg.spawn_min_dist {
+            let d = (cell - dungeon.spawn).as_vec2().length();
+            if d < cfg.spawn_min_dist {
                 continue;
             }
-            spawn_screen_at(&mut commands, dungeon.cell_center(cell), &scene, &rules, &mut targets);
-            placed += 1;
-            if placed >= cfg.count {
-                break 'scan;
-            }
+            eligible.push((d.to_bits(), x, y));
         }
     }
+    crate::sort_total!(&mut eligible, |k: &(u32, i32, i32)| (k.0, k.1, k.2));
+
+    let mut placed: Vec<Vec3> = Vec::new();
+    for (_, x, y) in eligible {
+        if placed.len() >= cfg.count {
+            break;
+        }
+        let pos = dungeon.cell_center(IVec2::new(x, y));
+        if placed.iter().any(|p| p.distance(pos) < SCREEN_SEPARATION) {
+            continue;
+        }
+        spawn_screen_at(&mut commands, pos, &scene, &rules, &mut targets);
+        placed.push(pos);
+    }
+    if placed.len() < cfg.count {
+        // Loud, not silent: a level that cannot hold the authored count is a content fact worth
+        // seeing, and a screen that quietly did not spawn is the failure mode this whole item is about.
+        warn!(
+            "watch feed: placed {} of {} screens — no further floor cell {SCREEN_SEPARATION} m clear \
+             of the others and past spawn_min_dist",
+            placed.len(),
+            cfg.count
+        );
+    }
 }
+
+/// Minimum spacing between screens, in metres. Two screens in one room is one screen with a spare.
+const SCREEN_SEPARATION: f32 = 20.0;
 
 /// Spawn one screen at `pos`. `pub` so the Research Room dev palette can place one by hand.
 pub fn spawn_screen_at(
@@ -112,7 +163,7 @@ pub fn spawn_screen_at(
 ) -> Entity {
     commands
         .spawn((
-            BroadcastScreen { charge: 0.0 },
+            BroadcastScreen { charge: 0.0, emissions: 0 },
             // Contained by looking AWAY — the `AtMost` inverse of SCP-1048's rule. Carried on the
             // entity like every other anomaly's, so `containment::tick` needs no special case.
             crate::containment::Containment::new(
@@ -185,6 +236,7 @@ fn screens_generate_while_watched(
             continue; // its own cell is not seatable — hold the charge rather than losing it
         };
         screen.charge = 0.0;
+        screen.emissions += 1;
         let s = seq.0 as u32;
         seq.0 += 1;
         crate::crab::spawn_crab_on_patch(

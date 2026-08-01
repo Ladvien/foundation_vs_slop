@@ -1848,6 +1848,59 @@ Split out 2026-07-30.
   > 📌 Wears `retro_tvs/retro_tv_large.glb` as a PLACEHOLDER — now the highest-value asset request in
   > `BEVY_GAME_INFO.md`, because unlike SCP-9191 itself the game side is settled.
   · *Deps:* C-3 (shipped) · *Touches:* `src/broadcast.rs`, `src/sim.rs`, `src/containment/`, `src/knowledge/`, `src/squad_ai/world_genome.rs`, `tests/containment.rs`
+- **FVS-N-30 — The watch feed never fired in passive play** · S · ✅ **FIXED 2026-08-01 — it was two authoring bugs, not a balance nudge**
+  Found by an accident worth recording. FVS-C-7's watch feed moved the goldens; that was attributed to
+  the feed **generating a crab** inside the 1800-tick golden window (a crab carries `Health`+`Transform`
+  and enters `snapshot_hash`; a screen does not). Hours later FVS-B-10's lure moved them **back to
+  exactly the pre-watch-feed values** — and the lure does nothing at all in a golden run (nobody throws
+  one, so `tick_lures` iterates an empty query). It contributes two schedule nodes and no gameplay.
+  **A pure scheduling nudge cannot un-generate a crab.** So the earlier attribution was incomplete: what
+  actually changed is that **the feed no longer charges to full inside the window**, and a perturbation
+  that small was enough to flip it.
+  That makes activation *marginal*: at `charge_rate: 0.14` the feed needs ~7 s of **sustained** ambient
+  ATTENTION above `watch_threshold: 0.30`, and whether an unscripted squad ever looks that long at a
+  screen 16 tiles off their route is close to a coin flip. A player may never see the anomaly do
+  anything, which for the first place SCP-9191's thesis touches gameplay is the wrong outcome.
+  **Not a correctness bug** — the mechanic is proven by
+  `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops`, which floods attention
+  deliberately and is unaffected. It is a *balance* finding, and the knobs are already evolvable.
+  *Cheapest probe:* instrument a passive run and count feed activations across the held-in seeds. If it
+  is near zero, either raise `charge_rate`, lower `watch_threshold`, or place screens ON the route
+  rather than `spawn_min_dist` away from it — the third is the one that changes the fiction least.
+  ⚠️ **The generalisable lesson is about attribution, not the feed:** "the goldens moved and here is a
+  plausible story" is not the same as "here is the cause". The ablation table in `tests/replay.rs`
+  ruled out two wrong causes and still landed on an incomplete third, because no ablation asked *did
+  the feed actually fire?*. Assert the mechanism, not just the hash.
+  · *Deps:* — · *Touches:* `assets/config/config.ron` (`sim.broadcast`), `src/broadcast.rs` · *Reading:* — (no corpus resource)
+  > ### 📐 MEASURED, then fixed. It was worse than this entry guessed: not marginal, NEVER.
+  > | | before | after |
+  > |---|---|---|
+  > | nearest squad approach to a screen | **101-137 m** | 13.8-15.0 m |
+  > | peak ambient ATTENTION at a screen | **0.000** | 0.007-0.012 |
+  > | emissions in 60 s of passive play | **0, 0, 0** | 14, 7, 14 |
+  > **Bug 1 — placement.** `spawn_screens` took the FIRST floor cells past `spawn_min_dist` in raster
+  > scan order, i.e. the map corner. **A minimum distance consumed in scan order is a maximum distance
+  > in disguise.** Copied from `scp999::spawn_scp999`, which survives the same idiom only because 999
+  > *moves* — it oozes toward the squad and finds them anyway. A static anomaly cannot. (999's own
+  > `spawn_min_dist` is equally not doing what its name says; cosmetic there, left alone.)
+  > **Bug 2 — threshold scale.** `watch_threshold: 0.30` was set by analogy with SCP-1048's `0.45`
+  > containment bar. Measured, the ATTENTION field is **~1.4 at a squad member's own cell and ~0.01 at
+  > 14 m** — steeply local — so 0.30 means *standing on it*. Both the threshold (0.006) and the
+  > containment ceiling (0.003) are now derived from that measurement rather than by analogy.
+  > ⚠️ **And the genome BOUNDS were wrong for the same reason** — `(0.05, 0.80)` put **every** genome
+  > in the inert region, so a world search would have spent its whole budget evolving an anomaly that
+  > never fires. Now `(0.0, 0.05)`, the band that actually discriminates. This is the FVS-N-21 failure
+  > in a new costume: a gene whose entire range is behaviourally identical.
+  > *Pinned by* `containment::the_watch_feed_fires_in_passive_play_on_the_held_in_seeds`, which asserts
+  > **every** held-in seed emits — one seed firing is still a prop on the other two. The pre-existing
+  > gaze test proved the RULE by flooding attention by hand; nothing asserted the mechanism fires when
+  > nobody is helping it, which is exactly how this survived.
+  > ⚠️ **Instrumentation lesson:** the first activation metric inferred emissions from the charge curve
+  > ("low now, high once") and reported **50** where there were **2**. `BroadcastScreen::emissions` now
+  > counts at the spawn site. A derived metric that can be misread will be.
+  > *Goldens re-pinned* — the third time in a day, and the only one of the three that is a real
+  > gameplay change rather than schedule permutation.
+  · *Deps:* — · *Touches:* `src/broadcast.rs`, `assets/config/config.ron`, `src/sim.rs`, `src/squad_ai/world_genome.rs`, `tests/containment.rs`, `tests/replay.rs`
 
 ### Push 8 — Determinism & CI Hardening  ·  cross-cutting  ·  continuous
 
