@@ -271,14 +271,24 @@ impl Plugin for CrabPlugin {
                 (
                     rebuild_crab_field,
                     // Enlist foraging crabs onto specific gibs before locomotion reads their targets.
+                    // `.before(GibEconomy)`: this and the two carry systems below read and write
+                    // `Carryable`/`GibKey`, which `gore`'s `GibEconomy` set also writes on this same
+                    // schedule. Without the edge they are mutually unordered and only the executor's
+                    // linearisation decides — the shape this repo's determinism rules forbid relying
+                    // on. Consumers first, which is exactly what the drain's old `Update` placement
+                    // gave. The constraint goes on each system's EXISTING registration: listing them
+                    // again as a second tuple registers them twice, which makes their `SystemTypeSet`
+                    // ambiguous and panics every `.before(carry_gibs)` in this file at schedule build.
                     assign_meat_targets
                         .after(crate::ai::AiSet::Think)
-                        .before(crab_locomotion),
+                        .before(crab_locomotion)
+                        .before(crate::gore::GibEconomy),
                     // A crab that left SeekMeat/Carry drops its load before the carry machine
                     // re-evaluates the crew (fleeing, latching, or re-foraging all release).
                     release_uncommitted_carriers
                         .after(crate::ai::AiSet::Think)
-                        .before(carry_gibs),
+                        .before(carry_gibs)
+                        .before(crate::gore::GibEconomy),
                     // Move after the brain has chosen this tick's mode (see `crate::ai`).
                     crab_locomotion
                         .after(rebuild_crab_field)
@@ -298,7 +308,8 @@ impl Plugin for CrabPlugin {
                     // Cooperative lift/haul/deliver — runs after crabs have moved and any fleer released.
                     carry_gibs
                         .after(crab_locomotion)
-                        .after(assign_meat_targets),
+                        .after(assign_meat_targets)
+                        .before(crate::gore::GibEconomy),
                     crab_contact_damage.after(crab_jump).in_set(crate::health::HealthDamage),
                     // Flood the local ALARM channel when a crab is wounded, before the deposits drain so
                     // the muster bloom is live this tick (mirrors `scout_mark_prey`'s ordering).
