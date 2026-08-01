@@ -324,6 +324,23 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   both channels have exactly one consumer each and a proven shape to copy.
   *Wanted:* movement/fire/verb choices that trade speed for quiet, and a HUD channel that makes the
   din legible (the containment HUD already names channels, so the vocabulary exists).
+  > ### 📐 SUPERSEDED AND SEQUENCED 2026-08-01 → `docs/2026-08-01-acoustic-program.md`
+  > The Director asked the larger question — how music, ambience and SFX become gameplay worth evolving
+  > — and the answer reframes this item as **stage 1 of four**, and as the prerequisite for FVS-N-28's
+  > descriptor fix rather than a peer of it.
+  > **Stage 1 is the noise verb, and it is the smallest of the four because the machinery already
+  > exists and is unused:** `NOISE_SWARM` propagates, `crab_draw_to_din` scales the pull,
+  > `investigate_threshold` gates it, and `Mode::Investigate` is already in the brain. What is missing
+  > is only a way for the player to write into the channel *deliberately* — a thrown noisemaker or a
+  > shot into a far wall that pulls the swarm off the extraction route.
+  > Grounded in Grimshaw & Schott's affordance argument (one actor's sounds "morph other players'
+  > soundscapes and so provide **new affordances**") — sound is a thing you USE, not only a thing you
+  > leak. It also makes the quiet half a decision: noise discipline is only a trade-off if noise is
+  > sometimes worth spending; a pure cost is a tax.
+  > ⚠️ **Must not add a `Mode`** — `MODE_COUNT` sets `NeuralPolicy::WEIGHT_COUNT` and would invalidate
+  > the policy archive baked 2026-08-01 *by width*. `Investigate` is the honest model anyway.
+  > *Evolvable:* lure strength, dwell, and **habituation** (how fast a swarm stops answering a repeated
+  > trick) — the last is what stops the verb being a solved button.
   > 📋 **Four costed options researched 2026-07-30 → `docs/noise_discipline_options.md`. Needs your pick.**
   > **A** `MOVE QUIET` latched stance (S/M — copies the `HoldFire` non-`ArmedTool` shape exactly) ·
   > **B** din meter in the HUD (S) · **C** graduated investigation, the Mafia III recognition model
