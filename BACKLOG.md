@@ -214,29 +214,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   *Also expect:* `baseline_prior.ron` auto-re-sweeps on the first prior-backed search, because
   `ensure_prior_fresh` is mtime-driven and `config.ron` is newer.
   *Done when:* retrained archive loads at current MODE_COUNT; smoke test shows non-degenerate policies. · *Deps:* **I-1** (blocks H-3) · *Touches:* `src/squad_ai/`, `bin/train.rs` · *Reading:* [ME], [QD]
-- **FVS-L-6 — The roster cannot be reviewed at the Site, and pretending it could was a CRASH (FOUND 2026-07-28)** · S
-  **Reported from real play**, and reproduced: entering the Site after `RETURN TO SITE` panicked with
-  `Parameter Res<State<MenuState>> failed validation: Resource does not exist`, from
-  `knowledge::roster::toggle_roster`.
-  **Root cause.** `MenuState` is a **SubState** sourced on `AppState::InGame`
-  (`#[source(AppState = AppState::InGame)]`), so Bevy **removes** `State<MenuState>` the moment the app
-  leaves `InGame`. `toggle_roster` takes it non-optionally and was registered
-  `.run_if(in_state(AppState::InGame).or_else(in_state(AppState::Site)))` — so at the Site it ran with
-  its own state gone.
-  **The `.or_else(…Site)` was never a working feature.** Even without the panic the roster could not
-  have opened there: `spawn_roster` hangs off `OnEnter(MenuState::Roster)`, and that state does not
-  exist at the Site either. It bought a crash and nothing else.
-  *Fixed:* restricted to `AppState::InGame` — where the whole `MenuState` mechanism actually works.
-  **Deliberately NOT wrapped in `Option`**, which the Bevy error message suggests and which would be
-  wrong here: it silences the panic and leaves a key that does nothing, which is a worse failure because
-  it *looks* supported.
-  *Pinned by* `replay::returning_to_the_site_after_a_run_does_not_panic` — it drives the real transition
-  (`Debrief` → `RunState::Idle` + `AppState::Site`) under the **windowed plugin set**, and runs in the
-  `test-harness` build so `bevy/debug` names the offending system. The shipped binary cannot.
-  **What remains, and it is a real want:** reviewing what each operative believes *between* expeditions
-  is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
-  `ui::site_hud` works — not a reach into the in-game overlay stack.
-  *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
 - **FVS-N-23 — The squad is 99% of the frame's geometry, and 23 materials of its draw calls** · L · *determinism: moves goldens* · ⛔ **DEMOTED 2026-07-30 — DO NOT DO THIS FOR PERFORMANCE**
   > **FVS-N-25 measured the frame as CPU-bound**: a 4x pixel cut moved frame time +4.1%. Decimating
   > these meshes would therefore buy ~nothing, while costing a golden re-pin and a
@@ -518,6 +495,28 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   ambient field and is M. Doing this first is also the cheap way to prove the ambient/per-entity
   distinction is real before paying for C-6.
   · *Deps:* C-3 (shipped) · *Touches:* `src/ai/`, new creature module · *Reading:* [STIG], [GOAP]
+  > ### 📐 SCOPED 2026-07-31 — concept chosen, and the "architecturally free" claim VERIFIED.
+  > **Concept (Director's call): a broadcasting screen.** An anomalous TV that performs for an audience —
+  > while watched it generates more of itself; deprive it of attention and it goes quiet enough to net.
+  > Ties the mechanic straight to SCP-9191, the rogue monster-generating AI: literally a screen churning
+  > out generated monsters, which is the endgame theme made mechanical rather than narrated. Uses the
+  > **unused `assets/retro_tvs/`** library.
+  > **The sign flip is real and it is cheap — verified against HEAD, not assumed:**
+  > * `Fact::SeenBySquad` already exists (`ai/utility.rs:173`), and `Mode::Build` is *already* gated on
+  >   its **inverse** — "the bear builds only what nobody is watching it build" (`:206`). The screen is
+  >   the same mode and the same fact with the consideration curve flipped.
+  > * The containment rule is one authored line: SCP-1048's is
+  >   `(channel: 9, sign: AtLeast, threshold: 0.45)` — contained by WATCHING. The screen's is
+  >   `sign: AtMost` — contained by LOOKING AWAY. The rule model already supports it; `scp999`'s rule is
+  >   described in-config as "the exact inverse" of 1048's, so this shape is already proven.
+  > ### ⛔ HARD CONSTRAINT, and it is the finding that matters most here
+  > **It must NOT add a `Mode`.** `MODE_COUNT` is 29 and sets `NeuralPolicy::WEIGHT_COUNT`; SCP-1048 added
+  > two (`Build`, `Emote`), so a creature adding one is the normal case, not a stretch. Adding one
+  > invalidates the policy archive **by width** — `from_weights` rejects it loudly — which would waste a
+  > 5-hour bake. Reusing `Build` is therefore not a shortcut, it is the requirement, and it happens to be
+  > the honest modelling anyway: the screen *is* building.
+  > *Still to decide before implementing:* what the screen emits (crabs read best against the SCP-9191
+  > "generator" theme), where it is placed, and the ATTENTION threshold. Everything else is scoped.
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
   Add 173/096 **only after** the bespoke roster is proven. Each needs a **new** per-entity continuous-observation state (directional/facing check vs a *specific* entity), explicitly distinct from the ambient `ATTENTION` field — new engineering, not a sign-flip reuse.
   *Done when:* a per-entity `ObservedBy`/facing check drives 173/096 freeze/aggro; documented as separate from ATTENTION; capture rules authored on top. · *Deps:* C-1..C-5 shipped, E-*, F-*, M-1 · *Touches:* new watch module, `src/ai/`, `src/enemy.rs` · *Reading:* [GOAP]

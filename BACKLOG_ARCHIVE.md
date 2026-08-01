@@ -1575,6 +1575,67 @@ Split out 2026-07-30.
   free, since they already float well above the leader's head.
   *Determinism:* none — `src/dialogue/` is cosmetic and `Update`-only; no pinned state, goldens unmoved.
   · *Deps:* — · *Touches:* `src/dialogue/runtime.rs` · *Reading:* — (no corpus resource)
+- **FVS-L-6 — The roster could not be reviewed at the Site** · S · ✅ **SHIPPED 2026-07-31**
+  **Reported from real play**, and reproduced: entering the Site after `RETURN TO SITE` panicked with
+  `Parameter Res<State<MenuState>> failed validation: Resource does not exist`, from
+  `knowledge::roster::toggle_roster`.
+  **Root cause.** `MenuState` is a **SubState** sourced on `AppState::InGame`
+  (`#[source(AppState = AppState::InGame)]`), so Bevy **removes** `State<MenuState>` the moment the app
+  leaves `InGame`. `toggle_roster` takes it non-optionally and was registered
+  `.run_if(in_state(AppState::InGame).or_else(in_state(AppState::Site)))` — so at the Site it ran with
+  its own state gone.
+  **The `.or_else(…Site)` was never a working feature.** Even without the panic the roster could not
+  have opened there: `spawn_roster` hangs off `OnEnter(MenuState::Roster)`, and that state does not
+  exist at the Site either. It bought a crash and nothing else.
+  *Fixed:* restricted to `AppState::InGame` — where the whole `MenuState` mechanism actually works.
+  **Deliberately NOT wrapped in `Option`**, which the Bevy error message suggests and which would be
+  wrong here: it silences the panic and leaves a key that does nothing, which is a worse failure because
+  it *looks* supported.
+  *Pinned by* `replay::returning_to_the_site_after_a_run_does_not_panic` — it drives the real transition
+  (`Debrief` → `RunState::Idle` + `AppState::Site`) under the **windowed plugin set**, and runs in the
+  `test-harness` build so `bevy/debug` names the offending system. The shipped binary cannot.
+  **What remains, and it is a real want:** reviewing what each operative believes *between* expeditions
+  is exactly when it matters (FVS-L-5, FVS-G-3). It needs a **Site-side screen of its own**, the way
+  `ui::site_hud` works — not a reach into the in-game overlay stack.
+  *Done when:* the roster is openable at the Site through a Site-owned screen. · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `src/ui/` · *Reading:* — (no corpus resource)
+  > ### ✅ SHIPPED — and it needed no new screen at all.
+  > `spawn_roster` was **already** Site-compatible and nobody had noticed: its own comment records that
+  > it deliberately avoids `ui::layout`'s region grid because "the frame does not even exist on some of
+  > the screens one can open from" — it is a self-contained full-screen scrim at `Z_MENU`. The only
+  > thing missing was a trigger not bound to `MenuState`. So: no second screen, no duplicated rows, no
+  > new widgets. Reusing the overlay also keeps **one** roster — two screens rendering the same beliefs
+  > would drift, and this screen's entire value is that what it says is true.
+  > `SiteRosterOpen` is a plain resource, not a second `SubState`: in-game the roster is a `MenuState`
+  > variant because it belongs to a *stack* of mutually exclusive overlays; at the Site there is no
+  > stack, so a bool is the whole requirement.
+  > *Pinned by* `replay::the_roster_opens_and_closes_at_the_site`, which presses the REAL bound key —
+  > the broken version would have passed a state-poking test too. Verified load-bearing.
+  > ⚠️ **Trap kept:** `ButtonInput::press()` before `app.update()` does NOT simulate a key press.
+  > Bevy's `keyboard_input_system` calls `clear()` in `PreUpdate` before draining the message queue, so
+  > the press is wiped before any `Update` system sees `just_pressed`, and the test fails against
+  > working code. Real `KeyboardInput` messages are the only honest simulation.
+  · *Deps:* L-5 · *Touches:* `src/knowledge/roster.rs`, `tests/replay.rs`
+- **FVS-N-27 — The gib economy was pinned state produced on `Update` (FOUND + FIXED 2026-07-31, review C2)** · M
+  `drain_gore`/`confine_gibs`/`cap_gib_chunks` sat on `Update` while `gib_hash` folds exactly what they
+  write — `(GibKey, Transform, Carryable)` plus the `GibRing` order that decides cap eviction. The
+  consumers (`crab::assign_meat_targets`/`carry_gibs`) are pinned `FixedUpdate`, so **gib spawn and
+  eviction timing relative to sim ticks, and through it the crab forage economy, was a function of frame
+  rate** in the shipped game. `mycelia::grazing` got the identical call right and documented it.
+  *Shipped:* the three sim systems move to `FixedUpdate`, `.chain()`ed (they were a bare unchained tuple,
+  correct only by grace of the executor's registration order) and `.after(HealthDamage)` — gore is
+  produced BY damage, and every `GoreQueue` writer is already on that schedule. Cosmetics
+  (`despawn_gore`, `cap_blood_pools`, `update_droplets`, `hide_in_fog`) stay on `Update`, where
+  frame-rate-dependent decay is correct.
+  New `gore::GibEconomy` set so consumers order against it explicitly rather than by linearisation.
+  **Goldens UNMOVED, and that is the correct result rather than a weak one:** the harness drives exactly
+  one frame per fixed tick, so at 1:1 the observable state at frame boundaries is identical either way.
+  The bug only exists at the n:1 ratio only the shipped game has — *the harness could not have caught
+  this by construction*, which is why it needed a review to find.
+  ⚠️ **First attempt panicked every harness `App` at schedule build**, and neither `cargo check` nor the
+  950-test core gate caught it: hanging `.before(GibEconomy)` on a NEW tuple of the crab systems
+  registered them twice, making their `SystemTypeSet` ambiguous and breaking every existing
+  `.before(carry_gibs)`. Only building the real `FixedUpdate` schedule surfaces this class.
+  · *Deps:* — · *Touches:* `src/gore.rs`, `src/crab/mod.rs` · *Reading:* [TEST-OW], [ABM]
 
 ### Push 7 — SCP-9191 Antagonist & Late Roster  ·  Tier 3 / endgame  ·  M4–M5
 
