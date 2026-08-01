@@ -74,23 +74,35 @@ impl SitePiece {
     // ART, and art belongs in an authored file, not a `match`. See `kit.rs` for why the Site stopped
     // being the one part of the game whose kit was a code property.
 
-    pub fn y_scale(self) -> f32 {
-        use SitePiece::*;
-        match self {
-            // Full-height architecture -> WALL_HEIGHT (2.4 m).
-            Wall | WallCorner | WallWindow | Column => {
-                crate::dungeon::WALL_HEIGHT / KIT_MODULE_HEIGHT
-            }
-            // A doorway must leave a 2.0 m opening (`DOORWAY_HEIGHT`); the header course above it is a
-            // separate `WallLow` placed at y = 2.0 by the spawner.
-            WallDoorway | WallDoorwayWide => crate::dungeon::DOORWAY_HEIGHT / KIT_MODULE_HEIGHT,
-            // Waist-high: a 0.5 m Kenney low wall -> ~0.9 m counter.
-            WallLow => 1.8,
-            // Native height is the intent.
-            Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal
-            | SpecimenStandin => 1.0,
-        }
+    // `y_scale` moved to `kit::SiteKit::y_scale` on 2026-08-01, because a scale is
+    // `target / authored` and only ONE of those is a game fact. What a wall must REACH is policy and
+    // stays here; how tall the artist made the mesh is art and lives in the kit.
+}
+
+/// The height, in metres, this piece must reach — or `None` when the authored size IS the intent.
+///
+/// Game policy, deliberately kit-independent. The old `y_scale` folded this together with a
+/// `KIT_MODULE_HEIGHT` constant that assumed a uniform 1 m kit; that held for the Kenney prototype
+/// blocks and breaks the moment a second kit exists. Ozea is mixed — `SM_Wall_1x1` is 1.00 m but
+/// `SM_DoorFrame_Single` is already 2.01 m — so scaling by a fixed module would have produced a 4 m
+/// doorway.
+pub fn target_height(piece: SitePiece) -> Option<f32> {
+    use SitePiece::*;
+    match piece {
+        // Full-height architecture.
+        Wall | WallCorner | WallWindow | Column => Some(crate::dungeon::WALL_HEIGHT),
+        // A doorway must leave a 2.0 m opening; the header course above it is a separate `WallLow`
+        // placed at y = 2.0 by the spawner.
+        WallDoorway | WallDoorwayWide => Some(crate::dungeon::DOORWAY_HEIGHT),
+        // Waist-high: a counter you can stand at.
+        WallLow => Some(0.9),
+        // Native height is the intent — dressing, decals, and the specimen stand-in.
+        Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal
+        | SpecimenStandin => None,
     }
+}
+
+impl SitePiece {
 
     /// Every piece the kit defines — so a test can walk the whole table.
     pub const ALL: &'static [SitePiece] = &[
@@ -133,27 +145,36 @@ mod tests {
     }
 
     #[test]
-    fn architecture_is_scaled_up_and_dressing_is_not() {
-        // The kit is a 1 m module in EVERY axis, so anything that stands up as architecture must be
-        // scaled or the Site renders knee-high. This pins the rule so a new piece cannot quietly ship
-        // at native height.
-        assert!(SitePiece::Wall.y_scale() > 2.0, "a wall must reach WALL_HEIGHT");
-        assert!(SitePiece::Column.y_scale() > 2.0);
-        assert_eq!(SitePiece::WallDoorway.y_scale(), crate::dungeon::DOORWAY_HEIGHT);
-        // Dressing keeps its authored size.
-        assert_eq!(SitePiece::Crate.y_scale(), 1.0);
-        assert_eq!(SitePiece::Floor.y_scale(), 1.0);
-        // A floor decal scaled in Y would z-fight the floor it sits on.
-        assert_eq!(SitePiece::AreaDecal.y_scale(), 1.0);
+    fn architecture_reaches_its_target_and_dressing_keeps_its_authored_size() {
+        // Policy only — heights the GAME requires, independent of any kit. The old version of this
+        // test asserted a SCALE, which silently baked in the Kenney 1 m module and would have passed
+        // just as happily against an Ozea kit it was sizing wrong.
+        assert_eq!(target_height(SitePiece::Wall), Some(crate::dungeon::WALL_HEIGHT));
+        assert_eq!(target_height(SitePiece::Column), Some(crate::dungeon::WALL_HEIGHT));
+        assert_eq!(target_height(SitePiece::WallDoorway), Some(crate::dungeon::DOORWAY_HEIGHT));
+        // Dressing and decals are authored at the size they want; a decal scaled in Y would z-fight
+        // the floor it sits on.
+        assert_eq!(target_height(SitePiece::Crate), None);
+        assert_eq!(target_height(SitePiece::Floor), None);
+        assert_eq!(target_height(SitePiece::AreaDecal), None);
     }
 
     #[test]
-    fn a_doorway_opening_clears_an_operative() {
-        // The Valkyrie renders at ~1.82 m. A doorway scaled below that is a wall with a mouse hole.
-        assert!(
-            SitePiece::WallDoorway.y_scale() * KIT_MODULE_HEIGHT > 1.82,
-            "the doorway opening must clear a 1.82 m operative"
-        );
+    fn every_shipped_kit_clears_an_operative_through_its_doorways() {
+        // The Valkyrie renders at ~1.82 m. A doorway that ends up shorter is a wall with a mouse
+        // hole — and now that scale is kit-derived, this has to hold for EVERY kit, not just the one
+        // whose module height used to be a constant.
+        use crate::site::kit::load_site_kit;
+        for path in ["assets/site/kit_greybox.ron", "assets/site/kit_ozea_partial.ron"] {
+            let kit = load_site_kit(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            for piece in [SitePiece::WallDoorway, SitePiece::WallDoorwayWide] {
+                let final_h = kit.piece(piece).height * kit.y_scale(piece);
+                assert!(
+                    final_h > 1.82,
+                    "{path}: {piece:?} ends up {final_h:.2} m — an operative cannot walk through it"
+                );
+            }
+        }
     }
 
     // `no_two_pieces_share_a_glb` moved to `kit::validate_site_kit` — it is a property of a KIT, and

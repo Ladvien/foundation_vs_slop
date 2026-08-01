@@ -10,6 +10,11 @@
 // against, and it stays shipped even once a dressed kit exists — a hand-authored hub has to be
 // debuggable, and you cannot see a layout bug through good lighting.
 //
+// HEIGHT. Each entry carries the mesh's AUTHORED height in metres. The scale applied at spawn is
+// `target / authored` — what a wall must REACH is game policy (`pieces::target_height`), how tall the
+// artist made it is an art fact and belongs here. This kit is a uniform 1 m module except the low
+// wall (0.5 m), which is why a single constant used to work; Ozea is mixed and it no longer does.
+//
 // SCHEMA. Every piece is a required named field (`deny_unknown_fields`), so a kit that forgets one
 // fails at PARSE time naming the field. The alternative — a map — would turn a forgotten piece into
 // an invisible wall at runtime, which is precisely the bug that survives a playtest.
@@ -21,21 +26,21 @@
 // =================================================================================================
 (
     // ── Structure ──
-    floor:             "kenney_prototype-kit/Models/GLB format/floor-square.glb",
-    wall:              "kenney_prototype-kit/Models/GLB format/wall.glb",
-    wall_corner:       "kenney_prototype-kit/Models/GLB format/wall-corner.glb",
-    wall_doorway:      "kenney_prototype-kit/Models/GLB format/wall-doorway.glb",
-    wall_doorway_wide: "kenney_prototype-kit/Models/GLB format/wall-doorway-wide.glb",
-    wall_window:       "kenney_prototype-kit/Models/GLB format/wall-window-large.glb",
-    wall_low:          "kenney_prototype-kit/Models/GLB format/wall-low.glb",
-    column:            "kenney_prototype-kit/Models/GLB format/column.glb",
+    floor: (glb: "kenney_prototype-kit/Models/GLB format/floor-square.glb", height: 1.0),
+    wall: (glb: "kenney_prototype-kit/Models/GLB format/wall.glb", height: 1.0),
+    wall_corner: (glb: "kenney_prototype-kit/Models/GLB format/wall-corner.glb", height: 1.0),
+    wall_doorway: (glb: "kenney_prototype-kit/Models/GLB format/wall-doorway.glb", height: 1.0),
+    wall_doorway_wide: (glb: "kenney_prototype-kit/Models/GLB format/wall-doorway-wide.glb", height: 1.0),
+    wall_window: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-large.glb", height: 1.0),
+    wall_low: (glb: "kenney_prototype-kit/Models/GLB format/wall-low.glb", height: 0.5),
+    column: (glb: "kenney_prototype-kit/Models/GLB format/column.glb", height: 1.0),
 
     // ── Dressing ──
-    crate_:            "kenney_prototype-kit/Models/GLB format/crate-color.glb",
-    pipe:              "kenney_prototype-kit/Models/GLB format/pipe.glb",
-    pipe_corner:       "kenney_prototype-kit/Models/GLB format/pipe-corner.glb",
-    floor_button:      "kenney_prototype-kit/Models/GLB format/button-floor-square.glb",
-    area_decal:        "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb",
-    arrow_decal:       "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb",
-    specimen_standin:  "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb",
+    crate_: (glb: "kenney_prototype-kit/Models/GLB format/crate-color.glb", height: 1.0),
+    pipe: (glb: "kenney_prototype-kit/Models/GLB format/pipe.glb", height: 1.0),
+    pipe_corner: (glb: "kenney_prototype-kit/Models/GLB format/pipe-corner.glb", height: 1.0),
+    floor_button: (glb: "kenney_prototype-kit/Models/GLB format/button-floor-square.glb", height: 1.0),
+    area_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb", height: 1.0),
+    arrow_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb", height: 1.0),
+    specimen_standin: (glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb", height: 1.0),
 )

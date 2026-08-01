@@ -27,30 +27,62 @@ use super::pieces::SitePiece;
 /// the fallback every test builds against.
 pub const SITE_KIT_PATH: &str = "assets/site/kit_greybox.ron";
 
-/// One GLB path per [`SitePiece`].
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+/// One mesh in a kit: where it lives, and how tall the artist made it.
+///
+/// **`height` is why this is a struct and not a bare path.** The Site's pieces are scaled to game
+/// heights (`WALL_HEIGHT` 2.4 m, `DOORWAY_HEIGHT` 2.0 m), and the scale factor is
+/// `target / authored`. The authored height is an **art** fact that differs per kit — the Kenney
+/// prototype kit is a uniform 1 m module, while Ozea is mixed: `SM_Wall_1x1` is 1.00 m but
+/// `SM_DoorFrame_Single` is already 2.01 m and `SM_Cryogenic_Stasis_Chamber` 2.41 m. A single
+/// `KIT_MODULE_HEIGHT` constant in code cannot describe both, and using Kenney's would have scaled
+/// the Ozea doorframe to 4 m. Measured at conversion time by `scripts/ozea_to_glb.py`, which prints
+/// every bounding box for exactly this reason.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KitPiece {
+    pub glb: String,
+    /// The mesh's authored height in metres, as it sits in the file.
+    pub height: f32,
+}
+
+/// One [`KitPiece`] per [`SitePiece`].
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SiteKit {
-    pub floor: String,
-    pub wall: String,
-    pub wall_corner: String,
-    pub wall_doorway: String,
-    pub wall_doorway_wide: String,
-    pub wall_window: String,
-    pub wall_low: String,
-    pub column: String,
-    pub crate_: String,
-    pub pipe: String,
-    pub pipe_corner: String,
-    pub floor_button: String,
-    pub area_decal: String,
-    pub arrow_decal: String,
-    pub specimen_standin: String,
+    pub floor: KitPiece,
+    pub wall: KitPiece,
+    pub wall_corner: KitPiece,
+    pub wall_doorway: KitPiece,
+    pub wall_doorway_wide: KitPiece,
+    pub wall_window: KitPiece,
+    pub wall_low: KitPiece,
+    pub column: KitPiece,
+    pub crate_: KitPiece,
+    pub pipe: KitPiece,
+    pub pipe_corner: KitPiece,
+    pub floor_button: KitPiece,
+    pub area_decal: KitPiece,
+    pub arrow_decal: KitPiece,
+    pub specimen_standin: KitPiece,
 }
 
 impl SiteKit {
     /// The GLB this kit dresses `piece` in.
     pub fn glb(&self, piece: SitePiece) -> &str {
+        &self.piece(piece).glb
+    }
+
+    /// Vertical scale for `piece` in THIS kit: the game's target height over the artist's.
+    ///
+    /// Game policy (what a wall must reach) stays in `pieces::target_height`; art fact (how tall the
+    /// mesh is) lives in the kit. Neither belongs in the other.
+    pub fn y_scale(&self, piece: SitePiece) -> f32 {
+        super::pieces::target_height(piece)
+            .map_or(1.0, |target| target / self.piece(piece).height)
+    }
+
+    /// The kit entry for `piece`.
+    pub fn piece(&self, piece: SitePiece) -> &KitPiece {
         use SitePiece::*;
         match piece {
             Floor => &self.floor,
@@ -95,6 +127,15 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
         }
         if !glb.ends_with(".glb") {
             return Err(format!("site kit: {piece:?} -> {glb:?} is not a .glb (artist_guide.md §3)"));
+        }
+    }
+    for piece in SitePiece::ALL {
+        let h = kit.piece(*piece).height;
+        if !(h.is_finite() && h > 0.0) {
+            return Err(format!(
+                "site kit: {piece:?} has authored height {h} — the scale is target/authored, so a \
+                 zero or negative height is a divide-by-zero or an inside-out mesh"
+            ));
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -157,6 +198,18 @@ mod tests {
         assert_ne!(greybox, swapped, "the fixture must actually differ, or it proves nothing");
         // Named pieces really did change kit — not merely "the structs differ somewhere".
         assert!(swapped.glb(SitePiece::Floor).contains("ozea"), "floor should be Ozea now");
+        // The scale really is kit-derived, not a constant: Ozea's wall is authored at 2.00 m and
+        // Kenney's at 1.00 m, so the SAME piece must scale differently in each kit.
+        // Compare a piece the fixture actually swaps: the Ozea doorframe is authored at 1.98 m and
+        // the Kenney one at 1.0 m, so the SAME piece must scale differently in each kit. (Comparing
+        // `Wall` proved nothing — the partial fixture still uses the Kenney wall, so both scales were
+        // identical and the assertion was vacuous.)
+        assert!(
+            (swapped.y_scale(SitePiece::WallDoorwayWide) - greybox.y_scale(SitePiece::WallDoorwayWide))
+                .abs()
+                > 0.5,
+            "a 1.98 m doorframe and a 1.0 m one cannot want the same scale — the kit is not driving it"
+        );
         assert!(greybox.glb(SitePiece::Floor).contains("kenney"), "greybox floor is Kenney");
         // And the swapped kit is a VALID kit, not just a different one.
         validate_site_kit(&swapped).expect("a swapped kit must satisfy every rule the shipped one does");
@@ -165,7 +218,7 @@ mod tests {
     #[test]
     fn a_non_glb_path_is_refused() {
         let mut kit = load_site_kit(SITE_KIT_PATH).expect("shipped kit loads");
-        kit.pipe = "site/ozea/pipe.fbx".into();
+        kit.pipe = KitPiece { glb: "site/ozea/pipe.fbx".into(), height: 1.0 };
         assert!(validate_site_kit(&kit).is_err(), "artist_guide.md §3 is glTF-binary only");
     }
 }

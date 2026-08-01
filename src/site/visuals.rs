@@ -135,7 +135,7 @@ fn place(
             Transform::from_translation(at)
                 .with_rotation(Quat::from_rotation_y(yaw_deg.to_radians()))
                 // The kit is a 1 m module in every axis; `y_scale` lifts architecture to WALL_HEIGHT.
-                .with_scale(Vec3::new(1.0, piece.y_scale(), 1.0)),
+                .with_scale(Vec3::new(1.0, kit.y_scale(piece), 1.0)),
             Visibility::Inherited,
         ))
         .with_child((WorldAssetRoot(scene), Transform::default()));
