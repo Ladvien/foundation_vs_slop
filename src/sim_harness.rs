@@ -457,6 +457,9 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
             // fog) is windowed-only and never registered here.
             crate::scp1048::Scp1048Plugin,
             crate::scp610::Scp610Plugin,
+            // The watch feed is GAMEPLAY (it mints crabs, which move and fight), so the exact-hash
+            // gate must cover it. Its only cosmetic half is the GLB it wears.
+            crate::broadcast::BroadcastPlugin,
         ),
         crate::laser::LaserPlugin,
         crate::impact_fx::ImpactFxPlugin,

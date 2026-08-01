@@ -255,6 +255,9 @@ fn contact_id(subject: Subject) -> Option<&'static str> {
         // roster", it is the first time the player sees something that was MADE. That is the SCP-9191
         // reveal in miniature and it deserves its own scene rather than a roster entry.
         Subject::BearCopies => Some("slop_first_sign"),
+        // Same reasoning as the copies: the feed is not another roster entry, it is the squad
+        // watching the generator work. It shares that scene rather than minting a duplicate one.
+        Subject::WatchFeed => Some("slop_first_sign"),
         // No authored scene: the watcher's whole character is that it does not announce itself, and a
         // conversation firing when you look at it would undo the one thing it does.
         Subject::Watcher => None,

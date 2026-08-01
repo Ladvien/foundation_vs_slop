@@ -1114,3 +1114,104 @@ fn killing_a_bloom_grants_no_specimen() {
         "the bloom must NOT be despawned — 610 is terrain, and it collapses in place (README §5)"
     );
 }
+
+fn screens(app: &mut App) -> Vec<(Entity, Vec3)> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (Entity, &Transform, &foundation_vs_slop::containment::TargetId),
+        With<foundation_vs_slop::broadcast::BroadcastScreen>,
+    >();
+    let mut v: Vec<_> = q.iter(world).map(|(e, tf, id)| (*id, e, tf.translation)).collect();
+    // SORT-OK: `TargetId` is minted once per spawn and never reused — total by construction.
+    v.sort_unstable_by_key(|(id, ..)| *id);
+    v.into_iter().map(|(_, e, p)| (e, p)).collect()
+}
+
+fn crab_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(), With<foundation_vs_slop::crab::Crab>>();
+    q.iter(world).count()
+}
+
+/// **FVS-C-7's acceptance, both directions.** The watch feed generates *while watched* and goes inert
+/// when it is not — the exact inverse of SCP-1048 above, on the same ambient `ATTENTION` channel.
+///
+/// Asserting only the "watched generates" half would pass trivially if the screen simply generated
+/// all the time, which is why the ignored half is measured first and is the stricter of the two. Same
+/// discipline as the bear test: a scenario that never engages is REPORTED, not silently passed
+/// (FVS-N-9's lesson).
+#[test]
+fn watching_the_feed_makes_it_generate_and_ignoring_it_stops() {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(&(_, at)) = screens(&mut app).first() else {
+        panic!(
+            "no watch feed spawned — `sim.broadcast.count` is {} and placement is a deterministic \
+             scan, so this is a wiring failure, not a content fact",
+            app.world().resource::<foundation_vs_slop::sim::SimTuning>().broadcast.count
+        );
+    };
+
+    // IGNORED: nobody is looking at it (it sits `spawn_min_dist` from the squad), so the swarm must
+    // not grow on its account. Measured first, because it is the half that can fail silently.
+    let before_idle = crab_count(&mut app);
+    step(&mut app, &cfg, 900);
+    let after_idle = crab_count(&mut app);
+    assert!(
+        after_idle <= before_idle,
+        "an unwatched feed generated anyway ({before_idle} -> {after_idle} crabs) — the ATTENTION \
+         gate is not holding, so 'look away to contain it' means nothing"
+    );
+
+    // WATCHED: flood the ambient field over its cell and it must start producing.
+    let before_watched = crab_count(&mut app);
+    for _ in 0..120 {
+        flood_attention(&mut app, at, 5.0);
+        step(&mut app, &cfg, 10);
+    }
+    let after_watched = crab_count(&mut app);
+    assert!(
+        after_watched > before_watched,
+        "sustained observation did not make the feed generate ({before_watched} -> \
+         {after_watched} crabs) — the anomaly is inert and the mechanic is not in the game"
+    );
+}
+
+/// The feed's containment rule must be the **inverse** of SCP-1048's, not a copy of it.
+///
+/// Cheap, and it guards the one thing that makes this creature distinct: a paste-o of the bear's
+/// `AtLeast` rule would leave two anomalies contained by staring, and the C-7 sign flip — the entire
+/// reason this could be built without new engineering — would be silently absent.
+#[test]
+fn the_feed_is_contained_by_looking_away_not_by_staring() {
+    use foundation_vs_slop::containment::rule::Sign;
+    let cfg = foundation_vs_slop::config::load_game_config().expect("config loads");
+    let feed = &cfg.containment.broadcast;
+    let bear = &cfg.containment.scp1048;
+
+    let attention = |r: &foundation_vs_slop::containment::rule::ContainmentRule| {
+        r.requires
+            .iter()
+            .find(|c| c.channel == foundation_vs_slop::ai::field::FieldId::ATTENTION.0)
+            .copied()
+            .expect("both gaze anomalies must gate on ATTENTION")
+    };
+    assert_eq!(attention(bear).sign, Sign::AtLeast, "the bear is contained by WATCHING");
+    assert_eq!(
+        attention(feed).sign,
+        Sign::AtMost,
+        "the watch feed must be contained by LOOKING AWAY — that inversion is the whole creature"
+    );
+    // And the inert band must exist: merely making it go quiet is not yet containing it.
+    assert!(
+        attention(feed).threshold < cfg.sim.broadcast.watch_threshold,
+        "the containment ceiling ({}) must sit BELOW the watched threshold ({}) — without that gap, \
+         a feed that has gone quiet is already being contained, and the player never has to hold \
+         attention off deliberately",
+        attention(feed).threshold,
+        cfg.sim.broadcast.watch_threshold
+    );
+}

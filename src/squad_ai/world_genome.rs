@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 146;
+pub const N: usize = 151;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -127,6 +127,19 @@ static BOUNDS: [(f32, f32); N] = [
     // footprint (a blob inside the huddle would make the mechanic free) and capped well inside a small
     // level, so `spawn_scp999`'s far-from-spawn scan always finds a cell and never warns itself empty.
     (4.0, 40.0),
+    // ── SimTuning::broadcast (the watch feed — the one creature that GENERATES while observed) ──
+    //    Every knob has a causal path to the world archive's `deaths` axis, which is the FVS-I-6 test
+    //    for whether a gene is worth having: more screens, or a faster feed, means more crabs, means
+    //    more deaths. That is the same argument the 8 gore dials were admitted on, and the reason the
+    //    ~22 cosmetic gore knobs were not.
+    (0.0, 4.0),    // count (usize) — screens seeded; 0 is legal here (a level without the anomaly is
+                   //   a real point in the space, unlike scp999 where the mechanic needs an instance)
+    (0.05, 0.80),  // watch_threshold — ambient ATTENTION at which the feed has an audience. Floored
+                   //   above zero so a feed is never permanently on, and capped below 1.0 so it is
+                   //   never unreachable; `decode` orders it against the containment ceiling.
+    (0.01, 1.00),  // charge_rate (emissions per second of sustained attention)
+    (0.01, 1.00),  // decay_rate (charge lost per second while ignored)
+    (4.0, 40.0),   // spawn_min_dist — same floor/cap reasoning as scp999's above
     // ── SimTuning::scp1048 (the Builder Bear family — the one creature that BUILDS more of itself) ──
     // Four knobs are floored at exactly 0.0 (strike_damage, rage_dread_rate, scream_dread,
     // growth_decay). That is deliberate and `sim::validate_tuning` matches it with `non_negative`
@@ -327,6 +340,12 @@ pub fn encode(
     v.push(sim.scp999.calm_rate);
     v.push(sim.scp999.morale_rate);
     v.push(sim.scp999.spawn_min_dist);
+    // broadcast (the watch feed), in BOUNDS order.
+    v.push(sim.broadcast.count as f32);
+    v.push(sim.broadcast.watch_threshold);
+    v.push(sim.broadcast.charge_rate);
+    v.push(sim.broadcast.decay_rate);
+    v.push(sim.broadcast.spawn_min_dist);
     // SCP-1048 Builder Bear family.
     v.push(sim.scp1048.count as f32);
     v.push(sim.scp1048.spawn_min_dist);
@@ -534,6 +553,15 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             contact_radius: f!(),
             calm_rate: f!(),
             morale_rate: f!(),
+            spawn_min_dist: f!(),
+        },
+        // The watch feed. `count` may legitimately decode to 0 — a level without the anomaly is a
+        // real point in the space — so unlike scp999 there is no floor of 1.
+        broadcast: crate::sim::BroadcastTuning {
+            count: f!().round().max(0.0) as usize,
+            watch_threshold: f!(),
+            charge_rate: f!(),
+            decay_rate: f!(),
             spawn_min_dist: f!(),
         },
         // SCP-1048 Builder Bear family. `count` and `max_bears` round to >= 1 (a search world always

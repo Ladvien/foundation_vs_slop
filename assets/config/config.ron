@@ -663,6 +663,18 @@
         // SCP-999 — the friendly "Tickle Monster" comfort blob (see src/scp999/). The ONLY creature that
         // LOWERS squad fear: it oozes to the most-anxious member and, on contact, drains FEAR + lifts
         // MORALE (companion-animal social buffering). All dials are evolvable (squad_ai::world_genome).
+        // The watch feed (src/broadcast/) — SCP-9191's generator, made mechanical. It emits crabs
+        // for as long as anyone looks at it, and goes inert when nobody does.
+        broadcast: (
+            count: 2,               // screens seeded into the level
+            watch_threshold: 0.30,  // ambient ATTENTION at which the feed has an audience. Sits ABOVE
+                                    // the containment ceiling (0.12) on purpose: between the two the
+                                    // feed is quiet but not yet being contained, so "look away" has to
+                                    // be held deliberately rather than satisfied in passing.
+            charge_rate: 0.14,      // ~7 s of sustained attention per crab
+            decay_rate: 0.10,       // ~10 s of being ignored undoes a full charge
+            spawn_min_dist: 16.0,   // tiles from the squad spawn — found, not handed over
+        ),
         scp999: (
             count: 1,               // comfort blobs seeded into the level at start
             move_speed: 2.2,        // ooze speed toward the most-anxious member (world units/s)
@@ -2274,6 +2286,28 @@
                 (channel: 9, sign: AtLeast, threshold: 0.45),  // ATTENTION — do not look away
             ],
             hold_secs: 8.0,
+            break_on_fail: Reset,
+        ),
+
+        // The watch feed — the OUT-WATCH capture INVERTED (FVS-C-7).
+        //
+        // SCP-1048 above is contained by refusing to look away. This is the same channel with the
+        // sign flipped: the feed works for an audience, so containing it means starving it of one.
+        // No new primitive was needed for either — that is the point of doing this before FVS-C-6's
+        // per-entity watch state, and it is why this rule is one line.
+        //
+        // The ceiling (0.12) sits BELOW `sim.broadcast.watch_threshold` (0.30), and the gap is the
+        // design: merely making it go quiet is not yet containing it. The squad has to pull attention
+        // properly off the room and hold it off, which fights their own auto-engage instinct.
+        //
+        // `Reset` rather than `Keep`, matching 1048: this is an attention discipline, and a discipline
+        // that forgives lapses is not one. Longer hold than 999 (6 s), shorter than 1048 (8 s) — it is
+        // the third capture, and the hard part is the fighting-your-instincts, not the duration.
+        broadcast: (
+            requires: [
+                (channel: 9, sign: AtMost, threshold: 0.12),  // ATTENTION — stop looking at it
+            ],
+            hold_secs: 6.0,
             break_on_fail: Reset,
         ),
 

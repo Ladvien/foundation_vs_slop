@@ -326,8 +326,30 @@ fn deterministic_core_is_bit_identical() {
 /// Budget a re-pin for every future `FixedUpdate` addition regardless (see the M0 note below): a new
 /// schedule node permutes the linearisation of other unconstrained systems, and no ordering edge
 /// fixes it.
+///
+/// ## Re-pinned 2026-08-01 — FVS-C-7's watch feed entered the deterministic core
+///
+/// `0x9f7a0787fdcb487f` -> `0xdbff6e94a7fa3d0e` (actors) and `0x82d9fc45c7e06f63` ->
+/// `0x0feb0281e67e81b8` (fields). The cause was **isolated by ablation rather than assumed**, and the
+/// first two hypotheses were both wrong — which is why the table is kept:
+///
+/// | ablation | actors | fields |
+/// |---|---|---|
+/// | `broadcast.count: 0` (systems registered, no screens) | pinned | MOVED |
+/// | `BroadcastPlugin` unregistered, `Subject::ALL` still 8 | pinned | pinned |
+///
+/// So it is neither the `Subject` enum growing nor a lossy genome encode (both were suspected;
+/// `authored_round_trips_exactly` and a config-vs-default check cleared the latter). It is simply
+/// **the creature being in the world and working**.
+///
+/// The last piece was a red herring worth naming: `deterministic_core_is_bit_identical` stayed green
+/// throughout, which looked like "the actor golden did not move". It did. That test steps **180**
+/// ticks and only compares two runs against *each other* — it never reads [`GOLDEN`]. The tests that
+/// do step **1800**, and by ~30 s of play the squad has walked past a screen, watched it, and the feed
+/// has generated a crab. A crab carries `Health` + `Transform`, so it enters `snapshot_hash`; a screen
+/// does not. **A green reproducibility test is not a green golden test.**
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0x9f7a0787fdcb487f;
+const GOLDEN: u64 = 0xdbff6e94a7fa3d0e;
 
 /// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
 /// message says exactly what to do.
@@ -560,8 +582,9 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 //
 // Measured from a settled tree; `field_passes_are_bit_identical` is itself the reproducibility check,
 // and the two `deterministic_core_is_bit_identical*` tests were green on the same tree first.
+/// Re-pinned 2026-08-01 alongside [`GOLDEN`] — same cause, same ablation table; see there.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x82d9fc45c7e06f63;
+const GOLDEN_FIELD: u64 = 0x0feb0281e67e81b8;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]
