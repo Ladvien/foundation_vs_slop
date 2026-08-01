@@ -74,6 +74,23 @@ pub struct GibSource {
     pub scale: f32,
 }
 
+/// The pinned gib economy: spawn -> confine -> evict, on `FixedUpdate`.
+///
+/// Named so the **consumers** can order against it. `crab::{assign_meat_targets,
+/// release_uncommitted_carriers, carry_gibs}` read and write `Carryable`/`GibKey` on the same
+/// schedule, and without an explicit edge they and `drain_gore` are mutually unordered — resolved
+/// only by the single-threaded executor's linearisation, which this repo's determinism rules exist
+/// to forbid relying on ("archetype order is not a stable total order"; a new schedule node permutes
+/// the linearisation of every unconstrained neighbour).
+///
+/// The consumers run **before** this set, which preserves the behaviour the `Update` placement had:
+/// the drain used to happen after the whole tick, so a crab saw a death's gibs on a later tick, never
+/// the one that produced them. Keeping that ordering means the reschedule fixes the frame-rate
+/// coupling **without** also changing what a crab can react to in a given tick — one change, one
+/// effect, so a golden movement here would have a single cause.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GibEconomy;
+
 /// A request for gore at a world position. Anything can push one into [`GoreQueue`].
 pub struct GoreEvent {
     pub pos: Vec3,
@@ -595,15 +612,53 @@ impl Plugin for GorePlugin {
             .init_resource::<GibSeq>()
             .insert_resource(settings)
             .add_systems(Startup, setup_gore_assets)
+            // ── The gib ECONOMY is pinned sim state, so it belongs on `FixedUpdate` ──────────────
+            //
+            // `CLAUDE.md`/TESTING.md: a system goes on `FixedUpdate` if it touches pinned state, else
+            // `Update`. All of gore used to sit on `Update`, and three of these systems fail that test:
+            // `drain_gore` mints `GibKey` + `Carryable` and pushes the `GibRing` whose ORDER decides
+            // cap eviction, `confine_gibs` writes gib `Transform`/`LinearVelocity`, and
+            // `cap_gib_chunks` evicts from the ring — and `gib_hash` folds exactly
+            // `(GibKey, Transform, Carryable)` plus the ring order.
+            //
+            // The consumers are pinned `FixedUpdate` sim: `crab::assign_meat_targets`/`carry_gibs`
+            // route the forage economy, which writes `Drives` and ultimately `Health`/`Transform`.
+            // **The harness could not catch this by construction** — `step()` drives exactly one frame
+            // per fixed tick, so frame- and tick-indexing coincide and every determinism test passes.
+            // In the shipped game the ratio floats with frame rate, so gib spawn/eviction timing
+            // relative to sim ticks — and through it the crab economy — was a function of FPS.
+            // `mycelia::grazing` got the identical call right and documented it; gore was the hole in
+            // that discipline.
+            //
+            // `.after(HealthDamage)`: gore is *produced by* damage. Every `GoreQueue` writer
+            // (`squad::despawn_dead_units`, `laser`, `parasite`, `enemy`) is already on `FixedUpdate`,
+            // so draining in the same tick the death happened is both the correct causal order and
+            // what removes the frame-rate coupling. Previously the drain ran in `Update`, i.e. after
+            // the frame's ticks, so crabs saw a death's gibs on some later tick decided by frame rate.
+            //
+            // `.chain()`: spawn -> confine -> evict is a real dependency. These three were a bare
+            // unchained tuple, correct only by grace of the single-threaded executor's registration
+            // order — the exact shape this repo's determinism rules exist to forbid.
+            .add_systems(
+                FixedUpdate,
+                (drain_gore, confine_gibs, cap_gib_chunks)
+                    .chain()
+                    .in_set(GibEconomy)
+                    .after(crate::health::HealthDamage)
+                    .distributive_run_if(in_state(crate::session::RunState::Active)),
+            )
+            // Purely cosmetic, and staying on `Update` deliberately: none of these touches `GibKey`,
+            // `Carryable` or the `GibRing`, so none can reach `gib_hash` or `snapshot_hash`.
+            // `despawn_gore` only expires `GoreFx` blood-spray decals; `cap_blood_pools`/
+            // `update_droplets` own the `PoolRing`, which is not folded by any oracle; `hide_in_fog`
+            // writes visibility. Frame-rate-dependent decay is correct for these — they should ease at
+            // the rate the player sees, not the rate the sim ticks.
             .add_systems(
                 Update,
                 (
-                    drain_gore,
                     update_droplets,
-                    confine_gibs,
                     crate::fog::hide_in_fog::<GibChunk>,
                     cap_blood_pools,
-                    cap_gib_chunks,
                     despawn_gore,
                 ).distributive_run_if(in_state(crate::session::RunState::Active)),
             );

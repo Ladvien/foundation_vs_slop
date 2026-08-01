@@ -216,6 +216,8 @@ pub enum Action {
 
     // --- Readouts (InGame). ---
     CycleHudDensity,
+    /// Arm the thrown lure — left-click then places a noisemaker (`crate::lure`).
+    ArmLure,
     ToggleRoster,
 
     // --- Site-67 (Site). ---
@@ -300,7 +302,7 @@ impl Action {
             | CameraRotateRight | CameraRecenter | TogglePause | SpeedDown | SpeedUp | PauseMenu => {
                 Context::Play
             }
-            ArmDevice | ArmQuarantine | ArmCap | ToggleHoldFire | DeploySensor | TogglePush
+            ArmDevice | ArmQuarantine | ArmCap | ArmLure | ToggleHoldFire | DeploySensor | TogglePush
             | CycleHudDensity | ToggleRoster => Context::InGame,
             CycleSpecimen | RunTopExperiment | FileFindings | CurateArchive | BuyCaptureDevice
             | BuyQuarantineCharge | BuyMedkit => Context::Site,
@@ -346,6 +348,7 @@ impl Action {
             ArmDevice => "arm_device",
             ArmQuarantine => "arm_quarantine",
             ArmCap => "arm_cap",
+            ArmLure => "arm_lure",
             ToggleHoldFire => "toggle_hold_fire",
             DeploySensor => "deploy_sensor",
             TogglePush => "toggle_push",
@@ -392,6 +395,7 @@ impl Action {
             ArmDevice => "ARM CAPTURE DEVICE",
             ArmQuarantine => "ARM QUARANTINE",
             ArmCap => "ARM NEST CAP",
+            ArmLure => "ARM LURE THROW",
             ToggleHoldFire => "HOLD FIRE",
             DeploySensor => "DEPLOY SENSOR",
             TogglePush => "ADVANCE TO CONTACT",
@@ -442,6 +446,7 @@ impl Action {
             ArmDevice => Binding::one(Chord::plain(KeyCode::KeyC)),
             ArmQuarantine => Binding::one(Chord::plain(KeyCode::KeyZ)),
             ArmCap => Binding::one(Chord::plain(KeyCode::KeyX)),
+            ArmLure => Binding::one(Chord::plain(KeyCode::KeyV)),
             ToggleHoldFire => Binding::one(Chord::plain(KeyCode::KeyF)),
             // `V` is free and sits beside the C/Z/X verb cluster.
             DeploySensor => Binding::one(Chord::plain(KeyCode::KeyV)),

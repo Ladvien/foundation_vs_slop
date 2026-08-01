@@ -72,10 +72,12 @@ pub enum Subject {
     /// **Appended, never inserted.** This enum's discriminants index saved beliefs in `SaveGame`, so
     /// reordering it would silently reinterpret every operative's existing knowledge.
     Flesh,
+    /// The watch feed (`crate::broadcast`) — the screen that generates while it is watched.
+    WatchFeed,
 }
 
 impl Subject {
-    pub const ALL: [Subject; 7] = [
+    pub const ALL: [Subject; 8] = [
         Subject::Crabs,
         Subject::Parasite,
         Subject::ComfortBlob,
@@ -83,6 +85,7 @@ impl Subject {
         Subject::BearCopies,
         Subject::Watcher,
         Subject::Flesh,
+        Subject::WatchFeed,
     ];
 
     /// Dense index into [`Self::ALL`]. **Append-only**, like [`crate::research::HiddenParam::as_index`]
@@ -100,6 +103,7 @@ impl Subject {
             Subject::BearCopies => 4,
             Subject::Watcher => 5,
             Subject::Flesh => 6,
+            Subject::WatchFeed => 7,
         }
     }
 }

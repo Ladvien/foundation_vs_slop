@@ -298,6 +298,9 @@ impl Plugin for SelectionPlugin {
                 cap_nest_input
                     .run_if(not(resource_exists::<ConversationLock>))
                     .run_if(resource_equals(ArmedTool::Cap)),
+                throw_lure_input
+                    .run_if(not(resource_exists::<ConversationLock>))
+                    .run_if(resource_equals(ArmedTool::Lure)),
                 // LAST of the right-button readers — see the ordering note on `command_input`.
                 arm_tool_input.run_if(not(resource_exists::<ConversationLock>)),
                 // A latched stance, so it is read wherever the other verb inputs are read.
@@ -956,6 +959,60 @@ pub fn place_quarantine_input(
     // Its own cue, not the move-order tick it used to borrow. The supply is ONE charge per
     // expedition (`config.ron: quarantine_supply`), so this is the least repeated and most
     // consequential click in the game, and it should not sound like ordering someone to walk.
+    sfx.write(Sfx::CordonPlaced);
+}
+
+/// Throw a noisemaker onto the floor under the cursor (`crate::lure`, FVS-B-10 stage 1).
+///
+/// Mirrors [`place_quarantine_input`] deliberately — snap to floor, spend a charge, disarm, cue —
+/// because a second placement idiom would be a second set of edge cases for the same gesture. The
+/// spend and the habituation step live in `lure::throw_lure`, not here: the Research Room palette
+/// places lures too, and the two callers must not disagree about what a throw costs.
+pub fn throw_lure_input(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    dungeon: Res<Dungeon>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    capture: Res<crate::DebugCaptureActive>,
+    tuning: Res<crate::sim::SimTuning>,
+    mut supply: ResMut<crate::lure::LureSupply>,
+    mut hab: ResMut<crate::lure::Habituation>,
+    mut seq: ResMut<crate::lure::LureSeq>,
+    mut armed: ResMut<ArmedTool>,
+    mut sfx: MessageWriter<Sfx>,
+) {
+    if capture.0 || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let (camera, cam_tf) = *camera;
+    let Some(point) = cursor_ground_point(&window, camera, cam_tf) else {
+        return;
+    };
+    if supply.0 == 0 {
+        warn!("no lures left this expedition");
+        sfx.write(Sfx::Invalid);
+        return;
+    }
+    let Some(cell) = nearest_floor(&dungeon, dungeon.world_to_cell(point)) else {
+        warn!("lure ignored: no floor within {SNAP_MAX_RING} cells of the click");
+        sfx.write(Sfx::Invalid);
+        return;
+    };
+    if crate::lure::throw_lure(
+        &mut commands,
+        dungeon.cell_center(cell),
+        &tuning.lure,
+        &mut supply,
+        &mut hab,
+        &mut seq,
+    )
+    .is_none()
+    {
+        sfx.write(Sfx::Invalid);
+        return;
+    }
+    *armed = ArmedTool::None;
     sfx.write(Sfx::CordonPlaced);
 }
 

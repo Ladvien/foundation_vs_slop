@@ -213,7 +213,10 @@ impl Plugin for DungeonPlugin {
         app.insert_resource(DungeonConfigRes(config))
             .add_systems(
                 OnEnter(crate::session::RunState::Active),
-                generate_dungeon.in_set(crate::session::RunBuild::World),
+                (
+                    resnapshot_dungeon_config.in_set(crate::session::RunBuild::Config),
+                    generate_dungeon.in_set(crate::session::RunBuild::World),
+                ),
             )
             // Plugins add plugins. This one owns the **generated grid** — the `Dungeon` resource that
             // nav, fog, placement and containment all read — and delegates the two *presentations* of
@@ -224,9 +227,26 @@ impl Plugin for DungeonPlugin {
     }
 }
 
-/// The authored `dungeon:` config slice, held so each run can generate from it.
+/// The `dungeon:` config slice for the **current** run, held so each run can generate from it.
+///
+/// Seeded from the authored slice at plugin build and refreshed from [`crate::config::GameConfig`] at
+/// the head of every run by [`resnapshot_dungeon_config`] — so a dial applied for one expedition
+/// (`director::pick_next_challenge`, `FVS_LEVELS_ELITE`) actually reaches generation.
 #[derive(Resource)]
 pub struct DungeonConfigRes(pub DungeonConfig);
+
+/// Refresh this run's `dungeon:` slice from `GameConfig` (`RunBuild::Config`, FVS-H-8).
+///
+/// Without this the plugin-build snapshot was a process-lifetime fact: the director wrote `gc.dungeon`
+/// before every expedition and `generate_dungeon` read a copy taken at startup, so an expedition
+/// announced as `BRANCH UNIVERSE {seed} · SECTOR x,y` was the authored world with a different label.
+/// `RunSeed` was already read live here, which is why the *seed* varied and the *config* never did.
+fn resnapshot_dungeon_config(
+    gc: Res<crate::config::GameConfig>,
+    mut config: ResMut<DungeonConfigRes>,
+) {
+    config.0 = gc.dungeon.clone();
+}
 
 /// Generate this run's `Dungeon` from [`crate::session::RunSeed`].
 ///

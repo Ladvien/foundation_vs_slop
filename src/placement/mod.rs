@@ -64,6 +64,25 @@ pub(crate) fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrat
     orch
 }
 
+/// Refresh this run's dialled `placement:` knobs from `GameConfig` (`RunBuild::Config`, FVS-H-8).
+///
+/// `director::pick_next_challenge` writes `gc.placement.metropolis` and `gc.placement.density` from the
+/// sampled level cell; both were snapshotted at plugin build and never re-read, so a dialled layout
+/// reached nothing. The solver registry is rebuilt through [`build_solvers`] rather than reaching into
+/// `MetropolisSolver` — one construction path, so a future backend cannot be wired into the startup
+/// registry and forgotten here.
+///
+/// `Manifest` (the furniture catalogue) is deliberately absent: the director does not dial
+/// `placement.furniture`, and refreshing a slice nothing writes would be a path with no writer.
+fn resnapshot_placement_config(
+    gc: Res<crate::config::GameConfig>,
+    mut solvers: ResMut<PlacementSolvers>,
+    mut density: ResMut<furnish::Density>,
+) {
+    *solvers = PlacementSolvers(build_solvers(gc.placement.metropolis.clone()));
+    *density = furnish::Density(gc.placement.density);
+}
+
 /// Tags a placed furniture entity with the region it belongs to — read by `furnish::furniture_room_visibility`
 /// to reveal furniture once the squad has entered its room (and to keep it revealed thereafter).
 #[derive(Component)]
@@ -91,6 +110,12 @@ impl Plugin for PlacementPlugin {
 
         // Runs at Startup after `DungeonPlugin` inserts the `Dungeon` resource (in its own `build`).
         app.add_systems(OnEnter(crate::session::RunState::Active), furnish::furnish_regions.in_set(crate::session::RunBuild::Populate));
+        // Refresh the dialled half of the `placement:` slice from `GameConfig` before `furnish_regions`
+        // reads it (FVS-H-8). `RunBuild::Config` is chained ahead of `Populate`, so no extra edge.
+        app.add_systems(
+            OnEnter(crate::session::RunState::Active),
+            resnapshot_placement_config.in_set(crate::session::RunBuild::Config),
+        );
         // Reveal each room's furniture the first time a squad unit walks into it, and keep it revealed
         // thereafter (remembered, per-room — see `furniture_room_visibility`).
         app.init_resource::<furnish::RevealedRooms>();

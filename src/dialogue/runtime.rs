@@ -292,8 +292,9 @@ fn present_current(
             options,
         } => {
             // The prompt as a speech bubble over the speaker.
+            let mut prompt_height = 0.0;
             if let Some(owner) = speaker_entity(*speaker, &members, &leader) {
-                spawn_line_bubble(
+                prompt_height = spawn_line_bubble(
                     &mut commands,
                     &assets,
                     &mut images,
@@ -303,7 +304,8 @@ fn present_current(
                     *emotion,
                     prompt,
                     Vec2::ZERO,
-                );
+                )
+                .y;
                 // Same glide as the Line arm: the choice prompt (and its clickable options, stacked
                 // over the leader nearby) must be on screen to be answerable at all.
                 if let Ok(tf) = speaker_pos.get(owner) {
@@ -311,8 +313,18 @@ fn present_current(
                 }
             }
             // Clickable option bubbles stacked above the leader.
+            //
+            // The stack starts above the PROMPT, not at a bare `CHOICE_BASE`. The prompt hangs off the
+            // speaker and the options off the leader — two independent stacks over two entities — and
+            // when those two stand near each other (the common case: the leader is often the one being
+            // asked) both columns project to the same screen space and collide. Reported from play
+            // 2026-07-31: "Text bubbles are overlapping", with option 1 drawn across the prompt.
+            // Vertical offsets are applied along **camera up** (`bubble::track_bubbles`), so clearing
+            // the prompt's own height is exactly the screen-space separation needed. When the speaker
+            // is far from the leader there was no overlap to fix and the options simply ride one bubble
+            // higher, which is free — they already float well above the leader's head.
             if let Ok(leader_e) = leader.single() {
-                let mut offset_y = CHOICE_BASE;
+                let mut offset_y = CHOICE_BASE + prompt_height;
                 for (i, opt) in options.iter().enumerate() {
                     let rendered = build_bubble(
                         &assets,
@@ -603,6 +615,11 @@ fn release_bark(
     ));
 }
 
+/// Spawn one tailed speech bubble over `owner`, returning its **world-space size**.
+///
+/// The caller needs the size because a bubble's footprint is only known after rasterisation (the text
+/// wraps), and the `Choice` arm stacks its clickable options clear of the prompt's height rather than
+/// at a fixed offset that cannot know it — see the stacking comment there.
 #[allow(clippy::too_many_arguments)]
 fn spawn_line_bubble(
     commands: &mut Commands,
@@ -614,7 +631,7 @@ fn spawn_line_bubble(
     emotion: Emotion,
     text: &str,
     offset: Vec2,
-) {
+) -> Vec2 {
     let rendered = build_bubble(
         assets,
         images,
@@ -634,6 +651,7 @@ fn spawn_line_bubble(
         NotShadowCaster, // speech bubble: casts no shadow (see world::setup_lighting)
         Transform::from_scale(Vec3::new(rendered.size.x, rendered.size.y, 1.0)),
     ));
+    rendered.size
 }
 
 #[cfg(test)]

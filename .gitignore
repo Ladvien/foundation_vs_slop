@@ -56,3 +56,7 @@ assets/config/bake_history/
 # MUST NOT be committed: a hardcoded absolute path broke CI on ubuntu-latest for every commit
 # ("failed to create directory /Users/…: Permission denied"). Each machine keeps its own local copy.
 .cargo/config.toml
+
+# Evidence written by `visual_capture::title_screen_matches_golden` when it fails — for one
+# review, never committed. The golden beside it IS committed.
+tests/golden/*.actual.png

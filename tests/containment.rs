@@ -1114,3 +1114,309 @@ fn killing_a_bloom_grants_no_specimen() {
         "the bloom must NOT be despawned — 610 is terrain, and it collapses in place (README §5)"
     );
 }
+
+fn screens(app: &mut App) -> Vec<(Entity, Vec3)> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<
+        (Entity, &Transform, &foundation_vs_slop::containment::TargetId),
+        With<foundation_vs_slop::broadcast::BroadcastScreen>,
+    >();
+    let mut v: Vec<_> = q.iter(world).map(|(e, tf, id)| (*id, e, tf.translation)).collect();
+    // SORT-OK: `TargetId` is minted once per spawn and never reused — total by construction.
+    v.sort_unstable_by_key(|(id, ..)| *id);
+    v.into_iter().map(|(_, e, p)| (e, p)).collect()
+}
+
+fn crab_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(), With<foundation_vs_slop::crab::Crab>>();
+    q.iter(world).count()
+}
+
+/// **FVS-C-7's acceptance, both directions.** The watch feed generates *while watched* and goes inert
+/// when it is not — the exact inverse of SCP-1048 above, on the same ambient `ATTENTION` channel.
+///
+/// Asserting only the "watched generates" half would pass trivially if the screen simply generated
+/// all the time, which is why the ignored half is measured first and is the stricter of the two. Same
+/// discipline as the bear test: a scenario that never engages is REPORTED, not silently passed
+/// (FVS-N-9's lesson).
+#[test]
+fn watching_the_feed_makes_it_generate_and_ignoring_it_stops() {
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let Some(&(_, at)) = screens(&mut app).first() else {
+        panic!(
+            "no watch feed spawned — `sim.broadcast.count` is {} and placement is a deterministic \
+             scan, so this is a wiring failure, not a content fact",
+            app.world().resource::<foundation_vs_slop::sim::SimTuning>().broadcast.count
+        );
+    };
+
+    // IGNORED: nobody is looking at it (it sits `spawn_min_dist` from the squad), so the swarm must
+    // not grow on its account. Measured first, because it is the half that can fail silently.
+    let before_idle = crab_count(&mut app);
+    step(&mut app, &cfg, 900);
+    let after_idle = crab_count(&mut app);
+    assert!(
+        after_idle <= before_idle,
+        "an unwatched feed generated anyway ({before_idle} -> {after_idle} crabs) — the ATTENTION \
+         gate is not holding, so 'look away to contain it' means nothing"
+    );
+
+    // WATCHED: flood the ambient field over its cell and it must start producing.
+    let before_watched = crab_count(&mut app);
+    for _ in 0..120 {
+        flood_attention(&mut app, at, 5.0);
+        step(&mut app, &cfg, 10);
+    }
+    let after_watched = crab_count(&mut app);
+    assert!(
+        after_watched > before_watched,
+        "sustained observation did not make the feed generate ({before_watched} -> \
+         {after_watched} crabs) — the anomaly is inert and the mechanic is not in the game"
+    );
+}
+
+/// The feed's containment rule must be the **inverse** of SCP-1048's, not a copy of it.
+///
+/// Cheap, and it guards the one thing that makes this creature distinct: a paste-o of the bear's
+/// `AtLeast` rule would leave two anomalies contained by staring, and the C-7 sign flip — the entire
+/// reason this could be built without new engineering — would be silently absent.
+#[test]
+fn the_feed_is_contained_by_looking_away_not_by_staring() {
+    use foundation_vs_slop::containment::rule::Sign;
+    let cfg = foundation_vs_slop::config::load_game_config().expect("config loads");
+    let feed = &cfg.containment.broadcast;
+    let bear = &cfg.containment.scp1048;
+
+    let attention = |r: &foundation_vs_slop::containment::rule::ContainmentRule| {
+        r.requires
+            .iter()
+            .find(|c| c.channel == foundation_vs_slop::ai::field::FieldId::ATTENTION.0)
+            .copied()
+            .expect("both gaze anomalies must gate on ATTENTION")
+    };
+    assert_eq!(attention(bear).sign, Sign::AtLeast, "the bear is contained by WATCHING");
+    assert_eq!(
+        attention(feed).sign,
+        Sign::AtMost,
+        "the watch feed must be contained by LOOKING AWAY — that inversion is the whole creature"
+    );
+    // And the inert band must exist: merely making it go quiet is not yet containing it.
+    assert!(
+        attention(feed).threshold < cfg.sim.broadcast.watch_threshold,
+        "the containment ceiling ({}) must sit BELOW the watched threshold ({}) — without that gap, \
+         a feed that has gone quiet is already being contained, and the player never has to hold \
+         attention off deliberately",
+        attention(feed).threshold,
+        cfg.sim.broadcast.watch_threshold
+    );
+}
+
+/// **FVS-B-10 stage 1's acceptance: a thrown lure actually pulls the swarm.**
+///
+/// The whole point of the verb is that noise becomes a resource you spend, so the assertion has to be
+/// that creatures *go somewhere they otherwise would not*. Asserting only "a deposit landed in the
+/// channel" would pass on machinery that no brain reads — which is exactly the state the acoustic
+/// layer was in before this (`docs/2026-08-01-acoustic-program.md`).
+#[test]
+fn a_thrown_lure_draws_the_swarm_toward_it() {
+    use foundation_vs_slop::ai::field::FieldId;
+    use foundation_vs_slop::lure::{throw_lure, Habituation, Lure, LureSeq, LureSupply};
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 120);
+
+    // Drop the lure well clear of the squad so any convergence is the lure's doing, not the squad's.
+    let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+    let spawn = dungeon.spawn;
+    let target = (0..dungeon.width as i32)
+        .flat_map(|x| (0..dungeon.height as i32).map(move |y| IVec2::new(x, y)))
+        .filter(|c| dungeon.is_floor(*c))
+        .find(|c| (*c - spawn).as_vec2().length() > 25.0)
+        .expect("a floor cell far from spawn");
+    let pos = dungeon.cell_center(target);
+
+    let tuning = app.world().resource::<foundation_vs_slop::sim::SimTuning>().lure;
+    let before = crab_distance_sum(&mut app, pos);
+
+    app.world_mut().resource_scope(|world, mut supply: Mut<LureSupply>| {
+        world.resource_scope(|world, mut hab: Mut<Habituation>| {
+            world.resource_scope(|world, mut seq: Mut<LureSeq>| {
+                let mut commands = world.commands();
+                throw_lure(&mut commands, pos, &tuning, &mut supply, &mut hab, &mut seq)
+                    .expect("the authored supply is non-zero, so a throw must succeed");
+            });
+        });
+    });
+    app.update();
+    assert_eq!(
+        app.world_mut().query::<&Lure>().iter(app.world()).count(),
+        1,
+        "the lure did not spawn"
+    );
+
+    step(&mut app, &cfg, 600);
+    // The channel must actually carry it — a lure that deposits nothing cannot pull anything, and
+    // this separates "the brain ignored it" from "nothing was ever written".
+    let din = app
+        .world()
+        .resource::<foundation_vs_slop::ai::field::Stig>()
+        .sample(FieldId::NOISE_SWARM, app.world().resource(), pos);
+    assert!(din > 0.0, "the lure wrote nothing into NOISE_SWARM");
+
+    let after = crab_distance_sum(&mut app, pos);
+    assert!(
+        after < before,
+        "the swarm did not close on the lure (summed distance {before:.1} -> {after:.1}) — the verb \
+         is machinery the brain does not read"
+    );
+}
+
+/// Total crab distance to `pos`. A sum rather than a mean so a despawned crab cannot flatter the
+/// result by leaving the average.
+fn crab_distance_sum(app: &mut App, pos: Vec3) -> f32 {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&Transform, With<foundation_vs_slop::crab::Crab>>();
+    q.iter(world).map(|tf| tf.translation.distance(pos)).sum()
+}
+
+/// Habituation is the mechanic, not a detail: without it the verb is a solved button.
+#[test]
+fn the_swarm_learns_the_trick_so_each_lure_is_quieter() {
+    use foundation_vs_slop::lure::{throw_lure, Habituation, Lure, LureSeq, LureSupply};
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let tuning = app.world().resource::<foundation_vs_slop::sim::SimTuning>().lure;
+    assert!(tuning.supply >= 2, "this test needs at least two lures authored");
+    // Read the amount off the lure JUST thrown, by entity. The first draft took the max across all
+    // live lures — which is always the FIRST lure, since it is the loudest and has not expired, so
+    // the comparison was of one value with itself.
+    let mut amounts = Vec::new();
+    for _ in 0..2 {
+        let mut thrown = None;
+        app.world_mut().resource_scope(|world, mut supply: Mut<LureSupply>| {
+            world.resource_scope(|world, mut hab: Mut<Habituation>| {
+                world.resource_scope(|world, mut seq: Mut<LureSeq>| {
+                    let mut commands = world.commands();
+                    thrown =
+                        throw_lure(&mut commands, Vec3::ZERO, &tuning, &mut supply, &mut hab, &mut seq);
+                });
+            });
+        });
+        let e = thrown.expect("supply was checked non-zero above");
+        app.update();
+        amounts.push(app.world().get::<Lure>(e).expect("the thrown lure exists").amount);
+    }
+    assert!(
+        amounts[1] < amounts[0],
+        "the second lure was not quieter than the first ({:?}) — without habituation the verb is a \
+         solved button: throw, walk past, repeat",
+        amounts
+    );
+}
+
+/// **FVS-N-30's probe, and then its guard.** Does the watch feed ever fire in PASSIVE play?
+///
+/// The mechanic is already proven by `watching_the_feed_makes_it_generate_and_ignoring_it_stops`,
+/// which floods `ATTENTION` deliberately. That is the right test for "does the rule work" and the
+/// wrong one for "will a player ever see it" — and the second question is the one a golden going
+/// backwards exposed: the feed had been charging to full inside the golden window, a two-node
+/// scheduling nudge stopped it, and nothing noticed because no test asserted the mechanism fires.
+///
+/// So this runs the real squad on the held-in seeds with nobody scripting attention, and asserts the
+/// feed reaches full charge at least once. It is the difference between a shipped anomaly and a prop.
+#[test]
+fn the_watch_feed_fires_in_passive_play_on_the_held_in_seeds() {
+    use foundation_vs_slop::broadcast::BroadcastScreen;
+    use foundation_vs_slop::squad_ai::coevolve::HELD_IN_SEEDS;
+    let _serial = serial_guard();
+
+    let mut report = Vec::new();
+    for seed in HELD_IN_SEEDS {
+        let mut cfg = SimConfig::deterministic_core();
+        cfg.dungeon_seed = Some(seed);
+        let mut app = build_headless_app(&cfg);
+        let mut peak = 0.0f32;
+        let mut peak_att = 0.0f32;
+        let mut peak_self = 0.0f32;
+        let mut nearest = f32::MAX;
+        let mut fired = 0usize;
+        // 3600 ticks = 60 s of passive play — twice the golden window, still well inside one
+        // expedition. If the feed cannot fire in a minute of ordinary play it will not fire at all.
+        for _ in 0..60 {
+            step(&mut app, &cfg, 60);
+            let world = app.world_mut();
+            let mut q = world.query::<(&BroadcastScreen, &Transform)>();
+            let seen: Vec<(f32, Vec3)> =
+                q.iter(world).map(|(s, tf)| (s.charge, tf.translation)).collect();
+            for (charge, _) in &seen {
+                peak = peak.max(*charge);
+            }
+            // The INPUT, not just the output: what ambient ATTENTION does a screen's cell actually
+            // reach? That separates "the squad never looks" from "the threshold is unreachable".
+            let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+            let stig = app.world().resource::<foundation_vs_slop::ai::field::Stig>();
+            for (_, pos) in &seen {
+                peak_att = peak_att.max(stig.sample(
+                    foundation_vs_slop::ai::field::FieldId::ATTENTION,
+                    dungeon,
+                    *pos,
+                ));
+            }
+            // Calibration: what does ATTENTION reach where the squad IS? That is the field's real
+            // dynamic range in play, and it is the number both thresholds should be set against.
+            let world = app.world_mut();
+            let mut uq2 = world.query_filtered::<&Transform, With<foundation_vs_slop::squad::Unit>>();
+            let upos: Vec<Vec3> = uq2.iter(world).map(|t| t.translation).collect();
+            let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+            let stig = app.world().resource::<foundation_vs_slop::ai::field::Stig>();
+            for u in &upos {
+                peak_self = peak_self.max(stig.sample(
+                    foundation_vs_slop::ai::field::FieldId::ATTENTION,
+                    dungeon,
+                    *u,
+                ));
+            }
+            // And how close did the squad ever get? A screen they never approach cannot be watched.
+            let world = app.world_mut();
+            let mut uq = world.query_filtered::<&Transform, With<foundation_vs_slop::squad::Unit>>();
+            let units: Vec<Vec3> = uq.iter(world).map(|t| t.translation).collect();
+            for (_, pos) in &seen {
+                for u in &units {
+                    nearest = nearest.min(u.distance(*pos));
+                }
+            }
+            // Read the screens' own counters — see `BroadcastScreen::emissions` for why this is not
+            // inferred from the charge curve.
+            let world = app.world_mut();
+            let mut q = world.query::<&BroadcastScreen>();
+            fired = q.iter(world).map(|s| s.emissions as usize).sum();
+        }
+        report.push(format!(
+            "seed {seed:#x}: peak charge {peak:.3}, peak ATTENTION {peak_att:.3} (threshold {:.4}), \
+             nearest squad approach {nearest:.1} m, ATTENTION at squad {peak_self:.3}, emissions {fired}",
+            app.world().resource::<foundation_vs_slop::sim::SimTuning>().broadcast.watch_threshold
+        ));
+    }
+    let line = report.join("\n  ");
+    eprintln!("watch-feed passive activation:\n  {line}");
+    // EVERY seed, not merely one: an anomaly that shows up on a third of levels is still a prop on
+    // the other two. This is the guard that FVS-N-30 existed for — the mechanic was proven by a test
+    // that flooded attention by hand, and nothing asserted it fires when nobody is helping it.
+    assert!(
+        report.iter().all(|r| !r.contains("emissions 0")),
+        "the watch feed never generated on at least one held-in seed — it is a prop there, not an \
+         anomaly:\n  {line}\n\nCheck placement first (a screen the squad never approaches cannot be \
+         watched), then `watch_threshold` against the field's MEASURED range — ~1.4 at a squad \
+         member's own cell, ~0.01 at 14 m. It is steeply local; do not set this by analogy with \
+         SCP-1048's containment bar, which is a 'standing on it' number."
+    );
+}

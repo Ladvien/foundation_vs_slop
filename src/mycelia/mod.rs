@@ -969,6 +969,18 @@ pub struct MoldParams {
     pub kill_barren: f32,
 }
 
+/// Refresh this run's `mycelia:` slice from `GameConfig` (`RunBuild::Config`, FVS-H-8).
+///
+/// The level archive's cells carry a `mycelia` slice, and `director::pick_next_challenge` writes it to
+/// `GameConfig` before every expedition. Without this the plugin-build snapshot won that argument
+/// permanently and the dialled infestation never reached the world.
+fn resnapshot_mycelia_config(
+    gc: Res<crate::config::GameConfig>,
+    mut config: ResMut<MyceliaConfig>,
+) {
+    *config = gc.mycelia.clone();
+}
+
 pub struct MyceliaPlugin;
 
 impl Plugin for MyceliaPlugin {
@@ -1004,6 +1016,13 @@ impl Plugin for MyceliaPlugin {
                 .chain()
                 .after(control::setup_control)
                 .in_set(crate::session::RunBuild::Populate),
+        )
+        // Refresh the `mycelia:` slice from `GameConfig` before `setup_habitat` reads it, so a dialled
+        // infestation reaches the run (FVS-H-8) — the plugin-build snapshot above is the *first* run's
+        // value, not every run's. `RunBuild::Config` is chained ahead of `Populate`, so no extra edge.
+        .add_systems(
+            OnEnter(crate::session::RunState::Active),
+            resnapshot_mycelia_config.in_set(crate::session::RunBuild::Config),
         )
         .add_systems(Update, advance_mold_time)
         // Reads `MoldStep`, so it must observe the flag `advance_mold_time` set this frame.

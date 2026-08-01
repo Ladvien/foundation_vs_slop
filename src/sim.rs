@@ -169,6 +169,75 @@ pub struct ParasiteTuning {
     pub manip_dark_gain: f32,
 }
 
+/// The thrown lure (`crate::lure`) — noise the player SPENDS rather than only leaks (FVS-B-10).
+///
+/// `habituation_step` is the knob that matters: without it the verb is a solved button (throw, walk
+/// past, repeat). With it the swarm remembers being tricked, and the verb becomes a resource with a
+/// rhythm. See `docs/2026-08-01-acoustic-program.md`.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LureTuning {
+    /// Lures carried per expedition.
+    pub supply: u32,
+    /// Per-tick `NOISE_SWARM` deposit at full strength, before habituation scaling.
+    pub deposit: f32,
+    /// How long one lure shouts, in fixed ticks.
+    pub duration_ticks: u32,
+    /// Habituation added per throw, in `[0,1]`. At `0.25` the fourth lure of a run is inaudible until
+    /// the swarm has forgotten some of the earlier ones.
+    pub habituation_step: f32,
+    /// Habituation recovered per fixed tick — how fast the swarm forgets.
+    pub habituation_recovery: f32,
+}
+
+/// The authored lure defaults, shared by `SimTuning::default()` and the genome's decode target.
+pub const LURE_DEFAULT: LureTuning = LureTuning {
+    supply: 3,
+    deposit: 0.9,
+    duration_ticks: 240,
+    habituation_step: 0.25,
+    habituation_recovery: 0.0008,
+};
+
+/// The watch feed (`crate::broadcast`) — a screen that generates while it is watched.
+///
+/// Every knob is a *difficulty* dial rather than a rule, which is why they live here in `sim:` and
+/// evolve, while the capture condition lives in `containment:` and does not. The distinction is the
+/// one `tests/genome_coverage.rs` enforces: a search free to retune what capturing MEANS would be
+/// moving the measuring stick.
+/// The authored defaults, shared by [`SimTuning`]'s `Default` and `world_genome`'s decode target.
+///
+/// One constant rather than two literals: the genome's `authored_round_trips_exactly` guard compares
+/// decode-of-encode against the shipped config, and two hand-copied initialisers are exactly how that
+/// drifts into a false green.
+pub const BROADCAST_DEFAULT: BroadcastTuning = BroadcastTuning {
+    count: 2,
+    watch_threshold: 0.006,
+    charge_rate: 0.14,
+    decay_rate: 0.10,
+    spawn_min_dist: 16.0,
+};
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BroadcastTuning {
+    /// Screens seeded into the level at start. 0 disables the anomaly entirely.
+    pub count: usize,
+    /// Ambient `ATTENTION` at the screen's own cell above which it counts as *watched* and generates.
+    /// Deliberately a different number from the containment rule's ceiling: the gap between them is
+    /// the band where the feed is inert but not yet being contained, which is what stops "look away"
+    /// from being a binary the player can hold by accident.
+    pub watch_threshold: f32,
+    /// Charge gained per second while watched. `1.0` charge = one emission, so this is literally
+    /// "emissions per second of sustained attention".
+    pub charge_rate: f32,
+    /// Charge lost per second while ignored. Decay rather than reset, so a flicker of the camera
+    /// costs progress instead of handing out a free wipe.
+    pub decay_rate: f32,
+    /// Tiles from the squad spawn a screen must sit — it is *found*, not handed over.
+    pub spawn_min_dist: f32,
+}
+
 /// SCP-999 — the friendly "Tickle Monster" comfort blob (see `crate::scp999`). The only creature that
 /// *lowers* squad anxiety: it oozes to the most-frightened member and, on contact, drains their FEAR and
 /// lifts MORALE (companion-animal social buffering — Beetz et al. 2012). Every dial is evolvable
@@ -279,6 +348,8 @@ pub struct SimTuning {
     pub boss: BossTuning,
     pub parasite: ParasiteTuning,
     pub scp999: Scp999Tuning,
+    pub broadcast: BroadcastTuning,
+    pub lure: LureTuning,
     pub scp1048: Scp1048Tuning,
     pub containment: ContainmentTuning,
     /// **How hard an operative's beliefs bite** (FVS-O-2). Scales the FEAR of an operative who is near
@@ -403,7 +474,9 @@ impl Default for SimTuning {
                 manip_curiosity_gain: 0.9,
                 manip_dark_gain: 3.0,
             },
-            scp999: Scp999Tuning {
+            broadcast: BROADCAST_DEFAULT,
+            lure: LURE_DEFAULT,
+        scp999: Scp999Tuning {
                 count: 1,
                 move_speed: 2.2,      // a touch faster than the crab crawl (1.8) so it can reach members
                 contact_radius: 0.9,  // reach = UNIT_BODY_RADIUS(0.33) + 0.9 = ~1.23 m; a generous tickle

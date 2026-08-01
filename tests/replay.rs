@@ -326,8 +326,78 @@ fn deterministic_core_is_bit_identical() {
 /// Budget a re-pin for every future `FixedUpdate` addition regardless (see the M0 note below): a new
 /// schedule node permutes the linearisation of other unconstrained systems, and no ordering edge
 /// fixes it.
+///
+/// ## Re-pinned 2026-08-01 — FVS-C-7's watch feed entered the deterministic core
+///
+/// `0x9f7a0787fdcb487f` -> `0xdbff6e94a7fa3d0e` (actors) and `0x82d9fc45c7e06f63` ->
+/// `0x0feb0281e67e81b8` (fields). The cause was **isolated by ablation rather than assumed**, and the
+/// first two hypotheses were both wrong — which is why the table is kept:
+///
+/// | ablation | actors | fields |
+/// |---|---|---|
+/// | `broadcast.count: 0` (systems registered, no screens) | pinned | MOVED |
+/// | `BroadcastPlugin` unregistered, `Subject::ALL` still 8 | pinned | pinned |
+///
+/// So it is neither the `Subject` enum growing nor a lossy genome encode (both were suspected;
+/// `authored_round_trips_exactly` and a config-vs-default check cleared the latter). It is simply
+/// **the creature being in the world and working**.
+///
+/// The last piece was a red herring worth naming: `deterministic_core_is_bit_identical` stayed green
+/// throughout, which looked like "the actor golden did not move". It did. That test steps **180**
+/// ticks and only compares two runs against *each other* — it never reads [`GOLDEN`]. The tests that
+/// do step **1800**, and by ~30 s of play the squad has walked past a screen, watched it, and the feed
+/// has generated a crab. A crab carries `Health` + `Transform`, so it enters `snapshot_hash`; a screen
+/// does not. **A green reproducibility test is not a green golden test.**
+///
+/// ## Re-pinned AGAIN 2026-08-01, and it went BACK — FVS-B-10's lure
+///
+/// `0xdbff6e94a7fa3d0e` -> `0x9f7a0787fdcb487f` (actors) and `0x0feb0281e67e81b8` ->
+/// `0x82d9fc45c7e06f63` (fields) — i.e. **exactly the values pinned before the watch feed landed a
+/// few hours earlier**. The lure adds two schedule nodes and nothing else in this scenario (nobody
+/// throws a lure in a golden run, so `tick_lures` iterates an empty query), so the schedule
+/// linearisation was permuted back to its earlier order. This repo has seen that before: the Push 2
+/// re-pin "landed back on the value measured before M0's session systems existed".
+///
+/// ⚠️ **But there is a second reading, and it is the one worth acting on.** The watch-feed re-pin
+/// hours earlier was attributed to the feed *generating a crab* inside the 1800-tick window (a crab
+/// carries `Health`+`Transform` and enters the hash; a screen does not). If that was right, a pure
+/// scheduling nudge could not undo it — the crab would still be there. So the honest conclusion is
+/// that **the feed no longer charges to full inside the golden window**, and a small perturbation was
+/// enough to flip it.
+///
+/// That makes the feed's activation *marginal in passive play*: it needs ~7 s of sustained attention
+/// (`charge_rate` 0.14), and whether an unscripted squad ever looks that long is close to a coin
+/// flip. Filed as FVS-N-30. The mechanic is proven by
+/// `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops`, which floods attention
+/// deliberately; that test is unaffected and still green. This is a balance finding, not a
+/// correctness one — but it means a player may never see the anomaly do anything.
+///
+/// ## Re-pinned a THIRD time 2026-08-01 — and this one is a real gameplay change (FVS-N-30)
+///
+/// `0x9f7a0787fdcb487f` -> `0x4d170fd316e6e5bf` (actors), `0x82d9fc45c7e06f63` ->
+/// `0x8145db22fc83542c` (fields). Unlike the two re-pins above — both pure schedule-node
+/// permutation — this one is the watch feed **actually working for the first time**.
+///
+/// Measured, not inferred (`containment::the_watch_feed_fires_in_passive_play_on_the_held_in_seeds`):
+///
+/// | | before | after |
+/// |---|---|---|
+/// | nearest squad approach to a screen | 101-137 m | 13.8-15.0 m |
+/// | peak ambient ATTENTION at a screen | 0.000 | 0.007-0.012 |
+/// | emissions in 60 s of passive play | 0, 0, 0 | 14, 7, 14 |
+///
+/// Two authoring bugs, both invisible to every existing test:
+///  1. **Placement.** `spawn_screens` took the FIRST floor cells past `spawn_min_dist` in raster
+///     scan order — i.e. the map corner. A minimum distance consumed in scan order is a *maximum*
+///     distance in disguise. Now ranks eligible cells by distance and takes the nearest.
+///  2. **Threshold scale.** `watch_threshold` was 0.30, copied by analogy from SCP-1048's 0.45
+///     containment bar. The ATTENTION field measures ~1.4 at a squad member's own cell and ~0.01 at
+///     14 m — it is steeply local, so 0.30 means "standing on it". Both the threshold and the
+///     containment ceiling were re-derived from that measurement, and the genome BOUNDS were widened
+///     for the same reason: the old `(0.05, 0.80)` put *every* genome in the inert region, so a
+///     world search would have spent its entire budget on an anomaly that never fires.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0x9f7a0787fdcb487f;
+const GOLDEN: u64 = 0x4d170fd316e6e5bf;
 
 /// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
 /// message says exactly what to do.
@@ -560,8 +630,10 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 //
 // Measured from a settled tree; `field_passes_are_bit_identical` is itself the reproducibility check,
 // and the two `deterministic_core_is_bit_identical*` tests were green on the same tree first.
+/// Re-pinned 2026-08-01 alongside [`GOLDEN`], twice in one day — see there for why the second
+/// re-pin went back to this file's pre-watch-feed value, and what that implies about the feed.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x82d9fc45c7e06f63;
+const GOLDEN_FIELD: u64 = 0x8145db22fc83542c;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]
@@ -662,6 +734,110 @@ fn every_world_config_slice_reaches_the_game_config() {
         GoreDynamics::from_config(app.world().resource::<GoreSettings>()),
         w.gore,
         "`GorePlugin` cloned `gc.gore` before the seam wrote it — the seam-before-plugins ordering regressed"
+    );
+}
+
+#[test]
+fn every_director_dialled_slice_reaches_the_run_build() {
+    // The run-build sibling of the seam guard above, and the acceptance test for FVS-H-8.
+    //
+    // `director::pick_next_challenge` samples a cell from the level archive on `OnEnter(Active)` and
+    // writes four `GameConfig` fields — `dungeon`, `mycelia`, `placement.metropolis`,
+    // `placement.density`. Every consumer snapshotted its slice into a resource at **plugin-build**
+    // time and never read `GameConfig` again, so all four writes were dead: the log said a challenge
+    // was sampled, FVS-H-7's briefing announced `BRANCH UNIVERSE {seed} · SECTOR x,y`, and every
+    // expedition was the authored world. That is worse than a silent no-op — the player perceived a
+    // distinction that did not exist.
+    //
+    // The defect only exists on the SECOND expedition, which is why no existing test could see it: the
+    // first run's snapshot is correct by construction. So this drives a real campaign shape —
+    // expedition, `RETURN TO SITE`, expedition — and dials `GameConfig` between them exactly as the
+    // director does. `RunBuild::Config` is what makes the second run see it.
+    //
+    // Coverage, stated honestly: `dungeon` and `placement.density` are asserted directly, and
+    // `Dungeon::width` proves the dialled slice reached *generation* rather than merely a resource.
+    // `placement.metropolis` has no reader outside `Orchestrator`'s type-erased `Box<dyn Solver>`, so
+    // it is not asserted here — it is written by the same unconditional `resnapshot_placement_config`
+    // body as `Density`, so a `Density` pass means that system ran. `mycelia` cannot be asserted at
+    // all in this build: `MyceliaPlugin` is GPU/windowed-only and deliberately absent from the harness
+    // (`sim_harness.rs:402`), and its re-snapshot system lives inside that same plugin — resource and
+    // refresher live and die together.
+    use bevy::prelude::{NextState, State};
+    use foundation_vs_slop::config::GameConfig;
+    use foundation_vs_slop::dungeon::{Dungeon, DungeonConfigRes};
+    use foundation_vs_slop::placement::furnish::Density;
+    use foundation_vs_slop::session::RunState;
+    let _serial = serial_guard();
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    // `begin_first_run` is `PostStartup`; the transition lands on the following frame.
+    step(&mut app, &cfg, 2);
+    assert_eq!(
+        app.world().resource::<State<RunState>>().get(),
+        &RunState::Active,
+        "the first expedition never started — the rest of this test would be vacuous"
+    );
+
+    let authored_rooms = app.world().resource::<Dungeon>().regions.len();
+    assert_eq!(
+        app.world().resource::<DungeonConfigRes>().0.coarse_w,
+        6,
+        "authored `coarse_w` moved; re-pick the dial below so it still differs"
+    );
+    assert_eq!(
+        app.world().resource::<Density>().0.wall_lights_per_room,
+        6,
+        "authored `wall_lights_per_room` moved; re-pick the dial below so it still differs"
+    );
+
+    // Dial `GameConfig` mid-campaign, the way `elite_overlay::apply_dim(Dim::Levels, …)` does.
+    //
+    // ⚠️ `coarse_w * block` MUST stay 192. That is not a style preference: `CONTROL_SIZE = 192` is the
+    // world extent the mycelia field and the dungeon both assume, `mycelia::habitat::build` refuses any
+    // other size loudly, and `level_genome::FACTORS` is *defined* as the four pairs that preserve it —
+    // so the archive can only ever trade block size against block count. Dialling `coarse_w` alone
+    // (the obvious way to write this test) produces a 256x192 dungeon no director pick can produce and
+    // panics `bake_mold`/`bake_almond_sources`. This moves `(6, 32)` -> `(8, 24)`: same 192 tiles per
+    // side, 36 room slots instead of 64 — a real archive cell, and a visibly different level.
+    {
+        let mut gc = app.world_mut().resource_mut::<GameConfig>();
+        gc.dungeon.coarse_w = 8;
+        gc.dungeon.coarse_h = 8;
+        gc.dungeon.block = 24;
+        gc.dungeon.doorway_ratio = 0.25;
+        gc.placement.density.wall_lights_per_room = 11;
+        gc.placement.metropolis.iterations += 1;
+    }
+
+    // `RETURN TO SITE`, then back through the ASYNC door — the transition pair `ui::debrief` drives.
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    step(&mut app, &cfg, 2);
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Active);
+    step(&mut app, &cfg, 2);
+
+    let dialled = &app.world().resource::<DungeonConfigRes>().0;
+    assert_eq!(
+        (dialled.coarse_w, dialled.block, dialled.doorway_ratio),
+        (8, 24, 0.25),
+        "the dialled `dungeon:` slice never reached `DungeonConfigRes` — the plugin-build snapshot is \
+         still winning, so every expedition is the authored world (FVS-H-8)"
+    );
+    assert_eq!(
+        app.world().resource::<Density>().0.wall_lights_per_room,
+        11,
+        "the dialled `placement.density` never reached `Density` — `resnapshot_placement_config` did \
+         not run, which also means `PlacementSolvers` still holds the authored Metropolis weights"
+    );
+
+    // The player-observable half: the dial has to reach *generation*, not just a resource. Room count,
+    // not extent — the extent is pinned at 192 (see the dial comment above), so the coarse
+    // factorisation is what a player actually sees change.
+    assert_ne!(
+        app.world().resource::<Dungeon>().regions.len(),
+        authored_rooms,
+        "the second expedition laid out the same rooms as the first despite a dialled coarse \
+         factorisation — a Branch universe that is the authored world with a different label"
     );
 }
 
@@ -1462,6 +1638,214 @@ fn search_rollouts_of_mutants_are_reproducible_under_load() {
     );
 }
 
+/// **The localizer for the two `*_reproducible_under_load` detectors above (FVS-J-6).** `#[ignore]`d:
+/// it costs CI nothing and exists for the day one of them goes red.
+///
+/// This replaces `zz_localize_g0`, which was deleted for good reason — it ran 25 full episodes under
+/// load on EVERY harness run, cost **1172 s ≈ 19.5 min** (28% of the lane), and a lane nobody will
+/// wait for never gets promoted to a gate. The mistake would be to conclude a localizer is not worth
+/// having; the right shape is one that is written, reviewed, and *dormant*. When J-6 last recurred the
+/// replacement had never been written, so the investigation started from nothing twice.
+///
+/// # Running it
+///
+/// The detector prints the pair, e.g. `mutant #3 (rng seed 0x6d07a17) on world 0x5c09191`. Set
+/// `MUTANT_INDEX` / `WORLD_SEED` to match, then:
+///
+/// ```text
+/// cargo test --features test-harness --test replay localize_rollout_divergence \
+///     -- --ignored --nocapture --test-threads=1
+/// ```
+///
+/// # Why it is built this way
+///
+/// * **One run, one record.** It uses `row_trace` (every tick) rather than `trace_episode` to bisect
+///   and *then* a fresh `row_trace` to diff. The first divergent tick VARIES between runs — this is a
+///   race that can fire at several points — so bisecting with one sample set and diffing with another
+///   compares two unrelated pairs, and the diff then shows accumulated drift rather than the
+///   originating change. `TickProbe::RowTrace`'s own doc comment records that lesson; this honours it.
+/// * **MULTISET diff, not set difference.** `snapshot_rows` sorts by WHOLE row, so two actors that are
+///   bit-identical in everything hashed occupy interchangeable slots. A set difference reports nothing
+///   when a value merely moves between two tied actors, and reports spurious "changes" when a tie
+///   reorders. Counting occurrences is the only honest comparison.
+/// * **Load well past the detector's 8 threads.** The failure is CI-only; the runner is a strictly
+///   harsher probe than this 24-core box, because 8 busy-loops on 2-4 cores is 2-4x oversubscription
+///   and here it is mild. Reproducing locally needs that oversubscription emulated, which is the
+///   cheapest first experiment this box can actually run. **A concurrent `cargo` build is also worth
+///   trying** — the 2026-07-31 occurrence happened alongside a full 24-core compile, which is arguably
+///   closer to the real condition than a busy-loop generator.
+///
+/// A clean result is **not** an exoneration: every local pass so far was measured under a weaker
+/// condition than the one that failed. Raise `LOAD_THREADS`, then say so.
+#[test]
+#[ignore = "diagnostic: run by hand when a *_reproducible_under_load detector goes red"]
+fn localize_rollout_divergence() {
+    use foundation_vs_slop::squad_ai::coevolve::{
+        brains_of, mutate_squad_feasible, mutate_swarm_feasible, SquadGenome, SwarmGenome, Templates,
+    };
+    use foundation_vs_slop::squad_ai::evaluate::row_trace;
+    use foundation_vs_slop::squad_ai::world_genome;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // ── Set these from the detector's failure message ──────────────────────────────────────────
+    /// Must match `search_rollouts_of_mutants_are_reproducible_under_load`, or mutant #N is a
+    /// different genome and this localizes nothing.
+    const MUTANT_RNG_SEED: u64 = 0x6D07A17;
+    let mutant_index: usize = env_or("FVS_LOCALIZE_MUTANT", 3);
+    let world_seed: u64 = env_or("FVS_LOCALIZE_WORLD", 0x5C09191);
+    // Full episode length, matching the detector. Reduce for a cheap smoke of this harness itself.
+    let ticks: u32 = env_or("FVS_LOCALIZE_TICKS", 7200);
+    // Replicates. More than the detector's 3 — a localizer wants the split to actually occur.
+    let reps: usize = env_or("FVS_LOCALIZE_REPS", 6);
+    // Deliberately far above the detector's 8, to emulate CI oversubscription.
+    let load_threads: usize = env_or("FVS_LOCALIZE_THREADS", 24);
+
+    // Env-tunable rather than recompiled, because the *first* thing this entry tells you to do is
+    // raise the thread count until the failure reproduces — an edit-rebuild cycle per attempt on a
+    // Bevy tree is the reason that experiment never got run.
+    //
+    // Runtime, stated only as far as it was actually measured: `TICKS=600 REPS=2 THREADS=4` runs in
+    // **5.2 s**. The full defaults (6 x 7200 ticks under 24 threads) are ~36x that work before
+    // contention and have NOT been timed end-to-end — budget generously rather than trusting an
+    // extrapolation, which this repo has been burned by twice.
+    fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+        std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    }
+
+    // ⚠️ **NO `serial_guard()` here, and that is load-bearing.** `evaluate.rs:400` takes it for each
+    // `App`'s lifetime inside the rollout path, and it is a non-reentrant `MutexGuard` — so a guard
+    // held by the test deadlocks the first `row_trace` call, silently and forever. The detectors above
+    // omit it for the same reason. Caught by running this diagnostic rather than merely compiling it:
+    // shipped untested it would have hung on the one day someone needed it, during a red CI.
+
+    // Draw the mutant set exactly as the detector does — same calls, same order, same seed — so index
+    // N here IS index N there. Any divergence in this loop makes the whole exercise meaningless.
+    let t = Templates::authored();
+    let mut rng = foundation_vs_slop::rng::seeded(MUTANT_RNG_SEED);
+    let mut genomes = Vec::new();
+    for _ in 0..=mutant_index {
+        let squad = mutate_squad_feasible(&t, &SquadGenome::authored(&t), &mut rng)
+            .expect("feasible squad mutant");
+        let swarm = mutate_swarm_feasible(&t, &SwarmGenome::authored(&t), &mut rng)
+            .expect("feasible swarm mutant");
+        let world = world_genome::mutate(&world_genome::authored(), 0.15, &mut rng)
+            .expect("feasible world mutant");
+        genomes.push((squad, swarm, world));
+    }
+    let (squad, swarm, world) = &genomes[mutant_index];
+    let wc = world_genome::decode(world).expect("world mutant decodes");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let load: Vec<_> = (0..load_threads)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+
+    eprintln!(
+        "localizer: mutant #{mutant_index} (seed {MUTANT_RNG_SEED:#x}) on world {world_seed:#x}, \
+         {reps} reps x {ticks} ticks under {load_threads} busy threads"
+    );
+    let mut traces: Vec<Vec<Vec<[u32; 5]>>> = Vec::new();
+    for rep in 0..reps {
+        let brains = brains_of(&t, squad, swarm).expect("brains from mutant");
+        let mut out = Vec::new();
+        row_trace(brains, Some(wc.clone()), world_seed, ticks, &mut out);
+        eprintln!("  rep {rep}: {} ticks recorded", out.len());
+        traces.push(out);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for h in load {
+        let _ = h.join();
+    }
+
+    // Group the replicates by their FULL trace. Two groups == the bimodal signature J-6 recorded:
+    // the same two outcomes across separate CI runs, which is a flipped discrete decision rather than
+    // accumulated float drift (drift gives a fresh result every time).
+    let mut groups: Vec<(usize, &Vec<Vec<[u32; 5]>>)> = Vec::new();
+    for tr in &traces {
+        match groups.iter_mut().find(|(_, g)| *g == tr) {
+            Some((n, _)) => *n += 1,
+            None => groups.push((1, tr)),
+        }
+    }
+    eprintln!("localizer: {} distinct trace(s) over {reps} reps", groups.len());
+    if groups.len() < 2 {
+        eprintln!(
+            "localizer: NO DIVERGENCE at {load_threads} threads. This is NOT an exoneration — it is a \
+             weaker condition than the CI failure. Raise load_threads, or re-run with a concurrent \
+             `cargo build --all-targets` alongside (the 2026-07-31 occurrence looked like that)."
+        );
+        return;
+    }
+
+    // First tick where any two groups disagree. Both traces index tick t at [t - 1].
+    let (a, b) = (groups[0].1, groups[1].1);
+    let split = (0..a.len().min(b.len()))
+        .find(|&i| a[i] != b[i])
+        .expect("groups differ, so some recorded tick must differ");
+    eprintln!(
+        "localizer: FIRST DIVERGENT TICK = {} (group sizes {} vs {})",
+        split + 1,
+        groups[0].0,
+        groups[1].0
+    );
+
+    // Multiset diff at that tick. Rows are [x, y, z, hp, hp_max] as f32 bit patterns.
+    let count = |rows: &Vec<[u32; 5]>| {
+        let mut m: BTreeMap<[u32; 5], i64> = BTreeMap::new();
+        for r in rows {
+            *m.entry(*r).or_default() += 1;
+        }
+        m
+    };
+    let (ca, cb) = (count(&a[split]), count(&b[split]));
+    let show = |r: &[u32; 5]| {
+        format!(
+            "pos({:.4}, {:.4}, {:.4}) hp {:.3}/{:.3}",
+            f32::from_bits(r[0]),
+            f32::from_bits(r[1]),
+            f32::from_bits(r[2]),
+            f32::from_bits(r[3]),
+            f32::from_bits(r[4])
+        )
+    };
+    eprintln!("localizer: rows only in A (or more numerous):");
+    for (row, n) in &ca {
+        let d = n - cb.get(row).copied().unwrap_or(0);
+        if d > 0 {
+            eprintln!("  +{d}  {}", show(row));
+        }
+    }
+    eprintln!("localizer: rows only in B (or more numerous):");
+    for (row, n) in &cb {
+        let d = n - ca.get(row).copied().unwrap_or(0);
+        if d > 0 {
+            eprintln!("  +{d}  {}", show(row));
+        }
+    }
+    eprintln!(
+        "localizer: A had {} actors, B had {}. An equal count with positions differing in the LOW BITS \
+         is float drift; a differing count, or a large positional jump, is a flipped discrete decision \
+         — look for a gameplay choice keyed on ECS query order that moves or damages an actor WITHOUT \
+         writing a stigmergy field (J-6's field hashes matched across the split).",
+        a[split].len(),
+        b[split].len()
+    );
+
+    panic!("localizer: divergence reproduced and reported above — see stderr for the first split tick");
+}
+
 /// **Reproduce the RETURN-TO-SITE crash** — the transition a player reported panicking (2026-07-28).
 ///
 /// # What the report showed
@@ -1550,5 +1934,121 @@ fn returning_to_the_site_after_a_run_does_not_panic() {
         app.world().resource::<State<AppState>>().get(),
         &AppState::Site,
         "the Site must be reachable and survivable after a run ends"
+    );
+}
+
+/// **FVS-L-6's acceptance test: the roster opens at the Site.**
+///
+/// The "Done when" is player-observable — *the roster is openable at the Site* — so this drives the
+/// real key, not the resource. That matters here more than usual: the previous attempt at this
+/// feature was a `.or_else(in_state(AppState::Site))` on the in-game toggle, which type-checked,
+/// read as support, and could never have worked — `spawn_roster` hung off a `MenuState` that does not
+/// exist at the Site. A test that poked the state directly would have passed against that too.
+///
+/// Pressing the bound key exercises the whole chain: binding -> `Actions` gating -> `SiteRosterOpen`
+/// -> spawn/despawn. `returning_to_the_site_after_a_run_does_not_panic` already pins the crash that
+/// the broken version caused; this pins that the replacement does the thing.
+#[test]
+fn the_roster_opens_and_closes_at_the_site() {
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::ButtonState;
+    use bevy::prelude::*;
+    use foundation_vs_slop::input::{Action, KeyBindings};
+    use foundation_vs_slop::knowledge::roster::{RosterScreenRoot, SiteRosterOpen};
+    use foundation_vs_slop::session::RunState;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    use foundation_vs_slop::ui::state::AppState;
+    use foundation_vs_slop::ui::UiPlugin;
+
+    let _serial = serial_guard();
+    // SAFETY: `serial_guard` is held, so this is the only thread touching the environment. Never
+    // touch the real campaign — entering the Site saves.
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("fvs_site_roster"));
+        std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join("fvs_site_roster_data"));
+    }
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app_unfinished(&cfg);
+    // Mirror `lib::run`'s windowed group, as the site-return test does, so this fails only for
+    // reasons a player can reach rather than for a plugin-set mismatch of the test's own making.
+    app.add_plugins((
+        UiPlugin,
+        foundation_vs_slop::research::ResearchLabPlugin,
+        foundation_vs_slop::site::O5Plugin,
+        foundation_vs_slop::knowledge::RosterPlugin,
+        foundation_vs_slop::knowledge::RecordsPlugin,
+        foundation_vs_slop::antagonist::AntagonistPlugin,
+        foundation_vs_slop::director::DirectorPlugin,
+        foundation_vs_slop::ui::briefing::BriefingPlugin,
+    ));
+    app.finish();
+    app.cleanup();
+    for _ in 0..40 {
+        app.update();
+    }
+
+    // To the Site, the way `RETURN TO SITE` does it.
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Site);
+    for _ in 0..30 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<State<AppState>>().get(),
+        &AppState::Site,
+        "the test never reached the Site, so the rest proves nothing"
+    );
+
+    let key = app.world().resource::<KeyBindings>().get(Action::ToggleRoster).primary.key;
+    // Real `KeyboardInput` messages, NOT `ButtonInput::press`. Bevy's `keyboard_input_system` calls
+    // `clear()` on `ButtonInput` in `PreUpdate` before draining the message queue, so a press written
+    // directly into the resource is wiped before any `Update` system can see it as `just_pressed` —
+    // the test then fails against working code, which is exactly what happened writing this.
+    let send = |app: &mut App, state: ButtonState| {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: Key::Character("r".into()),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    };
+    let open = |app: &mut App| {
+        send(app, ButtonState::Pressed);
+        app.update();
+        send(app, ButtonState::Released);
+        app.update();
+    };
+    let showing = |app: &mut App| {
+        app.world_mut().query::<&RosterScreenRoot>().iter(app.world()).count()
+    };
+
+    assert_eq!(showing(&mut app), 0, "the roster must not be open before it is asked for");
+
+    open(&mut app);
+    assert_eq!(
+        showing(&mut app),
+        1,
+        "pressing ToggleRoster at the Site did not open the roster — FVS-L-6's whole point"
+    );
+
+    open(&mut app);
+    assert_eq!(showing(&mut app), 0, "the same key must close it again");
+
+    // Re-open, then leave: the overlay must not outlive the screen it belongs to, and must not
+    // reappear unasked on the next visit.
+    open(&mut app);
+    assert_eq!(showing(&mut app), 1, "re-open failed");
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Title);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(showing(&mut app), 0, "leaving the Site must tear the roster overlay down");
+    assert_eq!(
+        *app.world().resource::<SiteRosterOpen>(),
+        SiteRosterOpen(false),
+        "leaving the Site must also clear the flag, or the next visit opens a panel nobody asked for"
     );
 }

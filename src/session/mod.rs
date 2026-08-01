@@ -73,14 +73,25 @@ pub enum RunState {
     Active,
 }
 
-/// The four phases of building a run's world, run in order on `OnEnter(RunState::Active)`.
+/// The five phases of building a run's world, run in order on `OnEnter(RunState::Active)`.
 ///
-/// The order is a real dependency chain, not tidiness: the grids are sized from the `Dungeon`, the
-/// populace is placed on floor cells the `Dungeon` defines, and the post-pass reads the populace.
-/// Anything registered here must be **idempotent across runs** — it executes once per expedition, not
-/// once per process.
+/// The order is a real dependency chain, not tidiness: the config is refreshed before anything reads
+/// it, the grids are sized from the `Dungeon`, the populace is placed on floor cells the `Dungeon`
+/// defines, and the post-pass reads the populace. Anything registered here must be **idempotent
+/// across runs** — it executes once per expedition, not once per process.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RunBuild {
+    /// Refresh each consumer's per-run config resource from [`crate::config::GameConfig`], **after**
+    /// anything that dials it for this expedition has written (`director::pick_next_challenge`).
+    ///
+    /// Plugins snapshot their own slice into a resource at *plugin-build* time, which is right for the
+    /// first run and was silently wrong for every one after it: the director sampled a cell from the
+    /// level archive, wrote `gc.dungeon`/`gc.mycelia`/`gc.placement.*`, and **no consumer ever read
+    /// `GameConfig` again**, so every expedition was the authored world under a Branch-universe label
+    /// (FVS-H-8). This stage is what makes a later run see a different slice. It is deliberately a
+    /// *stage* rather than a one-off fix in `dungeon`: any future slice the director learns to dial
+    /// has a defined place to be refreshed, and the seam is named where the ordering lives.
+    Config,
     /// Generate the `Dungeon` for this run's seed.
     World,
     /// Size the per-cell fields (stigmergy, fog, light, mold, almond water) to that dungeon.
@@ -258,7 +269,8 @@ impl Plugin for SessionPlugin {
             .add_message::<ForceVictory>()
             .configure_sets(
                 OnEnter(RunState::Active),
-                (RunBuild::World, RunBuild::Grids, RunBuild::Populate, RunBuild::PostPopulate).chain(),
+                (RunBuild::Config, RunBuild::World, RunBuild::Grids, RunBuild::Populate, RunBuild::PostPopulate)
+                    .chain(),
             )
             .add_systems(PostStartup, begin_first_run)
             // Reset BEFORE the world is built, so a fresh run starts at tick 0 with an open outcome.

@@ -663,6 +663,37 @@
         // SCP-999 — the friendly "Tickle Monster" comfort blob (see src/scp999/). The ONLY creature that
         // LOWERS squad fear: it oozes to the most-anxious member and, on contact, drains FEAR + lifts
         // MORALE (companion-animal social buffering). All dials are evolvable (squad_ai::world_genome).
+        // The watch feed (src/broadcast/) — SCP-9191's generator, made mechanical. It emits crabs
+        // for as long as anyone looks at it, and goes inert when nobody does.
+        broadcast: (
+            count: 2,               // screens seeded into the level
+            watch_threshold: 0.006, // ambient ATTENTION at which the feed has an audience.
+                                    // CALIBRATED BY MEASUREMENT, not by analogy — the first value
+                                    // (0.30) was copied from SCP-1048's containment bar and the feed
+                                    // then NEVER fired on any held-in seed. Measured range of this
+                                    // field: ~1.41 at a squad member's own cell, ~0.01 at a screen
+                                    // 14 m away. It is steeply local, so 0.30 means "standing on it"
+                                    // and 0.006 means "in the room with it", which is what an
+                                    // audience is. Pinned by
+                                    // `containment::the_watch_feed_fires_in_passive_play_on_the_held_in_seeds`.
+            charge_rate: 0.14,      // ~7 s of sustained attention per crab
+            decay_rate: 0.10,       // ~10 s of being ignored undoes a full charge
+            spawn_min_dist: 16.0,   // tiles from the squad spawn — found, not handed over
+        ),
+        // The thrown lure (src/lure.rs) — noise the player SPENDS. Pulls the swarm off a route so
+        // noise discipline becomes a trade rather than a tax.
+        lure: (
+            supply: 3,                  // lures per expedition — scarce enough to be a decision
+            deposit: 0.9,               // per-tick NOISE_SWARM at full strength. Above
+                                        // `audio.investigate_threshold` so one lure is unambiguously
+                                        // audible; the swarm should never half-hear a thrown lure.
+            duration_ticks: 240,        // 4 s of shouting at 60 Hz — long enough to walk a corridor
+            habituation_step: 0.25,     // each throw costs the NEXT one a quarter of its voice, so the
+                                        // 4th in quick succession is inaudible. This is what stops the
+                                        // verb being a solved button (throw, walk past, repeat).
+            habituation_recovery: 0.0008, // ~20 s to forget one throw — long enough that spamming is
+                                        // punished, short enough that a careful player gets it back
+        ),
         scp999: (
             count: 1,               // comfort blobs seeded into the level at start
             move_speed: 2.2,        // ooze speed toward the most-anxious member (world units/s)
@@ -2274,6 +2305,34 @@
                 (channel: 9, sign: AtLeast, threshold: 0.45),  // ATTENTION — do not look away
             ],
             hold_secs: 8.0,
+            break_on_fail: Reset,
+        ),
+
+        // The watch feed — the OUT-WATCH capture INVERTED (FVS-C-7).
+        //
+        // SCP-1048 above is contained by refusing to look away. This is the same channel with the
+        // sign flipped: the feed works for an audience, so containing it means starving it of one.
+        // No new primitive was needed for either — that is the point of doing this before FVS-C-6's
+        // per-entity watch state, and it is why this rule is one line.
+        //
+        // The ceiling (0.12) sits BELOW `sim.broadcast.watch_threshold` (0.30), and the gap is the
+        // design: merely making it go quiet is not yet containing it. The squad has to pull attention
+        // properly off the room and hold it off, which fights their own auto-engage instinct.
+        //
+        // `Reset` rather than `Keep`, matching 1048: this is an attention discipline, and a discipline
+        // that forgives lapses is not one. Longer hold than 999 (6 s), shorter than 1048 (8 s) — it is
+        // the third capture, and the hard part is the fighting-your-instincts, not the duration.
+        broadcast: (
+            requires: [
+                (channel: 9, sign: AtMost, threshold: 0.003), // ATTENTION — stop looking at it.
+                                    // Half the watch threshold, on the same measured scale: the band
+                                    // between them (0.003..0.006) is where the feed is quiet but not
+                                    // yet contained, so "look away" must be held rather than satisfied
+                                    // in passing. Both moved together when the scale was measured —
+                                    // the old 0.12 was unreachable-by-construction in the other
+                                    // direction, i.e. the feed was ALWAYS contained.
+            ],
+            hold_secs: 6.0,
             break_on_fail: Reset,
         ),
 
