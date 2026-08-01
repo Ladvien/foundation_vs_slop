@@ -94,12 +94,34 @@ impl Plugin for SiteVisualsPlugin {
             }
         };
         let nav = SiteNav::bake(&layout);
+        // `leave_for_the_site` reads the binding table non-optionally, and the plugin that registers a
+        // reader is what guarantees the resource exists — the same contract `camera` states.
+        crate::input::claim_bindings(app);
         app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
             .insert_resource(nav)
             .insert_resource(SiteLayoutRes(layout))
             .add_systems(Startup, spawn_site_geometry)
             .add_systems(Update, super::aperture::drive_aperture_charge)
             .add_systems(OnEnter(AppState::Site), focus_camera_on_site)
+            .add_systems(OnEnter(AppState::InGame), return_camera_to_squad)
+            // The outbound half of a visit. Gated on the two facts independently, exactly as
+            // `ui::containment_hud` is: the player must be looking at the expedition, and one must
+            // be live. `enter_the_door` below is the inbound half.
+            .add_systems(
+                Update,
+                leave_for_the_site
+                    .run_if(in_state(AppState::InGame))
+                    .run_if(in_state(crate::session::RunState::Active)),
+            )
+            // The inbound half of the toggle. Separate from the chain below because it must also
+            // require a live run — `command_avatar`/`drive_avatars`/`enter_the_door` all work at the
+            // Site between expeditions, and this one deliberately does not.
+            .add_systems(
+                Update,
+                return_to_the_expedition
+                    .run_if(in_state(AppState::Site))
+                    .run_if(in_state(crate::session::RunState::Active)),
+            )
             .add_systems(
                 Update,
                 (command_avatar, drive_avatars, enter_the_door)
@@ -132,9 +154,14 @@ fn place(
     commands
         .spawn((
             SiteVisual,
-            Transform::from_translation(at)
+            // `y_offset` lifts floor INLAYS clear of the plate they sit on: the line decals and the
+            // threshold light are the same 0.06 m thickness as the Ozea floor, so at y = 0 their top
+            // faces are exactly coplanar with it and the depth winner is undefined. See
+            // `KitPiece::y_offset` for why this is geometric rather than a depth bias.
+            Transform::from_translation(at + Vec3::Y * kit.y_offset(piece))
                 .with_rotation(Quat::from_rotation_y(yaw_deg.to_radians()))
-                // The kit is a 1 m module in every axis; `y_scale` lifts architecture to WALL_HEIGHT.
+                // The kit is authored at its own scale per piece; `y_scale` lifts architecture to
+                // WALL_HEIGHT and leaves dressing at the size the artist made it.
                 .with_scale(Vec3::new(1.0, kit.y_scale(piece), 1.0)),
             Visibility::Inherited,
         ))
@@ -150,6 +177,8 @@ fn spawn_site_geometry(
     mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
 ) {
     let l = &layout.0;
+    // Lights first, because nothing below is visible without them — see `light_the_site`.
+    light_the_site(&mut commands, l);
     for r in &l.floor {
         for c in r.cells() {
             place(&mut commands, &assets, &kit, SitePiece::Floor, l.cell_center(c), 0.0);
@@ -231,6 +260,73 @@ fn focus_camera_on_site(
     crate::camera::snap_camera_to(focus, &mut rig, &mut cams);
 }
 
+/// Ceiling height for the Site's own fixtures — just above `WALL_HEIGHT` so a light hangs over the
+/// wall tops rather than inside them.
+const SITE_FIXTURE_Y: f32 = 2.6;
+
+/// Grid spacing (metres) between fixtures within an area. Matched to [`SITE_FIXTURE_RANGE`] so pools
+/// overlap slightly instead of leaving dark bands between them.
+const SITE_FIXTURE_SPACING: f32 = 7.0;
+
+/// Per-fixture reach (metres). Same figure the dungeon's fixtures use — the rooms are a comparable
+/// scale and a second, differently-tuned number would drift from it.
+const SITE_FIXTURE_RANGE: f32 = 7.0;
+
+/// Per-fixture luminous power (lumens), matching the dungeon's `fixture_intensity`.
+const SITE_FIXTURE_LUMENS: f32 = 120_000.0;
+
+/// **Light Site-67 from inside itself.**
+///
+/// Before this the hub had no light source at all. It was lit only by `world`'s single
+/// `DirectionalLight`, which is aimed at the dungeon's origin — **1024 m away** — with a
+/// `CascadeShadowConfig` sized for dungeon distances. So the Site received a grazing key it was never
+/// pointed at, no shadows worth the name, and read as flat charcoal no matter what geometry stood in
+/// it. Dressing the kit could not have fixed that; it is a lighting bug wearing an art costume.
+///
+/// **Derived from `layout.areas`, not hand-placed.** Every area gets covered by construction, so a
+/// wing added to `site67.ron` later cannot ship unlit — the same argument that makes the perimeter
+/// generated rather than typed. It also means the count scales with the floorplan instead of with
+/// whoever last edited the list.
+///
+/// **Colour is the deliberate contrast.** The dungeon's fixtures are `(0.92, 1.0, 0.94)` — a faint
+/// green cast, low-CRI halophosphate, chosen to feel sickly. The Site is the opposite claim: a clean,
+/// faintly cool white. The player should be able to tell which world they are standing in with the HUD
+/// switched off.
+///
+/// **No shadows, and that is a budget decision rather than an oversight.** `light::spawn_fixture_lights`
+/// sets `shadow_maps_enabled: false` on every dungeon fixture for the same reason, and this adds ~29
+/// lights that are always resident (the dungeon's spawn only as rooms are revealed). Clinical
+/// fluorescent lighting is close to shadowless anyway, so the cheap answer is also the right look.
+fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
+    let color = Color::srgb(0.96, 0.98, 1.0);
+    for area in &l.areas {
+        let r = &area.rect;
+        // At least one fixture per area however small, then one per `SPACING` in each axis.
+        let nx = ((r.w as f32) / SITE_FIXTURE_SPACING).ceil().max(1.0) as i32;
+        let nz = ((r.h as f32) / SITE_FIXTURE_SPACING).ceil().max(1.0) as i32;
+        for ix in 0..nx {
+            for iz in 0..nz {
+                // Centre each fixture in its share of the rect rather than on a corner, so an area
+                // narrower than one spacing step still gets lit down its middle.
+                let fx = r.x as f32 + (ix as f32 + 0.5) * (r.w as f32 / nx as f32);
+                let fz = r.z as f32 + (iz as f32 + 0.5) * (r.h as f32 / nz as f32);
+                let at = l.point((fx, fz)) + Vec3::Y * SITE_FIXTURE_Y;
+                commands.spawn((
+                    SiteVisual,
+                    PointLight {
+                        color,
+                        intensity: SITE_FIXTURE_LUMENS,
+                        range: SITE_FIXTURE_RANGE,
+                        shadow_maps_enabled: false,
+                        ..default()
+                    },
+                    Transform::from_translation(at),
+                ));
+            }
+        }
+    }
+}
+
 /// Left-click sets the player avatar's destination — the same verb the expedition uses for move orders,
 /// so the hub needs no new control to learn.
 fn command_avatar(
@@ -284,7 +380,81 @@ fn drive_avatars(
     }
 }
 
-/// Walking an avatar into the aperture starts an expedition.
+/// Leave for Site-67 **without ending the expedition** (`docs/2026-08-01-two-live-layers.md` §2).
+///
+/// The whole flip is what this does *not* touch: `RunState` stays `Active`, so every system gated
+/// `in_state(RunState::Active)` — the entire simulation — keeps ticking unattended, `run_scoped()`
+/// despawns nothing, and `session::advance_to_next_world` never fires, so the world and its seed are
+/// still there when you walk back. Ending a run is a separate, deliberate verb (`ui::pause`'s
+/// `ABANDON EXPEDITION`); this one only changes which screen the player is on.
+///
+/// Deliberately **not** routed through the pause menu: `MenuState` is blocking, so a menu-gated visit
+/// would hand out a free freeze on the way out and the squad would never actually be exposed.
+fn leave_for_the_site(
+    actions: crate::input::Actions,
+    mut next_app: ResMut<NextState<AppState>>,
+    mut onboarding: ResMut<crate::settings::OnboardingSettings>,
+) {
+    if actions.just_pressed(crate::input::Action::VisitSite) {
+        info!("site: departing for SITE-67 — the expedition continues unattended");
+        next_app.set(AppState::Site);
+        // The player has demonstrably learned this verb, so its hint retires (`ui::hint`). Guarded on
+        // the current value: `ResMut` marks changed on *deref*, and `settings::autosave_on_change`
+        // writes the file whenever the resource changes — an unconditional assignment would rewrite
+        // `user_settings.ron` on every single visit for the rest of the campaign.
+        if !onboarding.learned_visit {
+            onboarding.learned_visit = true;
+        }
+    }
+}
+
+/// The other half of the toggle: the same key carries the player back to the expedition.
+///
+/// Gated on `RunState::Active` as well as `AppState::Site`, and that is the whole rule — with no run
+/// live there is nothing to return *to*, and the key must stay inert so the player standing in the hub
+/// between expeditions cannot land on an empty `InGame` screen. Starting a fresh run from `Idle`
+/// remains the ASYNC door's job ([`enter_the_door`]), which is a walk rather than a keystroke because
+/// beginning an expedition should cost more than glancing at one.
+///
+/// This does not duplicate the door's `Active` arm so much as give it a shortcut: both set
+/// `AppState::InGame` and touch nothing else, so there is exactly one transition with two triggers.
+fn return_to_the_expedition(
+    actions: crate::input::Actions,
+    mut next_app: ResMut<NextState<AppState>>,
+    mut onboarding: ResMut<crate::settings::OnboardingSettings>,
+) {
+    if actions.just_pressed(crate::input::Action::VisitSite) {
+        info!("site: returning to the expedition");
+        next_app.set(AppState::InGame);
+        // Its own flag, and guarded, for the reasons given on `leave_for_the_site`.
+        if !onboarding.learned_return {
+            onboarding.learned_return = true;
+        }
+    }
+}
+
+/// Put the camera back on the squad when the expedition screen comes up.
+///
+/// The camera is deliberately not `run_scoped()` (`camera.rs`), so after a visit it is still parked at
+/// the Site — 512+ world units away, per `site::layout`'s origin. A **snap**, not a glide: a glide
+/// across that gap would be a long crawl over empty space, and this is a screen arrival, which is
+/// exactly when `focus_camera_on_site` snaps in the other direction.
+///
+/// Harmless on the first entry of a run: `focus_camera_on_spawn` has already aimed at the dungeon
+/// spawn on `OnEnter(RunState::Active)`, and the squad anchor is that same place before anyone moves.
+fn return_camera_to_squad(
+    anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
+    mut rig: ResMut<crate::camera::CameraRig>,
+    mut cams: Query<&mut Transform, With<Camera3d>>,
+) {
+    // No valid anchor means no living squad to look at (`squad` clears it on an empty roster), and
+    // the terminal screens own the view at that point. Leave the camera where it is.
+    let Some(anchor) = anchor.filter(|a| a.valid) else { return };
+    crate::camera::snap_camera_to(anchor.pos, &mut rig, &mut cams);
+}
+
+/// Walking an avatar into the aperture is the ASYNC door, and it means one of two things depending on
+/// whether an expedition is already live.
 ///
 /// **No new state machinery** — FVS-A-5 already implements `Idle → Active` end to end, so the door is
 /// that transition with a body. The `in_state(AppState::Site)` run condition is also the re-fire guard:
@@ -296,21 +466,33 @@ fn enter_the_door(
     mut next_run: ResMut<NextState<crate::session::RunState>>,
     mut next_app: ResMut<NextState<AppState>>,
 ) {
-    // Only from `Idle`: a plain `set` to the state we are already in fires a same-state transition,
-    // which rebuilds the world for nothing. That is the trap `ui::title` records.
-    if *run_state.get() != crate::session::RunState::Idle {
-        return;
-    }
     let entered = avatars.iter().any(|a| {
         doors.iter().any(|(d, dt)| {
             let rel = (a.translation - dt.translation).abs();
             rel.x <= d.half_extents.x && rel.z <= d.half_extents.z
         })
     });
-    if entered {
-        info!("site: an operative stepped through the ASYNC door — beginning an expedition");
-        next_run.set(crate::session::RunState::Active);
-        next_app.set(AppState::Warmup);
+    if !entered {
+        return;
+    }
+    // A `match`, not a guard. This was `if run_state != Idle { return }`, which was correct only while
+    // standing at the Site implied no live expedition — after `leave_for_the_site` that guard would
+    // strand the player at the Site with an expedition running and no way back to it.
+    match *run_state.get() {
+        // Nothing running: the door starts one. Note the `set` stays off the state we are already in —
+        // a same-state transition rebuilds the world for nothing, the trap `ui::title` records.
+        crate::session::RunState::Idle => {
+            info!("site: an operative stepped through the ASYNC door — beginning an expedition");
+            next_run.set(crate::session::RunState::Active);
+            next_app.set(AppState::Warmup);
+        }
+        // A visit is ending: return to the expedition that has been running the whole time. `RunState`
+        // is untouched, and the target is `InGame` and **not** `Warmup` — `Warmup` waits on `MoldWarm`
+        // before handing over, which is right for a world being built and wrong for one already built.
+        crate::session::RunState::Active => {
+            info!("site: back through the ASYNC door — rejoining the expedition");
+            next_app.set(AppState::InGame);
+        }
     }
 }
 

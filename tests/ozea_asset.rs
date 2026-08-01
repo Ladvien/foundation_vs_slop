@@ -24,7 +24,7 @@
 mod common;
 use common::Glb;
 
-const GLB: &str = "assets/site/ozea/doorframe_double.glb";
+const GLB: &str = "assets/ozea/doorframe_double.glb";
 
 /// `dungeon::DOORWAY_HEIGHT`. Duplicated as a literal on purpose: the point of the test is that the
 /// *asset* is on the game's grid, so importing the constant would let both drift together.

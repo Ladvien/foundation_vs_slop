@@ -426,8 +426,13 @@ pub fn run() {
             // never registers. Grouped in a nested tuple to stay under Bevy's 16-element plugin limit.
             (
                 ui::UiPlugin,
-                // Save/load is windowed-only: it keys off `AppState::Site`, which the harness never
-                // registers, and a headless rollout must never touch the player's campaign file.
+                // Save/load is windowed-only, and a headless rollout must never touch the player's
+                // campaign file. **The safety is this registration, and now only this.** It used to
+                // have a second, redundant guard — `save_campaign` fired on `OnEnter(AppState::Site)`,
+                // a state the harness never registers — but the save moved to `OnExit(RunState::Active)`
+                // so that visiting the Site mid-run cannot snapshot a live expedition
+                // (`docs/2026-08-01-two-live-layers.md`). Every rollout ends a run, so adding this
+                // plugin to `sim_harness` would now overwrite the campaign on every episode.
                 persist::PersistPlugin,
                 // The research BENCH (FVS-E-5) — the verb that actually moves a posterior. Windowed
                 // for exactly the same reason as save/load above: it is gated on `AppState::Site`,

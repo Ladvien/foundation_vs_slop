@@ -275,7 +275,7 @@ impl Plugin for SessionPlugin {
             .add_systems(PostStartup, begin_first_run)
             // Reset BEFORE the world is built, so a fresh run starts at tick 0 with an open outcome.
             .add_systems(OnEnter(RunState::Active), reset_run.before(RunBuild::World))
-            .add_systems(OnExit(RunState::Active), advance_to_next_world)
+            .add_systems(OnExit(RunState::Active), advance_to_next_world.in_set(RunEnd::AdvanceSeed))
             // The run condition IS the latch (module docs): once the outcome leaves `Undecided`,
             // neither system runs again, so the clock freezes at the resolving tick and the outcome
             // can never be overwritten.
@@ -353,6 +353,20 @@ fn reset_run(
     // Critical on a re-run: the previous squad is despawned on this same transition, so a stale `true`
     // would read the gap before the new squad spawns as an instant wipe.
     *seen = SquadSeen::default();
+}
+
+/// Ordering seam for run teardown, so anything that must observe the **next** run's seed can say so.
+///
+/// A named set rather than `.after(advance_to_next_world)` because the contract belongs to the seam,
+/// not to one function someone may later split. [`crate::persist::save_campaign`] is why it exists:
+/// `SaveGame::run_seed` records the universe the player resumes into, so a save that captured the
+/// pre-advance seed would hand them their specimens in the world they just left. That ordering used to
+/// hold by accident — the save fired on `OnEnter(AppState::Site)`, a whole state transition later —
+/// and stopped being accidental when visiting the Site stopped meaning "end the run".
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RunEnd {
+    /// [`advance_to_next_world`] has picked the next Branch universe.
+    AdvanceSeed,
 }
 
 /// Pick the next Branch universe as the player leaves a run.
@@ -634,5 +648,67 @@ mod tests {
         assert!(!RunOutcome::Undecided.is_decided());
         assert!(RunOutcome::Victory.is_decided());
         assert!(RunOutcome::Defeat(DefeatCause::SquadWipe).is_decided());
+    }
+
+    /// **The correctness risk of the two-live-layers change, named.**
+    ///
+    /// `advance_to_next_world` fires on `OnExit(RunState::Active)` and picks the next Branch universe.
+    /// A *visit* to Site-67 must not trip it. If it did, the player would walk back through the ASYNC
+    /// door into a **different world** — and worse, quietly: `run_scoped()` despawns the expedition on
+    /// that same transition, so the squad they were commanding would be gone with no event saying so.
+    ///
+    /// This holds because a visit changes `AppState` only. The test exists because that is a property
+    /// of two systems agreeing to leave `RunState` alone, and nothing else would notice if one of them
+    /// stopped — which is exactly the "shipped, green, and silently wrong" shape the repo keeps hitting.
+    #[test]
+    fn a_visit_preserves_the_run_seed_and_an_abandon_advances_it() {
+        use crate::ui::state::AppState;
+
+        let mut app = App::new();
+        // `StatesPlugin` supplies the `StateTransition` schedule that `OnExit` runs in — a bare `App`
+        // has no states machinery, and `init_state` panics without it.
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<RunState>()
+            .init_state::<AppState>()
+            .insert_resource(RunSeed(0x1234_5678_9abc_def0))
+            .add_systems(OnExit(RunState::Active), advance_to_next_world);
+
+        // A live expedition, being watched.
+        app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Active);
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+        app.update();
+        let seed = app.world().resource::<RunSeed>().0;
+
+        // THE VISIT: the screen changes, the run does not.
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Site);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<RunState>>().get(),
+            RunState::Active,
+            "standing at the Site must not end the expedition — that is the whole feature"
+        );
+        assert_eq!(
+            app.world().resource::<RunSeed>().0,
+            seed,
+            "a visit must leave the seed alone, or the player returns to a different world"
+        );
+
+        // …and back through the door. Still the same world.
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            app.world().resource::<RunSeed>().0,
+            seed,
+            "returning from a visit must not advance the seed either"
+        );
+
+        // THE ABANDON: this one really does end the run, and the next expedition is a new universe.
+        app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+        app.update();
+        assert_ne!(
+            app.world().resource::<RunSeed>().0,
+            seed,
+            "abandoning must advance to the next Branch universe (FVS-A-5)"
+        );
     }
 }

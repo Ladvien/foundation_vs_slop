@@ -257,6 +257,8 @@ fn drive_camera(
     // The squad's eased centroid, already computed every fixed tick for the cohesion leash. `Option`
     // because it is a squad-AI resource and the camera outlives any run (title screen, Site).
     anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
+    // Inert `false` in the harness (nothing writes it there), exactly like `SimBlocked` above.
+    orders_blocked: Res<crate::time_control::OrdersBlocked>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
@@ -268,7 +270,14 @@ fn drive_camera(
     // are different things, and only the first is a design choice. Routed through the glide so it
     // is a smooth pull rather than a teleport (writing `rig.focus` directly WAS a teleport — the
     // transform below is rebuilt from it the same frame).
-    if actions.just_pressed(Action::CameraRecenter) {
+    //
+    // Gated on `orders_allowed` for the same reason `selection`'s input is, and it is a rule rather
+    // than a technicality: **while you are at Site-67 you cannot look at your squad.** Before
+    // `input::Action::VisitSite` this branch no-opped there for free — the run was `Idle`, so no squad
+    // existed and `anchor.valid` was false. During a visit the anchor IS valid, so without this the
+    // key would glide the camera 512+ units back to the dungeon with the Site HUD still up, and hand
+    // the player a way to supervise the expedition they are supposed to have left unattended.
+    if actions.just_pressed(Action::CameraRecenter) && !orders_blocked.0 {
         if let Some(anchor) = anchor.filter(|a| a.valid) {
             rig.glide_to = Some(anchor.pos);
         }

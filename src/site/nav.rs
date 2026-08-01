@@ -8,6 +8,12 @@
 //! (post-run, describing a world that has been despawned). Operatives at the Site would collide with a
 //! ghost dungeon and repaint a ghost fog grid.
 //!
+//! **This argument is now conditional, and the condition is new.** Since `input::Action::VisitSite`
+//! the player can stand at the Site *during* a live expedition, and in that case `Dungeon` is neither
+//! absent nor stale — it is the world the squad is currently walking around in
+//! (`docs/2026-08-01-two-live-layers.md` §5). So the reasoning above holds only for the Site between
+//! expeditions. Anyone using it to justify a new decision must say which of the two cases they mean.
+//!
 //! ## Why it is not a `Dungeon`
 //!
 //! `Dungeon` is a single global resource that FVS-A-5 regenerates per run. A second one would make

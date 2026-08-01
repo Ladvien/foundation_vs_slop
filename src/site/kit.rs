@@ -23,9 +23,18 @@ use serde::{Deserialize, Serialize};
 
 use super::pieces::SitePiece;
 
-/// The shipped greybox kit. Kenney prototype blocks — deliberately readable rather than pretty, and
-/// the fallback every test builds against.
-pub const SITE_KIT_PATH: &str = "assets/site/kit_greybox.ron";
+/// The shipped kit — Ozea's low-poly sci-fi facility set, promoted into `assets/ozea/`.
+///
+/// This pointed at `kit_greybox.ron` until 2026-08-01, when enough of the library was converted to
+/// dress the hub. The greybox kit did not go away; it became [`GREYBOX_KIT_PATH`], the fixture that
+/// proves the swap.
+pub const SITE_KIT_PATH: &str = "assets/site/kit_ozea.ron";
+
+/// The greybox kit, kept as the **swap fixture**: the pair proves re-skinning the Site is authoring
+/// one file. Not dead weight — `pieces::every_piece_maps_to_a_glb_that_exists_on_disk` runs against
+/// every shipped kit, so this one stays loadable and complete rather than rotting into a file that
+/// names meshes nobody has checked in years.
+pub const GREYBOX_KIT_PATH: &str = "assets/site/kit_greybox.ron";
 
 /// One mesh in a kit: where it lives, and how tall the artist made it.
 ///
@@ -35,14 +44,28 @@ pub const SITE_KIT_PATH: &str = "assets/site/kit_greybox.ron";
 /// prototype kit is a uniform 1 m module, while Ozea is mixed: `SM_Wall_1x1` is 1.00 m but
 /// `SM_DoorFrame_Single` is already 2.01 m and `SM_Cryogenic_Stasis_Chamber` 2.41 m. A single
 /// `KIT_MODULE_HEIGHT` constant in code cannot describe both, and using Kenney's would have scaled
-/// the Ozea doorframe to 4 m. Measured at conversion time by `scripts/ozea_to_glb.py`, which prints
-/// every bounding box for exactly this reason.
+/// the Ozea doorframe to 4 m. Measured at conversion time by `scripts/fbx_to_glb.py`, which writes an
+/// `INVENTORY.md` beside the staged GLBs recording every mesh's W/H/D for exactly this reason. (This
+/// named `scripts/ozea_to_glb.py` for months — a script that has never existed.)
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KitPiece {
     pub glb: String,
     /// The mesh's authored height in metres, as it sits in the file.
     pub height: f32,
+    /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
+    ///
+    /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
+    /// so are `floor_light` and the line decals, so a decal placed at y = 0 has its top face *exactly*
+    /// coplanar with the floor's. Coplanar faces are not a precision problem that a depth bias would
+    /// paper over — they are genuinely the same plane, and the winner is undefined. Separating them in
+    /// space is the honest fix and it holds at any depth range or camera distance.
+    ///
+    /// It lives in the kit rather than the layout because it is a fact about the **mesh** (how thick
+    /// the floor it sits on is), not about the placement — the same decal wants the same lift at every
+    /// one of its positions, and a per-placement offset would be fifteen chances to author it wrong.
+    #[serde(default)]
+    pub y_offset: f32,
 }
 
 /// One [`KitPiece`] per [`SitePiece`].
@@ -79,6 +102,11 @@ impl SiteKit {
     pub fn y_scale(&self, piece: SitePiece) -> f32 {
         super::pieces::target_height(piece)
             .map_or(1.0, |target| target / self.piece(piece).height)
+    }
+
+    /// How far off the ground plane `piece` sits in THIS kit — see [`KitPiece::y_offset`].
+    pub fn y_offset(&self, piece: SitePiece) -> f32 {
+        self.piece(piece).y_offset
     }
 
     /// The kit entry for `piece`.
@@ -192,25 +220,22 @@ mod tests {
     /// returning `&'static str`, so the Site's look was a property of the binary.
     #[test]
     fn the_site_kit_is_swappable_by_authoring_one_file() {
-        let greybox = load_site_kit(SITE_KIT_PATH).expect("greybox kit loads");
-        let swapped =
-            load_site_kit("assets/site/kit_ozea_partial.ron").expect("the swap fixture loads");
-        assert_ne!(greybox, swapped, "the fixture must actually differ, or it proves nothing");
+        // The shipped kit is Ozea now and the greybox is the fixture — the reverse of how this test
+        // was first written, and the swap it proves is the same swap either way round.
+        let shipped = load_site_kit(SITE_KIT_PATH).expect("the shipped Ozea kit loads");
+        let swapped = load_site_kit(GREYBOX_KIT_PATH).expect("the greybox fixture loads");
+        assert_ne!(shipped, swapped, "the fixture must actually differ, or it proves nothing");
         // Named pieces really did change kit — not merely "the structs differ somewhere".
-        assert!(swapped.glb(SitePiece::Floor).contains("ozea"), "floor should be Ozea now");
-        // The scale really is kit-derived, not a constant: Ozea's wall is authored at 2.00 m and
-        // Kenney's at 1.00 m, so the SAME piece must scale differently in each kit.
-        // Compare a piece the fixture actually swaps: the Ozea doorframe is authored at 1.98 m and
-        // the Kenney one at 1.0 m, so the SAME piece must scale differently in each kit. (Comparing
-        // `Wall` proved nothing — the partial fixture still uses the Kenney wall, so both scales were
-        // identical and the assertion was vacuous.)
+        assert!(shipped.glb(SitePiece::Floor).contains("ozea"), "the shipped floor is Ozea");
+        assert!(swapped.glb(SitePiece::Floor).contains("kenney"), "the fixture floor is Kenney");
+        // The scale really is kit-derived rather than a constant. `Wall` is the honest comparison now
+        // that the shipped kit swaps it: Ozea authors the wall at 2.00 m and Kenney at 1.00 m, so the
+        // SAME piece must want a different scale in each. (This asserted on `WallDoorwayWide` while
+        // the old partial fixture still used the Kenney wall, which made a `Wall` comparison vacuous.)
         assert!(
-            (swapped.y_scale(SitePiece::WallDoorwayWide) - greybox.y_scale(SitePiece::WallDoorwayWide))
-                .abs()
-                > 0.5,
-            "a 1.98 m doorframe and a 1.0 m one cannot want the same scale — the kit is not driving it"
+            (shipped.y_scale(SitePiece::Wall) - swapped.y_scale(SitePiece::Wall)).abs() > 0.5,
+            "a 2.00 m wall and a 1.00 m one cannot want the same scale — the kit is not driving it"
         );
-        assert!(greybox.glb(SitePiece::Floor).contains("kenney"), "greybox floor is Kenney");
         // And the swapped kit is a VALID kit, not just a different one.
         validate_site_kit(&swapped).expect("a swapped kit must satisfy every rule the shipped one does");
     }
@@ -218,7 +243,7 @@ mod tests {
     #[test]
     fn a_non_glb_path_is_refused() {
         let mut kit = load_site_kit(SITE_KIT_PATH).expect("shipped kit loads");
-        kit.pipe = KitPiece { glb: "site/ozea/pipe.fbx".into(), height: 1.0 };
+        kit.pipe = KitPiece { glb: "ozea/pipe.fbx".into(), height: 1.0, y_offset: 0.0 };
         assert!(validate_site_kit(&kit).is_err(), "artist_guide.md §3 is glTF-binary only");
     }
 }

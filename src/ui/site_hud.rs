@@ -472,9 +472,15 @@ mod tests {
         let b = crate::input::KeyBindings::default();
         let empty = cycle_button_label(0, &b);
         let held = cycle_button_label(3, &b);
+        // Derived from the LIVE binding, never a literal. This asserted `starts_with("Tab")` until
+        // `VisitSite` took `Tab` for the Site toggle and this action moved to `I` — the test failed
+        // for a rebind it should not have been able to see. Same rule `verb_bar` records: a hardcoded
+        // key in a label (or in the test that guards one) is how a player gets told a key that does
+        // nothing.
+        let key = b.key_label(crate::input::Action::CycleSpecimen);
         for l in [&empty, &held] {
             assert!(!l.trim().is_empty());
-            assert!(l.starts_with("Tab"), "{l} must lead with its key");
+            assert!(l.starts_with(&key), "{l} must lead with its key ({key})");
         }
         assert!(empty.contains("NO SPECIMEN ON THE SLAB"), "{empty}");
         assert!(empty.contains("CONTAIN ONE FIRST"), "the route out, not just the state: {empty}");

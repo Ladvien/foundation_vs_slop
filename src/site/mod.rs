@@ -30,6 +30,12 @@
 //! collide with a ghost dungeon and repaint a ghost fog grid. The Site therefore gets its own
 //! `SiteAvatar`, never `squad::Unit`; promoting avatars to real operatives is FVS-G-3's job.
 //!
+//! **Read that as "between expeditions".** `input::Action::VisitSite` lets the player stand here with
+//! a run still `Active`, and during such a visit `Dungeon` is live rather than absent-or-stale, so the
+//! constraint above simply does not bind (`docs/2026-08-01-two-live-layers.md` §5). That is a door
+//! opening, not a thing breaking — but the two cases are now genuinely different, and the argument
+//! above only ever covered one of them.
+//!
 //! ## Determinism
 //!
 //! The gameplay half (the Site root, the Site↔specimen relationship) is **harness-visible**, because

@@ -121,6 +121,37 @@ pub fn sync_sim_blocked(
     }
 }
 
+/// The sole writer of [`OrdersBlocked`] — the mirror of [`sync_sim_blocked`] for the player's *mouse*
+/// rather than the clock. See [`should_block_orders`] for the rule and
+/// [`crate::time_control::OrdersBlocked`] for why this is a resource instead of a run condition.
+pub fn sync_order_block(
+    app_state: Res<State<AppState>>,
+    mut blocked: ResMut<crate::time_control::OrdersBlocked>,
+) {
+    let want = should_block_orders(app_state.get());
+    if blocked.0 != want {
+        blocked.0 = want;
+    }
+}
+
+/// Pure order-block decision for [`sync_order_block`]: the player may only command the expedition
+/// while they are **looking at** it.
+///
+/// One `match` arm does the work, but it replaces a genuine bug. `selection`'s order-issuing input is
+/// gated on `RunState::Active` and nothing else, which was exactly right while the only way to reach
+/// Site-67 was to end the run first. Since `input::Action::VisitSite` an expedition stays `Active`
+/// while the player stands at the Site, so without this every one of those systems was still live:
+/// right-click marched the squad toward wherever a Site-space cursor ray met `y = 0` — 512+ units
+/// outside the dungeon — one left-click both walked the Site avatar and re-selected the squad, and the
+/// armed verbs would happily throw a capture device from inside the hub.
+///
+/// Stated as "not `InGame`" rather than "is `Site`" on purpose: the terminal screens and the title
+/// have never wanted the mouse issuing orders either, and enumerating the blocked screens is how the
+/// next one gets forgotten.
+fn should_block_orders(app_state: &AppState) -> bool {
+    !matches!(app_state, AppState::InGame)
+}
+
 /// Pure freeze decision for [`sync_sim_blocked`], split out so the single-writer freeze rule — including
 /// the spec's "arming Cmd+P auto-pauses" — is unit-testable without an `App`. The sim freezes when the
 /// region capture is **armed** (`capture_active`), while the note box is open (`note_open`), during
@@ -132,8 +163,13 @@ fn should_freeze(capture_active: bool, note_open: bool, app_state: &AppState, me
             AppState::Boot | AppState::Title | AppState::Warmup => true,
             // The Site must NOT freeze. Freezing sets `SimBlocked`, which gates `camera::drive_camera`
             // and the Site's own avatar mover — the hub would render as a still photograph you cannot
-            // walk around in. There is no expedition running to freeze anyway: `RunState` is `Idle`
-            // here, so nothing pinned is ticking that we would want stopped.
+            // walk around in.
+            //
+            // This used to add "and there is no expedition running to freeze anyway: `RunState` is
+            // `Idle` here." That second reason is **gone**: since `input::Action::VisitSite`, standing
+            // at the Site can mean an expedition is live and ticking unattended
+            // (`docs/2026-08-01-two-live-layers.md`). The answer is unchanged and now load-bearing for
+            // a new reason — freezing here would silently pause the very exposure a visit is *for*.
             AppState::Site => false,
             // The run is over: freeze the world behind the terminal screens so the last frame the
             // player saw is the one they read the verdict over. The sim would otherwise keep ticking
@@ -159,12 +195,43 @@ mod freeze_tests {
         assert!(!should_freeze(false, false, &AppState::InGame, false), "normal play must NOT freeze");
         // Boot/title/warmup always freeze; a blocking in-game menu freezes.
         assert!(should_freeze(false, false, &AppState::Title, false));
-        // The Site is the one non-playing state that must stay LIVE: freezing sets `SimBlocked`, which
-        // gates the camera and the avatar mover, and a hub you cannot walk around in is a photograph.
+        // The Site must stay LIVE, now for two reasons. Freezing sets `SimBlocked`, which gates the
+        // camera and the avatar mover, and a hub you cannot walk around in is a photograph — and since
+        // `input::Action::VisitSite` an expedition can be running while the player stands here, so a
+        // freeze would also pause the unattended squad that a visit deliberately leaves exposed.
         assert!(
             !should_freeze(false, false, &AppState::Site, false),
-            "Site-67 must not freeze — the player walks around in it"
+            "Site-67 must not freeze — the player walks around in it, and a visit leaves a live \
+             expedition ticking"
         );
         assert!(should_freeze(false, false, &AppState::InGame, true));
+    }
+
+    /// The companion rule to the freeze test above, and the reason the two are separate resources.
+    #[test]
+    fn orders_only_reach_the_squad_while_the_player_is_watching_them() {
+        // Playing: the mouse commands the expedition. This is the only state where it may.
+        assert!(!should_block_orders(&AppState::InGame), "normal play must accept orders");
+        // **The case this exists for.** At Site-67 an expedition may still be `Active` and ticking, so
+        // `should_freeze` says do NOT freeze — but the squad is off-screen and 512+ world units away,
+        // and a right-click here would march it toward a Site-space ray's `y = 0` hit outside the map.
+        assert!(
+            should_block_orders(&AppState::Site),
+            "the Site must not command the squad — this is what makes a visit safe to render"
+        );
+        // The pair that would otherwise look contradictory, stated together so nobody 'fixes' it:
+        // at the Site the sim runs AND orders are blocked. Every other screen agrees with its freeze.
+        assert!(!should_freeze(false, false, &AppState::Site, false));
+        // Terminal screens and the pre-game screens never wanted the mouse issuing orders either.
+        for state in [
+            AppState::Boot,
+            AppState::Title,
+            AppState::Warmup,
+            AppState::Victory,
+            AppState::GameOver,
+            AppState::Debrief,
+        ] {
+            assert!(should_block_orders(&state), "{state:?} must not issue squad orders");
+        }
     }
 }

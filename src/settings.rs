@@ -80,6 +80,31 @@ impl Default for AccessibilitySettings {
     }
 }
 
+/// What the player has already been taught, so a hint can retire instead of nagging forever.
+///
+/// **One flag per verb, and each is set when its verb is USED** — not when the player arrives
+/// somewhere. A single "has visited the Site" flag was the obvious design and it was wrong: arriving
+/// at the Site would retire the hint that tells you how to *leave* it, in the same transition, so that
+/// hint could never be seen by anyone. Retiring on use is also the honest claim — the player has
+/// demonstrably learned the key, rather than merely been somewhere it is written down.
+///
+/// **Here and not in `persist::SaveGame`**, and the reason is not filing tidiness. `SAVE_VERSION`
+/// mismatches are *refused, never migrated* (`persist`'s module docs say why), so a new field there
+/// would lock a player out of an existing campaign — an absurd price for a hint. This file grows
+/// additively instead. It is also the honest home: "has this person been shown the key" describes the
+/// player, not the campaign, and should survive deleting a save. Same argument
+/// [`AccessibilitySettings`] makes for itself, and like it, **nothing here may become an RL/QD gene**.
+#[derive(Resource, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct OnboardingSettings {
+    /// Set when the player first *uses* the visit verb (`site::visuals::leave_for_the_site`).
+    /// Retires the in-expedition hint.
+    pub learned_visit: bool,
+    /// Set when the player first *uses* the return verb
+    /// (`site::visuals::return_to_the_expedition`). Retires the hint shown at the Site.
+    pub learned_return: bool,
+}
+
 /// On-disk container. Grows additively (each field `#[serde(default)]`), so older save files load
 /// fine as newer preference groups are added.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -87,6 +112,8 @@ impl Default for AccessibilitySettings {
 pub struct UserSettings {
     pub hud: HudSettings,
     pub accessibility: AccessibilitySettings,
+    /// What the player has already been shown (see [`OnboardingSettings`]).
+    pub onboarding: OnboardingSettings,
     /// Keyboard overrides (`crate::input`). Stores only what the player *changed*, so the action
     /// list can grow — and a shipped default can be improved — without a stale save silently
     /// pinning the old binding.
@@ -97,11 +124,13 @@ impl UserSettings {
     fn from_resources(
         hud: &HudSettings,
         acc: &AccessibilitySettings,
+        onboarding: &OnboardingSettings,
         input: &crate::input::InputSettings,
     ) -> Self {
         Self {
             hud: hud.clone(),
             accessibility: acc.clone(),
+            onboarding: onboarding.clone(),
             // The **persisted** overrides, verbatim — never re-derived from the live `KeyBindings`.
             // See `autosave_on_change` for why that distinction is the difference between preserving
             // the player's file and destroying it.
@@ -139,6 +168,7 @@ impl Plugin for SettingsPlugin {
             .insert_resource(settings.input)
             .insert_resource(settings.hud)
             .insert_resource(settings.accessibility)
+            .insert_resource(settings.onboarding)
             .insert_resource(load_state)
             .add_systems(Update, autosave_on_change);
     }
@@ -230,6 +260,7 @@ fn autosave_on_change(
     state: Res<SettingsLoadState>,
     hud: Res<HudSettings>,
     acc: Res<AccessibilitySettings>,
+    onboarding: Res<OnboardingSettings>,
     input: Res<crate::input::InputSettings>,
     mut startup_seen: Local<bool>,
 ) {
@@ -237,14 +268,14 @@ fn autosave_on_change(
         *startup_seen = true;
         return;
     }
-    if !(hud.is_changed() || acc.is_changed() || input.is_changed()) {
+    if !(hud.is_changed() || acc.is_changed() || onboarding.is_changed() || input.is_changed()) {
         return;
     }
     if matches!(*state, SettingsLoadState::Damaged(_)) {
         return;
     }
     let Some(path) = settings_path() else { return };
-    write_settings(&path, &UserSettings::from_resources(&hud, &acc, &input));
+    write_settings(&path, &UserSettings::from_resources(&hud, &acc, &onboarding, &input));
 }
 
 /// Atomic write (tmp + rename) so a crash mid-write can't corrupt the settings file.
@@ -287,6 +318,7 @@ mod tests {
                 text_scale: 1.5,
                 reduce_flashing: true,
             },
+            onboarding: OnboardingSettings { learned_visit: true, learned_return: false },
             input: crate::input::InputSettings::default(),
         };
         let text = ron::ser::to_string_pretty(&original, ron::ser::PrettyConfig::default()).unwrap();
@@ -309,6 +341,7 @@ mod tests {
         let saved = UserSettings::from_resources(
             &HudSettings::default(),
             &AccessibilitySettings::default(),
+            &OnboardingSettings::default(),
             &crate::input::InputSettings {
                 overrides: vec![crate::input::StoredBinding {
                     action: Action::ArmDevice.id().to_string(),

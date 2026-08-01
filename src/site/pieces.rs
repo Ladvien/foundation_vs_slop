@@ -165,7 +165,7 @@ mod tests {
         // hole — and now that scale is kit-derived, this has to hold for EVERY kit, not just the one
         // whose module height used to be a constant.
         use crate::site::kit::load_site_kit;
-        for path in ["assets/site/kit_greybox.ron", "assets/site/kit_ozea_partial.ron"] {
+        for path in [crate::site::kit::SITE_KIT_PATH, crate::site::kit::GREYBOX_KIT_PATH] {
             let kit = load_site_kit(path).unwrap_or_else(|e| panic!("{path}: {e}"));
             for piece in [SitePiece::WallDoorway, SitePiece::WallDoorwayWide] {
                 let final_h = kit.piece(piece).height * kit.y_scale(piece);

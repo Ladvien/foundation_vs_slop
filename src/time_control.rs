@@ -73,6 +73,38 @@ pub struct UserPaused(pub bool);
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct SimBlocked(pub bool);
 
+/// Set by the windowed UI while the player's pointer is aimed at something **other than the
+/// expedition**, to stop `selection`'s order-issuing input reaching a squad the player cannot see.
+///
+/// **Why this is a resource and not an `AppState` run condition.** `ui::state` and `ui/mod.rs` both
+/// state the rule: gameplay plugins must never be gated on `in_state(AppState::InGame)`, because the
+/// harness does not register `AppState` at all and the world has to keep ticking under the boot and
+/// title screens. So this is the same shape as [`SimBlocked`] — one writer
+/// (`ui::state::sync_order_block`), inert `false` by default, and the deterministic core cannot tell
+/// it exists. `replay::ui_never_leaks_into_deterministic_core` pins that.
+///
+/// **Why it is separate from [`SimBlocked`].** They meant the same thing right up until
+/// `input::Action::VisitSite`: standing at Site-67 now leaves an expedition **running**
+/// (`docs/2026-08-01-two-live-layers.md`), so the Site must NOT freeze the sim — that exposure is the
+/// whole feature — while it must still stop the mouse commanding a squad that is off-screen and 512+
+/// world units away. `ui::state::should_freeze` and [`should_block_orders`] answer two now-different
+/// questions, and collapsing them back into one would either freeze the unattended squad or let a
+/// right-click at the Site march it to a coordinate outside the map.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrdersBlocked(pub bool);
+
+/// Run condition: may the player's pointer command the expedition right now?
+///
+/// A named `fn` rather than `resource_equals(OrdersBlocked(false))` at each call site, for two
+/// reasons. The mechanical one: `resource_equals` returns a closure that is not `Clone`, so it cannot
+/// be used with `distributive_run_if` — and `selection` documents (measured) that a tuple-level
+/// `run_if` adds a set node which moves the deterministic golden by itself. The real one: this is the
+/// single spelling of "orders reach the squad", so a second consumer cannot invent a subtly different
+/// one. Reads inert `false` in the harness, where nothing writes [`OrdersBlocked`].
+pub fn orders_allowed(blocked: Res<OrdersBlocked>) -> bool {
+    !blocked.0
+}
+
 /// Pure pause-composition rule, factored out for a unit test: the sim is frozen if the player
 /// paused **or** a blocking UI screen is open.
 #[inline]
@@ -137,6 +169,7 @@ impl Plugin for TimeControlPlugin {
         app.init_resource::<GameSpeed>()
             .init_resource::<UserPaused>()
             .init_resource::<SimBlocked>()
+            .init_resource::<OrdersBlocked>()
             // `read_speed_input` writes `UserPaused`; `compose_pause` then folds `UserPaused` +
             // `SimBlocked` into the single `GameSpeed::paused` write. `.chain()` keeps that order so
             // a key press and its resulting pause state land in the same frame.
