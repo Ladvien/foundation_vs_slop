@@ -79,8 +79,12 @@ impl Context {
         match (self, other) {
             (Menu, Menu) => true,
             (Menu, _) | (_, Menu) => false,
-            // Everything else shares the screen with everything else, except that a run and the
-            // Site are mutually exclusive states.
+            // Everything else shares the screen with everything else, except that the expedition
+            // HUD and the Site are mutually exclusive *screens*.
+            //
+            // Note this is about `AppState`, not `RunState`: since `VisitSite`, an expedition can be
+            // live while the player stands at the Site. It is still only ever one screen's hotkeys
+            // that are readable, which is what this rule is actually asserting.
             (InGame, Site) | (Site, InGame) => false,
             _ => true,
         }
@@ -220,6 +224,13 @@ pub enum Action {
     ArmLure,
     ToggleRoster,
 
+    // --- Leaving (InGame). ---
+    /// Travel to Site-67 **without ending the expedition**. The squad keeps executing its standing
+    /// order while you are away and the sim never freezes — that exposure is the whole point of the
+    /// verb (`docs/2026-08-01-two-live-layers.md` §2/§4). Ending a run is a different, deliberate
+    /// verb: `ABANDON EXPEDITION` in the pause menu.
+    VisitSite,
+
     // --- Site-67 (Site). ---
     CycleSpecimen,
     RunTopExperiment,
@@ -250,7 +261,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 37] = [
         Action::CameraPanForward,
         Action::CameraPanBack,
         Action::CameraPanLeft,
@@ -268,7 +279,9 @@ impl Action {
         Action::DeploySensor,
         Action::TogglePush,
         Action::CycleHudDensity,
+        Action::ArmLure,
         Action::ToggleRoster,
+        Action::VisitSite,
         Action::CycleSpecimen,
         Action::RunTopExperiment,
         Action::FileFindings,
@@ -290,9 +303,60 @@ impl Action {
 
     /// Dense index into [`KeyBindings`]'s table. A fixed array rather than a map, for the same
     /// reason `ui::layout::HudRegions` is one: no iteration order to reason about.
+    ///
+    /// **An exhaustive `match`, not a lookup in [`Action::ALL`].** This was
+    /// `ALL.iter().position(..).unwrap_or(0)`, and that `unwrap_or` was a silent fallback of exactly
+    /// the shape the project forbids: `ArmLure` was declared on the enum but never added to `ALL`, so
+    /// its index silently became `0` — `CameraPanForward`'s slot. The lure was really bound to `W`,
+    /// never appeared on the controls screen (`ui::controls_screen` iterates `ALL`), could not be
+    /// rebound or persisted (`from_id` searches `ALL`), and — because
+    /// [`the_key_space_has_no_collisions`] also iterates `ALL` — it hid a second bug: its default `V`
+    /// collided with `DeploySensor`'s. A missing entry produced a *wrong answer* instead of a failure.
+    ///
+    /// Now a new variant fails to compile until it is given an index here, and because these indices
+    /// are absolute, a variant missing from `ALL` shifts every later entry off its own position and
+    /// trips [`all_is_dense_and_in_declaration_order`]. Compiler first, test second, no third path.
     pub fn index(self) -> usize {
-        // `ALL` is asserted dense and in declaration order by a test, so position IS the index.
-        Action::ALL.iter().position(|a| *a == self).unwrap_or(0)
+        use Action::*;
+        match self {
+            CameraPanForward => 0,
+            CameraPanBack => 1,
+            CameraPanLeft => 2,
+            CameraPanRight => 3,
+            CameraRotateLeft => 4,
+            CameraRotateRight => 5,
+            CameraRecenter => 6,
+            TogglePause => 7,
+            SpeedDown => 8,
+            SpeedUp => 9,
+            ArmDevice => 10,
+            ArmQuarantine => 11,
+            ArmCap => 12,
+            ToggleHoldFire => 13,
+            DeploySensor => 14,
+            TogglePush => 15,
+            CycleHudDensity => 16,
+            ArmLure => 17,
+            ToggleRoster => 18,
+            VisitSite => 19,
+            CycleSpecimen => 20,
+            RunTopExperiment => 21,
+            FileFindings => 22,
+            CurateArchive => 23,
+            BuyCaptureDevice => 24,
+            BuyQuarantineCharge => 25,
+            BuyMedkit => 26,
+            PauseMenu => 27,
+            MenuBack => 28,
+            MenuUp => 29,
+            MenuDown => 30,
+            MenuActivate => 31,
+            DevAiOverlay => 32,
+            DevPerfHud => 33,
+            DevResearchRoom => 34,
+            DevForceVictory => 35,
+            DevRegionCapture => 36,
+        }
     }
 
     pub fn context(self) -> Context {
@@ -304,6 +368,13 @@ impl Action {
             }
             ArmDevice | ArmQuarantine | ArmCap | ArmLure | ToggleHoldFire | DeploySensor | TogglePush
             | CycleHudDensity | ToggleRoster => Context::InGame,
+            // **`Play`, not `InGame`** — and the distinction is load-bearing rather than tidy.
+            // `VisitSite` toggles: it carries the player to Site-67 from an expedition and back again
+            // from the Site, so it is genuinely live on both screens. `Play` is the only context that
+            // overlaps both (`overlaps` returns false for the `InGame`/`Site` pair), so declaring it
+            // `InGame` would let [`the_key_space_has_no_collisions`] cheerfully hand `Tab` to a second
+            // `Context::Site` action — and the player would press it expecting one thing and get two.
+            VisitSite => Context::Play,
             CycleSpecimen | RunTopExperiment | FileFindings | CurateArchive | BuyCaptureDevice
             | BuyQuarantineCharge | BuyMedkit => Context::Site,
             MenuBack | MenuUp | MenuDown | MenuActivate => Context::Menu,
@@ -354,6 +425,7 @@ impl Action {
             TogglePush => "toggle_push",
             CycleHudDensity => "cycle_hud_density",
             ToggleRoster => "toggle_roster",
+            VisitSite => "visit_site",
             CycleSpecimen => "cycle_specimen",
             RunTopExperiment => "run_top_experiment",
             FileFindings => "file_findings",
@@ -401,6 +473,7 @@ impl Action {
             TogglePush => "ADVANCE TO CONTACT",
             CycleHudDensity => "CYCLE HUD DENSITY",
             ToggleRoster => "OPEN ROSTER",
+            VisitSite => "VISIT SITE-67",
             CycleSpecimen => "SELECT SPECIMEN",
             RunTopExperiment => "RUN THE TOP TEST",
             FileFindings => "FILE FINDINGS",
@@ -424,6 +497,10 @@ impl Action {
     /// The shipped default. Every chord here is checked for collisions by
     /// [`the_key_space_has_no_collisions`] and for persistability by
     /// [`every_default_binding_can_be_written_to_disk`].
+    ///
+    /// **`T` is deliberately left unbound.** Three fixtures rebind onto it to prove a rebind takes
+    /// effect, and they need a key no shipped action holds. Assigning `T` here fails those tests in a
+    /// way that reads as unrelated breakage — free letters for a new action are `O`, `P` and `U`.
     pub fn default_binding(self) -> Binding {
         use Action::*;
         match self {
@@ -446,17 +523,34 @@ impl Action {
             ArmDevice => Binding::one(Chord::plain(KeyCode::KeyC)),
             ArmQuarantine => Binding::one(Chord::plain(KeyCode::KeyZ)),
             ArmCap => Binding::one(Chord::plain(KeyCode::KeyX)),
+            // `V` belongs to the lure: it is an arm-verb and sits beside the C/Z/X arm cluster.
             ArmLure => Binding::one(Chord::plain(KeyCode::KeyV)),
             ToggleHoldFire => Binding::one(Chord::plain(KeyCode::KeyF)),
-            // `V` is free and sits beside the C/Z/X verb cluster.
-            DeploySensor => Binding::one(Chord::plain(KeyCode::KeyV)),
+            // Was `V`, which `ArmLure` already held — a collision the collision test could not see
+            // while `ArmLure` was missing from `ALL` (see [`Action::index`]).
+            //
+            // `Y`, not the equally-free `T`: `T` is the key three test fixtures rebind ONTO
+            // (`a_rebind_round_trips_and_a_colliding_one_is_refused`,
+            // `settings::a_rebound_key_survives_the_round_trip_to_disk`,
+            // `ui::verb_bar::every_verb_states_its_key`), so binding it turns every one of them red.
+            DeploySensor => Binding::one(Chord::plain(KeyCode::KeyY)),
             // `G` is free and sits beside the other stance key, `F` (hold fire).
             TogglePush => Binding::one(Chord::plain(KeyCode::KeyG)),
 
             CycleHudDensity => Binding::one(Chord::plain(KeyCode::KeyH)),
             ToggleRoster => Binding::one(Chord::plain(KeyCode::KeyL)),
+            // `Tab` — the "switch view" key by convention, and this is a view switch rather than an
+            // order: it toggles between the expedition and Site-67 in both directions. Note it is
+            // multi-character, so any label for it must use [`KeyBindings::key_label`];
+            // [`KeyBindings::key_char`] answers `'?'` for anything that is not a single glyph.
+            //
+            // The expedition keeps ticking the instant this fires, so it is not a pause.
+            VisitSite => Binding::one(Chord::plain(KeyCode::Tab)),
 
-            CycleSpecimen => Binding::one(Chord::plain(KeyCode::Tab)),
+            // Was `Tab`, which `VisitSite` now owns in `Context::Play` — and `Play` overlaps `Site`,
+            // so the two really would have been live together. `I` is free (`O` and `U` are the other
+            // two; `T` stays unbound for the rebind fixtures noted above).
+            CycleSpecimen => Binding::one(Chord::plain(KeyCode::KeyI)),
             RunTopExperiment => Binding::one(Chord::plain(KeyCode::KeyR)),
             FileFindings => Binding::one(Chord::plain(KeyCode::KeyK)),
             CurateArchive => Binding::one(Chord::plain(KeyCode::KeyJ)),
@@ -834,10 +928,21 @@ mod tests {
 
     #[test]
     fn all_is_dense_and_in_declaration_order() {
-        // `index()` is a position lookup into `ALL`, and that index is the table slot. A duplicate
-        // or a missing entry would silently alias two actions onto one binding.
+        // `index()` is now an exhaustive `match` returning an ABSOLUTE slot, so this check does what
+        // its name always claimed. Previously `index()` was a position lookup *into `ALL`*, which made
+        // the assertion below tautological — it could not see a variant that was missing from `ALL`,
+        // and one was: `ArmLure` aliased onto slot 0 for free. With absolute indices, a missing entry
+        // shifts every later action off its own position and fails here on the first one.
         for (i, a) in Action::ALL.iter().enumerate() {
             assert_eq!(a.index(), i, "{a:?} is out of order in ALL");
+        }
+        // The specific regression: declared on the enum, wired into `ui::verb_bar`, absent from `ALL`.
+        assert!(Action::ALL.contains(&Action::ArmLure), "ArmLure must be in ALL");
+        assert!(Action::ALL.contains(&Action::VisitSite), "VisitSite must be in ALL");
+        // Round-trip through the persisted id, which `from_id` resolves by searching `ALL` — the path
+        // that silently returned `None` for the lure, so a rebind could never be saved or loaded.
+        for a in Action::ALL {
+            assert_eq!(Action::from_id(a.id()), Some(a), "{a:?} does not round-trip through its id");
         }
         for (i, a) in Action::ALL.iter().enumerate() {
             for b in &Action::ALL[i + 1..] {

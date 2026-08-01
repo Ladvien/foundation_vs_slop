@@ -1,0 +1,79 @@
+// =================================================================================================
+// SITE-67 ART KIT — Ozea. **This is the shipped kit** (`site::kit::SITE_KIT_PATH`).
+//
+// `kit_greybox.ron` remains beside it as the swap fixture, and the pair is the proof the seam works:
+// `site::kit::tests::the_site_kit_is_swappable_by_authoring_one_file` loads both and asserts the
+// Site's look — and its SCALES — differ with zero code edits. Before 2026-08-01 the kit was a `match`
+// in Rust and re-skinning the Site meant recompiling it.
+//
+// HEIGHT is the mesh's **authored** height in metres; the scale applied is `target / authored`
+// (`pieces::target_height` is the game's policy, this file is the art's fact). Every number below was
+// MEASURED by `scripts/fbx_to_glb.py`, which writes an `INVENTORY.md` beside the staged GLBs with each
+// mesh's W/H/D — never hand-guessed, and never re-derived from a mesh AABB at load, which would read
+// 100× large because the library is authored in centimetres.
+//
+// ── Why these meshes and not the obvious ones ──
+//
+// The Site grid is 1 m and `site::visuals::place` scales **only Y** — X and Z are hard 1.0, so a
+// mesh's footprint is used as authored. That single fact chose most of this file:
+//
+//   * `SM_Wall_Straight`, the natural pick, is **2.00 m long** and would span two cells. `SM_Wall_1x2`
+//     is the same kit's 1.00 m run and is the one that lands on the grid.
+//   * `SM_Wall_CornerCap` (0.22 m footprint) is the corner POST, not a 2 m corner panel — modular
+//     corners here are two runs meeting behind a post.
+//   * The floors are exactly 1.00 × 1.00, which is why they were the only pieces the earlier partial
+//     kit dared adopt.
+//
+// The two doorway pieces are deliberately NOT on the 1 m grid, and that is correct rather than a
+// compromise: `pieces::SitePiece::WallDoorway` is documented as a **2 m opening**, so a 2.06 m frame
+// is the intended size.
+//
+// ⚠️ Do NOT map containment cells from `Cellule`. `docs/2026-07-26-site-hub-and-operative-knowledge.md`
+// §7 measured it at 0.30 × 0.50 × 0.30 m — French *cellule* is a **battery** cell, not a room. The
+// real article is `Cryogenic_Stasis_Chamber`, promoted below as `cryo_pod.glb`, and its 1.00 × 1.02
+// footprint drops onto a single grid cell.
+// =================================================================================================
+(
+    // ── Structure ──
+    // 1.00 × 1.00 floor plate, so one mesh is one cell.
+    floor:             (glb: "ozea/floor.glb",                height: 0.06),
+    // 1.00 m run (`SM_Wall_1x2`), authored 2.00 m tall against a 2.4 m `WALL_HEIGHT` — a 1.2× stretch,
+    // which flat-colour low-poly panelling carries without reading as distortion.
+    wall:              (glb: "ozea/wall.glb",                 height: 2.00),
+    // The corner POST — see the header note.
+    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.00),
+    // A 2 m opening between areas, which is what this piece is FOR.
+    wall_doorway:      (glb: "ozea/doorframe_single.glb",     height: 2.01),
+    // The ASYNC aperture's frame. The one mesh promoted before this pass.
+    wall_doorway_wide: (glb: "ozea/doorframe_double.glb",     height: 1.98),
+    // Containment-cell glazing — the player must be able to SEE what is held.
+    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.00),
+    // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
+    // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a
+    // fit, kept because a counter is the cheapest way to furnish a room and this is the only panel
+    // in the promoted set with a 1 m footprint.
+    wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00),
+    column:            (glb: "ozea/column.glb",               height: 1.10),
+
+    // ── Dressing ──
+    crate_:            (glb: "ozea/crate.glb",                height: 1.00),
+    pipe:              (glb: "ozea/pipe.glb",                 height: 0.30),
+    pipe_corner:       (glb: "ozea/pipe_corner.glb",          height: 0.30),
+    // ── Floor inlays ──
+    // `y_offset` on all three, and it is not optional: the Ozea floor plate is 0.06 m thick and so are
+    // these, so at y = 0 their top faces are EXACTLY coplanar with the floor's and the depth winner is
+    // undefined — it renders as white squares flickering against grey ones. 0.062 clears the plate by
+    // 2 mm. See `KitPiece::y_offset`.
+    //
+    // The lit threshold pad at the aperture's mouth.
+    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.062),
+    // Wing colour-coding: learnability without signage (design doc §2.4).
+    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.062),
+    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.062),
+
+    // ── The specimen ──
+    // No longer a stand-in. `fill_containment_cells` puts one of these in a cell per held specimen,
+    // in capture order — so what the player walks past is a rack of cryo pods holding the things they
+    // brought home, which is the entire argument for the hub being a place rather than a menu.
+    specimen_standin:  (glb: "ozea/cryo_pod.glb",             height: 2.41),
+)

@@ -1143,7 +1143,7 @@ fn ui_never_leaks_into_deterministic_core() {
     // writer, so in the headless core they must stay at their inert `false` defaults. A stray
     // `SimBlocked=true` would freeze replay; this asserts that can't happen.
     use bevy::prelude::State;
-    use foundation_vs_slop::time_control::{SimBlocked, UserPaused};
+    use foundation_vs_slop::time_control::{OrdersBlocked, SimBlocked, UserPaused};
     use foundation_vs_slop::ui::state::AppState;
 
     let _serial = serial_guard();
@@ -1158,6 +1158,12 @@ fn ui_never_leaks_into_deterministic_core() {
     assert!(
         !app.world().resource::<SimBlocked>().0,
         "SimBlocked must stay false in the core (no UI writer present)"
+    );
+    assert!(
+        !app.world().resource::<OrdersBlocked>().0,
+        "OrdersBlocked must stay false in the core — `selection`'s order input is gated on it, so a \
+         stray `true` would silently stop the harness issuing move orders. Same contract as \
+         SimBlocked: owned by TimeControlPlugin, written only by `ui::state::sync_order_block`."
     );
     assert!(
         !app.world().resource::<UserPaused>().0,
@@ -1177,6 +1183,7 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
     use foundation_vs_slop::input::KeyBindings;
     use foundation_vs_slop::ui::containment_hud::ContainmentHudRoot;
     use foundation_vs_slop::ui::controls_screen::{control_lines, ControlsRoot};
+    use foundation_vs_slop::ui::hint::HintRoot;
     use foundation_vs_slop::ui::hud::{BossBarRoot, HudRoot, RosterStripRoot, SpeedText};
     use foundation_vs_slop::ui::layout::{HudFrame, Region, RegionNode};
     use foundation_vs_slop::ui::pause::PauseRoot;
@@ -1278,6 +1285,15 @@ fn ui_screens_spawn_and_pause_blocks_the_sim() {
         }),
         ("verb bar", {
             let mut q = app.world_mut().query_filtered::<Entity, With<VerbBarRoot>>();
+            q.iter(app.world()).next().is_some()
+        }),
+        // The controls hint. It is the panel most likely to vanish unnoticed, because its *content*
+        // is legitimately empty once the player has learned the key — so "nothing on screen" is a
+        // valid state and only the root entity distinguishes "retired" from "never resolved its
+        // region". `MidCenter` had no occupant before this, which is exactly the case
+        // `layout::panel_in` returns `None` for without anyone noticing.
+        ("controls hint", {
+            let mut q = app.world_mut().query_filtered::<Entity, With<HintRoot>>();
             q.iter(app.world()).next().is_some()
         }),
     ] {

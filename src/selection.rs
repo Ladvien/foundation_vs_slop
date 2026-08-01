@@ -316,6 +316,21 @@ impl Plugin for SelectionPlugin {
                 // wraps an anonymous set whose extra graph node permutes the schedule's linearisation
                 // and moves the deterministic golden by itself (measured).
                 .distributive_run_if(in_state(crate::session::RunState::Active))
+                // …and the player must be LOOKING at the expedition. `RunState::Active` alone was
+                // right while the only route to Site-67 was to end the run first; since
+                // `input::Action::VisitSite` an expedition stays `Active` while the player stands in
+                // the hub, and every system above was still live there — right-click marched the squad
+                // at a Site-space ray's `y = 0` hit 512+ units outside the map, one left-click both
+                // walked the avatar and re-selected the squad, and the armed verbs still threw.
+                //
+                // A resource, not `in_state(AppState::InGame)`: `ui::state` and `ui/mod.rs` both
+                // forbid gating gameplay on `AppState`, because the harness never registers it. This
+                // reads `false` there and headless behaviour is unchanged — the same argument
+                // `SimBlocked` makes, pinned by `replay::ui_never_leaks_into_deterministic_core`.
+                // `distributive_run_if` for the reason stated above: a tuple-level `run_if` would add
+                // a set node and move the golden by itself.
+                .distributive_run_if(crate::time_control::orders_allowed)
+                .after(crate::ui::state::sync_order_block)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         );
         app.init_resource::<ControlGroups>()
@@ -333,7 +348,15 @@ impl Plugin for SelectionPlugin {
             select_whole_squad_on_run_start.after(crate::session::RunBuild::Populate),
         );
         // Cosmetic only — ring gizmos + cursor icon read state but feed nothing pinned, so they stay on `Update`.
-        app.add_systems(Update, (draw_selection_rings, update_cursor).distributive_run_if(in_state(crate::session::RunState::Active)));
+        // Same two conditions as the order input, for the same reason: at the Site these would draw
+        // selection rings around an off-screen squad and hand the player an armed-tool cursor for a
+        // verb they cannot use. Cosmetic and on `Update`, so neither condition can touch the golden.
+        app.add_systems(
+            Update,
+            (draw_selection_rings, update_cursor)
+                .distributive_run_if(in_state(crate::session::RunState::Active))
+                .distributive_run_if(crate::time_control::orders_allowed),
+        );
     }
 }
 

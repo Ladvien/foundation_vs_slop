@@ -525,10 +525,18 @@ mod tests {
 
 /// Autosave/load wiring.
 ///
-/// **Save on arriving at the Site, not on quitting.** Two reasons, and the second is the real one:
-/// arriving at the Site is the moment meta-progress actually changed (an expedition just resolved and
-/// its specimen was banked), and a save triggered by quitting is a save that never happens when the
-/// process is killed — which is how a player loses an evening.
+/// **Save when the run ends, not when the player changes screen, and not on quitting.** The middle
+/// clause is the one that moved. The original rule was "save on arriving at the Site", and its
+/// reasoning still holds — arriving at the Site was the moment meta-progress actually changed (an
+/// expedition just resolved and its specimen was banked), and a save triggered by *quitting* is a save
+/// that never happens when the process is killed, which is how a player loses an evening.
+///
+/// What broke it: since `input::Action::VisitSite`, the player can stand at the Site with an
+/// expedition still live (`docs/2026-08-01-two-live-layers.md`). `OnEnter(AppState::Site)` would then
+/// fire mid-run and write a half-finished expedition into the campaign. `OnExit(RunState::Active)` is
+/// the event the old trigger was really a proxy for: it fires on extraction, on a wipe, on an abandon
+/// **and** on quit-to-title — strictly more coverage than before, since quitting to the title
+/// previously saved nothing at all — while a visit does not leave `Active` and so writes nothing.
 ///
 /// **Load once, at `Startup`.** A campaign is read exactly as the process begins, before anything can
 /// have banked a specimen of its own, so there is no merge case to get wrong.
@@ -557,7 +565,12 @@ impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SaveGuard::Writable)
             .add_systems(Startup, load_campaign.after(crate::site::spawn_site))
-            .add_systems(OnEnter(crate::ui::state::AppState::Site), save_campaign);
+            // Run-end, not screen-change. `.after(RunEnd::AdvanceSeed)` because `SaveGame::run_seed`
+            // must be the universe the player resumes INTO, not the one they just finished.
+            .add_systems(
+                OnExit(crate::session::RunState::Active),
+                save_campaign.after(crate::session::RunEnd::AdvanceSeed),
+            );
     }
 }
 

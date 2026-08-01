@@ -127,6 +127,28 @@ fn spawn_pause(mut commands: Commands, theme: Res<UiTheme>, fonts: Res<FontAsset
                         },
                     );
 
+                // Abandon the expedition — the deliberate END, as opposed to a visit.
+                //
+                // `input::Action::VisitSite` walks to the Site with the run still live; this is the
+                // other verb, and the two must stay visibly different because they are one keystroke
+                // apart and only one of them is recoverable. Ending the run here is what fires
+                // `OnExit(Active)`: the world despawns via `run_scoped()`, `advance_to_next_world`
+                // picks the next Branch universe, and `persist::save_campaign` banks the campaign.
+                c.spawn(button_visual(&theme))
+                    .with_children(|b| {
+                        b.spawn(text(&theme, &fonts, "ABANDON EXPEDITION", theme.font_body));
+                    })
+                    .observe(
+                        |_: On<Activate>,
+                         mut next: ResMut<NextState<AppState>>,
+                         mut run: ResMut<NextState<crate::session::RunState>>| {
+                            run.set(crate::session::RunState::Idle);
+                            // …and you land at SITE-67, the same place a resolved run leaves you.
+                            // Abandoning is a way to *end* an expedition, not to leave the game.
+                            next.set(AppState::Site);
+                        },
+                    );
+
                 // Quit to title
                 c.spawn(button_visual(&theme))
                     .with_children(|b| {

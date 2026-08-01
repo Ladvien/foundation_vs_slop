@@ -20,6 +20,7 @@ use bevy::prelude::*;
 pub mod boot;
 pub mod briefing;
 pub mod containment_hud;
+pub mod hint;
 pub mod controls_screen;
 pub mod event_line;
 pub mod research_hud;
@@ -79,6 +80,12 @@ impl Plugin for UiPlugin {
                     // One transient line for the thing that just happened. The game had no log,
                     // toast or notification of any kind before this.
                     event_line::EventLinePlugin,
+                    // Teaching lines for the two verbs that move the player between the expedition
+                    // and Site-67 — the Tab toggle and the ASYNC door. Grouped here rather than
+                    // given a top-level slot both because the outer tuple is at the 15-element cap
+                    // and because it belongs: this is an Access-side surface in exactly the sense
+                    // `controls_screen` is, and it retires once learned.
+                    hint::HintPlugin,
                 ),
                 hud::HudPlugin,
                 // Terminal screens. Presentation only — the win/lose decision is `crate::session`,
@@ -101,6 +108,16 @@ impl Plugin for UiPlugin {
             .init_resource::<crate::DebugCaptureActive>()
             // Sole writer of `SimBlocked`: freeze the sim under any blocking screen.
             .add_systems(Update, state::sync_sim_blocked)
+            // **`RunFixedMainLoop`, not `Update`** — unlike its sibling. `selection`'s order-issuing
+            // input runs in `BeforeFixedMainLoop`, which sits *ahead* of `Update` in the main schedule
+            // order (First → PreUpdate → StateTransition → RunFixedMainLoop → Update). A writer on
+            // `Update` would therefore be read one frame stale, leaving a single frame after the player
+            // presses VISIT SITE in which a click still commands the squad. `StateTransition` runs
+            // before this, so the `AppState` read here is the fresh one.
+            .add_systems(
+                RunFixedMainLoop,
+                state::sync_order_block.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            )
             // Shared menu behavior for every screen — registered once, globally. Each no-ops when no
             // menu is open, so a new screen needs no per-screen nav/focus wiring (and none can be
             // forgotten): hover/keyboard/NumpadEnter selection, the hover+focus tint, and dropping
