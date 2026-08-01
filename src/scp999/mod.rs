@@ -142,14 +142,19 @@ impl Plugin for Scp999VisualsPlugin {
 /// `scp999.spawn_min_dist`.
 const SPAWN_SEP: f32 = 3.0;
 
-/// Spawn `sim.scp999.count` blobs out in the level, at least `sim.scp999.spawn_min_dist` tiles from the
-/// squad spawn and `SPAWN_SEP` apart from each other — the same greedy far-from-spawn placement the
-/// enemies (`enemy::spawn_enemies`) and crab nests (`crab::setup::spawn_crabs`) use, so every creature
-/// seeds by one rule. The blob used to fan out one tile behind the squad; starting in contact meant the
-/// squad never actually carried its fear anywhere, and the player asked for it to seed out in the world
-/// (debug capture 2026-07-24). Deterministic: a fixed raster scan, no RNG — so for a given level layout
-/// the blob starts in the same place every run, and `spawn_min_dist` (evolvable) is what moves it.
-/// Per-blob decorrelation comes from the monotonic [`Scp999Seq`].
+/// This species' key in [`crate::placement::anomalies::AnomalySites`] — the shared level-wide placement
+/// pass that decides where every anomaly goes (and keeps them off each other).
+pub(crate) const ANOMALY_KEY: &str = "scp999";
+
+/// Spawn `sim.scp999.count` blobs at the sites the shared level-wide pass solved for this species.
+///
+/// The blob used to fan out one tile behind the squad; starting in contact meant the squad never
+/// actually carried its fear anywhere, and the player asked for it to seed out in the world (debug
+/// capture 2026-07-24). It then used its own greedy raster scan — the same one four other species each
+/// had a copy of — which put it in the map's corner alongside all of them (2026-08-01). Placement now
+/// lives in `placement::anomalies`, one pass for the whole roster, so `spawn_min_dist` is honoured
+/// *and* the blob is kept clear of every other anomaly rather than only of other blobs.
+/// Per-blob decorrelation still comes from the monotonic [`Scp999Seq`].
 fn spawn_scp999(
     mut commands: Commands,
     dungeon: Res<Dungeon>,
@@ -158,38 +163,17 @@ fn spawn_scp999(
     assets: Res<AssetServer>,
     mut seq: ResMut<Scp999Seq>,
     mut targets: ResMut<crate::containment::TargetSeq>,
+    sites: Res<crate::placement::anomalies::AnomalySites>,
 ) {
     if sim.scp999.count == 0 {
         return;
     }
-    let mut chosen: Vec<IVec2> = Vec::new();
-    'scan: for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let cell = IVec2::new(x, y);
-            if !dungeon.is_floor(cell) {
-                continue;
-            }
-            if (cell - dungeon.spawn).as_vec2().length() < sim.scp999.spawn_min_dist {
-                continue;
-            }
-            if chosen
-                .iter()
-                .any(|c| (*c - cell).as_vec2().length() < SPAWN_SEP)
-            {
-                continue;
-            }
-            chosen.push(cell);
-            if chosen.len() >= sim.scp999.count {
-                break 'scan;
-            }
-        }
-    }
-
+    // Sites come from the shared level-wide pass (`placement::anomalies`), which already applied this
+    // species' `spawn_min_dist` and — the part the old local scan could not do — kept the blob clear of
+    // every OTHER anomaly, not just of other blobs. It also warns on its own shortfall, so there is
+    // nothing to re-report here.
+    let chosen: Vec<IVec2> = sites.get(ANOMALY_KEY).to_vec();
     if chosen.is_empty() {
-        warn!(
-            "scp999: no floor cell at least {} tiles from spawn — no comfort blob placed",
-            sim.scp999.spawn_min_dist
-        );
         return;
     }
 

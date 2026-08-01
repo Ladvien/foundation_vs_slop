@@ -360,6 +360,19 @@ pub struct SimTuning {
     /// `ContainmentTuning` records: this is **difficulty**, which is exactly what the world genome
     /// exists to explore. What a belief *means* is not evolvable; how much it costs you is.
     pub belief_fear_gain: f32,
+    /// **Minimum distance, in tiles, between any two anomalies — across species.**
+    ///
+    /// The one knob the shared placement pass adds (`placement::anomalies`). Before it there was no
+    /// cross-species spacing anywhere: five species each scanned for cells in isolation, tracking
+    /// separation only from their own kind, and all five landed in the same corner (player capture
+    /// 2026-08-01). Deliberately a single shared value rather than a per-pair matrix — "610 must be
+    /// 30 tiles from a nest but 12 from a bear" is a rule nobody has asked for, and a matrix would be
+    /// five times the config for a distinction the player cannot see.
+    ///
+    /// Evolvable, and it belongs on `SimTuning` for the reason the neighbours record: this is
+    /// **difficulty**. Tightly-packed anomalies make one wing lethal and the rest empty; spread ones
+    /// make the whole level live. That is exactly the axis the world genome exists to explore.
+    pub anomaly_separation: f32,
 }
 
 /// **Containment LOGISTICS** — how many devices the squad carries, how far each verb reaches, how big
@@ -412,6 +425,9 @@ impl Default for SimTuning {
             // no-op, so the goldens do not move for a mechanic nobody enabled; turning it on is a
             // deliberate act that earns its own measured re-pin.
             belief_fear_gain: 0.4,
+            // Cross-species anomaly spacing, tiles. See the field docs; `assets/config/config.ron`
+            // carries the shipped value and the reasoning for 18.
+            anomaly_separation: 18.0,
             fear: FearTuning {
                 per_crab: 0.08,
                 of_anomaly: 0.9,

@@ -190,11 +190,32 @@ const WOUND_R: f32 = 0.09;
 // --- Host-side components (always present on every unit AND every crab) ----------------------------
 
 /// Marks an entity a manca can infest — every squad unit and every crab (a union target set spanning two
-/// creature types). A plain marker so `manca_hunt` can scan `With<Parasitizable>` without caring which
-/// kind of host it is. Added at each host's spawn site, never at runtime, so it never splits a hashed
-/// archetype.
+/// creature types). `manca_hunt` scans `With<Parasitizable>` without caring which kind of host it is.
+/// Added at each host's spawn site, never at runtime, so it never splits a hashed archetype.
+///
+/// # Why it carries the lump's seat
+///
+/// The gestation tell ([`InfestationLump`]) used to sit at one shared `(0.0, 0.45, 0.0)` for every host,
+/// described as "a generic spot that reads on both the unit figurine and a crab". Measuring the GLBs says
+/// it read on neither. A squad unit's root carries `squad::FIGURINE_SCALE` (1.13), so local 0.45 lands at
+/// world **0.51** — thigh height on a figure whose mesh spans world y −0.28..1.85, not the chest a
+/// chestburster wants. A crab's carapace tops out at world **0.408**, so the same 0.45 floated the lump
+/// clear of the shell with a visible gap — which is what the player boxed on 2026-08-01 and read as a
+/// green dot hovering over the crab.
+///
+/// Bodies differ, so "where does a swelling sit on me, and how big is it" is a fact each creature owns —
+/// `squad::UNIT_LUMP_SEAT` and `crab::CRAB_LUMP_SEAT`. These are **value fields present from spawn**,
+/// never toggled, so they cost no archetype churn on the hashed host — the same discipline
+/// [`Infestation`] is built around.
 #[derive(Component)]
-pub struct Parasitizable;
+pub struct Parasitizable {
+    /// Where the lump sits, in the **host root's local space** (so it is pre-multiplied by whatever scale
+    /// that root carries). Measured against the host's GLB bounds; cosmetic, tune by devshot.
+    pub lump_seat: Vec3,
+    /// Non-uniform scale applied to the shared unit-sphere lump mesh — the swelling's size *and* its
+    /// squashed, pressing-outward shape on this host. Multiplied by the twitch pulse each frame.
+    pub lump_scale: Vec3,
+}
 
 /// A host's infestation state — **always present** (a flipped field, not an inserted/removed marker), so
 /// adding/clearing an infestation never changes the host's archetype (the determinism invariant every
@@ -273,9 +294,13 @@ enum BurstPhase {
 }
 
 /// Insert the always-present host parasitism components. Called from every host spawn site (squad units,
-/// crabs) so the two markers are uniform across each host archetype.
-pub fn host_infestation_bundle() -> (Parasitizable, Infestation) {
-    (Parasitizable, Infestation::default())
+/// crabs) so the two components are uniform across each host archetype.
+///
+/// `lump_seat`/`lump_scale` are required rather than defaulted: there is no seat that is right for both a
+/// 1.85 m figurine and a 0.46 m crab, and the old shared constant proved it by being wrong for each in a
+/// different direction. Each caller passes its own measured body constant — see [`Parasitizable`].
+pub fn host_infestation_bundle(lump_seat: Vec3, lump_scale: Vec3) -> (Parasitizable, Infestation) {
+    (Parasitizable { lump_seat, lump_scale }, Infestation::default())
 }
 
 // --- Manca (free parasite) components --------------------------------------------------------------
@@ -602,11 +627,9 @@ fn build_wound_assets(
     commands.insert_resource(WoundAssets { disc, mat });
 }
 
-/// Radius of the subdermal gestation lump (a small swelling on the host body).
+/// Radius of the shared unit lump mesh. Every host scales this by its own `Parasitizable::lump_scale`,
+/// so this is a reference size, not the size any particular swelling renders at.
 const LUMP_R: f32 = 0.09;
-/// Local offset of the lump on the host (upper body / chest area — a generic spot that reads on both the
-/// unit figurine and a crab).
-const LUMP_LOCAL: Vec3 = Vec3::new(0.0, 0.45, 0.0);
 
 /// Shared lump mesh + sickly material so the gestation tell can be attached without reloading (mirrors
 /// [`WoundAssets`]).
@@ -632,11 +655,27 @@ fn build_lump_assets(
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     let mesh = meshes.add(Sphere::new(LUMP_R));
-    // A sickly, faintly glowing swelling — greenish infection pressing up under the skin.
+    // An inflamed, swollen swelling — blood pooling under stretched skin, not a status pip.
+    //
+    // It was `srgb(0.35, 0.42, 0.12)`: a smooth, flat-shaded, emissive olive ball floating clear of the
+    // body. Kätsyri, Mäkäräinen, Förger & Takala 2015 (10.3389/fpsyg.2015.00390) find the strongest
+    // support of any uncanny-valley hypothesis they review — 4 of 4 studies — for perceptual mismatch
+    // between the realism levels of individual *features*. A primitive at a different realism level from
+    // the photo-textured body it sits on reads as UI, which is exactly what happened: the player took it
+    // for a green pickup dot (2026-08-01 capture) rather than for a thing growing inside the crab.
+    //
+    // NOT `palette::GOC_RED`. That is Type Red — *regenerator* — in the GOC colour taxonomy, it is what
+    // hostile bolt fire is, and `palette.rs`'s own test asserts laser fire IS that colour rather than
+    // merely matching it. A parasite is not a regenerator, so borrowing that hue would state something
+    // false in a vocabulary the game uses deliberately. This is a darker, duller, blood-under-skin red
+    // that claims no faction and carries no taxonomy.
     let mat = mats.add(StandardMaterial {
-        base_color: Color::srgb(0.35, 0.42, 0.12),
-        emissive: LinearRgba::rgb(0.10, 0.14, 0.02),
-        perceptual_roughness: 0.7,
+        base_color: Color::srgb(0.62, 0.09, 0.10),
+        // Faint and warm — enough to stay readable in an unlit corridor (the whole point of a tell the
+        // player is meant to spot in time), well under anything that reads as self-lit.
+        emissive: LinearRgba::rgb(0.14, 0.015, 0.015),
+        // Wet and tight, not the dry 0.7 matte of the old ball — a stretched, shiny swelling.
+        perceptual_roughness: 0.42,
         ..default()
     });
     commands.insert_resource(LumpAssets { mesh, mat });
@@ -652,7 +691,7 @@ pub(crate) fn drive_infestation_tell(
     mut commands: Commands,
     time: Res<Time>,
     assets: Option<Res<LumpAssets>>,
-    hosts: Query<(Entity, &Infestation)>,
+    hosts: Query<(Entity, &Infestation, &Parasitizable)>,
     mut lumps: Query<(Entity, &InfestationLump, &mut Transform)>,
 ) {
     let Some(assets) = assets else {
@@ -665,9 +704,11 @@ pub(crate) fn drive_infestation_tell(
     let mut lumped: HashSet<Entity> = HashSet::new();
     for (lump_e, lump, mut tf) in &mut lumps {
         match hosts.get(lump.host) {
-            Ok((_, inf)) if inf.active && !inf.is_erupting() => {
+            Ok((_, inf, host)) if inf.active && !inf.is_erupting() => {
                 lumped.insert(lump.host);
-                tf.scale = Vec3::splat(pulse);
+                // The swelling's own squashed shape times the twitch — so the pulse reads as pressure
+                // building inside a fixed lump, not as a ball breathing.
+                tf.scale = host.lump_scale * pulse;
             }
             // Host still alive but no longer gestating (survived the burst / cured) → remove the tell.
             Ok(_) => {
@@ -677,13 +718,13 @@ pub(crate) fn drive_infestation_tell(
             Err(_) => {}
         }
     }
-    for (host_e, inf) in &hosts {
+    for (host_e, inf, host) in &hosts {
         if inf.active && !inf.is_erupting() && !lumped.contains(&host_e) {
             commands.entity(host_e).with_child((
                 InfestationLump { host: host_e },
                 Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(assets.mat.clone()),
-                Transform::from_translation(LUMP_LOCAL),
+                Transform::from_translation(host.lump_seat).with_scale(host.lump_scale),
                 Visibility::Inherited,
             ));
         }

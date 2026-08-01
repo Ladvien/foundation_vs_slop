@@ -266,6 +266,14 @@ pub(crate) const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 /// `scp1048.spawn_min_dist`.
 const SPAWN_SEP: f32 = 3.0;
 
+/// This species' key in [`crate::placement::anomalies::AnomalySites`] — the shared level-wide placement
+/// pass that decides where every anomaly goes (and keeps them off each other).
+///
+/// Only the **benign original** is placed by that pass. SCP-1048-A/B/C are *built* at runtime inside
+/// their parent's own cell (`replicate.rs`, `SPAWN_JITTER` 0.35 m), which is deliberate — the copies
+/// are made where the bear is. Spacing the original therefore spaces its whole brood.
+pub(crate) const ANOMALY_KEY: &str = "scp1048";
+
 /// Monotonic spawn counter — a unique, ever-increasing seed handed to each bear at birth.
 ///
 /// Mirrors `parasite::MancaSpawnSeq`, and for the same reason: a bear built at runtime shares its
@@ -398,35 +406,18 @@ fn spawn_scp1048(
     mut seq: ResMut<Scp1048SpawnSeq>,
     rules: Res<crate::containment::ContainmentRules>,
     mut targets: ResMut<crate::containment::TargetSeq>,
+    sites: Res<crate::placement::anomalies::AnomalySites>,
 ) {
     if sim.scp1048.count == 0 {
         return;
     }
-    let mut chosen: Vec<IVec2> = Vec::new();
-    'scan: for y in 0..dungeon.height as i32 {
-        for x in 0..dungeon.width as i32 {
-            let cell = IVec2::new(x, y);
-            if !dungeon.is_floor(cell) {
-                continue;
-            }
-            if (cell - dungeon.spawn).as_vec2().length() < sim.scp1048.spawn_min_dist {
-                continue;
-            }
-            if chosen.iter().any(|c| (*c - cell).as_vec2().length() < SPAWN_SEP) {
-                continue;
-            }
-            chosen.push(cell);
-            if chosen.len() >= sim.scp1048.count {
-                break 'scan;
-            }
-        }
-    }
-
+    // Sites come from the shared level-wide pass (`placement::anomalies`), which applied
+    // `spawn_min_dist` and kept the bear clear of every OTHER anomaly. Spacing the original also spaces
+    // its brood: 1048-A/B/C are built inside the parent's own cell (`replicate.rs`), so where the bear
+    // stands is where the copies appear — which is why the player saw 1048 and 1048-A cornered together
+    // with 610 and the boss. It warns on its own shortfall.
+    let chosen: Vec<IVec2> = sites.get(ANOMALY_KEY).to_vec();
     if chosen.is_empty() {
-        warn!(
-            "scp1048: no floor cell at least {} tiles from spawn — no Builder Bear placed",
-            sim.scp1048.spawn_min_dist
-        );
         return;
     }
 

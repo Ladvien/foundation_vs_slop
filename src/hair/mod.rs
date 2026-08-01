@@ -1,9 +1,17 @@
 //! Physics-reactive accent hair for squad figurines — a small number of guide-hair "wisp" clumps
 //! (Ward, Bertails, Kim, Marschner, Cani & Lin, "A Survey on Hair Modeling: Styling, Simulation, and
 //! Rendering", IEEE TVCG 2007, DOI 10.1109/tvcg.2007.30 — the survey's case for simulating a handful
-//! of guide strands rather than every fiber) layered over the static `valkyrie_hair` card already
-//! baked into the figurine rig. Every squad member shares the same `characters/valkyrie.glb` rig
-//! (recolored per outfit — see `squad::recolor_units`), so this applies to all five.
+//! of guide strands rather than every fiber). Every squad member shares the same
+//! `characters/valkyrie.glb` rig (recolored per outfit — see `squad::recolor_units`), so this applies
+//! to all five.
+//!
+//! **These wisps are now the figurine's ONLY hair.** They used to be layered over a static hair card
+//! baked into the rig; the 2026-08-01 decimation removed it (`valkyrie_body.001`, materials
+//! `hair_cap_valkyrie`/`hair_cards_valkyrie`, which were also the rig's only two textures). Nothing
+//! here read that mesh — roots are placed by a hand-tuned offset from the `head` bone, and the "sample
+//! the scalp cap's triangles" upgrade noted below was never wired — so the removal cost this module no
+//! wiring, only its backdrop. `tests/valkyrie_asset.rs` asserts the cap stays gone, because a
+//! re-export that reinstates it would put two sets of hair in the same place.
 //!
 //! Each clump is a short particle chain anchored to the `head` bone. The solver lives in [`sim`] —
 //! **Dynamic Follow-The-Leader** (Müller, Kim & Chentanez, "Fast Simulation of Inextensible Hair and
@@ -35,7 +43,7 @@
 //! `AlphaMode::Mask` — soft lock side-edges, vertical strand-brightness striations, and a frayed,
 //! slit tip, with the hair colour baked directly into the texture. [`build_strand_texture`] is a
 //! line-for-line port of that Python function, so the runtime physics strands read as the SAME
-//! hair-card material family as the static `valkyrie_hair` card sitting right next to them, per the
+//! hair-card material family the rig's own baked card used before it was decimated away, per the
 //! same real-time hair-card literature (Tariq & Bavoil 2008; Scheuermann, "Practical Real-Time Hair
 //! Rendering and Shading", SIGGRAPH 2004, DOI 10.1145/1186223.1186408) rather than inventing a new
 //! look.
