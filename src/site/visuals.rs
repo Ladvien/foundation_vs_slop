@@ -118,8 +118,17 @@ pub struct SiteLayoutRes(pub SiteLayout);
 /// One GLB piece, placed. The scene rides a **cosmetic child** — the same discipline every creature
 /// spawn uses, because an async scene load attaching `Children`/`SceneInstance` to an entity other
 /// systems query is the archetype churn `sim_harness` was hardened against.
-fn place(commands: &mut Commands, assets: &AssetServer, piece: SitePiece, at: Vec3, yaw_deg: f32) {
-    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(piece.glb()));
+fn place(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    kit: &crate::site::kit::SiteKit,
+    piece: SitePiece,
+    at: Vec3,
+    yaw_deg: f32,
+) {
+    // Owned: `AssetPath` would otherwise borrow from the kit resource and escape into the spawn.
+    let scene: Handle<WorldAsset> =
+        assets.load(GltfAssetLabel::Scene(0).from_asset(kit.glb(piece).to_owned()));
     commands
         .spawn((
             SiteVisual,
@@ -135,6 +144,7 @@ fn place(commands: &mut Commands, assets: &AssetServer, piece: SitePiece, at: Ve
 fn spawn_site_geometry(
     mut commands: Commands,
     assets: Res<AssetServer>,
+    kit: Res<crate::site::SiteKitRes>,
     layout: Res<SiteLayoutRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
@@ -142,20 +152,20 @@ fn spawn_site_geometry(
     let l = &layout.0;
     for r in &l.floor {
         for c in r.cells() {
-            place(&mut commands, &assets, SitePiece::Floor, l.cell_center(c), 0.0);
+            place(&mut commands, &assets, &kit, SitePiece::Floor, l.cell_center(c), 0.0);
         }
     }
     for w in &l.walls {
         let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
-        place(&mut commands, &assets, w.piece, at, w.yaw);
+        place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
     }
     for p in &l.props {
-        place(&mut commands, &assets, p.piece, l.point(p.pos), p.yaw);
+        place(&mut commands, &assets, &kit, p.piece, l.point(p.pos), p.yaw);
     }
 
     // The ASYNC door: a wide frame, plus the trigger volume inside it.
     let door_at = l.point(l.door.pos);
-    place(&mut commands, &assets, SitePiece::WallDoorwayWide, door_at, l.door.yaw);
+    place(&mut commands, &assets, &kit, SitePiece::WallDoorwayWide, door_at, l.door.yaw);
     let (hx, hy, hz) = l.door.trigger_half_extents;
     commands.spawn((
         SiteVisual,
@@ -182,7 +192,7 @@ fn spawn_site_geometry(
     // Containment cells: the glazed front, and an empty marker the specimen body will fill.
     for c in &l.cells {
         let at = l.point(c.pos);
-        place(&mut commands, &assets, SitePiece::WallWindow, at, c.yaw);
+        place(&mut commands, &assets, &kit, SitePiece::WallWindow, at, c.yaw);
         commands.spawn((SiteVisual, ContainmentCell { index: c.index, pos: at }, Transform::from_translation(at)));
     }
 
@@ -312,6 +322,7 @@ fn enter_the_door(
 fn fill_containment_cells(
     mut commands: Commands,
     assets: Res<AssetServer>,
+    kit: Res<crate::site::SiteKitRes>,
     site: Option<Res<crate::site::SiteRoot>>,
     rosters: Query<&crate::site::SiteSpecimens>,
     specimens: Query<&crate::containment::Specimen>,
@@ -349,7 +360,10 @@ fn fill_containment_cells(
             Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)).with_scale(Vec3::splat(0.6)),
             Visibility::Inherited,
             WorldAssetRoot(
-                assets.load(GltfAssetLabel::Scene(0).from_asset(SitePiece::SpecimenStandin.glb())),
+                assets.load(
+                    GltfAssetLabel::Scene(0)
+                        .from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
+                ),
             ),
         ));
         let _ = cell.pos;

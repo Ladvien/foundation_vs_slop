@@ -61,7 +61,12 @@ const EXEMPT: &[&str] = &["src/sim_harness.rs", "src/bin/train.rs"];
 /// still exempt) and string-literal contents are blanked by the shared stripper: +8 real sites the
 /// budget had never seen. Measured, not derived — the printed per-file list below the test shows the
 /// current composition.
-const BUDGET: usize = 27;
+// 27 -> 28 on 2026-08-01: `site::SitePlugin::build` panics on a malformed art kit, exactly as
+// `config::ConfigPlugin::build` already does on a malformed `config.ron`
+// (`load_game_config().unwrap_or_else(|e| panic!("config: {e}"))`). Same class of precondition: an
+// authored asset the game cannot start without, where the alternative — a silent default — renders a
+// Site with holes in it and no indication why. Loud at startup beats invisible at runtime.
+const BUDGET: usize = 28;
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };

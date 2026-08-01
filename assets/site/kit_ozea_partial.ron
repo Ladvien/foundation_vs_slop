@@ -1,0 +1,40 @@
+// =================================================================================================
+// SITE-67 ART KIT — Ozea (PARTIAL), and the asset-swap acceptance fixture.
+//
+// Two jobs, deliberately one file:
+//
+//  1. It is the swap PROOF. `site::kit::tests::the_site_kit_is_swappable_by_authoring_one_file`
+//     loads it and asserts the Site's look changed with zero code edits — the same contract
+//     `assets/config/furniture_kenney.ron` proves for the furniture library. Before 2026-08-01 the
+//     Site's kit was a `match` in Rust and this was impossible to state, let alone test.
+//
+//  2. It is the START of the real dressed kit. Only THREE Ozea meshes are converted to GLB so far
+//     (`assets/ozea/floor_grate`, `assets/ozea/floor_light`, `assets/site/ozea/doorframe_double`);
+//     everything else still points at greybox. That is honest rather than aspirational — as more of
+//     the 411-mesh library is converted, rows move over one at a time and this file becomes the
+//     shipped kit.
+//
+// ⚠️ Do NOT copy the containment-cell mapping from the Ozea audit without re-measuring:
+// `docs/2026-07-26-site-hub-and-operative-knowledge.md` §7 records that `Cellule` is 0.30 m — a
+// French *battery* cell, not a room.
+// =================================================================================================
+(
+    // ── Ozea, converted ──
+    floor:             "ozea/floor_grate.glb",
+    wall_doorway_wide: "site/ozea/doorframe_double.glb",
+    floor_button:      "ozea/floor_light.glb",
+
+    // ── Still greybox, awaiting conversion ──
+    wall:              "kenney_prototype-kit/Models/GLB format/wall.glb",
+    wall_corner:       "kenney_prototype-kit/Models/GLB format/wall-corner.glb",
+    wall_doorway:      "kenney_prototype-kit/Models/GLB format/wall-doorway.glb",
+    wall_window:       "kenney_prototype-kit/Models/GLB format/wall-window-large.glb",
+    wall_low:          "kenney_prototype-kit/Models/GLB format/wall-low.glb",
+    column:            "kenney_prototype-kit/Models/GLB format/column.glb",
+    crate_:            "kenney_prototype-kit/Models/GLB format/crate-color.glb",
+    pipe:              "kenney_prototype-kit/Models/GLB format/pipe.glb",
+    pipe_corner:       "kenney_prototype-kit/Models/GLB format/pipe-corner.glb",
+    area_decal:        "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb",
+    arrow_decal:       "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb",
+    specimen_standin:  "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb",
+)

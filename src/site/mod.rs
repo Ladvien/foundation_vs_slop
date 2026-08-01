@@ -44,6 +44,7 @@
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
 pub mod aperture;
+pub mod kit;
 pub mod layout;
 pub mod nav;
 pub mod o5;
@@ -114,8 +115,21 @@ pub struct SiteSpecimens(Vec<Entity>);
 /// this codebase rejects. `Startup` runs exactly once per process and needs no guard.
 pub struct SitePlugin;
 
+/// The Site's art kit, loaded once at plugin build.
+///
+/// A resource rather than a `const`, because which kit is loaded is now a choice — greybox today, a
+/// dressed kit later, and a test may build against either.
+#[derive(Resource, Deref)]
+pub struct SiteKitRes(pub kit::SiteKit);
+
 impl Plugin for SitePlugin {
     fn build(&self, app: &mut App) {
+        // One path, no fallback: a malformed kit is a loud startup failure, exactly like
+        // `config::load_game_config`. Falling back to a default here would render a Site with holes
+        // in it and no indication why.
+        let k = kit::load_site_kit(kit::SITE_KIT_PATH)
+            .unwrap_or_else(|e| panic!("site kit: {e}"));
+        app.insert_resource(SiteKitRes(k));
         app.add_systems(Startup, spawn_site);
     }
 }

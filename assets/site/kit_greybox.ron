@@ -1,0 +1,41 @@
+// =================================================================================================
+// SITE-67 ART KIT — greybox (Kenney prototype kit)
+//
+// Which GLB each `site::pieces::SitePiece` wears. This was a `match` in Rust until 2026-08-01; making
+// it data means the Site is re-skinnable by authoring a file, which is how the rest of the game
+// already treats a kit (`placement::manifest` + `assets/config/furniture_kenney.ron`). ONE kit
+// mechanism in the game rather than two.
+//
+// This kit is deliberately GREYBOX: readable blocks, not art. It is the fallback every test builds
+// against, and it stays shipped even once a dressed kit exists — a hand-authored hub has to be
+// debuggable, and you cannot see a layout bug through good lighting.
+//
+// SCHEMA. Every piece is a required named field (`deny_unknown_fields`), so a kit that forgets one
+// fails at PARSE time naming the field. The alternative — a map — would turn a forgotten piece into
+// an invisible wall at runtime, which is precisely the bug that survives a playtest.
+//
+// Two rules the validator enforces, both about SILENT failures:
+//   * every path must end `.glb` (docs/artist_guide.md §3 — glTF 2.0 binary only);
+//   * no two pieces may share a mesh, or geometry the layout distinguishes renders identically and
+//     the hub stops being learnable.
+// =================================================================================================
+(
+    // ── Structure ──
+    floor:             "kenney_prototype-kit/Models/GLB format/floor-square.glb",
+    wall:              "kenney_prototype-kit/Models/GLB format/wall.glb",
+    wall_corner:       "kenney_prototype-kit/Models/GLB format/wall-corner.glb",
+    wall_doorway:      "kenney_prototype-kit/Models/GLB format/wall-doorway.glb",
+    wall_doorway_wide: "kenney_prototype-kit/Models/GLB format/wall-doorway-wide.glb",
+    wall_window:       "kenney_prototype-kit/Models/GLB format/wall-window-large.glb",
+    wall_low:          "kenney_prototype-kit/Models/GLB format/wall-low.glb",
+    column:            "kenney_prototype-kit/Models/GLB format/column.glb",
+
+    // ── Dressing ──
+    crate_:            "kenney_prototype-kit/Models/GLB format/crate-color.glb",
+    pipe:              "kenney_prototype-kit/Models/GLB format/pipe.glb",
+    pipe_corner:       "kenney_prototype-kit/Models/GLB format/pipe-corner.glb",
+    floor_button:      "kenney_prototype-kit/Models/GLB format/button-floor-square.glb",
+    area_decal:        "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb",
+    arrow_decal:       "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb",
+    specimen_standin:  "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb",
+)

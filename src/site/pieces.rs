@@ -70,33 +70,10 @@ pub enum SitePiece {
 }
 
 impl SitePiece {
-    /// The GLB this piece loads.
-    pub fn glb(self) -> &'static str {
-        use SitePiece::*;
-        match self {
-            Floor => "kenney_prototype-kit/Models/GLB format/floor-square.glb",
-            Wall => "kenney_prototype-kit/Models/GLB format/wall.glb",
-            WallCorner => "kenney_prototype-kit/Models/GLB format/wall-corner.glb",
-            WallDoorway => "kenney_prototype-kit/Models/GLB format/wall-doorway.glb",
-            WallDoorwayWide => "kenney_prototype-kit/Models/GLB format/wall-doorway-wide.glb",
-            WallWindow => "kenney_prototype-kit/Models/GLB format/wall-window-large.glb",
-            WallLow => "kenney_prototype-kit/Models/GLB format/wall-low.glb",
-            Column => "kenney_prototype-kit/Models/GLB format/column.glb",
-            Crate => "kenney_prototype-kit/Models/GLB format/crate-color.glb",
-            Pipe => "kenney_prototype-kit/Models/GLB format/pipe.glb",
-            PipeCorner => "kenney_prototype-kit/Models/GLB format/pipe-corner.glb",
-            FloorButton => "kenney_prototype-kit/Models/GLB format/button-floor-square.glb",
-            AreaDecal => "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb",
-            ArrowDecal => "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb",
-            SpecimenStandin => "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb",
-        }
-    }
+    // `glb()` lived here until 2026-08-01 and now lives in `site::kit`: which mesh a piece wears is
+    // ART, and art belongs in an authored file, not a `match`. See `kit.rs` for why the Site stopped
+    // being the one part of the game whose kit was a code property.
 
-    /// Vertical scale to apply at spawn.
-    ///
-    /// `1.0` means "the kit's native height is already right for this piece's job" — a crate is a crate
-    /// at 0.5 m, a floor plane has no height, and a floor decal must stay flat. Anything that stands up
-    /// as architecture is scaled to the game's wall contract.
     pub fn y_scale(self) -> f32 {
         use SitePiece::*;
         match self {
@@ -141,12 +118,15 @@ mod tests {
 
     #[test]
     fn every_piece_maps_to_a_glb_that_exists_on_disk() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped greybox kit loads");
         // No precedent in the repo for this check, and it is the single most likely greybox failure:
         // a mistyped path is a silently missing prop at runtime, discovered by squinting at a screenshot.
         // Costs nothing to catch at `cargo test` instead. Paths are cwd-relative like `GAME_CONFIG_PATH`.
-        let missing: Vec<&str> = SitePiece::ALL
-            .iter()
-            .map(|p| p.glb())
+        let missing: Vec<&str> = kit
+            .entries()
+            .into_iter()
+            .map(|(_, glb)| glb)
             .filter(|rel| !std::path::Path::new("assets").join(rel).exists())
             .collect();
         assert!(missing.is_empty(), "Site pieces name GLBs that are not in assets/: {missing:?}");
@@ -176,13 +156,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_two_pieces_share_a_glb() {
-        // Not a correctness requirement, but a duplicate is almost always a copy-paste in the table
-        // that silently makes one piece render as another.
-        let mut seen = std::collections::HashSet::new();
-        for p in SitePiece::ALL {
-            assert!(seen.insert(p.glb()), "{p:?} duplicates another piece's GLB");
-        }
-    }
+    // `no_two_pieces_share_a_glb` moved to `kit::validate_site_kit` — it is a property of a KIT, and
+    // every kit must satisfy it, not just the one that used to be hardcoded here.
 }
