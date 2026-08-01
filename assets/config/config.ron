@@ -105,7 +105,7 @@
                 // this kit, so nothing anchors to the ceiling now — rooms light by wall sconces + desk lamps.
                 ( key: "lamp_tall", glb: "low_poly_furniture/glb/Lights/Ceiling Light.glb",
                   category: "light", tags: ["decor"], role: Scatter(surface: "worktop"),
-                  footprint: (0.35, 0.35), affordances: ["emit"], height: 0.5 ),
+                  footprint: (0.61, 0.61), affordances: ["emit"], height: 0.5 ),
                 ( key: "wall_light", glb: "low_poly_furniture/glb/Lights/Wall Light.glb",
                   category: "light", tags: ["wall"], role: Anchor(host: Wall),
                   footprint: (0.38, 0.20), affordances: ["emit"] ),
@@ -173,11 +173,17 @@
                   category: "appliance", tags: ["kitchen"], role: Freestanding, footprint: (0.88, 0.61),
                   affordances: ["store", "back_to_wall"], pivot: (-0.157, -0.136) ),
                 // A TV rests on a media unit / table — a Scatter prop; footprint is the flatscreen STAND's
-                // shallow contact area so it seats on a ~0.6 m-deep desk without overhanging.
+                // Footprint is the mesh's MEASURED extent (0.88 x 0.80), not a contact patch. It read
+                // `(0.88, 0.30)` with the comment "shallow contact area so it seats on a ~0.6 m-deep
+                // desk without overhanging" — which is backwards: shrinking the reservation does not
+                // shrink the chassis, it just stops the solver reserving room for it. 0.25 m hung off
+                // each side, and on a desk backed to a wall that rear quarter-metre went through the
+                // wall (player capture, 2026-08-01). A TV that does not fit a 0.6 m desk must go on a
+                // deeper support or not be placed — `tests/prop_footprint_contract.rs` pins this.
                 // "screen" gives the TV an eery flickering cool-cyan LOS glow (windowed-only; see
                 // light.rs `attach_screen_lights`). "emit" keeps it feeding the gameplay LightField.
                 ( key: "tv", glb: "low_poly_furniture/glb/Electronics/TV A.glb",
-                  category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.30),
+                  category: "appliance", tags: ["living"], role: Scatter(surface: "support"), footprint: (0.88, 0.80),
                   affordances: ["emit", "screen"], height: 0.50 ),
 
                 // ---- Retro CRT televisions (assets/retro_tvs/, converted by scripts/import_retro_tvs.py).
