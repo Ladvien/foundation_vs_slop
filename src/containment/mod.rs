@@ -51,6 +51,9 @@ pub struct ContainmentConfig {
     pub scp999: ContainmentRule,
     /// SCP-1048's out-watch basin (FVS-C-3).
     pub scp1048: ContainmentRule,
+    /// The watch feed (FVS-C-7) — the `AtMost` inverse of `scp1048`'s rule above. Contained by
+    /// depriving it of an audience, which is the same channel with the sign flipped.
+    pub broadcast: ContainmentRule,
     /// SCP-150's rule (FVS-C-4).
     ///
     /// Carried for the *specimen*, not for a basin: the parasite is extracted by curing its host

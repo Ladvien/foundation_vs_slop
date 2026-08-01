@@ -329,6 +329,11 @@ pub fn line_for(subject: Subject, claim: Claim) -> &'static str {
         (Subject::Flesh, Claim::Lethal) => "Don't let it touch you. That's all it wants.",
         (Subject::Flesh, Claim::Harmless) => "It just sits there. It never came at us.",
         (Subject::Flesh, Claim::Containable) => "You don't kill it. You wall the room off and wait.",
+        // The watch feed. "Containable" is the whole mechanic in a sentence, and it has to fight
+        // the instinct the other two gaze anomalies build — with 1048 you stare it down.
+        (Subject::WatchFeed, Claim::Lethal) => "It makes more of them. The longer you look.",
+        (Subject::WatchFeed, Claim::Harmless) => "It's just a screen. It never did anything.",
+        (Subject::WatchFeed, Claim::Containable) => "Don't look at it. That's it. Don't look.",
         (Subject::BearCopies, Claim::Lethal) => "The copies aren't like the bear. They'll kill you.",
         (Subject::BearCopies, Claim::Harmless) => "The copies never touched me.",
         (Subject::BearCopies, Claim::Containable) => "You out-stare the copies. They stop building.",

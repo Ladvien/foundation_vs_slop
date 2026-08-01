@@ -204,6 +204,7 @@ pub fn subject_name(s: crate::knowledge::Subject) -> &'static str {
         Subject::BuilderBear => "SCP-1048",
         Subject::BearCopies => "SCP-1048-A",
         Subject::Watcher => "THE WATCHER",
+        Subject::WatchFeed => "THE WATCH FEED",
     }
 }
 
