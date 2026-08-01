@@ -31,6 +31,7 @@ pub mod autogib;
 pub mod behavior_tuning;
 pub mod blood_lens;
 pub mod broadcast;
+pub mod lure;
 pub mod ai;
 pub mod ai_overlay;
 pub mod almond_water;
@@ -364,6 +365,7 @@ pub fn run() {
                 // Gameplay half — also registered in `sim_harness`, same split as the bear.
                 scp610::Scp610Plugin,
             broadcast::BroadcastPlugin,
+            lure::LurePlugin,
             ),
             laser::LaserPlugin,
             impact_fx::ImpactFxPlugin,

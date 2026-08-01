@@ -244,6 +244,30 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   cell now actually reaches the world.
   *Done when:* the objective either discriminates across the archive's top band, or is documented as
   deliberately saturating with the reason. · *Deps:* — · *Touches:* `src/squad_ai/level_quality.rs` · *Reading:* [QD-PCG], [ME]
+- **FVS-N-30 — The watch feed may never fire in passive play (FOUND 2026-08-01, by a golden that went backwards)** · S
+  Found by an accident worth recording. FVS-C-7's watch feed moved the goldens; that was attributed to
+  the feed **generating a crab** inside the 1800-tick golden window (a crab carries `Health`+`Transform`
+  and enters `snapshot_hash`; a screen does not). Hours later FVS-B-10's lure moved them **back to
+  exactly the pre-watch-feed values** — and the lure does nothing at all in a golden run (nobody throws
+  one, so `tick_lures` iterates an empty query). It contributes two schedule nodes and no gameplay.
+  **A pure scheduling nudge cannot un-generate a crab.** So the earlier attribution was incomplete: what
+  actually changed is that **the feed no longer charges to full inside the window**, and a perturbation
+  that small was enough to flip it.
+  That makes activation *marginal*: at `charge_rate: 0.14` the feed needs ~7 s of **sustained** ambient
+  ATTENTION above `watch_threshold: 0.30`, and whether an unscripted squad ever looks that long at a
+  screen 16 tiles off their route is close to a coin flip. A player may never see the anomaly do
+  anything, which for the first place SCP-9191's thesis touches gameplay is the wrong outcome.
+  **Not a correctness bug** — the mechanic is proven by
+  `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops`, which floods attention
+  deliberately and is unaffected. It is a *balance* finding, and the knobs are already evolvable.
+  *Cheapest probe:* instrument a passive run and count feed activations across the held-in seeds. If it
+  is near zero, either raise `charge_rate`, lower `watch_threshold`, or place screens ON the route
+  rather than `spawn_min_dist` away from it — the third is the one that changes the fiction least.
+  ⚠️ **The generalisable lesson is about attribution, not the feed:** "the goldens moved and here is a
+  plausible story" is not the same as "here is the cause". The ablation table in `tests/replay.rs`
+  ruled out two wrong causes and still landed on an incomplete third, because no ablation asked *did
+  the feed actually fire?*. Assert the mechanism, not just the hash.
+  · *Deps:* — · *Touches:* `assets/config/config.ron` (`sim.broadcast`), `src/broadcast.rs` · *Reading:* — (no corpus resource)
 - **FVS-I-6 — Audit descriptors BEFORE adding any of I-7..I-10 (PREREQUISITE)** · M · *determinism: offline* · ✅ **STATIC AUDIT RUN 2026-07-30 → `docs/descriptor_audit.md`**
   > **Read the audit before touching I-7..I-10 — it changes all four.** Headlines:
   > * **I-10 is STALE** — `BreedingTuning` (7) and `ParasiteTuning` (14) are *already* decoded in

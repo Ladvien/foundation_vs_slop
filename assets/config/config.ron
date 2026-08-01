@@ -675,6 +675,20 @@
             decay_rate: 0.10,       // ~10 s of being ignored undoes a full charge
             spawn_min_dist: 16.0,   // tiles from the squad spawn — found, not handed over
         ),
+        // The thrown lure (src/lure.rs) — noise the player SPENDS. Pulls the swarm off a route so
+        // noise discipline becomes a trade rather than a tax.
+        lure: (
+            supply: 3,                  // lures per expedition — scarce enough to be a decision
+            deposit: 0.9,               // per-tick NOISE_SWARM at full strength. Above
+                                        // `audio.investigate_threshold` so one lure is unambiguously
+                                        // audible; the swarm should never half-hear a thrown lure.
+            duration_ticks: 240,        // 4 s of shouting at 60 Hz — long enough to walk a corridor
+            habituation_step: 0.25,     // each throw costs the NEXT one a quarter of its voice, so the
+                                        // 4th in quick succession is inaudible. This is what stops the
+                                        // verb being a solved button (throw, walk past, repeat).
+            habituation_recovery: 0.0008, // ~20 s to forget one throw — long enough that spamming is
+                                        // punished, short enough that a careful player gets it back
+        ),
         scp999: (
             count: 1,               // comfort blobs seeded into the level at start
             move_speed: 2.2,        // ooze speed toward the most-anxious member (world units/s)

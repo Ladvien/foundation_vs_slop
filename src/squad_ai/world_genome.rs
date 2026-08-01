@@ -44,7 +44,7 @@ use crate::sim::{
 /// to 6 dials when the mold→LOS occlusion coupling was removed — see `mold::MoldConfig`. Breeding dropped
 /// to 7 dials when the population cap and local crowding gate were removed — the meat economy is the
 /// swarm's only size lever.)
-pub const N: usize = 151;
+pub const N: usize = 156;
 
 /// Hard `(min, max)` per knob, in the **same order** as [`encode`] walks the config. Each shipped value
 /// sits comfortably inside its range; the extremes are playable-but-different, never degenerate. This
@@ -140,6 +140,17 @@ static BOUNDS: [(f32, f32); N] = [
     (0.01, 1.00),  // charge_rate (emissions per second of sustained attention)
     (0.01, 1.00),  // decay_rate (charge lost per second while ignored)
     (4.0, 40.0),   // spawn_min_dist — same floor/cap reasoning as scp999's above
+    // ── SimTuning::lure (FVS-B-10 stage 1 — noise the player SPENDS) ──
+    //    All five reach the world archive's `deaths` axis through the swarm's routing: a lure pulls
+    //    creatures off the squad, which changes who dies. `habituation_*` are the interesting pair —
+    //    they set whether the verb is a rhythm or a solved button, which is a difficulty property,
+    //    not a cosmetic one. Bounds anchored at 0 so the authored values round-trip bit-exactly
+    //    (`authored_world_config_override_is_a_noop` is bit-exact, not tolerant).
+    (0.0, 8.0),    // supply (u32) — lures per expedition; 0 disables the verb, a real design point
+    (0.0, 2.0),    // deposit — per-tick NOISE_SWARM at full strength
+    (0.0, 960.0),  // duration_ticks (u32) — 16 s at 60 Hz upper bound
+    (0.0, 1.0),    // habituation_step — 1.0 means one throw exhausts the trick entirely
+    (0.0, 0.01),   // habituation_recovery per tick — at the top the swarm forgets in ~100 ticks
     // ── SimTuning::scp1048 (the Builder Bear family — the one creature that BUILDS more of itself) ──
     // Four knobs are floored at exactly 0.0 (strike_damage, rage_dread_rate, scream_dread,
     // growth_decay). That is deliberate and `sim::validate_tuning` matches it with `non_negative`
@@ -346,6 +357,12 @@ pub fn encode(
     v.push(sim.broadcast.charge_rate);
     v.push(sim.broadcast.decay_rate);
     v.push(sim.broadcast.spawn_min_dist);
+    // lure (the thrown noisemaker), in BOUNDS order.
+    v.push(sim.lure.supply as f32);
+    v.push(sim.lure.deposit);
+    v.push(sim.lure.duration_ticks as f32);
+    v.push(sim.lure.habituation_step);
+    v.push(sim.lure.habituation_recovery);
     // SCP-1048 Builder Bear family.
     v.push(sim.scp1048.count as f32);
     v.push(sim.scp1048.spawn_min_dist);
@@ -563,6 +580,16 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             charge_rate: f!(),
             decay_rate: f!(),
             spawn_min_dist: f!(),
+        },
+        // The thrown lure. `supply` may decode to 0 — a run without the verb is a legitimate point in
+        // the space, and the search should be free to find that the swarm is more interesting when the
+        // player cannot bribe it.
+        lure: crate::sim::LureTuning {
+            supply: f!().round().max(0.0) as u32,
+            deposit: f!(),
+            duration_ticks: f!().round().max(0.0) as u32,
+            habituation_step: f!(),
+            habituation_recovery: f!(),
         },
         // SCP-1048 Builder Bear family. `count` and `max_bears` round to >= 1 (a search world always
         // has a bear to exercise the mechanic, and a cap of 0 could never hold the one it seeded).

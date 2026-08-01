@@ -33,6 +33,8 @@ pub enum ArmedTool {
     Quarantine,
     /// Left-click orders the squad to cap the nest under the cursor.
     Cap,
+    /// Left-click throws a noisemaker onto the floor under the cursor (`crate::lure`).
+    Lure,
 }
 
 /// Capture devices left this expedition. Zeroed from tuning on `OnEnter(RunState::Active)`.

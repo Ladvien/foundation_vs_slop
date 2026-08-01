@@ -70,6 +70,8 @@ pub struct VerbChipLabel(pub Verb);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verb {
     Device,
+    /// Throw a noisemaker to pull the swarm off a route (`crate::lure`, FVS-B-10).
+    Lure,
     Quarantine,
     Cap,
     HoldFire,
@@ -84,8 +86,8 @@ pub enum Verb {
 }
 
 impl Verb {
-    pub const ALL: [Verb; 6] =
-        [Verb::Device, Verb::Quarantine, Verb::Cap, Verb::HoldFire, Verb::Sensor, Verb::Push];
+    pub const ALL: [Verb; 7] =
+        [Verb::Device, Verb::Quarantine, Verb::Cap, Verb::Lure, Verb::HoldFire, Verb::Sensor, Verb::Push];
 
     /// The registry action this verb is bound to. The chip's printed key is read from the **live**
     /// `KeyBindings` through this — see [`Verb::key`].
@@ -95,6 +97,7 @@ impl Verb {
             Verb::Device => Action::ArmDevice,
             Verb::Quarantine => Action::ArmQuarantine,
             Verb::Cap => Action::ArmCap,
+            Verb::Lure => Action::ArmLure,
             Verb::HoldFire => Action::ToggleHoldFire,
             Verb::Sensor => Action::DeploySensor,
             Verb::Push => Action::TogglePush,
@@ -130,6 +133,7 @@ impl Verb {
             Verb::Device => "THROW A CAPTURE DEVICE AT AN ANOMALY. TAKES IT ALIVE.",
             Verb::Quarantine => "BOUND A REGION. FOR OUTBREAKS THAT HAVE NO BODY TO CATCH.",
             Verb::Cap => "SEAL A NEST. STOPS REINFORCEMENTS; YIELDS NOTHING.",
+            Verb::Lure => "THROW A NOISEMAKER. PULLS THE SWARM; THEY LEARN THE TRICK.",
             Verb::HoldFire => "STOP SHOOTING. SOME ANOMALIES ARE ONLY CONTAINED THIS WAY.",
             Verb::Sensor => "AN ENGINEER DEPLOYS A DRONE. SHOWS THE MAP WHILE IT LASTS.",
             Verb::Push => "THE SELECTION CLOSES ON WHAT IT SEES. THEY HOLD OTHERWISE.",
@@ -141,6 +145,7 @@ impl Verb {
             Verb::Device => "DEVICE",
             Verb::Quarantine => "QUARANTINE",
             Verb::Cap => "CAP NEST",
+            Verb::Lure => "THROW LURE",
             Verb::HoldFire => "HOLD FIRE",
             Verb::Sensor => "SENSOR",
             Verb::Push => "ADVANCE",
@@ -153,6 +158,7 @@ impl Verb {
             Verb::Device => ArmRequest::Toggle(ArmedTool::Device),
             Verb::Quarantine => ArmRequest::Toggle(ArmedTool::Quarantine),
             Verb::Cap => ArmRequest::Toggle(ArmedTool::Cap),
+            Verb::Lure => ArmRequest::Toggle(ArmedTool::Lure),
             Verb::HoldFire => ArmRequest::ToggleWeaponsTight,
             Verb::Sensor => ArmRequest::DeploySensor,
             Verb::Push => ArmRequest::TogglePush,
@@ -165,6 +171,7 @@ impl Verb {
             (Verb::Device, ArmedTool::Device)
                 | (Verb::Quarantine, ArmedTool::Quarantine)
                 | (Verb::Cap, ArmedTool::Cap)
+                | (Verb::Lure, ArmedTool::Lure)
         )
     }
 }
@@ -308,10 +315,14 @@ fn chip_label(verb: Verb, charges: Option<u32>, tight: bool, cooldown: f32, key:
     }
 }
 
-fn charges_for(verb: Verb, devices: u32, quarantines: u32) -> Option<u32> {
+fn charges_for(verb: Verb, devices: u32, quarantines: u32, lures: u32) -> Option<u32> {
     match verb {
         Verb::Device => Some(devices),
         Verb::Quarantine => Some(quarantines),
+        // The lure IS a per-expedition supply, so it shows a charge count like the other two. Its
+        // habituation is deliberately NOT shown here — a second number on the chip would imply two
+        // resources when there is one, and the swarm's boredom is meant to be felt, not read.
+        Verb::Lure => Some(lures),
         // Cap has no supply; HoldFire is a stance; the Sensor's cost is a COOLDOWN, not a charge
         // (see `crate::sensor` on why it is time rather than an economy).
         Verb::Cap | Verb::HoldFire | Verb::Sensor | Verb::Push => None,
@@ -321,6 +332,7 @@ fn charges_for(verb: Verb, devices: u32, quarantines: u32) -> Option<u32> {
 fn update_chips(
     devices: Res<DeviceSupply>,
     quarantines: Res<QuarantineSupply>,
+    lures: Res<crate::lure::LureSupply>,
     tight: Res<WeaponsTight>,
     sensor_cd: Res<crate::sensor::SensorCooldown>,
     pushers: Query<(), (With<crate::squad::Unit>, With<crate::squad::PushOrder>)>,
@@ -340,7 +352,7 @@ fn update_chips(
         };
         let want = chip_label(
             label.0,
-            charges_for(label.0, devices.0, quarantines.0),
+            charges_for(label.0, devices.0, quarantines.0, lures.0),
             latched,
             sensor_cd.0,
             label.0.key(&bindings),
@@ -365,6 +377,7 @@ fn style_chips(
     tight: Res<WeaponsTight>,
     devices: Res<DeviceSupply>,
     quarantines: Res<QuarantineSupply>,
+    lures: Res<crate::lure::LureSupply>,
     pushers: Query<(), (With<crate::squad::Unit>, With<crate::squad::PushOrder>)>,
     mut chips: Query<(&VerbChip, &Hovered, &mut BackgroundColor, &mut BorderColor)>,
     mut labels: Query<(&VerbChipLabel, &mut TextColor)>,
@@ -375,7 +388,7 @@ fn style_chips(
             || (verb == Verb::HoldFire && tight.0)
             || (verb == Verb::Push && pushing)
     };
-    let spent = |verb: Verb| charges_for(verb, devices.0, quarantines.0) == Some(0);
+    let spent = |verb: Verb| charges_for(verb, devices.0, quarantines.0, lures.0) == Some(0);
 
     for (chip, hovered, mut bg, mut border) in &mut chips {
         let verb = chip.0;
@@ -527,7 +540,7 @@ mod tests {
         // player that the keyboard route does not exist.
         let b = crate::input::KeyBindings::default();
         for v in Verb::ALL {
-            let l = chip_label(v, charges_for(v, 3, 1), false, 0.0, v.key(&b));
+            let l = chip_label(v, charges_for(v, 3, 1, 2), false, 0.0, v.key(&b));
             assert!(l.starts_with(v.key(&b)), "{v:?} chip must lead with its key: {l}");
         }
 
@@ -567,7 +580,7 @@ mod tests {
             let l = chip_label(Verb::Sensor, None, false, cd, 'V');
             assert!(!l.contains(" x"), "{l} reads as a spendable charge");
         }
-        assert_eq!(charges_for(Verb::Sensor, 9, 9), None);
+        assert_eq!(charges_for(Verb::Sensor, 9, 9, 2), None);
     }
 
     #[test]
@@ -640,7 +653,7 @@ mod tests {
         assert!(on.contains('\u{2022}'), "the latched stance is marked: {on}");
         assert_ne!(off, on);
         assert!(!on.contains("ADVANCE x"), "never a count");
-        assert_eq!(charges_for(Verb::Push, 9, 9), None);
+        assert_eq!(charges_for(Verb::Push, 9, 9, 2), None);
     }
 
     #[test]

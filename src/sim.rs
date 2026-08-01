@@ -169,6 +169,36 @@ pub struct ParasiteTuning {
     pub manip_dark_gain: f32,
 }
 
+/// The thrown lure (`crate::lure`) — noise the player SPENDS rather than only leaks (FVS-B-10).
+///
+/// `habituation_step` is the knob that matters: without it the verb is a solved button (throw, walk
+/// past, repeat). With it the swarm remembers being tricked, and the verb becomes a resource with a
+/// rhythm. See `docs/2026-08-01-acoustic-program.md`.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LureTuning {
+    /// Lures carried per expedition.
+    pub supply: u32,
+    /// Per-tick `NOISE_SWARM` deposit at full strength, before habituation scaling.
+    pub deposit: f32,
+    /// How long one lure shouts, in fixed ticks.
+    pub duration_ticks: u32,
+    /// Habituation added per throw, in `[0,1]`. At `0.25` the fourth lure of a run is inaudible until
+    /// the swarm has forgotten some of the earlier ones.
+    pub habituation_step: f32,
+    /// Habituation recovered per fixed tick — how fast the swarm forgets.
+    pub habituation_recovery: f32,
+}
+
+/// The authored lure defaults, shared by `SimTuning::default()` and the genome's decode target.
+pub const LURE_DEFAULT: LureTuning = LureTuning {
+    supply: 3,
+    deposit: 0.9,
+    duration_ticks: 240,
+    habituation_step: 0.25,
+    habituation_recovery: 0.0008,
+};
+
 /// The watch feed (`crate::broadcast`) — a screen that generates while it is watched.
 ///
 /// Every knob is a *difficulty* dial rather than a rule, which is why they live here in `sim:` and
@@ -319,6 +349,7 @@ pub struct SimTuning {
     pub parasite: ParasiteTuning,
     pub scp999: Scp999Tuning,
     pub broadcast: BroadcastTuning,
+    pub lure: LureTuning,
     pub scp1048: Scp1048Tuning,
     pub containment: ContainmentTuning,
     /// **How hard an operative's beliefs bite** (FVS-O-2). Scales the FEAR of an operative who is near
@@ -444,6 +475,7 @@ impl Default for SimTuning {
                 manip_dark_gain: 3.0,
             },
             broadcast: BROADCAST_DEFAULT,
+            lure: LURE_DEFAULT,
         scp999: Scp999Tuning {
                 count: 1,
                 move_speed: 2.2,      // a touch faster than the crab crawl (1.8) so it can reach members

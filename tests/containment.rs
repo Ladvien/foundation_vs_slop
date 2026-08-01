@@ -1215,3 +1215,110 @@ fn the_feed_is_contained_by_looking_away_not_by_staring() {
         cfg.sim.broadcast.watch_threshold
     );
 }
+
+/// **FVS-B-10 stage 1's acceptance: a thrown lure actually pulls the swarm.**
+///
+/// The whole point of the verb is that noise becomes a resource you spend, so the assertion has to be
+/// that creatures *go somewhere they otherwise would not*. Asserting only "a deposit landed in the
+/// channel" would pass on machinery that no brain reads — which is exactly the state the acoustic
+/// layer was in before this (`docs/2026-08-01-acoustic-program.md`).
+#[test]
+fn a_thrown_lure_draws_the_swarm_toward_it() {
+    use foundation_vs_slop::ai::field::FieldId;
+    use foundation_vs_slop::lure::{throw_lure, Habituation, Lure, LureSeq, LureSupply};
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 120);
+
+    // Drop the lure well clear of the squad so any convergence is the lure's doing, not the squad's.
+    let dungeon = app.world().resource::<foundation_vs_slop::dungeon::Dungeon>();
+    let spawn = dungeon.spawn;
+    let target = (0..dungeon.width as i32)
+        .flat_map(|x| (0..dungeon.height as i32).map(move |y| IVec2::new(x, y)))
+        .filter(|c| dungeon.is_floor(*c))
+        .find(|c| (*c - spawn).as_vec2().length() > 25.0)
+        .expect("a floor cell far from spawn");
+    let pos = dungeon.cell_center(target);
+
+    let tuning = app.world().resource::<foundation_vs_slop::sim::SimTuning>().lure;
+    let before = crab_distance_sum(&mut app, pos);
+
+    app.world_mut().resource_scope(|world, mut supply: Mut<LureSupply>| {
+        world.resource_scope(|world, mut hab: Mut<Habituation>| {
+            world.resource_scope(|world, mut seq: Mut<LureSeq>| {
+                let mut commands = world.commands();
+                throw_lure(&mut commands, pos, &tuning, &mut supply, &mut hab, &mut seq)
+                    .expect("the authored supply is non-zero, so a throw must succeed");
+            });
+        });
+    });
+    app.update();
+    assert_eq!(
+        app.world_mut().query::<&Lure>().iter(app.world()).count(),
+        1,
+        "the lure did not spawn"
+    );
+
+    step(&mut app, &cfg, 600);
+    // The channel must actually carry it — a lure that deposits nothing cannot pull anything, and
+    // this separates "the brain ignored it" from "nothing was ever written".
+    let din = app
+        .world()
+        .resource::<foundation_vs_slop::ai::field::Stig>()
+        .sample(FieldId::NOISE_SWARM, app.world().resource(), pos);
+    assert!(din > 0.0, "the lure wrote nothing into NOISE_SWARM");
+
+    let after = crab_distance_sum(&mut app, pos);
+    assert!(
+        after < before,
+        "the swarm did not close on the lure (summed distance {before:.1} -> {after:.1}) — the verb \
+         is machinery the brain does not read"
+    );
+}
+
+/// Total crab distance to `pos`. A sum rather than a mean so a despawned crab cannot flatter the
+/// result by leaving the average.
+fn crab_distance_sum(app: &mut App, pos: Vec3) -> f32 {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&Transform, With<foundation_vs_slop::crab::Crab>>();
+    q.iter(world).map(|tf| tf.translation.distance(pos)).sum()
+}
+
+/// Habituation is the mechanic, not a detail: without it the verb is a solved button.
+#[test]
+fn the_swarm_learns_the_trick_so_each_lure_is_quieter() {
+    use foundation_vs_slop::lure::{throw_lure, Habituation, Lure, LureSeq, LureSupply};
+    let _serial = serial_guard();
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app(&cfg);
+    step(&mut app, &cfg, 60);
+
+    let tuning = app.world().resource::<foundation_vs_slop::sim::SimTuning>().lure;
+    assert!(tuning.supply >= 2, "this test needs at least two lures authored");
+    // Read the amount off the lure JUST thrown, by entity. The first draft took the max across all
+    // live lures — which is always the FIRST lure, since it is the loudest and has not expired, so
+    // the comparison was of one value with itself.
+    let mut amounts = Vec::new();
+    for _ in 0..2 {
+        let mut thrown = None;
+        app.world_mut().resource_scope(|world, mut supply: Mut<LureSupply>| {
+            world.resource_scope(|world, mut hab: Mut<Habituation>| {
+                world.resource_scope(|world, mut seq: Mut<LureSeq>| {
+                    let mut commands = world.commands();
+                    thrown =
+                        throw_lure(&mut commands, Vec3::ZERO, &tuning, &mut supply, &mut hab, &mut seq);
+                });
+            });
+        });
+        let e = thrown.expect("supply was checked non-zero above");
+        app.update();
+        amounts.push(app.world().get::<Lure>(e).expect("the thrown lure exists").amount);
+    }
+    assert!(
+        amounts[1] < amounts[0],
+        "the second lure was not quieter than the first ({:?}) — without habituation the verb is a \
+         solved button: throw, walk past, repeat",
+        amounts
+    );
+}

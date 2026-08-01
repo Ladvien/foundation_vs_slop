@@ -348,8 +348,31 @@ fn deterministic_core_is_bit_identical() {
 /// do step **1800**, and by ~30 s of play the squad has walked past a screen, watched it, and the feed
 /// has generated a crab. A crab carries `Health` + `Transform`, so it enters `snapshot_hash`; a screen
 /// does not. **A green reproducibility test is not a green golden test.**
+///
+/// ## Re-pinned AGAIN 2026-08-01, and it went BACK — FVS-B-10's lure
+///
+/// `0xdbff6e94a7fa3d0e` -> `0x9f7a0787fdcb487f` (actors) and `0x0feb0281e67e81b8` ->
+/// `0x82d9fc45c7e06f63` (fields) — i.e. **exactly the values pinned before the watch feed landed a
+/// few hours earlier**. The lure adds two schedule nodes and nothing else in this scenario (nobody
+/// throws a lure in a golden run, so `tick_lures` iterates an empty query), so the schedule
+/// linearisation was permuted back to its earlier order. This repo has seen that before: the Push 2
+/// re-pin "landed back on the value measured before M0's session systems existed".
+///
+/// ⚠️ **But there is a second reading, and it is the one worth acting on.** The watch-feed re-pin
+/// hours earlier was attributed to the feed *generating a crab* inside the 1800-tick window (a crab
+/// carries `Health`+`Transform` and enters the hash; a screen does not). If that was right, a pure
+/// scheduling nudge could not undo it — the crab would still be there. So the honest conclusion is
+/// that **the feed no longer charges to full inside the golden window**, and a small perturbation was
+/// enough to flip it.
+///
+/// That makes the feed's activation *marginal in passive play*: it needs ~7 s of sustained attention
+/// (`charge_rate` 0.14), and whether an unscripted squad ever looks that long is close to a coin
+/// flip. Filed as FVS-N-30. The mechanic is proven by
+/// `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops`, which floods attention
+/// deliberately; that test is unaffected and still green. This is a balance finding, not a
+/// correctness one — but it means a player may never see the anomaly do anything.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN: u64 = 0xdbff6e94a7fa3d0e;
+const GOLDEN: u64 = 0x9f7a0787fdcb487f;
 
 /// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
 /// message says exactly what to do.
@@ -582,9 +605,10 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 //
 // Measured from a settled tree; `field_passes_are_bit_identical` is itself the reproducibility check,
 // and the two `deterministic_core_is_bit_identical*` tests were green on the same tree first.
-/// Re-pinned 2026-08-01 alongside [`GOLDEN`] — same cause, same ablation table; see there.
+/// Re-pinned 2026-08-01 alongside [`GOLDEN`], twice in one day — see there for why the second
+/// re-pin went back to this file's pre-watch-feed value, and what that implies about the feed.
 #[cfg(target_arch = "x86_64")]
-const GOLDEN_FIELD: u64 = 0x0feb0281e67e81b8;
+const GOLDEN_FIELD: u64 = 0x82d9fc45c7e06f63;
 
 /// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
 #[cfg(not(target_arch = "x86_64"))]
