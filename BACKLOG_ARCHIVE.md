@@ -1794,6 +1794,60 @@ Split out 2026-07-30.
   *Component discipline:* inserted at spawn and never toggled — only its value flips — so it cannot churn the hashed archetype.
   **The goldens did NOT move — and that is a warning, not a reassurance.** The 1800-tick golden runs with no synthetic player, so the squad idles at spawn and never gets line of sight to the watcher: `looked_at` stays `false` exactly as it did under the old permanent-`false`, and the new path is never exercised. This is TESTING.md invariant 11 verbatim ("coverage of a *system* is not coverage of its *contended* path" — the same blind spot that hid G0 for months). The behaviour is covered by `containment::the_watcher_knows_when_the_squad_can_see_it`, which walks the squad onto the watcher deliberately; **do not** treat the unchanged golden as evidence the mechanic works.
   **Not done:** the Smiley shader/mesh wall-clip bug bundled into this item is untouched; it is a rendering issue with no connection to the observation definition and should be its own item. · *Deps:* — (unblocks C-6) · *Reading:* [GOAP]
+- **FVS-C-7 — A second gaze-reactive creature, via the ATTENTION sign-flip** · M · ✅ **SHIPPED 2026-08-01 — the watch feed**
+  `ATTENTION` already drives SCP-1048's out-watch capture (a creature *suppressed* while watched). The
+  inverse — one that acts **only when not observed** — is the same channel with the condition flipped,
+  so it is architecturally free: no new primitive, no new field, no append to a hashed enum.
+  **Explicitly distinct from FVS-C-6.** C-6 needs a genuinely new per-entity, directional
+  continuous-watch state (facing vs a *specific* entity) and is XL; this one reads the existing
+  ambient field and is M. Doing this first is also the cheap way to prove the ambient/per-entity
+  distinction is real before paying for C-6.
+  · *Deps:* C-3 (shipped) · *Touches:* `src/ai/`, new creature module · *Reading:* [STIG], [GOAP]
+  > ### 📐 SCOPED 2026-07-31 — concept chosen, and the "architecturally free" claim VERIFIED.
+  > **Concept (Director's call): a broadcasting screen.** An anomalous TV that performs for an audience —
+  > while watched it generates more of itself; deprive it of attention and it goes quiet enough to net.
+  > Ties the mechanic straight to SCP-9191, the rogue monster-generating AI: literally a screen churning
+  > out generated monsters, which is the endgame theme made mechanical rather than narrated. Uses the
+  > **unused `assets/retro_tvs/`** library.
+  > **The sign flip is real and it is cheap — verified against HEAD, not assumed:**
+  > * `Fact::SeenBySquad` already exists (`ai/utility.rs:173`), and `Mode::Build` is *already* gated on
+  >   its **inverse** — "the bear builds only what nobody is watching it build" (`:206`). The screen is
+  >   the same mode and the same fact with the consideration curve flipped.
+  > * The containment rule is one authored line: SCP-1048's is
+  >   `(channel: 9, sign: AtLeast, threshold: 0.45)` — contained by WATCHING. The screen's is
+  >   `sign: AtMost` — contained by LOOKING AWAY. The rule model already supports it; `scp999`'s rule is
+  >   described in-config as "the exact inverse" of 1048's, so this shape is already proven.
+  > ### ⛔ HARD CONSTRAINT, and it is the finding that matters most here
+  > **It must NOT add a `Mode`.** `MODE_COUNT` is 29 and sets `NeuralPolicy::WEIGHT_COUNT`; SCP-1048 added
+  > two (`Build`, `Emote`), so a creature adding one is the normal case, not a stretch. Adding one
+  > invalidates the policy archive **by width** — `from_weights` rejects it loudly — which would waste a
+  > 5-hour bake. Reusing `Build` is therefore not a shortcut, it is the requirement, and it happens to be
+  > the honest modelling anyway: the screen *is* building.
+  > *Still to decide before implementing:* what the screen emits (crabs read best against the SCP-9191
+  > "generator" theme), where it is placed, and the ATTENTION threshold. Everything else is scoped.
+  > ### ✅ SHIPPED, and the "architecturally free" claim held
+  > `src/broadcast.rs`. A screen that generates dimensional crabs while the squad watches it, contained
+  > by depriving it of an audience. No new `Mode`, no new `Fact`, no new field — `Mode::Build` and
+  > `Fact::SeenBySquad` already existed and 1048 already gates on that fact's INVERSE. The containment
+  > rule is one authored line: `(channel: 9, sign: AtMost, threshold: 0.12)` against 1048's `AtLeast`.
+  > **The ceiling sits BELOW `sim.broadcast.watch_threshold` (0.30) deliberately** — between the two the
+  > feed is quiet but not yet contained, so 'look away' must be held rather than satisfied in passing.
+  > *Pinned by* `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops` (BOTH
+  > directions — the ignored half is measured first, since it is the one that can pass vacuously) and
+  > `the_feed_is_contained_by_looking_away_not_by_staring` (guards the sign flip and the inert band).
+  > ⚠️ **It moved the goldens, and the diagnosis is kept because two hypotheses were wrong first.**
+  > Not the `Subject::ALL` 7→8 growth, and not a lossy genome encode — both suspected and cleared. It is
+  > the creature working: by 1800 ticks the squad has walked past a screen and it has generated a crab,
+  > which carries `Health`+`Transform` and so enters `snapshot_hash` (a screen does not).
+  > **The red herring worth keeping:** `deterministic_core_is_bit_identical` stayed green throughout,
+  > which read as 'the actor golden did not move'. It steps **180** ticks and compares two runs against
+  > *each other* — it never reads `GOLDEN`. **A green reproducibility test is not a green golden test.**
+  > ⚠️ Appending `Subject::WatchFeed` required growing `Subject::ALL` to 8 — `Knowledge`'s belief array
+  > is sized off `ALL.len()`, so missing it is an index-out-of-bounds PANIC at runtime, not a compile
+  > error. Two red tests surfaced it. Per FVS-N-22's ruling this also resets existing campaigns.
+  > 📌 Wears `retro_tvs/retro_tv_large.glb` as a PLACEHOLDER — now the highest-value asset request in
+  > `BEVY_GAME_INFO.md`, because unlike SCP-9191 itself the game side is settled.
+  · *Deps:* C-3 (shipped) · *Touches:* `src/broadcast.rs`, `src/sim.rs`, `src/containment/`, `src/knowledge/`, `src/squad_ai/world_genome.rs`, `tests/containment.rs`
 
 ### Push 8 — Determinism & CI Hardening  ·  cross-cutting  ·  continuous
 

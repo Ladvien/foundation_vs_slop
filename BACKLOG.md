@@ -487,37 +487,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Reading:** **[UV-REV]**, **[UV-FMRI]**, [QD-OEE], [QD-PCG], [GOAP]
 **Done when:** the endgame trigger fires after a curriculum threshold; confrontation mechanics derive from the SCP-9191 generator theme; 173/096 are capturable via a new per-entity continuous-watch state (explicitly distinct from the ambient field); no shipped copy cites the deprecated semiotic-decay theming as canon.
 
-- **FVS-C-7 — A second gaze-reactive creature, via the ATTENTION sign-flip** · M
-  `ATTENTION` already drives SCP-1048's out-watch capture (a creature *suppressed* while watched). The
-  inverse — one that acts **only when not observed** — is the same channel with the condition flipped,
-  so it is architecturally free: no new primitive, no new field, no append to a hashed enum.
-  **Explicitly distinct from FVS-C-6.** C-6 needs a genuinely new per-entity, directional
-  continuous-watch state (facing vs a *specific* entity) and is XL; this one reads the existing
-  ambient field and is M. Doing this first is also the cheap way to prove the ambient/per-entity
-  distinction is real before paying for C-6.
-  · *Deps:* C-3 (shipped) · *Touches:* `src/ai/`, new creature module · *Reading:* [STIG], [GOAP]
-  > ### 📐 SCOPED 2026-07-31 — concept chosen, and the "architecturally free" claim VERIFIED.
-  > **Concept (Director's call): a broadcasting screen.** An anomalous TV that performs for an audience —
-  > while watched it generates more of itself; deprive it of attention and it goes quiet enough to net.
-  > Ties the mechanic straight to SCP-9191, the rogue monster-generating AI: literally a screen churning
-  > out generated monsters, which is the endgame theme made mechanical rather than narrated. Uses the
-  > **unused `assets/retro_tvs/`** library.
-  > **The sign flip is real and it is cheap — verified against HEAD, not assumed:**
-  > * `Fact::SeenBySquad` already exists (`ai/utility.rs:173`), and `Mode::Build` is *already* gated on
-  >   its **inverse** — "the bear builds only what nobody is watching it build" (`:206`). The screen is
-  >   the same mode and the same fact with the consideration curve flipped.
-  > * The containment rule is one authored line: SCP-1048's is
-  >   `(channel: 9, sign: AtLeast, threshold: 0.45)` — contained by WATCHING. The screen's is
-  >   `sign: AtMost` — contained by LOOKING AWAY. The rule model already supports it; `scp999`'s rule is
-  >   described in-config as "the exact inverse" of 1048's, so this shape is already proven.
-  > ### ⛔ HARD CONSTRAINT, and it is the finding that matters most here
-  > **It must NOT add a `Mode`.** `MODE_COUNT` is 29 and sets `NeuralPolicy::WEIGHT_COUNT`; SCP-1048 added
-  > two (`Build`, `Emote`), so a creature adding one is the normal case, not a stretch. Adding one
-  > invalidates the policy archive **by width** — `from_weights` rejects it loudly — which would waste a
-  > 5-hour bake. Reusing `Build` is therefore not a shortcut, it is the requirement, and it happens to be
-  > the honest modelling anyway: the screen *is* building.
-  > *Still to decide before implementing:* what the screen emits (crabs read best against the SCP-9191
-  > "generator" theme), where it is placed, and the ATTENTION threshold. Everything else is scoped.
 - **FVS-C-6 — (LATE) 173/096 + per-entity continuous-watch** · XL · *determinism: FixedUpdate; facing math bit-exact (watch ARM↔x86 f32, J-3)*
   Add 173/096 **only after** the bespoke roster is proven. Each needs a **new** per-entity continuous-observation state (directional/facing check vs a *specific* entity), explicitly distinct from the ambient `ATTENTION` field — new engineering, not a sign-flip reuse.
   *Done when:* a per-entity `ObservedBy`/facing check drives 173/096 freeze/aggro; documented as separate from ATTENTION; capture rules authored on top. · *Deps:* C-1..C-5 shipped, E-*, F-*, M-1 · *Touches:* new watch module, `src/ai/`, `src/enemy.rs` · *Reading:* [GOAP]
