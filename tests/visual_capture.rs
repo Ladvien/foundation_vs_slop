@@ -24,6 +24,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const GOLDEN: &str = "tests/golden/title_screen.png";
+/// Where a FAILING capture is written so a human can look at it beside [`GOLDEN`]. Gitignored: it is
+/// evidence for one review, not a second golden.
+const ACTUAL: &str = "tests/golden/title_screen.actual.png";
 /// Fixed comparison resolution — the native capture (whatever the monitor is) is resized to this, so the
 /// golden is monitor-independent and small. At this scale the title screen's live "watch feed" (small
 /// moving units, light flicker) averages out against the static geometry/menu (measured SSIM ≈ 1.0
@@ -72,10 +75,36 @@ fn capture_once(timeout: Duration) -> Option<Vec<f32>> {
 /// `#[ignore]`d and never run by CI: re-pinning a golden is a deliberate, human-reviewed act
 /// (`TESTING.md` — "never auto-approve a diff"). Capture a clean title frame first, **look at it**,
 /// then:
-///   `cargo test --features test-harness --test visual_capture -- --ignored regenerate_golden`
+///   `FVS_REPIN_VISUAL_GOLDEN=1 cargo test --features test-harness --test visual_capture -- --ignored regenerate_golden`
+///
+/// # Why the env var, and not just the `#[ignore]`
+///
+/// `--ignored` runs **every** ignored test in the file, so the bare
+/// `cargo test --features test-harness -- --ignored` — the obvious way to "run the display-gated
+/// checks" — used to run this re-pin tool *alongside* [`title_screen_matches_golden`], silently
+/// overwriting the golden from whatever `screenshot.png` happened to be lying in the crate root. The
+/// comparison then graded itself against a golden the same invocation had just written, which cannot
+/// fail. That is a green light with no check behind it.
+///
+/// The module doc warned about this in prose, and prose does not stop it — the same reasoning that
+/// turned the `config.ron` mtime hazard into `load_game_config`'s mechanical guard. Now `--ignored`
+/// means "run the checks" by default, and re-pinning takes an explicit, visible act.
 #[test]
 #[ignore] // regeneration tool, not a check.
 fn regenerate_golden_from_screenshot() {
+    if std::env::var("FVS_REPIN_VISUAL_GOLDEN").as_deref() != Ok("1") {
+        // Skip rather than fail: `--ignored` is a legitimate way to run this file's real check, and
+        // failing here would make that invocation red for doing the right thing.
+        eprintln!(
+            "regenerate_golden_from_screenshot: SKIPPED — this is the re-pin TOOL, not a check.\n\
+             It rewrites {GOLDEN} from screenshot.png, which would make `title_screen_matches_golden` \
+             grade itself against an image this same run produced.\n\
+             To actually re-pin (after capturing a clean title frame and LOOKING at it):\n  \
+             FVS_REPIN_VISUAL_GOLDEN=1 cargo test --features test-harness --test visual_capture \
+             -- --ignored regenerate_golden"
+        );
+        return;
+    }
     let src = image::open("screenshot.png").expect(
         "put a freshly captured screenshot.png in the crate root first (touch screenshot.request \
          while the windowed game runs)",
@@ -117,10 +146,11 @@ fn regenerate_golden_from_screenshot() {
 ///
 /// **Two traps cost real time here; both are avoidable.**
 ///
-///  1. `cargo test ... -- --ignored` runs *both* ignored tests in this file, and
-///     [`regenerate_golden_from_screenshot`] silently re-pins from whatever `screenshot.png` happens to
-///     be lying in the crate root. Run them **by name**, never together, or the comparison grades
-///     itself against a golden the same invocation just overwrote.
+///  1. ~~`cargo test ... -- --ignored` runs *both* ignored tests in this file~~ — **fixed 2026-07-31,
+///     mechanically.** It still runs both, but [`regenerate_golden_from_screenshot`] now skips unless
+///     `FVS_REPIN_VISUAL_GOLDEN=1`, so `--ignored` means "run the checks" and can no longer re-pin the
+///     golden out from under this comparison. The trap was documented here in prose and the prose did
+///     not stop it happening; a guard does.
 ///  2. A stale game process will hand you the wrong scene. `pkill -f target/debug/foundation_vs_slop`
 ///     matches its own wrapper shell and kills that instead of the game (`pkill -x foundation_vs_s`
 ///     works — the name is truncated to 15 chars). A surviving `FVS_RESEARCH_ROOM=1` instance
@@ -146,12 +176,14 @@ fn title_screen_matches_golden() {
     // Best of a few frames: a transient full-screen VHS-glitch frame can't fail an otherwise-healthy run.
     let mut best = 0.0f32;
     let mut captured = 0usize;
+    let mut best_shot: Option<Vec<f32>> = None;
     for _ in 0..3 {
         if let Some(shot) = capture_once(Duration::from_secs(6)) {
             captured += 1;
             let s = foundation_vs_slop::visual_regression::ssim(&shot, &golden, W as usize, H as usize);
-            if s > best {
+            if s > best || best_shot.is_none() {
                 best = s;
+                best_shot = Some(shot);
             }
         }
         std::thread::sleep(Duration::from_secs(2));
@@ -168,10 +200,29 @@ fn title_screen_matches_golden() {
         "the windowed game produced no screenshot — no display available, or the window closed early \
          (this test needs a real window; it is #[ignore]d for exactly this reason)"
     );
+    // On failure, KEEP the frame that failed. Without this the test deleted its own evidence
+    // (`remove_file("screenshot.png")` above) and reported a bare number, so the one thing this
+    // file's whole discipline asks for — "capture a clean frame first, **look at it**", the step
+    // that caught the desaturation bug every unit test passed — was impossible to do from a red run.
+    // A number cannot tell you re-pin-vs-regression; the image can.
+    if best < THRESHOLD {
+        if let Some(shot) = &best_shot {
+            let bytes: Vec<u8> =
+                shot.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+            match image::GrayImage::from_raw(W, H, bytes) {
+                Some(img) => match img.save(ACTUAL) {
+                    Ok(()) => eprintln!("wrote the failing frame to {ACTUAL} — open it beside {GOLDEN}"),
+                    Err(e) => eprintln!("could not write {ACTUAL}: {e}"),
+                },
+                None => eprintln!("could not build a {W}x{H} image from the capture"),
+            }
+        }
+    }
     assert!(
         best >= THRESHOLD,
         "title-screen SSIM {best:.4} < {THRESHOLD} (best of {captured} frame(s) vs the golden) — a \
          rendering regression: a broken shader/material (pink), missing geometry, or a layout shift. \
-         If the title art changed on purpose, regenerate tests/golden/title_screen.png (see module doc)."
+         The failing frame is at {ACTUAL}: OPEN IT beside {GOLDEN} before deciding. If the title art \
+         changed on purpose, re-pin per the module doc (it needs FVS_REPIN_VISUAL_GOLDEN=1)."
     );
 }
