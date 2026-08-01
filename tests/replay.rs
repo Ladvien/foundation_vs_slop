@@ -1864,3 +1864,119 @@ fn returning_to_the_site_after_a_run_does_not_panic() {
         "the Site must be reachable and survivable after a run ends"
     );
 }
+
+/// **FVS-L-6's acceptance test: the roster opens at the Site.**
+///
+/// The "Done when" is player-observable — *the roster is openable at the Site* — so this drives the
+/// real key, not the resource. That matters here more than usual: the previous attempt at this
+/// feature was a `.or_else(in_state(AppState::Site))` on the in-game toggle, which type-checked,
+/// read as support, and could never have worked — `spawn_roster` hung off a `MenuState` that does not
+/// exist at the Site. A test that poked the state directly would have passed against that too.
+///
+/// Pressing the bound key exercises the whole chain: binding -> `Actions` gating -> `SiteRosterOpen`
+/// -> spawn/despawn. `returning_to_the_site_after_a_run_does_not_panic` already pins the crash that
+/// the broken version caused; this pins that the replacement does the thing.
+#[test]
+fn the_roster_opens_and_closes_at_the_site() {
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::ButtonState;
+    use bevy::prelude::*;
+    use foundation_vs_slop::input::{Action, KeyBindings};
+    use foundation_vs_slop::knowledge::roster::{RosterScreenRoot, SiteRosterOpen};
+    use foundation_vs_slop::session::RunState;
+    use foundation_vs_slop::sim_harness::build_headless_app_unfinished;
+    use foundation_vs_slop::ui::state::AppState;
+    use foundation_vs_slop::ui::UiPlugin;
+
+    let _serial = serial_guard();
+    // SAFETY: `serial_guard` is held, so this is the only thread touching the environment. Never
+    // touch the real campaign — entering the Site saves.
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("fvs_site_roster"));
+        std::env::set_var("XDG_DATA_HOME", std::env::temp_dir().join("fvs_site_roster_data"));
+    }
+
+    let cfg = SimConfig::deterministic_core();
+    let mut app = build_headless_app_unfinished(&cfg);
+    // Mirror `lib::run`'s windowed group, as the site-return test does, so this fails only for
+    // reasons a player can reach rather than for a plugin-set mismatch of the test's own making.
+    app.add_plugins((
+        UiPlugin,
+        foundation_vs_slop::research::ResearchLabPlugin,
+        foundation_vs_slop::site::O5Plugin,
+        foundation_vs_slop::knowledge::RosterPlugin,
+        foundation_vs_slop::knowledge::RecordsPlugin,
+        foundation_vs_slop::antagonist::AntagonistPlugin,
+        foundation_vs_slop::director::DirectorPlugin,
+        foundation_vs_slop::ui::briefing::BriefingPlugin,
+    ));
+    app.finish();
+    app.cleanup();
+    for _ in 0..40 {
+        app.update();
+    }
+
+    // To the Site, the way `RETURN TO SITE` does it.
+    app.world_mut().resource_mut::<NextState<RunState>>().set(RunState::Idle);
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Site);
+    for _ in 0..30 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<State<AppState>>().get(),
+        &AppState::Site,
+        "the test never reached the Site, so the rest proves nothing"
+    );
+
+    let key = app.world().resource::<KeyBindings>().get(Action::ToggleRoster).primary.key;
+    // Real `KeyboardInput` messages, NOT `ButtonInput::press`. Bevy's `keyboard_input_system` calls
+    // `clear()` on `ButtonInput` in `PreUpdate` before draining the message queue, so a press written
+    // directly into the resource is wiped before any `Update` system can see it as `just_pressed` —
+    // the test then fails against working code, which is exactly what happened writing this.
+    let send = |app: &mut App, state: ButtonState| {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: Key::Character("r".into()),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    };
+    let open = |app: &mut App| {
+        send(app, ButtonState::Pressed);
+        app.update();
+        send(app, ButtonState::Released);
+        app.update();
+    };
+    let showing = |app: &mut App| {
+        app.world_mut().query::<&RosterScreenRoot>().iter(app.world()).count()
+    };
+
+    assert_eq!(showing(&mut app), 0, "the roster must not be open before it is asked for");
+
+    open(&mut app);
+    assert_eq!(
+        showing(&mut app),
+        1,
+        "pressing ToggleRoster at the Site did not open the roster — FVS-L-6's whole point"
+    );
+
+    open(&mut app);
+    assert_eq!(showing(&mut app), 0, "the same key must close it again");
+
+    // Re-open, then leave: the overlay must not outlive the screen it belongs to, and must not
+    // reappear unasked on the next visit.
+    open(&mut app);
+    assert_eq!(showing(&mut app), 1, "re-open failed");
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Title);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(showing(&mut app), 0, "leaving the Site must tear the roster overlay down");
+    assert_eq!(
+        *app.world().resource::<SiteRosterOpen>(),
+        SiteRosterOpen(false),
+        "leaving the Site must also clear the flag, or the next visit opens a panel nobody asked for"
+    );
+}

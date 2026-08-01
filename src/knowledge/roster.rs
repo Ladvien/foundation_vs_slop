@@ -175,6 +175,47 @@ fn toggle_roster(
     }
 }
 
+/// Is the roster overlay open **at the Site**? (FVS-L-6.)
+///
+/// A plain resource, deliberately **not** a `SubState`. `MenuState` is sourced on
+/// `AppState::InGame`, so Bevy removes `State<MenuState>` the moment the app leaves it — which is
+/// exactly the crash this item was filed for. Minting a second `SubState` on `AppState::Site` would
+/// work, but it would also be a second state machine to keep in step with the first for one boolean.
+///
+/// In-game the roster is a `MenuState` variant because it belongs to a *stack* of mutually exclusive
+/// overlays (pause, settings, controls) that must not open on top of one another. At the Site there is
+/// no such stack, so a bool is the whole requirement.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiteRosterOpen(pub bool);
+
+/// `ToggleRoster` at the Site. Same key, same meaning, different owner.
+fn toggle_site_roster(actions: crate::input::Actions, mut open: ResMut<SiteRosterOpen>) {
+    if actions.just_pressed(crate::input::Action::ToggleRoster) {
+        // `ResMut` deref marks the resource changed, which is what drives spawn/despawn below — so
+        // write only on an actual press, never unconditionally.
+        open.0 = !open.0;
+    }
+}
+
+/// Leaving the Site closes it, so re-entering does not restore a panel the player did not ask for.
+fn close_site_roster(mut open: ResMut<SiteRosterOpen>) {
+    open.set_if_neq(SiteRosterOpen(false));
+}
+
+fn site_roster_opened(open: Res<SiteRosterOpen>) -> bool {
+    open.is_changed() && open.0
+}
+
+fn site_roster_closed(open: Res<SiteRosterOpen>) -> bool {
+    // `is_changed()` is also true on the frame the resource is inserted, when `.0` is false — that
+    // fires one despawn against zero entities, which is a no-op rather than a special case to code.
+    open.is_changed() && !open.0
+}
+
+fn site_roster_is_open(open: Res<SiteRosterOpen>) -> bool {
+    open.0
+}
+
 fn spawn_roster(
     mut commands: Commands,
     theme: Res<crate::ui::theme::UiTheme>,
@@ -307,9 +348,38 @@ impl Plugin for RosterPlugin {
                 // opened at the Site regardless: `spawn_roster` hangs off `OnEnter(MenuState::Roster)`,
                 // and that state does not exist there either. An `Option` would silence the panic and
                 // leave a key that does nothing — a worse failure, because it looks supported.
-                // Reviewing the roster between expeditions is a real want; it needs a Site-side screen
-                // of its own, the way `ui::site_hud` works. Tracked as FVS-L-6.
+                // Reviewing the roster between expeditions is a real want, and it is now served by the
+                // Site-side toggle registered below rather than by widening this one (FVS-L-6).
                 toggle_roster.run_if(in_state(AppState::InGame)),
+            )
+            // ── FVS-L-6: the same overlay, at the Site, on its own state ────────────────────────
+            //
+            // `spawn_roster` was ALREADY Site-compatible and nobody had noticed: it is a self-contained
+            // full-screen scrim at `Z_MENU`, and its own comment records that it deliberately avoids
+            // `ui::layout`'s region grid because "the frame does not even exist on some of the screens
+            // one can open from". So this needs no second screen, no duplicated rows, and no new
+            // widgets — only a trigger that does not depend on `MenuState`, which is the single thing
+            // that was actually missing.
+            //
+            // Reusing the overlay rather than building a Site-native panel is also the choice that
+            // keeps ONE roster: two screens rendering the same beliefs would drift, and the whole
+            // point of this screen is that what it says is true.
+            .init_resource::<SiteRosterOpen>()
+            .add_systems(Update, toggle_site_roster.run_if(in_state(AppState::Site)))
+            .add_systems(
+                Update,
+                (
+                    spawn_roster.run_if(site_roster_opened),
+                    despawn_scoped::<RosterScreenRoot>.run_if(site_roster_closed),
+                    update_roster.run_if(site_roster_is_open),
+                )
+                    .run_if(in_state(AppState::Site)),
+            )
+            // Leaving the Site tears the overlay down AND clears the flag, so the panel never
+            // reappears unasked on the next visit — and never outlives the screen it belongs to.
+            .add_systems(
+                OnExit(AppState::Site),
+                (close_site_roster, despawn_scoped::<RosterScreenRoot>),
             );
     }
 }
