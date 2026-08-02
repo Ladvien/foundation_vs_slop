@@ -472,6 +472,7 @@ impl SiteLayout {
             return Err("site layout: the door trigger has a non-positive extent".into());
         }
         self.validate_doorway_gap()?;
+        self.validate_doorway_plaques()?;
         // Cell display indices must be unique and dense, so "specimen N goes in cell N" is unambiguous.
         let mut idx: Vec<u32> = self.cells.iter().map(|c| c.index).collect();
         // SORT-OK: the input is an authored RON list, never an ECS query — `site67.ron` yields its
@@ -519,6 +520,47 @@ impl SiteLayout {
     /// `the_prop_is_authored_in_metres_on_the_games_grid` pins that against the bytes — so the gap is
     /// two cells and the frame sits centred on the edge they share. Kit-independent by construction:
     /// it is a fact about `TILE_SIZE` and the layout, not about which mesh is worn.
+    /// **Every doorway has solid wall beside it to hang its plaque on.**
+    ///
+    /// `site::visuals` derives one plaque per clearance level and hangs it `PLAQUE_BESIDE_DOOR` along
+    /// the wall from the opening's centre. That cell has to actually be wall: floor there means the
+    /// sign floats in a gap, and a second doorway there means two doors sharing one plate, which reads
+    /// as the wrong door being restricted. Neither shows up in a test that only looks at the floor,
+    /// and neither is visible from most camera angles — a sign edge-on is a sliver.
+    ///
+    /// Checked for **both** sides, because the plaque hangs on one and the frame needs the other to
+    /// stand against: a doorway with open floor on both sides is not a doorway, it is a gap.
+    fn validate_doorway_plaques(&self) -> Result<(), String> {
+        for d in &self.doorways {
+            let cell = IVec2::new(d.cell.0, d.cell.1);
+            if !self.is_floor(cell) {
+                return Err(format!(
+                    "site layout: the {} doorway at {:?} is not floor — an opening has to be walkable \
+                     or the flood-fill cannot pass through it and the room is sealed",
+                    d.label, d.cell
+                ));
+            }
+            // The wall the door sits in runs across the direction it separates.
+            let step = if (45.0..135.0).contains(&d.yaw.rem_euclid(180.0)) {
+                IVec2::X
+            } else {
+                IVec2::Y
+            };
+            for side in [step, -step] {
+                let beside = cell + side;
+                if self.is_floor(beside) {
+                    return Err(format!(
+                        "site layout: the {} doorway at {:?} has FLOOR at {:?}, along the wall it is \
+                         supposed to sit in — so it is a gap rather than a door, and its plaque would \
+                         hang in mid-air. Move the opening, or narrow the floor either side of it.",
+                        d.label, d.cell, (beside.x, beside.y)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_doorway_gap(&self) -> Result<(), String> {
         let f = self.door.frame_pos;
         let cells = self.doorway_gap_cells();
@@ -1098,6 +1140,62 @@ mod tests {
 
     /// **The floor plan has two sources of truth, and this is the only thing keeping them equal.**
     ///
+    /// **A door plaque needs a wall to hang on, and the rule bites.**
+    ///
+    /// A check that cannot fail reads like coverage. The failure it guards is invisible from most
+    /// camera angles — a sign seen edge-on is a sliver — and invisible to every floor-only test.
+    #[test]
+    fn a_doorway_with_open_floor_beside_it_is_refused() {
+        let mut l = shipped();
+        // Widen one doorway into a two-cell gap by flooring the cell next to it along its own wall.
+        let d = l.doorways[0].clone();
+        let step = if (45.0..135.0).contains(&d.yaw.rem_euclid(180.0)) { (1, 0) } else { (0, 1) };
+        l.floor.push(Rect { x: d.cell.0 + step.0, z: d.cell.1 + step.1, w: 1, h: 1 });
+        let err = l
+            .validate_doorway_plaques()
+            .expect_err("a doorway with floor beside it is a gap, not a door");
+        assert!(
+            err.contains(&d.label) && err.contains("mid-air"),
+            "the message must name the door and say what breaks: {err}"
+        );
+
+        // ...and the shipped Site has solid wall beside every one of its doors.
+        shipped()
+            .validate_doorway_plaques()
+            .expect("every shipped doorway must have a wall to hang its plaque on");
+    }
+
+    /// Every clearance-gated door wears its level, and an open one wears nothing.
+    #[test]
+    fn a_restricted_door_is_countable_from_across_the_corridor() {
+        use crate::personnel::Clearance;
+        let l = shipped();
+        let gated: Vec<_> = l.doorways.iter().filter(|d| d.clearance.is_some()).collect();
+        assert!(
+            gated.len() >= 13,
+            "the twelve cells and the block itself are Level 2; found {}",
+            gated.len()
+        );
+        for d in &gated {
+            let n = d.clearance.expect("filtered").rank();
+            assert!(
+                (1..=5).contains(&n),
+                "{} would hang {n} plaques — a Level 0 door is not restricted and must be authored \
+                 as `None`, or it wears no sign and reads as open anyway",
+                d.label
+            );
+        }
+        // The living half is deliberately open: a site where people cannot reach their own bunks is
+        // a prison, and a plaque on the galley door would say the opposite.
+        assert!(
+            l.doorways
+                .iter()
+                .any(|d| d.label == "GALLEY" && d.clearance.is_none()),
+            "the galley must be unrestricted"
+        );
+        assert_eq!(Clearance::Level2.rank(), 2);
+    }
+
     /// **The authored walls must BE the boundary of the authored floor.**
     ///
     /// This replaces a test that compared `site67.ron`'s `floor:` against a hand-duplicated copy of

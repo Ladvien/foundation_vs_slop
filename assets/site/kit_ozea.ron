@@ -91,6 +91,10 @@
     // door by construction. `y_scale` is a no-op 1.0.
     wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40, footprint: (0.10, 1.00)),
     // Containment-cell glazing — the player must be able to SEE what is held.
+    // The door plaque. `SM_DoorSign_Room` from Pack_SciFi_E_003, converted with `--reorigin-base` so
+    // it is XZ-centred with its base at y = 0 like every other mesh here (`tests/ozea_asset.rs`).
+    // Measured off the GLB's POSITION accessors: 0.336 wide, 0.180 tall, 0.120 deep.
+    door_plaque:       (glb: "ozea/door_plaque.glb", height: 0.18, footprint: (0.336, 0.12)),
     wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40, footprint: (0.20, 2.00)),
     // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
     // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a

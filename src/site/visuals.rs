@@ -528,6 +528,33 @@ pub(crate) const CELL_DEPTH: f32 = 2.0;
 /// follows the room rather than being a second coordinate that can disagree with it.
 pub(crate) const CELL_ROOM_HALF_DEPTH: f32 = 1.5;
 
+/// Height of the TOP plaque's base above the floor, in metres. Eye height for a standing person,
+/// which is where signage that has to be read while walking belongs.
+const PLAQUE_EYE_HEIGHT: f32 = 1.55;
+/// Vertical pitch between stacked plaques. Slightly more than the 0.18 m sign is tall, so the stack
+/// reads as separate plates rather than as one tall one — the count is the whole message.
+const PLAQUE_STACK_STEP: f32 = 0.24;
+/// How far along the wall from the doorway's centre the plaque hangs.
+///
+/// ⚠️ **Inside the doorway cell, not past it.** This was 0.62 — deliberately "past the opening's edge
+/// so it is on solid wall" — and that reasoning is wrong for how the Site builds walls: a panel sits
+/// on the BOUNDARY of the doorway cell, half a metre out, so anything beyond that is inside the
+/// neighbouring wall cell and the sign is swallowed by the geometry. Found by rendering it and seeing
+/// nothing. 0.42 hangs it in the door's own reveal, where it is visible from both approaches.
+const PLAQUE_BESIDE_DOOR: f32 = 0.42;
+
+/// Which way the wall a doorway sits in RUNS, as a unit step.
+///
+/// Same half-turn convention as every wall in the kit and as `SiteLayout::doorway_run_step`: a frame
+/// at yaw 90 separates along X, so its wall runs along X and the plaque hangs beside it that way.
+fn plaque_run(yaw_deg: f32) -> Vec3 {
+    if (45.0..135.0).contains(&yaw_deg.rem_euclid(180.0)) {
+        Vec3::X
+    } else {
+        Vec3::Z
+    }
+}
+
 /// Which way a containment cell's interior lies, given its authored yaw.
 ///
 /// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
@@ -640,6 +667,28 @@ fn spawn_site_geometry(
             at + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT,
             d.yaw,
         );
+        // ── THE PLAQUE ───────────────────────────────────────────────────────────────────────────
+        //
+        // Derived from the doorway, never authored — the discipline `wall_panels`, `corner_vertices`,
+        // `light_the_site` and `post_positions` all follow. Move a door and its sign moves with it;
+        // change what it takes to pass and the sign changes on its own.
+        //
+        // **One plaque per clearance level, stacked.** A Level 2 door wears two and an open door wears
+        // none, so how restricted a door is, is countable from across the corridor. Deliberately not
+        // colour-coded however much SCP:CB's are — see `SitePiece::DoorPlaque`.
+        let Some(level) = d.clearance else { continue };
+        let along = plaque_run(d.yaw);
+        for i in 0..level.rank() {
+            let y = PLAQUE_EYE_HEIGHT - i as f32 * PLAQUE_STACK_STEP;
+            place(
+                &mut commands,
+                &assets,
+                &kit,
+                SitePiece::DoorPlaque,
+                at + along * PLAQUE_BESIDE_DOOR + Vec3::Y * y,
+                d.yaw,
+            );
+        }
     }
 
     // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,

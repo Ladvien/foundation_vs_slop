@@ -53,6 +53,17 @@ pub enum SitePiece {
     WallHeader,
     /// Glazing for a containment cell front.
     WallWindow,
+    /// **A door plaque** — the sign beside a doorway that says what is behind it and what it takes to
+    /// go in.
+    ///
+    /// The clearance is read off the COUNT: a door carries one plaque per level it demands, so a
+    /// Level 2 door visibly wears more signage than an open one and an unrestricted door wears none.
+    /// Deliberately not colour-coded, however much SCP:CB's are: `docs/lore/2026-07-12-scp-color-
+    /// language.md` reserves hue for the anomalous — *"Grayscale is contained. Color is anomalous"* —
+    /// and spending it on wayfinding would spend the signal the D-Block and the specimens depend on.
+    /// Count is the same encoding rule `docs/ui.md` §1.3 sets for the HUD: luminance and repetition,
+    /// never hue.
+    DoorPlaque,
     /// Waist-high run: counters, records desks, the requisition bar.
     WallLow,
     /// The examination slab in the research wing — where `research::lab::StudySubject` lies.
@@ -181,6 +192,9 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
         // cannot drift apart and reopen the slot. `DOORWAY_HEIGHT`'s own doc says "the wall runs
         // continuous above it"; the dungeon honoured that and the Site did not until 2026-08-01.
         WallHeader => Some(crate::dungeon::WALL_HEIGHT - crate::dungeon::DOORWAY_HEIGHT),
+        // The plaque keeps the size the artist made it: it is signage, not architecture, and a sign
+        // stretched to a game height is a sign nobody can read.
+        DoorPlaque => None,
         // Waist-high: a counter you can stand at. Authored in `site67.ron`'s props as the Records desk
         // and the Requisition counter.
         WallLow => Some(0.9),
@@ -206,6 +220,7 @@ impl SitePiece {
         SitePiece::WallDoorwayWide,
         SitePiece::WallHeader,
         SitePiece::WallWindow,
+        SitePiece::DoorPlaque,
         SitePiece::WallLow,
         SitePiece::Column,
         SitePiece::Slab,
