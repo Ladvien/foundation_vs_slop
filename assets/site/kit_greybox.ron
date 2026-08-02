@@ -54,4 +54,24 @@
     area_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb", height: 1.0),
     arrow_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb", height: 1.0),
     specimen_standin: (glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb", height: 1.0),
+
+    // ── Furniture for the living half (2026-08-02) ──
+    // Greybox stand-ins. Shape-suggestive where a primitive allows it, but the point of this kit
+    // is to PROVE THE SWAP, not to be playable — every entry only has to be a distinct real mesh.
+    bunk: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube.glb", height: 1.0, y_offset: 0.0 ),
+    locker: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding.glb", height: 1.0, y_offset: 0.0 ),
+    bedside_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube-rounded.glb", height: 1.0, y_offset: 0.0 ),
+    galley_counter: ( glb: "kenney_prototype-kit/Models/GLB format/shape-slope.glb", height: 1.0, y_offset: 0.0 ),
+    mess_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon.glb", height: 1.0, y_offset: 0.0 ),
+    stool: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder.glb", height: 1.0, y_offset: 0.0 ),
+    coffee_machine: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-half.glb", height: 1.0, y_offset: 0.0 ),
+    water_dispenser: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-cylinder.glb", height: 1.0, y_offset: 0.0 ),
+    bench: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism-low.glb", height: 1.0, y_offset: 0.0 ),
+    vending_machine: ( glb: "kenney_prototype-kit/Models/GLB format/door-garage.glb", height: 1.0, y_offset: 0.0 ),
+    chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon-half.glb", height: 1.0, y_offset: 0.0 ),
+    map_table: ( glb: "kenney_prototype-kit/Models/GLB format/target-a-round.glb", height: 1.0, y_offset: 0.0 ),
+    control_desk: ( glb: "kenney_prototype-kit/Models/GLB format/lever-double.glb", height: 1.0, y_offset: 0.0 ),
+    surveillance_console: ( glb: "kenney_prototype-kit/Models/GLB format/lever-single.glb", height: 1.0, y_offset: 0.0 ),
+    server_rack: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-hexagon.glb", height: 1.0, y_offset: 0.0 ),
+    command_chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism.glb", height: 1.0, y_offset: 0.0 ),
 )

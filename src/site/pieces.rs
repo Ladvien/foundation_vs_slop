@@ -75,6 +75,48 @@ pub enum SitePiece {
     /// Recording the species is FVS-E-1's job (the research posterior needs it anyway); until then a
     /// stand-in is honest and a guessed model would not be.
     SpecimenStandin,
+
+    // ── Furniture for the living half (2026-08-02) ──
+    //
+    // Everything below is authored at its own size (`target_height` returns `None`) — a bunk scaled to
+    // a policy height would be a bunk of the wrong length, and unlike a wall there is no game rule
+    // saying how tall a chair must be.
+    //
+    // Several of these will carry USE SLOTS: a marker spawned beside the prop that one person may claim,
+    // so two people never stand inside one bunk. Which ones is decided by the routine layer, not here —
+    // this enum only says the mesh exists and where it is placed.
+    /// Where an operative or staff member sleeps. Quarters.
+    Bunk,
+    /// Personal storage beside a bunk. Quarters.
+    Locker,
+    /// Small surface beside a bunk — the one place at the Site anything personal can sit. Quarters.
+    BedsideTable,
+    /// The galley's work surface: where food is prepared rather than eaten.
+    GalleyCounter,
+    /// The galley's eating surface. Standing height, so it pairs with [`Self::Stool`].
+    MessTable,
+    /// Galley seating.
+    Stool,
+    /// The one appliance the whole shift agrees about.
+    CoffeeMachine,
+    /// Galley water point.
+    WaterDispenser,
+    /// Bench seating in the activities room.
+    Bench,
+    /// Activities-room vending. Dressing with a story: somebody stocked it.
+    VendingMachine,
+    /// General seating — activities and the war room.
+    Chair,
+    /// The war room's centrepiece: a holographic plot of somewhere you are about to go.
+    MapTable,
+    /// The war room's working surface.
+    ControlDesk,
+    /// The monitoring room's wall of screens, pointed at the containment wing next door.
+    SurveillanceConsole,
+    /// Monitoring-room server stack.
+    ServerRack,
+    /// The one seat in the monitoring room, facing the screens.
+    CommandChair,
 }
 
 impl SitePiece {
@@ -110,9 +152,14 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
         // Waist-high: a counter you can stand at. Authored in `site67.ron`'s props as the Records desk
         // and the Requisition counter.
         WallLow => Some(0.9),
-        // Native height is the intent — dressing, decals, and the specimen stand-in.
+        // Native height is the intent — dressing, decals, the specimen stand-in, and every piece of
+        // furniture in the living half. A chair has no policy height the way a wall does.
         Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal | Slab
-        | SpecimenStandin => None,
+        | SpecimenStandin
+        | Bunk | Locker | BedsideTable | GalleyCounter
+        | MessTable | Stool | CoffeeMachine | WaterDispenser
+        | Bench | VendingMachine | Chair | MapTable
+        | ControlDesk | SurveillanceConsole | ServerRack | CommandChair => None,
     }
 }
 
@@ -136,6 +183,22 @@ impl SitePiece {
         SitePiece::AreaDecal,
         SitePiece::ArrowDecal,
         SitePiece::SpecimenStandin,
+        SitePiece::Bunk,
+        SitePiece::Locker,
+        SitePiece::BedsideTable,
+        SitePiece::GalleyCounter,
+        SitePiece::MessTable,
+        SitePiece::Stool,
+        SitePiece::CoffeeMachine,
+        SitePiece::WaterDispenser,
+        SitePiece::Bench,
+        SitePiece::VendingMachine,
+        SitePiece::Chair,
+        SitePiece::MapTable,
+        SitePiece::ControlDesk,
+        SitePiece::SurveillanceConsole,
+        SitePiece::ServerRack,
+        SitePiece::CommandChair,
     ];
 }
 

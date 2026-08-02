@@ -25,10 +25,10 @@ FLOOR = [
     (26, 20, 2, 2),    # connector: requisition -> briefing
     (24, 22, 10, 8),   # briefing room
     (0, 24, 24, 2),    # the SOUTH spine
-    (0, 26, 5, 4),     # quarters
-    (6, 26, 5, 4),     # galley
-    (12, 26, 5, 4),    # activities
-    (18, 26, 5, 4),    # war room
+    (0, 26, 5, 8),     # quarters
+    (6, 26, 5, 8),     # galley
+    (12, 26, 5, 8),    # activities
+    (18, 26, 5, 8),    # war room
 ]
 
 # Cells the ASYNC aperture occupies — its own frame is placed by the spawner, so no wall may sit on

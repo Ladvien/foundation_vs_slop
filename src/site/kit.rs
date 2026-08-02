@@ -115,6 +115,25 @@ pub struct SiteKit {
     pub area_decal: KitPiece,
     pub arrow_decal: KitPiece,
     pub specimen_standin: KitPiece,
+
+    // ── Furniture for the living half (2026-08-02). Every one is authored at its own size;
+    // `target_height` returns `None` for all of them, so `y_scale` is a no-op 1.0.
+    pub bunk: KitPiece,
+    pub locker: KitPiece,
+    pub bedside_table: KitPiece,
+    pub galley_counter: KitPiece,
+    pub mess_table: KitPiece,
+    pub stool: KitPiece,
+    pub coffee_machine: KitPiece,
+    pub water_dispenser: KitPiece,
+    pub bench: KitPiece,
+    pub vending_machine: KitPiece,
+    pub chair: KitPiece,
+    pub map_table: KitPiece,
+    pub control_desk: KitPiece,
+    pub surveillance_console: KitPiece,
+    pub server_rack: KitPiece,
+    pub command_chair: KitPiece,
 }
 
 impl SiteKit {
@@ -157,6 +176,22 @@ impl SiteKit {
             AreaDecal => &self.area_decal,
             ArrowDecal => &self.arrow_decal,
             SpecimenStandin => &self.specimen_standin,
+            Bunk => &self.bunk,
+            Locker => &self.locker,
+            BedsideTable => &self.bedside_table,
+            GalleyCounter => &self.galley_counter,
+            MessTable => &self.mess_table,
+            Stool => &self.stool,
+            CoffeeMachine => &self.coffee_machine,
+            WaterDispenser => &self.water_dispenser,
+            Bench => &self.bench,
+            VendingMachine => &self.vending_machine,
+            Chair => &self.chair,
+            MapTable => &self.map_table,
+            ControlDesk => &self.control_desk,
+            SurveillanceConsole => &self.surveillance_console,
+            ServerRack => &self.server_rack,
+            CommandChair => &self.command_chair,
         }
     }
 

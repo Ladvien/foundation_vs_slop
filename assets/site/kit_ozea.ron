@@ -131,4 +131,23 @@
     // in capture order — so what the player walks past is a rack of cryo pods holding the things they
     // brought home, which is the entire argument for the hub being a place rather than a menu.
     specimen_standin:  (glb: "ozea/cryo_pod.glb",             height: 2.41),
+
+    // ── Furniture for the living half (2026-08-02) ──
+    // Heights MEASURED by scripts/fbx_to_glb.py and copied from its INVENTORY.md, never guessed.
+    bunk: ( glb: "ozea/bunk.glb", height: 0.55, y_offset: 0.0 ),
+    locker: ( glb: "ozea/locker.glb", height: 1.90, y_offset: 0.0 ),
+    bedside_table: ( glb: "ozea/bedside_table.glb", height: 0.50, y_offset: 0.0 ),
+    galley_counter: ( glb: "ozea/galley_counter.glb", height: 0.75, y_offset: 0.0 ),
+    mess_table: ( glb: "ozea/mess_table.glb", height: 1.20, y_offset: 0.0 ),
+    stool: ( glb: "ozea/stool.glb", height: 0.98, y_offset: 0.0 ),
+    coffee_machine: ( glb: "ozea/coffee_machine.glb", height: 0.67, y_offset: 0.0 ),
+    water_dispenser: ( glb: "ozea/water_dispenser.glb", height: 1.20, y_offset: 0.0 ),
+    bench: ( glb: "ozea/bench.glb", height: 0.45, y_offset: 0.0 ),
+    vending_machine: ( glb: "ozea/vending_machine.glb", height: 1.95, y_offset: 0.0 ),
+    chair: ( glb: "ozea/chair.glb", height: 1.11, y_offset: 0.0 ),
+    map_table: ( glb: "ozea/map_table.glb", height: 1.01, y_offset: 0.0 ),
+    control_desk: ( glb: "ozea/control_desk.glb", height: 1.13, y_offset: 0.0 ),
+    surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0 ),
+    server_rack: ( glb: "ozea/server_rack.glb", height: 1.80, y_offset: 0.0 ),
+    command_chair: ( glb: "ozea/command_chair.glb", height: 1.10, y_offset: 0.0 ),
 )
