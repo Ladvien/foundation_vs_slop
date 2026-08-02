@@ -59,14 +59,24 @@
     // (`scripts/gen_site_perimeter.py`).
     // Hand-typing ~220 entries is how a gap gets left in a wall that nobody notices for a month.
     //
-    // The diagonal half is each room's convex (outer) corner, and it was missing until 2026-08-01:
-    // a run passes THROUGH every orthogonal cell but turns at a diagonal one, so the two runs stopped
-    // 0.5 m short of where their centrelines cross and left an open notch you could see straight
-    // through — 16 of them, one per outside corner. Found by screenshotting the perimeter, not by a
-    // test. The earlier corner-cap work had capped only the 12 CONCAVE junctions. Convex corners get
-    // the same treatment concave ones do — two crossed 1 m panels, each reaching its neighbouring run
-    // — and because the cell then carries both yaws, `site::visuals::corner_cells` caps the seam with
-    // no extra code. 28 capped junctions now, up from 12.
+    // The diagonal half is each room's convex (outer) corner — 16 cells, one per outside corner —
+    // and it was missing until 2026-08-01, which left an open notch you could see straight through at
+    // each. Found by screenshotting the perimeter, not by a test.
+    //
+    // What this list is FOR, as of the 2026-08-01 rewrite: it states which cells are wall, which is
+    // what `is_walkable` and `SiteLayout::validate` read. It no longer says where a wall FACE is.
+    // `site::visuals::wall_panels` derives that from FLOOR EDGES — one 1 m panel per floor-cell edge
+    // whose neighbour is a wall cell — and `corner_vertices` caps the lattice points where two
+    // perpendicular panels meet (28 of them). Two consequences worth knowing before editing below:
+    //
+    //   * `yaw` on a `Wall` row is not read by the spawner any more. It is retained because it still
+    //     documents the run's direction for a human, and `gen_site_perimeter.py` still emits it.
+    //   * The 16 diagonal-only cells emit no panel of their own (they share no EDGE with any floor
+    //     cell, only a corner). They are still the truth about which cells are wall, and their
+    //     corner is capped by the two runs that meet there.
+    //
+    // Non-`Wall` pieces on this list — a column standing in a run, say — are still placed at their
+    // cell centre with their authored yaw: those are furniture on a cell, not a face on an edge.
     //
     // Safe by construction: `is_walkable = is_floor && !wall`, and every cell below is NOT floor, so
     // no wall here can change walkability or break `SiteLayout::validate`'s connectivity flood-fill.

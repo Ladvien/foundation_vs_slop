@@ -422,9 +422,9 @@ fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
 
 /// Build the booth behind a containment cell's glass: two side walls and a back.
 ///
-/// **Derived from the cell's own placement, never authored** — the same discipline `corner_cells`
-/// uses, so adding a seventh cell to `site67.ron` gets an enclosure for free and no cell can be left
-/// as a bare pane by forgetting to type one.
+/// **Derived from the cell's own placement, never authored** — the same discipline [`wall_panels`]
+/// and [`corner_vertices`] use, so adding a seventh cell to `site67.ron` gets an enclosure for free
+/// and no cell can be left as a bare pane by forgetting to type one.
 ///
 /// Until 2026-08-01 a cell WAS a bare pane: `site67.ron`'s `cells:` authors one `WallWindow` and
 /// nothing around it, so a containment wing holding nothing read as six sheets of glass standing on

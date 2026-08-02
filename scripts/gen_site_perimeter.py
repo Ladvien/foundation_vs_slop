@@ -60,10 +60,15 @@ walled = {c for c in boundary if c not in DOOR_KEEP_OUT}
 # only the 12 CONCAVE junctions, which are the cells that do sit in `boundary`.
 #
 # A convex corner is a cell that touches floor ONLY diagonally: the runs on both sides of it are
-# enclosing the same room, and the cell is the point they turn around. Crossed slabs are the fix for
-# the same reason they are at a concave junction — each 1 m panel reaches its neighbouring run
-# exactly, using only grid-native pieces — and because the cell then carries both yaws,
-# `site::visuals::corner_cells` picks it up and caps the seam with no extra code.
+# enclosing the same room, and the cell is the point they turn around.
+#
+# These diagonal-only cells emit no panel of their own — `site::visuals::wall_panels` keys on floor
+# EDGES, and a cell touching floor only diagonally shares no edge with any floor cell. They are kept
+# because the perimeter is a statement about which cells are wall (what `is_walkable` and
+# `SiteLayout::validate` read), and leaving a room's outside corner out of it would say the corner is
+# open when it is not. The visible corner is capped by `site::visuals::corner_vertices`, which finds
+# the lattice point where two perpendicular panels already meet — so the cap follows the panels, not
+# this list.
 #
 # **Defined from the FLOOR, never from the walls**, and that is load-bearing. Deriving it instead from
 # "a wall arrives on each axis" looks equivalent and is not: adding a wall creates fresh cells that
