@@ -420,6 +420,9 @@ pub fn run() {
                 // `Health`. Registered here rather than inside `SiteVisualsPlugin` because it owns a
                 // resource that UI plugins outside `site::` read.
                 site::SitePresencePlugin,
+                // Near walls squash so the camera can see into the rooms — the treatment the dungeon
+                // has had since long before the hub existed, shaped for base-origined meshes.
+                site::SiteCutawayPlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the

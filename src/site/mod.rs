@@ -50,6 +50,7 @@
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
 pub mod aperture;
+pub mod cutaway;
 pub mod kit;
 pub mod layout;
 pub mod nav;
@@ -65,6 +66,7 @@ pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
 pub use people::{CastId, Operative, SiteAvatar, Staff, StaffMember, StaffRig};
+pub use cutaway::SiteCutawayPlugin;
 pub use presence::{in_area, AreaEntered, CurrentArea, SitePresencePlugin};
 pub use review::{ExpeditionTally, O5Plugin, Requisitioned};
 pub use visuals::SiteVisualsPlugin;

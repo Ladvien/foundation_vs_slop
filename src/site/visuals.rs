@@ -277,7 +277,7 @@ type WallPanel = (i32, i32, bool);
 ///
 /// `site67.ron` still says which cells are wall — that is what `is_walkable` and `SiteLayout::validate`
 /// read. Only the question "where is its face" is answered here.
-fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
+pub(crate) fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
     let wall_cells: std::collections::HashSet<(i32, i32)> = l
         .walls
         .iter()
@@ -371,7 +371,7 @@ fn place(
     piece: SitePiece,
     at: Vec3,
     yaw_deg: f32,
-) {
+) -> Entity {
     // Owned: `AssetPath` would otherwise borrow from the kit resource and escape into the spawn.
     let scene: Handle<WorldAsset> =
         assets.load(GltfAssetLabel::Scene(0).from_asset(kit.glb(piece).to_owned()));
@@ -399,7 +399,8 @@ fn place(
                 .with_scale(Vec3::splat(kit.scale(piece)) * Vec3::new(1.0, kit.y_scale(piece), 1.0)),
             Visibility::Inherited,
         ))
-        .with_child((WorldAssetRoot(scene), Transform::default()));
+        .with_child((WorldAssetRoot(scene), Transform::default()))
+        .id()
 }
 
 /// Bevy's `Rectangle` is authored in the XY plane with a **+Z normal**, so its width axis is world X.
@@ -585,7 +586,16 @@ fn spawn_site_geometry(
     let panels = wall_panels(l);
     for &panel in &panels {
         let (at, yaw) = panel_transform(l, panel);
-        place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+        let e = place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+        // The knee-wall cutaway, which the hub went without for its whole life. A panel that encloses
+        // nothing (floor on both sides, or on neither) gets no normal and is left standing — see
+        // `cutaway::panel_outward`.
+        if let Some(outward) = super::cutaway::panel_outward(l, panel) {
+            commands.entity(e).insert(super::cutaway::SiteKneeWall {
+                outward,
+                base_scale_y: kit.scale(SitePiece::Wall) * kit.y_scale(SitePiece::Wall),
+            });
+        }
     }
     // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,
     // say) still stands where it was authored: it is furniture on a cell, not a face on an edge.
@@ -600,7 +610,7 @@ fn spawn_site_geometry(
     let corners = corner_vertices(&panels);
     for &v in &corners {
         let at = l.point((v.0 as f32, v.1 as f32));
-        place(
+        let e = place(
             &mut commands,
             &assets,
             &kit,
@@ -608,6 +618,13 @@ fn spawn_site_geometry(
             at,
             corner_yaw(&panels, v),
         );
+        if let Some(outward) = super::cutaway::corner_outward(l, &panels, v) {
+            commands.entity(e).insert(super::cutaway::SiteKneeWall {
+                outward,
+                base_scale_y: kit.scale(SitePiece::WallCorner)
+                    * kit.y_scale(SitePiece::WallCorner),
+            });
+        }
     }
     for p in &l.props {
         let mut at = l.point(p.pos);
