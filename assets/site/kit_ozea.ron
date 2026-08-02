@@ -90,6 +90,10 @@
     // own top trim at its authored size and the piece lines up with the wall tops either side of the
     // door by construction. `y_scale` is a no-op 1.0.
     wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40),
+    // Half a wall panel, cropped along its LENGTH by `scripts/ozea_wall_heights.py`'s `LEGS` — the leg
+    // of a junction. Cut at the panel's plain midpoint, and it takes the same 2.40 m re-authoring the
+    // full panel does, so a leg and a run are the same wall. `y_scale` is a no-op 1.0.
+    wall_leg:          (glb: "ozea/wall_leg.glb",             height: 2.40),
     // Containment-cell glazing — the player must be able to SEE what is held.
     wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40),
     // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to

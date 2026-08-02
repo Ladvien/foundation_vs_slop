@@ -84,6 +84,26 @@ HEADERS = [
     ("wall_header.glb", "Pack_SciFi_HS_004_V1.0", "SM_Wall_1x2.fbx", 0.40),
 ]
 
+# `(dest name, pack, fbx)` — the half-length **corner leg**, cropped along the panel's LENGTH.
+#
+# A junction cell used to carry two FULL 1 m panels crossed at its centre. The corner point is that
+# same centre, so each panel ran 0.50 m PAST the other: the two runs met in a plus, not an L, and each
+# left a half-panel stub jutting into open space. The player saw it as "the walls, where two of them
+# meet, overlap by about 1/3". Two adjacent junction cells made it worse — two parallel stubs with a
+# doubled section between them.
+#
+# A leg is half a panel, so a junction places one leg per direction that actually continues instead of
+# two panels that always overshoot. Cut at the panel's midpoint (`z = 0` in the exported mesh), which
+# is plain: the length detail sits at |z| 0.18-0.25 and 0.40-0.50, so the cut misses every groove and
+# the half kept keeps its authored END trim for the side that butts the next full panel.
+#
+# It also takes the SAME height re-authoring `wall.glb` does (cut 1.00, +0.40 to reach 2.40) — a leg
+# that skipped it would be a 2.00 m stub against 2.40 m runs, which is the very defect this file
+# exists to remove.
+LEGS = [
+    ("wall_leg.glb", "Pack_SciFi_HS_004_V1.0", "SM_Wall_1x2.fbx", 1.00, 2.40),
+]
+
 
 def raise_above(objs, cut: float, delta: float) -> None:
     """Translate every vertex above `cut` up by `delta`, in Blender's Z-up.
@@ -132,6 +152,79 @@ def crop_above(objs, cut: float) -> None:
         bm.to_mesh(mesh)
         bm.free()
         mesh.update()
+
+
+def crop_half(objs, axis: int, keep_negative: bool) -> None:
+    """Keep half the mesh along `axis`, cutting at 0 and capping the face it opens.
+
+    Same `bisect_plane` + `holes_fill` shape as `crop_above`; the only difference is which plane. The
+    normal is flipped to choose a side, because `clear_inner` always removes what lies on the plane
+    normal's negative side.
+    """
+    n = [0.0, 0.0, 0.0]
+    n[axis] = -1.0 if keep_negative else 1.0
+    seen: set[int] = set()
+    for obj in objs:
+        mesh = obj.data
+        if id(mesh) in seen:
+            continue
+        seen.add(id(mesh))
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        res = bmesh.ops.bisect_plane(
+            bm,
+            geom=list(bm.verts) + list(bm.edges) + list(bm.faces),
+            plane_co=Vector((0.0, 0.0, 0.0)),
+            plane_no=Vector(n),
+            clear_inner=True,
+        )
+        edges = [e for e in res["geom_cut"] if isinstance(e, bmesh.types.BMEdge)]
+        if edges:
+            bmesh.ops.holes_fill(bm, edges=edges)
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh.update()
+
+
+def build_leg(
+    src_root: str, out_dir: str, dest: str, pack: str, fbx: str, cut: float, target: float
+) -> str:
+    """Crop a wall panel to half its LENGTH, for a corner leg — see `LEGS`."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    path = os.path.join(src_root, pack, "02_EXPORT", "FBX", fbx)
+    if not os.path.isfile(path):
+        return f"{dest}: SOURCE MISSING {path}"
+    bpy.ops.import_scene.fbx(filepath=path)
+    meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+    if not meshes:
+        return f"{dest}: no mesh objects in {fbx}"
+    for obj in bpy.context.scene.objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+    before = reorigin_group_to_base(meshes)
+    # Height first, on exactly the terms `build` uses, so a leg and a run are the same wall.
+    delta = target - before[2]
+    if delta < 0 or not (0.0 < cut < before[2]):
+        return f"{dest}: cut {cut} / target {target} outside the piece (0..{before[2]:.3f})"
+    raise_above(meshes, cut, delta)
+    # `export_yup` maps Blender (x, y, z) to glTF (x, z, -y), so the panel's exported LENGTH axis (Z)
+    # is Blender's Y. Keeping Blender y <= 0 keeps the exported +Z half.
+    crop_half(meshes, 1, keep_negative=True)
+    ext = reorigin_group_to_base(meshes)
+
+    out = os.path.join(out_dir, dest)
+    bpy.ops.export_scene.gltf(
+        filepath=out,
+        export_format="GLB",
+        export_apply=True,
+        export_yup=True,
+        export_tangents=True,
+        export_animations=False,
+        use_selection=False,
+    )
+    return f"{dest}: length {before[1]:.3f} -> {ext[1]:.3f} m (height {ext[2]:.3f} m)"
 
 
 def build_header(src_root: str, out_dir: str, dest: str, pack: str, fbx: str, height: float) -> str:
@@ -225,6 +318,8 @@ def main() -> int:
         print("ozea_wall_heights:", build(a.src, a.out, dest, pack, fbx, cut, target))
     for dest, pack, fbx, height in HEADERS:
         print("ozea_wall_heights:", build_header(a.src, a.out, dest, pack, fbx, height))
+    for dest, pack, fbx, cut, target in LEGS:
+        print("ozea_wall_heights:", build_leg(a.src, a.out, dest, pack, fbx, cut, target))
     return 0
 
 

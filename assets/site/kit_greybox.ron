@@ -40,6 +40,10 @@
     // here: this kit is readable blocks, and it already stretches `wall_low` 1.8x for the same reason.
     // The shipped Ozea kit gets a properly cropped 0.40 m piece instead.
     wall_header: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-cutout-small.glb", height: 1.0),
+    // The junction leg. Kenney has no HALF-length panel, so the greybox corner still overshoots — it
+    // is readable blocks and that is the trade it makes everywhere else too. The shipped Ozea kit gets
+    // a properly cropped 0.5 m leg.
+    wall_leg: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-cutout-medium.glb", height: 1.0),
     wall_window: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-large.glb", height: 1.0),
     wall_low: (glb: "kenney_prototype-kit/Models/GLB format/wall-low.glb", height: 0.5),
     // A low block reads as a slab in greybox terms; the shipped kit gets a real treatment bed.

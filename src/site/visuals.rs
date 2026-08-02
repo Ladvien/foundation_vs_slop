@@ -323,6 +323,10 @@ fn spawn_aperture_quad(
     ));
 }
 
+/// Length of a corner leg, in metres — half a wall panel, so it reaches from the corner point (a cell
+/// CENTRE) to the cell edge where the next full panel begins.
+const WALL_LEG_LEN: f32 = 0.5;
+
 /// Height of the examination slab's bed platform, in metres — where a study subject lies.
 ///
 /// Measured off `slab.glb` (`SM_MedPod_Treatment_Bed`): the widest horizontal band of the mesh is at
@@ -403,23 +407,54 @@ fn spawn_site_geometry(
             );
         }
     }
+    let junctions = corner_cells(l);
     for w in &l.walls {
+        // A junction is rendered from LEGS below, not from the crossed panels the layout records.
+        // `site67.ron` still says "wall on this cell" — that is what `is_walkable` and the validator
+        // read — but two full 1 m panels crossed at the cell CENTRE is not what a corner looks like.
+        if w.piece == SitePiece::Wall && junctions.contains(&w.cell) {
+            continue;
+        }
         let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
         place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
     }
-    // Cap every junction. ADDITIVE — the two crossed slabs stay and the cap covers the seam where
-    // they meet; it does not replace them. Substituting it was the first attempt and it was wrong:
-    // `SM_Wall_CornerCap` is a 0.22 m post, so swapping it in deleted a full metre of wall from each
-    // run and left a pole standing in the gap — which is precisely what the player had reported.
-    for cell in corner_cells(l) {
+    for cell in &junctions {
         let at = l.cell_center(IVec2::new(cell.0, cell.1));
+        // One HALF-panel leg per direction the perimeter actually continues in, reaching from the
+        // corner point to the cell edge — so an L junction gets two legs, a T gets three, and a
+        // crossing gets four, with nothing left over.
+        for (step, yaw) in [
+            (IVec2::X, 90.0),
+            (IVec2::NEG_X, 90.0),
+            (IVec2::Y, 0.0),
+            (IVec2::NEG_Y, 0.0),
+        ] {
+            let n = (cell.0 + step.x, cell.1 + step.y);
+            if !l
+                .walls
+                .iter()
+                .any(|w| w.cell == n && w.piece == SitePiece::Wall)
+            {
+                continue;
+            }
+            let off = Vec3::new(step.x as f32, 0.0, step.y as f32) * (WALL_LEG_LEN * 0.5);
+            place(
+                &mut commands,
+                &assets,
+                &kit,
+                SitePiece::WallLeg,
+                at + off,
+                yaw,
+            );
+        }
+        // ...and the cap over the seam where they meet.
         place(
             &mut commands,
             &assets,
             &kit,
             SitePiece::WallCorner,
             at,
-            corner_yaw(l, cell),
+            corner_yaw(l, *cell),
         );
     }
     for p in &l.props {

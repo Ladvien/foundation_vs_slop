@@ -127,6 +127,30 @@ existed anywhere in the world and the wing was bare floor. `assets/ozea/slab.glb
 guessed. It adds no gameplay rule: the subject is still chosen by `keep_a_study_subject`; this only
 shows what that already decided.
 
+## The fourth pass: the corners were still wrong, in the other direction
+
+The player, on the closed corners: *"where two of them meet, it feels like they overlap by about
+1/3."* They were right, and it is the older half of the corner design rather than anything the convex
+fix introduced.
+
+A junction cell carried **two full 1 m panels crossed at its centre** — and the corner point IS that
+centre, so each panel ran **0.50 m past the other**. The runs met in a **plus, not an L**, and each
+left a half-panel stub jutting into open space: outward at a convex corner, straight into the walkable
+opening at a concave one. Two adjacent junctions made it worse — two parallel stubs with a doubled
+section between them, which is exactly what "overlap" describes.
+
+Full panels cannot build this corner. The corner point is a cell CENTRE, so a piece that stops there
+has to be half a cell long. `assets/ozea/wall_leg.glb` is that piece: `SM_Wall_1x2` cropped along its
+LENGTH at the panel's plain midpoint (the length detail sits at |z| 0.18–0.25 and 0.40–0.50, so the
+cut misses every groove), and given the same 2.40 m re-authoring the full panel gets so a leg and a
+run are the same wall.
+
+A junction now places **one leg per direction the perimeter actually continues in** — two for an L,
+three for a T, four for a crossing — each reaching from the corner point to the cell edge where the
+next full panel begins. Nothing overshoots and nothing is left out. `site67.ron` still records a wall
+on those cells, because that is what `is_walkable` and the validator read; only the *rendering*
+changed.
+
 ## Knowingly left
 
 - **`wall_low` is still squashed** 2.00 → 0.9 (0.45×). Shortening a panel properly is an authoring
