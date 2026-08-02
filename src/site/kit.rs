@@ -36,6 +36,19 @@ pub const SITE_KIT_PATH: &str = "assets/site/kit_ozea.ron";
 /// names meshes nobody has checked in years.
 pub const GREYBOX_KIT_PATH: &str = "assets/site/kit_greybox.ron";
 
+/// How far a `rests_on` piece may look for the surface it stands on.
+///
+/// A dressing prop is authored at the position it should occupy *on* its host, so the host's own
+/// centre is at most half its diagonal away — a 3.68 m control desk is the longest in the kit. This
+/// is comfortably past that and comfortably short of the next room.
+pub const RESTS_ON_REACH: f32 = 2.5;
+
+/// `serde` default for [`KitPiece::scale`] — an unscaled piece is the overwhelming case, and the kit
+/// should not have to say `scale: 1.0` thirty-three times.
+fn one() -> f32 {
+    1.0
+}
+
 /// One mesh in a kit: where it lives, and how tall the artist made it.
 ///
 /// **`height` is why this is a struct and not a bare path.** The Site's pieces are scaled to game
@@ -99,10 +112,59 @@ pub struct KitPiece {
     /// console. Seats near one are required to face it (`layout::check_prop_placements`).
     ///
     /// The furniture manifest expresses the same idea as `surfaces: ["support", "worktop"]`
-    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because nothing
-    /// here scatters objects ONTO surfaces yet.
+    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because the Site's
+    /// surface *vocabulary* is one class — see [`Self::rests_on`].
     #[serde(default)]
     pub surface: bool,
+
+    /// **This piece sits on top of another piece rather than on the floor.**
+    ///
+    /// A mug belongs on a table, not at the table's feet. Before this, the Site had no way to say so:
+    /// `layout::PropPlacement` is `(piece, pos, yaw)` with **no height**, and [`Self::y_offset`] is a
+    /// fact about the *mesh* (how thick the floor under a decal is), not about a placement — so a mug
+    /// authored in the galley stood on the deck.
+    ///
+    /// # Derived, never authored
+    ///
+    /// The height comes from the **hosting piece**, found at build time as the nearest prop within
+    /// [`RESTS_ON_REACH`] whose kit entry has `surface: true`. That is the same
+    /// derive-don't-author discipline `visuals::wall_panels` (faces from floor edges),
+    /// `corner_vertices`, `light_the_site` (a wing's fixtures from its rect), the slab spot (from the
+    /// authored `Slab`) and `people::post_positions` all follow. Move the table and the mug moves;
+    /// change the table's mesh and the mug rises with it.
+    ///
+    /// **A prop that rests on nothing is a loud failure, not a float.** `check_prop_placements`
+    /// rejects it and names the piece, because the alternative — silently seating it at y = 0 — is a
+    /// mug embedded in the floor that no test would ever notice.
+    ///
+    /// The token is a surface *class*, matching `placement::furnish::SURFACE_CLASSES`' vocabulary
+    /// rather than inventing a second one. The Site offers one class today (`"support"`); the manifest
+    /// side additionally distinguishes `"worktop"`. Keeping the token — instead of a bare `bool` —
+    /// is what lets the two vocabularies converge when the Site's dressing moves onto the shared
+    /// constraint IR (`slop/research/2026-07-24-world-population-grammar.md`, Stage A).
+    #[serde(default)]
+    pub rests_on: Option<String>,
+
+    /// Uniform scale applied to the mesh at placement. Defaults to `1.0` — **authored size is the
+    /// intent**, exactly as `pieces::target_height` returns `None` for furniture.
+    ///
+    /// # Why this exists, and why it is not a licence to resize art
+    ///
+    /// It exists because one library the dressing draws on is inconsistently scaled.
+    /// `assets/low_poly_furniture/` was converted for the dungeon's furniture manifest, which carries
+    /// its own per-item footprint, so nothing there ever had to be life-size. Measured 2026-08-02:
+    /// `Mug.glb` is 0.109 m tall and `Plate.glb` 0.029 m — both correct — while `Kettle.glb` is
+    /// 0.547 m and `Keyboard.glb` 0.793 m wide, roughly double. `artist_guide.md` §1 is explicit that
+    /// assets are authored in real metres; these predate the Site using them.
+    ///
+    /// ⚠️ **The number must be derived from a measurement, not dialled by eye**: measure the mesh,
+    /// divide the real-world size by it, write that. `footprint` and `height` in this same entry must
+    /// then be the **scaled** values, because every placement rule reads them.
+    ///
+    /// Distinct from [`Self::y_offset`] (a translation) and from `SiteKit::y_scale` (which stretches
+    /// Y only, to bring a wall to `WALL_HEIGHT`). This is uniform, so it never distorts a shape.
+    #[serde(default = "one")]
+    pub scale: f32,
     /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
     ///
     /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
@@ -148,6 +210,17 @@ pub struct DoorPiece {
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SiteKit {
+    pub trash_bin: KitPiece,
+    pub pallet: KitPiece,
+    pub step_ladder: KitPiece,
+    pub storage_box: KitPiece,
+    pub storage_crate: KitPiece,
+    pub utility_cart: KitPiece,
+    pub tube_rack: KitPiece,
+    pub data_folder: KitPiece,
+    pub medical_vial: KitPiece,
+    pub mug: KitPiece,
+    pub books: KitPiece,
     pub floor: KitPiece,
     pub wall: KitPiece,
     pub wall_corner: KitPiece,
@@ -205,10 +278,32 @@ impl SiteKit {
         self.piece(piece).y_offset
     }
 
+    /// Uniform placement scale for `piece` in THIS kit — see [`KitPiece::scale`].
+    pub fn scale(&self, piece: SitePiece) -> f32 {
+        self.piece(piece).scale
+    }
+
+    /// The surface class `piece` must rest on, if it is not a floor-standing piece.
+    /// See [`KitPiece::rests_on`].
+    pub fn rests_on(&self, piece: SitePiece) -> Option<&str> {
+        self.piece(piece).rests_on.as_deref()
+    }
+
     /// The kit entry for `piece`.
     pub fn piece(&self, piece: SitePiece) -> &KitPiece {
         use SitePiece::*;
         match piece {
+            TrashBin => &self.trash_bin,
+            Pallet => &self.pallet,
+            StepLadder => &self.step_ladder,
+            StorageBox => &self.storage_box,
+            StorageCrate => &self.storage_crate,
+            UtilityCart => &self.utility_cart,
+            TubeRack => &self.tube_rack,
+            DataFolder => &self.data_folder,
+            MedicalVial => &self.medical_vial,
+            Mug => &self.mug,
+            Books => &self.books,
             Floor => &self.floor,
             Wall => &self.wall,
             WallCorner => &self.wall_corner,
@@ -274,12 +369,41 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
         }
     }
     for piece in SitePiece::ALL {
-        let h = kit.piece(*piece).height;
+        let entry = kit.piece(*piece);
+        let h = entry.height;
         if !(h.is_finite() && h > 0.0) {
             return Err(format!(
                 "site kit: {piece:?} has authored height {h} — the scale is target/authored, so a \
                  zero or negative height is a divide-by-zero or an inside-out mesh"
             ));
+        }
+        // Same reasoning as the height, one step further along: `scale` multiplies the placement
+        // transform, so a zero collapses the mesh to a point and a negative one turns it inside out —
+        // both of which render as "the prop is missing" with nothing in the log.
+        if !(entry.scale.is_finite() && entry.scale > 0.0) {
+            return Err(format!(
+                "site kit: {piece:?} has scale {} — a zero collapses the mesh and a negative one \
+                 mirrors it; both look like a missing asset and neither errors at spawn",
+                entry.scale
+            ));
+        }
+        // A `rests_on` token must name a surface class something in this kit actually offers,
+        // otherwise the piece can never be seated and would silently sit on the floor. Checked at the
+        // door in the same spirit as `placement::manifest::validate_manifest`'s two-sided contract —
+        // "a scatter class no item in the kit offers is a load-time reject naming the item".
+        if let Some(class) = &entry.rests_on {
+            if crate::placement::furnish::surface_bits(class) == 0 {
+                return Err(format!(
+                    "site kit: {piece:?} rests on {class:?}, which is not a surface class. The \
+                     vocabulary is `placement::furnish::SURFACE_CLASSES`."
+                ));
+            }
+            if !SitePiece::ALL.iter().any(|p| kit.piece(*p).surface) {
+                return Err(format!(
+                    "site kit: {piece:?} rests on {class:?} but no piece in this kit offers a \
+                     surface — it could never be seated"
+                ));
+            }
         }
     }
     // A doorway's opening must be a real hole inside a real mesh. The aperture quad is built from
@@ -453,6 +577,8 @@ mod tests {
             footprint: (0.3, 0.3),
             front: None,
             surface: false,
+            rests_on: None,
+            scale: 1.0,
         };
         assert!(
             validate_site_kit(&kit).is_err(),

@@ -150,4 +150,20 @@
     surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0, footprint: (0.58, 1.54), surface: true ),
     server_rack: ( glb: "ozea/server_rack.glb", height: 1.80, y_offset: 0.0, footprint: (0.74, 1.32) ),
     command_chair: ( glb: "ozea/command_chair.glb", height: 1.10, y_offset: 0.0, footprint: (0.59, 0.55), front: Some(90.0) ),
+
+    // ── Dressing: the lived-in layer (2026-08-02) ───────────────────────────────────────
+    // Heights and footprints are MEASURED, never guessed — Ozea's from the converter's own
+    // INVENTORY.md, the rest read out of the GLB's POSITION accessors.
+    // `mug` and `books` come from assets/low_poly_furniture/ — Ozea has no human objects at all.
+    trash_bin: ( glb: "ozea/trash_bin.glb", height: 0.8, footprint: (0.41, 0.6) ),
+    pallet: ( glb: "ozea/pallet.glb", height: 0.13, footprint: (0.81, 1.21) ),
+    step_ladder: ( glb: "ozea/step_ladder.glb", height: 0.84, footprint: (0.67, 0.56) ),
+    storage_box: ( glb: "ozea/storage_box.glb", height: 0.37, footprint: (0.59, 0.5) ),
+    storage_crate: ( glb: "ozea/storage_crate.glb", height: 0.27, footprint: (0.5, 0.72) ),
+    utility_cart: ( glb: "ozea/utility_cart.glb", height: 0.9, footprint: (1.08, 0.81) ),
+    tube_rack: ( glb: "ozea/tube_rack.glb", height: 0.13, footprint: (0.05, 0.22), rests_on: Some("support") ),
+    data_folder: ( glb: "ozea/data_folder.glb", height: 0.04, footprint: (0.25, 0.2), rests_on: Some("support") ),
+    medical_vial: ( glb: "ozea/medical_vial.glb", height: 0.16, footprint: (0.07, 0.07), rests_on: Some("support") ),
+    mug: ( glb: "site_dressing/mug.glb", height: 0.109, footprint: (0.136, 0.105), rests_on: Some("support") ),
+    books: ( glb: "site_dressing/books.glb", height: 0.178, footprint: (0.306, 0.106), rests_on: Some("support"), scale: 0.6 ),
 )

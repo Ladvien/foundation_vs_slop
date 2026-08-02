@@ -609,6 +609,61 @@ fn thresholds(rect: &Rect, nav: &super::nav::SiteNav) -> Vec<(crate::placement::
     out
 }
 
+/// How high `p` sits, and on what — `None` when it is a floor-standing piece.
+///
+/// A `rests_on` piece is authored at the XZ position it should occupy **on** its host; the height is
+/// then read off the host rather than authored, so moving the table moves the mug and re-skinning the
+/// kit re-seats it. See `kit::KitPiece::rests_on` for why this is derived rather than a per-placement
+/// number.
+///
+/// Returns `Ok(None)` for a floor piece and `Err` for a resting piece with no host in reach — that is
+/// a **fault**, not a fallback: seating it at y = 0 would bury a mug in the deck, and nothing about
+/// that errors at spawn.
+///
+/// Deterministic without an ordering lint: `layout.props` is an authored `Vec` read in file order, and
+/// the pick is broken to a **total** key by `(distance, x, z)`, so two equally close hosts cannot tie.
+pub(crate) fn resting_on<'a>(
+    layout: &'a SiteLayout,
+    kit: &super::kit::SiteKit,
+    p: &PropPlacement,
+) -> Option<Result<(f32, &'a PropPlacement), String>> {
+    let class = kit.rests_on(p.piece)?;
+    let mut best: Option<(f32, f32, f32, &PropPlacement)> = None;
+    for q in &layout.props {
+        if !kit.piece(q.piece).surface || std::ptr::eq(q, p) {
+            continue;
+        }
+        let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
+        if d > super::kit::RESTS_ON_REACH {
+            continue;
+        }
+        // Explicit loop rather than `min_by`: a tied comparator would hand the choice to iteration
+        // order, which is the shape `tests/determinism_lint.rs` exists to catch. `(d, x, z)` is total.
+        let key = (d, q.pos.0, q.pos.1);
+        let better = match best {
+            None => true,
+            Some(b) => key < (b.0, b.1, b.2),
+        };
+        if better {
+            best = Some((key.0, key.1, key.2, q));
+        }
+    }
+    Some(match best {
+        Some((_, _, _, host)) => {
+            let top = kit.piece(host.piece).height * kit.y_scale(host.piece);
+            Ok((top, host))
+        }
+        None => Err(format!(
+            "{:?} at {:?} rests on {class:?} but no surface piece stands within {:.1} m of it — it \
+             would be seated at floor level, buried in the deck, with nothing logged. Move it onto a \
+             surface, or drop `rests_on` from its kit entry.",
+            p.piece,
+            p.pos,
+            super::kit::RESTS_ON_REACH
+        )),
+    })
+}
+
 pub(crate) fn is_floor_marking(kit: &super::kit::SiteKit, piece: SitePiece) -> bool {
     kit.piece(piece).height * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
 }
@@ -656,8 +711,27 @@ pub fn check_prop_placements(
         // such pairs faults. That is the 2D footprint model's known blind spot — it compares plan
         // outlines and cannot see that one of the two is 5 cm thick and lying on the ground — so the
         // exclusion is stated here rather than waived away six times at the call site.
-        if !is_floor_marking(kit, p.piece) {
+        // ...and a piece that RESTS ON another is not on the floor at all, so the floor rules do not
+        // apply to it either. A mug on a table overlaps that table completely in plan — `overlap_area`
+        // is a 2D outline test and cannot see that one of the two is 75 cm higher. Excluding it here
+        // is the same exemption `is_floor_marking` takes, for the same reason: the model is a plan
+        // view, and both of these live outside it. The `resting_on` check below is what covers them.
+        if !is_floor_marking(kit, p.piece) && kit.rests_on(p.piece).is_none() {
             solid.push((i, f));
+        }
+    }
+
+    // ── Anything that rests on a surface has one to rest on ──
+    //
+    // The height of a `rests_on` piece is derived from its host (`resting_on`), so a piece authored
+    // away from every surface has no height to derive and would be seated at y = 0 — a mug sunk into
+    // the deck, which spawns cleanly and logs nothing.
+    for p in &layout.props {
+        if p.waive.is_some() {
+            continue;
+        }
+        if let Some(Err(e)) = resting_on(layout, kit, p) {
+            faults.push(e);
         }
     }
 
@@ -1065,6 +1139,66 @@ mod tests {
             waive: None,
         });
         check_prop_placements(&l, &kit).expect("a chair facing the room is fine");
+    }
+
+    /// **A prop that rests on a surface finds one, and takes its height from it.**
+    ///
+    /// The height of a `rests_on` piece is derived from its host, never authored — `PropPlacement` has
+    /// no height field at all. The failure this guards is silent by construction: a mug authored away
+    /// from every surface would seat at y = 0, spawn cleanly, log nothing, and be buried in the deck.
+    #[test]
+    fn a_resting_prop_finds_its_host_and_a_stranded_one_is_refused() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let l = shipped();
+
+        // Every resting prop the Site actually ships resolves to a host, and to a host that is
+        // genuinely a surface rather than whatever happened to be nearest.
+        let mut resting = 0;
+        for p in &l.props {
+            let Some(rest) = resting_on(&l, &kit, p) else { continue };
+            resting += 1;
+            let (top, host) = rest.unwrap_or_else(|e| panic!("{e}"));
+            assert!(kit.piece(host.piece).surface, "{:?} rests on a non-surface", p.piece);
+            assert!(top > 0.0, "{:?} would be seated at floor level", p.piece);
+        }
+        assert!(resting >= 4, "the Site ships resting dressing; found {resting}");
+
+        // ...and one authored in open floor is a loud fault, naming the piece.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            // The middle of the ASYNC hall — deliberately the emptiest floor in the Site.
+            piece: SitePiece::Mug,
+            pos: (5.5, 6.5),
+            yaw: 0.0,
+            waive: None,
+        });
+        let err = check_prop_placements(&l, &kit).expect_err("a stranded mug must be refused");
+        assert!(
+            err.contains("rests on") && err.contains("Mug"),
+            "the message must name the piece and the relation: {err}"
+        );
+    }
+
+    /// A resting prop is exempt from the FLOOR rules, and that is not a loophole.
+    ///
+    /// `overlap_area` is a plan-view test: a mug on a table overlaps that table completely and cannot
+    /// see that one of the two is three-quarters of a metre higher. The same exemption
+    /// `is_floor_marking` takes, for the same reason.
+    #[test]
+    fn a_mug_on_a_table_does_not_count_as_overlapping_it() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let mut l = shipped();
+        // Dead centre of the briefing room's mess table — maximum possible plan overlap.
+        l.props.push(PropPlacement {
+            piece: SitePiece::Mug,
+            pos: (26.2, 24.4),
+            yaw: 0.0,
+            waive: None,
+        });
+        check_prop_placements(&l, &kit)
+            .expect("a mug standing on a table is the point, not an overlap");
     }
 
     /// The kit records the measured facing, and it is the quarter turn that caused the bug.

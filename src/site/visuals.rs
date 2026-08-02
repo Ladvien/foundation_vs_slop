@@ -384,9 +384,19 @@ fn place(
             // `KitPiece::y_offset` for why this is geometric rather than a depth bias.
             Transform::from_translation(at + Vec3::Y * kit.y_offset(piece))
                 .with_rotation(Quat::from_rotation_y(yaw_deg.to_radians()))
-                // The kit is authored at its own scale per piece; `y_scale` lifts architecture to
-                // WALL_HEIGHT and leaves dressing at the size the artist made it.
-                .with_scale(Vec3::new(1.0, kit.y_scale(piece), 1.0)),
+                // Two different scales, and they answer different questions.
+                //
+                // `y_scale` is GAME POLICY stretching Y alone: a wall must reach `WALL_HEIGHT`
+                // whatever the artist made it, and dressing (`target_height` → `None`) is left at the
+                // size it was authored.
+                //
+                // `scale` is an ART CORRECTION applied uniformly: one of the libraries the dressing
+                // draws on (`assets/low_poly_furniture/`) was converted for the dungeon's manifest,
+                // which carries its own footprint, so nothing there ever had to be life-size — `Books
+                // A.glb` measures a half-metre wide. Uniform, so it never distorts a shape, and the
+                // kit's `height`/`footprint` are the post-scale values because every placement rule
+                // reads them. See `KitPiece::scale`.
+                .with_scale(Vec3::splat(kit.scale(piece)) * Vec3::new(1.0, kit.y_scale(piece), 1.0)),
             Visibility::Inherited,
         ))
         .with_child((WorldAssetRoot(scene), Transform::default()));
@@ -600,7 +610,17 @@ fn spawn_site_geometry(
         );
     }
     for p in &l.props {
-        let at = l.point(p.pos);
+        let mut at = l.point(p.pos);
+        // A dressing prop that rests on a surface takes its height from the host it stands on —
+        // derived, never authored (`kit::KitPiece::rests_on`). `check_prop_placements` has already
+        // refused any resting prop with no host, so an `Err` here cannot reach a built Site; it is
+        // logged rather than ignored so a future caller that skipped the check is not silent.
+        if let Some(rest) = super::layout::resting_on(l, &kit, p) {
+            match rest {
+                Ok((top, _host)) => at.y += top,
+                Err(e) => warn!("site: {e}"),
+            }
+        }
         place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
         // The slab is the one prop with a gameplay meaning attached, so it also gets a marker at the
         // height of its bed platform for `lay_out_the_study_subject` to parent a body to.

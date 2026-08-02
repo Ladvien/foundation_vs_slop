@@ -117,6 +117,38 @@ pub enum SitePiece {
     ServerRack,
     /// The one seat in the monitoring room, facing the screens.
     CommandChair,
+
+    // ── Dressing: the lived-in layer (2026-08-02) ─────────────────────────────────────────
+    //
+    // Split by MEANING, not by source library: Ozea is what the Foundation ISSUED, and
+    // `assets/low_poly_furniture/` is what somebody BROUGHT. Checked mesh by mesh, Ozea has no
+    // mugs, bottles, food, books, bags or blankets at all — it is a facility kit, so the human
+    // half has to come from somewhere else, and the seam is legible rather than accidental.
+    //
+    // Several of these carry `rests_on` in the kit: they seat on a surface piece's top rather
+    // than the floor, derived from the host at build time (`kit::KitPiece::rests_on`).
+    /// Somebody has to empty it. The cheapest single object that says a room is used.
+    TrashBin,
+    /// A site still moving in. Under `FLOOR_MARKING_HEIGHT`, so boxes may stand on it.
+    Pallet,
+    /// Left where the last job finished.
+    StepLadder,
+    /// Transit box, lid on. The containment wing is still half a store room.
+    StorageBox,
+    /// Its shallower sibling, so a stack reads as a stack rather than a repeat.
+    StorageCrate,
+    /// Wheeled: it is somewhere because someone pushed it there.
+    UtilityCart,
+    /// Sample tubes. Rests on the slab — the research wing's one verb, dressed.
+    TubeRack,
+    /// Paper. The Foundation runs on it, and the archive is where 47721 is not.
+    DataFolder,
+    /// The smallest object in the kit. Scale reference for everything around it.
+    MedicalVial,
+    /// Measured 0.109 m — life size as authored, no scale needed. The single strongest 'someone was just here' signal in the whole catalogue.
+    Mug,
+    /// Authored 0.510 x 0.297 m — a half-metre book stack. scale 0.6 brings it to 0.31 x 0.18; the height and footprint here are the SCALED values, because every placement rule reads them.
+    Books,
 }
 
 impl SitePiece {
@@ -154,7 +186,8 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
         WallLow => Some(0.9),
         // Native height is the intent — dressing, decals, the specimen stand-in, and every piece of
         // furniture in the living half. A chair has no policy height the way a wall does.
-        Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal | Slab
+        TrashBin | Pallet | StepLadder | StorageBox | StorageCrate | UtilityCart | TubeRack | DataFolder | MedicalVial | Mug | Books
+        | Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal | Slab
         | SpecimenStandin
         | Bunk | Locker | BedsideTable | GalleyCounter
         | MessTable | Stool | CoffeeMachine | WaterDispenser
@@ -181,6 +214,17 @@ impl SitePiece {
         SitePiece::PipeCorner,
         SitePiece::FloorButton,
         SitePiece::AreaDecal,
+        SitePiece::TrashBin,
+        SitePiece::Pallet,
+        SitePiece::StepLadder,
+        SitePiece::StorageBox,
+        SitePiece::StorageCrate,
+        SitePiece::UtilityCart,
+        SitePiece::TubeRack,
+        SitePiece::DataFolder,
+        SitePiece::MedicalVial,
+        SitePiece::Mug,
+        SitePiece::Books,
         SitePiece::ArrowDecal,
         SitePiece::SpecimenStandin,
         SitePiece::Bunk,

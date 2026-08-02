@@ -516,6 +516,72 @@
         ( piece: ServerRack,    pos: (18.6, 32.8), yaw:   0.0 ),
         ( piece: Locker,        pos: (22.4, 32.6), yaw: 270.0 ),
 
+        // ═══ DRESSING: the lived-in layer (2026-08-02) ═══════════════════════════════════════════
+        //
+        // Split by MEANING: Ozea is what the Foundation ISSUED, `assets/low_poly_furniture/` is what
+        // somebody BROUGHT. Ozea has no mugs, books, food or bags anywhere in its 418 meshes — it is a
+        // facility kit — so the human half has to come from elsewhere, and the seam is deliberate.
+        //
+        // The fiction this dresses is the RECOMMISSIONING (docs/lore/2026-08-02-site-67-recommissioned.md):
+        // a site reopened around an aperture nobody planned for, staffed by people who have been here
+        // months. So the empty wings are not bare — they are still half unpacked.
+        //
+        // A prop with `rests_on` in the kit takes its HEIGHT FROM ITS HOST, derived at build time from
+        // the nearest `surface: true` piece. Author only the XZ position; `check_prop_placements`
+        // refuses a resting prop with no surface in reach rather than burying it in the deck.
+
+        // ── CONTAINMENT  x[14,30) z[2,12) — was ZERO props ──
+        //
+        // Sixteen by ten cells, and until now the only things in it were the six cell booths. The
+        // booths occupy z[3,5]; the spine threshold is z[11,12]; so the working strip is z 7..10.
+        // Read as: the wing is still half a store room, which is exactly what a reopened site looks
+        // like before it has filled its cells.
+        ( piece: Pallet,        pos: (16.6,  8.2), yaw:   0.0 ),
+        ( piece: StorageCrate,  pos: (16.6,  9.6), yaw:   0.0 ),
+        ( piece: StorageBox,    pos: (18.2,  8.3), yaw:  90.0 ),
+        ( piece: StepLadder,    pos: (20.4,  8.6), yaw: 180.0 ),
+        ( piece: UtilityCart,   pos: (23.2,  8.6), yaw:  90.0 ),
+        ( piece: TrashBin,      pos: (26.4,  8.8), yaw:   0.0 ),
+
+        // ── RESEARCH  x[10,22) z[14,24) — was TWO props, one of them a decal ──
+        //
+        // The 12x10 wing BACKLOG.md:839 calls "an empty floor". The slab and its spot stay the subject;
+        // these say the room is worked in rather than furnished.
+        ( piece: UtilityCart,   pos: (12.4, 16.4), yaw:  90.0 ),
+        ( piece: StorageBox,    pos: (12.2, 21.8), yaw:   0.0 ),
+        ( piece: TrashBin,      pos: (20.4, 21.9), yaw:   0.0 ),
+
+        // ── RECORDS  x[0,8) z[14,22) — 2900 K tungsten, "paper, dust, and a desk lamp" ──
+        ( piece: TrashBin,      pos: ( 6.6, 20.4), yaw:   0.0 ),
+        ( piece: StorageBox,    pos: ( 6.4, 16.2), yaw: 270.0 ),
+
+        // ── BRIEFING  x[24,34) z[22,30) — was ONE prop, and all five operatives stand here ──
+        //
+        // A mess table earns its place twice: the room needed something to gather round, and it is the
+        // only `surface: true` piece in the room — so it is what the folder and the mug rest on.
+        ( piece: MessTable,     pos: (26.2, 24.4), yaw:   0.0 ),
+        ( piece: DataFolder,    pos: (26.1, 24.3), yaw:  20.0 ),
+        ( piece: Mug,           pos: (26.4, 24.6), yaw:   0.0 ),
+        ( piece: TrashBin,      pos: (32.6, 23.0), yaw:   0.0 ),
+
+        // ── ASYNC APERTURE HALL  x[0,12) z[2,12) — four floor markings and nothing standing ──
+        //
+        // Kept sparse on purpose: the hall's job is to be the dark room the door glows into, and the
+        // threshold pads are diegetic UI. Two crates against the west wall, well clear of the door.
+        ( piece: StorageCrate,  pos: ( 1.0,  9.6), yaw:  90.0 ),
+        ( piece: Pallet,        pos: ( 1.2,  7.6), yaw:  90.0 ),
+
+        // ── GALLEY — what somebody brought ──
+        ( piece: Mug,           pos: ( 8.3, 28.4), yaw:   0.0 ),
+        ( piece: Mug,           pos: ( 9.6, 33.4), yaw:   0.0 ),
+
+        // ── WAR ROOM — the map table is the centrepiece, so it is what carries the paper ──
+        ( piece: DataFolder,    pos: (20.2, 30.2), yaw: 340.0 ),
+        ( piece: Books,         pos: (20.9, 29.7), yaw:  15.0 ),
+
+        // ── MONITORING — a mug on a console at 06:00 ──
+        ( piece: Mug,           pos: (33.0,  6.3), yaw:   0.0 ),
+
         // ── MONITORING  x[30,34) z[2,12) ──
         //
         // The room is pointed at the thing it watches; that is the whole reason it is here rather than

@@ -74,4 +74,21 @@
     surveillance_console: ( glb: "kenney_prototype-kit/Models/GLB format/lever-single.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.30), surface: true ),
     server_rack: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00) ),
     command_chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), front: Some(90.0) ),
+
+    // ── Dressing: the lived-in layer (2026-08-02) ───────────────────────────────────────
+    // Heights and footprints are MEASURED, never guessed — Ozea's from the converter's own
+    // INVENTORY.md, the rest read out of the GLB's POSITION accessors.
+    // Stand-ins only: every entry has to be a DISTINCT real mesh, nothing more. All chosen
+    // base-origined so they do not sink through the deck.
+    trash_bin: ( glb: "kenney_prototype-kit/Models/GLB format/crate.glb", height: 0.5, footprint: (0.5, 0.5) ),
+    pallet: ( glb: "kenney_prototype-kit/Models/GLB format/floor-thick.glb", height: 0.2, footprint: (1.0, 1.0) ),
+    step_ladder: ( glb: "kenney_prototype-kit/Models/GLB format/ladder.glb", height: 1.0, footprint: (0.15, 0.55) ),
+    storage_box: ( glb: "kenney_prototype-kit/Models/GLB format/ladder-top.glb", height: 0.302, footprint: (0.4, 0.5) ),
+    storage_crate: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-round.glb", height: 0.15, footprint: (0.5, 0.5) ),
+    utility_cart: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding-double.glb", height: 0.8, footprint: (0.35, 0.9) ),
+    tube_rack: ( glb: "kenney_prototype-kit/Models/GLB format/column-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
+    data_folder: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-square-small.glb", height: 0.15, footprint: (0.5, 0.5), rests_on: Some("support") ),
+    medical_vial: ( glb: "kenney_prototype-kit/Models/GLB format/column-rounded-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
+    mug: ( glb: "kenney_prototype-kit/Models/GLB format/hat-cap.glb", height: 0.15, footprint: (0.335, 0.22), rests_on: Some("support") ),
+    books: ( glb: "kenney_prototype-kit/Models/GLB format/hat-hard.glb", height: 0.175, footprint: (0.33, 0.24), rests_on: Some("support") ),
 )
