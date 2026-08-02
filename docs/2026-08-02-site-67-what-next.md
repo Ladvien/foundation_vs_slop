@@ -80,7 +80,7 @@ be declared more than once, which is that variant's own definition.
 | **Room tone as looping beds** | M | `area_tone` gives each wing its own rhythm and register from the nine shipped one-shots. Twelve rooms cannot have twelve *timbres* from nine clips; the library has 3,614 `.ogg` (**not** the 5,076 this file first claimed — that figure counts one format per track). ⚠️ ogg only. |
 | **Stage C — routines, pathfinding** | L | Staff stand still. `drive_avatars` drops the order when wedged. Unblocks the D-Class escort. |
 | **D-Block, D-Class bodies, the galley cook** | M | `fieldop` is the orange jumpsuit and is now the D-Class body; the cook needs a rig nobody else wears. |
-| **The `replay + liveness` CI red** | ? | Failing on `main` for 3+ merges (`tests/containment.rs:842`, `:1163`). ⚠️ `BACKLOG.md` names the **wrong cause**, and the overall GitHub run still reports success. |
+| **The `replay` red** | ? | ⚠️ **Measured on clean `main` (de54542) 2026-08-02, not inferred.** Four tests fail there: `authored_world_config_override_is_a_noop`, `field_passes_are_bit_identical`, `migrated_defaults_reproduce_the_shipped_golden_hash`, `photophobia_pulls_crabs_into_shadow`. `BACKLOG.md` names two *containment* tests, which is the **wrong set** — and the golden-hash one being red means **the deterministic-core golden is currently unpinnable as a regression signal**. The overall GitHub run still reports success. |
 
 ---
 
@@ -120,6 +120,11 @@ Every one of these cost real time and none would show up in a test.
   the genome-coverage ledger and the panic budget.
 - `cargo test --features test-harness -- --test-threads=1 --no-fail-fast` — needs a GPU, ~62 min.
   ⚠️ Check `free` first.
+- ⚠️ **Establish the baseline in a detached worktree before blaming your change.** Five replay tests
+  went red on this branch; four of them are red on `main` too, and the fifth was a genuine regression
+  — a run condition reading a resource its plugin did not claim, which panicked and then *poisoned the
+  `serial_guard` mutex*, taking the other four down with it and making one real bug look like five.
+  `git worktree add --detach <dir> main` and run the same test names.
 - ⚠️ **The `strain` coupling is bit-exact against the goldens by CONSTRUCTION, not by measurement**:
   strain accrues on `OnEnter(AppState::Debrief)` and the harness never enters an `AppState`, so it is
   `0.0` in every rollout and the floor's inner guard never fires. The day the harness runs campaigns
