@@ -21,6 +21,7 @@ rather than from the code.
 | **Knee-wall cutaway** | The hub's walls squash like the dungeon's. This was the single biggest visual defect: at two of four detents whole wings were behind a full-height wall. |
 | **The Paratherapist has a job** | `Knowledge::strain` — the design doc §6.2 counter-pressure to veteran lock-in — plus a **deep debrief** that trades a `Lethal` belief for calm. |
 | **The hub makes its own noise** | `area_tone` per wing, and footfalls, which the Site had none of. |
+| **The war room shows the branch** | `BRANCH UNIVERSE 0x… CLUTTER ▓▓▓░░ INFESTATION ▓▓░░░`, headed **LAST EXPEDITION** — the director has not sampled the next world yet. `RunState::Idle` only. |
 | **Dressing, committed** | Plus four real defects the new tests found in it (below). |
 
 ---
@@ -73,7 +74,7 @@ be declared more than once, which is that variant's own definition.
 
 | Item | Size | Note |
 |---|---|---|
-| **The War Room readout** | S | `ui/briefing.rs` already renders `BRANCH UNIVERSE 0x… CLUTTER ▓▓▓░░ INFESTATION ▓▓░░░`. The room is called the war room and does not show it. ⚠️ `RunState::Idle` **only** — `two-live-layers` §5 forbids supervising an unattended squad. Same for Monitoring, whose verb is reviewing the **last** expedition. |
+| **Monitoring has no verb** | S | The last room without one. ⚠️ `RunState::Idle` **only**, like the war room — `two-live-layers` §5 forbids supervising the squad you left unattended — so its verb is reviewing the **last** expedition, not watching the current one. Nowak and Sgt. Achebe are already posted there. |
 | **The staff should talk** | M | ⚠️ **`Bark::speaker` is a `usize` squad-member index that resolves to a `Unit`, and the Site deliberately has none.** So the existing bark path cannot carry a staff line without work — wiring it naively produces a system that silently never fires, which is this repo's most common bug. It also wants the **dialogue speaker re-audit** first (~15 conversations; `config.ron`'s speaker note disagrees with `RoleId`). |
 | **Briefing has no panel** | S | A consequence of room-gating, and it is the room the five operatives spawn in — so the first thing a player ever sees in the hub is now a room with a name and no readout. The roster is the natural fit ("plan the next expedition" = look at your people), but it is a full-screen overlay today, and auto-opening one on entry would be intrusive. **Decide deliberately.** |
 | **Dressing grammar stages 3–5** | L | Route Site clutter through the orchestrator; `Guard` against a `SiteEra` from `O5Standing::expeditions` (the one strictly-monotone persisted counter — **not** `RunSeed`, resampled per expedition). ⚠️ Reconcile, never respawn: `spawn_site_geometry` is `Startup`-only *deliberately*. |
