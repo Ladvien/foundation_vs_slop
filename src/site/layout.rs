@@ -1063,6 +1063,35 @@ pub fn check_prop_placements(
 mod tests {
     use super::*;
 
+    /// The rect of a room, by id. Tests that need "somewhere in the galley" ask for it rather than
+    /// writing a literal — the Site's coordinates have moved wholesale twice in one day, and every
+    /// literal in this module broke both times. Derive, don't author, applies to tests too.
+    fn room(l: &SiteLayout, id: AreaId) -> Rect {
+        l.area(id).unwrap_or_else(|| panic!("{id:?} must exist")).rect
+    }
+
+    /// A point `inset` metres inside a room's east wall, centred on its depth.
+    fn by_east_wall(r: Rect, inset: f32) -> (f32, f32) {
+        ((r.x + r.w) as f32 - inset, r.z as f32 + r.h as f32 * 0.5)
+    }
+
+    /// Where the briefing room's mess table actually is.
+    fn briefing_table() -> (f32, f32) {
+        let l = shipped();
+        let b = room(&l, AreaId::Briefing);
+        l.props
+            .iter()
+            .find(|p| p.piece == SitePiece::MessTable && b.contains_metres(p.pos))
+            .map(|p| p.pos)
+            .expect("the briefing room ships a mess table")
+    }
+
+    /// The middle of the briefing room, clear of anything it ships.
+    fn briefing_centre() -> (f32, f32) {
+        let b = room(&shipped(), AreaId::Briefing);
+        (b.x as f32 + b.w as f32 * 0.5, b.z as f32 + b.h as f32 * 0.5)
+    }
+
     fn shipped() -> SiteLayout {
         SiteLayout::load().expect("the shipped site67.ron must parse and validate")
     }
@@ -1173,11 +1202,13 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
 
-        // A 2.29 m bunk at yaw 0 centred half a metre inside the quarters' west wall (x = 5).
+        // A 2.29 m bunk at yaw 0 centred half a metre inside the quarters' west wall, so it pushes
+        // through. Derived from the room, not written down: these coordinates have moved twice.
         let mut l = shipped();
+        let q = room(&l, AreaId::Quarters);
         l.props.push(PropPlacement {
             piece: SitePiece::Bunk,
-            pos: (6.5, 38.0),
+            pos: (q.x as f32 + 0.5, q.z as f32 + q.h as f32 * 0.5),
             yaw: 0.0,
             waive: None,
         });
@@ -1218,13 +1249,20 @@ mod tests {
             .expect("the shipped kit must load");
 
         // A chair beside the galley's mess table, turned side-on to it.
+        let galley = room(&shipped(), AreaId::Kitchen);
+        let table = shipped()
+            .props
+            .iter()
+            .find(|p| p.piece == SitePiece::MessTable && galley.contains_metres(p.pos))
+            .map(|p| p.pos)
+            .expect("the galley ships a mess table");
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            // Beside the galley's northern mess table, which moved with the room to (17.5, 37.6)
-            // when the Site tripled in 2026-08-02. Clear of the room's walls, so the WALL rule cannot
-            // fire first and mask the facing fault this test is about.
-            pos: (18.6, 37.6),
+            // Beside whichever mess table the galley actually ships, offset along +X so the chair
+            // is side-on to it. Derived, so a re-laid galley cannot silently move this into a wall
+            // and let the WALL rule fire first, masking the facing fault this test is about.
+            pos: (table.0 + 1.1, table.1),
             yaw: 0.0,
             waive: None,
         });
@@ -1258,12 +1296,20 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
 
-        // A locker planted in the galley's opening onto the south spine — its doorway is cell
-        // (17, 34), so z = 35 is the first row inside the room and the way in.
+        // A locker planted in the galley's own doorway. Found by asking the layout which cell that
+        // is rather than writing it down, then standing just inside it.
+        let galley = room(&shipped(), AreaId::Kitchen);
+        let l0 = shipped();
+        let d = l0
+            .doorways
+            .iter()
+            .find(|d| d.label == "GALLEY" && d.cell.1 < galley.z)
+            .expect("the galley has a door off the south spine");
+        let in_the_way = (d.cell.0 as f32 + 0.5, galley.z as f32 + 0.4);
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Locker,
-            pos: (17.5, 35.4),
+            pos: in_the_way,
             yaw: 0.0,
             waive: None,
         });
@@ -1310,12 +1356,13 @@ mod tests {
 
         // A chair in the middle of the quarters' east wall, turned to face into it. No surface is
         // within `SEAT_ADDRESSES_SURFACE_WITHIN`, so only the wall rule can catch this.
+        let against_the_wall = by_east_wall(room(&shipped(), AreaId::Quarters), 0.5);
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            // Quarters is x[6,11); x = 11 is wall. Forward is `(sin yaw, cos yaw)` and `front` is
-            // +90°, so an authored yaw of 0 faces +X — straight into that wall.
-            pos: (10.5, 41.5),
+            // Forward is `(sin yaw, cos yaw)` and `front` is +90°, so an authored yaw of 0 faces
+            // +X — straight into the quarters' east wall.
+            pos: against_the_wall,
             yaw: 0.0,
             waive: None,
         });
@@ -1329,7 +1376,7 @@ mod tests {
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            pos: (10.5, 41.5),
+            pos: against_the_wall,
             yaw: 180.0,
             waive: None,
         });
@@ -1399,11 +1446,13 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
         let mut l = shipped();
-        // Wholly inside the briefing room's mess table (moved with the room to (50.2, 21.4)) —
-        // maximum plan overlap with the host, but clear of the folder and mug the room ships.
+        // Wholly inside the briefing room's mess table — maximum plan overlap with the host, offset
+        // just enough to clear the folder and the mug the room already ships, which the rule DOES
+        // judge. Derived from wherever that table actually is.
+        let table = briefing_table();
         l.props.push(PropPlacement {
             piece: SitePiece::Mug,
-            pos: (50.4, 21.2),
+            pos: (table.0 + 0.2, table.1 - 0.2),
             yaw: 0.0,
             waive: None,
         });
@@ -1425,7 +1474,7 @@ mod tests {
         for _ in 0..2 {
             l.props.push(PropPlacement {
                 piece: SitePiece::Mug,
-                pos: (50.2, 21.4),
+                pos: briefing_table(),
                 yaw: 0.0,
                 waive: None,
             });
@@ -1496,11 +1545,18 @@ mod tests {
         let mut l = shipped();
         l.props.retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
 
-        // CELL 01 x[22,25) and CELL 02 x[26,29) are separated by the single wall column x = 25. A
-        // table just inside one and a mug just inside the other are 2 m apart — well within reach,
-        // and on opposite sides of a wall.
-        let table: (f32, f32) = (24.5, 3.5);
-        let mug: (f32, f32) = (26.5, 3.5);
+        // Two neighbouring cell rooms, separated by a single wall column. A table just inside one
+        // and a mug just inside the other are within reach of each other, and on opposite sides of a
+        // wall. Taken from the authored rects so doubling the cells cannot silently un-test this.
+        let cells: Vec<Rect> = l
+            .areas
+            .iter()
+            .filter(|a| a.id == AreaId::ContainmentCell)
+            .map(|a| a.rect)
+            .collect();
+        let (a, b) = (cells[0], cells[1]);
+        let table: (f32, f32) = ((a.x + a.w) as f32 - 0.5, a.z as f32 + 0.5);
+        let mug: (f32, f32) = (b.x as f32 + 0.5, b.z as f32 + 0.5);
         assert!(
             ((mug.0 - table.0).powi(2) + (mug.1 - table.1).powi(2)).sqrt()
                 < super::super::kit::RESTS_ON_REACH,
@@ -1544,7 +1600,11 @@ mod tests {
                 .retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
             // Exact halves: 0.4 apart is NOT equidistant in f32, and the rounding decided the tie
             // before the tiebreak could — which made the test pass for the wrong reason.
-            let mut tables = vec![(50.0, 21.5), (51.0, 21.5)];
+            // Exact halves either side of the room's centre: 0.4 apart is NOT equidistant in f32,
+            // and the rounding decided the tie before the tiebreak could — which made this pass for
+            // the wrong reason.
+            let c = briefing_centre();
+            let mut tables = vec![(c.0 - 0.5, c.1), (c.0 + 0.5, c.1)];
             if reversed {
                 tables.reverse();
             }
@@ -1559,7 +1619,7 @@ mod tests {
             l.props.push(PropPlacement {
                 piece: SitePiece::Mug,
                 // Exactly equidistant from both.
-                pos: (50.5, 21.5),
+                pos: briefing_centre(),
                 yaw: 0.0,
                 waive: None,
             });
@@ -1574,7 +1634,8 @@ mod tests {
             build(true),
             "a tie broken by authoring order would make the Site's dressing depend on file order"
         );
-        assert_eq!(build(false), (50.0, 21.5), "the lower x wins the tie");
+        let c = briefing_centre();
+        assert_eq!(build(false), (c.0 - 0.5, c.1), "the lower x wins the tie");
     }
 
     /// **Which room is this?** — the question nothing could ask before 2026-08-02.

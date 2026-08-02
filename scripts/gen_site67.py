@@ -38,34 +38,38 @@ TILE = 1  # cells are 1 m; kept as a name so the arithmetic below reads as metre
 # (AreaId, label, x, z, w, h). Sizes are UNCHANGED from the pre-2026-08-02 layout for every room that
 # already existed — the growth is in the corridors, so a room's dressing stays as dense as it was.
 ROOMS = [
-    ("AsyncDoor",   "ASYNC APERTURE", 6,  2, 12, 10),
-    ("Monitoring",  "MONITORING",    50,  2,  4, 10),
-    ("Records",     "RECORDS",        6, 19,  8,  8),
-    ("Research",    "RESEARCH",      20, 19, 12, 10),
-    ("Requisition", "REQUISITION",   36, 19,  8,  6),
-    ("Briefing",    "BRIEFING",      48, 19, 10,  8),
-    ("Quarters",    "QUARTERS",       6, 35,  5,  8),
-    ("Kitchen",     "GALLEY",        15, 35,  5,  8),
-    ("Activities",  "ACTIVITIES",    24, 35,  5,  8),
-    ("WarRoom",     "WAR ROOM",      33, 35,  5,  8),
+    # Rooms are sized to MEET each other with exactly one wall column between them, so the plan has no
+    # voids left in it. The Director's call, 2026-08-02: fill the empty space by expanding the rooms.
+    # The cost is dressing density — a room that doubles in area with the same props in it is half as
+    # furnished — and that is a known follow-up rather than an oversight.
+    ("AsyncDoor",   "ASYNC APERTURE",  6,  2, 14, 17),
+    ("Monitoring",  "MONITORING",     65,  2,  7, 17),
+    ("Records",     "RECORDS",         6, 25, 16, 10),
+    ("Research",    "RESEARCH",       23, 25, 16, 10),
+    ("Requisition", "REQUISITION",    40, 25, 16, 10),
+    ("Briefing",    "BRIEFING",       57, 25, 15, 10),
+    ("Quarters",    "QUARTERS",        6, 41, 16,  8),
+    ("Kitchen",     "GALLEY",         23, 41, 16,  8),
+    ("Activities",  "ACTIVITIES",     40, 41, 16,  8),
+    ("WarRoom",     "WAR ROOM",       57, 41, 15,  8),
 ]
 
 # ── THE CONTAINMENT BLOCK ────────────────────────────────────────────────────────────────────────
 # Twelve cell rooms, six either side of their own corridor. Each is 3x3 — big enough to walk into and
 # stand beside what is held there, which a 2 m booth never was.
-CELL_W = CELL_H = 3
-CELL_PITCH = 4                     # 3 of room + 1 of wall
+CELL_W = CELL_H = 6
+CELL_PITCH = 7                     # 6 of room + 1 of wall
 CELL_X0 = 22
 CELL_COLS = 6
-CELL_NORTH_Z = 2                   # rooms occupy z[2,5)
-CELL_CORRIDOR_Z = 6                # corridor occupies z[6,9)
+CELL_NORTH_Z = 2                   # rooms occupy z[2,8)
+CELL_CORRIDOR_Z = 9                # corridor occupies z[9,12)
 CELL_CORRIDOR_H = 3
-CELL_SOUTH_Z = 10                  # rooms occupy z[10,13)
+CELL_SOUTH_Z = 13                  # rooms occupy z[13,19)
 
 CELL_XS = [CELL_X0 + i * CELL_PITCH for i in range(CELL_COLS)]
 # The corridor overhangs the cell run by one cell each end so its own end walls are not a cell's wall.
 CELL_CORRIDOR_X0 = CELL_X0 - 1
-CELL_CORRIDOR_W = CELL_COLS * CELL_PITCH  # last cell's trailing wall column, plus the leading one
+CELL_CORRIDOR_W = CELL_COLS * CELL_PITCH + 1  # the leading wall column, plus each cell's trailing one
 
 CELLS = []   # (label, x, z, w, h, door_cell, frame_yaw, interior_yaw)
 for i, cx in enumerate(CELL_XS):
@@ -80,18 +84,14 @@ for i, cx in enumerate(CELL_XS):
 # ── CORRIDORS ────────────────────────────────────────────────────────────────────────────────────
 # Every one is an `AreaId::Corridor`, which may be declared more than once — see `SiteLayout::validate`.
 CORRIDORS = [
-    # THE SERVICE RING, as a U rather than a loop. A facility you can only cross through its own rooms
-    # is a comb; a ring means every wing has two ways out. It is open at the NORTH because that edge is
-    # the containment block and the aperture hall — the ASYNC door has to sit on the building's outer
-    # wall, and putting a corridor outside it would mean walking round the back of the way out.
-    ("SERVICE RING",  2, 44, 60,  3),                    # south leg
-    ("SERVICE RING",  2,  2,  3, 42),                    # west leg
-    ("SERVICE RING", 59,  2,  3, 42),                    # east leg
-    # The two spines, four cells wide — enough that two people pass without the camera reading a duct.
-    ("SPINE",         5, 14, 54,  4),                    # main spine: north band <-> working half
-    ("SPINE",         5, 30, 54,  4),                    # south spine: working half <-> living half
-    ("APPROACH",     10, 12,  4,  2),                    # aperture hall down to the main spine
-    ("CELL SPUR",    CELL_CORRIDOR_X0 + CELL_CORRIDOR_W + 1, 2, 3, 12),  # cell row + monitoring -> spine
+    # THE SERVICE RING, a U rather than a loop: the north edge is the containment block and the
+    # aperture hall, and the ASYNC door has to sit on the building's outer wall.
+    ("SERVICE RING",  2, 50, 74,  3),                    # south leg
+    ("SERVICE RING",  2,  2,  3, 48),                    # west leg
+    ("SERVICE RING", 73,  2,  3, 48),                    # east leg
+    # The two spines, four cells wide and now running the full width of the facility.
+    ("SPINE",         5, 20, 68,  4),                    # main spine: north band <-> working half
+    ("SPINE",         5, 36, 68,  4),                    # south spine: working half <-> living half
 ]
 
 # ── DOORWAYS ─────────────────────────────────────────────────────────────────────────────────────
@@ -105,37 +105,39 @@ def door(x, z, yaw, clearance=None, label=""):
     DOORWAYS.append({"cell": (x, z), "yaw": yaw, "clearance": clearance, "label": label})
 
 # Every cell room. LEVEL 2 — canon puts working proximity to a contained anomaly at Level 2, which is
-# the clearance Ito (the containment specialist) and the two researchers hold.
+# the clearance Ito (the containment specialist) and the two researchers hold. The door is centred on
+# the cell's wall, which a 6 m room has room for and a 3 m one did not.
 for (label, cx, cz, w, h, dcell, fyaw, _iyaw) in CELLS:
     door(dcell[0], dcell[1], fyaw, clearance="Level2", label=label)
 
-# Onto the cell row at all. Monitoring's own door is unrestricted: Nowak is Level 1, which canon
-# describes as working in proximity to contained anomalies with NO access to them — so he can reach
-# his camera bank and not the cells, which is the distinction made spatial.
-door(CELL_CORRIDOR_X0 + CELL_CORRIDOR_W, 7, 0.0, clearance="Level2", label="CONTAINMENT")
-door(CELL_CORRIDOR_X0 + CELL_CORRIDOR_W + 4, 6, 0.0, clearance=None, label="MONITORING")  # x=49, the wall between the spur and the camera bank
+# Onto the cell row at all, from the aperture hall. Monitoring's own door is unrestricted: Nowak is
+# Level 1, which canon describes as working in proximity to contained anomalies with NO access to
+# them — so he reaches his camera bank and not the cells, which is that distinction made spatial.
+door(CELL_CORRIDOR_X0 - 1, 10, 0.0, clearance="Level2", label="CONTAINMENT")
+door(CELL_CORRIDOR_X0 + CELL_CORRIDOR_W, 10, 0.0, clearance=None, label="MONITORING")
 
 # Off the main spine into the working half. Records is RAISA's: Level 2, "a ceiling on information".
-door(9, 18, 90.0, clearance="Level2", label="RECORDS")
-door(25, 18, 90.0, clearance=None, label="RESEARCH")
-door(39, 18, 90.0, clearance=None, label="REQUISITION")
-door(52, 18, 90.0, clearance=None, label="BRIEFING")
+door(13, 24, 90.0, clearance="Level2", label="RECORDS")
+door(30, 24, 90.0, clearance=None, label="RESEARCH")
+door(47, 24, 90.0, clearance=None, label="REQUISITION")
+door(64, 24, 90.0, clearance=None, label="BRIEFING")
 # Off the south spine into the living half, all unrestricted — a site where people cannot reach their
 # own bunks is a prison.
-door(8, 34, 90.0, clearance=None, label="QUARTERS")
-door(17, 34, 90.0, clearance=None, label="GALLEY")
-door(26, 34, 90.0, clearance=None, label="ACTIVITIES")
-door(35, 34, 90.0, clearance=None, label="WAR ROOM")
-# Research also opens onto the south spine, so the working half is not a dead end.
-door(25, 29, 90.0, clearance=None, label="RESEARCH")
-# NO door where the ring meets a spine: the west and east legs run flush against both spines' ends,
-# so those junctions are already open floor. A doorway cell there would sit INSIDE the spine rect and
-# `validate` rejects overlapping areas — which is the check doing its job, since a door through a
-# wall that is not there is a door onto nothing. Corridor meeting corridor is an opening, not a door.
-door(8, 43, 90.0, clearance=None, label="QUARTERS")
-door(35, 43, 90.0, clearance=None, label="WAR ROOM")
-# ...and the aperture hall onto the west leg, so arriving from an expedition you are already inside.
-door(5, 6, 0.0, clearance=None, label="ASYNC APERTURE")
+door(13, 40, 90.0, clearance=None, label="QUARTERS")
+door(30, 40, 90.0, clearance=None, label="GALLEY")
+door(47, 40, 90.0, clearance=None, label="ACTIVITIES")
+door(64, 40, 90.0, clearance=None, label="WAR ROOM")
+# The working half also opens onto the south spine, so it is not a dead end.
+door(13, 35, 90.0, clearance=None, label="RECORDS")
+door(30, 35, 90.0, clearance=None, label="RESEARCH")
+door(47, 35, 90.0, clearance=None, label="REQUISITION")
+door(64, 35, 90.0, clearance=None, label="BRIEFING")
+# The aperture hall and the north band onto the spine.
+door(13, 19, 90.0, clearance=None, label="ASYNC APERTURE")
+door(68, 19, 90.0, clearance=None, label="MONITORING")
+# ...and the living half onto the ring's south leg, so the bottom of the site is a loop.
+door(13, 49, 90.0, clearance=None, label="QUARTERS")
+door(64, 49, 90.0, clearance=None, label="WAR ROOM")
 
 # ── ASSEMBLY ─────────────────────────────────────────────────────────────────────────────────────
 FLOOR = []
@@ -217,7 +219,7 @@ def wall_rows():
 
 def connectivity_report():
     """Flood-fill the floor and name anything the operative spawn cannot reach."""
-    start = (52, 22)  # the briefing room, where the operatives idle
+    start = (62, 30)  # the briefing room, where the operatives idle
     if start not in cells:
         return [f"the spawn cell {start} is not floor at all"]
     seen, stack = {start}, [start]

@@ -14,21 +14,25 @@ import sys
 
 # (old_x, old_z, old_w, old_h, dx, dz, name)
 MOVES = [
-    (0, 2, 12, 10,   6,  0, "async door hall"),
-    (14, 2, 16, 10, -1, -1, "containment wing -> twelve cell rooms replace it"),
-    (30, 2, 4, 10,  20,  0, "monitoring"),
-    (0, 12, 34, 2,   5,  2, "spine -> main spine"),
-    (0, 14, 8, 8,    6,  5, "records"),
-    (8, 14, 2, 10,   2, -2, "spine connector -> the approach"),
-    (10, 14, 12, 10, 10,  5, "research"),
-    (24, 14, 8, 6,  12,  5, "requisition"),
-    (26, 20, 2, 2,  12,  5, "requisition connector"),
-    (24, 22, 10, 8, 24, -3, "briefing"),
-    (0, 24, 24, 2,   5,  6, "south spine"),
-    (0, 26, 5, 8,    6,  9, "quarters"),
-    (6, 26, 5, 8,    9,  9, "galley"),
-    (12, 26, 5, 8,  12,  9, "activities"),
-    (18, 26, 5, 8,  15,  9, "war room"),
+    # v1 (the 2026-08-02 enlargement) -> v2 (rooms expanded to close the voids, cells doubled).
+    (6, 2, 14, 10,    0,  0, "async door hall — grew south over its own approach"),
+    (10, 12, 4, 2,    0,  0, "the approach — swallowed by the hall"),
+    (50, 2, 4, 10,   15,  0, "monitoring"),
+    (21, 6, 24, 3,    0,  3, "the cell row"),
+    (46, 2, 3, 12,   -1, -1, "cell spur — the block now meets monitoring directly"),
+    (5, 14, 54, 4,    0,  6, "main spine"),
+    (6, 19, 8, 8,     0,  6, "records"),
+    (20, 19, 12, 10,  3,  6, "research"),
+    (36, 19, 8, 6,    4,  6, "requisition"),
+    (48, 19, 10, 8,   9,  6, "briefing"),
+    (5, 30, 54, 4,    0,  6, "south spine"),
+    (6, 35, 5, 8,     0,  6, "quarters"),
+    (15, 35, 5, 8,    8,  6, "galley"),
+    (24, 35, 5, 8,   16,  6, "activities"),
+    (33, 35, 5, 8,   24,  6, "war room"),
+    (2, 44, 60, 3,    0,  6, "ring — south leg"),
+    (2, 2, 3, 42,     0,  0, "ring — west leg"),
+    (59, 2, 3, 42,   14,  0, "ring — east leg"),
 ]
 
 PROP = re.compile(r'^(\s*\(\s*piece:\s*)(\w+)(\s*,\s*pos:\s*\(\s*)([-\d.]+)(\s*,\s*)([-\d.]+)(\s*\))(.*)$')
@@ -67,7 +71,7 @@ def main(path):
         dx, dz, _name = hit
         if dx == -1 and dz == -1:
             dropped += 1
-            out.append(f"        // RELOCATED (containment wing became twelve cell rooms): {s.strip()}")
+            out.append(f"        // RELOCATED (its corridor was absorbed): {s.strip()}")
             continue
         moved += 1
         out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{x + dx:.1f}{m.group(5)}{z + dz:.1f}{m.group(7)}{m.group(8)}")
