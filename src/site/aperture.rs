@@ -11,8 +11,12 @@
 //! Windowed-only. A `MaterialPlugin` in the harness would make the deterministic core depend on a GPU,
 //! which is the stated reason `LightingPlugin` and `MyceliaPlugin` are excluded from `sim_harness`.
 
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+};
 use bevy::shader::ShaderRef;
 
 /// Uniform for [`AsyncApertureMaterial`]. `ShaderType`-compatible field order and 16-byte padding.
@@ -28,7 +32,12 @@ pub struct ApertureUniform {
 impl Default for ApertureUniform {
     fn default() -> Self {
         // Tuned blind (no GPU in this loop) — these are a starting point for iteration, not a verdict.
-        Self { depth: 0.55, warp: 0.9, charge: 0.0, _pad: 0.0 }
+        Self {
+            depth: 0.55,
+            warp: 0.9,
+            charge: 0.0,
+            _pad: 0.0,
+        }
     }
 }
 
@@ -46,6 +55,26 @@ impl Material for AsyncApertureMaterial {
     /// wall behind it, which is precisely the thing it must not be.
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Opaque
+    }
+    /// **Double-sided**, because the quad stands in the Site's OUTER perimeter and the camera turns.
+    ///
+    /// Bevy's default back-face culling made the aperture visible only from the hall: at the Q/E
+    /// detents that look at the Site from outside, the ASYNC door was a see-through hole in the
+    /// exterior wall with the hall floor visible through it. Found by screenshotting from behind on
+    /// 2026-08-01. Rendering both faces keeps the door reading as a door from every angle; the
+    /// corridor illusion simply runs the other way from the far side, which is the correct thing for
+    /// an aperture that genuinely goes somewhere.
+    ///
+    /// There is no `cull_mode` hook on `Material` — the pipeline's primitive state is where culling
+    /// lives, so it is set in `specialize`.
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 

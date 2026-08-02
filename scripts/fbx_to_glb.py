@@ -51,8 +51,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import bpy
+
+# Blender runs this as `--python scripts/fbx_to_glb.py`, which does NOT put `scripts/` on `sys.path`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mesh_origin import reorigin_group_to_base  # noqa: E402 — must follow the path insert above
 
 
 def cli_args() -> argparse.Namespace:
@@ -74,6 +79,16 @@ def cli_args() -> argparse.Namespace:
         type=float,
         default=12.0,
         help="report any model whose bounding box exceeds this many metres (artist guide §3 rule 6)",
+    )
+    p.add_argument(
+        "--reorigin-base",
+        action="store_true",
+        help=(
+            "seat each asset's pivot XZ-centred with its base at y=0 (artist guide §3 rule 7). "
+            "Use for anything destined for a KIT — `site::kit::y_scale` scales about the entity "
+            "origin, so a centre-origined wall buries half of itself. Off by default so a bulk "
+            "staging pass stays faithful to what the artist authored."
+        ),
     )
     return p.parse_args(argv)
 
@@ -125,7 +140,12 @@ def scene_extent() -> float:
 
 
 def convert(
-    pack: str, path: str, out_dir: str, max_extent: float, dims_out: dict | None = None
+    pack: str,
+    path: str,
+    out_dir: str,
+    max_extent: float,
+    dims_out: dict | None = None,
+    reorigin_base: bool = False,
 ) -> tuple[bool, str]:
     """Import one FBX into an empty scene and export it as `.glb`. Returns `(ok, note)`.
 
@@ -168,6 +188,21 @@ def convert(
     bpy.context.view_layer.objects.active = meshes[0]
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
+    # SEAT THE PIVOT (opt-in, `--reorigin-base`).
+    #
+    # `location=False, rotation=False` above is deliberate for a bulk staging pass — it keeps the file
+    # faithful to what the artist authored. But a mesh destined for a KIT needs one shared datum, and
+    # this library does not have one: measured across the 16 promoted Ozea pieces, walls and floors are
+    # centre-origined while props are base-origined, because the source packs themselves disagree
+    # (`SM_Wall_Corner` is even off-centre by 15 mm in two axes).
+    #
+    # `site::kit::y_scale` is `target / authored` applied about the entity origin, so a centre-origined
+    # wall scaled to reach `WALL_HEIGHT` grows half its gain DOWNWARD and buries itself. See
+    # `mesh_origin` for the full reasoning. Group-wise, not per-object: a two-object asset like the
+    # cryo pod must move rigidly or it shears.
+    if reorigin_base:
+        reorigin_group_to_base(meshes)
+
     extent = scene_extent()
     note = ""
     if extent > max_extent:
@@ -205,7 +240,7 @@ def main() -> int:
     problems: list[str] = []
     dims: dict[str, tuple[float, float, float, str]] = {}
     for i, (pack, path) in enumerate(files, 1):
-        good, note = convert(pack, path, a.out, a.max_extent, dims)
+        good, note = convert(pack, path, a.out, a.max_extent, dims, a.reorigin_base)
         name = os.path.basename(path)
         if good:
             ok += 1

@@ -51,6 +51,10 @@ from pathlib import Path
 
 import bpy
 
+# Blender runs this as `--python scripts/blend_to_glb.py`, which does NOT put `scripts/` on `sys.path`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mesh_origin import isolate, reorigin_to_base  # noqa: E402,F401 — after the path insert above
+
 
 def slugify(name: str, strip_prefix: str | None) -> str:
     """`TinyLiving_SirCumferenceCoffeeTable` → `sir_cumference_coffee_table`."""
@@ -64,58 +68,10 @@ def slugify(name: str, strip_prefix: str | None) -> str:
     return re.sub(r"_+", "_", name).strip("_").lower()
 
 
-def isolate(obj) -> None:
-    """Make `obj` the one selected, active object."""
-    bpy.ops.object.select_all(action="DESELECT")
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-
-
-def reorigin_to_base(obj, unit_scale: bool = False) -> tuple[float, float, float]:
-    """Apply transforms, then move mesh data so base-centre sits at the world origin.
-
-    Returns the object's `(x, y, z)` extent in metres *after* the move — Blender axes, so `z` is the
-    height that becomes Bevy's `+Y`.
-    """
-    isolate(obj)
-    # Detach from any parent FIRST, keeping the world transform. `transform_apply` bakes only the
-    # object's OWN transform — a parented object keeps inheriting its parent's, so the "applied"
-    # result is still rotated. glTF is the case that bites: Blender's importer parents everything to
-    # a root empty carrying the Y-up -> Z-up conversion, so without this the acid barrels exported
-    # lying on their side (height on Y, 0.86, instead of Z) and the base-at-origin move below then
-    # planted a *side* face at y=0. A `.blend` with unparented objects never shows the bug.
-    if obj.parent is not None:
-        bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
-    if unit_scale:
-        # Keep the inherited ROTATION, discard the inherited SCALE. For packs whose mesh-local
-        # coordinates are already the intended metres and whose node chain carries only junk.
-        #
-        # The acid-barrel pack is the worked example: node 1 (an `.fbx` wrapper) scales by 0.01, node 4
-        # by 334.94, netting 3.3494 — a Sketchfab FBX round-trip artifact. Applied faithfully that
-        # yields a 2.87 m barrel; the raw POSITION accessor reads 0.5525 x 0.5525 x 0.8573, and a real
-        # 55-gallon drum is 0.851 m tall. So the mesh is authored correct and the chain is noise.
-        # Ignoring the parent entirely is NOT the fix — that chain also carries glTF's Y-up -> Z-up
-        # rotation, and dropping it exports the barrels lying on their side.
-        obj.scale = (1.0, 1.0, 1.0)
-    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-
-    # With transforms applied, local == world, so `bound_box` is the world AABB.
-    corners = [tuple(c) for c in obj.bound_box]
-    xs = [c[0] for c in corners]
-    ys = [c[1] for c in corners]
-    zs = [c[2] for c in corners]
-    cx = (min(xs) + max(xs)) * 0.5
-    cy = (min(ys) + max(ys)) * 0.5
-    base_z = min(zs)
-
-    # Move the MESH, not the object: the object transform is already applied, and shifting it again
-    # would reintroduce exactly the offset this is removing.
-    for v in obj.data.vertices:
-        v.co.x -= cx
-        v.co.y -= cy
-        v.co.z -= base_z
-    obj.data.update()
-    return (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+# `isolate` and `reorigin_to_base` moved to `scripts/mesh_origin.py` (imported above) so the three
+# converters share one copy. They had already drifted into two shapes — a function here and the same
+# arithmetic inline in `import_retro_tvs.py` — while `fbx_to_glb.py`, which produced the entire Ozea
+# Site kit, had neither and shipped 11 of 16 meshes on mismatched pivots.
 
 
 def main(argv: list[str]) -> int:

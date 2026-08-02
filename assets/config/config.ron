@@ -278,14 +278,18 @@
                 // panel detailing. So the corridor architecture stays as-is and only the floor plates
                 // land, as occasional Tiled props rather than a floor replacement (at 1 tile = 1 m a
                 // 192x192 level cannot afford 284-944 tris on every cell).
+                // `y_offset: -0.03` sets the plate INTO the deck rather than on top of it. It used to
+                // get that by accident — the mesh was centre-origined, so half of it sank below y = 0
+                // on its own. The Ozea kit is now uniformly base-at-0 (2026-08-01,
+                // `assets/ozea/README.md`), which removed the accident, so the intent is stated.
                 ( key: "floor_grate", glb: "ozea/floor_grate.glb",
                   category: "decor", tags: ["hall", "office"], role: Tiled, footprint: (1.0, 1.0),
-                  affordances: ["decor"], height: 0.06 ),
+                  affordances: ["decor"], height: 0.06, y_offset: -0.03 ),
                 // Recessed floor light: "emit" puts it in the gameplay LightField, so a lit floor plate
                 // is a real navigation cue for photophobic creatures, not just a bright patch.
                 ( key: "floor_light", glb: "ozea/floor_light.glb",
                   category: "light", tags: ["hall"], role: Tiled, footprint: (1.0, 1.0),
-                  affordances: ["emit", "decor"], height: 0.06 ),
+                  affordances: ["emit", "decor"], height: 0.06, y_offset: -0.03 ),
 
                 // Office — a desk so "office"-tagged rooms (a generation-time room type) read as
                 // workspaces. A desk is a worktop (hosts a desk lamp), as well as a generic support.

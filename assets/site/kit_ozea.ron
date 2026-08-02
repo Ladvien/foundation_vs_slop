@@ -12,6 +12,26 @@
 // mesh's W/H/D — never hand-guessed, and never re-derived from a mesh AABB at load, which would read
 // 100× large because the library is authored in centimetres.
 //
+// ── Every mesh here is base-at-0, and the wall family is authored to 2.40 ──
+//
+// Both were fixed on 2026-08-01 after the player reported *"the north and south wall doesn't square
+// into the east-and-west walls… looks like the floors point of origin may be off too."*
+//
+//   * **Origin.** 11 of the 16 meshes used to carry whatever pivot their source pack happened to have
+//     — walls and floors centre-origined, props base-origined. `y_scale` is applied about the entity
+//     origin, so a centre-origined 2.00 m wall scaled by 1.2 became Y[-1.2,+1.2]: half of it
+//     underground and 1.17 m standing against 2.40 m intended. `assets/ozea/README.md` has the full
+//     account; `tests/ozea_asset.rs` now pins the convention against the bytes.
+//   * **Height.** `wall`, `wall_corner`, `wall_window` and `column` are re-authored to a true 2.40 m
+//     by `scripts/ozea_wall_heights.py` — cut at a plain band and lengthened, so trim and skirting
+//     keep their authored proportions. Their `y_scale` is now a no-op **1.0**. This replaces a 1.2×
+//     stretch on the walls and a **2.18×** stretch on the column, the very distortion
+//     `assets/config/config.ron` cites as the reason the Ozea walls were never promoted into the
+//     dungeon furniture kit.
+//
+// `wall_low` is the one piece still scaled — 2.00 authored against a 0.9 target, a 0.45× squash. It is
+// knowingly left, because shortening a panel properly is an authoring decision, not a conversion flag.
+//
 // ── Why these meshes and not the obvious ones ──
 //
 // The Site grid is 1 m and `site::visuals::place` scales **only Y** — X and Z are hard 1.0, so a
@@ -36,40 +56,75 @@
 (
     // ── Structure ──
     // 1.00 × 1.00 floor plate, so one mesh is one cell.
-    floor:             (glb: "ozea/floor.glb",                height: 0.06),
-    // 1.00 m run (`SM_Wall_1x2`), authored 2.00 m tall against a 2.4 m `WALL_HEIGHT` — a 1.2× stretch,
-    // which flat-colour low-poly panelling carries without reading as distortion.
-    wall:              (glb: "ozea/wall.glb",                 height: 2.00),
+    //
+    // `y_offset: -0.06` sinks the plate so its TOP face lands exactly on y = 0. That plane is not
+    // arbitrary: it is where avatar feet stand, where `command_avatar` resolves a click order, and
+    // where `nav` puts every cell centre. Without this the plate's top would sit at +0.06 and
+    // everything that walks on it would stand 6 cm inside it. The greybox kit gets this for free —
+    // its floor is a zero-thickness plane already at y = 0.
+    floor:             (glb: "ozea/floor.glb",                height: 0.06, y_offset: -0.06),
+    // 1.00 m run (`SM_Wall_1x2`), authored to a true 2.40 m — see the header note on heights.
+    wall:              (glb: "ozea/wall.glb",                 height: 2.40),
     // The corner POST — see the header note.
-    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.00),
-    // A 2 m opening between areas, which is what this piece is FOR.
-    wall_doorway:      (glb: "ozea/doorframe_single.glb",     height: 2.01),
+    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.40),
+    // ── The two doorways, and the OPENING each actually leaves ──
+    //
+    // `opening` is the clear hole: jamb inner face to jamb inner face, floor to lintel underside. It
+    // is NOT derivable from `height`, and it is what the ASYNC aperture quad is built from. Measured
+    // from each mesh's POSITION accessors — for `doorframe_double` the jambs face each other at
+    // |z| = 0.800 and the lintel underside sits at y = 1.626, with small plinths at the jamb feet
+    // (|z| 0.646–0.715, up to y 0.203) that crop the quad's bottom corners, which is wanted.
+    //
+    // Until 2026-08-01 the quad was sized from `door.trigger_half_extents` instead — a GAMEPLAY
+    // volume, generous on purpose because it must catch a walking avatar — giving a 3.2 m quad
+    // against this 1.6 m hole. The aperture material is opaque by design, so that overhang punched
+    // through the wall either side of the door rather than fading out.
+    wall_doorway:      (mesh: (glb: "ozea/doorframe_single.glb", height: 2.01), opening: (0.867, 1.705)),
     // The ASYNC aperture's frame. The one mesh promoted before this pass.
-    wall_doorway_wide: (glb: "ozea/doorframe_double.glb",     height: 1.98),
+    wall_doorway_wide: (mesh: (glb: "ozea/doorframe_double.glb", height: 1.98), opening: (1.600, 1.626)),
+    // The header course over a doorway: `WALL_HEIGHT` 2.40 − `DOORWAY_HEIGHT` 2.00 = a 0.40 m band.
+    // Without it the perimeter had a 0.40 × 2.00 m slot straight through it above the ASYNC door.
+    //
+    // Built by CROPPING the top 0.40 m off `SM_Wall_1x2` (`scripts/ozea_wall_heights.py`'s `HEADERS`),
+    // not by squashing a wall. A header course IS the top of the wall, so the crop keeps the wall's
+    // own top trim at its authored size and the piece lines up with the wall tops either side of the
+    // door by construction. `y_scale` is a no-op 1.0.
+    wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40),
     // Containment-cell glazing — the player must be able to SEE what is held.
-    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.00),
+    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40),
     // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
     // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a
     // fit, kept because a counter is the cheapest way to furnish a room and this is the only panel
     // in the promoted set with a 1 m footprint.
     wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00),
-    column:            (glb: "ozea/column.glb",               height: 1.10),
+    // The examination slab: `SM_MedPod_Treatment_Bed` (E_001), the same pack the cryo pod comes from,
+    // so the research wing and the containment wing read as one facility. Native size is the intent —
+    // it is furniture, not architecture — and its bed platform sits at y = 0.60, which is where
+    // `site::visuals::SLAB_SURFACE_Y` lays the study subject.
+    slab:              (glb: "ozea/slab.glb",                 height: 1.72),
+    // `SM_Pylonne`, authored 1.10 m in the pack and re-authored to 2.40 here. It was the worst
+    // offender of the lot: at its native height `y_scale` stretched it **2.18×**.
+    column:            (glb: "ozea/column.glb",               height: 2.40),
 
     // ── Dressing ──
     crate_:            (glb: "ozea/crate.glb",                height: 1.00),
     pipe:              (glb: "ozea/pipe.glb",                 height: 0.30),
     pipe_corner:       (glb: "ozea/pipe_corner.glb",          height: 0.30),
     // ── Floor inlays ──
-    // `y_offset` on all three, and it is not optional: the Ozea floor plate is 0.06 m thick and so are
-    // these, so at y = 0 their top faces are EXACTLY coplanar with the floor's and the depth winner is
-    // undefined — it renders as white squares flickering against grey ones. 0.062 clears the plate by
-    // 2 mm. See `KitPiece::y_offset`.
+    // `y_offset` on all three, and it is not optional: these are the same 0.06/0.05 m thickness as the
+    // floor plate they lie on, so with both seated at y = 0 their top faces would be coplanar and the
+    // depth winner undefined — it renders as white squares flickering against grey ones, which is
+    // exactly what the player captured on 2026-08-01. See `KitPiece::y_offset`.
+    //
+    // **0.002, not 0.062.** The old value cleared a plate whose top sat at +0.03 because the mesh was
+    // centre-origined; now every mesh is base-at-0 and `floor` is sunk to put its top on y = 0, so an
+    // inlay only has to clear the *plane*. 2 mm, the same margin as before.
     //
     // The lit threshold pad at the aperture's mouth.
-    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.062),
+    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.002),
     // Wing colour-coding: learnability without signage (design doc §2.4).
-    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.062),
-    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.062),
+    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.002),
+    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.002),
 
     // ── The specimen ──
     // No longer a stand-in. `fill_containment_cells` puts one of these in a cell per held specimen,

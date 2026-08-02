@@ -24,10 +24,11 @@
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
+use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::layout::SiteLayout;
 use super::nav::SiteNav;
-use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::pieces::SitePiece;
+use crate::anim;
 use crate::ui::state::AppState;
 
 /// Collision half-extent for an avatar, matching the squad's own footprint so the Site's doorways feel
@@ -40,6 +41,9 @@ const ARRIVE_EPS: f32 = 0.15;
 /// The Valkyrie figurine's authored render scale (mirrors `squad`'s, so an operative is the same size
 /// here as in the field).
 const FIGURINE_SCALE: f32 = 1.13;
+/// Time constant for smoothing an operative's measured speed before it drives the blend. Matches the
+/// squad's `LOCO_SMOOTH_TAU` in spirit: long enough that a single stuttery frame cannot flip the pose.
+const AVATAR_LOCO_TAU: f32 = 0.12;
 
 /// Marker on any entity belonging to the Site's presentation.
 #[derive(Component)]
@@ -74,11 +78,38 @@ pub struct AsyncDoor {
 pub struct ContainmentCell {
     pub index: u32,
     pub pos: Vec3,
+    /// The cell's authored yaw, kept so the occupant can be placed INSIDE the booth rather than in
+    /// the plane of its glass — see `cell_interior_dir`.
+    pub yaw: f32,
 }
 
 /// The body currently shown inside a cell, if that cell is occupied.
 #[derive(Component)]
 pub struct CellOccupant;
+
+/// The examination slab in the research wing. Spawned beside the `Slab` prop, at the height of its
+/// bed platform, so a study subject can simply be parented to it.
+#[derive(Component)]
+pub struct StudySlab;
+
+/// The body currently lying on the slab, if anything is being studied.
+#[derive(Component)]
+pub struct SlabOccupant;
+
+/// The GLB child of a [`SiteAvatar`]. Carries the cosmetic animation state, never the avatar itself —
+/// the same split `squad::FigurineModel` makes, and for the same reason (issue #18).
+#[derive(Component)]
+struct AvatarModel;
+
+/// Smoothed locomotion for one operative's model, so the blend does not chatter frame to frame.
+///
+/// `last` is the parent's position at the previous frame: Site avatars are moved by writing
+/// `Transform` directly (`drive_avatars`), so unlike a squad `Unit` there is no `Velocity` to read.
+#[derive(Component, Default)]
+struct AvatarLoco {
+    speed: f32,
+    last: Option<Vec3>,
+}
 
 pub struct SiteVisualsPlugin;
 
@@ -100,7 +131,19 @@ impl Plugin for SiteVisualsPlugin {
         app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
             .insert_resource(nav)
             .insert_resource(SiteLayoutRes(layout))
-            .add_systems(Startup, spawn_site_geometry)
+            // AFTER the graph exists: `spawn_site_geometry` pins `ValkyrieAnim`'s graph and slots on
+            // each operative's model child as an `anim::BlendSource`, and Bevy is otherwise free to
+            // order two `Startup` systems either way round. The squad states the same constraint for
+            // `spawn_unit`; the Site is the second spawner and needs it just as much.
+            .add_systems(
+                Startup,
+                spawn_site_geometry.after(crate::squad::build_valkyrie_anim),
+            )
+            // Cosmetic, so `Update` — never `FixedUpdate` (`docs/animation.md`). Deliberately NOT
+            // gated on `AppState::Site`: `apply_pose_blenders` snaps weights on its first pass, so a
+            // blender that had never been driven would prime to all-zero and show one frame of bind
+            // pose the moment the player walks in. Five avatars is not a cost worth that.
+            .add_systems(Update, drive_avatar_animation)
             .add_systems(Update, super::aperture::drive_aperture_charge)
             .add_systems(OnEnter(AppState::Site), focus_camera_on_site)
             .add_systems(OnEnter(AppState::InGame), return_camera_to_squad)
@@ -129,13 +172,129 @@ impl Plugin for SiteVisualsPlugin {
                     .run_if(in_state(AppState::Site)),
             )
             // Cells fill outside the Site state too, so walking in never catches them mid-populate.
-            .add_systems(Update, fill_containment_cells);
+            .add_systems(Update, (fill_containment_cells, lay_out_the_study_subject));
     }
 }
 
 /// The authored layout, kept for the systems that need world positions.
 #[derive(Resource, Deref)]
 pub struct SiteLayoutRes(pub SiteLayout);
+
+/// One panel of perimeter wall, as a segment on the **floor's edge**.
+///
+/// `(x, z)` is the segment's LOW lattice endpoint and `along_x` its direction, so a panel is exactly a
+/// unit edge of the floor grid: `along_x` runs from `(x, z)` to `(x+1, z)` on the line `z`, otherwise
+/// from `(x, z)` to `(x, z+1)` on the line `x`. Ordered and hashable so the spawn walks them in a
+/// stable order rather than a `HashSet`'s.
+type WallPanel = (i32, i32, bool);
+
+/// Every panel the perimeter needs, derived from **floor edges** rather than from wall-cell centres.
+///
+/// # The rule
+///
+/// *For every floor cell, for each of its four edges whose neighbour is a wall cell, one 1 m panel
+/// centred on that edge.* That is the whole model, and everything else falls out of it.
+///
+/// # Why it replaced three attempts at the same bug
+///
+/// A wall cell is a whole 1 m cell but the panel in it is 0.10 m thick, so "where is the wall?" had no
+/// answer the floor agreed with. Drawing it at the cell CENTRE put it half a cell off the floor edge;
+/// the corner point then landed half a cell from where the panels actually were, and — this is the
+/// part that kept biting — that offset points the *opposite way* at a convex corner than at a concave
+/// one. Three fixes in a row (crossed slabs, then half-length legs, then seating the panels on the
+/// floor edge) each corrected the case in front of them and broke the other: stubs jutting into open
+/// space at one, and a lit cap post standing alone in a 0.5 m hole at the other.
+///
+/// Keying on the floor edge removes the offset instead of correcting it. The wall line and the floor
+/// grid become the same line **by construction**, so panel joints land on floor seams, and a corner is
+/// simply two perpendicular panels whose endpoints coincide — no gap and no overhang, at a convex
+/// corner, a concave one or a T, with no piece other than the plain 1 m panel.
+///
+/// `site67.ron` still says which cells are wall — that is what `is_walkable` and `SiteLayout::validate`
+/// read. Only the question "where is its face" is answered here.
+fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
+    let wall_cells: std::collections::HashSet<(i32, i32)> = l
+        .walls
+        .iter()
+        .filter(|w| w.piece == SitePiece::Wall)
+        .map(|w| w.cell)
+        .collect();
+    let mut panels = std::collections::BTreeSet::new();
+    for r in &l.floor {
+        for c in r.cells() {
+            let (x, z) = (c.x, c.y);
+            if wall_cells.contains(&(x + 1, z)) {
+                panels.insert((x + 1, z, false));
+            }
+            if wall_cells.contains(&(x - 1, z)) {
+                panels.insert((x, z, false));
+            }
+            if wall_cells.contains(&(x, z + 1)) {
+                panels.insert((x, z + 1, true));
+            }
+            if wall_cells.contains(&(x, z - 1)) {
+                panels.insert((x, z, true));
+            }
+        }
+    }
+    panels
+}
+
+/// Where a panel's centre sits in world space, and the yaw that lays it along its edge.
+///
+/// `wall.glb` is thin along X and 1 m long along Z, so a panel running along Z is yaw 0 and one
+/// running along X is yaw 90 — the same convention `site67.ron`'s walls header states.
+fn panel_transform(l: &SiteLayout, (x, z, along_x): WallPanel) -> (Vec3, f32) {
+    if along_x {
+        (l.point((x as f32 + 0.5, z as f32)), 90.0)
+    } else {
+        (l.point((x as f32, z as f32 + 0.5)), 0.0)
+    }
+}
+
+/// The lattice points where two **perpendicular** panels meet — the corners, derived from the panels
+/// themselves rather than from anything authored.
+///
+/// A straight run only ever contributes panels of one direction, so it yields no corners; a corner,
+/// and equally a T or a crossing, contributes both. That makes the cap reachable by construction:
+/// edit the layout however you like and the corners follow.
+fn corner_vertices(
+    panels: &std::collections::BTreeSet<WallPanel>,
+) -> std::collections::BTreeSet<(i32, i32)> {
+    let mut ends_x = std::collections::HashSet::new();
+    let mut ends_z = std::collections::HashSet::new();
+    for &(x, z, along_x) in panels {
+        if along_x {
+            ends_x.insert((x, z));
+            ends_x.insert((x + 1, z));
+        } else {
+            ends_z.insert((x, z));
+            ends_z.insert((x, z + 1));
+        }
+    }
+    ends_x.intersection(&ends_z).copied().collect()
+}
+
+/// Which way a corner's cap faces, in degrees about +Y — from the directions panels LEAVE the vertex.
+///
+/// **The shipped Ozea cap is a 0.22 × 0.22 square post, so this yaw is currently invisible.** It is
+/// computed anyway because the greybox kit's corner is an L (`kenney .../wall-corner.glb`), and an L
+/// pointed the wrong way at three of four corners is a silent, per-corner wrongness nobody would trace
+/// back here. `SITE_KIT_PATH` is one line; this keeps a kit swap from needing a second one.
+fn corner_yaw(panels: &std::collections::BTreeSet<WallPanel>, (x, z): (i32, i32)) -> f32 {
+    let px = panels.contains(&(x, z, true));
+    let nx = panels.contains(&(x - 1, z, true));
+    let pz = panels.contains(&(x, z, false));
+    let nz = panels.contains(&(x, z - 1, false));
+    match (px, pz, nx, nz) {
+        (true, true, _, _) => 0.0,
+        (_, true, true, _) => 90.0,
+        (_, _, true, true) => 180.0,
+        (true, _, _, true) => 270.0,
+        // A T or a crossing leaves in three or four directions; a square post is right there anyway.
+        _ => 0.0,
+    }
+}
 
 /// One GLB piece, placed. The scene rides a **cosmetic child** — the same discipline every creature
 /// spawn uses, because an async scene load attaching `Children`/`SceneInstance` to an entity other
@@ -168,6 +327,136 @@ fn place(
         .with_child((WorldAssetRoot(scene), Transform::default()));
 }
 
+/// Bevy's `Rectangle` is authored in the XY plane with a **+Z normal**, so its width axis is world X.
+/// Every doorframe in every kit here is thin along X and spans Z — Ozea's `SM_DoorFrame_Double` and
+/// Kenney's `wall-doorway` alike — so a frame's opening plane faces ±X. The two native axes differ by
+/// a quarter turn, and handing both the same unmodified `door.yaw` is what stood the quad *across* the
+/// frame rather than in it, for ANY value of that yaw. `-90` puts the lit face toward the hall.
+const APERTURE_QUAD_YAW_OFFSET: f32 = -90.0;
+
+/// Metres the quad is pushed back INTO the frame, so the jambs crop its edges instead of the two
+/// z-fighting. It rides the quad's own normal: as a bare world-space `+Z` nudge — which is what it
+/// was — it slid sideways along the frame at every yaw but zero.
+const APERTURE_RECESS: f32 = 0.02;
+
+/// The ASYNC aperture: a quad standing in the doorframe's clear opening.
+///
+/// Sized from the kit's measured `opening`, which is an **art** fact about the frame. It was sized
+/// from `DoorPlacement::trigger_half_extents` until 2026-08-01 — a gameplay volume, generous on
+/// purpose so it catches a walking avatar — which made a 3.2 m quad for a 1.6 m hole. The material is
+/// `AlphaMode::Opaque` deliberately (the aperture must occlude), so that overhang did not fade out at
+/// the edges: it punched an opaque hole through the wall either side of the door.
+///
+/// `assets/shaders/async_aperture.wgsl` remaps `mesh.uv` to `[-1, 1]` and marches on `uv.x`, with no
+/// aspect uniform to compensate — so the corridor illusion is stretched by whatever the quad's aspect
+/// happens to be. At 1.600 × 1.642 that is very nearly square, which is what it was written assuming;
+/// at the old 3.2 × 2.0 it was stretched 1.6:1. Tuning the shader itself is FVS-G-5 and still open.
+fn spawn_aperture_quad(
+    commands: &mut Commands,
+    kit: &crate::site::kit::SiteKit,
+    meshes: &mut Assets<Mesh>,
+    aperture_mats: &mut Assets<AsyncApertureMaterial>,
+    frame_at: Vec3,
+    yaw_deg: f32,
+) {
+    // Width is authored as-is because `place` scales Y only; height rides the frame's own y_scale, so
+    // the quad grows exactly as much as the opening it fills does.
+    let (ow, oh) = kit.wall_doorway_wide.opening;
+    let oh = oh * kit.y_scale(SitePiece::WallDoorwayWide);
+    let quad = meshes.add(Rectangle::new(ow, oh));
+    let mat = aperture_mats.add(AsyncApertureMaterial {
+        settings: ApertureUniform::default(),
+    });
+    let rot = Quat::from_rotation_y((yaw_deg + APERTURE_QUAD_YAW_OFFSET).to_radians());
+    let normal = rot * Vec3::Z;
+    commands.spawn((
+        SiteVisual,
+        ApertureQuad,
+        Mesh3d(quad),
+        MeshMaterial3d(mat),
+        NotShadowCaster, // anomalous portal quad: casts no shadow (see world::setup_lighting)
+        // The opening starts at the floor, so the quad's centre is half its height up.
+        Transform::from_translation(frame_at + Vec3::Y * oh * 0.5 - normal * APERTURE_RECESS)
+            .with_rotation(rot),
+    ));
+}
+
+/// From a non-floor cell's CENTRE to the edge of the floor it borders.
+///
+/// The perimeter is drawn from floor edges (`wall_panels`), and the ASYNC doorway stands in a gap in
+/// that same perimeter — so its frame has to sit on the same line the panels either side of it do,
+/// not half a cell back at its own cell centre. `frame_pos` stays authored in CELL space because that
+/// is what `validate_doorway_gap` checks; the step onto the edge is taken here, once, at render time.
+fn floor_edge_offset(l: &SiteLayout, cell: IVec2) -> Vec3 {
+    for (step, off) in [
+        (IVec2::Y, Vec3::Z),
+        (IVec2::NEG_Y, Vec3::NEG_Z),
+        (IVec2::X, Vec3::X),
+        (IVec2::NEG_X, Vec3::NEG_X),
+    ] {
+        if l.is_floor(cell + step) {
+            return off * 0.5;
+        }
+    }
+    Vec3::ZERO
+}
+
+/// Height of the examination slab's bed platform, in metres — where a study subject lies.
+///
+/// Measured off `slab.glb` (`SM_MedPod_Treatment_Bed`): the widest horizontal band of the mesh is at
+/// y ≈ 0.55–0.60, which is the mattress. Not guessed, and not the mesh's 1.72 m overall height, which
+/// is the raised canopy at the head end.
+const SLAB_SURFACE_Y: f32 = 0.60;
+
+/// How deep a containment booth runs behind its glazed front, in metres. Two cells, matching the 2 m
+/// span of `wall_window` itself, so a cell is square in plan.
+const CELL_DEPTH: f32 = 2.0;
+
+/// Which way a containment cell's interior lies, given its authored yaw.
+///
+/// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
+/// the kit), so the glass faces `rot(yaw) · X` and the booth runs the other way.
+fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
+    -(Quat::from_rotation_y(yaw_deg.to_radians()) * Vec3::X)
+}
+
+/// Build the booth behind a containment cell's glass: two side walls and a back.
+///
+/// **Derived from the cell's own placement, never authored** — the same discipline [`wall_panels`]
+/// and [`corner_vertices`] use, so adding a seventh cell to `site67.ron` gets an enclosure for free
+/// and no cell can be left as a bare pane by forgetting to type one.
+///
+/// Until 2026-08-01 a cell WAS a bare pane: `site67.ron`'s `cells:` authors one `WallWindow` and
+/// nothing around it, so a containment wing holding nothing read as six sheets of glass standing on
+/// an open deck. That undercuts the whole point of FVS-D-4 — the player is supposed to walk past a
+/// rack of the things they brought home, and a rack has to look like one when it is empty.
+///
+/// Sides run along the interior direction and are therefore a quarter-turn from the glass; the back
+/// is parallel to it. Everything is `Wall`, which is 1 m long, so a 2 m run is two pieces.
+fn enclose_containment_cell(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    kit: &crate::site::kit::SiteKit,
+    at: Vec3,
+    yaw_deg: f32,
+) {
+    let rot = Quat::from_rotation_y(yaw_deg.to_radians());
+    let inward = cell_interior_dir(yaw_deg);
+    let span = rot * Vec3::Z;
+    // Sides: at both ends of the glass, stepping one metre at a time into the booth.
+    for side in [-1.0f32, 1.0] {
+        for step in [0.5f32, 1.5] {
+            let p = at + span * side * (CELL_DEPTH * 0.5) + inward * step;
+            place(commands, assets, kit, SitePiece::Wall, p, yaw_deg + 90.0);
+        }
+    }
+    // Back: parallel to the glass, at the far end of the booth.
+    for side in [-0.5f32, 0.5] {
+        let p = at + inward * CELL_DEPTH + span * side;
+        place(commands, assets, kit, SitePiece::Wall, p, yaw_deg);
+    }
+}
+
 fn spawn_site_geometry(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -175,54 +464,144 @@ fn spawn_site_geometry(
     layout: Res<SiteLayoutRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
+    valk: Res<crate::squad::ValkyrieAnim>,
 ) {
     let l = &layout.0;
     // Lights first, because nothing below is visible without them — see `light_the_site`.
     light_the_site(&mut commands, l);
     for r in &l.floor {
         for c in r.cells() {
-            place(&mut commands, &assets, &kit, SitePiece::Floor, l.cell_center(c), 0.0);
+            place(
+                &mut commands,
+                &assets,
+                &kit,
+                SitePiece::Floor,
+                l.cell_center(c),
+                0.0,
+            );
         }
     }
+    // THE PERIMETER, from floor edges — see `wall_panels` for why this replaced three attempts at
+    // deriving it from wall-cell centres.
+    let panels = wall_panels(l);
+    for &panel in &panels {
+        let (at, yaw) = panel_transform(l, panel);
+        place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+    }
+    // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,
+    // say) still stands where it was authored: it is furniture on a cell, not a face on an edge.
     for w in &l.walls {
+        if w.piece == SitePiece::Wall {
+            continue;
+        }
         let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
         place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
     }
+    // Cap each corner, at the lattice point where two perpendicular panels already meet.
+    let corners = corner_vertices(&panels);
+    for &v in &corners {
+        let at = l.point((v.0 as f32, v.1 as f32));
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallCorner,
+            at,
+            corner_yaw(&panels, v),
+        );
+    }
     for p in &l.props {
-        place(&mut commands, &assets, &kit, p.piece, l.point(p.pos), p.yaw);
+        let at = l.point(p.pos);
+        place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
+        // The slab is the one prop with a gameplay meaning attached, so it also gets a marker at the
+        // height of its bed platform for `lay_out_the_study_subject` to parent a body to.
+        if p.piece == SitePiece::Slab {
+            commands.spawn((
+                SiteVisual,
+                StudySlab,
+                Transform::from_translation(at + Vec3::Y * SLAB_SURFACE_Y)
+                    .with_rotation(Quat::from_rotation_y(p.yaw.to_radians())),
+                Visibility::Inherited,
+            ));
+        }
     }
 
-    // The ASYNC door: a wide frame, plus the trigger volume inside it.
-    let door_at = l.point(l.door.pos);
-    place(&mut commands, &assets, &kit, SitePiece::WallDoorwayWide, door_at, l.door.yaw);
+    // The ASYNC door: a wide frame standing IN the perimeter gap, plus the trigger volume on the floor
+    // in front of it. Two positions, deliberately — `frame_pos` is not floor and `pos` must be, so one
+    // field could never have served both. It served `pos`, and the frame stood a metre out in the hall.
+    //
+    // The frame seats on the run's line like every other panel does, so it does not stand half a cell
+    // proud of the wall it fills. `frame_pos` stays authored in CELL space — that is what
+    // `validate_doorway_gap` checks — and the seat is applied here, at render time, exactly once.
+    let door_cell = IVec2::new(
+        l.door.frame_pos.0.floor() as i32,
+        l.door.frame_pos.1.floor() as i32,
+    );
+    let door_seat = floor_edge_offset(l, door_cell);
+    let frame_at = l.point(l.door.frame_pos) + door_seat;
+    place(
+        &mut commands,
+        &assets,
+        &kit,
+        SitePiece::WallDoorwayWide,
+        frame_at,
+        l.door.yaw,
+    );
     let (hx, hy, hz) = l.door.trigger_half_extents;
     commands.spawn((
         SiteVisual,
-        AsyncDoor { half_extents: Vec3::new(hx, hy, hz) },
-        Transform::from_translation(door_at),
+        AsyncDoor {
+            half_extents: Vec3::new(hx, hy, hz),
+        },
+        Transform::from_translation(l.point(l.door.pos)),
     ));
-    // The aperture itself: a quad standing in the frame's opening, recessed a couple of centimetres so
-    // the frame geometry crops its edges rather than the two z-fighting. Sized to `DOORWAY_HEIGHT` so
-    // it fills the opening the kit actually leaves.
-    let opening_w = hx * 2.0;
-    let opening_h = crate::dungeon::DOORWAY_HEIGHT;
-    let quad = meshes.add(Rectangle::new(opening_w, opening_h));
-    let mat = aperture_mats.add(AsyncApertureMaterial { settings: ApertureUniform::default() });
-    commands.spawn((
-        SiteVisual,
-        ApertureQuad,
-        Mesh3d(quad),
-        MeshMaterial3d(mat),
-        NotShadowCaster, // anomalous portal quad: casts no shadow (see world::setup_lighting)
-        Transform::from_translation(door_at + Vec3::new(0.0, opening_h * 0.5, 0.02))
-            .with_rotation(Quat::from_rotation_y(l.door.yaw.to_radians())),
-    ));
+    // The header course. The frame reaches `DOORWAY_HEIGHT` and the walls beside it `WALL_HEIGHT`, so
+    // without this the perimeter has a 0.40 m slot straight through it above the door — you see the
+    // void over the lintel. `DOORWAY_HEIGHT`'s doc has always said "the wall runs continuous above
+    // it"; the dungeon honoured that and the Site never had. The cells come from the layout, so the
+    // course cannot disagree with the gap `validate` checks the frame against.
+    for cell in l.doorway_gap_cells() {
+        let at = l.cell_center(cell) + door_seat + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT;
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallHeader,
+            at,
+            l.door.yaw,
+        );
+    }
+    spawn_aperture_quad(
+        &mut commands,
+        &kit,
+        &mut meshes,
+        &mut aperture_mats,
+        frame_at,
+        l.door.yaw,
+    );
 
-    // Containment cells: the glazed front, and an empty marker the specimen body will fill.
+    // Containment cells: the glazed front, the booth behind it, and an empty marker the specimen body
+    // will fill.
     for c in &l.cells {
         let at = l.point(c.pos);
-        place(&mut commands, &assets, &kit, SitePiece::WallWindow, at, c.yaw);
-        commands.spawn((SiteVisual, ContainmentCell { index: c.index, pos: at }, Transform::from_translation(at)));
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallWindow,
+            at,
+            c.yaw,
+        );
+        enclose_containment_cell(&mut commands, &assets, &kit, at, c.yaw);
+        commands.spawn((
+            SiteVisual,
+            ContainmentCell {
+                index: c.index,
+                pos: at,
+                yaw: c.yaw,
+            },
+            Transform::from_translation(at),
+        ));
     }
 
     // Operative avatars. The first is the one the player drives.
@@ -236,17 +615,40 @@ fn spawn_site_geometry(
             Visibility::Inherited,
         ));
         e.with_child((
+            AvatarModel,
             WorldAssetRoot(
                 assets.load(GltfAssetLabel::Scene(0).from_asset("characters/valkyrie.glb")),
             ),
             Transform::from_scale(Vec3::splat(FIGURINE_SCALE))
                 .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            // Without this the operatives stand in the GLB's BIND POSE — arms straight out, rifle
+            // held level at chest height a metre to the side, which reads as a lance run through
+            // each of them. The mesh was never wrong: `rifle` measures 0.902 m composed through its
+            // whole node chain. Nothing was animating them, so nothing ever left the rest pose.
+            //
+            // Same seam the squad uses (`squad::spawn_unit`): the cosmetic state rides the MODEL
+            // child, never the entity other systems query, and `anim::attach_pose_blenders` wires
+            // the streamed-in `AnimationPlayer` to the nearest `BlendSource` ancestor — this entity.
+            anim::BlendSource {
+                graph: valk.graph.clone(),
+                slots: valk.slots.clone(),
+            },
+            AvatarLoco::default(),
         ));
         if i == 0 {
             e.insert(PlayerAvatar);
         }
     }
-    info!("site: built Site-67 ({} floor runs, {} cells)", l.floor.len(), l.cells.len());
+    // The panel and corner counts are how the derived rule is verified at runtime — `site67.ron`
+    // authors no panels and no corners, so a 0 in either means the derivation stopped matching the
+    // layout it is supposed to trace.
+    info!(
+        "site: built Site-67 ({} floor runs, {} cells, {} wall panels, {} corners)",
+        l.floor.len(),
+        l.cells.len(),
+        panels.len(),
+        corners.len()
+    );
 }
 
 fn focus_camera_on_site(
@@ -340,9 +742,15 @@ fn command_avatar(
         return;
     }
     let (camera, cam_tf) = *camera;
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
-    let Some(d) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+        return;
+    };
+    let Some(d) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) else {
+        return;
+    };
     let point = ray.get_point(d);
     if !nav.is_walkable(nav.world_to_cell(point)) {
         return; // clicking a wall is not an order
@@ -377,6 +785,92 @@ fn drive_avatars(
             // Wedged in a corner: drop the order rather than vibrate against the wall forever.
             goal.0 = None;
         }
+    }
+}
+
+/// Put the specimen under study on the slab, and take it off again when nothing is being studied.
+///
+/// **Makes an existing system visible instead of inventing one.** `research::lab::StudySubject` is
+/// documented as "the specimen currently on the slab", and the research HUD says *NO SPECIMEN ON THE
+/// SLAB — CONTAIN ONE FIRST* — but until 2026-08-01 there was no slab anywhere in the world and the
+/// research wing was bare floor. The subject is chosen by `research::lab::keep_a_study_subject`; this
+/// only shows what it already decided, so it adds no gameplay rule of its own.
+///
+/// Cosmetic, `Update`, and it spawns nothing carrying `Health` — the module's invariant holds.
+fn lay_out_the_study_subject(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    kit: Res<crate::site::SiteKitRes>,
+    subject: Res<crate::research::StudySubject>,
+    slabs: Query<Entity, With<StudySlab>>,
+    occupants: Query<Entity, With<SlabOccupant>>,
+) {
+    let wanted = subject.0.is_some();
+    let present = occupants.iter().next().is_some();
+    if wanted == present {
+        return; // already agrees with the research state
+    }
+    if !wanted {
+        for e in &occupants {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+    for slab in &slabs {
+        commands.entity(slab).with_child((
+            SlabOccupant,
+            SiteVisual,
+            // The same stand-in a containment cell uses, and for the same reason: `Specimen` records
+            // only `captured: Entity` and that entity dies with the expedition, so the Site genuinely
+            // does not know the species. Lying down rather than standing — it is on a table.
+            Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(0.45)),
+            Visibility::Inherited,
+            WorldAssetRoot(assets.load(
+                GltfAssetLabel::Scene(0).from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
+            )),
+        ));
+    }
+}
+
+/// Ease each operative's animation blend from how far its avatar actually moved this frame.
+///
+/// **Cosmetic, `Update` only**, and it writes nothing but a `PoseBlender` — so it cannot reach
+/// `snapshot_hash`, exactly as `docs/animation.md` requires of the whole animation layer.
+///
+/// Simpler than `squad::drive_valkyrie_animation` because a hub avatar is simpler: `drive_avatars`
+/// turns it to face the way it actually moved, so travel is always straight ahead in its own frame
+/// (`theta = 0`), and nobody aims or fires in the Site. What is left is idle ↔ walk ↔ run, which is
+/// the whole of what a hub needs.
+fn drive_avatar_animation(
+    time: Res<Time>,
+    avatars: Query<&Transform, With<SiteAvatar>>,
+    mut models: Query<(&ChildOf, &mut anim::PoseBlender, &mut AvatarLoco), With<AvatarModel>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    // Same exponential form the squad's smoothing uses — frame-rate independent, so the blend looks
+    // the same at 30 and 240 fps.
+    let ease = 1.0 - (-dt / AVATAR_LOCO_TAU).exp();
+    for (child_of, mut blender, mut loco) in &mut models {
+        let Ok(tf) = avatars.get(child_of.parent()) else {
+            continue; // parent is not an avatar (or was despawned)
+        };
+        let raw = match loco.last {
+            // First frame: no previous position, so no speed can be measured yet. Starting at 0 shows
+            // the idle clip, which is the correct pose for an operative that has not been ordered.
+            None => 0.0,
+            Some(prev) => (tf.translation - prev).with_y(0.0).length() / dt,
+        };
+        loco.last = Some(tf.translation);
+        loco.speed += (raw - loco.speed) * ease;
+        let weights = crate::squad::valkyrie_weights(loco.speed, 0.0, false, false);
+        if let Err(e) = blender.set_targets(&weights) {
+            error!("site avatar: {e}");
+        }
+        blender.set_ground_speed(loco.speed);
     }
 }
 
@@ -449,7 +943,9 @@ fn return_camera_to_squad(
 ) {
     // No valid anchor means no living squad to look at (`squad` clears it on an empty roster), and
     // the terminal screens own the view at that point. Leave the camera where it is.
-    let Some(anchor) = anchor.filter(|a| a.valid) else { return };
+    let Some(anchor) = anchor.filter(|a| a.valid) else {
+        return;
+    };
     crate::camera::snap_camera_to(anchor.pos, &mut rig, &mut cams);
 }
 
@@ -514,7 +1010,9 @@ fn fill_containment_cells(
     let Some(site) = site else { return };
     // `Option`, always: Bevy REMOVES the relationship target when it empties, so a Site holding nothing
     // matches nothing — which reads as "no Site" if you query it bare. That is the first expedition.
-    let Ok(roster) = rosters.get(site.0) else { return };
+    let Ok(roster) = rosters.get(site.0) else {
+        return;
+    };
 
     let mut held: Vec<(u64, Entity)> = roster
         .iter()
@@ -539,14 +1037,14 @@ fn fill_containment_cells(
         commands.entity(*cell_entity).with_child((
             CellOccupant,
             SiteVisual,
-            Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)).with_scale(Vec3::splat(0.6)),
+            // Half a booth in, not at the origin: the cell entity sits exactly where the GLASS is, so
+            // a body at (0,0,0) stood inside the pane it is meant to be seen through.
+            Transform::from_translation(cell_interior_dir(cell.yaw) * (CELL_DEPTH * 0.5))
+                .with_scale(Vec3::splat(0.6)),
             Visibility::Inherited,
-            WorldAssetRoot(
-                assets.load(
-                    GltfAssetLabel::Scene(0)
-                        .from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
-                ),
-            ),
+            WorldAssetRoot(assets.load(
+                GltfAssetLabel::Scene(0).from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
+            )),
         ));
         let _ = cell.pos;
     }

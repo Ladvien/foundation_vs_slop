@@ -68,17 +68,45 @@ pub struct KitPiece {
     pub y_offset: f32,
 }
 
-/// One [`KitPiece`] per [`SitePiece`].
+/// A doorway: a [`KitPiece`] plus the **clear opening** its mesh leaves.
+///
+/// The opening is a separate art fact from `height`, and neither is derivable from the other:
+/// `doorframe_double.glb` stands 1.980 m tall overall, but its jambs face each other across 1.600 m
+/// and its lintel underside is 1.626 m up. Nothing in a bounding box says so.
+///
+/// **The ASYNC aperture quad is sized from this.** Until 2026-08-01 it was sized from
+/// `DoorPlacement::trigger_half_extents` — a *gameplay* volume, deliberately generous because it has
+/// to catch a walking avatar — which made the quad 3.2 m against a 1.6 m hole. The material is
+/// `AlphaMode::Opaque` by design, so that overhang was not a soft artifact: it punched a hole through
+/// the wall either side of the door.
+///
+/// Measured from the mesh's `POSITION` accessors, never guessed — the same rule `kit_ozea.ron`'s
+/// header states for `height`. Both doorway pieces carry it as a **required** field, so a kit that
+/// omits it fails at parse time; there is no `Option` for a spawner to branch on.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DoorPiece {
+    /// The mesh, on exactly the same terms as every other piece.
+    pub mesh: KitPiece,
+    /// Clear opening `(width, height)` in metres, in the mesh's own authored scale — so the rendered
+    /// height is this times [`SiteKit::y_scale`], and the width is this as-is (`site::visuals::place`
+    /// scales Y only).
+    pub opening: (f32, f32),
+}
+
+/// One [`KitPiece`] per [`SitePiece`]; the two doorways carry an opening as well.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SiteKit {
     pub floor: KitPiece,
     pub wall: KitPiece,
     pub wall_corner: KitPiece,
-    pub wall_doorway: KitPiece,
-    pub wall_doorway_wide: KitPiece,
+    pub wall_doorway: DoorPiece,
+    pub wall_doorway_wide: DoorPiece,
+    pub wall_header: KitPiece,
     pub wall_window: KitPiece,
     pub wall_low: KitPiece,
+    pub slab: KitPiece,
     pub column: KitPiece,
     pub crate_: KitPiece,
     pub pipe: KitPiece,
@@ -100,8 +128,7 @@ impl SiteKit {
     /// Game policy (what a wall must reach) stays in `pieces::target_height`; art fact (how tall the
     /// mesh is) lives in the kit. Neither belongs in the other.
     pub fn y_scale(&self, piece: SitePiece) -> f32 {
-        super::pieces::target_height(piece)
-            .map_or(1.0, |target| target / self.piece(piece).height)
+        super::pieces::target_height(piece).map_or(1.0, |target| target / self.piece(piece).height)
     }
 
     /// How far off the ground plane `piece` sits in THIS kit — see [`KitPiece::y_offset`].
@@ -116,10 +143,12 @@ impl SiteKit {
             Floor => &self.floor,
             Wall => &self.wall,
             WallCorner => &self.wall_corner,
-            WallDoorway => &self.wall_doorway,
-            WallDoorwayWide => &self.wall_doorway_wide,
+            WallDoorway => &self.wall_doorway.mesh,
+            WallDoorwayWide => &self.wall_doorway_wide.mesh,
+            WallHeader => &self.wall_header,
             WallWindow => &self.wall_window,
             WallLow => &self.wall_low,
+            Slab => &self.slab,
             Column => &self.column,
             Crate => &self.crate_,
             Pipe => &self.pipe,
@@ -154,7 +183,9 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
             return Err(format!("site kit: {piece:?} has an empty GLB path"));
         }
         if !glb.ends_with(".glb") {
-            return Err(format!("site kit: {piece:?} -> {glb:?} is not a .glb (artist_guide.md §3)"));
+            return Err(format!(
+                "site kit: {piece:?} -> {glb:?} is not a .glb (artist_guide.md §3)"
+            ));
         }
     }
     for piece in SitePiece::ALL {
@@ -163,6 +194,29 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
             return Err(format!(
                 "site kit: {piece:?} has authored height {h} — the scale is target/authored, so a \
                  zero or negative height is a divide-by-zero or an inside-out mesh"
+            ));
+        }
+    }
+    // A doorway's opening must be a real hole inside a real mesh. The aperture quad is built from
+    // these two numbers, so a zero leaves an invisible portal and an opening taller than the frame
+    // means it was copied from a bounding box instead of measured between the jambs.
+    for (name, door) in [
+        ("wall_doorway", &kit.wall_doorway),
+        ("wall_doorway_wide", &kit.wall_doorway_wide),
+    ] {
+        let (w, h) = door.opening;
+        if !(w.is_finite() && w > 0.0 && h.is_finite() && h > 0.0) {
+            return Err(format!(
+                "site kit: {name} has clear opening {:?} — the ASYNC aperture quad is sized from \
+                 this, and a non-positive opening is an invisible portal",
+                door.opening
+            ));
+        }
+        if h > door.mesh.height {
+            return Err(format!(
+                "site kit: {name}'s clear opening is {h} m tall but the mesh is only {} m — an \
+                 opening is the hole BETWEEN the jambs and UNDER the lintel, not the bounding box",
+                door.mesh.height
             ));
         }
     }
@@ -194,7 +248,11 @@ mod tests {
     #[test]
     fn the_shipped_kit_parses_and_validates() {
         let kit = load_site_kit(SITE_KIT_PATH).expect("the shipped greybox kit must load");
-        assert_eq!(kit.entries().len(), SitePiece::ALL.len(), "every piece is dressed");
+        assert_eq!(
+            kit.entries().len(),
+            SitePiece::ALL.len(),
+            "every piece is dressed"
+        );
     }
 
     #[test]
@@ -202,7 +260,10 @@ mod tests {
         // The whole reason this is a struct rather than a map: forgetting a piece must not be a
         // runtime hole in a wall.
         let text = r#"( floor: "a.glb", wall: "b.glb" )"#;
-        assert!(parse_site_kit(text).is_err(), "a partial kit must not parse");
+        assert!(
+            parse_site_kit(text).is_err(),
+            "a partial kit must not parse"
+        );
     }
 
     #[test]
@@ -224,12 +285,21 @@ mod tests {
         // was first written, and the swap it proves is the same swap either way round.
         let shipped = load_site_kit(SITE_KIT_PATH).expect("the shipped Ozea kit loads");
         let swapped = load_site_kit(GREYBOX_KIT_PATH).expect("the greybox fixture loads");
-        assert_ne!(shipped, swapped, "the fixture must actually differ, or it proves nothing");
+        assert_ne!(
+            shipped, swapped,
+            "the fixture must actually differ, or it proves nothing"
+        );
         // Named pieces really did change kit — not merely "the structs differ somewhere".
-        assert!(shipped.glb(SitePiece::Floor).contains("ozea"), "the shipped floor is Ozea");
-        assert!(swapped.glb(SitePiece::Floor).contains("kenney"), "the fixture floor is Kenney");
+        assert!(
+            shipped.glb(SitePiece::Floor).contains("ozea"),
+            "the shipped floor is Ozea"
+        );
+        assert!(
+            swapped.glb(SitePiece::Floor).contains("kenney"),
+            "the fixture floor is Kenney"
+        );
         // The scale really is kit-derived rather than a constant. `Wall` is the honest comparison now
-        // that the shipped kit swaps it: Ozea authors the wall at 2.00 m and Kenney at 1.00 m, so the
+        // that the shipped kit swaps it: Ozea authors the wall at 2.40 m and Kenney at 1.00 m, so the
         // SAME piece must want a different scale in each. (This asserted on `WallDoorwayWide` while
         // the old partial fixture still used the Kenney wall, which made a `Wall` comparison vacuous.)
         assert!(
@@ -237,13 +307,68 @@ mod tests {
             "a 2.00 m wall and a 1.00 m one cannot want the same scale — the kit is not driving it"
         );
         // And the swapped kit is a VALID kit, not just a different one.
-        validate_site_kit(&swapped).expect("a swapped kit must satisfy every rule the shipped one does");
+        validate_site_kit(&swapped)
+            .expect("a swapped kit must satisfy every rule the shipped one does");
+    }
+
+    /// The regression that shipped the broken aperture: an opening taken from the frame's OUTLINE
+    /// rather than measured between its jambs.
+    #[test]
+    fn a_doorway_opening_bigger_than_its_mesh_is_refused() {
+        let mut kit = load_site_kit(SITE_KIT_PATH).expect("shipped kit loads");
+        kit.wall_doorway_wide.opening.1 = kit.wall_doorway_wide.mesh.height + 0.5;
+        let err =
+            validate_site_kit(&kit).expect_err("an opening taller than the frame is nonsense");
+        assert!(
+            err.contains("BETWEEN the jambs"),
+            "the message must say WHY: {err}"
+        );
+
+        let mut kit = load_site_kit(SITE_KIT_PATH).expect("shipped kit loads");
+        kit.wall_doorway.opening.0 = 0.0;
+        assert!(
+            validate_site_kit(&kit).is_err(),
+            "a zero-width opening is an invisible portal"
+        );
+    }
+
+    /// Both kits must carry the openings, or the swap fixture stops proving the swap works.
+    #[test]
+    fn every_shipped_kit_measures_its_doorway_openings() {
+        for path in [SITE_KIT_PATH, GREYBOX_KIT_PATH] {
+            let kit = load_site_kit(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            for (name, door) in [
+                ("wall_doorway", &kit.wall_doorway),
+                ("wall_doorway_wide", &kit.wall_doorway_wide),
+            ] {
+                // A doorway whose "opening" equals its whole footprint was copied from a bbox.
+                assert!(
+                    door.opening.1 < door.mesh.height,
+                    "{path}: {name} opening {:?} is not strictly inside a {} m mesh",
+                    door.opening,
+                    door.mesh.height
+                );
+            }
+            // The wide doorway is the one the ASYNC aperture wears, and it must be the wider of the
+            // two — otherwise `wall_doorway_wide` is misnamed and the layout's 2-cell gap is wrong.
+            assert!(
+                kit.wall_doorway_wide.opening.0 > kit.wall_doorway.opening.0,
+                "{path}: the wide doorway must open wider than the single one"
+            );
+        }
     }
 
     #[test]
     fn a_non_glb_path_is_refused() {
         let mut kit = load_site_kit(SITE_KIT_PATH).expect("shipped kit loads");
-        kit.pipe = KitPiece { glb: "ozea/pipe.fbx".into(), height: 1.0, y_offset: 0.0 };
-        assert!(validate_site_kit(&kit).is_err(), "artist_guide.md §3 is glTF-binary only");
+        kit.pipe = KitPiece {
+            glb: "ozea/pipe.fbx".into(),
+            height: 1.0,
+            y_offset: 0.0,
+        };
+        assert!(
+            validate_site_kit(&kit).is_err(),
+            "artist_guide.md §3 is glTF-binary only"
+        );
     }
 }
