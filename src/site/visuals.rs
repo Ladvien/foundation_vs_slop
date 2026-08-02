@@ -379,6 +379,26 @@ fn spawn_aperture_quad(
         Transform::from_translation(frame_at + Vec3::Y * oh * 0.5 - normal * APERTURE_RECESS)
             .with_rotation(rot),
     ));
+    // ...and the light it throws into the hall. On the HALL side of the quad (`+normal`), because a
+    // light at the quad's own plane is half-buried in the frame and spills backwards through the
+    // perimeter wall. `drive_aperture_charge` breathes and charges its intensity; the value here is
+    // only the first frame's.
+    commands.spawn((
+        SiteVisual,
+        super::aperture::ApertureGlow,
+        PointLight {
+            color: super::aperture::APERTURE_LIGHT_TINT,
+            intensity: super::aperture::APERTURE_LIGHT_LUMENS,
+            // Reaches into the hall without washing the containment wing next door.
+            range: 9.0,
+            // The one light in the Site whose shadows are the POINT: the frame's jambs cropping the
+            // spill is what makes the glow read as coming through an opening.
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_translation(frame_at + Vec3::Y * oh * 0.55 + normal * 0.55),
+    ));
 }
 
 /// From a non-floor cell's CENTRE to the edge of the floor it borders.
@@ -666,16 +686,155 @@ fn focus_camera_on_site(
 /// wall tops rather than inside them.
 const SITE_FIXTURE_Y: f32 = 2.6;
 
-/// Grid spacing (metres) between fixtures within an area. Matched to [`SITE_FIXTURE_RANGE`] so pools
-/// overlap slightly instead of leaving dark bands between them.
-const SITE_FIXTURE_SPACING: f32 = 7.0;
+/// Grid spacing (metres) between fixtures within an area.
+///
+/// **Deliberately wider than [`AreaLight::range`] now.** It used to equal the range exactly, with the
+/// stated goal that "pools overlap slightly instead of leaving dark bands between them" — which is a
+/// description of even fill, and even fill is what made the hub read as a floorplan rather than a
+/// building. Darkness between pools is what makes architecture legible; the gap is the point.
+const SITE_FIXTURE_SPACING: f32 = 8.0;
 
-/// Per-fixture reach (metres). Same figure the dungeon's fixtures use — the rooms are a comparable
-/// scale and a second, differently-tuned number would drift from it.
-const SITE_FIXTURE_RANGE: f32 = 7.0;
+/// One area's lighting character. **Per-wing colour is the wayfinding**, not just the mood: the design
+/// doc (§2.1) makes "learnable without signage" the hub's whole reason for being hand-authored, and
+/// until 2026-08-02 the entire burden of that fell on a single floor decal per room while every
+/// fixture in the building emitted the same near-white.
+///
+/// `kelvin` is a real colour temperature run through [`blackbody_srgb`] rather than a hand-picked RGB,
+/// so the wings sit on one physical scale and cannot drift into arbitrary hues relative to each other.
+struct AreaLight {
+    /// Correlated colour temperature. Warm = lived in, cool = clinical.
+    kelvin: f32,
+    /// Luminous power of the area's KEY fixture — the one nearest its centre, and the only one that
+    /// casts a real shadow map.
+    key_lumens: f32,
+    /// Luminous power of the remaining FILL fixtures.
+    fill_lumens: f32,
+    /// Per-fixture reach in metres. Shorter than [`SITE_FIXTURE_SPACING`] leaves the pools separate.
+    range: f32,
+}
 
-/// Per-fixture luminous power (lumens), matching the dungeon's `fixture_intensity`.
-const SITE_FIXTURE_LUMENS: f32 = 120_000.0;
+/// How each wing is lit, and why.
+///
+/// The temperatures are the Director's call (2026-08-02). They read as a sequence when you walk the
+/// spine, which is the point: you can tell which wing you are in from the colour of the air before you
+/// can read the decal on the floor.
+fn area_light(id: super::layout::AreaId) -> AreaLight {
+    use super::layout::AreaId::*;
+    match id {
+        // Clinical and high-key. This is the one room that must look like it is inspected daily.
+        Containment => AreaLight {
+            kelvin: 6500.0,
+            key_lumens: 380_000.0,
+            fill_lumens: 260_000.0,
+            range: 10.0,
+        },
+        // Surgical, and mostly dark except where it matters — the slab gets its own spot below, so the
+        // ambient here is deliberately thin. A bright empty room reads as an empty room.
+        Research => AreaLight {
+            kelvin: 5600.0,
+            key_lumens: 230_000.0,
+            fill_lumens: 150_000.0,
+            range: 9.5,
+        },
+        // Tungsten, low and pooled. Paper, dust, and a desk lamp's worth of light.
+        Records => AreaLight {
+            kelvin: 2900.0,
+            key_lumens: 220_000.0,
+            fill_lumens: 145_000.0,
+            range: 9.0,
+        },
+        // Sodium. A loading bay, lit for work rather than for comfort.
+        Requisition => AreaLight {
+            kelvin: 2400.0,
+            key_lumens: 240_000.0,
+            fill_lumens: 155_000.0,
+            range: 9.5,
+        },
+        // Warm. The room you leave from, and the one place in the Site that should feel like people.
+        Briefing => AreaLight {
+            kelvin: 3200.0,
+            key_lumens: 265_000.0,
+            fill_lumens: 175_000.0,
+            range: 9.5,
+        },
+        // Neutral connective tissue, and the DIMMEST thing in the building. A corridor you walk along
+        // between brighter rooms is what makes the rooms read as rooms.
+        Corridor => AreaLight {
+            kelvin: 4000.0,
+            key_lumens: 150_000.0,
+            fill_lumens: 115_000.0,
+            range: 9.0,
+        },
+        // ⚠️ NOT in the Director's table, which named the six destinations and the spine. Chosen here,
+        // and stated rather than buried: the ASYNC hall is lit dim and neutral **so the aperture is the
+        // brightest thing in it**. Lighting this room properly would put a sodium portal in a well-lit
+        // hall and lose it; the hall's job is to be the dark room the door glows into.
+        AsyncDoor => AreaLight {
+            kelvin: 4000.0,
+            key_lumens: 110_000.0,
+            fill_lumens:  75_000.0,
+            range: 9.0,
+        },
+    }
+}
+
+/// Luminous power of the surgical spot over the examination slab, in lumens. The brightest single
+/// fixture in the Site by a wide margin — it is the one pool of light the research wing is *about*.
+const SLAB_SPOT_LUMENS: f32 = 420_000.0;
+
+/// Height of the slab spot above the floor. Below the ceiling fixtures, so it reads as a task light
+/// swung down over the table rather than as room lighting.
+const SLAB_SPOT_Y: f32 = 2.15;
+
+/// Convert a correlated colour temperature to a **linear** sRGB multiplier.
+///
+/// Kim et al. (2002), "Design of Advanced Color Temperature Control System for HDTV Applications",
+/// *J. Korean Phys. Soc.* 41(6) — the standard piecewise-cubic fit to the Planckian locus in CIE 1931
+/// `xy`, valid over 1667–25000 K, which is the approximation graphics code has used for two decades in
+/// place of integrating Planck's law against the CIE colour-matching functions. Chromaticity is then
+/// taken to XYZ at `Y = 1` and through the sRGB D65 matrix (IEC 61966-2-1).
+///
+/// **Normalised to a peak of 1**, deliberately: the result is a *hue*, and brightness stays where it
+/// belongs, in the fixture's lumens. Without that, picking a warmer wing would silently dim it.
+///
+/// Returns linear (not gamma-encoded) values because `PointLight::color` is a linear radiometric
+/// multiplier — feeding it `Color::srgb` would apply the transfer function a second time and wash
+/// every temperature toward white.
+fn blackbody_srgb(kelvin: f32) -> Color {
+    let t = kelvin.clamp(1667.0, 25000.0);
+    let (t2, t3) = (t * t, t * t * t);
+    // Chromaticity x, in two pieces about 4000 K.
+    let x = if t <= 4000.0 {
+        -0.2661239e9 / t3 - 0.2343589e6 / t2 + 0.8776956e3 / t + 0.179910
+    } else {
+        -3.0258469e9 / t3 + 2.1070379e6 / t2 + 0.2226347e3 / t + 0.240390
+    };
+    let (x2, x3) = (x * x, x * x * x);
+    // ...and y, in three, hinged on the SAME x rather than on t.
+    let y = if t <= 2222.0 {
+        -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683
+    } else if t <= 4000.0 {
+        -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867
+    } else {
+        3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483
+    };
+    // `y` is a denominator below. The fit cannot return zero anywhere in the clamped range, but the
+    // division is guarded rather than assumed — a NaN here would blacken a whole wing silently.
+    if y.abs() < 1e-6 {
+        return Color::WHITE;
+    }
+    let (big_x, big_y, big_z) = (x / y, 1.0, (1.0 - x - y) / y);
+    let r = 3.2404542 * big_x - 1.5371385 * big_y - 0.4985314 * big_z;
+    let g = -0.9692660 * big_x + 1.8760108 * big_y + 0.0415560 * big_z;
+    let b = 0.0556434 * big_x - 0.2040259 * big_y + 1.0572252 * big_z;
+    // Out-of-gamut components come back negative; clamp, then normalise to a peak of 1.
+    let (r, g, b) = (r.max(0.0), g.max(0.0), b.max(0.0));
+    let peak = r.max(g).max(b);
+    if peak <= 1e-6 {
+        return Color::WHITE;
+    }
+    Color::linear_rgb(r / peak, g / peak, b / peak)
+}
 
 /// **Light Site-67 from inside itself.**
 ///
@@ -690,22 +849,35 @@ const SITE_FIXTURE_LUMENS: f32 = 120_000.0;
 /// generated rather than typed. It also means the count scales with the floorplan instead of with
 /// whoever last edited the list.
 ///
-/// **Colour is the deliberate contrast.** The dungeon's fixtures are `(0.92, 1.0, 0.94)` — a faint
-/// green cast, low-CRI halophosphate, chosen to feel sickly. The Site is the opposite claim: a clean,
-/// faintly cool white. The player should be able to tell which world they are standing in with the HUD
-/// switched off.
+/// **Colour is the deliberate contrast, and as of 2026-08-02 it is also the wayfinding.** The dungeon's
+/// fixtures are `(0.92, 1.0, 0.94)` — a faint green cast, low-CRI halophosphate, chosen to feel sickly.
+/// The Site answers it per wing, on a real colour-temperature scale ([`area_light`], [`blackbody_srgb`]):
+/// 6500 K in containment down to 2400 K in requisition. Before this every fixture in the building was
+/// the same near-white, so light did no storytelling and no wayfinding at all, and the whole burden of
+/// "which wing is this" fell on one floor decal per room.
 ///
-/// **No shadows, and that is a budget decision rather than an oversight.** `light::spawn_fixture_lights`
-/// sets `shadow_maps_enabled: false` on every dungeon fixture for the same reason, and this adds ~29
-/// lights that are always resident (the dungeon's spawn only as rooms are revealed). Clinical
-/// fluorescent lighting is close to shadowless anyway, so the cheap answer is also the right look.
+/// **Key and fill, not a flat grid.** Each area's centremost fixture is its key: brighter, and the only
+/// one carrying a real shadow map. The rest are fill. Every fixture gets `contact_shadows_enabled` —
+/// screen-space, so it costs no shadow map — because the thing that made the hub read as a floorplan
+/// was that nothing touched the floor. A prop with no contact shadow is a decal.
+///
+/// **Shadow budget: one shadow-mapping light per area, seven in total.** A point light's shadow map is
+/// six faces, so enabling it on all ~29 fixtures would be a very different bill. `light::
+/// spawn_fixture_lights` still sets `shadow_maps_enabled: false` on every dungeon fixture — but those
+/// spawn per revealed room and can reach hundreds, whereas the Site's set is fixed and small enough to
+/// afford the seven that carry the whole look.
 fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
-    let color = Color::srgb(0.96, 0.98, 1.0);
     for area in &l.areas {
         let r = &area.rect;
+        let spec = area_light(area.id);
+        let color = blackbody_srgb(spec.kelvin);
         // At least one fixture per area however small, then one per `SPACING` in each axis.
         let nx = ((r.w as f32) / SITE_FIXTURE_SPACING).ceil().max(1.0) as i32;
         let nz = ((r.h as f32) / SITE_FIXTURE_SPACING).ceil().max(1.0) as i32;
+        // The key is the fixture nearest the middle of the grid, so it lands in the room's centre
+        // rather than in a corner. Integer division floors, which is what centres an odd count and
+        // picks the lower-middle of an even one — either is the middle of the room.
+        let (kx, kz) = (nx / 2, nz / 2);
         for ix in 0..nx {
             for iz in 0..nz {
                 // Centre each fixture in its share of the rect rather than on a corner, so an area
@@ -713,19 +885,52 @@ fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
                 let fx = r.x as f32 + (ix as f32 + 0.5) * (r.w as f32 / nx as f32);
                 let fz = r.z as f32 + (iz as f32 + 0.5) * (r.h as f32 / nz as f32);
                 let at = l.point((fx, fz)) + Vec3::Y * SITE_FIXTURE_Y;
+                let is_key = ix == kx && iz == kz;
                 commands.spawn((
                     SiteVisual,
                     PointLight {
                         color,
-                        intensity: SITE_FIXTURE_LUMENS,
-                        range: SITE_FIXTURE_RANGE,
-                        shadow_maps_enabled: false,
+                        intensity: if is_key {
+                            spec.key_lumens
+                        } else {
+                            spec.fill_lumens
+                        },
+                        range: spec.range,
+                        shadow_maps_enabled: is_key,
+                        contact_shadows_enabled: true,
                         ..default()
                     },
                     Transform::from_translation(at),
                 ));
             }
         }
+    }
+    // The surgical spot over the examination slab. A `SpotLight` rather than another point fixture
+    // because the brief is "one bright pool" — a cone aimed straight down puts a hard-edged disc on the
+    // table and leaves the rest of the wing dim, which is the whole composition of the room.
+    //
+    // Placed from the authored `Slab` prop, so moving the slab in `site67.ron` moves its light. A wing
+    // with no slab simply gets no spot; nothing here assumes one exists.
+    for p in l.props.iter().filter(|p| p.piece == SitePiece::Slab) {
+        let at = l.point(p.pos) + Vec3::Y * SLAB_SPOT_Y;
+        commands.spawn((
+            SiteVisual,
+            SpotLight {
+                color: blackbody_srgb(area_light(super::layout::AreaId::Research).kelvin),
+                intensity: SLAB_SPOT_LUMENS,
+                range: 6.0,
+                // Tight inner cone with a soft outer falloff: a hard disc with a legible edge, not a
+                // wash. `outer` must exceed `inner` or the penumbra inverts.
+                inner_angle: 0.30,
+                outer_angle: 0.55,
+                shadow_maps_enabled: true,
+                contact_shadows_enabled: true,
+                ..default()
+            },
+            // Straight down. `SpotLight` points along its own -Z, so a -90° pitch aims it at the floor.
+            Transform::from_translation(at)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        ));
     }
 }
 
@@ -1055,5 +1260,126 @@ fn fill_containment_cells(
             held.len(),
             by_index.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::color::LinearRgba;
+
+    /// Unpack the linear components a fixture will actually be given.
+    fn lin(c: Color) -> LinearRgba {
+        LinearRgba::from(c)
+    }
+
+    /// The Planckian fit behaves like a blackbody, not like a lookup table someone typed.
+    ///
+    /// This is the one piece of real physics in the Site's presentation, and it is exactly the kind of
+    /// thing that goes wrong silently: a transposed coefficient still returns a plausible-looking
+    /// colour, and nobody notices that requisition is faintly blue until they stand in it.
+    #[test]
+    fn colour_temperature_runs_warm_to_cool_in_the_right_direction() {
+        // Every wing the Site actually uses, coldest first.
+        let cold = lin(blackbody_srgb(6500.0));
+        let mid = lin(blackbody_srgb(4000.0));
+        let warm = lin(blackbody_srgb(2400.0));
+
+        // Warm light is red-dominant and blue-starved; cool light is not. The classic sign error
+        // (using `t` where the fit wants `x`) inverts precisely this.
+        assert!(
+            warm.red > warm.green && warm.green > warm.blue,
+            "2400 K must fall off R > G > B, got {warm:?}"
+        );
+        assert!(
+            cold.blue > warm.blue,
+            "6500 K must carry more blue than 2400 K: {} vs {}",
+            cold.blue,
+            warm.blue
+        );
+        // Blue rises monotonically with temperature across the range the Site spans.
+        assert!(
+            warm.blue < mid.blue && mid.blue < cold.blue,
+            "blue must increase with kelvin: {} {} {}",
+            warm.blue,
+            mid.blue,
+            cold.blue
+        );
+    }
+
+    /// Colour is a HUE, and brightness lives in the fixture's lumens.
+    ///
+    /// Without the peak normalisation, picking a warmer wing would silently dim it — the 2400 K
+    /// requisition would come out darker than the 6500 K containment at identical lumens, and the
+    /// difference would read as a lighting bug rather than a colour choice.
+    #[test]
+    fn every_temperature_is_normalised_to_the_same_peak() {
+        for k in [1667.0, 2400.0, 2900.0, 3200.0, 4000.0, 5600.0, 6500.0, 25000.0] {
+            let c = lin(blackbody_srgb(k));
+            let peak = c.red.max(c.green).max(c.blue);
+            assert!(
+                (peak - 1.0).abs() < 1e-4,
+                "{k} K peaks at {peak}, so it would be dimmer or brighter than its lumens say"
+            );
+            assert!(
+                c.red >= 0.0 && c.green >= 0.0 && c.blue >= 0.0,
+                "{k} K produced a negative component: {c:?}"
+            );
+            assert!(
+                c.red.is_finite() && c.green.is_finite() && c.blue.is_finite(),
+                "{k} K produced a non-finite component: {c:?}"
+            );
+        }
+    }
+
+    /// Out-of-range input is clamped rather than extrapolated. The fit is only valid over
+    /// 1667–25000 K; outside it the cubics diverge fast, and a NaN would blacken a whole wing.
+    #[test]
+    fn absurd_temperatures_are_clamped_not_extrapolated() {
+        assert_eq!(lin(blackbody_srgb(0.0)), lin(blackbody_srgb(1667.0)));
+        assert_eq!(lin(blackbody_srgb(-5.0)), lin(blackbody_srgb(1667.0)));
+        assert_eq!(lin(blackbody_srgb(1.0e9)), lin(blackbody_srgb(25000.0)));
+    }
+
+    /// The corridor is dimmer than the rooms it serves — **except the ASYNC hall, which is dimmer
+    /// still, on purpose.**
+    ///
+    /// The exception is the whole composition of that room: the aperture is the brightest thing in it
+    /// and its own `ApertureGlow` is what lights the floor, so ceiling fixtures bright enough to be
+    /// comfortable would drown the portal. Every other destination is brighter than the connective
+    /// tissue between them, which is what makes a room read as a room when you walk into it.
+    ///
+    /// `area_light` matches exhaustively so a new `AreaId` is a compile error rather than an unlit
+    /// wing — this pins the part the compiler cannot: that the numbers say what the design says.
+    ///
+    /// (Written first as a blanket "every room beats the spine", which failed on exactly the room the
+    /// exception exists for. The rule below is the one the design actually holds.)
+    #[test]
+    fn the_spine_is_dimmer_than_the_rooms_it_joins_except_the_lit_by_portal_hall() {
+        use super::super::layout::AreaId;
+        let spine = area_light(AreaId::Corridor);
+        for id in AreaId::REQUIRED {
+            let room = area_light(*id);
+            if *id == AreaId::AsyncDoor {
+                assert!(
+                    room.key_lumens < spine.key_lumens,
+                    "the ASYNC hall must stay darker than the spine ({} vs {}) or the aperture stops \
+                     being the brightest thing in it",
+                    room.key_lumens,
+                    spine.key_lumens
+                );
+                continue;
+            }
+            assert!(
+                room.key_lumens >= spine.key_lumens,
+                "{id:?} keys at {} lumens, dimmer than the corridor's {} — a corridor brighter than \
+                 the rooms it serves flattens the whole hub",
+                room.key_lumens,
+                spine.key_lumens
+            );
+        }
+        // Containment is the high-key room; requisition the warmest.
+        assert!(area_light(AreaId::Containment).kelvin > area_light(AreaId::Briefing).kelvin);
+        assert!(area_light(AreaId::Requisition).kelvin < area_light(AreaId::Records).kelvin);
     }
 }

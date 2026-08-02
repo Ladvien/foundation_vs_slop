@@ -80,7 +80,23 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     // stiffens the warp's contrast. Deliberately NOT a colour shift to red or green — the anomaly is
     // not hostile, it is indifferent, and the Foundation's containment of it is what makes it safe.
     let core = 1.0 - smoothstep(0.0, 0.45, length(uv * vec2<f32>(0.6, 1.0)));
-    col += WALL_TINT * core * material.charge * 0.55;
+
+    // 4. IT IS NEVER INERT, AND IT IS AN HDR LIGHT SOURCE (both added 2026-08-02).
+    //
+    //    The core term used to be multiplied by `charge` alone, so an aperture nobody was standing in
+    //    contributed exactly nothing and the door rendered as a flat sheet of sodium — the game's
+    //    signature image was the dullest surface in the hub. A resting breath fixes that: slow enough
+    //    (~7 s) to read as respiration rather than a pulse, which is the difference between "alive"
+    //    and "an effect".
+    //
+    //    And nothing in this shader previously exceeded 1.0, so despite the camera carrying `Hdr` +
+    //    `Bloom` the aperture could not bloom AT ALL. Taking the core above 1 is what makes it read as
+    //    a hole emitting light into the room rather than a panel painted on the wall. The Rust side
+    //    puts a real `PointLight` at the same place so the spill lands on the hall floor too — a
+    //    portal that lights nothing does not read as a portal.
+    let breath = 0.5 + 0.5 * sin(t * 0.9);
+    let rest = 1.15 + 0.55 * breath;
+    col += WALL_TINT * core * (rest + material.charge * 2.6);
 
     // A single slow horizontal band, like a fluorescent tube passing somewhere it should not be.
     let sweep = exp(-pow((uv.y - sin(t * 0.13) * 0.7) * 6.0, 2.0));
