@@ -45,7 +45,25 @@ pub struct ResearchHudPlugin;
 
 impl Plugin for ResearchHudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
+        app
+            // **The panel opens itself when you walk in.** Experiments happen at the slab. Paired
+            // with the curriculum panel, which gates on the same room from a different region.
+            //
+            // `Update` and not `OnEnter(AppState::Site)`: the room, not the screen, is what
+            // decides now. The key binding is deliberately NOT gated — see the applier systems
+            // below, which still run anywhere in the hub. Presence OFFERS; the key still ACTS.
+            .add_systems(
+                Update,
+                spawn_panel
+                    .after(layout::spawn_frame)
+                    .run_if(crate::site::panel_wanted::<ResearchHudRoot>(crate::site::AreaId::Research)),
+            )
+            .add_systems(
+                Update,
+                despawn_scoped::<ResearchHudRoot>
+                    .run_if(crate::site::panel_stale::<ResearchHudRoot>(crate::site::AreaId::Research)),
+            )
+            // Leaving the Site entirely still tears it down, whichever room the player was in.
             .add_systems(OnExit(AppState::Site), despawn_scoped::<ResearchHudRoot>)
             .add_systems(
                 Update,

@@ -535,10 +535,24 @@ impl Plugin for RecordsPlugin {
                     .in_set(crate::session::RunBuild::PostPopulate)
                     .after(super::roster::restore_squad_knowledge),
             )
+            // **The panel opens itself when you walk in.** The archive is a place: RAISA keeps
+            // it, Farrow stands in it, and the reports the antagonist plants appear on its shelves.
+            //
+            // `Update` and not `OnEnter(AppState::Site)`: the room, not the screen, is what
+            // decides now. The key binding is deliberately NOT gated — see the applier systems
+            // below, which still run anywhere in the hub. Presence OFFERS; the key still ACTS.
             .add_systems(
-                OnEnter(AppState::Site),
-                spawn_panel.after(crate::ui::layout::spawn_frame),
+                Update,
+                spawn_panel
+                    .after(crate::ui::layout::spawn_frame)
+                    .run_if(crate::site::panel_wanted::<RecordsPanel>(crate::site::AreaId::Records)),
             )
+            .add_systems(
+                Update,
+                despawn_scoped::<RecordsPanel>
+                    .run_if(crate::site::panel_stale::<RecordsPanel>(crate::site::AreaId::Records)),
+            )
+            // Leaving the Site entirely still tears it down, whichever room the player was in.
             .add_systems(OnExit(AppState::Site), despawn_scoped::<RecordsPanel>)
             .add_systems(
                 Update,

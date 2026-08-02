@@ -103,6 +103,30 @@ pub fn in_area(area: AreaId) -> impl Fn(Res<CurrentArea>) -> bool + Clone {
     move |current: Res<CurrentArea>| current.0 == Some(area)
 }
 
+/// **Should this room's panel be up, and is it not?** — the spawn half of an auto-opening panel.
+///
+/// Keyed on the panel's own root component rather than on a message, so the answer is a fact about
+/// the world instead of a fact about event history. A message-driven spawner has to be right about
+/// every path into the room — walking in, entering the Site already standing in it (the five
+/// operatives spawn in the briefing room), or a panel that failed to spawn because the HUD frame was
+/// not up yet — and a missed message leaves a room permanently silent with nothing in the log.
+pub fn panel_wanted<R: Component>(
+    area: AreaId,
+) -> impl Fn(Res<CurrentArea>, Query<(), With<R>>) -> bool + Clone {
+    move |current: Res<CurrentArea>, panels: Query<(), With<R>>| {
+        current.0 == Some(area) && panels.is_empty()
+    }
+}
+
+/// **Is this room's panel up while the player is somewhere else?** — the despawn half.
+pub fn panel_stale<R: Component>(
+    area: AreaId,
+) -> impl Fn(Res<CurrentArea>, Query<(), With<R>>) -> bool + Clone {
+    move |current: Res<CurrentArea>, panels: Query<(), With<R>>| {
+        current.0 != Some(area) && !panels.is_empty()
+    }
+}
+
 /// Leaving the Site entirely means the player is nowhere in it — otherwise the last room visited
 /// stays "current" across a whole expedition, and the panel it owns reopens on return without the
 /// player having walked anywhere.
@@ -169,6 +193,45 @@ mod tests {
         );
     }
 
+    /// **The room ↔ region ledger.** Two panels in one room must not claim one region.
+    ///
+    /// `ui::layout:9` records that regions are claimed per-screen and collide **silently** — the
+    /// second claimant simply does not appear. That was survivable while every hub panel spawned on
+    /// `OnEnter(AppState::Site)` and the four claims were fixed for the whole screen. Auto-opening
+    /// makes the claims *transient*, and the research wing deliberately hosts two panels at once
+    /// (the curriculum and the experiments), so the invariant now has to be stated.
+    ///
+    /// ⚠️ This is a hand-kept ledger: it is a copy of what the four plugins register, not a read of
+    /// it. Adding a room panel means adding a row. The thing it catches is the silent one.
+    #[test]
+    fn no_two_panels_in_one_room_claim_the_same_hud_region() {
+        use crate::ui::layout::Region;
+        let panels: &[(&str, Option<AreaId>, Region)] = &[
+            ("records", Some(AreaId::Records), Region::BottomRight),
+            ("requisition", Some(AreaId::Requisition), Region::BottomLeft),
+            ("research experiments", Some(AreaId::Research), Region::TopRight),
+            ("thaumiel curriculum", Some(AreaId::Research), Region::TopLeft),
+            // Not room-gated: the teaching line follows the player everywhere in the hub, which is
+            // the point of it. Listed so it is weighed against every room rather than forgotten.
+            ("hint", None, Region::MidCenter),
+        ];
+        for (i, (name_a, area_a, region_a)) in panels.iter().enumerate() {
+            for (name_b, area_b, region_b) in panels.iter().skip(i + 1) {
+                // Two panels can share a region only if they can never be on screen together.
+                let co_visible = match (area_a, area_b) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true, // an ungated panel is visible in every room
+                };
+                assert!(
+                    !(co_visible && region_a == region_b),
+                    "{name_a} and {name_b} are both up in {area_a:?}/{area_b:?} and both claim \
+                     {region_a:?} — `layout::panel_in` gives it to whichever spawns first and the \
+                     other vanishes with nothing in the log"
+                );
+            }
+        }
+    }
+
     /// The gate is exact. A verb offered in Records must not also be offered in the room next door.
     ///
     /// Driven through a real schedule rather than by calling the closure, because what is being
@@ -200,5 +263,73 @@ mod tests {
         app.insert_resource(CurrentArea(Some(AreaId::Records)));
         app.update();
         assert_eq!(app.world().resource::<Ran>().0, 1, "standing in Records opens it");
+    }
+
+    /// A marker standing in for a panel root.
+    #[derive(Component)]
+    struct FakePanel;
+
+    /// The panel spawns once on entry and is torn down once on leaving — never respawned per frame.
+    ///
+    /// This is the failure the level-vs-edge distinction exists to prevent: a spawner keyed on "am I
+    /// in the room" rather than "am I in the room AND is the panel missing" rebuilds its whole
+    /// subtree sixty times a second, and `review.rs:186` records what that costs — the button dies
+    /// under the cursor mid-click.
+    #[test]
+    fn a_room_panel_spawns_once_and_despawns_once() {
+        let mut app = App::new();
+        app.insert_resource(CurrentArea(None))
+            .init_resource::<Ran>()
+            .add_systems(
+                Update,
+                (
+                    (|mut c: Commands, mut r: ResMut<Ran>| {
+                        c.spawn(FakePanel);
+                        r.0 += 1;
+                    })
+                    .run_if(panel_wanted::<FakePanel>(AreaId::Records)),
+                    (|mut c: Commands, q: Query<Entity, With<FakePanel>>| {
+                        for e in &q {
+                            c.entity(e).despawn();
+                        }
+                    })
+                    .run_if(panel_stale::<FakePanel>(AreaId::Records)),
+                )
+                    .chain(),
+            );
+
+        app.insert_resource(CurrentArea(Some(AreaId::Records)));
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<Ran>().0,
+            1,
+            "five frames in the same room must spawn the panel ONCE"
+        );
+        assert_eq!(
+            app.world_mut().query::<&FakePanel>().iter(app.world()).count(),
+            1
+        );
+
+        app.insert_resource(CurrentArea(Some(AreaId::Kitchen)));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world_mut().query::<&FakePanel>().iter(app.world()).count(),
+            0,
+            "walking out closes it"
+        );
+        assert_eq!(
+            app.world().resource::<Ran>().0,
+            1,
+            "and leaving must not have spawned it again on the way"
+        );
+
+        // ...and walking back in opens it again. The resource is the state, so this needs no memory.
+        app.insert_resource(CurrentArea(Some(AreaId::Records)));
+        app.update();
+        assert_eq!(app.world().resource::<Ran>().0, 2);
     }
 }

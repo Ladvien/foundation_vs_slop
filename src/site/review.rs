@@ -448,10 +448,23 @@ impl Plugin for O5Plugin {
                 ),
             )
             .add_systems(OnEnter(AppState::Debrief), file_expedition_report)
+            // **The panel opens itself when you walk in.** You draw kit from the store, not from anywhere in the building.
+            //
+            // `Update` and not `OnEnter(AppState::Site)`: the room, not the screen, is what
+            // decides now. The key binding is deliberately NOT gated — see the applier systems
+            // below, which still run anywhere in the hub. Presence OFFERS; the key still ACTS.
             .add_systems(
-                OnEnter(AppState::Site),
-                spawn_panel.after(crate::ui::layout::spawn_frame),
+                Update,
+                spawn_panel
+                    .after(crate::ui::layout::spawn_frame)
+                    .run_if(crate::site::panel_wanted::<RequisitionPanel>(crate::site::AreaId::Requisition)),
             )
+            .add_systems(
+                Update,
+                despawn_scoped::<RequisitionPanel>
+                    .run_if(crate::site::panel_stale::<RequisitionPanel>(crate::site::AreaId::Requisition)),
+            )
+            // Leaving the Site entirely still tears it down, whichever room the player was in.
             .add_systems(OnExit(AppState::Site), despawn_scoped::<RequisitionPanel>)
             .add_systems(
                 Update,

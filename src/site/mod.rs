@@ -67,7 +67,9 @@ pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
 pub use people::{CastId, Operative, SiteAvatar, Staff, StaffMember, StaffRig};
 pub use cutaway::SiteCutawayPlugin;
-pub use presence::{in_area, AreaEntered, CurrentArea, SitePresencePlugin};
+pub use presence::{
+    in_area, panel_stale, panel_wanted, AreaEntered, CurrentArea, SitePresencePlugin,
+};
 pub use review::{ExpeditionTally, O5Plugin, Requisitioned};
 pub use visuals::SiteVisualsPlugin;
 pub use pieces::SitePiece;
