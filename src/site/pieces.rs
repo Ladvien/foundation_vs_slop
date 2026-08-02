@@ -51,12 +51,6 @@ pub enum SitePiece {
     /// The header course over a doorway — the band of wall between `DOORWAY_HEIGHT` and
     /// `WALL_HEIGHT`, without which the perimeter has a slot straight through it above the door.
     WallHeader,
-    /// Half a wall panel: the leg of a junction, running from the corner point to the cell edge.
-    ///
-    /// A junction cannot be built from full panels. The corner point is a cell CENTRE, so a 1 m panel
-    /// centred there runs 0.5 m PAST it — two of them cross in a plus and leave a half-panel stub
-    /// jutting into the open on each axis, which the player read as the walls overlapping.
-    WallLeg,
     /// Glazing for a containment cell front.
     WallWindow,
     /// Waist-high run: counters, records desks, the requisition bar.
@@ -104,7 +98,7 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
     use SitePiece::*;
     match piece {
         // Full-height architecture.
-        Wall | WallCorner | WallLeg | WallWindow | Column => Some(crate::dungeon::WALL_HEIGHT),
+        Wall | WallCorner | WallWindow | Column => Some(crate::dungeon::WALL_HEIGHT),
         // The frame's OUTER height. What the player walks through is smaller and is a separate art
         // fact — `kit::DoorPiece::opening`, which the ASYNC aperture quad is built from. (This said a
         // separate `WallLow` header course was placed above it at y = 2.0. No spawner ever did that.)
@@ -131,7 +125,6 @@ impl SitePiece {
         SitePiece::WallDoorway,
         SitePiece::WallDoorwayWide,
         SitePiece::WallHeader,
-        SitePiece::WallLeg,
         SitePiece::WallWindow,
         SitePiece::WallLow,
         SitePiece::Column,

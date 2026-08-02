@@ -174,6 +174,41 @@ line as the run they belong to, the cap lands where the two seated lines cross, 
 and its header take the same seat. `frame_pos` stays authored in CELL space, because that is what
 `validate_doorway_gap` checks; the seat is applied once, at render time.
 
+## The sixth pass: stop correcting the offset, remove it
+
+Three corner fixes in a row each corrected the case in front of them and broke the other. A contact
+sheet of **all 28 junctions at one zoom and one camera yaw** is what made that legible: eight of the
+twelve concave ones were a lit cap post standing *alone on open floor*, walls stopping half a metre
+short on both arms, while the convex ones had grown outward stubs.
+
+One root cause the whole time. A wall cell is a whole 1 m cell but its panel is 0.10 m thick, so
+"where is the wall?" had no answer the floor agreed with — and the half-cell offset between the two
+points the **opposite way** at a convex corner than at a concave one. Crossed slabs, then half-length
+legs, then seating the panels: each fixed one sign and broke the other.
+
+The model is now one rule:
+
+> **For every floor cell, for each of its four edges whose neighbour is a wall cell, one 1 m panel
+> centred on that edge.**
+
+The wall line and the floor grid become the same line *by construction*, so there is no offset left to
+get the sign of. Panel joints land on floor seams; a corner is two perpendicular panels whose
+endpoints coincide — no gap and no overhang, at a convex corner, a concave one or a T, with no piece
+other than the plain 1 m panel. Caps go at the lattice points where two perpendicular panels meet.
+
+Gone with it: `wall_seat`, `corner_cells`, the half-length `WallLeg` piece and `wall_leg.glb`. The
+counts were checked rather than assumed — **194 panels, 28 corners**, with every one of the 182 wall
+cells that borders floor producing panels (the other 16 are the diagonal-only corner cells, which
+correctly need none). The runtime `info!` prints both, so a derivation that stops tracing the layout
+says so at startup.
+
+`site67.ron` is untouched: it still declares which cells are wall, and `is_walkable`,
+`SiteLayout::validate` and the doorway-gap check all read exactly what they read before. Only "where
+is its face" moved.
+
+**The cap stays.** Re-shot at high zoom on the fixed geometry it reads as the corner's lit edge, not
+as a post — the chunk was the broken geometry around it, not the 0.22 m footprint.
+
 ## Knowingly left
 
 - **`wall_low` is still squashed** 2.00 → 0.9 (0.45×). Shortening a panel properly is an authoring

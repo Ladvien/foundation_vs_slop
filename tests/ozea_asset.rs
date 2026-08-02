@@ -225,13 +225,12 @@ fn every_ozea_mesh_is_base_origined_and_xz_centred() {
         bad.len(),
         bad.join("\n  ")
     );
-    // 19 = the 16 promoted by hand, plus `wall_header.glb` and `wall_leg.glb` (both cropped from the
-    // wall — for the doorway's header course and a junction's leg) and `slab.glb` (the research
-    // wing's examination bed). A floor, not an equality:
+    // 18 = the 16 promoted by hand, plus `wall_header.glb` (cropped from the wall for the doorway's
+    // header course) and `slab.glb` (the research wing's examination bed). A floor, not an equality:
     // promoting another mesh should not fail this test, but a glob that silently stops seeing the
     // kit must.
     assert!(
-        checked >= 19,
+        checked >= 18,
         "expected the whole kit, only saw {checked} meshes"
     );
 }

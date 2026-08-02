@@ -180,60 +180,118 @@ impl Plugin for SiteVisualsPlugin {
 #[derive(Resource, Deref)]
 pub struct SiteLayoutRes(pub SiteLayout);
 
-/// The cells where two wall runs meet — derived from the layout, never authored.
+/// One panel of perimeter wall, as a segment on the **floor's edge**.
 ///
-/// A junction is a cell carrying **both** a yaw-0 and a yaw-90 [`SitePiece::Wall`]. That is how
-/// `site67.ron` draws its 12 corners: two 0.10 m slabs crossed on one cell, which leaves the outer
-/// corner as two exposed slab ends. The kit has always carried a `wall_corner` cap for exactly this,
-/// it is validated, it is in `SitePiece::ALL` — and until now nothing ever placed one. Shipped,
-/// dressed and unreachable.
+/// `(x, z)` is the segment's LOW lattice endpoint and `along_x` its direction, so a panel is exactly a
+/// unit edge of the floor grid: `along_x` runs from `(x, z)` to `(x+1, z)` on the line `z`, otherwise
+/// from `(x, z)` to `(x, z+1)` on the line `x`. Ordered and hashable so the spawn walks them in a
+/// stable order rather than a `HashSet`'s.
+type WallPanel = (i32, i32, bool);
+
+/// Every panel the perimeter needs, derived from **floor edges** rather than from wall-cell centres.
 ///
-/// **Derived rather than authored** so a future edit to the layout cannot forget a corner, and so the
-/// piece is reachable by construction instead of by remembering. Yaw is compared on the half-turn
-/// (`rem_euclid(180)`): a wall at 180° lies along the same axis as one at 0°, so treating them as
-/// different orientations would invent junctions that are really just a slab facing the other way.
-fn corner_cells(l: &SiteLayout) -> std::collections::HashSet<(i32, i32)> {
-    let mut axes: std::collections::HashMap<(i32, i32), u32> = std::collections::HashMap::new();
-    for w in &l.walls {
-        if w.piece != SitePiece::Wall {
-            continue; // a Column standing in the spine is not a junction
+/// # The rule
+///
+/// *For every floor cell, for each of its four edges whose neighbour is a wall cell, one 1 m panel
+/// centred on that edge.* That is the whole model, and everything else falls out of it.
+///
+/// # Why it replaced three attempts at the same bug
+///
+/// A wall cell is a whole 1 m cell but the panel in it is 0.10 m thick, so "where is the wall?" had no
+/// answer the floor agreed with. Drawing it at the cell CENTRE put it half a cell off the floor edge;
+/// the corner point then landed half a cell from where the panels actually were, and — this is the
+/// part that kept biting — that offset points the *opposite way* at a convex corner than at a concave
+/// one. Three fixes in a row (crossed slabs, then half-length legs, then seating the panels on the
+/// floor edge) each corrected the case in front of them and broke the other: stubs jutting into open
+/// space at one, and a lit cap post standing alone in a 0.5 m hole at the other.
+///
+/// Keying on the floor edge removes the offset instead of correcting it. The wall line and the floor
+/// grid become the same line **by construction**, so panel joints land on floor seams, and a corner is
+/// simply two perpendicular panels whose endpoints coincide — no gap and no overhang, at a convex
+/// corner, a concave one or a T, with no piece other than the plain 1 m panel.
+///
+/// `site67.ron` still says which cells are wall — that is what `is_walkable` and `SiteLayout::validate`
+/// read. Only the question "where is its face" is answered here.
+fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
+    let wall_cells: std::collections::HashSet<(i32, i32)> = l
+        .walls
+        .iter()
+        .filter(|w| w.piece == SitePiece::Wall)
+        .map(|w| w.cell)
+        .collect();
+    let mut panels = std::collections::BTreeSet::new();
+    for r in &l.floor {
+        for c in r.cells() {
+            let (x, z) = (c.x, c.y);
+            if wall_cells.contains(&(x + 1, z)) {
+                panels.insert((x + 1, z, false));
+            }
+            if wall_cells.contains(&(x - 1, z)) {
+                panels.insert((x, z, false));
+            }
+            if wall_cells.contains(&(x, z + 1)) {
+                panels.insert((x, z + 1, true));
+            }
+            if wall_cells.contains(&(x, z - 1)) {
+                panels.insert((x, z, true));
+            }
         }
-        let half = w.yaw.rem_euclid(180.0);
-        // Two axis bits, so "has both" is one mask test and a float yaw never reaches a hash key.
-        let bit = if !(45.0..135.0).contains(&half) { 1 } else { 2 };
-        *axes.entry(w.cell).or_insert(0) |= bit;
     }
-    axes.into_iter()
-        .filter(|(_, m)| *m == 3)
-        .map(|(c, _)| c)
-        .collect()
+    panels
 }
 
-/// Which way a junction's cap faces, in degrees about +Y.
+/// Where a panel's centre sits in world space, and the yaw that lays it along its edge.
 ///
-/// Derived from which neighbours continue a wall: the corner turns *away* from the two directions the
-/// runs leave in. Yaw 0 is the corner whose arms point +X and +Z.
+/// `wall.glb` is thin along X and 1 m long along Z, so a panel running along Z is yaw 0 and one
+/// running along X is yaw 90 — the same convention `site67.ron`'s walls header states.
+fn panel_transform(l: &SiteLayout, (x, z, along_x): WallPanel) -> (Vec3, f32) {
+    if along_x {
+        (l.point((x as f32 + 0.5, z as f32)), 90.0)
+    } else {
+        (l.point((x as f32, z as f32 + 0.5)), 0.0)
+    }
+}
+
+/// The lattice points where two **perpendicular** panels meet — the corners, derived from the panels
+/// themselves rather than from anything authored.
+///
+/// A straight run only ever contributes panels of one direction, so it yields no corners; a corner,
+/// and equally a T or a crossing, contributes both. That makes the cap reachable by construction:
+/// edit the layout however you like and the corners follow.
+fn corner_vertices(
+    panels: &std::collections::BTreeSet<WallPanel>,
+) -> std::collections::BTreeSet<(i32, i32)> {
+    let mut ends_x = std::collections::HashSet::new();
+    let mut ends_z = std::collections::HashSet::new();
+    for &(x, z, along_x) in panels {
+        if along_x {
+            ends_x.insert((x, z));
+            ends_x.insert((x + 1, z));
+        } else {
+            ends_z.insert((x, z));
+            ends_z.insert((x, z + 1));
+        }
+    }
+    ends_x.intersection(&ends_z).copied().collect()
+}
+
+/// Which way a corner's cap faces, in degrees about +Y — from the directions panels LEAVE the vertex.
 ///
 /// **The shipped Ozea cap is a 0.22 × 0.22 square post, so this yaw is currently invisible.** It is
-/// computed anyway because the greybox kit's corner is an L (`kenney .../wall-corner.glb`), and an
-/// L pointed the wrong way at three of four junctions is a silent, per-corner wrongness nobody would
-/// trace back here. `SITE_KIT_PATH` is one line; this keeps a kit swap from needing a second one.
-fn corner_yaw(l: &SiteLayout, cell: (i32, i32)) -> f32 {
-    let has_wall = |c: (i32, i32)| {
-        l.walls
-            .iter()
-            .any(|w| w.piece == SitePiece::Wall && w.cell == c)
-    };
-    let (x, z) = cell;
-    let (px, nx) = (has_wall((x + 1, z)), has_wall((x - 1, z)));
-    let (pz, nz) = (has_wall((x, z + 1)), has_wall((x, z - 1)));
+/// computed anyway because the greybox kit's corner is an L (`kenney .../wall-corner.glb`), and an L
+/// pointed the wrong way at three of four corners is a silent, per-corner wrongness nobody would trace
+/// back here. `SITE_KIT_PATH` is one line; this keeps a kit swap from needing a second one.
+fn corner_yaw(panels: &std::collections::BTreeSet<WallPanel>, (x, z): (i32, i32)) -> f32 {
+    let px = panels.contains(&(x, z, true));
+    let nx = panels.contains(&(x - 1, z, true));
+    let pz = panels.contains(&(x, z, false));
+    let nz = panels.contains(&(x, z - 1, false));
     match (px, pz, nx, nz) {
         (true, true, _, _) => 0.0,
         (_, true, true, _) => 90.0,
         (_, _, true, true) => 180.0,
         (true, _, _, true) => 270.0,
-        // Runs that do not leave in two perpendicular directions are a crossing, not a corner (the
-        // spine's T-junctions). A square post is right there and orientation is moot.
+        // A T or a crossing leaves in three or four directions; a square post is right there anyway.
         _ => 0.0,
     }
 }
@@ -323,57 +381,25 @@ fn spawn_aperture_quad(
     ));
 }
 
-/// Half a cell: the distance from a wall cell's CENTRE to the floor edge beside it.
-const WALL_SEAT: f32 = 0.5;
-
-/// The offset that seats a wall's centreline on the **floor's edge** rather than on its cell centre.
+/// From a non-floor cell's CENTRE to the edge of the floor it borders.
 ///
-/// A wall cell is a whole 1 m cell, but the panel in it is only 0.10 m thick, and it was drawn at the
-/// cell CENTRE — half a cell away from the floor it is supposed to enclose. That left a **0.45 m band
-/// of nothing** between the floor's edge and the wall's inner face, right round the perimeter, and it
-/// is why the floor's grid did not line up with the panels: floor seams fall on cell BOUNDARIES
-/// (integers) while the wall line sat on a cell CENTRE. Along a run they always agreed — a 1 m panel
-/// centred on a cell centre spans integer to integer — so only the across-run axis was out.
-///
-/// Seating it on the boundary puts the panel astride the floor's edge, 0.05 m either side, so the
-/// plate's cut edge is hidden under the wall and the grid reads continuous into it.
-///
-/// `thin` is the panel's thin axis (`IVec2::X` for a yaw-0 wall, `IVec2::Y` for yaw 90). A cell with
-/// floor on BOTH sides is a divider between two rooms and correctly stays centred; a convex corner
-/// touches floor only diagonally, which the second pass resolves. `site67.ron` currently has 226 wall
-/// placements, no dividers and no undecidable cells — `SiteLayout::validate` keeps it that way.
-fn wall_seat(l: &SiteLayout, cell: IVec2, thin: IVec2) -> Vec3 {
-    let step = Vec3::new(thin.x as f32, 0.0, thin.y as f32) * WALL_SEAT;
-    let (pos, neg) = (l.is_floor(cell + thin), l.is_floor(cell - thin));
-    if pos != neg {
-        return if pos { step } else { -step };
-    }
-    if pos && neg {
-        return Vec3::ZERO; // a divider between two rooms: the cell centre IS the right line
-    }
-    let perp = IVec2::new(thin.y, thin.x);
-    for s in [1, -1] {
-        for t in [1, -1] {
-            if l.is_floor(cell + thin * s + perp * t) {
-                return step * s as f32;
-            }
+/// The perimeter is drawn from floor edges (`wall_panels`), and the ASYNC doorway stands in a gap in
+/// that same perimeter — so its frame has to sit on the same line the panels either side of it do,
+/// not half a cell back at its own cell centre. `frame_pos` stays authored in CELL space because that
+/// is what `validate_doorway_gap` checks; the step onto the edge is taken here, once, at render time.
+fn floor_edge_offset(l: &SiteLayout, cell: IVec2) -> Vec3 {
+    for (step, off) in [
+        (IVec2::Y, Vec3::Z),
+        (IVec2::NEG_Y, Vec3::NEG_Z),
+        (IVec2::X, Vec3::X),
+        (IVec2::NEG_X, Vec3::NEG_X),
+    ] {
+        if l.is_floor(cell + step) {
+            return off * 0.5;
         }
     }
     Vec3::ZERO
 }
-
-/// The thin axis of a panel placed at `yaw`, on the half-turn convention the walls are authored on.
-fn thin_axis(yaw_deg: f32) -> IVec2 {
-    if (45.0..135.0).contains(&yaw_deg.rem_euclid(180.0)) {
-        IVec2::Y
-    } else {
-        IVec2::X
-    }
-}
-
-/// Length of a corner leg, in metres — half a wall panel, so it reaches from the corner point (a cell
-/// CENTRE) to the cell edge where the next full panel begins.
-const WALL_LEG_LEN: f32 = 0.5;
 
 /// Height of the examination slab's bed platform, in metres — where a study subject lies.
 ///
@@ -455,70 +481,33 @@ fn spawn_site_geometry(
             );
         }
     }
-    let junctions = corner_cells(l);
+    // THE PERIMETER, from floor edges — see `wall_panels` for why this replaced three attempts at
+    // deriving it from wall-cell centres.
+    let panels = wall_panels(l);
+    for &panel in &panels {
+        let (at, yaw) = panel_transform(l, panel);
+        place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+    }
+    // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,
+    // say) still stands where it was authored: it is furniture on a cell, not a face on an edge.
     for w in &l.walls {
-        // A junction is rendered from LEGS below, not from the crossed panels the layout records.
-        // `site67.ron` still says "wall on this cell" — that is what `is_walkable` and the validator
-        // read — but two full 1 m panels crossed at the cell CENTRE is not what a corner looks like.
-        if w.piece == SitePiece::Wall && junctions.contains(&w.cell) {
+        if w.piece == SitePiece::Wall {
             continue;
         }
-        let cell = IVec2::new(w.cell.0, w.cell.1);
-        // Seated on the floor's edge, not the cell centre — see `wall_seat`.
-        let seat = if w.piece == SitePiece::Wall {
-            wall_seat(l, cell, thin_axis(w.yaw))
-        } else {
-            Vec3::ZERO
-        };
-        place(
-            &mut commands,
-            &assets,
-            &kit,
-            w.piece,
-            l.cell_center(cell) + seat,
-            w.yaw,
-        );
+        let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
+        place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
     }
-    for cell in &junctions {
-        let at = l.cell_center(IVec2::new(cell.0, cell.1));
-        // One HALF-panel leg per direction the perimeter actually continues in, reaching from the
-        // corner point to the cell edge — so an L junction gets two legs, a T gets three, and a
-        // crossing gets four, with nothing left over.
-        for (step, yaw) in [
-            (IVec2::X, 90.0),
-            (IVec2::NEG_X, 90.0),
-            (IVec2::Y, 0.0),
-            (IVec2::NEG_Y, 0.0),
-        ] {
-            let n = (cell.0 + step.x, cell.1 + step.y);
-            if !l
-                .walls
-                .iter()
-                .any(|w| w.cell == n && w.piece == SitePiece::Wall)
-            {
-                continue;
-            }
-            let off = Vec3::new(step.x as f32, 0.0, step.y as f32) * (WALL_LEG_LEN * 0.5);
-            place(
-                &mut commands,
-                &assets,
-                &kit,
-                SitePiece::WallLeg,
-                at + off,
-                yaw,
-            );
-        }
-        // ...and the cap where they meet, which is where the two SEATED lines cross — one seat per
-        // axis, summed, so the post lands on the floor's actual corner.
-        let c = IVec2::new(cell.0, cell.1);
-        let seam = wall_seat(l, c, IVec2::X) + wall_seat(l, c, IVec2::Y);
+    // Cap each corner, at the lattice point where two perpendicular panels already meet.
+    let corners = corner_vertices(&panels);
+    for &v in &corners {
+        let at = l.point((v.0 as f32, v.1 as f32));
         place(
             &mut commands,
             &assets,
             &kit,
             SitePiece::WallCorner,
-            at + seam,
-            corner_yaw(l, *cell),
+            at,
+            corner_yaw(&panels, v),
         );
     }
     for p in &l.props {
@@ -544,12 +533,11 @@ fn spawn_site_geometry(
     // The frame seats on the run's line like every other panel does, so it does not stand half a cell
     // proud of the wall it fills. `frame_pos` stays authored in CELL space — that is what
     // `validate_doorway_gap` checks — and the seat is applied here, at render time, exactly once.
-    let door_thin = thin_axis(l.door.yaw);
     let door_cell = IVec2::new(
         l.door.frame_pos.0.floor() as i32,
         l.door.frame_pos.1.floor() as i32,
     );
-    let door_seat = wall_seat(l, door_cell, door_thin);
+    let door_seat = floor_edge_offset(l, door_cell);
     let frame_at = l.point(l.door.frame_pos) + door_seat;
     place(
         &mut commands,
@@ -651,13 +639,15 @@ fn spawn_site_geometry(
             e.insert(PlayerAvatar);
         }
     }
-    // The corner count is how the derived rule is verified at runtime — `site67.ron` authors no
-    // corners at all, so a 0 here means the derivation stopped matching the layout.
+    // The panel and corner counts are how the derived rule is verified at runtime — `site67.ron`
+    // authors no panels and no corners, so a 0 in either means the derivation stopped matching the
+    // layout it is supposed to trace.
     info!(
-        "site: built Site-67 ({} floor runs, {} cells, {} wall corners)",
+        "site: built Site-67 ({} floor runs, {} cells, {} wall panels, {} corners)",
         l.floor.len(),
         l.cells.len(),
-        corner_cells(l).len()
+        panels.len(),
+        corners.len()
     );
 }
 
