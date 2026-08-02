@@ -100,6 +100,7 @@ pub mod orca;
 pub mod parasite;
 pub mod palette;
 pub mod pathfind;
+pub mod personnel;
 pub mod psi_vision;
 pub mod placement;
 pub mod rng;

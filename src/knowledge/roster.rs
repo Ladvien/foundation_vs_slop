@@ -221,7 +221,12 @@ fn spawn_roster(
     theme: Res<crate::ui::theme::UiTheme>,
     fonts: Res<crate::ui::theme::FontAssets>,
     table: Res<SquadKnowledge>,
+    roster: Res<crate::squad_ai::persona::PersonaRoster>,
 ) {
+    // The names, and what each of them *is*. Both call sites here used to pass `&[]`, so this screen
+    // printed `OPERATIVE 0`..`OPERATIVE 4` while `persona.rs` had carried real names all along —
+    // which is a large part of why the three definitions of the cast were able to disagree unnoticed.
+    let plates = roster.name_plates();
     // A scrim plus a centred bordered panel — the idiom every other overlay in this game uses
     // (`ui::pause`, `ui::settings_menu`, `ui::controls_screen`). This screen used to be bare text at
     // `PositionType::Absolute` with a hand-picked 20 px offset and **no background at all**, so the
@@ -273,7 +278,7 @@ fn spawn_roster(
                     },
                 ));
                 // Seed the first frame's content so the panel is never blank for a frame.
-                let rows = roster_rows_all(&table, &[]);
+                let rows = roster_rows_all(&table, &plates);
                 readout.with_children(|c| {
                     crate::ui::rows::spawn_rows(c, &theme, &fonts, &rows);
                 });
@@ -294,12 +299,13 @@ fn update_roster(
     theme: Res<crate::ui::theme::UiTheme>,
     fonts: Res<crate::ui::theme::FontAssets>,
     table: Res<SquadKnowledge>,
+    roster: Res<crate::squad_ai::persona::PersonaRoster>,
     mut panels: Query<(Entity, &mut crate::ui::rows::RowPanel), With<RosterReadout>>,
 ) {
     if !table.is_changed() {
         return;
     }
-    let rows = roster_rows_all(&table, &[]);
+    let rows = roster_rows_all(&table, &roster.name_plates());
     for (entity, mut panel) in &mut panels {
         // `sync_rows` is itself a no-op when the rows are unchanged, so this is guarded twice — once
         // on the resource and once on the content. That is the same double guard the string version
