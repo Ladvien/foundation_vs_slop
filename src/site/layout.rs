@@ -526,6 +526,17 @@ impl SiteLayout {
 ///
 /// Props whose piece has no footprint in the kit cannot be checked and are not silently passed —
 /// there is no such piece, because `footprint` is a required field on every `KitPiece`.
+/// How close a seat must be to a surface before it is considered "pulled up to" it, in metres.
+///
+/// 2.0 m covers a chair tucked at a table and a console operator's seat, and excludes a bench against
+/// the far wall of the same room — which should NOT be required to face the table it happens to share
+/// a room with.
+const SEAT_ADDRESSES_SURFACE_WITHIN: f32 = 2.0;
+
+/// Minimum cosine between a seat's front and the direction to its surface. `0.7` is a 45° cone, so a
+/// chair at the corner of a table still passes while a side-on or back-turned one does not.
+const SEAT_FACING_MIN_COS: f32 = 0.7;
+
 /// Rendered height (metres) at or below which a piece is a **floor marking** — a decal, a threshold
 /// pad, a floor plate — rather than an object standing in the room.
 ///
@@ -544,7 +555,7 @@ pub fn check_prop_placements(
     layout: &SiteLayout,
     kit: &super::kit::SiteKit,
 ) -> Result<Vec<String>, String> {
-    use crate::placement::ir::{escapes_bounds, overlap_area, Footprint};
+    use crate::placement::ir::{escapes_bounds, facing_cosine, overlap_area, Footprint};
 
     let mut waived = Vec::new();
     // (index, area label, footprint) for every prop the OVERLAP rule applies to.
@@ -585,6 +596,55 @@ pub fn check_prop_placements(
         // exclusion is stated here rather than waived away six times at the call site.
         if !is_floor_marking(kit, p.piece) {
             solid.push((i, f));
+        }
+    }
+
+    // ── Seats address the surface they are pulled up to ──
+    //
+    // A chair at a table that faces away from it is the single most legible piece of wrongness a room
+    // can have: it reads as a mistake instantly, from any angle, even to someone who has never seen the
+    // room before. Every chair in the Site was authored exactly that way on 2026-08-02 — the yaws were
+    // written against the ENGINE's facing convention while the mesh fronts a quarter-turn off it — and
+    // the fault survived a four-angle visual pass because a sideways chair still looks like a chair.
+    //
+    // Only pieces that HAVE a front are checked. A stool and a bench measure symmetric, so they get no
+    // `front` in the kit and nothing is asserted about them: demanding a facing from a backless seat
+    // would be inventing a fact about the art.
+    for p in &layout.props {
+        if p.waive.is_some() {
+            continue;
+        }
+        let Some(front) = kit.piece(p.piece).front else {
+            continue;
+        };
+        // The nearest surface within reach, if any. Nearest rather than "every surface": a chair
+        // between two tables belongs to one of them, and requiring it to face both is unsatisfiable.
+        let mut nearest: Option<(f32, &PropPlacement)> = None;
+        for q in layout.props.iter().filter(|q| kit.piece(q.piece).surface) {
+            let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
+            if d <= SEAT_ADDRESSES_SURFACE_WITHIN && nearest.is_none_or(|(bd, _)| d < bd) {
+                nearest = Some((d, q));
+            }
+        }
+        let Some((d, target)) = nearest else { continue };
+        // `front` is the mesh's own quarter-turn offset from the engine convention — see
+        // `kit::KitPiece::front`. Without it this test is exactly 90° wrong for every chair.
+        let yaw = (p.yaw + front).to_radians();
+        let cos = facing_cosine(p.pos, yaw, target.pos);
+        if cos < SEAT_FACING_MIN_COS {
+            let want = (target.pos.1 - p.pos.1)
+                .atan2(target.pos.0 - p.pos.0)
+                .to_degrees();
+            faults.push(format!(
+                "{:?} at {:?} yaw {} is {:.0}° off the {:?} it is pulled up to {d:.2} m away — a seat \
+                 at a surface must face it. Try yaw {:.0}.",
+                p.piece,
+                p.pos,
+                p.yaw,
+                cos.clamp(-1.0, 1.0).acos().to_degrees(),
+                target.piece,
+                (90.0 - want - front).rem_euclid(360.0),
+            ));
         }
     }
 
@@ -739,6 +799,69 @@ mod tests {
         }
         let err = check_prop_placements(&l, &kit).expect_err("two props in one spot must be refused");
         assert!(err.contains("overlaps"), "the message must say what overlapped: {err}");
+    }
+
+    /// A seat pulled up to a surface must address it — and a backless one must not be asked to.
+    ///
+    /// Both halves matter. The first caught all eight seats in the Site on 2026-08-02: their yaws were
+    /// authored against the ENGINE's facing convention (`forward = local +Z`) while `chair.glb` and
+    /// `command_chair.glb` front local **+X**, measured from where the backrest mass sits. Every chair
+    /// was a quarter-turn sideways to its table, and a four-angle visual pass had already missed it,
+    /// because a sideways chair still looks like a chair.
+    ///
+    /// The second half is why `stool` and `bench` carry no `front` in the kit: they measure symmetric
+    /// to within a centimetre because they genuinely have no back, so asserting a facing on them would
+    /// be asserting something about the art that is not true.
+    #[test]
+    fn a_seat_at_a_surface_must_face_it_and_a_backless_one_is_exempt() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+
+        // A chair beside the galley's mess table, turned side-on to it.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Chair,
+            pos: (7.6, 30.6),
+            yaw: 0.0,
+            waive: None,
+        });
+        let err = check_prop_placements(&l, &kit).expect_err("a side-on chair must be refused");
+        assert!(
+            err.contains("must face it") && err.contains("Try yaw"),
+            "the message must say what is wrong AND what to do: {err}"
+        );
+
+        // The same spot, same yaw, with a STOOL — no back, so no facing to assert.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Stool,
+            pos: (7.6, 30.6),
+            yaw: 0.0,
+            waive: None,
+        });
+        check_prop_placements(&l, &kit)
+            .expect("a backless stool has no front, so no facing may be demanded of it");
+    }
+
+    /// The kit records the measured facing, and it is the quarter turn that caused the bug.
+    #[test]
+    fn the_seat_meshes_declare_the_front_that_was_measured_off_them() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        for seat in [SitePiece::Chair, SitePiece::CommandChair] {
+            assert_eq!(
+                kit.piece(seat).front,
+                Some(90.0),
+                "{seat:?} fronts local +X (backrest mass at -X), a quarter turn off the engine's +Z"
+            );
+        }
+        for backless in [SitePiece::Stool, SitePiece::Bench] {
+            assert_eq!(
+                kit.piece(backless).front,
+                None,
+                "{backless:?} measured symmetric — it has no front and none may be asserted"
+            );
+        }
     }
 
     /// A waiver is a sentence, and it exempts exactly the prop that carries it.

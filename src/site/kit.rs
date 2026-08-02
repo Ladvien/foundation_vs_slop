@@ -73,6 +73,36 @@ pub struct KitPiece {
     /// pivot because every Ozea mesh is XZ-centred by conversion (`--reorigin-base`), which
     /// `tests/ozea_asset.rs` pins.
     pub footprint: (f32, f32),
+
+    /// Which way this mesh **fronts**, as degrees to add to its authored yaw to get the direction the
+    /// engine's facing convention (`forward = (sin yaw, cos yaw)`, i.e. local +Z) would report.
+    /// `None` means the piece has no front and nothing may assert where it points.
+    ///
+    /// **Measured from the mesh, not assumed.** A seat's front is opposite its backrest, and the
+    /// backrest is the vertical mass above the seat: taking the XZ centroid of every vertex in the
+    /// upper 45% of the mesh and comparing it to the whole mesh's centroid gives the back direction.
+    /// For `chair.glb` and `command_chair.glb` that offset is −X, so both front **local +X** — a
+    /// quarter turn off the engine's +Z, hence `Some(90.0)`.
+    ///
+    /// `stool.glb` and `bench.glb` measure symmetric to within a centimetre, because they genuinely
+    /// have no back. They get `None`, and that is not a shrug: asserting a facing on a stool would be
+    /// asserting a fact about the art that is not true, and the rule below would then demand people
+    /// sit on them a particular way round for no reason.
+    ///
+    /// This existing 90° gap is why every chair in `site67.ron` was authored sideways to its table on
+    /// 2026-08-02 — the yaws were written against the engine convention while the mesh fronted
+    /// somewhere else. Same class as `visuals::APERTURE_QUAD_YAW_OFFSET`.
+    #[serde(default)]
+    pub front: Option<f32>,
+
+    /// A horizontal work or dining surface that seating should address — a table, a counter, a
+    /// console. Seats near one are required to face it (`layout::check_prop_placements`).
+    ///
+    /// The furniture manifest expresses the same idea as `surfaces: ["support", "worktop"]`
+    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because nothing
+    /// here scatters objects ONTO surfaces yet.
+    #[serde(default)]
+    pub surface: bool,
     /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
     ///
     /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
@@ -421,6 +451,8 @@ mod tests {
             height: 1.0,
             y_offset: 0.0,
             footprint: (0.3, 0.3),
+            front: None,
+            surface: false,
         };
         assert!(
             validate_site_kit(&kit).is_err(),

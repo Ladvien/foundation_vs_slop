@@ -287,10 +287,9 @@ impl MetropolisSolver {
             (Scope::Object(i), Predicate::Facing(j)) => {
                 if let (Some(a), Some(b)) = (objs.get(*i), objs.get(*j)) {
                     // Reward `a`'s facing direction pointing toward `b`: cost = 1 - cos(angle).
-                    let (fx, fz) = (a.yaw.sin(), a.yaw.cos());
-                    let (dx, dz) = (b.x - a.x, b.z - a.z);
-                    let len = (dx * dx + dz * dz).sqrt().max(1e-4);
-                    let dot = (fx * dx + fz * dz) / len;
+                    // Shared with the Site's authored-seat rule via `ir::facing_cosine` — one
+                    // definition of "is this pointing at that".
+                    let dot = crate::placement::ir::facing_cosine((a.x, a.z), a.yaw, (b.x, b.z));
                     // Scaled by `coherence` so the seat→screen arrangement is tunable from
                     // backrooms-random (0) to living-room-coherent (1) without retuning `w_facing`.
                     w.w_facing * w.coherence * (1.0 - dot as f64)

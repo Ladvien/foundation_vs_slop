@@ -140,6 +140,28 @@ pub fn escapes_bounds(f: &Footprint, bounds: (f32, f32, f32, f32)) -> f64 {
     over(bx0 - f.x) + over(f.x - bx1) + over(bz0 - f.z) + over(f.z - bz1)
 }
 
+/// How well a thing at `from` with yaw `yaw` points at `to`: the cosine of the angle between its
+/// forward and the direction to the target. `1.0` is dead on, `0.0` is side-on, `-1.0` is back-turned.
+///
+/// **Forward is `(sin yaw, cos yaw)`** — local +Z — which is the convention `Predicate::Facing` has
+/// always scored with and `furnish`'s wall-light yaw already assumes. A mesh that fronts some other
+/// local axis says so once, in its kit entry, rather than at every call site: `site::kit::KitPiece::
+/// front` is the degrees to add to the authored yaw before asking this question.
+///
+/// Degenerate case: the length is floored at `1e-4` rather than special-cased, so two coincident
+/// objects score ~0 (side-on) rather than 1 (dead on). That is **`metropolis`'s original behaviour**,
+/// preserved deliberately — an early return of `1.0` reads better in isolation but is a different
+/// number in the annealer's cost, and a coincident pair is already dominated by the overlap term
+/// anyway. Changing solver arithmetic while "just extracting a function" is the exact mistake the
+/// commit before this one had to undo.
+#[inline]
+pub fn facing_cosine(from: (f32, f32), yaw: f32, to: (f32, f32)) -> f32 {
+    let (fx, fz) = (yaw.sin(), yaw.cos());
+    let (dx, dz) = (to.0 - from.0, to.1 - from.1);
+    let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+    (fx * dx + fz * dz) / len
+}
+
 /// A doorway / corridor mouth on a region's boundary — derived from the coarse `CellData.open`
 /// links + the corridor carve. `cell` is the interior floor cell at lane 0 of the opening, `dir` the
 /// wall it pierces (N/E/S/W), and `width` the number of open lanes (≥1) — the doorway necks down from
@@ -398,6 +420,9 @@ mod tests {
     /// The difference only shows when a piece genuinely does not fit, which is exactly the case a
     /// checker is for. The input below is a footprint larger than its room in both axes — all four
     /// hinges positive — where the two orders differ in the last bits.
+    // The literals below are exact `f32` values, written at full precision so the input that
+    // distinguishes the two summation orders is reproducible rather than approximately re-typed.
+    #[allow(clippy::excessive_precision)]
     #[test]
     fn the_hinge_sum_is_accumulated_in_f64_not_f32() {
         let f = Footprint {
