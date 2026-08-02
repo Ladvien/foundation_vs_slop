@@ -312,12 +312,48 @@ pub fn on_first_contact(
     }
 }
 
+/// **Can a scripted line actually be seen at the Site?**
+///
+/// `runtime::speaker_entity` resolves a speaker index through `Query<(Entity, &SquadMember),
+/// With<Unit>>`, and `src/site/mod.rs` states plainly why squad `Unit`s never stand at the Site:
+/// `spawn_unit` carries `session::run_scoped()` and both `squad::unit_movement` and `fog::update_los`
+/// take `Res<Dungeon>`, which while `Idle` is absent or stale. The Site has [`crate::site::SiteAvatar`]
+/// bodies instead, and those are invisible to `speaker_entity`.
+///
+/// Without this gate the two `OnEnter(AppState::Site)` beats below are not merely silent — they are
+/// **destroyed**. [`play`] marks the id in [`ConversationsPlayed`], which rides in `SaveGame`, and
+/// `runtime::present_current` sets `presented = true` whether or not a bubble spawned. So the beat is
+/// stepped through invisibly and can never play again, on this campaign or any reload of it.
+///
+/// During a *visit* (`RunState::Active`, `docs/2026-08-01-two-live-layers.md`) it is worse rather than
+/// better: units do exist, so `speaker_entity` finds one — a kilometre away in the dungeon, since
+/// `site67.ron`'s origin is `(1024, 0, 1024)` — and `present_current` sets `rig.glide_to` to its
+/// position, **gliding the camera off the Site**.
+///
+/// Both cases are covered by one condition, and it is the honest one: a scripted Site beat needs a
+/// speaker *standing at the Site*. While `Idle` no expedition is running, so any live `Unit` is by
+/// definition not in a dungeon; while `Active` the squad is away. Today the first clause makes this
+/// always false, and that is the correct behaviour rather than a disablement — **a held beat plays
+/// when the speaker path is repaired; a consumed one is gone forever.** It becomes true on its own the
+/// moment FVS-G-3 promotes Site avatars to real operatives, with no edit here.
+///
+/// The proper repair — `runtime::Bark.speaker` from `usize` to `Entity`, so a `SiteAvatar` can own a
+/// bubble — is Stage D of `docs/lore/2026-08-02-site-67-recommissioned.md`'s implementation plan and
+/// is deliberately not attempted here.
+fn a_speaker_stands_at_the_site(
+    run: Res<State<crate::session::RunState>>,
+    speakers: Query<(), (With<Unit>, With<crate::squad::SquadMember>)>,
+) -> bool {
+    *run.get() == crate::session::RunState::Idle && !speakers.is_empty()
+}
+
 pub fn plugin(app: &mut App) {
     app.init_resource::<ConversationsPlayed>()
         .add_systems(OnEnter(AppState::InGame), on_expedition_start)
         .add_systems(
             OnEnter(AppState::Site),
-            (on_home_with_specimen, on_unattributed_report),
+            (on_home_with_specimen, on_unattributed_report)
+                .run_if(a_speaker_stands_at_the_site),
         )
         .add_systems(OnEnter(AppState::Debrief), on_squad_wipe)
         .add_systems(
@@ -474,6 +510,53 @@ mod tests {
             .drain()
             .count();
         assert_eq!(again, 0, "a first happens once, even across frames");
+    }
+
+    #[test]
+    fn a_site_beat_is_held_rather_than_consumed_when_nobody_can_speak_it() {
+        // **The regression this exists for is a permanent, saved loss.** Both `OnEnter(AppState::Site)`
+        // beats used to fire into an empty stage: `runtime::speaker_entity` resolves through
+        // `With<Unit>`, no squad unit ever stands at the Site (`src/site/mod.rs`), so zero bubbles
+        // spawned — but `play` had already written the id into `ConversationsPlayed`, which rides in
+        // `SaveGame`. The scene was stepped through invisibly and could never play again, on this
+        // campaign or any reload of it.
+        //
+        // This drives the real `plugin()` registration rather than the systems directly, because the
+        // fix IS the registration: a unit test on `on_home_with_specimen` would pass either way.
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .add_message::<StartConversation>()
+            .init_state::<AppState>()
+            .init_state::<crate::session::RunState>();
+        plugin(&mut app);
+
+        // A specimen is banked, so the beat's own precondition holds — this test would be vacuous
+        // otherwise, which is how a guard gets "verified" against a case it never sees.
+        app.world_mut().spawn(crate::containment::Specimen {
+            captured: Entity::PLACEHOLDER,
+            captured_tick: 0,
+            subject: Subject::ComfortBlob,
+        });
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Site);
+        app.update();
+
+        assert!(
+            !app.world().resource::<ConversationsPlayed>().has_played("home_with_specimen"),
+            "the beat was CONSUMED with nobody at the Site to speak it — it can now never play, \
+             on this campaign or any reload of it"
+        );
+        let started = app
+            .world_mut()
+            .resource_mut::<Messages<StartConversation>>()
+            .drain()
+            .count();
+        assert_eq!(
+            started, 0,
+            "starting the conversation is what glides the camera a kilometre off the Site to the \
+             only entity `speaker_entity` can find"
+        );
     }
 
     #[test]

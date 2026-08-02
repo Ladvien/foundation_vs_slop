@@ -68,6 +68,18 @@ This does real work beyond flavour:
 §7's standing "re-verify SCP canon before shipping copy" note still applies to any *quoted* canon; the
 number itself is ours to define.
 
+**Amended 2026-08-02 — the Site was not merely chosen, it was REOPENED.** 67 turned out not to be
+unclaimed after all: the *archived* Secure Facilities Locations list carries a one-line entry for it,
+and that entry says the facility was **abandoned after a breach**. Adopted rather than ignored,
+because it pays for itself three times over — it explains why half the Site is bare floor, it hands
+SCP-9191 a document nobody can produce (Psychiatric Evaluation Log 47721, which canon references and
+never wrote), and it costs the ASYNC door nothing. The paragraph above still holds exactly as
+written; recommissioning only adds a clause in front of it — *and then reopened that Site when the
+door appeared.* The building predates us; the aperture does not.
+
+Full decision record, the staff roster with canonical titles and clearances, and the canon citations:
+`docs/lore/2026-08-02-site-67-recommissioned.md`.
+
 ### 2.4 What is in it
 
 | Area | Purpose | Depends on |
