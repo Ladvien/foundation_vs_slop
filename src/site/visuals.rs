@@ -49,12 +49,7 @@ const AVATAR_LOCO_TAU: f32 = 0.12;
 #[derive(Component)]
 pub struct SiteVisual;
 
-/// An operative standing in the hub. **Never `squad::Unit`** — see the module note.
-///
-/// Index-keyed like `squad::SquadMember` so FVS-G-3 can later map an avatar onto a persistent operative
-/// without re-keying anything.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct SiteAvatar(pub usize);
+pub use super::people::{CastId, Operative, SiteAvatar, Staff};
 
 /// Where this avatar is walking, if anywhere.
 #[derive(Component, Debug, Default)]
@@ -96,10 +91,29 @@ pub struct StudySlab;
 #[derive(Component)]
 pub struct SlabOccupant;
 
-/// The GLB child of a [`SiteAvatar`]. Carries the cosmetic animation state, never the avatar itself —
-/// the same split `squad::FigurineModel` makes, and for the same reason (issue #18).
+/// The GLB child of an **operative's** [`SiteAvatar`]. Carries the cosmetic animation state, never the
+/// avatar itself — the same split `squad::FigurineModel` makes, and for the same reason (issue #18).
+///
+/// ⚠️ **Staff models carry [`StaffModel`] instead, and the split is load-bearing.** This marker means
+/// "a model whose blender holds the Valkyrie's ten slots in the Valkyrie's order", because that is what
+/// [`drive_avatar_animation`] feeds it. A staff body has four slots; `PoseBlender::set_targets` refuses
+/// a length mismatch by **writing nothing**, so a staff member caught by this query would hold bind
+/// pose forever while logging once per frame. Two markers is what makes that untypeable.
 #[derive(Component)]
 struct AvatarModel;
+
+/// The GLB child of a **staff member's** [`SiteAvatar`]. See [`AvatarModel`] for why these are two
+/// markers rather than one.
+#[derive(Component)]
+struct StaffModel;
+
+/// Which idle a staff body stands in.
+///
+/// Constant per person, chosen from a stable hash of their `CastId` at spawn. Nine bodies all playing
+/// clip 0 breathe in perfect lockstep, which the eye reads as a rendering artefact rather than as
+/// people; `util::hash01_u32` exists precisely so that per-spawn variation is not keyed on position.
+#[derive(Component, Debug, Clone, Copy)]
+struct IdleLook(bool);
 
 /// Smoothed locomotion for one operative's model, so the blend does not chatter frame to frame.
 ///
@@ -152,6 +166,17 @@ impl Plugin for SiteVisualsPlugin {
                 return;
             }
         }
+        // The staff, validated at the door. One path: a missing `staff.ron` means "no staff yet" and
+        // is normal, but a malformed one is a loud failure and the Site does not build — exactly the
+        // stance taken two blocks above for the layout and the kit. An author who mistyped a title
+        // must see it, rather than walk into an empty hub and wonder where everyone went.
+        let staff = match super::people::load_site_staff(super::people::STAFF_PATH) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("site: {e} — Site-67 will not be built");
+                return;
+            }
+        };
         let nav = SiteNav::bake(&layout);
         // `leave_for_the_site` reads the binding table non-optionally, and the plugin that registers a
         // reader is what guarantees the resource exists — the same contract `camera` states.
@@ -159,19 +184,24 @@ impl Plugin for SiteVisualsPlugin {
         app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
             .insert_resource(nav)
             .insert_resource(SiteLayoutRes(layout))
-            // AFTER the graph exists: `spawn_site_geometry` pins `ValkyrieAnim`'s graph and slots on
-            // each operative's model child as an `anim::BlendSource`, and Bevy is otherwise free to
-            // order two `Startup` systems either way round. The squad states the same constraint for
-            // `spawn_unit`; the Site is the second spawner and needs it just as much.
+            .insert_resource(SiteStaffRes(staff))
+            // AFTER both graphs exist: `spawn_site_geometry` pins `ValkyrieAnim`'s graph and slots on
+            // each operative's model child, and `StaffAnim`'s on each staff member's, as an
+            // `anim::BlendSource`. Bevy is otherwise free to order two `Startup` systems either way
+            // round. The squad states the same constraint for `spawn_unit`; the Site is the second
+            // spawner and now needs it twice over.
+            .add_systems(Startup, super::staff_anim::build_staff_anim)
             .add_systems(
                 Startup,
-                spawn_site_geometry.after(crate::squad::build_valkyrie_anim),
+                spawn_site_geometry
+                    .after(crate::squad::build_valkyrie_anim)
+                    .after(super::staff_anim::build_staff_anim),
             )
             // Cosmetic, so `Update` — never `FixedUpdate` (`docs/animation.md`). Deliberately NOT
             // gated on `AppState::Site`: `apply_pose_blenders` snaps weights on its first pass, so a
             // blender that had never been driven would prime to all-zero and show one frame of bind
             // pose the moment the player walks in. Five avatars is not a cost worth that.
-            .add_systems(Update, drive_avatar_animation)
+            .add_systems(Update, (drive_avatar_animation, drive_staff_animation))
             .add_systems(Update, super::aperture::drive_aperture_charge)
             .add_systems(OnEnter(AppState::Site), focus_camera_on_site)
             .add_systems(OnEnter(AppState::InGame), return_camera_to_squad)
@@ -207,6 +237,13 @@ impl Plugin for SiteVisualsPlugin {
 /// The authored layout, kept for the systems that need world positions.
 #[derive(Resource, Deref)]
 pub struct SiteLayoutRes(pub SiteLayout);
+
+/// The authored staff roster, loaded once at plugin build.
+///
+/// A resource for the same reason `SiteKitRes` is one: it is validated at the door, and the systems
+/// that need it should read the copy that was already proven good rather than re-reading the file.
+#[derive(Resource, Deref)]
+pub struct SiteStaffRes(pub Vec<super::people::StaffMember>);
 
 /// One panel of perimeter wall, as a segment on the **floor's edge**.
 ///
@@ -458,13 +495,13 @@ const SLAB_SURFACE_Y: f32 = 0.60;
 
 /// How deep a containment booth runs behind its glazed front, in metres. Two cells, matching the 2 m
 /// span of `wall_window` itself, so a cell is square in plan.
-const CELL_DEPTH: f32 = 2.0;
+pub(crate) const CELL_DEPTH: f32 = 2.0;
 
 /// Which way a containment cell's interior lies, given its authored yaw.
 ///
 /// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
 /// the kit), so the glass faces `rot(yaw) · X` and the booth runs the other way.
-fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
+pub(crate) fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
     -(Quat::from_rotation_y(yaw_deg.to_radians()) * Vec3::X)
 }
 
@@ -513,8 +550,12 @@ fn spawn_site_geometry(
     mut meshes: ResMut<Assets<Mesh>>,
     mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
     valk: Res<crate::squad::ValkyrieAnim>,
+    staff_anim: Res<super::staff_anim::StaffAnim>,
+    staff: Res<SiteStaffRes>,
+    nav: Res<SiteNav>,
 ) {
     let l = &layout.0;
+    let staff = &staff.0;
     // Lights first, because nothing below is visible without them — see `light_the_site`.
     light_the_site(&mut commands, l);
     for r in &l.floor {
@@ -657,7 +698,9 @@ fn spawn_site_geometry(
         let at = l.point(*s);
         let mut e = commands.spawn((
             SiteVisual,
-            SiteAvatar(i),
+            SiteAvatar,
+            Operative(i),
+            CastId::of_operative(i),
             AvatarGoal::default(),
             Transform::from_translation(at),
             Visibility::Inherited,
@@ -687,15 +730,80 @@ fn spawn_site_geometry(
             e.insert(PlayerAvatar);
         }
     }
+
+    // The staff. Nine people who work here, posted to the rooms they work in.
+    //
+    // Grouped by post first, because the spawn point is DERIVED rather than authored: everyone sharing
+    // a room is placed together so `post_positions` can space them out and keep them clear of the
+    // furniture. Iterating the roster in order and asking for one cell at a time would stand the second
+    // cook exactly where the first one already is.
+    //
+    // The grouping walks `AreaId::REQUIRED` rather than a map of whatever posts happen to appear, so
+    // the iteration order is a fixed compile-time list and not a hash order.
+    let mut staffed = 0usize;
+    for area in super::layout::AreaId::REQUIRED {
+        let here: Vec<(usize, &super::people::StaffMember)> = staff
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.post == *area)
+            .collect();
+        if here.is_empty() {
+            continue;
+        }
+        let spots = super::people::post_positions(l, &kit.0, &nav, *area, here.len());
+        for ((index, member), spot) in here.iter().zip(spots.iter()) {
+            let at = l.point((spot.x, spot.y));
+            let cast = CastId::of_staff(*index);
+            let rig = member.rig;
+            commands
+                .spawn((
+                    SiteVisual,
+                    SiteAvatar,
+                    Staff(*index),
+                    cast,
+                    AvatarGoal::default(),
+                    Transform::from_translation(at),
+                    Visibility::Inherited,
+                ))
+                .with_child((
+                    StaffModel,
+                    // Constant per person and stable across boots — see `IdleLook`.
+                    IdleLook(crate::util::hash01_u32(cast.0 as u32) < 0.5),
+                    WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(rig.glb()))),
+                    // Same authored scale and the same half-turn as the operatives: these rigs share
+                    // the Valkyrie's MPFB2 lineage and face glTF +Z, so an unrotated body would stand
+                    // with its back to the camera.
+                    Transform::from_scale(Vec3::splat(FIGURINE_SCALE))
+                        .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                    anim::BlendSource {
+                        graph: staff_anim.get(rig).graph.clone(),
+                        slots: staff_anim.get(rig).slots.clone(),
+                    },
+                    AvatarLoco::default(),
+                ));
+            staffed += 1;
+        }
+    }
+    if staffed != staff.len() {
+        // `post_positions` already warns per person; this is the count, so a roster that half-spawned
+        // is visible in one line rather than reconstructed from scattered warnings.
+        warn!(
+            "site: {staffed} of {} staff were placed — the roster and the layout disagree",
+            staff.len()
+        );
+    }
+
     // The panel and corner counts are how the derived rule is verified at runtime — `site67.ron`
     // authors no panels and no corners, so a 0 in either means the derivation stopped matching the
     // layout it is supposed to trace.
     info!(
-        "site: built Site-67 ({} floor runs, {} cells, {} wall panels, {} corners)",
+        "site: built Site-67 ({} floor runs, {} cells, {} wall panels, {} corners, {} operatives, \
+         {staffed} staff)",
         l.floor.len(),
         l.cells.len(),
         panels.len(),
-        corners.len()
+        corners.len(),
+        l.spawns.len()
     );
 }
 
@@ -1121,7 +1229,33 @@ fn lay_out_the_study_subject(
     }
 }
 
-/// Ease each operative's animation blend from how far its avatar actually moved this frame.
+/// Measure how far a model's avatar parent moved this frame, smoothed.
+///
+/// Shared by both animation drivers below, which differ only in the weight vector they then produce.
+/// Site avatars are moved by writing `Transform` directly (`drive_avatars`), so unlike a squad `Unit`
+/// there is no `Velocity` to read and speed has to come from the position delta.
+///
+/// Returns `None` when the parent is not an avatar (or was despawned), which is the caller's signal to
+/// skip rather than to pose.
+fn measure_avatar_speed(
+    tf: &Transform,
+    loco: &mut AvatarLoco,
+    dt: f32,
+    ease: f32,
+) -> f32 {
+    let raw = match loco.last {
+        // First frame: no previous position, so no speed can be measured yet. Starting at 0 shows the
+        // idle clip, which is the correct pose for a body that has not been ordered anywhere.
+        None => 0.0,
+        Some(prev) => (tf.translation - prev).with_y(0.0).length() / dt,
+    };
+    loco.last = Some(tf.translation);
+    loco.speed += (raw - loco.speed) * ease;
+    let _ = dt;
+    loco.speed
+}
+
+/// Ease each **operative's** animation blend from how far its avatar actually moved this frame.
 ///
 /// **Cosmetic, `Update` only**, and it writes nothing but a `PoseBlender` — so it cannot reach
 /// `snapshot_hash`, exactly as `docs/animation.md` requires of the whole animation layer.
@@ -1130,6 +1264,12 @@ fn lay_out_the_study_subject(
 /// turns it to face the way it actually moved, so travel is always straight ahead in its own frame
 /// (`theta = 0`), and nobody aims or fires in the Site. What is left is idle ↔ walk ↔ run, which is
 /// the whole of what a hub needs.
+///
+/// ⚠️ **`With<AvatarModel>` is the load-bearing half of the query.** This feeds a 10-wide vector in the
+/// Valkyrie's slot order; a staff model's blender holds four. `PoseBlender::set_targets` refuses a
+/// length mismatch by writing **nothing at all**, so a staff body caught here would hold bind pose for
+/// the rest of the process while logging once per frame — a failure that looks like a broken asset
+/// rather than a mis-typed query. See [`drive_staff_animation`].
 fn drive_avatar_animation(
     time: Res<Time>,
     avatars: Query<&Transform, With<SiteAvatar>>,
@@ -1146,19 +1286,46 @@ fn drive_avatar_animation(
         let Ok(tf) = avatars.get(child_of.parent()) else {
             continue; // parent is not an avatar (or was despawned)
         };
-        let raw = match loco.last {
-            // First frame: no previous position, so no speed can be measured yet. Starting at 0 shows
-            // the idle clip, which is the correct pose for an operative that has not been ordered.
-            None => 0.0,
-            Some(prev) => (tf.translation - prev).with_y(0.0).length() / dt,
-        };
-        loco.last = Some(tf.translation);
-        loco.speed += (raw - loco.speed) * ease;
-        let weights = crate::squad::valkyrie_weights(loco.speed, 0.0, false, false);
+        let speed = measure_avatar_speed(tf, &mut loco, dt, ease);
+        let weights = crate::squad::valkyrie_weights(speed, 0.0, false, false);
         if let Err(e) = blender.set_targets(&weights) {
             error!("site avatar: {e}");
         }
-        blender.set_ground_speed(loco.speed);
+        blender.set_ground_speed(speed);
+    }
+}
+
+/// The same, for **staff**, whose blenders hold four slots rather than the Valkyrie's ten.
+///
+/// Split from [`drive_avatar_animation`] rather than branching inside it, because the difference is
+/// the *shape of the weight vector* and a branch would put two incompatible contracts behind one
+/// query. Two markers make the mismatch untypeable instead of merely unlikely.
+///
+/// Cosmetic, `Update` only, writes nothing but a `PoseBlender` — the same exemption the rest of the
+/// animation layer takes.
+fn drive_staff_animation(
+    time: Res<Time>,
+    avatars: Query<&Transform, With<SiteAvatar>>,
+    mut models: Query<
+        (&ChildOf, &IdleLook, &mut anim::PoseBlender, &mut AvatarLoco),
+        With<StaffModel>,
+    >,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let ease = 1.0 - (-dt / AVATAR_LOCO_TAU).exp();
+    for (child_of, look, mut blender, mut loco) in &mut models {
+        let Ok(tf) = avatars.get(child_of.parent()) else {
+            continue;
+        };
+        let speed = measure_avatar_speed(tf, &mut loco, dt, ease);
+        let weights = super::staff_anim::staff_weights(speed, look.0);
+        if let Err(e) = blender.set_targets(&weights) {
+            error!("site staff: {e}");
+        }
+        blender.set_ground_speed(speed);
     }
 }
 

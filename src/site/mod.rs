@@ -54,13 +54,16 @@ pub mod kit;
 pub mod layout;
 pub mod nav;
 pub mod o5;
+pub mod people;
 pub mod review;
 pub mod pieces;
+pub mod staff_anim;
 pub mod visuals;
 
 pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
+pub use people::{CastId, Operative, SiteAvatar, Staff, StaffMember, StaffRig};
 pub use review::{ExpeditionTally, O5Plugin, Requisitioned};
 pub use visuals::SiteVisualsPlugin;
 pub use pieces::SitePiece;

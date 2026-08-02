@@ -448,41 +448,52 @@
         // Four bunks head-to-wall down the west side with a locker and a bedside table each, which is
         // what makes the room read as somewhere FIVE people live rather than a bedroom. Bunks run along
         // Z (yaw 0) so their long axis is the room's long axis; the aisle is the east half.
-        ( piece: Bunk,          pos: ( 0.8, 27.3), yaw:  90.0 ),
-        ( piece: BedsideTable,  pos: ( 1.8, 26.4), yaw:   0.0 ),
-        ( piece: Locker,        pos: ( 4.4, 27.0), yaw: 270.0 ),
-        ( piece: Bunk,          pos: ( 0.8, 30.0), yaw:  90.0 ),
-        ( piece: BedsideTable,  pos: ( 1.8, 29.1), yaw:   0.0 ),
-        ( piece: Locker,        pos: ( 4.4, 27.8), yaw: 270.0 ),
-        ( piece: Bunk,          pos: ( 0.8, 32.7), yaw:  90.0 ),
-        ( piece: BedsideTable,  pos: ( 1.8, 31.8), yaw:   0.0 ),
-        ( piece: Locker,        pos: ( 4.4, 28.6), yaw: 270.0 ),
-        ( piece: Locker,        pos: ( 4.4, 29.4), yaw: 270.0 ),
+        //
+        // ⚠️ EVERYTHING HERE MOVED SOUTH ON 2026-08-02, and the reason applies to all four south rooms.
+        // These were authored against a "north wall" that does not exist: the room's entire z=26 edge is
+        // its way in from the south spine (openings in Site-67 are the ABSENCE of wall, so a room can be
+        // open along a whole side). Furniture on that edge was standing in the doorway.
+        // `check_prop_placements` now derives every threshold and refuses this — see THRESHOLD_CLEAR.
+        ( piece: Bunk,          pos: ( 0.8, 28.15), yaw:  90.0 ),
+        ( piece: BedsideTable,  pos: ( 1.8, 27.4), yaw:   0.0 ),
+        ( piece: Locker,        pos: ( 4.4, 27.5), yaw: 270.0 ),
+        ( piece: Bunk,          pos: ( 0.8, 30.45), yaw:  90.0 ),
+        ( piece: BedsideTable,  pos: ( 1.8, 29.7), yaw:   0.0 ),
+        ( piece: Locker,        pos: ( 4.4, 28.3), yaw: 270.0 ),
+        ( piece: Bunk,          pos: ( 0.8, 32.75), yaw:  90.0 ),
+        ( piece: BedsideTable,  pos: ( 1.8, 32.0), yaw:   0.0 ),
+        ( piece: Locker,        pos: ( 4.4, 29.1), yaw: 270.0 ),
+        ( piece: Locker,        pos: ( 4.4, 29.9), yaw: 270.0 ),
 
         // ── GALLEY  x[6,11) z[26,34) ──
         //
-        // Work surface and appliances along the north wall, eating in the middle. The coffee machine
-        // sits ON the counter run rather than on the floor: `y_offset` is a kit fact, so it is placed
-        // at counter height here by standing it on the counter's own 0.75 m top.
-        ( piece: GalleyCounter, pos: ( 7.0, 26.6), yaw:  90.0 ),
-        ( piece: GalleyCounter, pos: ( 8.4, 26.6), yaw:  90.0 ),
-        ( piece: GalleyCounter, pos: ( 9.8, 26.6), yaw:  90.0 ),
-        ( piece: CoffeeMachine, pos: ( 7.2, 27.4), yaw: 180.0 ),
-        ( piece: WaterDispenser,pos: (10.5, 27.2), yaw: 180.0 ),
-        ( piece: MessTable,     pos: ( 8.5, 29.5), yaw:   0.0 ),
-        ( piece: Stool,         pos: ( 7.6, 29.5), yaw:  90.0 ),
-        ( piece: Stool,         pos: ( 9.4, 29.5), yaw: 270.0 ),
-        ( piece: MessTable,     pos: ( 8.5, 31.8), yaw:   0.0 ),
-        ( piece: Stool,         pos: ( 7.6, 31.8), yaw:  90.0 ),
-        ( piece: Stool,         pos: ( 9.4, 31.8), yaw: 270.0 ),
+        // Work surface and appliances along the SOUTH wall — z=34, which is a real wall — with eating in
+        // the middle and the way in from the spine left clear. The counter run was authored along z=26
+        // against a "north wall" that is actually the doorway; see the QUARTERS note.
+        //
+        // The coffee machine sits ON the counter run rather than on the floor: `y_offset` is a kit fact,
+        // so it is placed at counter height here by standing it on the counter's own 0.75 m top.
+        ( piece: GalleyCounter, pos: ( 7.0, 33.6), yaw:  90.0 ),
+        ( piece: GalleyCounter, pos: ( 8.4, 33.6), yaw:  90.0 ),
+        ( piece: GalleyCounter, pos: ( 9.8, 33.6), yaw:  90.0 ),
+        ( piece: CoffeeMachine, pos: ( 7.2, 32.8), yaw:   0.0 ),
+        ( piece: WaterDispenser,pos: (10.5, 32.8), yaw:   0.0 ),
+        ( piece: MessTable,     pos: ( 8.5, 28.6), yaw:   0.0 ),
+        ( piece: Stool,         pos: ( 7.6, 28.6), yaw:  90.0 ),
+        ( piece: Stool,         pos: ( 9.4, 28.6), yaw: 270.0 ),
+        ( piece: MessTable,     pos: ( 8.5, 30.9), yaw:   0.0 ),
+        ( piece: Stool,         pos: ( 7.6, 30.9), yaw:  90.0 ),
+        ( piece: Stool,         pos: ( 9.4, 30.9), yaw: 270.0 ),
 
         // ── ACTIVITIES  x[12,17) z[26,34) ──
         //
         // A REC ROOM, not a gym — deliberately. No rig in this game has an exercise clip, and a gym
         // full of standing figures reads as a bug rather than as a gym. Benches, a table and a vending
         // machine are all covered by `sit`, which every staff rig has.
-        ( piece: VendingMachine,pos: (12.7, 26.6), yaw: 180.0 ),
-        ( piece: Bench,         pos: (13.2, 28.5), yaw:   0.0 ),
+        //
+        // The vending machine moved to the WEST wall (x=11 is real wall) from the z=26 doorway.
+        ( piece: VendingMachine,pos: (12.5, 28.6), yaw: 180.0 ),
+        ( piece: Bench,         pos: (13.6, 28.5), yaw:   0.0 ),
         ( piece: Bench,         pos: (15.8, 28.5), yaw:   0.0 ),
         ( piece: MessTable,     pos: (14.5, 30.5), yaw:   0.0 ),
         ( piece: Chair,         pos: (13.6, 30.5), yaw:   0.0 ),
@@ -495,24 +506,35 @@
         // The map table is the centrepiece and everything faces it. `SM_Holo` is the only mesh in the
         // whole Ozea library that reads as a plot of somewhere you are about to go, which is exactly
         // what this room is for.
-        ( piece: MapTable,      pos: (20.5, 29.5), yaw:   0.0 ),
-        ( piece: Chair,         pos: (19.2, 29.5), yaw:   0.0 ),
-        ( piece: Chair,         pos: (21.8, 29.5), yaw: 180.0 ),
-        ( piece: Chair,         pos: (20.5, 28.5), yaw: 270.0 ),
-        ( piece: ControlDesk,   pos: (20.5, 27.0), yaw:  90.0 ),
+        ( piece: MapTable,      pos: (20.5, 30.0), yaw:   0.0 ),
+        ( piece: Chair,         pos: (19.2, 30.0), yaw:   0.0 ),
+        ( piece: Chair,         pos: (21.8, 30.0), yaw: 180.0 ),
+        ( piece: Chair,         pos: (20.5, 29.0), yaw: 270.0 ),
+        // Moved off the z=26 doorway (see the QUARTERS note): its 3.68 m run spanned the room's entire
+        // way in, which was the single worst case in the Site — 1.72 m² of overlap on one cell alone.
+        ( piece: ControlDesk,   pos: (20.5, 27.9), yaw:  90.0 ),
         ( piece: ServerRack,    pos: (18.6, 32.8), yaw:   0.0 ),
         ( piece: Locker,        pos: (22.4, 32.6), yaw: 270.0 ),
 
         // ── MONITORING  x[30,34) z[2,12) ──
         //
-        // Consoles down the WEST wall, which is the wall it shares with the containment wing. The room
-        // is pointed at the thing it watches; that is the whole reason it is here rather than in the
-        // south wing with the domestic rooms.
-        ( piece: SurveillanceConsole, pos: (30.85,  4.0), yaw:  90.0 ),
-        ( piece: SurveillanceConsole, pos: (30.85,  6.0), yaw:  90.0 ),
-        ( piece: SurveillanceConsole, pos: (30.85,  8.0), yaw:  90.0 ),
-        ( piece: CommandChair,        pos: (32.0,  4.0), yaw: 180.0 ),
-        ( piece: CommandChair,        pos: (32.0,  6.0), yaw: 180.0 ),
+        // The room is pointed at the thing it watches; that is the whole reason it is here rather than
+        // in the south wing with the domestic rooms.
+        //
+        // ⚠️ CONSOLES MOVED TO THE EAST WALL, 2026-08-02. They were authored "down the WEST wall, which
+        // is the wall it shares with the containment wing" — and there is no such wall. Measured: every
+        // cell of the x=30 boundary is walkable on both sides, so monitoring is open to the containment
+        // wing along its entire length and the console run was standing across the only way in. The
+        // room's one real wall is x=34, so the consoles line that instead and the operators now sit
+        // with their backs to the east wall looking west at the cells — which is the same sightline the
+        // original note wanted, arrived at from the other side.
+        ( piece: SurveillanceConsole, pos: (33.15,  4.0), yaw: 270.0 ),
+        ( piece: SurveillanceConsole, pos: (33.15,  6.0), yaw: 270.0 ),
+        ( piece: SurveillanceConsole, pos: (33.15,  8.0), yaw: 270.0 ),
+        // Pulled up to the consoles from the west, so the seat-faces-surface rule holds with the run
+        // on the other side.
+        ( piece: CommandChair,        pos: (31.9,  4.0), yaw:   0.0 ),
+        ( piece: CommandChair,        pos: (31.9,  6.0), yaw:   0.0 ),
         ( piece: ServerRack,          pos: (32.6, 10.4), yaw: 270.0 ),
         ( piece: ServerRack,          pos: (32.6,  2.6), yaw: 270.0 ),
     ],

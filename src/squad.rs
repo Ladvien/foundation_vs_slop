@@ -28,7 +28,6 @@ use crate::ai::drives::Drives;
 use crate::squad_ai::actions::UtterCooldown;
 use crate::squad_ai::cohesion::DesiredMove;
 use crate::squad_ai::dialogue::MemoryStream;
-use crate::squad_ai::persona::load_personas;
 use crate::squad_ai::role::RoleId;
 
 /// The squad itself — a bodiless organisational entity that owns its operatives through the
@@ -685,6 +684,14 @@ impl Plugin for SquadPlugin {
         // `anim::BlendSource`, so the resource must exist before the first unit spawns.
         // `build_valkyrie_anim` loads assets (process-lifetime) and stays on `Startup`; `spawn_squad`
         // populates the world and is therefore per-run (FVS-A-5).
+        // The cast, resolved once. Same shape and same failure mode as `SitePlugin`'s kit load: one
+        // path, and a malformed `personas.ron` is a loud startup panic rather than a silent fall back
+        // to the defaults the author meant to replace. It lives here rather than in `spawn_squad` so
+        // it survives between expeditions — identity outlives the bodies, and Site-67's roster screen
+        // is read while no `Unit` exists at all.
+        let roster = crate::squad_ai::persona::load_personas()
+            .unwrap_or_else(|e| panic!("personas.ron: {e}"));
+        app.insert_resource(crate::squad_ai::persona::PersonaRoster(roster));
         app.add_systems(Startup, build_valkyrie_anim)
             .add_systems(OnEnter(crate::session::RunState::Active), spawn_squad.in_set(crate::session::RunBuild::Populate))
             // `unit_movement` CONSUMES the `DesiredMove` goal that `squad_ai::squad_think` produces in
@@ -735,6 +742,7 @@ fn spawn_squad(
     valk: Res<ValkyrieAnim>,
     sim: Res<SimTuning>,
     beh: Res<crate::behavior_tuning::BehaviorTuning>,
+    roster: Res<crate::squad_ai::persona::PersonaRoster>,
 ) {
     // Pick five distinct floor cells clustered around the dungeon spawn.
     let base = dungeon.spawn;
@@ -752,10 +760,10 @@ fn spawn_squad(
         );
     }
 
-    // The role + persona roster, index-matched to spawn order (member i plays role i). Loaded from
-    // `assets/config/personas.ron` when present (validated), else the code-literal defaults — a
-    // malformed/invalid override is a loud startup panic, never a silent default (mirrors roles.ron).
-    let personas = load_personas().unwrap_or_else(|e| panic!("personas.ron: {e}"));
+    // The role + persona roster, index-matched to spawn order (member i plays role i). Resolved once
+    // in `SquadPlugin::build` — see `PersonaRoster` for why identity is a resource rather than a
+    // per-run file read: it has to outlive the bodies, because Site-67 reads it while none exist.
+    let personas = &roster.0;
 
     // The roster node, spawned before its members so every unit can name it at spawn (a relationship
     // source may not point at an entity that does not exist yet).

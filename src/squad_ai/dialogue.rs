@@ -415,6 +415,11 @@ mod tests {
         Persona {
             name: "Test".into(),
             role,
+            // The job axis is irrelevant to line selection — these templates key on `role` (the
+            // behaviour repertoire) and `verbosity`. Fixed rather than varied so a future test that
+            // *does* depend on the title has to say so.
+            title: crate::personnel::StaffTitle::MtfOperative,
+            clearance: crate::personnel::Clearance::Level2,
             temperament: "clinical".into(),
             verbosity,
         }
