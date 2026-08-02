@@ -153,6 +153,23 @@ pub enum Clearance {
 
 impl Clearance {
     /// Player-facing copy for a placard: `LEVEL 2`.
+    /// The level as a number, `0..=5`.
+    ///
+    /// **A ceiling on information, not a rank** — `Clearance`'s own doc calls the rank reading one of
+    /// the amateur tells, and this does not change that. It exists because a door plaque has to show
+    /// *how many* levels a door demands: `site::visuals` hangs one plaque per level, so the count on
+    /// the wall is the clearance, read without hue (`docs/lore/2026-07-12-scp-color-language.md`).
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Level0 => 0,
+            Self::Level1 => 1,
+            Self::Level2 => 2,
+            Self::Level3 => 3,
+            Self::Level4 => 4,
+            Self::Level5 => 5,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Level0 => "LEVEL 0",

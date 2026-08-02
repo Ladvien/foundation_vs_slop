@@ -415,6 +415,24 @@ pub fn run() {
                 // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and
                 // IS harness-visible.
                 site::SiteVisualsPlugin,
+                // The rest of the hub's presentation, nested to stay under Bevy's 16-element plugin
+                // limit — the same reason the UI group below is nested. All four are windowed-only by
+                // the same construction as `SiteVisualsPlugin`: they follow a `PlayerAvatar`, which
+                // is a `Transform` with no `Health`, and none of them can reach `snapshot_hash`.
+                (
+                    // Where in the hub the player is standing. Registered out here rather than inside
+                    // `SiteVisualsPlugin` because it owns a resource that UI plugins outside `site::`
+                    // read.
+                    site::SitePresencePlugin,
+                    // Near walls squash so the camera can see into the rooms — the treatment the
+                    // dungeon has had since long before the hub existed, reshaped for base-origined
+                    // meshes.
+                    site::SiteCutawayPlugin,
+                    // Footfalls that exist, and a room tone per wing.
+                    site::SiteAudioPlugin,
+                    // The rooms say their names when you walk in, then retire.
+                    site::SiteSignagePlugin,
+                ),
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the
@@ -443,6 +461,9 @@ pub fn run() {
                 // fires on `AppState::Debrief` and the shop lives at `AppState::Site`, neither of
                 // which the harness registers.
                 site::O5Plugin,
+                // Activities: the Paratherapist's two verbs, and the strain they spend. Windowed-only
+                // like the rest of the hub's UI; it writes only the persisted `SquadKnowledge`.
+                site::ActivitiesPlugin,
                 // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
                 // the screen is UI, and the carry writes `Knowledge` only at world construction.
                 knowledge::RosterPlugin,

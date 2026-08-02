@@ -32,7 +32,7 @@ impl Plugin for CutawayPlugin {
 
 /// Ease rate for the cutaway height/scale lerp — matched to the camera's own rotation smoothing so a
 /// wall grows or shrinks over the same turn. Frame-rate independent via `1 − exp(−k·dt)`.
-const CUTAWAY_SMOOTHING: f32 = 9.0;
+pub(crate) const CUTAWAY_SMOOTHING: f32 = 9.0;
 
 /// Once a wall/decoration is this close to its target pose it is snapped exactly onto it, and from
 /// then on `update_cutaway` never touches its `Transform` again until the camera turns. Without the
@@ -40,7 +40,7 @@ const CUTAWAY_SMOOTHING: f32 = 9.0;
 /// dungeon (a 192×192 map's worth) was written — and marked `Changed<Transform>` — every frame
 /// forever, fanning out into transform propagation and render re-extraction for geometry that had
 /// visually settled seconds ago (FVS perf pass, 2026-07-31). Well under a pixel at any zoom.
-const CUTAWAY_SNAP: f32 = 2e-3;
+pub(crate) const CUTAWAY_SNAP: f32 = 2e-3;
 
 /// How a spawned tile participates in the cutaway: floors don't; walls squash to knee height on the
 /// near edge; wall-mounted lintels hide on the near edge; a corner post squashes like a wall but
@@ -87,13 +87,13 @@ pub fn wall_outward(wall_pos: Vec3, cell_center: Vec3) -> Vec3 {
 
 /// True when an outward-facing wall normal points toward the camera — its inner face occludes the room,
 /// so the wall should be a knee wall. At the four 90° detents exactly the two adjacent edges qualify.
-pub(crate) fn faces_camera(outward: Vec3, to_camera: Vec3) -> bool {
+pub fn faces_camera(outward: Vec3, to_camera: Vec3) -> bool {
     outward.dot(to_camera) > 0.0
 }
 
 /// `(scale.y, translation.y)` for a wall standing 0→`WALL_HEIGHT`: knee-high and reseated on the floor
 /// when near the camera, full height and centred otherwise.
-pub(crate) fn wall_pose(near: bool) -> (f32, f32) {
+pub fn wall_pose(near: bool) -> (f32, f32) {
     if near {
         (CAMERA_WALL_FRACTION, WALL_HEIGHT * CAMERA_WALL_FRACTION * 0.5)
     } else {

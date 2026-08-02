@@ -91,6 +91,10 @@
     // door by construction. `y_scale` is a no-op 1.0.
     wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40, footprint: (0.10, 1.00)),
     // Containment-cell glazing — the player must be able to SEE what is held.
+    // The door plaque. `SM_DoorSign_Room` from Pack_SciFi_E_003, converted with `--reorigin-base` so
+    // it is XZ-centred with its base at y = 0 like every other mesh here (`tests/ozea_asset.rs`).
+    // Measured off the GLB's POSITION accessors: 0.336 wide, 0.180 tall, 0.120 deep.
+    door_plaque:       (glb: "ozea/door_plaque.glb", height: 0.18, footprint: (0.336, 0.12)),
     wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40, footprint: (0.20, 2.00)),
     // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
     // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a
@@ -101,7 +105,7 @@
     // so the research wing and the containment wing read as one facility. Native size is the intent —
     // it is furniture, not architecture — and its bed platform sits at y = 0.60, which is where
     // `site::visuals::SLAB_SURFACE_Y` lays the study subject.
-    slab:              (glb: "ozea/slab.glb",                 height: 1.72, footprint: (2.17, 1.07), surface: true),
+    slab:              (glb: "ozea/slab.glb",                 height: 1.72, footprint: (2.17, 1.07), surfaces: ["support"]),
     // `SM_Pylonne`, authored 1.10 m in the pack and re-authored to 2.40 here. It was the worst
     // offender of the lot: at its native height `y_scale` stretched it **2.18×**.
     column:            (glb: "ozea/column.glb",               height: 2.40, footprint: (0.50, 0.80)),
@@ -137,17 +141,33 @@
     bunk: ( glb: "ozea/bunk.glb", height: 0.55, y_offset: 0.0, footprint: (2.29, 1.18) ),
     locker: ( glb: "ozea/locker.glb", height: 1.90, y_offset: 0.0, footprint: (0.46, 1.10) ),
     bedside_table: ( glb: "ozea/bedside_table.glb", height: 0.50, y_offset: 0.0, footprint: (0.40, 0.50) ),
-    galley_counter: ( glb: "ozea/galley_counter.glb", height: 0.75, y_offset: 0.0, footprint: (0.60, 1.40), surface: true ),
-    mess_table: ( glb: "ozea/mess_table.glb", height: 1.20, y_offset: 0.0, footprint: (0.60, 0.60), surface: true ),
+    galley_counter: ( glb: "ozea/galley_counter.glb", height: 0.75, y_offset: 0.0, footprint: (0.60, 1.40), surfaces: ["support", "worktop"] ),
+    mess_table: ( glb: "ozea/mess_table.glb", height: 1.20, y_offset: 0.0, footprint: (0.60, 0.60), surfaces: ["support", "worktop"] ),
     stool: ( glb: "ozea/stool.glb", height: 0.98, y_offset: 0.0, footprint: (0.51, 0.41) ),
     coffee_machine: ( glb: "ozea/coffee_machine.glb", height: 0.67, y_offset: 0.0, footprint: (0.40, 0.50) ),
     water_dispenser: ( glb: "ozea/water_dispenser.glb", height: 1.20, y_offset: 0.0, footprint: (0.45, 0.45) ),
     bench: ( glb: "ozea/bench.glb", height: 0.45, y_offset: 0.0, footprint: (0.55, 2.00) ),
     vending_machine: ( glb: "ozea/vending_machine.glb", height: 1.95, y_offset: 0.0, footprint: (0.91, 1.15) ),
     chair: ( glb: "ozea/chair.glb", height: 1.11, y_offset: 0.0, footprint: (0.57, 0.45), front: Some(90.0) ),
-    map_table: ( glb: "ozea/map_table.glb", height: 1.01, y_offset: 0.0, footprint: (1.46, 1.46), surface: true ),
-    control_desk: ( glb: "ozea/control_desk.glb", height: 1.13, y_offset: 0.0, footprint: (1.47, 3.68), surface: true ),
-    surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0, footprint: (0.58, 1.54), surface: true ),
+    map_table: ( glb: "ozea/map_table.glb", height: 1.01, y_offset: 0.0, footprint: (1.46, 1.46), surfaces: ["support", "worktop"] ),
+    control_desk: ( glb: "ozea/control_desk.glb", height: 1.13, y_offset: 0.0, footprint: (1.47, 3.68), surfaces: ["support", "worktop"] ),
+    surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0, footprint: (0.58, 1.54), surfaces: ["support", "worktop"] ),
     server_rack: ( glb: "ozea/server_rack.glb", height: 1.80, y_offset: 0.0, footprint: (0.74, 1.32) ),
     command_chair: ( glb: "ozea/command_chair.glb", height: 1.10, y_offset: 0.0, footprint: (0.59, 0.55), front: Some(90.0) ),
+
+    // ── Dressing: the lived-in layer (2026-08-02) ───────────────────────────────────────
+    // Heights and footprints are MEASURED, never guessed — Ozea's from the converter's own
+    // INVENTORY.md, the rest read out of the GLB's POSITION accessors.
+    // `mug` and `books` come from assets/low_poly_furniture/ — Ozea has no human objects at all.
+    trash_bin: ( glb: "ozea/trash_bin.glb", height: 0.8, footprint: (0.41, 0.6) ),
+    pallet: ( glb: "ozea/pallet.glb", height: 0.13, footprint: (0.81, 1.21) ),
+    step_ladder: ( glb: "ozea/step_ladder.glb", height: 0.84, footprint: (0.67, 0.56) ),
+    storage_box: ( glb: "ozea/storage_box.glb", height: 0.37, footprint: (0.59, 0.5) ),
+    storage_crate: ( glb: "ozea/storage_crate.glb", height: 0.27, footprint: (0.5, 0.72) ),
+    utility_cart: ( glb: "ozea/utility_cart.glb", height: 0.9, footprint: (1.08, 0.81) ),
+    tube_rack: ( glb: "ozea/tube_rack.glb", height: 0.13, footprint: (0.05, 0.22), rests_on: Some("support") ),
+    data_folder: ( glb: "ozea/data_folder.glb", height: 0.04, footprint: (0.25, 0.2), rests_on: Some("worktop") ),
+    medical_vial: ( glb: "ozea/medical_vial.glb", height: 0.16, footprint: (0.07, 0.07), rests_on: Some("support") ),
+    mug: ( glb: "site_dressing/mug.glb", height: 0.109, footprint: (0.136, 0.105), rests_on: Some("worktop") ),
+    books: ( glb: "site_dressing/books.glb", height: 0.178, footprint: (0.306, 0.106), rests_on: Some("worktop"), scale: 0.6 ),
 )

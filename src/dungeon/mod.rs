@@ -72,7 +72,7 @@ pub fn is_camera_facing_pos(wall_pos: Vec3, cell_center: Vec3) -> bool {
 }
 
 mod biome;
-mod cutaway;
+pub mod cutaway;
 mod config;
 mod layout;
 mod render;

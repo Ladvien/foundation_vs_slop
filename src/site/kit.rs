@@ -36,6 +36,19 @@ pub const SITE_KIT_PATH: &str = "assets/site/kit_ozea.ron";
 /// names meshes nobody has checked in years.
 pub const GREYBOX_KIT_PATH: &str = "assets/site/kit_greybox.ron";
 
+/// How far a `rests_on` piece may look for the surface it stands on.
+///
+/// A dressing prop is authored at the position it should occupy *on* its host, so the host's own
+/// centre is at most half its diagonal away — a 3.68 m control desk is the longest in the kit. This
+/// is comfortably past that and comfortably short of the next room.
+pub const RESTS_ON_REACH: f32 = 2.5;
+
+/// `serde` default for [`KitPiece::scale`] — an unscaled piece is the overwhelming case, and the kit
+/// should not have to say `scale: 1.0` thirty-three times.
+fn one() -> f32 {
+    1.0
+}
+
 /// One mesh in a kit: where it lives, and how tall the artist made it.
 ///
 /// **`height` is why this is a struct and not a bare path.** The Site's pieces are scaled to game
@@ -95,14 +108,78 @@ pub struct KitPiece {
     #[serde(default)]
     pub front: Option<f32>,
 
-    /// A horizontal work or dining surface that seating should address — a table, a counter, a
-    /// console. Seats near one are required to face it (`layout::check_prop_placements`).
+    /// **The surface classes this piece OFFERS** — a table, a counter, a console, the slab.
+    /// Seats near one are required to face it (`layout::check_prop_placements`), and it is what a
+    /// [`Self::rests_on`] piece may be seated on.
     ///
-    /// The furniture manifest expresses the same idea as `surfaces: ["support", "worktop"]`
-    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because nothing
-    /// here scatters objects ONTO surfaces yet.
+    /// # Why a set of classes and not a `bool`
+    ///
+    /// This was `surface: bool` when `rests_on` landed on 2026-08-02, and the pairing was decorative:
+    /// `resting_on` bound the requested class only to interpolate it into an error string, then tested
+    /// the host with a boolean. A mug asking for `"worktop"` seated happily on anything flat — the
+    /// specimen slab included.
+    ///
+    /// Two sides, matched by bit — `surface_bits(rests_on) & offered != 0` — is the contract
+    /// `placement::manifest::validate_manifest` already enforces for the dungeon's furniture, and
+    /// naming it the same thing (`surfaces`) is what lets the two vocabularies converge rather than
+    /// drift. Tutenel et al. 2010 is the reason it is a set and not a single token: what a piece
+    /// OFFERS (the feature axis) is separate from what it is FOR (the service axis), and one top can
+    /// legitimately offer several classes.
+    ///
+    /// The Site's vocabulary is `placement::furnish::SURFACE_CLASSES` verbatim: `"support"` is any
+    /// horizontal top, `"worktop"` is a desk or table people work and eat at. **The slab offers only
+    /// `"support"`** — it is where a specimen is laid out, and a mug on it would read as somebody's
+    /// coffee beside an anomaly. That distinction is the whole point of the class surviving to the
+    /// match.
     #[serde(default)]
-    pub surface: bool,
+    pub surfaces: Vec<String>,
+
+    /// **This piece sits on top of another piece rather than on the floor.**
+    ///
+    /// A mug belongs on a table, not at the table's feet. Before this, the Site had no way to say so:
+    /// `layout::PropPlacement` is `(piece, pos, yaw)` with **no height**, and [`Self::y_offset`] is a
+    /// fact about the *mesh* (how thick the floor under a decal is), not about a placement — so a mug
+    /// authored in the galley stood on the deck.
+    ///
+    /// # Derived, never authored
+    ///
+    /// The height comes from the **hosting piece**, found at build time as the nearest prop **in the
+    /// same area** within [`RESTS_ON_REACH`] that offers this class in its `surfaces`. That is the same
+    /// derive-don't-author discipline `visuals::wall_panels` (faces from floor edges),
+    /// `corner_vertices`, `light_the_site` (a wing's fixtures from its rect), the slab spot (from the
+    /// authored `Slab`) and `people::post_positions` all follow. Move the table and the mug moves;
+    /// change the table's mesh and the mug rises with it.
+    ///
+    /// **A prop that rests on nothing is a loud failure, not a float.** `check_prop_placements`
+    /// rejects it and names the piece, because the alternative — silently seating it at y = 0 — is a
+    /// mug embedded in the floor that no test would ever notice.
+    ///
+    /// The token is a surface *class*, matching `placement::furnish::SURFACE_CLASSES`' vocabulary
+    /// rather than inventing a second one, and it is matched against the host's [`Self::surfaces`] by
+    /// bit — see that field for why the pairing has to be two-sided to mean anything.
+    #[serde(default)]
+    pub rests_on: Option<String>,
+
+    /// Uniform scale applied to the mesh at placement. Defaults to `1.0` — **authored size is the
+    /// intent**, exactly as `pieces::target_height` returns `None` for furniture.
+    ///
+    /// # Why this exists, and why it is not a licence to resize art
+    ///
+    /// It exists because one library the dressing draws on is inconsistently scaled.
+    /// `assets/low_poly_furniture/` was converted for the dungeon's furniture manifest, which carries
+    /// its own per-item footprint, so nothing there ever had to be life-size. Measured 2026-08-02:
+    /// `Mug.glb` is 0.109 m tall and `Plate.glb` 0.029 m — both correct — while `Kettle.glb` is
+    /// 0.547 m and `Keyboard.glb` 0.793 m wide, roughly double. `artist_guide.md` §1 is explicit that
+    /// assets are authored in real metres; these predate the Site using them.
+    ///
+    /// ⚠️ **The number must be derived from a measurement, not dialled by eye**: measure the mesh,
+    /// divide the real-world size by it, write that. `footprint` and `height` in this same entry must
+    /// then be the **scaled** values, because every placement rule reads them.
+    ///
+    /// Distinct from [`Self::y_offset`] (a translation) and from `SiteKit::y_scale` (which stretches
+    /// Y only, to bring a wall to `WALL_HEIGHT`). This is uniform, so it never distorts a shape.
+    #[serde(default = "one")]
+    pub scale: f32,
     /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
     ///
     /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
@@ -148,6 +225,17 @@ pub struct DoorPiece {
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SiteKit {
+    pub trash_bin: KitPiece,
+    pub pallet: KitPiece,
+    pub step_ladder: KitPiece,
+    pub storage_box: KitPiece,
+    pub storage_crate: KitPiece,
+    pub utility_cart: KitPiece,
+    pub tube_rack: KitPiece,
+    pub data_folder: KitPiece,
+    pub medical_vial: KitPiece,
+    pub mug: KitPiece,
+    pub books: KitPiece,
     pub floor: KitPiece,
     pub wall: KitPiece,
     pub wall_corner: KitPiece,
@@ -155,6 +243,7 @@ pub struct SiteKit {
     pub wall_doorway_wide: DoorPiece,
     pub wall_header: KitPiece,
     pub wall_window: KitPiece,
+    pub door_plaque: KitPiece,
     pub wall_low: KitPiece,
     pub slab: KitPiece,
     pub column: KitPiece,
@@ -205,10 +294,69 @@ impl SiteKit {
         self.piece(piece).y_offset
     }
 
+    /// Uniform placement scale for `piece` in THIS kit — see [`KitPiece::scale`].
+    pub fn scale(&self, piece: SitePiece) -> f32 {
+        self.piece(piece).scale
+    }
+
+    /// The surface class `piece` must rest on, if it is not a floor-standing piece.
+    /// See [`KitPiece::rests_on`].
+    pub fn rests_on(&self, piece: SitePiece) -> Option<&str> {
+        self.piece(piece).rests_on.as_deref()
+    }
+
+    /// The class bit `piece` requires of a host, if it rests on one — see [`KitPiece::rests_on`].
+    ///
+    /// An unknown token maps to `0`, which matches nothing. That is not a silent drop: it cannot
+    /// reach here, because [`validate_site_kit`] rejects an unrecognised token at load.
+    pub fn rests_on_bits(&self, piece: SitePiece) -> Option<u32> {
+        self.rests_on(piece)
+            .map(crate::placement::furnish::surface_bits)
+    }
+
+    /// The OR of the classes `piece` OFFERS as a host — see [`KitPiece::surfaces`].
+    pub fn surface_bits(&self, piece: SitePiece) -> u32 {
+        self.piece(piece)
+            .surfaces
+            .iter()
+            .map(|s| crate::placement::furnish::surface_bits(s))
+            .fold(0, |acc, b| acc | b)
+    }
+
+    /// Does `piece` offer any surface at all? The question the seat-facing rule asks, where *which*
+    /// class a top offers is irrelevant — a chair addresses the thing it is pulled up to whatever
+    /// that thing is for.
+    pub fn is_surface(&self, piece: SitePiece) -> bool {
+        self.surface_bits(piece) != 0
+    }
+
+    /// **How high the top of `piece` stands** — the number a resting prop is seated at.
+    ///
+    /// Every transform `visuals::place` applies to a host, in the same order it applies them:
+    /// `y_offset` lifts the piece off the deck, `scale` is the uniform art correction and `y_scale`
+    /// the architectural stretch. Reading only `height * y_scale` — as this did when `rests_on`
+    /// landed — is correct exactly while every surface piece is scale 1.0 and offset 0.0, and
+    /// silently floats or sinks the dressing the moment one is not.
+    pub fn top_height(&self, piece: SitePiece) -> f32 {
+        let k = self.piece(piece);
+        k.y_offset + k.height * k.scale * self.y_scale(piece)
+    }
+
     /// The kit entry for `piece`.
     pub fn piece(&self, piece: SitePiece) -> &KitPiece {
         use SitePiece::*;
         match piece {
+            TrashBin => &self.trash_bin,
+            Pallet => &self.pallet,
+            StepLadder => &self.step_ladder,
+            StorageBox => &self.storage_box,
+            StorageCrate => &self.storage_crate,
+            UtilityCart => &self.utility_cart,
+            TubeRack => &self.tube_rack,
+            DataFolder => &self.data_folder,
+            MedicalVial => &self.medical_vial,
+            Mug => &self.mug,
+            Books => &self.books,
             Floor => &self.floor,
             Wall => &self.wall,
             WallCorner => &self.wall_corner,
@@ -216,6 +364,7 @@ impl SiteKit {
             WallDoorwayWide => &self.wall_doorway_wide.mesh,
             WallHeader => &self.wall_header,
             WallWindow => &self.wall_window,
+            DoorPlaque => &self.door_plaque,
             WallLow => &self.wall_low,
             Slab => &self.slab,
             Column => &self.column,
@@ -274,12 +423,57 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
         }
     }
     for piece in SitePiece::ALL {
-        let h = kit.piece(*piece).height;
+        let entry = kit.piece(*piece);
+        let h = entry.height;
         if !(h.is_finite() && h > 0.0) {
             return Err(format!(
                 "site kit: {piece:?} has authored height {h} — the scale is target/authored, so a \
                  zero or negative height is a divide-by-zero or an inside-out mesh"
             ));
+        }
+        // Same reasoning as the height, one step further along: `scale` multiplies the placement
+        // transform, so a zero collapses the mesh to a point and a negative one turns it inside out —
+        // both of which render as "the prop is missing" with nothing in the log.
+        if !(entry.scale.is_finite() && entry.scale > 0.0) {
+            return Err(format!(
+                "site kit: {piece:?} has scale {} — a zero collapses the mesh and a negative one \
+                 mirrors it; both look like a missing asset and neither errors at spawn",
+                entry.scale
+            ));
+        }
+        // A `rests_on` token must name a surface class something in this kit actually offers,
+        // otherwise the piece can never be seated and would silently sit on the floor. Checked at the
+        // door in the same spirit as `placement::manifest::validate_manifest`'s two-sided contract —
+        // "a scatter class no item in the kit offers is a load-time reject naming the item".
+        for class in &entry.surfaces {
+            if crate::placement::furnish::surface_bits(class) == 0 {
+                return Err(format!(
+                    "site kit: {piece:?} offers surface class {class:?}, which is not one. The \
+                     vocabulary is `placement::furnish::SURFACE_CLASSES`."
+                ));
+            }
+        }
+        if let Some(class) = &entry.rests_on {
+            let want = crate::placement::furnish::surface_bits(class);
+            if want == 0 {
+                return Err(format!(
+                    "site kit: {piece:?} rests on {class:?}, which is not a surface class. The \
+                     vocabulary is `placement::furnish::SURFACE_CLASSES`."
+                ));
+            }
+            // The two-sided half. Asking "does ANY piece have a surface" — which is what this checked
+            // when `surfaces` was a `bool` — passes a kit in which nothing offers the class actually
+            // requested, and the failure then surfaces as a placement fault per authored prop rather
+            // than as one sentence about the kit.
+            if !SitePiece::ALL
+                .iter()
+                .any(|p| kit.surface_bits(*p) & want != 0)
+            {
+                return Err(format!(
+                    "site kit: {piece:?} rests on {class:?} but no piece in this kit OFFERS that \
+                     class in its `surfaces` — it could never be seated"
+                ));
+            }
         }
     }
     // A doorway's opening must be a real hole inside a real mesh. The aperture quad is built from
@@ -452,7 +646,9 @@ mod tests {
             y_offset: 0.0,
             footprint: (0.3, 0.3),
             front: None,
-            surface: false,
+            surfaces: Vec::new(),
+            rests_on: None,
+            scale: 1.0,
         };
         assert!(
             validate_site_kit(&kit).is_err(),

@@ -55,6 +55,20 @@ pub use super::people::{CastId, Operative, SiteAvatar, Staff};
 #[derive(Component, Debug, Default)]
 pub struct AvatarGoal(pub Option<Vec3>);
 
+impl AvatarGoal {
+    /// **Is this body actually walking?** — the question `Velocity` would answer for a squad unit.
+    ///
+    /// Site avatars deliberately carry no `Velocity`: `drive_avatars` eases `Transform` toward the
+    /// goal directly, and `site::mod` gives the full reason a `SiteAvatar` is not a `squad::Unit`.
+    /// So "moving" has to be asked of the goal, and it has to be asked with an epsilon — the ease is
+    /// exponential, so a bare `goal.is_some()` stays true forever as the position converges and a
+    /// footstep voice keyed on it would never stop.
+    pub fn walking(&self, at: &Transform, epsilon: f32) -> bool {
+        self.0
+            .is_some_and(|g| at.translation.distance_squared(g) > epsilon * epsilon)
+    }
+}
+
 /// The one avatar the player drives.
 #[derive(Component)]
 pub struct PlayerAvatar;
@@ -277,7 +291,7 @@ type WallPanel = (i32, i32, bool);
 ///
 /// `site67.ron` still says which cells are wall — that is what `is_walkable` and `SiteLayout::validate`
 /// read. Only the question "where is its face" is answered here.
-fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
+pub(crate) fn wall_panels(l: &SiteLayout) -> std::collections::BTreeSet<WallPanel> {
     let wall_cells: std::collections::HashSet<(i32, i32)> = l
         .walls
         .iter()
@@ -371,7 +385,7 @@ fn place(
     piece: SitePiece,
     at: Vec3,
     yaw_deg: f32,
-) {
+) -> Entity {
     // Owned: `AssetPath` would otherwise borrow from the kit resource and escape into the spawn.
     let scene: Handle<WorldAsset> =
         assets.load(GltfAssetLabel::Scene(0).from_asset(kit.glb(piece).to_owned()));
@@ -384,12 +398,23 @@ fn place(
             // `KitPiece::y_offset` for why this is geometric rather than a depth bias.
             Transform::from_translation(at + Vec3::Y * kit.y_offset(piece))
                 .with_rotation(Quat::from_rotation_y(yaw_deg.to_radians()))
-                // The kit is authored at its own scale per piece; `y_scale` lifts architecture to
-                // WALL_HEIGHT and leaves dressing at the size the artist made it.
-                .with_scale(Vec3::new(1.0, kit.y_scale(piece), 1.0)),
+                // Two different scales, and they answer different questions.
+                //
+                // `y_scale` is GAME POLICY stretching Y alone: a wall must reach `WALL_HEIGHT`
+                // whatever the artist made it, and dressing (`target_height` → `None`) is left at the
+                // size it was authored.
+                //
+                // `scale` is an ART CORRECTION applied uniformly: one of the libraries the dressing
+                // draws on (`assets/low_poly_furniture/`) was converted for the dungeon's manifest,
+                // which carries its own footprint, so nothing there ever had to be life-size — `Books
+                // A.glb` measures a half-metre wide. Uniform, so it never distorts a shape, and the
+                // kit's `height`/`footprint` are the post-scale values because every placement rule
+                // reads them. See `KitPiece::scale`.
+                .with_scale(Vec3::splat(kit.scale(piece)) * Vec3::new(1.0, kit.y_scale(piece), 1.0)),
             Visibility::Inherited,
         ))
-        .with_child((WorldAssetRoot(scene), Transform::default()));
+        .with_child((WorldAssetRoot(scene), Transform::default()))
+        .id()
 }
 
 /// Bevy's `Rectangle` is authored in the XY plane with a **+Z normal**, so its width axis is world X.
@@ -497,6 +522,39 @@ const SLAB_SURFACE_Y: f32 = 0.60;
 /// span of `wall_window` itself, so a cell is square in plan.
 pub(crate) const CELL_DEPTH: f32 = 2.0;
 
+/// Half the depth of a containment CELL ROOM, in metres — the 3x3 rects `site67.ron` authors.
+///
+/// Used to find the room's corridor-facing wall from its authored centre, so the observation window
+/// follows the room rather than being a second coordinate that can disagree with it.
+pub(crate) const CELL_ROOM_HALF_DEPTH: f32 = 1.5;
+
+/// Height of the TOP plaque's base above the floor, in metres. Eye height for a standing person,
+/// which is where signage that has to be read while walking belongs.
+const PLAQUE_EYE_HEIGHT: f32 = 1.55;
+/// Vertical pitch between stacked plaques. Slightly more than the 0.18 m sign is tall, so the stack
+/// reads as separate plates rather than as one tall one — the count is the whole message.
+const PLAQUE_STACK_STEP: f32 = 0.24;
+/// How far along the wall from the doorway's centre the plaque hangs.
+///
+/// ⚠️ **Inside the doorway cell, not past it.** This was 0.62 — deliberately "past the opening's edge
+/// so it is on solid wall" — and that reasoning is wrong for how the Site builds walls: a panel sits
+/// on the BOUNDARY of the doorway cell, half a metre out, so anything beyond that is inside the
+/// neighbouring wall cell and the sign is swallowed by the geometry. Found by rendering it and seeing
+/// nothing. 0.42 hangs it in the door's own reveal, where it is visible from both approaches.
+const PLAQUE_BESIDE_DOOR: f32 = 0.42;
+
+/// Which way the wall a doorway sits in RUNS, as a unit step.
+///
+/// Same half-turn convention as every wall in the kit and as `SiteLayout::doorway_run_step`: a frame
+/// at yaw 90 separates along X, so its wall runs along X and the plaque hangs beside it that way.
+fn plaque_run(yaw_deg: f32) -> Vec3 {
+    if (45.0..135.0).contains(&yaw_deg.rem_euclid(180.0)) {
+        Vec3::X
+    } else {
+        Vec3::Z
+    }
+}
+
 /// Which way a containment cell's interior lies, given its authored yaw.
 ///
 /// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
@@ -575,8 +633,64 @@ fn spawn_site_geometry(
     let panels = wall_panels(l);
     for &panel in &panels {
         let (at, yaw) = panel_transform(l, panel);
-        place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+        let e = place(&mut commands, &assets, &kit, SitePiece::Wall, at, yaw);
+        // The knee-wall cutaway, which the hub went without for its whole life. A panel that encloses
+        // nothing (floor on both sides, or on neither) gets no normal and is left standing — see
+        // `cutaway::panel_outward`.
+        if let Some(outward) = super::cutaway::panel_outward(l, panel) {
+            commands.entity(e).insert(super::cutaway::SiteKneeWall {
+                outward,
+                base_scale_y: kit.scale(SitePiece::Wall) * kit.y_scale(SitePiece::Wall),
+            });
+        }
     }
+    // ── DOORWAYS ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // **Site-67 has doors now.** The old hub had none — an opening was the absence of wall, so a room
+    // stood open along a whole shared edge — and that was inherited from `placement::furnish`'s
+    // Backrooms art direction (*"No doors — the Backrooms look leaves every opening as a bare
+    // doorway"*), which is a decision about the DUNGEON. The Director corrected it on 2026-08-02: the
+    // hub is a Foundation facility, and facilities have doors.
+    //
+    // The frame stands ON the doorway cell, which is floor — see `layout::Doorway` for why an opening
+    // has to be floor rather than a hole in the floor. The header course closes the 0.40 m band above
+    // it, without which the perimeter has a slot straight through it at head height; the same fix the
+    // ASYNC aperture needed on 2026-08-01.
+    for d in &l.doorways {
+        let at = l.cell_center(IVec2::new(d.cell.0, d.cell.1));
+        place(&mut commands, &assets, &kit, SitePiece::WallDoorway, at, d.yaw);
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallHeader,
+            at + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT,
+            d.yaw,
+        );
+        // ── THE PLAQUE ───────────────────────────────────────────────────────────────────────────
+        //
+        // Derived from the doorway, never authored — the discipline `wall_panels`, `corner_vertices`,
+        // `light_the_site` and `post_positions` all follow. Move a door and its sign moves with it;
+        // change what it takes to pass and the sign changes on its own.
+        //
+        // **One plaque per clearance level, stacked.** A Level 2 door wears two and an open door wears
+        // none, so how restricted a door is, is countable from across the corridor. Deliberately not
+        // colour-coded however much SCP:CB's are — see `SitePiece::DoorPlaque`.
+        let Some(level) = d.clearance else { continue };
+        let along = plaque_run(d.yaw);
+        for i in 0..level.rank() {
+            let y = PLAQUE_EYE_HEIGHT - i as f32 * PLAQUE_STACK_STEP;
+            place(
+                &mut commands,
+                &assets,
+                &kit,
+                SitePiece::DoorPlaque,
+                at + along * PLAQUE_BESIDE_DOOR + Vec3::Y * y,
+                d.yaw,
+            );
+        }
+    }
+
     // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,
     // say) still stands where it was authored: it is furniture on a cell, not a face on an edge.
     for w in &l.walls {
@@ -590,7 +704,7 @@ fn spawn_site_geometry(
     let corners = corner_vertices(&panels);
     for &v in &corners {
         let at = l.point((v.0 as f32, v.1 as f32));
-        place(
+        let e = place(
             &mut commands,
             &assets,
             &kit,
@@ -598,9 +712,26 @@ fn spawn_site_geometry(
             at,
             corner_yaw(&panels, v),
         );
+        if let Some(outward) = super::cutaway::corner_outward(l, &panels, v) {
+            commands.entity(e).insert(super::cutaway::SiteKneeWall {
+                outward,
+                base_scale_y: kit.scale(SitePiece::WallCorner)
+                    * kit.y_scale(SitePiece::WallCorner),
+            });
+        }
     }
     for p in &l.props {
-        let at = l.point(p.pos);
+        let mut at = l.point(p.pos);
+        // A dressing prop that rests on a surface takes its height from the host it stands on —
+        // derived, never authored (`kit::KitPiece::rests_on`). `check_prop_placements` has already
+        // refused any resting prop with no host, so an `Err` here cannot reach a built Site; it is
+        // logged rather than ignored so a future caller that skipped the check is not silent.
+        if let Some(rest) = super::layout::resting_on(l, &kit, p) {
+            match rest {
+                Ok((top, _host_ix)) => at.y += top,
+                Err(e) => warn!("site: {e}"),
+            }
+        }
         place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
         // The slab is the one prop with a gameplay meaning attached, so it also gets a marker at the
         // height of its bed platform for `lay_out_the_study_subject` to parent a body to.
@@ -671,17 +802,30 @@ fn spawn_site_geometry(
 
     // Containment cells: the glazed front, the booth behind it, and an empty marker the specimen body
     // will fill.
+    // **A cell is a ROOM now, so it needs no booth.** `enclose_containment_cell` used to build two
+    // side walls and a back behind each pane, because a cell was a 2 m alcove standing on the open
+    // deck of the containment wing. The twelve cells are authored rects in `areas:`/`floor:` as of
+    // 2026-08-02, so the perimeter pass walls them like every other room and building a second
+    // enclosure inside the first would put two walls in one place.
+    //
+    // What survives is the OBSERVATION WINDOW: a cell you can only see into by opening its door is a
+    // cupboard, and the containment wing's whole job is to be a rack of held things you walk past.
+    // The window goes in the corridor-facing wall beside the door — `window_offset` is one cell to the
+    // side of the doorway, which is the only part of that wall guaranteed to be solid.
     for c in &l.cells {
         let at = l.point(c.pos);
+        // The wall between this cell and the cell row: half the room's depth from its centre, on the
+        // side its `yaw` faces. Derived from the authored centre, never a second authored number.
+        let facing = Quat::from_rotation_y(c.yaw.to_radians()) * Vec3::Z;
+        let window_at = at + facing * (CELL_ROOM_HALF_DEPTH) + facing.cross(Vec3::Y) * 1.0;
         place(
             &mut commands,
             &assets,
             &kit,
             SitePiece::WallWindow,
-            at,
-            c.yaw,
+            window_at,
+            c.yaw + 90.0,
         );
-        enclose_containment_cell(&mut commands, &assets, &kit, at, c.yaw);
         commands.spawn((
             SiteVisual,
             ContainmentCell {
@@ -857,6 +1001,16 @@ struct AreaLight {
 fn area_light(id: super::layout::AreaId) -> AreaLight {
     use super::layout::AreaId::*;
     match id {
+        // **A cell.** Colder and harder than the corridor outside it, and deliberately over-lit for
+        // its size: this is a room designed so that nothing in it is ever in shadow, which is what a
+        // containment cell is FOR. Short range because it is 3x3 — a 10 m falloff in a 3 m room just
+        // spills through the doorway and lights the corridor twice.
+        ContainmentCell => AreaLight {
+            kelvin: 6900.0,
+            key_lumens: 300_000.0,
+            fill_lumens: 210_000.0,
+            range: 5.0,
+        },
         // Clinical and high-key. This is the one room that must look like it is inspected daily.
         Containment => AreaLight {
             kelvin: 6500.0,

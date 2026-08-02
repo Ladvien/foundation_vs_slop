@@ -111,10 +111,105 @@ fn spawn_briefing(
         });
 }
 
+/// Root marker for the **war room's** copy of the briefing, at Site-67.
+#[derive(Component)]
+pub struct WarRoomRoot;
+
+/// What the war room says about the last expedition.
+///
+/// The same descriptors, re-headed. The tense is the whole difference and it is not cosmetic: at the
+/// Site the director has not sampled the *next* world yet, so a panel headed `EXPEDITION BRIEFING`
+/// would be claiming to describe a world that does not exist. `ExpeditionBriefing` while `Idle` holds
+/// the one you came back from, and saying so is the same honesty rule FVS-H-7 sets for the
+/// authored-world case — a state the player cannot perceive is a second path however the code frames
+/// it.
+pub fn war_room_text(b: &ExpeditionBriefing) -> String {
+    match b.0 {
+        // Before the first expedition there is nothing to review, and the room should say so rather
+        // than render an authored-world briefing that reads like a plan (`docs/ui.md` §1.4).
+        None => "WAR ROOM\n\
+                 NO EXPEDITION ON RECORD.\n\
+                 The board is clear until you have been through the door."
+            .to_string(),
+        Some(_) => briefing_text(b).replacen(
+            "EXPEDITION BRIEFING",
+            "WAR ROOM — LAST EXPEDITION",
+            1,
+        ),
+    }
+}
+
+fn spawn_war_room(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    fonts: Res<FontAssets>,
+    regions: Res<HudRegions>,
+    briefing: Res<ExpeditionBriefing>,
+) {
+    let root = (
+        WarRoomRoot,
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(Val::Px(theme.space_md), Val::Px(theme.space_sm)),
+            ..default()
+        },
+        BackgroundColor(theme.panel),
+        crate::ui::widgets::border_all(theme.panel_border),
+        Pickable::IGNORE,
+    );
+    // `MidLeft` — free in every room. The four corner panels and the war room can never be on screen
+    // together anyway, but taking a distinct region means the ledger test in `site::presence` stays
+    // provable rather than depending on the gating being right.
+    let Some(mut ec) = layout::panel_in(&mut commands, &regions, Region::MidLeft, root) else {
+        error!("war room: no layout frame at spawn — the branch readout is not shown");
+        return;
+    };
+    ec.with_children(|p| {
+        p.spawn((
+            crate::ui::widgets::text_colored(
+                &theme,
+                &fonts,
+                war_room_text(&briefing),
+                theme.font_body,
+                theme.text,
+            ),
+            Pickable::IGNORE,
+        ));
+    });
+}
+
 pub struct BriefingPlugin;
 
 impl Plugin for BriefingPlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
+        // ── The war room, at the Site ────────────────────────────────────────────────────────────
+        //
+        // `ui/briefing` has rendered `BRANCH UNIVERSE 0x… CLUTTER ▓▓▓░░ INFESTATION ▓▓░░░` since
+        // FVS-L-4, and the room named after it did not show it. Now it does, when you stand in it.
+        //
+        // ⚠️ **`RunState::Idle` only, and that is a rule rather than an optimisation.**
+        // `docs/2026-08-01-two-live-layers.md` §5 forbids supervising the squad you left unattended:
+        // during a `VisitSite` the expedition is still running and reading its board would be exactly
+        // the surveillance that document rules out. The room is dark during a visit, deliberately, and
+        // `AreaId::WarRoom`'s own doc comment says so.
+        app.add_systems(
+            Update,
+            spawn_war_room
+                .after(layout::spawn_frame)
+                .run_if(in_state(crate::session::RunState::Idle))
+                .run_if(crate::site::panel_wanted::<WarRoomRoot>(
+                    crate::site::AreaId::WarRoom,
+                )),
+        )
+        .add_systems(
+            Update,
+            despawn_scoped::<WarRoomRoot>.run_if(
+                crate::site::panel_stale::<WarRoomRoot>(crate::site::AreaId::WarRoom)
+                    .or_else(in_state(crate::session::RunState::Active)),
+            ),
+        )
+        .add_systems(OnExit(AppState::Site), despawn_scoped::<WarRoomRoot>);
         // `OnEnter(InGame)` rather than `OnEnter(Warmup)`: the director writes the briefing during
         // `OnEnter(RunState::Active)`, which lands before `Warmup` finishes, but reading it at `InGame`
         // means the panel cannot render a briefing for the *previous* expedition if a transition is
@@ -146,6 +241,34 @@ mod tests {
         assert!(t.contains("0x5C09191"), "the Branch universe must be identified: {t}");
         assert!(t.contains("3,5"), "the archive cell must be identified: {t}");
         assert!(t.contains("CLUTTER") && t.contains("INFESTATION"), "{t}");
+    }
+
+    /// **The war room reviews; it does not plan.**
+    ///
+    /// At the Site the director has not sampled the next world yet, so a panel headed `EXPEDITION
+    /// BRIEFING` would be describing a world that does not exist. The tense is the whole difference
+    /// between an honest readout and one the player would act on wrongly.
+    #[test]
+    fn the_war_room_speaks_in_the_past_tense_and_keeps_both_axes() {
+        let t = war_room_text(&sampled(0.8, 0.2));
+        assert!(t.contains("LAST EXPEDITION"), "the tense is the point: {t}");
+        assert!(
+            !t.contains("EXPEDITION BRIEFING"),
+            "it must not claim to brief a world nobody has sampled: {t}"
+        );
+        // ...and it still carries what the briefing carries, in the archive's own axes.
+        assert!(t.contains("0x5C09191") && t.contains("CLUTTER") && t.contains("INFESTATION"), "{t}");
+    }
+
+    /// Before the first expedition the board is empty, and the room says so.
+    ///
+    /// Falling through to the authored-world briefing would print "Baseline site conditions" under a
+    /// war-room header, which reads as a plan for an expedition that has not been prepared.
+    #[test]
+    fn an_empty_board_is_named_rather_than_filled_with_the_authored_world() {
+        let t = war_room_text(&ExpeditionBriefing(None));
+        assert!(t.contains("NO EXPEDITION ON RECORD"), "{t}");
+        assert!(!t.contains("AUTHORED UNIVERSE"), "that is the in-game briefing's line, not this one: {t}");
     }
 
     #[test]

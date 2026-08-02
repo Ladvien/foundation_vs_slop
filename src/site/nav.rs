@@ -206,9 +206,14 @@ mod tests {
         // Push diagonally into a wall and assert real progress along the free axis. Without the
         // axis-separated retry this returns ~0 and every brush against a wall reads as a freeze.
         let (_l, n) = nav();
-        // The spine's south edge: walkable at z=12, void below (the async hall ends at z=11 only for
-        // x<12, so pick a spine cell east of the hall).
-        let start = n.cell_center(IVec2::new(20, 12));
+        // Any walkable cell with a non-walkable one directly north of it — a wall to slide along.
+        // Searched rather than written down: the Site's coordinates moved wholesale twice on
+        // 2026-08-02 and every literal in this module broke both times.
+        let probe = (0..80)
+            .flat_map(|x| (0..60).map(move |z| IVec2::new(x, z)))
+            .find(|c| n.is_walkable(*c) && !n.is_walkable(*c + IVec2::NEG_Y))
+            .expect("the Site has at least one wall to stand beside");
+        let start = n.cell_center(probe);
         assert!(n.is_walkable(n.world_to_cell(start)), "precondition: the probe starts on floor");
         let moved = n.resolve_move(start, Vec3::new(1.0, 0.0, -1.0), 0.25);
         assert!(

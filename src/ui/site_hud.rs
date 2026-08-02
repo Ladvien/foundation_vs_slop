@@ -320,8 +320,30 @@ pub struct SiteHudPlugin;
 
 impl Plugin for SiteHudPlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
         app.add_message::<CycleSpecimenRequest>()
-            .add_systems(OnEnter(AppState::Site), spawn_panel.after(layout::spawn_frame))
+            // **The panel opens itself when you walk in.** The curriculum and the specimen selector
+            // belong with the experiments they feed, so this shares the research wing with
+            // `research_hud` rather than being stranded from it — two panels, two regions, one room.
+            //
+            // `Update` and not `OnEnter(AppState::Site)`: the room, not the screen, is what decides
+            // now. The key binding is deliberately NOT gated — see `cycle_study_subject` below,
+            // which still runs anywhere in the hub. Presence OFFERS; the key still ACTS.
+            .add_systems(
+                Update,
+                spawn_panel
+                    .after(layout::spawn_frame)
+                    .run_if(crate::site::panel_wanted::<SiteHudRoot>(
+                        crate::site::AreaId::Research,
+                    )),
+            )
+            .add_systems(
+                Update,
+                despawn_scoped::<SiteHudRoot>.run_if(crate::site::panel_stale::<SiteHudRoot>(
+                    crate::site::AreaId::Research,
+                )),
+            )
+            // Leaving the Site entirely still tears it down, whichever room the player was in.
             .add_systems(OnExit(AppState::Site), despawn_scoped::<SiteHudRoot>)
             .add_systems(
                 Update,
