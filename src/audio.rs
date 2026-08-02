@@ -245,7 +245,7 @@ impl Sfx {
 
 /// Handles for every clip, loaded once at startup.
 #[derive(Resource)]
-struct AudioAssets {
+pub(crate) struct AudioAssets {
     move_order: Handle<AudioSource>,
     invalid: Handle<AudioSource>,
     /// Camera-shutter "snap" for the Ctrl+P debug region-capture (see `region_capture`).
@@ -294,13 +294,31 @@ struct AudioAssets {
 /// one-shot multiplies its per-clip base by its group gain at spawn; the forever-alive beds multiply
 /// by their group gain × the duck factor each frame. Master + mute stay on `GlobalVolume`.
 #[derive(Resource)]
-struct AudioBus {
+pub(crate) struct AudioBus {
     music: f32,
-    ambience: f32,
-    sfx: f32,
+    pub(crate) ambience: f32,
+    pub(crate) sfx: f32,
     ui: f32,
     /// 0 = no duck … 1 = full duck. Bumped by loud events, decays each frame.
     duck: f32,
+}
+
+impl AudioAssets {
+    /// The **concrete** footstep set — index 1, the non-carpet biome. Site-67 is a poured-concrete
+    /// facility, so this is the surface the hub walks on; the carpet set is the Backrooms'.
+    ///
+    /// An accessor rather than public fields: the Site needs exactly two of these tables, and
+    /// widening the whole struct would let a future caller reach past the handful of clips anyone
+    /// has thought about.
+    pub(crate) fn concrete_footsteps(&self) -> &[Handle<AudioSource>] {
+        &self.footsteps[1]
+    }
+
+    /// The sparse one-shot palette: six creaks, two drips, a clock. See `crate::site::audio` for
+    /// which wing draws from which slice of it, and why that is the hub's room tone.
+    pub(crate) fn ambient_oneshots(&self) -> &[Handle<AudioSource>] {
+        &self.ambient
+    }
 }
 
 impl Default for AudioBus {
@@ -1081,7 +1099,7 @@ fn one_shot(vol: f32, speed: f32) -> PlaybackSettings {
 /// the `Transform` alongside the settings so a caller spawns `(AudioPlayer, one_shot_spatial(..))`.
 /// The emitter reads its `GlobalTransform` after transform propagation (Bevy runs audio playback
 /// `after(TransformSystems::Propagate)`), so its position is correct on the very first frame.
-fn one_shot_spatial(pos: Vec3, vol: f32, speed: f32) -> (PlaybackSettings, Transform) {
+pub(crate) fn one_shot_spatial(pos: Vec3, vol: f32, speed: f32) -> (PlaybackSettings, Transform) {
     let mut s = PlaybackSettings::DESPAWN.with_spatial(true);
     s.volume = Volume::Linear(vol);
     s.speed = speed;
@@ -1096,14 +1114,14 @@ fn looped(vol: f32) -> PlaybackSettings {
 }
 
 /// A playback-speed multiplier of `1.0 ± amount`, so repeated one-shots don't sound identical.
-fn jitter(state: &mut u32, amount: f32) -> f32 {
+pub(crate) fn jitter(state: &mut u32, amount: f32) -> f32 {
     1.0 + (rand01(state) * 2.0 - 1.0) * amount
 }
 
 /// Round-robin pick over `len` variants with **no immediate repeat**: never returns the same index
 /// twice in a row (unless there's only one), so a repeatedly-triggered sound cycles instead of
 /// stamping one clip. `last` is the caller's running memory of the previous pick. Panic-free.
-fn pick_variant(rng: &mut u32, len: usize, last: &mut usize) -> usize {
+pub(crate) fn pick_variant(rng: &mut u32, len: usize, last: &mut usize) -> usize {
     if len <= 1 {
         *last = 0;
         return 0;

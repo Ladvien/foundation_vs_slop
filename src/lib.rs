@@ -454,6 +454,8 @@ pub fn run() {
                 // Activities: the Paratherapist's two verbs, and the strain they spend. Windowed-only
                 // like the rest of the hub's UI; it writes only the persisted `SquadKnowledge`.
                 site::ActivitiesPlugin,
+                // The hub's own sound: footfalls that exist, and a room tone per wing.
+                site::SiteAudioPlugin,
                 // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
                 // the screen is UI, and the carry writes `Knowledge` only at world construction.
                 knowledge::RosterPlugin,

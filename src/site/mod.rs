@@ -51,6 +51,7 @@
 
 pub mod activities;
 pub mod aperture;
+pub mod audio;
 pub mod cutaway;
 pub mod kit;
 pub mod layout;
@@ -68,6 +69,7 @@ pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
 pub use people::{CastId, Operative, SiteAvatar, Staff, StaffMember, StaffRig};
 pub use activities::ActivitiesPlugin;
+pub use audio::SiteAudioPlugin;
 pub use cutaway::SiteCutawayPlugin;
 pub use presence::{
     in_area, panel_stale, panel_wanted, AreaEntered, CurrentArea, SitePresencePlugin,

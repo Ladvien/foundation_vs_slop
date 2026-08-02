@@ -55,6 +55,20 @@ pub use super::people::{CastId, Operative, SiteAvatar, Staff};
 #[derive(Component, Debug, Default)]
 pub struct AvatarGoal(pub Option<Vec3>);
 
+impl AvatarGoal {
+    /// **Is this body actually walking?** — the question `Velocity` would answer for a squad unit.
+    ///
+    /// Site avatars deliberately carry no `Velocity`: `drive_avatars` eases `Transform` toward the
+    /// goal directly, and `site::mod` gives the full reason a `SiteAvatar` is not a `squad::Unit`.
+    /// So "moving" has to be asked of the goal, and it has to be asked with an epsilon — the ease is
+    /// exponential, so a bare `goal.is_some()` stays true forever as the position converges and a
+    /// footstep voice keyed on it would never stop.
+    pub fn walking(&self, at: &Transform, epsilon: f32) -> bool {
+        self.0
+            .is_some_and(|g| at.translation.distance_squared(g) > epsilon * epsilon)
+    }
+}
+
 /// The one avatar the player drives.
 #[derive(Component)]
 pub struct PlayerAvatar;
