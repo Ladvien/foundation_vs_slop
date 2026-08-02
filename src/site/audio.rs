@@ -238,6 +238,11 @@ pub struct SiteAudioPlugin;
 
 impl Plugin for SiteAudioPlugin {
     fn build(&self, app: &mut App) {
+        // `site_room_tone` takes `Res<CurrentArea>`, and a missing `Res` panics on parameter
+        // validation rather than skipping the system. Same rule as the room-gated panels, and it
+        // applies to a plain system exactly as it does to a run condition — see
+        // `presence::claim_current_area` for the failure this cost.
+        crate::site::claim_current_area(app);
         app.add_systems(
             Update,
             (site_footsteps, site_room_tone).run_if(in_state(AppState::Site)),
