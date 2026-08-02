@@ -49,6 +49,7 @@
 //! presentation half (geometry, avatars, the aperture material) is windowed-only `SiteVisualsPlugin`,
 //! and any body it spawns must carry a `Transform` **without** a `Health` to stay out of the fold.
 
+pub mod activities;
 pub mod aperture;
 pub mod cutaway;
 pub mod kit;
@@ -66,6 +67,7 @@ pub use layout::{AreaId, SiteLayout};
 pub use nav::SiteNav;
 pub use o5::{Consumable, ExpeditionReport, O5Standing, Rating};
 pub use people::{CastId, Operative, SiteAvatar, Staff, StaffMember, StaffRig};
+pub use activities::ActivitiesPlugin;
 pub use cutaway::SiteCutawayPlugin;
 pub use presence::{
     in_area, panel_stale, panel_wanted, AreaEntered, CurrentArea, SitePresencePlugin,

@@ -239,6 +239,11 @@ pub enum Action {
     BuyCaptureDevice,
     BuyQuarantineCharge,
     BuyMedkit,
+    /// Sit the most strained operative down with Dr. Lindqvist. Gives strain back and costs nothing.
+    TherapySession,
+    /// Talk that operative out of the `Lethal` belief they hold most confidently — more relief than a
+    /// session, paid for with the confidence `Knowledge::fear_scale` reads.
+    DeepDebrief,
 
     // --- Screens. ---
     /// Open / close the pause menu. **Not rebindable** — a player who rebinds their only way out
@@ -261,7 +266,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 39] = [
         Action::CameraPanForward,
         Action::CameraPanBack,
         Action::CameraPanLeft,
@@ -289,6 +294,8 @@ impl Action {
         Action::BuyCaptureDevice,
         Action::BuyQuarantineCharge,
         Action::BuyMedkit,
+        Action::TherapySession,
+        Action::DeepDebrief,
         Action::PauseMenu,
         Action::MenuBack,
         Action::MenuUp,
@@ -346,16 +353,18 @@ impl Action {
             BuyCaptureDevice => 24,
             BuyQuarantineCharge => 25,
             BuyMedkit => 26,
-            PauseMenu => 27,
-            MenuBack => 28,
-            MenuUp => 29,
-            MenuDown => 30,
-            MenuActivate => 31,
-            DevAiOverlay => 32,
-            DevPerfHud => 33,
-            DevResearchRoom => 34,
-            DevForceVictory => 35,
-            DevRegionCapture => 36,
+            TherapySession => 27,
+            DeepDebrief => 28,
+            PauseMenu => 29,
+            MenuBack => 30,
+            MenuUp => 31,
+            MenuDown => 32,
+            MenuActivate => 33,
+            DevAiOverlay => 34,
+            DevPerfHud => 35,
+            DevResearchRoom => 36,
+            DevForceVictory => 37,
+            DevRegionCapture => 38,
         }
     }
 
@@ -376,7 +385,7 @@ impl Action {
             // `Context::Site` action — and the player would press it expecting one thing and get two.
             VisitSite => Context::Play,
             CycleSpecimen | RunTopExperiment | FileFindings | CurateArchive | BuyCaptureDevice
-            | BuyQuarantineCharge | BuyMedkit => Context::Site,
+            | BuyQuarantineCharge | BuyMedkit | TherapySession | DeepDebrief => Context::Site,
             MenuBack | MenuUp | MenuDown | MenuActivate => Context::Menu,
             DevAiOverlay | DevPerfHud | DevResearchRoom | DevForceVictory | DevRegionCapture => {
                 Context::Dev
@@ -433,6 +442,8 @@ impl Action {
             BuyCaptureDevice => "buy_capture_device",
             BuyQuarantineCharge => "buy_quarantine_charge",
             BuyMedkit => "buy_medkit",
+            TherapySession => "therapy_session",
+            DeepDebrief => "deep_debrief",
             PauseMenu => "pause_menu",
             MenuBack => "menu_back",
             MenuUp => "menu_up",
@@ -481,6 +492,8 @@ impl Action {
             BuyCaptureDevice => "BUY CAPTURE DEVICE",
             BuyQuarantineCharge => "BUY QUARANTINE CHARGE",
             BuyMedkit => "BUY MEDKIT",
+            TherapySession => "SIT WITH THE PARATHERAPIST",
+            DeepDebrief => "DEEP DEBRIEF — TRADE A BELIEF FOR CALM",
             PauseMenu => "PAUSE MENU",
             MenuBack => "BACK",
             MenuUp => "MENU UP",
@@ -557,6 +570,8 @@ impl Action {
             BuyCaptureDevice => Binding::one(Chord::plain(KeyCode::KeyB)),
             BuyQuarantineCharge => Binding::one(Chord::plain(KeyCode::KeyN)),
             BuyMedkit => Binding::one(Chord::plain(KeyCode::KeyM)),
+            TherapySession => Binding::one(Chord::plain(KeyCode::KeyT)),
+            DeepDebrief => Binding::one(Chord::plain(KeyCode::KeyY)),
 
             PauseMenu => Binding::one(Chord::plain(KeyCode::Escape)),
             MenuBack => Binding::one(Chord::plain(KeyCode::Escape)),

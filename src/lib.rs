@@ -451,6 +451,9 @@ pub fn run() {
                 // fires on `AppState::Debrief` and the shop lives at `AppState::Site`, neither of
                 // which the harness registers.
                 site::O5Plugin,
+                // Activities: the Paratherapist's two verbs, and the strain they spend. Windowed-only
+                // like the rest of the hub's UI; it writes only the persisted `SquadKnowledge`.
+                site::ActivitiesPlugin,
                 // FVS-L-5's roster screen plus the cross-run belief carry (FVS-G-3). Windowed:
                 // the screen is UI, and the carry writes `Knowledge` only at world construction.
                 knowledge::RosterPlugin,

@@ -61,6 +61,12 @@ use crate::site::{HeldAt, SiteRoot};
 /// the first capture, the first specimen carried home, the first operative lost — and a first that
 /// repeats every launch is not a first. Meta-progress in exactly FVS-G-3's sense.
 ///
+/// `7` (2026-08-02): `Knowledge` gained `strain` — what carrying the knowledge has cost the
+/// operative, and the counter-pressure to veteran lock-in the Site design doc §6.2 asked for. It
+/// rides `squad_knowledge`, so a v6 save deserialises into a struct that is a field short. Refused
+/// rather than defaulted: a v6 campaign's veterans would come back with *no* accumulated cost, which
+/// is silently the most favourable possible reading of their history.
+///
 /// `3` (2026-07-27): the O5 economy joined the save (`o5`, `requisitioned`). FVS-P-3 shipped the
 /// review, the allowance and the requisition panel but never added them here, so its own *Done when* —
 /// "the budget round-trips through save/load" — was unmet: every restart handed the Director a zeroed
@@ -69,7 +75,7 @@ use crate::site::{HeldAt, SiteRoot};
 /// `2` (2026-07-27): [`SavedSpecimen`] gained `subject`. A v1 save records *that* four things were
 /// captured but not *what* they were, and the research battery and unlock payout are both keyed on
 /// species — so a v1 campaign cannot be reconstructed, only guessed at. Refusing is the honest outcome.
-pub const SAVE_VERSION: u32 = 6;
+pub const SAVE_VERSION: u32 = 7;
 
 /// One banked specimen, as it survives a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

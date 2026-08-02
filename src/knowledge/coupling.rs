@@ -15,6 +15,12 @@
 //!
 //! # It ships at gain ZERO
 //!
+//! ⚠️ The paragraph below is kept because it records the original design, but its factual claim is
+//! **stale**: `SimTuning::default().belief_fear_gain` has been `0.4` since the coupling was turned on,
+//! and `a_known_lethal_subject_is_more_frightening_than_an_unknown_one` asserts it is `> 0.0`. The
+//! bit-exact-no-op argument now applies to `strain` instead, which really does ship at zero in every
+//! headless rollout.
+//!
 //! `sim.belief_fear_gain` defaults to `0.0`, which makes [`apply_belief_fear`] a **bit-exact no-op**:
 //! `fear_scale` returns exactly 1.0 at gain 0 for every belief, and multiplying an `f32` by 1.0 is the
 //! identity. So the goldens do not move, and turning it on is a deliberate act that gets its own
@@ -85,10 +91,38 @@ pub fn apply_belief_fear(
     bears: Query<(&Transform, &crate::scp1048::Scp1048)>,
     mut units: Query<(&Transform, &Knowledge, &mut Drives), With<Unit>>,
 ) {
+    // ── STRAIN: the floor a worn-out veteran cannot get below ────────────────────────────────────
+    //
+    // First, and deliberately **outside** both early returns below: strain is not a reaction to
+    // anything being present. It is what is left over from the last expedition, so it applies in an
+    // empty corridor exactly as much as beside a contained anomaly. That is what makes it a
+    // counter-pressure to veteran lock-in rather than a second kind of belief.
+    //
+    // Written as a raised floor rather than a multiplier so it can never *lower* fear, and so it
+    // compounds correctly with the belief scaling that follows: knowledge amplifies the strained
+    // baseline instead of replacing it.
+    //
+    // ⚠️ **Bit-exact while nobody is strained**, which is every headless rollout: strain accrues only
+    // on a completed expedition, and `AppState::Debrief` does not exist in the harness. The inner
+    // guard means an unstrained operative's `Drives` is never even dereferenced mutably, so no
+    // `Changed<Drives>` is raised either.
+    let floor_at_full = sim.strain.fear_floor;
+    if floor_at_full > 0.0 {
+        for (_, knowledge, mut drives) in &mut units {
+            if knowledge.strain <= 0.0 {
+                continue;
+            }
+            let floor = (floor_at_full * knowledge.strain).clamp(0.0, 1.0);
+            if drives.v[DriveId::FEAR.0] < floor {
+                drives.v[DriveId::FEAR.0] = floor;
+            }
+        }
+    }
+
     let gain = sim.belief_fear_gain;
     if gain == 0.0 {
-        // The shipped default. Bailing rather than multiplying by an identity keeps it free as well as
-        // bit-exact, and makes the "this is off" state obvious at the top of the function.
+        // Bailing rather than multiplying by an identity keeps it free as well as bit-exact, and
+        // makes the "this is off" state obvious at the top of the function.
         return;
     }
     let present = present_subjects(&contained, &bears);

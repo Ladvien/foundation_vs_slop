@@ -762,6 +762,36 @@
         // it COSTS you is exactly difficulty. The search may legitimately choose 0 (the mechanic off).
         belief_fear_gain: 0.4,
 
+        // STRAIN — what a career costs, and the reason Dr. Lindqvist is posted in the activities
+        // room. The Site design doc settled on operatives persisting with their knowledge, then named
+        // the worry that creates (§6.2): "if one operative accumulates everything, the player will
+        // always pick them and the others rot. A counter-pressure is needed ... fear accumulates
+        // alongside knowledge and a veteran is the most afraid."
+        //
+        // NOT evolvable yet, and that is a stated omission rather than an oversight — see
+        // `squad_ai::world_genome`. The honest descriptor for these knobs is the design doc's
+        // epistemic spread (§3.6) and it does not exist; encoding them against today's level
+        // descriptors would repeat FVS-I-8, where zero of fifteen `MetropolisWeights` knobs move an
+        // axis of the archive they were added to.
+        strain: (
+            // Six expeditions to saturate. Weighed against the doc's own stake -- losing an operative
+            // must be "rare and legible rather than routine attrition" -- so the weight has to land
+            // well inside a campaign rather than at the end of one.
+            per_expedition: 0.17,
+            // Two sessions undo one expedition: worth walking to the activities room for, and still
+            // not enough to keep one operative in the field for ever.
+            relief_per_session: 0.34,
+            // FEAR floor at full strain. A third of maximum before anything has happened -- enough to
+            // lose a containment hold under pressure, not enough to break someone in a corridor.
+            // This is the only one of the four that touches the pinned core.
+            fear_floor: 0.33,
+            // What a DEEP DEBRIEF burns off a `Lethal` belief: about a third of a firsthand one.
+            // `Knowledge::fear_scale` reads exactly this confidence, so talking an operative down
+            // from their terror necessarily costs them what they knew -- the game's thesis as a
+            // number. Too high and the archive becomes a laundry for veterans.
+            debrief_confidence_loss: 0.3,
+        ),
+
         // Minimum distance in TILES between any two anomalies, ACROSS species — the one knob the
         // shared placement pass adds (`src/placement/anomalies.rs`).
         //

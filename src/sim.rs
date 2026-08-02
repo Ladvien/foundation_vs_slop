@@ -336,6 +336,42 @@ pub struct Scp1048Tuning {
     pub copy_w_b: f32,
 }
 
+/// **Strain** — the counter-pressure to veteran lock-in, and the Paratherapist's reason to exist.
+///
+/// The Site design doc settled on persistent operatives carrying their knowledge across runs, then
+/// named the consequence it was worried about (§6.2): *"if one operative accumulates everything, the
+/// player will always pick them and the others rot. A counter-pressure is needed — fatigue,
+/// assignment limits, or simply that fear accumulates alongside knowledge and a veteran is the most
+/// afraid."*
+///
+/// Strain is that last option, made concrete: it accrues with every expedition survived, it raises
+/// the operative's FEAR floor so a veteran genuinely *is* the jumpiest person on the team, and the
+/// only thing that spends it is time with Dr. Lindqvist in the activities room.
+///
+/// ⚠️ **Both defaults that touch the pinned core are load-bearing.** `fear_floor` is what makes
+/// strain visible to the simulation at all; strain itself is zero in every headless rollout, because
+/// it accrues only on a completed expedition and `AppState` does not exist in the harness. That is
+/// what keeps this bit-exact against the goldens until a campaign actually runs.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrainTuning {
+    /// Added per expedition survived. `1.0` is saturation, so this is "how many expeditions until an
+    /// operative is fully worn out" expressed as its reciprocal.
+    pub per_expedition: f32,
+    /// How much one session with the Paratherapist gives back.
+    pub relief_per_session: f32,
+    /// FEAR floor at strain 1.0. The operative cannot be calmer than this, whatever is or is not in
+    /// front of them — which is the point: strain is not a reaction to a threat, it is what is left
+    /// over from the last one.
+    pub fear_floor: f32,
+    /// How much confidence a **deep debrief** burns off a `Lethal` belief.
+    ///
+    /// The expensive verb, and the game's thesis in one number: `fear_scale` reads exactly this
+    /// confidence, so talking an operative down from their terror necessarily costs them what they
+    /// knew. Set it too high and the archive becomes a laundry for veterans.
+    pub debrief_confidence_loss: f32,
+}
+
 /// Root simulation-tuning resource. Extend with new sections as later phases need them; keep
 /// [`SimTuning::default`] bit-identical to the shipped consts, guarded by the deterministic-core hash.
 #[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -360,6 +396,8 @@ pub struct SimTuning {
     /// `ContainmentTuning` records: this is **difficulty**, which is exactly what the world genome
     /// exists to explore. What a belief *means* is not evolvable; how much it costs you is.
     pub belief_fear_gain: f32,
+    /// **What carrying knowledge costs an operative over a career** (2026-08-02).
+    pub strain: StrainTuning,
     /// **Minimum distance, in tiles, between any two anomalies — across species.**
     ///
     /// The one knob the shared placement pass adds (`placement::anomalies`). Before it there was no
@@ -425,6 +463,21 @@ impl Default for SimTuning {
             // no-op, so the goldens do not move for a mechanic nobody enabled; turning it on is a
             // deliberate act that earns its own measured re-pin.
             belief_fear_gain: 0.4,
+            strain: StrainTuning {
+                // Six expeditions to saturate. Chosen against the design doc's own stake — losing an
+                // operative has to be "rare and legible rather than routine attrition" — so a
+                // veteran should feel the weight well inside a campaign, not at the end of one.
+                per_expedition: 0.17,
+                // Two sessions undo one expedition. Therapy is meant to be worth walking to, and
+                // still not enough on its own to keep one operative in the field forever.
+                relief_per_session: 0.34,
+                // At full strain an operative sits at a third of maximum FEAR before anything has
+                // happened. Enough to lose a containment hold under pressure; not enough to break
+                // them standing in a corridor.
+                fear_floor: 0.33,
+                // A debrief costs about a third of what a firsthand belief is worth.
+                debrief_confidence_loss: 0.3,
+            },
             // Cross-species anomaly spacing, tiles. See the field docs; `assets/config/config.ron`
             // carries the shipped value and the reasoning for 18.
             anomaly_separation: 18.0,

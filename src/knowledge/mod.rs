@@ -200,6 +200,27 @@ pub struct Knowledge {
     /// about one kind of thing at once — "1048-A copies are lethal" and "they can be contained by
     /// out-watching them" are both true, and both worth knowing separately.
     beliefs: [[Option<Belief>; Claim::ALL.len()]; Subject::ALL.len()],
+
+    /// **What carrying all of that has cost them**, in `[0, 1]` (2026-08-02).
+    ///
+    /// # Why this lives in `Knowledge` and not beside it
+    ///
+    /// It looks like a foreign field on a structure named for what someone knows. It is the opposite:
+    /// strain is *the price of the contents of this struct*, and the design doc's counter-pressure to
+    /// veteran lock-in is stated in exactly those terms — *"fear accumulates alongside knowledge and a
+    /// veteran is the most afraid"* (§6.2). Putting it here means it rides the one persistence
+    /// mechanism knowledge already has: `roster::sync_squad_knowledge` rebuilds the table from the
+    /// **living**, so an operative who does not come back loses their strain along with everything
+    /// they knew, structurally and with no code that has to remember to do it.
+    ///
+    /// A second parallel table would be a second thing to keep in step, and the first time the two
+    /// disagreed the bug would read as "the wrong person is tired".
+    ///
+    /// # A value field, never a marker
+    ///
+    /// `crate::scp1048`'s rule: a component toggled on acquisition splits the hashed archetype and
+    /// makes ECS iteration order run-dependent. Present from spawn at `0.0`, like every belief slot.
+    pub strain: f32,
 }
 
 impl Knowledge {
@@ -271,6 +292,71 @@ impl Knowledge {
         // as being less afraid of it, and conflating them would collapse the asymmetry this system is
         // built on.
         scale.max(0.0)
+    }
+
+    /// One more expedition survived. Saturates at 1.0 rather than growing without bound — the FEAR
+    /// floor it feeds is a fraction of a clamped drive, so an unbounded strain would be a number that
+    /// stopped meaning anything above 1.
+    pub fn accrue_strain(&mut self, per_expedition: f32) {
+        self.strain = (self.strain + per_expedition).clamp(0.0, 1.0);
+    }
+
+    /// A session with the Paratherapist. **The cheap verb, and it only touches strain.**
+    ///
+    /// Returns whether anything actually changed, so the caller can refuse the session rather than
+    /// silently doing nothing — an operative at zero strain has nothing to talk about.
+    pub fn relieve_strain(&mut self, relief: f32) -> bool {
+        if self.strain <= 0.0 {
+            return false;
+        }
+        self.strain = (self.strain - relief).max(0.0);
+        true
+    }
+
+    /// **A deep debrief: trades fear for knowledge.**
+    ///
+    /// Talks the operative down from the single `Lethal` belief they hold most confidently, and takes
+    /// that confidence with it. This is the design doc's thesis expressed as a button — *"the
+    /// Foundation's tragedy is that understanding a thing is what makes it frightening, and also the
+    /// only way to contain it"* (§3.4) — because [`Self::fear_scale`] reads precisely the confidence
+    /// this burns.
+    ///
+    /// The belief is **removed**, not floored at a low confidence, once it falls below what the
+    /// weakest provenance would have granted. That is the modelling point the whole system is built
+    /// on: absence is a distinct state from doubt (Fisher, via `W3014596384`), and an operative who
+    /// has been talked out of believing something should be back to *not knowing*, not to knowing it
+    /// faintly. It also means the debrief genuinely costs something — `can_read_rule` and the
+    /// containment HUD go dark with it.
+    ///
+    /// Returns the subject that was worked on, so the caller can name it to the player. Nothing to
+    /// debrief is `None`, never a silent no-op.
+    pub fn deep_debrief(&mut self, loss: f32) -> Option<Subject> {
+        // The pick is a `max` over subjects, so it needs a stable total key: `(confidence, index)`.
+        // Two beliefs at identical confidence are broken by subject order, which is the enum's own
+        // declaration order and is the same on every machine. Written as an explicit loop rather than
+        // `max_by` — `tests/determinism_lint.rs` scans for that method by name, and a comparator here
+        // would be a genuine pick over a table.
+        let mut best: Option<(f32, usize)> = None;
+        for (i, subject) in Subject::ALL.iter().enumerate() {
+            let Some(b) = self.of(*subject, Claim::Lethal) else {
+                continue;
+            };
+            let key = (b.confidence, i);
+            if best.is_none_or(|(bc, bi)| key > (bc, bi)) {
+                best = Some(key);
+            }
+        }
+        let (_, ix) = best?;
+        let subject = Subject::ALL[ix];
+        let slot = &mut self.beliefs[subject.index()][Claim::Lethal.index()];
+        let Some(b) = slot.as_mut() else {
+            return None;
+        };
+        b.confidence -= loss;
+        if b.confidence < Provenance::Read.base_confidence() {
+            *slot = None;
+        }
+        Some(subject)
     }
 
     /// Can this operative read the subject's containment rule in the HUD?

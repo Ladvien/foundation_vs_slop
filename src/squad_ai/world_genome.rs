@@ -659,6 +659,20 @@ pub fn decode(g: &WorldGenome) -> Result<WorldConfig, String> {
             out_watch_threshold: f!(),
         },
         belief_fear_gain: f!(),
+        // **`strain` is NOT encoded, and that is stated rather than left to be noticed.**
+        //
+        // It is a real omission with a real reason. The world archive bins on level descriptors, and
+        // the FVS-I-8 audit found that zero of `MetropolisWeights`' fifteen knobs move an axis of it
+        // — a gene that cannot move a descriptor fills the genome without filling the archive, and
+        // this repo has three collapsed archives on record from exactly that shape. Strain's honest
+        // descriptor is the design doc's **epistemic spread** (§3.6): how concentrated knowledge is
+        // across the squad, which strain pushes against directly because the most-knowing operative
+        // becomes the most strained. That axis does not exist yet.
+        //
+        // So: encoding it now would cost a full world re-bake to buy a knob nobody could select on.
+        // Land the descriptor first, then the genes. Until then the defaults ship, and every headless
+        // rollout sees strain 0.0 — which is what keeps `apply_belief_fear` bit-exact.
+        strain: crate::sim::SimTuning::default().strain,
         anomaly_separation: f!(),
     };
     // MoldConfig — the 6 evolved dials (encode order); substeps/seed_v/light_ref keep calibrated defaults.

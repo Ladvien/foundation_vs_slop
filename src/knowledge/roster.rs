@@ -82,6 +82,31 @@ pub fn restore_squad_knowledge(
     }
 }
 
+/// **One more expedition on the clock** — every operative who came back is a little more worn.
+///
+/// Written onto the live `Knowledge` components rather than onto the table, so it rides
+/// [`sync_squad_knowledge`] like everything else and inherits the property that matters: an operative
+/// who did not survive is not in this query, so their strain dies with their knowledge and their slot
+/// resets. Nothing has to remember to clear it.
+///
+/// **`OnEnter(AppState::Debrief)`, and therefore windowed-only.** That is what keeps
+/// `coupling::apply_belief_fear` bit-exact against the goldens: a headless rollout never enters an
+/// `AppState` at all, so `strain` is `0.0` in every one of them and the floor is never applied. The
+/// day the harness runs campaigns, that stops being true and the goldens move — which is a re-pin
+/// with a reason, not a surprise.
+pub fn accrue_strain_on_return(
+    sim: Res<crate::sim::SimTuning>,
+    mut operatives: Query<&mut Knowledge, With<Unit>>,
+) {
+    let per = sim.strain.per_expedition;
+    if per <= 0.0 {
+        return;
+    }
+    for mut knowledge in &mut operatives {
+        knowledge.accrue_strain(per);
+    }
+}
+
 /// Root marker for the roster overlay.
 #[derive(Component)]
 pub struct RosterScreenRoot;
@@ -332,6 +357,13 @@ impl Plugin for RosterPlugin {
             .add_systems(
                 OnEnter(crate::session::RunState::Active),
                 restore_squad_knowledge.in_set(crate::session::RunBuild::PostPopulate),
+            )
+            // The survivors are still live entities at `Debrief` — that is what lets
+            // `site::review::file_expedition_report` count them on the same transition — so this
+            // writes the components and `sync_squad_knowledge` carries it into the table.
+            .add_systems(
+                OnEnter(crate::ui::state::AppState::Debrief),
+                accrue_strain_on_return,
             )
             .add_systems(
                 Update,

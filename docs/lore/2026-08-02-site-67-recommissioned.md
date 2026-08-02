@@ -168,10 +168,18 @@ the two worth the authoring:
   SCP-9191's unattributed reports appear, and is the person who **cannot produce Log 47721**. The
   antagonist's attack surface now has a human standing on it.
 - **Dr. Lindqvist, Paratherapist.** ● canon term — *"therapy for people who have seen things."* Posted
-  in the activities room. This game models FEAR and false belief on persistent operatives who carry
-  both between expeditions; the Foundation's canon name for the person who addresses that is a
-  paratherapist, and the room the design doc describes as *"the room that offsets what the field does
-  to people"* is where they work.
+  in the activities room, which the design doc describes as *"the room that offsets what the field
+  does to people"*.
+
+  ⚠️ **This entry originally claimed operatives carry FEAR between expeditions. They did not** —
+  `Drives` is run-scoped and absent from `SaveGame`, so fear reset to zero every expedition and there
+  was nothing here for a paratherapist to treat. Only *beliefs* persisted. The claim was corrected on
+  2026-08-02 by making it true rather than by deleting it: `knowledge::Knowledge::strain` persists in
+  `SquadKnowledge`, accrues per expedition survived, raises the operative's **FEAR floor** in the
+  field, and is spent in her room. It is the design doc §6.2 counter-pressure to veteran lock-in —
+  *"fear accumulates alongside knowledge and a veteran is the most afraid"* — and her second verb, a
+  **deep debrief**, is §3.4's trade as a button: she can talk an operative down from a `Lethal`
+  belief, and it costs them the belief.
 
 ⚠️ **There is no Site Director in this roster, and there must not be.** The design doc §6 settles that
 **the player is the Director of Site-67**. A Site Director NPC would be the player's own chair with
