@@ -80,29 +80,13 @@ impl MetropolisSolver {
     }
 }
 
-/// One object's live state during optimization: centre (x, z) in world/tile coords + yaw about +Y.
-#[derive(Clone, Copy)]
-struct Obj {
-    x: f32,
-    z: f32,
-    yaw: f32,
-    // Native footprint half-extents (before yaw); AABB half-extents are swapped at 90°/270°.
-    hw: f32,
-    hd: f32,
-}
+/// One object being annealed. **This is `ir::Footprint`** — the shared definition of a placed
+/// object's floor footprint, moved out of this solver on 2026-08-02 so Site-67's hand-authored
+/// placements could be checked against the same geometry the dungeon's solved ones are. See the type's
+/// own doc for why that mattered; the short version is that the Site had no overlap or bounds check at
+/// all, because those rules lived in here as private energy terms.
+type Obj = crate::placement::ir::Footprint;
 
-impl Obj {
-    /// Axis-aligned half-extents given the current (quarter-turn) yaw.
-    fn half_extents(&self) -> (f32, f32) {
-        // Quarter-turn furniture: at 90°/270° width and depth swap.
-        let quarter = (self.yaw / FRAC_PI_2).round() as i32 & 3;
-        if quarter % 2 == 1 {
-            (self.hd, self.hw)
-        } else {
-            (self.hw, self.hd)
-        }
-    }
-}
 
 /// Interior bounds (min/max object-centre coords) after wall inset — computed per footprint at eval.
 struct Bounds {
@@ -261,10 +245,9 @@ impl MetropolisSolver {
         let mut bounds = 0.0;
 
         for (i, a) in objs.iter().enumerate() {
-            let (ahw, ahd) = a.half_extents();
-            // In-bounds: quadratic penalty for any part of the footprint past a wall.
-            let (bx0, bx1, bz0, bz1) = (rx0 + ahw, rx1 - ahw, rz0 + ahd, rz1 - ahd);
-            bounds += over(bx0 - a.x) + over(a.x - bx1) + over(bz0 - a.z) + over(a.z - bz1);
+            // In-bounds: hinge penalty for any part of the footprint past a wall. Shared with the
+            // Site's authored-placement check via `ir::escapes_bounds` — one definition of "inside".
+            bounds += crate::placement::ir::escapes_bounds(a, (rx0, rx1, rz0, rz1));
             // Back-to-wall attraction is NOT applied unconditionally here: it is emitted per piece as
             // an explicit `AgainstWall` constraint (see `freestanding_constraints`) and scored once in
             // `constraint_cost`. Scoring it here too would double-count `w_wall` (~2× the tuned pull).
@@ -304,10 +287,9 @@ impl MetropolisSolver {
             (Scope::Object(i), Predicate::Facing(j)) => {
                 if let (Some(a), Some(b)) = (objs.get(*i), objs.get(*j)) {
                     // Reward `a`'s facing direction pointing toward `b`: cost = 1 - cos(angle).
-                    let (fx, fz) = (a.yaw.sin(), a.yaw.cos());
-                    let (dx, dz) = (b.x - a.x, b.z - a.z);
-                    let len = (dx * dx + dz * dz).sqrt().max(1e-4);
-                    let dot = (fx * dx + fz * dz) / len;
+                    // Shared with the Site's authored-seat rule via `ir::facing_cosine` — one
+                    // definition of "is this pointing at that".
+                    let dot = crate::placement::ir::facing_cosine((a.x, a.z), a.yaw, (b.x, b.z));
                     // Scaled by `coherence` so the seat→screen arrangement is tunable from
                     // backrooms-random (0) to living-room-coherent (1) without retuning `w_facing`.
                     w.w_facing * w.coherence * (1.0 - dot as f64)
@@ -403,15 +385,7 @@ fn rand_range(rng: &mut ChaCha8Rng, lo: f32, hi: f32) -> f32 {
 
 /// AABB overlap area of two oriented (quarter-turn) footprints.
 fn aabb_overlap_area(a: &Obj, b: &Obj) -> f32 {
-    let (ahw, ahd) = a.half_extents();
-    let (bhw, bhd) = b.half_extents();
-    let ox = (ahw + bhw) - (a.x - b.x).abs();
-    let oz = (ahd + bhd) - (a.z - b.z).abs();
-    if ox > 0.0 && oz > 0.0 {
-        ox * oz
-    } else {
-        0.0
-    }
+    crate::placement::ir::overlap_area(a, b)
 }
 
 /// Room interior extents in world/tile coords, inset for the wall slab. Object centres live inside.
@@ -608,4 +582,49 @@ mod tests {
         };
         assert_eq!(run(), run());
     }
+
+    /// **The solver lands in the SAME PLACE it did before**, bit for bit, for a fixed seed.
+    ///
+    /// `deterministic_under_seed` above proves the solver agrees with *itself* — `run() == run()` —
+    /// which is a different and much weaker claim. It cannot see a change to the cost function at all,
+    /// because both halves of its comparison move together.
+    ///
+    /// That gap was not hypothetical. Hoisting the in-bounds hinge into `ir::escapes_bounds` on
+    /// 2026-08-02 initially summed the four terms in `f32` and widened afterwards, where the original
+    /// widened each term first. Measured over 400k random inputs, those disagree in **53%** of cases.
+    /// The whole suite stayed green, because nothing pinned where the furniture actually went.
+    ///
+    /// So: a change here means the dungeon furnishes differently for every seed. If that was
+    /// deliberate, re-pin these numbers and say so in the commit. If it was not, something in the cost
+    /// function moved and this is the only thing that will tell you.
+    #[test]
+    fn the_solved_layout_is_pinned_for_a_fixed_seed() {
+        let r = region();
+        let problem = PlacementProblem {
+            region: &r,
+            candidates: vec![item(1.6, 0.7), item(0.9, 0.6)].into(),
+            constraints: Vec::new(),
+        };
+        let solver = MetropolisSolver::new(weights());
+        let mut rng = seeded(11);
+        let got: Vec<(u32, u32)> = match solver.solve(&problem, &mut rng).expect("solve") {
+            Outcome::Ranked(v) => v[0]
+                .1
+                .iter()
+                .map(|p| (p.pos[0].to_bits(), p.pos[2].to_bits()))
+                .collect(),
+            _ => panic!("expected ranked"),
+        };
+        assert_eq!(
+            got, PINNED_LAYOUT_SEED_11,
+            "the solver no longer lands where it did — the dungeon now furnishes differently for \
+             EVERY seed. Deliberate? Re-pin and say so. Not deliberate? Something moved in the cost \
+             function; `escapes_bounds`/`overlap_area` in `placement::ir` are the shared geometry."
+        );
+    }
 }
+
+/// Bit-exact solver output for seed 11 — see `the_solved_layout_is_pinned_for_a_fixed_seed`.
+#[cfg(test)]
+const PINNED_LAYOUT_SEED_11: &[(u32, u32)] =
+    &[(1081317365, 1074081542), (1074665548, 1063516872)];

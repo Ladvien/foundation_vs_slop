@@ -53,6 +53,56 @@ pub struct KitPiece {
     pub glb: String,
     /// The mesh's authored height in metres, as it sits in the file.
     pub height: f32,
+    /// The mesh's authored XZ footprint `(width, depth)` in metres, before yaw.
+    ///
+    /// **Required, and measured — never guessed**, on the same terms as [`Self::height`] and
+    /// [`DoorPiece::opening`]. `scripts/fbx_to_glb.py` writes every mesh's W/H/D to an `INVENTORY.md`
+    /// beside its output; these are those numbers.
+    ///
+    /// # What it is for
+    ///
+    /// `site::layout::check_prop_placements` runs every authored prop in `site67.ron` through the
+    /// **same** overlap and in-bounds rules the dungeon's solver anneals against
+    /// (`placement::ir::overlap_area` / `escapes_bounds`). It cannot do that without knowing how much
+    /// floor a piece actually covers, and before 2026-08-02 the kit did not say — so the Site's props
+    /// were the one placement path in the game that nothing checked. The first furnishing pass put
+    /// three bunks through a wall and a control desk a metre into a corridor.
+    ///
+    /// Note this is the FOOTPRINT, not the reservation: `placement::manifest::ManifestItem` carries a
+    /// deliberately symmetric footprint plus a `pivot` for off-centre meshes. The Site kit needs no
+    /// pivot because every Ozea mesh is XZ-centred by conversion (`--reorigin-base`), which
+    /// `tests/ozea_asset.rs` pins.
+    pub footprint: (f32, f32),
+
+    /// Which way this mesh **fronts**, as degrees to add to its authored yaw to get the direction the
+    /// engine's facing convention (`forward = (sin yaw, cos yaw)`, i.e. local +Z) would report.
+    /// `None` means the piece has no front and nothing may assert where it points.
+    ///
+    /// **Measured from the mesh, not assumed.** A seat's front is opposite its backrest, and the
+    /// backrest is the vertical mass above the seat: taking the XZ centroid of every vertex in the
+    /// upper 45% of the mesh and comparing it to the whole mesh's centroid gives the back direction.
+    /// For `chair.glb` and `command_chair.glb` that offset is −X, so both front **local +X** — a
+    /// quarter turn off the engine's +Z, hence `Some(90.0)`.
+    ///
+    /// `stool.glb` and `bench.glb` measure symmetric to within a centimetre, because they genuinely
+    /// have no back. They get `None`, and that is not a shrug: asserting a facing on a stool would be
+    /// asserting a fact about the art that is not true, and the rule below would then demand people
+    /// sit on them a particular way round for no reason.
+    ///
+    /// This existing 90° gap is why every chair in `site67.ron` was authored sideways to its table on
+    /// 2026-08-02 — the yaws were written against the engine convention while the mesh fronted
+    /// somewhere else. Same class as `visuals::APERTURE_QUAD_YAW_OFFSET`.
+    #[serde(default)]
+    pub front: Option<f32>,
+
+    /// A horizontal work or dining surface that seating should address — a table, a counter, a
+    /// console. Seats near one are required to face it (`layout::check_prop_placements`).
+    ///
+    /// The furniture manifest expresses the same idea as `surfaces: ["support", "worktop"]`
+    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because nothing
+    /// here scatters objects ONTO surfaces yet.
+    #[serde(default)]
+    pub surface: bool,
     /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
     ///
     /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
@@ -115,6 +165,25 @@ pub struct SiteKit {
     pub area_decal: KitPiece,
     pub arrow_decal: KitPiece,
     pub specimen_standin: KitPiece,
+
+    // ── Furniture for the living half (2026-08-02). Every one is authored at its own size;
+    // `target_height` returns `None` for all of them, so `y_scale` is a no-op 1.0.
+    pub bunk: KitPiece,
+    pub locker: KitPiece,
+    pub bedside_table: KitPiece,
+    pub galley_counter: KitPiece,
+    pub mess_table: KitPiece,
+    pub stool: KitPiece,
+    pub coffee_machine: KitPiece,
+    pub water_dispenser: KitPiece,
+    pub bench: KitPiece,
+    pub vending_machine: KitPiece,
+    pub chair: KitPiece,
+    pub map_table: KitPiece,
+    pub control_desk: KitPiece,
+    pub surveillance_console: KitPiece,
+    pub server_rack: KitPiece,
+    pub command_chair: KitPiece,
 }
 
 impl SiteKit {
@@ -157,6 +226,22 @@ impl SiteKit {
             AreaDecal => &self.area_decal,
             ArrowDecal => &self.arrow_decal,
             SpecimenStandin => &self.specimen_standin,
+            Bunk => &self.bunk,
+            Locker => &self.locker,
+            BedsideTable => &self.bedside_table,
+            GalleyCounter => &self.galley_counter,
+            MessTable => &self.mess_table,
+            Stool => &self.stool,
+            CoffeeMachine => &self.coffee_machine,
+            WaterDispenser => &self.water_dispenser,
+            Bench => &self.bench,
+            VendingMachine => &self.vending_machine,
+            Chair => &self.chair,
+            MapTable => &self.map_table,
+            ControlDesk => &self.control_desk,
+            SurveillanceConsole => &self.surveillance_console,
+            ServerRack => &self.server_rack,
+            CommandChair => &self.command_chair,
         }
     }
 
@@ -365,6 +450,9 @@ mod tests {
             glb: "ozea/pipe.fbx".into(),
             height: 1.0,
             y_offset: 0.0,
+            footprint: (0.3, 0.3),
+            front: None,
+            surface: false,
         };
         assert!(
             validate_site_kit(&kit).is_err(),

@@ -38,8 +38,21 @@ pub const SITE_LAYOUT_PATH: &str = "assets/site/site67.ron";
 /// bytes — so this is a fact about `TILE_SIZE` and the art contract, not about which kit is worn.
 const DOORWAY_CELLS: i32 = 2;
 
-/// The six areas from the design doc §2.4. An enum rather than a string so a typo is a compile error
-/// and so [`SiteLayout::validate`] can prove all six are present.
+/// The areas of Site-67. An enum rather than a string so a typo is a compile error and so
+/// [`SiteLayout::validate`] can prove every one of them is present.
+///
+/// # Two generations, and the difference is deliberate
+///
+/// The **first six** are the design doc's §2.4 table, where every row named the system that needed a
+/// location: the ASYNC door needed FVS-A-5, containment needed FVS-D-4, research needed the Thaumiel
+/// tree. The area existed because a mechanic had nowhere to happen.
+///
+/// The **second five** (2026-08-02) invert that: the space comes first and the mechanics follow. They
+/// exist because a Foundation site that contains anomalies is also somewhere people *live* — they
+/// sleep, eat, train, plan and watch — and a hub with none of that reads as a facility diagram. That
+/// is a Director's call and it is worth stating plainly here, because it is the opposite of the rule
+/// the first six were chosen by, and the repo's named top process risk is shipping a room with no
+/// verb in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum AreaId {
@@ -55,13 +68,24 @@ pub enum AreaId {
     Requisition,
     /// The O5 performance review; the Director's standing (FVS-P-1).
     Briefing,
-    /// The spine that joins them. Not one of the six, but it is floor and it must be walkable.
+    /// Where the operatives and staff sleep. Bunks, lockers, personal effects.
+    Quarters,
+    /// The galley. Where a shift starts and where people are found between tasks.
+    Kitchen,
+    /// Training and recreation — the room that offsets what the field does to people.
+    Activities,
+    /// Plan the next expedition. **`RunState::Idle` only** — see `docs/2026-08-01-two-live-layers.md`
+    /// §5: you may not supervise the squad you left unattended, so this room is dark during a visit.
+    WarRoom,
+    /// Watches the containment wing it stands beside. Same `RunState::Idle` rule as [`Self::WarRoom`].
+    Monitoring,
+    /// The spines that join them. Not a destination, but it is floor and it must be walkable.
     Corridor,
 }
 
 impl AreaId {
-    /// The six the design doc requires. `Corridor` is deliberately absent — it is connective tissue,
-    /// not a destination.
+    /// Every area the layout must contain. `Corridor` is deliberately absent — it is connective
+    /// tissue, not a destination.
     pub const REQUIRED: &'static [AreaId] = &[
         AreaId::AsyncDoor,
         AreaId::Containment,
@@ -69,6 +93,11 @@ impl AreaId {
         AreaId::Records,
         AreaId::Requisition,
         AreaId::Briefing,
+        AreaId::Quarters,
+        AreaId::Kitchen,
+        AreaId::Activities,
+        AreaId::WarRoom,
+        AreaId::Monitoring,
     ];
 }
 
@@ -85,6 +114,23 @@ pub struct Rect {
 impl Rect {
     pub fn contains(&self, c: IVec2) -> bool {
         c.x >= self.x && c.x < self.x + self.w && c.y >= self.z && c.y < self.z + self.h
+    }
+    /// Cell-space `contains` in METRES — props are authored off-grid, so "which room is this in"
+    /// is a continuous question. Same half-open convention as [`Self::contains`].
+    pub fn contains_metres(&self, p: (f32, f32)) -> bool {
+        p.0 >= self.x as f32
+            && p.0 < (self.x + self.w) as f32
+            && p.1 >= self.z as f32
+            && p.1 < (self.z + self.h) as f32
+    }
+    /// Interior extents in metres, as `ir::escapes_bounds` wants them.
+    pub fn bounds_metres(&self) -> (f32, f32, f32, f32) {
+        (
+            self.x as f32,
+            (self.x + self.w) as f32,
+            self.z as f32,
+            (self.z + self.h) as f32,
+        )
     }
     pub fn overlaps(&self, o: &Rect) -> bool {
         self.x < o.x + o.w && o.x < self.x + self.w && self.z < o.z + o.h && o.z < self.z + self.h
@@ -119,12 +165,25 @@ pub struct WallPlacement {
 }
 
 /// A dressing prop, positioned in metres so it need not sit on the grid.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+///
+/// **Not `Copy`** since 2026-08-02: it owns a waiver reason. Callers iterate by reference, which they
+/// already did.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PropPlacement {
     pub piece: SitePiece,
     pub pos: (f32, f32),
     pub yaw: f32,
+    /// **Why this prop is exempt from the placement rules** — see [`check_prop_placements`].
+    ///
+    /// A *reason*, never a boolean. `Some("...")` waives this one prop and prints the reason in the
+    /// startup log, so an exemption is greppable, self-documenting, and visibly someone's decision.
+    /// A `bool` would let "I could not be bothered" and "this deliberately overhangs the counter"
+    /// look identical in the diff, which is exactly the ambiguity the rules exist to remove.
+    ///
+    /// Defaults to `None`, so the rules apply unless somebody writes down why they should not.
+    #[serde(default)]
+    pub waive: Option<String>,
 }
 
 /// A containment cell that can display one specimen (FVS-D-4).
@@ -438,12 +497,390 @@ impl SiteLayout {
     }
 }
 
+/// **Run Site-67's hand-authored props through the same placement rules the dungeon's solved
+/// furniture obeys** — and report every violation at once, with the distance it is out by.
+///
+/// # Why this exists
+///
+/// The dungeon's furniture is *solved*: `placement::solvers::metropolis` anneals against energy terms
+/// that include footprint overlap and staying inside the room, so a piece through a wall is a state
+/// the solver climbs out of. Site-67 is **hand-authored on purpose** (design doc §2.1 — a hub has to
+/// be learnable), so its props never enter a solver, and until 2026-08-02 nothing checked them at all.
+///
+/// The cost of that gap, measured: the first pass at furnishing the living half put three bunks
+/// 0.15 m through the west wall (a bunk is 2.29 m long and was laid across a 5 m room), ran the war
+/// room's 3.68 m control desk a full metre out into the corridor, pushed three surveillance consoles
+/// 0.17 m through the wall they share with containment, and sat three bedside tables inside their own
+/// bunks. **Seventeen faults, none of them visible in a screenshot at play zoom.**
+///
+/// # It reuses the solver's geometry rather than restating it
+///
+/// [`ir::overlap_area`] and [`ir::escapes_bounds`] are the *same functions* `metropolis` scores with.
+/// A private copy here would be a second answer to "do these two overlap", and the two would drift the
+/// first time either was tuned.
+///
+/// # The escape hatch is a sentence, not a flag
+///
+/// [`PropPlacement::waive`] takes a reason string. A waived prop is skipped and its reason is logged,
+/// so an exemption stays greppable and stays somebody's stated decision.
+///
+/// Props whose piece has no footprint in the kit cannot be checked and are not silently passed —
+/// there is no such piece, because `footprint` is a required field on every `KitPiece`.
+/// How close a seat must be to a surface before it is considered "pulled up to" it, in metres.
+///
+/// 2.0 m covers a chair tucked at a table and a console operator's seat, and excludes a bench against
+/// the far wall of the same room — which should NOT be required to face the table it happens to share
+/// a room with.
+const SEAT_ADDRESSES_SURFACE_WITHIN: f32 = 2.0;
+
+/// Minimum cosine between a seat's front and the direction to its surface. `0.7` is a 45° cone, so a
+/// chair at the corner of a table still passes while a side-on or back-turned one does not.
+const SEAT_FACING_MIN_COS: f32 = 0.7;
+
+/// Rendered height (metres) at or below which a piece is a **floor marking** — a decal, a threshold
+/// pad, a floor plate — rather than an object standing in the room.
+///
+/// The shipped kit separates cleanly at this value: markings are 0.05–0.06 m and the next thinnest
+/// piece of real furniture is the 0.30 m pipe. It is a fact about what a mesh IS, so it is derived
+/// from the mesh's own height rather than from a hand-kept list of piece names that would need a new
+/// entry every time the kit grew.
+const FLOOR_MARKING_HEIGHT: f32 = 0.15;
+
+/// Does this piece lie flat on the floor, such that things may legitimately stand on it?
+fn is_floor_marking(kit: &super::kit::SiteKit, piece: SitePiece) -> bool {
+    kit.piece(piece).height * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
+}
+
+pub fn check_prop_placements(
+    layout: &SiteLayout,
+    kit: &super::kit::SiteKit,
+) -> Result<Vec<String>, String> {
+    use crate::placement::ir::{escapes_bounds, facing_cosine, overlap_area, Footprint};
+
+    let mut waived = Vec::new();
+    // (index, area label, footprint) for every prop the OVERLAP rule applies to.
+    let mut solid: Vec<(usize, Footprint)> = Vec::new();
+    let mut faults: Vec<String> = Vec::new();
+
+    for (i, p) in layout.props.iter().enumerate() {
+        if let Some(reason) = &p.waive {
+            waived.push(format!("{:?} at {:?} — waived: {reason}", p.piece, p.pos));
+            continue;
+        }
+        let (fw, fd) = kit.piece(p.piece).footprint;
+        let f = Footprint {
+            x: p.pos.0,
+            z: p.pos.1,
+            yaw: p.yaw.to_radians(),
+            hw: fw * 0.5,
+            hd: fd * 0.5,
+        };
+        // Which area is it in? Props outside every area are dressing in a corridor — legal, and the
+        // bounds rule simply has nothing to measure against, so only the overlap rule applies.
+        let area = layout.areas.iter().find(|a| a.rect.contains_metres(p.pos));
+        if let Some(area) = area {
+            let label = area.label.as_str();
+            let out = escapes_bounds(&f, area.rect.bounds_metres());
+            if out > 0.02 {
+                faults.push(format!(
+                    "{:?} at {:?} yaw {} sticks {out:.2} m out of {label} — its footprint is {fw:.2} \
+                     x {fd:.2} m, so at this yaw it does not fit where it was put",
+                    p.piece, p.pos, p.yaw
+                ));
+            }
+        }
+        // ...but the OVERLAP rule only applies to things that occupy space. A floor marking does not:
+        // furniture standing on top of a decal is correct, and the first run of this check called six
+        // such pairs faults. That is the 2D footprint model's known blind spot — it compares plan
+        // outlines and cannot see that one of the two is 5 cm thick and lying on the ground — so the
+        // exclusion is stated here rather than waived away six times at the call site.
+        if !is_floor_marking(kit, p.piece) {
+            solid.push((i, f));
+        }
+    }
+
+    // ── Seats address the surface they are pulled up to ──
+    //
+    // A chair at a table that faces away from it is the single most legible piece of wrongness a room
+    // can have: it reads as a mistake instantly, from any angle, even to someone who has never seen the
+    // room before. Every chair in the Site was authored exactly that way on 2026-08-02 — the yaws were
+    // written against the ENGINE's facing convention while the mesh fronts a quarter-turn off it — and
+    // the fault survived a four-angle visual pass because a sideways chair still looks like a chair.
+    //
+    // Only pieces that HAVE a front are checked. A stool and a bench measure symmetric, so they get no
+    // `front` in the kit and nothing is asserted about them: demanding a facing from a backless seat
+    // would be inventing a fact about the art.
+    for p in &layout.props {
+        if p.waive.is_some() {
+            continue;
+        }
+        let Some(front) = kit.piece(p.piece).front else {
+            continue;
+        };
+        // The nearest surface within reach, if any. Nearest rather than "every surface": a chair
+        // between two tables belongs to one of them, and requiring it to face both is unsatisfiable.
+        let mut nearest: Option<(f32, &PropPlacement)> = None;
+        for q in layout.props.iter().filter(|q| kit.piece(q.piece).surface) {
+            let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
+            if d <= SEAT_ADDRESSES_SURFACE_WITHIN && nearest.is_none_or(|(bd, _)| d < bd) {
+                nearest = Some((d, q));
+            }
+        }
+        let Some((d, target)) = nearest else { continue };
+        // `front` is the mesh's own quarter-turn offset from the engine convention — see
+        // `kit::KitPiece::front`. Without it this test is exactly 90° wrong for every chair.
+        let yaw = (p.yaw + front).to_radians();
+        let cos = facing_cosine(p.pos, yaw, target.pos);
+        if cos < SEAT_FACING_MIN_COS {
+            let want = (target.pos.1 - p.pos.1)
+                .atan2(target.pos.0 - p.pos.0)
+                .to_degrees();
+            faults.push(format!(
+                "{:?} at {:?} yaw {} is {:.0}° off the {:?} it is pulled up to {d:.2} m away — a seat \
+                 at a surface must face it. Try yaw {:.0}.",
+                p.piece,
+                p.pos,
+                p.yaw,
+                cos.clamp(-1.0, 1.0).acos().to_degrees(),
+                target.piece,
+                (90.0 - want - front).rem_euclid(360.0),
+            ));
+        }
+    }
+
+    for (n, (i, a)) in solid.iter().enumerate() {
+        for (j, b) in solid.iter().skip(n + 1) {
+            let ov = overlap_area(a, b);
+            if ov > 0.02 {
+                faults.push(format!(
+                    "{:?} at {:?} overlaps {:?} at {:?} by {ov:.2} m²",
+                    layout.props[*i].piece,
+                    layout.props[*i].pos,
+                    layout.props[*j].piece,
+                    layout.props[*j].pos
+                ));
+            }
+        }
+    }
+
+    if faults.is_empty() {
+        Ok(waived)
+    } else {
+        // Every fault at once. Reporting the first would mean N build-run cycles to place N props.
+        Err(format!(
+            "site layout: {} prop placement(s) break the placement rules —\n  {}\n\
+             Fix the position/yaw, or give that prop a `waive: Some(\"reason\")` in site67.ron \
+             stating why it is allowed to.",
+            faults.len(),
+            faults.join("\n  ")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn shipped() -> SiteLayout {
         SiteLayout::load().expect("the shipped site67.ron must parse and validate")
+    }
+
+    /// **The floor plan has two sources of truth, and this is the only thing keeping them equal.**
+    ///
+    /// `scripts/gen_site_perimeter.py` carries a hand-duplicated copy of `site67.ron`'s `floor:` list
+    /// in its `FLOOR` literal, because it is a standalone script with no RON parser. Nothing made the
+    /// two agree until 2026-08-02.
+    ///
+    /// Drift here is close to undetectable by eye and catastrophic in a specific way: the generator
+    /// emits the perimeter of a building that does not exist, so the new floor keeps the OLD layout's
+    /// wall cells sitting **on top of it** — and `is_walkable = is_floor && !wall`, so those become
+    /// unwalkable holes in the middle of a room, while the walls the new floor actually needs are
+    /// never emitted at all. A room you cannot cross, ringed by nothing.
+    ///
+    /// Parsed with a regex rather than by importing Python: the point is to compare the two authored
+    /// lists, and a parser that shares code with either one would not.
+    #[test]
+    fn the_perimeter_generator_agrees_with_the_layout_about_where_the_floor_is() {
+        let script = std::fs::read_to_string("scripts/gen_site_perimeter.py")
+            .expect("the perimeter generator must be readable from the crate root");
+        let body = script
+            .split_once("FLOOR = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(inner, _)| inner)
+            .expect("gen_site_perimeter.py must define a FLOOR = [ ... ] literal");
+
+        let mut from_script: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for line in body.lines() {
+            let Some(open) = line.find('(') else { continue };
+            let Some(close) = line[open..].find(')') else {
+                continue;
+            };
+            let nums: Vec<i32> = line[open + 1..open + close]
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect();
+            if let [x, z, w, h] = nums[..] {
+                from_script.push((x, z, w, h));
+            }
+        }
+
+        let from_layout: Vec<(i32, i32, i32, i32)> = shipped()
+            .floor
+            .iter()
+            .map(|r| (r.x, r.z, r.w, r.h))
+            .collect();
+
+        assert!(
+            !from_script.is_empty(),
+            "parsed no rects out of the script's FLOOR list — has its formatting changed?"
+        );
+        assert_eq!(
+            from_script, from_layout,
+            "scripts/gen_site_perimeter.py's FLOOR list has drifted from site67.ron's floor: list. \
+             Make them identical and RE-RUN the script over the walls: block — a stale perimeter \
+             leaves wall cells standing on floor, which `is_walkable` reads as holes you cannot \
+             walk through."
+        );
+    }
+
+    /// The shipped Site passes its own placement rules.
+    ///
+    /// This is the acceptance test for the whole check: it runs the real `site67.ron` against the real
+    /// kit, using the same `ir` geometry the dungeon solver scores with. When it fails it names every
+    /// offending prop and the distance it is out by, so fixing a furnishing pass is one read of the
+    /// message rather than N build-run cycles.
+    #[test]
+    fn every_authored_prop_obeys_the_placement_rules() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let waived = check_prop_placements(&shipped(), &kit).expect("the shipped Site must be legal");
+        // Waivers are legal, but a silent drift toward "everything is waived" is not. If this ever
+        // trips, read the reasons before raising it.
+        assert!(
+            waived.len() <= 3,
+            "{} props are waived out of the placement rules — that is a lot of exceptions: {waived:#?}",
+            waived.len()
+        );
+    }
+
+    /// ...and the rules actually BITE. A check that cannot fail is worse than no check, because it
+    /// reads like coverage.
+    ///
+    /// Both faults below are real ones from the first furnishing pass on 2026-08-02, reproduced: a
+    /// bunk laid across a 5 m room so it pushes through the wall, and two props in the same place.
+    #[test]
+    fn a_prop_through_a_wall_or_inside_another_prop_is_refused() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+
+        // A 2.29 m bunk at yaw 0 centred 1.0 m into a room whose west wall is at x = 0.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Bunk,
+            pos: (1.0, 29.0),
+            yaw: 0.0,
+            waive: None,
+        });
+        let err = check_prop_placements(&l, &kit).expect_err("a bunk through a wall must be refused");
+        assert!(
+            err.contains("Bunk") && err.contains("sticks"),
+            "the message must name the piece and how far out it is: {err}"
+        );
+
+        // Two chairs in exactly the same place.
+        let mut l = shipped();
+        for _ in 0..2 {
+            l.props.push(PropPlacement {
+                piece: SitePiece::Chair,
+                pos: (20.5, 31.0),
+                yaw: 0.0,
+                waive: None,
+            });
+        }
+        let err = check_prop_placements(&l, &kit).expect_err("two props in one spot must be refused");
+        assert!(err.contains("overlaps"), "the message must say what overlapped: {err}");
+    }
+
+    /// A seat pulled up to a surface must address it — and a backless one must not be asked to.
+    ///
+    /// Both halves matter. The first caught all eight seats in the Site on 2026-08-02: their yaws were
+    /// authored against the ENGINE's facing convention (`forward = local +Z`) while `chair.glb` and
+    /// `command_chair.glb` front local **+X**, measured from where the backrest mass sits. Every chair
+    /// was a quarter-turn sideways to its table, and a four-angle visual pass had already missed it,
+    /// because a sideways chair still looks like a chair.
+    ///
+    /// The second half is why `stool` and `bench` carry no `front` in the kit: they measure symmetric
+    /// to within a centimetre because they genuinely have no back, so asserting a facing on them would
+    /// be asserting something about the art that is not true.
+    #[test]
+    fn a_seat_at_a_surface_must_face_it_and_a_backless_one_is_exempt() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+
+        // A chair beside the galley's mess table, turned side-on to it.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Chair,
+            pos: (7.6, 30.6),
+            yaw: 0.0,
+            waive: None,
+        });
+        let err = check_prop_placements(&l, &kit).expect_err("a side-on chair must be refused");
+        assert!(
+            err.contains("must face it") && err.contains("Try yaw"),
+            "the message must say what is wrong AND what to do: {err}"
+        );
+
+        // The same spot, same yaw, with a STOOL — no back, so no facing to assert.
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Stool,
+            pos: (7.6, 30.6),
+            yaw: 0.0,
+            waive: None,
+        });
+        check_prop_placements(&l, &kit)
+            .expect("a backless stool has no front, so no facing may be demanded of it");
+    }
+
+    /// The kit records the measured facing, and it is the quarter turn that caused the bug.
+    #[test]
+    fn the_seat_meshes_declare_the_front_that_was_measured_off_them() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        for seat in [SitePiece::Chair, SitePiece::CommandChair] {
+            assert_eq!(
+                kit.piece(seat).front,
+                Some(90.0),
+                "{seat:?} fronts local +X (backrest mass at -X), a quarter turn off the engine's +Z"
+            );
+        }
+        for backless in [SitePiece::Stool, SitePiece::Bench] {
+            assert_eq!(
+                kit.piece(backless).front,
+                None,
+                "{backless:?} measured symmetric — it has no front and none may be asserted"
+            );
+        }
+    }
+
+    /// A waiver is a sentence, and it exempts exactly the prop that carries it.
+    #[test]
+    fn a_waived_prop_is_skipped_and_says_why() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let mut l = shipped();
+        l.props.push(PropPlacement {
+            piece: SitePiece::Bunk,
+            pos: (1.0, 29.0),
+            yaw: 0.0,
+            waive: Some("deliberately recessed into the alcove".into()),
+        });
+        let waived = check_prop_placements(&l, &kit).expect("a waived prop must not fail the check");
+        assert!(
+            waived.iter().any(|w| w.contains("deliberately recessed")),
+            "the reason must be reported so an exemption stays visible: {waived:#?}"
+        );
     }
 
     #[test]

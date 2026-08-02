@@ -62,11 +62,11 @@
     // where `nav` puts every cell centre. Without this the plate's top would sit at +0.06 and
     // everything that walks on it would stand 6 cm inside it. The greybox kit gets this for free —
     // its floor is a zero-thickness plane already at y = 0.
-    floor:             (glb: "ozea/floor.glb",                height: 0.06, y_offset: -0.06),
+    floor:             (glb: "ozea/floor.glb",                height: 0.06, y_offset: -0.06, footprint: (1.00, 1.00)),
     // 1.00 m run (`SM_Wall_1x2`), authored to a true 2.40 m — see the header note on heights.
-    wall:              (glb: "ozea/wall.glb",                 height: 2.40),
+    wall:              (glb: "ozea/wall.glb",                 height: 2.40, footprint: (0.10, 1.00)),
     // The corner POST — see the header note.
-    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.40),
+    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.40, footprint: (0.22, 0.22)),
     // ── The two doorways, and the OPENING each actually leaves ──
     //
     // `opening` is the clear hole: jamb inner face to jamb inner face, floor to lintel underside. It
@@ -79,9 +79,9 @@
     // volume, generous on purpose because it must catch a walking avatar — giving a 3.2 m quad
     // against this 1.6 m hole. The aperture material is opaque by design, so that overhang punched
     // through the wall either side of the door rather than fading out.
-    wall_doorway:      (mesh: (glb: "ozea/doorframe_single.glb", height: 2.01), opening: (0.867, 1.705)),
+    wall_doorway:      (mesh: (glb: "ozea/doorframe_single.glb", height: 2.01, footprint: (0.46, 2.06)), opening: (0.867, 1.705)),
     // The ASYNC aperture's frame. The one mesh promoted before this pass.
-    wall_doorway_wide: (mesh: (glb: "ozea/doorframe_double.glb", height: 1.98), opening: (1.600, 1.626)),
+    wall_doorway_wide: (mesh: (glb: "ozea/doorframe_double.glb", height: 1.98, footprint: (0.40, 2.00)), opening: (1.600, 1.626)),
     // The header course over a doorway: `WALL_HEIGHT` 2.40 − `DOORWAY_HEIGHT` 2.00 = a 0.40 m band.
     // Without it the perimeter had a 0.40 × 2.00 m slot straight through it above the ASYNC door.
     //
@@ -89,27 +89,27 @@
     // not by squashing a wall. A header course IS the top of the wall, so the crop keeps the wall's
     // own top trim at its authored size and the piece lines up with the wall tops either side of the
     // door by construction. `y_scale` is a no-op 1.0.
-    wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40),
+    wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40, footprint: (0.10, 1.00)),
     // Containment-cell glazing — the player must be able to SEE what is held.
-    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40),
+    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40, footprint: (0.20, 2.00)),
     // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
     // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a
     // fit, kept because a counter is the cheapest way to furnish a room and this is the only panel
     // in the promoted set with a 1 m footprint.
-    wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00),
+    wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00, footprint: (0.20, 1.00)),
     // The examination slab: `SM_MedPod_Treatment_Bed` (E_001), the same pack the cryo pod comes from,
     // so the research wing and the containment wing read as one facility. Native size is the intent —
     // it is furniture, not architecture — and its bed platform sits at y = 0.60, which is where
     // `site::visuals::SLAB_SURFACE_Y` lays the study subject.
-    slab:              (glb: "ozea/slab.glb",                 height: 1.72),
+    slab:              (glb: "ozea/slab.glb",                 height: 1.72, footprint: (2.17, 1.07), surface: true),
     // `SM_Pylonne`, authored 1.10 m in the pack and re-authored to 2.40 here. It was the worst
     // offender of the lot: at its native height `y_scale` stretched it **2.18×**.
-    column:            (glb: "ozea/column.glb",               height: 2.40),
+    column:            (glb: "ozea/column.glb",               height: 2.40, footprint: (0.50, 0.80)),
 
     // ── Dressing ──
-    crate_:            (glb: "ozea/crate.glb",                height: 1.00),
-    pipe:              (glb: "ozea/pipe.glb",                 height: 0.30),
-    pipe_corner:       (glb: "ozea/pipe_corner.glb",          height: 0.30),
+    crate_:            (glb: "ozea/crate.glb",                height: 1.00, footprint: (1.00, 1.00)),
+    pipe:              (glb: "ozea/pipe.glb",                 height: 0.30, footprint: (0.30, 0.88)),
+    pipe_corner:       (glb: "ozea/pipe_corner.glb",          height: 0.30, footprint: (0.59, 0.59)),
     // ── Floor inlays ──
     // `y_offset` on all three, and it is not optional: these are the same 0.06/0.05 m thickness as the
     // floor plate they lie on, so with both seated at y = 0 their top faces would be coplanar and the
@@ -121,14 +121,33 @@
     // inlay only has to clear the *plane*. 2 mm, the same margin as before.
     //
     // The lit threshold pad at the aperture's mouth.
-    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.002),
+    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.002, footprint: (1.00, 1.00)),
     // Wing colour-coding: learnability without signage (design doc §2.4).
-    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.002),
-    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.002),
+    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.002, footprint: (1.00, 1.00)),
+    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.002, footprint: (1.00, 1.00)),
 
     // ── The specimen ──
     // No longer a stand-in. `fill_containment_cells` puts one of these in a cell per held specimen,
     // in capture order — so what the player walks past is a rack of cryo pods holding the things they
     // brought home, which is the entire argument for the hub being a place rather than a menu.
-    specimen_standin:  (glb: "ozea/cryo_pod.glb",             height: 2.41),
+    specimen_standin:  (glb: "ozea/cryo_pod.glb",             height: 2.41, footprint: (1.00, 1.02)),
+
+    // ── Furniture for the living half (2026-08-02) ──
+    // Heights MEASURED by scripts/fbx_to_glb.py and copied from its INVENTORY.md, never guessed.
+    bunk: ( glb: "ozea/bunk.glb", height: 0.55, y_offset: 0.0, footprint: (2.29, 1.18) ),
+    locker: ( glb: "ozea/locker.glb", height: 1.90, y_offset: 0.0, footprint: (0.46, 1.10) ),
+    bedside_table: ( glb: "ozea/bedside_table.glb", height: 0.50, y_offset: 0.0, footprint: (0.40, 0.50) ),
+    galley_counter: ( glb: "ozea/galley_counter.glb", height: 0.75, y_offset: 0.0, footprint: (0.60, 1.40), surface: true ),
+    mess_table: ( glb: "ozea/mess_table.glb", height: 1.20, y_offset: 0.0, footprint: (0.60, 0.60), surface: true ),
+    stool: ( glb: "ozea/stool.glb", height: 0.98, y_offset: 0.0, footprint: (0.51, 0.41) ),
+    coffee_machine: ( glb: "ozea/coffee_machine.glb", height: 0.67, y_offset: 0.0, footprint: (0.40, 0.50) ),
+    water_dispenser: ( glb: "ozea/water_dispenser.glb", height: 1.20, y_offset: 0.0, footprint: (0.45, 0.45) ),
+    bench: ( glb: "ozea/bench.glb", height: 0.45, y_offset: 0.0, footprint: (0.55, 2.00) ),
+    vending_machine: ( glb: "ozea/vending_machine.glb", height: 1.95, y_offset: 0.0, footprint: (0.91, 1.15) ),
+    chair: ( glb: "ozea/chair.glb", height: 1.11, y_offset: 0.0, footprint: (0.57, 0.45), front: Some(90.0) ),
+    map_table: ( glb: "ozea/map_table.glb", height: 1.01, y_offset: 0.0, footprint: (1.46, 1.46), surface: true ),
+    control_desk: ( glb: "ozea/control_desk.glb", height: 1.13, y_offset: 0.0, footprint: (1.47, 3.68), surface: true ),
+    surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0, footprint: (0.58, 1.54), surface: true ),
+    server_rack: ( glb: "ozea/server_rack.glb", height: 1.80, y_offset: 0.0, footprint: (0.74, 1.32) ),
+    command_chair: ( glb: "ozea/command_chair.glb", height: 1.10, y_offset: 0.0, footprint: (0.59, 0.55), front: Some(90.0) ),
 )

@@ -82,6 +82,27 @@ impl Material for AsyncApertureMaterial {
 #[derive(Component)]
 pub struct ApertureQuad;
 
+/// The light the aperture throws into the ASYNC hall.
+///
+/// **The shader alone could not do this.** A custom `fragment` writes a colour and stops there — it
+/// illuminates nothing around it, so before 2026-08-02 the portal lit its own pixels and left the hall
+/// floor in front of it completely dark. A hole onto somewhere else that casts nothing reads as a
+/// poster of a hole. This is the real light, sodium-tinted to match `WALL_TINT` in
+/// `assets/shaders/async_aperture.wgsl`, and it breathes and charges on exactly the same terms the
+/// shader does — see [`drive_aperture_charge`].
+#[derive(Component)]
+pub struct ApertureGlow;
+
+/// Sodium spill colour. Matches `WALL_TINT` in the shader; the two are the same art fact, and if they
+/// drift the portal's own light stops agreeing with the portal.
+pub const APERTURE_LIGHT_TINT: Color = Color::linear_rgb(0.82, 0.74, 0.42);
+
+/// Resting luminous power of the aperture's spill, in lumens.
+pub const APERTURE_LIGHT_LUMENS: f32 = 90_000.0;
+
+/// Extra lumens at full charge — the door brightening as it notices someone.
+pub const APERTURE_LIGHT_CHARGE_LUMENS: f32 = 150_000.0;
+
 /// Ease `charge` toward 1 while an operative is inside the door's trigger, and back down when not.
 ///
 /// On `Update` and cosmetic: it writes only a material uniform, never `(Transform, Health)`.
@@ -91,6 +112,7 @@ pub fn drive_aperture_charge(
     quads: Query<&MeshMaterial3d<AsyncApertureMaterial>, With<ApertureQuad>>,
     doors: Query<(&super::visuals::AsyncDoor, &Transform)>,
     avatars: Query<&Transform, With<super::visuals::SiteAvatar>>,
+    mut glows: Query<&mut PointLight, With<ApertureGlow>>,
 ) {
     // A generous approach radius rather than the trigger itself: the door should notice you BEFORE you
     // are through it, or the effect only ever plays on the frame you leave.
@@ -103,9 +125,20 @@ pub fn drive_aperture_charge(
     let target = if near { 1.0 } else { 0.0 };
     // Slow: an anomaly noticing you should not snap.
     let k = (time.delta_secs() * 1.4).clamp(0.0, 1.0);
+    let mut charge = 0.0f32;
     for handle in &quads {
         if let Some(mut m) = mats.get_mut(&handle.0) {
             m.settings.charge += (target - m.settings.charge) * k;
+            charge = m.settings.charge;
         }
+    }
+    // Drive the spill from the SAME charge the shader is showing, and breathe it on the same period
+    // (`sin(t * 0.9)` there). Recomputing the phase from `elapsed_secs` rather than threading it
+    // through keeps one number in one place; the two are in step because they read the same clock.
+    let breath = 0.5 + 0.5 * (time.elapsed_secs() * 0.9).sin();
+    let lumens = APERTURE_LIGHT_LUMENS * (0.82 + 0.18 * breath)
+        + APERTURE_LIGHT_CHARGE_LUMENS * charge;
+    for mut light in &mut glows {
+        light.intensity = lumens;
     }
 }

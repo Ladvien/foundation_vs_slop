@@ -56,6 +56,112 @@ impl Rect2 {
     }
 }
 
+/// One placed object's axis-aligned floor footprint: where it is, which way it faces, and how much
+/// room it takes.
+///
+/// # Why this lives in the IR rather than in a solver
+///
+/// The two rules that stop furniture being nonsense — *pieces do not interpenetrate* and *a piece
+/// stays inside the room it was placed in* — were, until 2026-08-02, private to
+/// `solvers::metropolis`: an `Obj` struct plus `aabb_overlap_area`, scored as built-in energy terms
+/// rather than as [`Constraint`]s. That worked for the dungeon, whose furniture is *solved*.
+///
+/// It left the **Site** unprotected, because Site-67 is hand-authored: `site67.ron` types positions
+/// directly and never enters a solver, so nothing checked them. The first pass at furnishing the
+/// living half put three bunks 15 cm through a wall, ran a 3.68 m control desk a metre out into a
+/// corridor, and sat three bedside tables inside their own bunks — none of it visible in a
+/// screenshot at play zoom.
+///
+/// So the geometry moved here, where both callers can reach it, and there is exactly **one**
+/// definition of "do these two overlap" and "is this inside its room". A second copy for the Site
+/// would have been a second answer to the same question, which is the failure mode this codebase
+/// spends most of its comments avoiding.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Footprint {
+    pub x: f32,
+    pub z: f32,
+    /// Yaw about +Y, radians.
+    pub yaw: f32,
+    /// Native half-extents BEFORE yaw. The axis-aligned pair is [`Self::half_extents`].
+    pub hw: f32,
+    pub hd: f32,
+}
+
+impl Footprint {
+    /// Axis-aligned half-extents at the current yaw.
+    ///
+    /// **Quarter-turn furniture:** at 90°/270° width and depth swap, and nothing between is modelled.
+    /// That is a real limit of this representation and it is the right one here — every placement in
+    /// this game is authored or solved on quarter turns, and an oriented box would make the overlap
+    /// test a separating-axis problem for no gain anyone can see.
+    #[inline]
+    pub fn half_extents(&self) -> (f32, f32) {
+        if self.yaw.sin().abs() > 0.5 {
+            (self.hd, self.hw)
+        } else {
+            (self.hw, self.hd)
+        }
+    }
+}
+
+/// Area (m²) by which two footprints interpenetrate. `0.0` when they are clear of each other.
+#[inline]
+pub fn overlap_area(a: &Footprint, b: &Footprint) -> f32 {
+    let (ahw, ahd) = a.half_extents();
+    let (bhw, bhd) = b.half_extents();
+    let ox = (ahw + bhw) - (a.x - b.x).abs();
+    let oz = (ahd + bhd) - (a.z - b.z).abs();
+    if ox > 0.0 && oz > 0.0 { ox * oz } else { 0.0 }
+}
+
+/// How far (metres, summed over the axes it breaches) a footprint sticks out past `bounds`, given as
+/// the interior extents `(x0, x1, z0, z1)`. `0.0` when the whole footprint is inside.
+///
+/// A hinge sum rather than a boolean so a solver can descend it and a checker can report *how far*
+/// out the offender is — "0.15 m through the west wall" is actionable; "invalid" is not.
+///
+/// # Returns `f64`, and that is not cosmetic
+///
+/// Each term is widened to `f64` **before** the sum, which is what `metropolis` did when this lived
+/// there as a private expression. Summing the four hinges in `f32` and widening the total afterwards
+/// is a different number — `f32` addition rounds at every step — and this feeds a simulated-annealing
+/// cost, where a difference in the last bits changes which proposals are accepted and therefore where
+/// the furniture ends up for a given seed.
+///
+/// I wrote it the other way round first. Nothing caught it: the placement tests assert that solving
+/// *succeeds*, not that it lands in the same place, so a silent layout shift would have ridden out on
+/// a green suite.
+#[inline]
+pub fn escapes_bounds(f: &Footprint, bounds: (f32, f32, f32, f32)) -> f64 {
+    let (ahw, ahd) = f.half_extents();
+    let (x0, x1, z0, z1) = bounds;
+    let (bx0, bx1, bz0, bz1) = (x0 + ahw, x1 - ahw, z0 + ahd, z1 - ahd);
+    let over = |v: f32| -> f64 { v.max(0.0) as f64 };
+    over(bx0 - f.x) + over(f.x - bx1) + over(bz0 - f.z) + over(f.z - bz1)
+}
+
+/// How well a thing at `from` with yaw `yaw` points at `to`: the cosine of the angle between its
+/// forward and the direction to the target. `1.0` is dead on, `0.0` is side-on, `-1.0` is back-turned.
+///
+/// **Forward is `(sin yaw, cos yaw)`** — local +Z — which is the convention `Predicate::Facing` has
+/// always scored with and `furnish`'s wall-light yaw already assumes. A mesh that fronts some other
+/// local axis says so once, in its kit entry, rather than at every call site: `site::kit::KitPiece::
+/// front` is the degrees to add to the authored yaw before asking this question.
+///
+/// Degenerate case: the length is floored at `1e-4` rather than special-cased, so two coincident
+/// objects score ~0 (side-on) rather than 1 (dead on). That is **`metropolis`'s original behaviour**,
+/// preserved deliberately — an early return of `1.0` reads better in isolation but is a different
+/// number in the annealer's cost, and a coincident pair is already dominated by the overlap term
+/// anyway. Changing solver arithmetic while "just extracting a function" is the exact mistake the
+/// commit before this one had to undo.
+#[inline]
+pub fn facing_cosine(from: (f32, f32), yaw: f32, to: (f32, f32)) -> f32 {
+    let (fx, fz) = (yaw.sin(), yaw.cos());
+    let (dx, dz) = (to.0 - from.0, to.1 - from.1);
+    let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+    (fx * dx + fz * dz) / len
+}
+
 /// A doorway / corridor mouth on a region's boundary — derived from the coarse `CellData.open`
 /// links + the corridor carve. `cell` is the interior floor cell at lane 0 of the opening, `dir` the
 /// wall it pierces (N/E/S/W), and `width` the number of open lanes (≥1) — the doorway necks down from
@@ -298,3 +404,58 @@ impl std::fmt::Display for SolveError {
 }
 
 impl std::error::Error for SolveError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`escapes_bounds`] widens each hinge to `f64` BEFORE summing, and that is load-bearing.
+    ///
+    /// This exists because the refactor that created this function got it wrong in the other
+    /// direction — summing in `f32` and widening the total — and the whole suite stayed green.
+    /// `metropolis`'s own `deterministic_under_seed` could not see it (both halves of `run() == run()`
+    /// move together), and even the bit-pinned layout test could not: in a *converged* solve every
+    /// piece is in bounds, so all four hinges are zero and the two summations agree exactly.
+    ///
+    /// The difference only shows when a piece genuinely does not fit, which is exactly the case a
+    /// checker is for. The input below is a footprint larger than its room in both axes — all four
+    /// hinges positive — where the two orders differ in the last bits.
+    // The literals below are exact `f32` values, written at full precision so the input that
+    // distinguishes the two summation orders is reproducible rather than approximately re-typed.
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn the_hinge_sum_is_accumulated_in_f64_not_f32() {
+        let f = Footprint {
+            x: 0.685_108_4,
+            z: 0.121_921_23,
+            yaw: 0.0,
+            hw: 1.133_890_7,
+            hd: 1.855_970_6,
+        };
+        let bounds = (0.0, 1.094_911_6, 0.0, 1.860_573_1);
+        let got = escapes_bounds(&f, bounds);
+
+        // Each term widened first, then summed — the reference semantics.
+        let (ahw, ahd) = f.half_extents();
+        let (bx0, bx1) = (bounds.0 + ahw, bounds.1 - ahw);
+        let (bz0, bz1) = (bounds.2 + ahd, bounds.3 - ahd);
+        let w = |v: f32| -> f64 { v.max(0.0) as f64 };
+        let want = w(bx0 - f.x) + w(f.x - bx1) + w(bz0 - f.z) + w(f.z - bz1);
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "escapes_bounds must accumulate in f64; got {got:?}, want {want:?}"
+        );
+
+        // ...and that it is NOT the f32-accumulated answer, or this test proves nothing.
+        let n = |v: f32| -> f32 { v.max(0.0) };
+        let f32_sum =
+            (n(bx0 - f.x) + n(f.x - bx1) + n(bz0 - f.z) + n(f.z - bz1)) as f64;
+        assert_ne!(
+            got.to_bits(),
+            f32_sum.to_bits(),
+            "this input no longer distinguishes the two summation orders — find another, or the \
+             test has stopped guarding anything"
+        );
+    }
+}

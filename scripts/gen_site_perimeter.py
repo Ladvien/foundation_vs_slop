@@ -9,15 +9,26 @@ Orientation: the promoted `SM_Wall_1x2` is 0.10 m thin along X and 1.00 m long a
 separating along X wants yaw 0 and one separating along Z wants yaw 90.
 """
 
+# ⚠️ THIS IS A HAND-DUPLICATED COPY of `site67.ron`'s `floor:` list, and nothing checks that the two
+# agree. If they drift, this script generates the perimeter of a building that does not exist: the
+# new floor keeps the OLD room's wall cells sitting on top of it as unwalkable holes, and the walls
+# the new floor needs are never emitted. Change one, change the other, in the same commit.
 FLOOR = [
     (0, 2, 12, 10),    # async door hall
     (14, 2, 16, 10),   # containment wing
+    (30, 2, 4, 10),    # monitoring — beside the cells it watches
     (0, 12, 34, 2),    # the spine
     (0, 14, 8, 8),     # records office
+    (8, 14, 2, 10),    # connector: spine -> south spine
     (10, 14, 12, 10),  # research wing
     (24, 14, 8, 6),    # requisition
     (26, 20, 2, 2),    # connector: requisition -> briefing
     (24, 22, 10, 8),   # briefing room
+    (0, 24, 24, 2),    # the SOUTH spine
+    (0, 26, 5, 8),     # quarters
+    (6, 26, 5, 8),     # galley
+    (12, 26, 5, 8),    # activities
+    (18, 26, 5, 8),    # war room
 ]
 
 # Cells the ASYNC aperture occupies — its own frame is placed by the spawner, so no wall may sit on
