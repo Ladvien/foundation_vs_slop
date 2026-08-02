@@ -305,12 +305,15 @@ pub fn post_positions(
 
     // Every prop standing in this room, as the footprint the placement solver would see. Floor
     // markings are excluded for the reason `check_prop_placements` states: a body standing on a decal
-    // is correct, and the 2D model cannot see that one of the two is 5 cm thick and lying down.
+    // is correct, and the 2D model cannot see that one of the two is 5 cm thick and lying down. A
+    // prop RESTING on another is excluded for the mirror-image reason — it is 75 cm up in the air,
+    // and the table holding it already excludes the floor underneath. Counting the mug as well would
+    // shrink where a person may stand on the strength of a mug.
     let mut props: Vec<(Vec2, Footprint)> = layout
         .props
         .iter()
         .filter(|p| a.rect.contains_metres(p.pos))
-        .filter(|p| !super::layout::is_floor_marking(kit, p.piece))
+        .filter(|p| super::layout::occupies_floor(kit, p.piece))
         .map(|p| {
             let (fw, fd) = kit.piece(p.piece).footprint;
             (

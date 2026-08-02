@@ -617,7 +617,7 @@ fn spawn_site_geometry(
         // logged rather than ignored so a future caller that skipped the check is not silent.
         if let Some(rest) = super::layout::resting_on(l, &kit, p) {
             match rest {
-                Ok((top, _host)) => at.y += top,
+                Ok((top, _host_ix)) => at.y += top,
                 Err(e) => warn!("site: {e}"),
             }
         }

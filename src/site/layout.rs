@@ -291,6 +291,31 @@ impl SiteLayout {
         seen
     }
 
+    /// The area declared with this id.
+    pub fn area(&self, id: AreaId) -> Option<&Area> {
+        self.areas.iter().find(|a| a.id == id)
+    }
+
+    /// **Which area is this cell in?** `None` in a corridor gap or off the floor entirely.
+    ///
+    /// The hub's missing keystone: until 2026-08-02 `AreaId` was used only to *look up* a rect —
+    /// per-wing lighting, staff spawn grouping — and nothing ever asked the question the other way
+    /// round. So no system could know which room the player was standing in, which is why every hub
+    /// verb was a screen that worked anywhere rather than something that happened somewhere.
+    ///
+    /// A linear scan is not a shortcut to be optimised later: [`Self::validate`] proves the areas do
+    /// not overlap, so the answer is unique and the list is twelve long. Returning the first match is
+    /// therefore not a *pick* — there is nothing to tie-break, and no ordering key is owed.
+    pub fn area_at(&self, c: IVec2) -> Option<AreaId> {
+        self.areas.iter().find(|a| a.rect.contains(c)).map(|a| a.id)
+    }
+
+    /// [`Self::area_at`] in metre space — props are authored off-grid, so "which room is this in" is
+    /// a continuous question for everything except the player's own footprint.
+    pub fn area_at_metres(&self, p: (f32, f32)) -> Option<&Area> {
+        self.areas.iter().find(|a| a.rect.contains_metres(p))
+    }
+
     /// World position of a cell centre.
     pub fn cell_center(&self, c: IVec2) -> Vec3 {
         Vec3::new(
@@ -315,9 +340,19 @@ impl SiteLayout {
                 return Err(format!("site layout: missing required area {want:?}"));
             }
         }
-        // No area declared twice — two rects claiming one id makes "where is Records?" ambiguous.
+        // No DESTINATION declared twice — two rects claiming one id makes "where is Records?"
+        // ambiguous. `Corridor` is exempt and that is the enum's own definition of it: *"the spines
+        // that join them. Not a destination"* — the Site has a north spine, a south spine and two
+        // short connectors, and "where is the corridor?" is not a question anybody asks.
+        //
+        // The exemption exists because the alternative was worse. Until 2026-08-02 those three extra
+        // runs were simply absent from `areas` — floor belonging to no area at all — which was
+        // harmless while `AreaId` was only ever used to look a rect UP. `area_at` asks the reverse,
+        // and a player standing on unclaimed floor is *nowhere*: every presence-driven verb goes
+        // quiet and no room-tone emitter owns the air. They were also unlit, `light_the_site` being
+        // another per-area pass.
         for (i, a) in self.areas.iter().enumerate() {
-            if self.areas[..i].iter().any(|b| b.id == a.id) {
+            if a.id != AreaId::Corridor && self.areas[..i].iter().any(|b| b.id == a.id) {
                 return Err(format!(
                     "site layout: area {:?} declared more than once",
                     a.id
@@ -620,17 +655,40 @@ fn thresholds(rect: &Rect, nav: &super::nav::SiteNav) -> Vec<(crate::placement::
 /// a **fault**, not a fallback: seating it at y = 0 would bury a mug in the deck, and nothing about
 /// that errors at spawn.
 ///
+/// # Three things a host must be
+///
+/// **It must offer the class asked for.** `kit.surface_bits(host) & want != 0` — the two-sided match
+/// `placement::manifest::validate_manifest` already enforces for the dungeon. This read a `bool` when
+/// `rests_on` landed, which made the class decorative: a mug asking for `"worktop"` seated on the
+/// specimen slab as happily as on a table.
+///
+/// **It must be in the same area.** The reach test alone is a 2.5 m radius with no notion of walls,
+/// and the Site's rooms are separated by exactly one cell of wall — so a mug authored near a party
+/// wall could take its height from a table *in the next room*, which spawns cleanly and looks like a
+/// float. [`SiteLayout::area_at_metres`] is what makes this expressible; before it existed the
+/// question could not be asked. A prop in a corridor (in no area at all) may only host from the
+/// corridor, by the same rule.
+///
+/// **Its top must be measured the way the host is actually drawn** — see `SiteKit::top_height`.
+///
 /// Deterministic without an ordering lint: `layout.props` is an authored `Vec` read in file order, and
 /// the pick is broken to a **total** key by `(distance, x, z)`, so two equally close hosts cannot tie.
-pub(crate) fn resting_on<'a>(
-    layout: &'a SiteLayout,
+/// ⚠️ That claim is unenforced — `tests/determinism_lint.rs` is textual and cannot see a hand-rolled
+/// loop — so it is asserted by `two_hosts_at_equal_distance_are_broken_by_position` below.
+pub(crate) fn resting_on(
+    layout: &SiteLayout,
     kit: &super::kit::SiteKit,
     p: &PropPlacement,
-) -> Option<Result<(f32, &'a PropPlacement), String>> {
+) -> Option<Result<(f32, usize), String>> {
     let class = kit.rests_on(p.piece)?;
-    let mut best: Option<(f32, f32, f32, &PropPlacement)> = None;
-    for q in &layout.props {
-        if !kit.piece(q.piece).surface || std::ptr::eq(q, p) {
+    let want = kit.rests_on_bits(p.piece)?;
+    let area = layout.area_at_metres(p.pos).map(|a| a.id);
+    let mut best: Option<(f32, f32, f32, usize)> = None;
+    for (ix, q) in layout.props.iter().enumerate() {
+        if kit.surface_bits(q.piece) & want == 0 || std::ptr::eq(q, p) {
+            continue;
+        }
+        if layout.area_at_metres(q.pos).map(|a| a.id) != area {
             continue;
         }
         let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
@@ -645,27 +703,46 @@ pub(crate) fn resting_on<'a>(
             Some(b) => key < (b.0, b.1, b.2),
         };
         if better {
-            best = Some((key.0, key.1, key.2, q));
+            best = Some((key.0, key.1, key.2, ix));
         }
     }
     Some(match best {
-        Some((_, _, _, host)) => {
-            let top = kit.piece(host.piece).height * kit.y_scale(host.piece);
-            Ok((top, host))
-        }
+        Some((_, _, _, host)) => Ok((kit.top_height(layout.props[host].piece), host)),
         None => Err(format!(
-            "{:?} at {:?} rests on {class:?} but no surface piece stands within {:.1} m of it — it \
-             would be seated at floor level, buried in the deck, with nothing logged. Move it onto a \
-             surface, or drop `rests_on` from its kit entry.",
+            "{:?} at {:?} rests on {class:?} but no piece offering that class stands within {:.1} m \
+             of it in {} — it would be seated at floor level, buried in the deck, with nothing \
+             logged. Move it onto a surface that offers {class:?}, or change its kit entry.",
             p.piece,
             p.pos,
-            super::kit::RESTS_ON_REACH
+            super::kit::RESTS_ON_REACH,
+            area.map_or_else(|| "the corridor".to_string(), |a| format!("{a:?}")),
         )),
     })
 }
 
+/// A flat thing **lying on the deck** — a decal, a line marking, a threshold pad.
+///
+/// ⚠️ **A resting prop is never one, whatever it measures.** This was a bare height threshold until
+/// 2026-08-02, which was fine while everything short was a decal; the dressing pass then added a
+/// 0.109 m mug, a 0.04 m data folder and a 0.107 m stack of books, and *every one of them* was
+/// silently reclassified as a floor marking. That exempted them from the overlap rule and from the
+/// staff-exclusion set — so two mugs in the same spot on the same table were not a fault, and the
+/// evidence was a test that passed. The height was never the definition; "is it lying on the floor"
+/// was, and `rests_on` is the part of that question the kit can now answer.
 pub(crate) fn is_floor_marking(kit: &super::kit::SiteKit, piece: SitePiece) -> bool {
-    kit.piece(piece).height * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
+    kit.rests_on(piece).is_none()
+        && kit.piece(piece).height * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
+}
+
+/// Does this piece take up floor space — the question "can a person stand here, and is it in the
+/// doorway" actually asks?
+///
+/// Distinct from [`is_floor_marking`] by exactly one term. A decal does not occupy the floor because
+/// you walk over it; a mug does not occupy the floor because it is 75 cm above it, standing on a
+/// table that occupies the floor on its own account. The overlap rule wants the *first* exclusion
+/// only, because two mugs on one table genuinely do collide.
+pub(crate) fn occupies_floor(kit: &super::kit::SiteKit, piece: SitePiece) -> bool {
+    !is_floor_marking(kit, piece) && kit.rests_on(piece).is_none()
 }
 
 pub fn check_prop_placements(
@@ -675,8 +752,9 @@ pub fn check_prop_placements(
     use crate::placement::ir::{escapes_bounds, facing_cosine, overlap_area, Footprint};
 
     let mut waived = Vec::new();
-    // (index, area label, footprint) for every prop the OVERLAP rule applies to.
-    let mut solid: Vec<(usize, Footprint)> = Vec::new();
+    // (index, footprint, host index) for every prop the OVERLAP rule applies to. `host` is the prop
+    // this one RESTS ON, and it is the only pair the rule is allowed to forgive — see below.
+    let mut solid: Vec<(usize, Footprint, Option<usize>)> = Vec::new();
     let mut faults: Vec<String> = Vec::new();
 
     for (i, p) in layout.props.iter().enumerate() {
@@ -694,7 +772,7 @@ pub fn check_prop_placements(
         };
         // Which area is it in? Props outside every area are dressing in a corridor — legal, and the
         // bounds rule simply has nothing to measure against, so only the overlap rule applies.
-        let area = layout.areas.iter().find(|a| a.rect.contains_metres(p.pos));
+        let area = layout.area_at_metres(p.pos);
         if let Some(area) = area {
             let label = area.label.as_str();
             let out = escapes_bounds(&f, area.rect.bounds_metres());
@@ -711,13 +789,23 @@ pub fn check_prop_placements(
         // such pairs faults. That is the 2D footprint model's known blind spot — it compares plan
         // outlines and cannot see that one of the two is 5 cm thick and lying on the ground — so the
         // exclusion is stated here rather than waived away six times at the call site.
-        // ...and a piece that RESTS ON another is not on the floor at all, so the floor rules do not
-        // apply to it either. A mug on a table overlaps that table completely in plan — `overlap_area`
-        // is a 2D outline test and cannot see that one of the two is 75 cm higher. Excluding it here
-        // is the same exemption `is_floor_marking` takes, for the same reason: the model is a plan
-        // view, and both of these live outside it. The `resting_on` check below is what covers them.
-        if !is_floor_marking(kit, p.piece) && kit.rests_on(p.piece).is_none() {
-            solid.push((i, f));
+        // ...and a piece that RESTS ON another overlaps that ONE prop completely in plan —
+        // `overlap_area` is a 2D outline test and cannot see that one of the two is 75 cm higher.
+        //
+        // ⚠️ The first cut of this dropped every resting prop from the rule entirely, which is a
+        // bigger hole than the one it was patching: two mugs authored at the same spot on the same
+        // table were not a fault, and neither was a mug standing in a chair. The exemption is
+        // one-pair-wide — this prop against **its own host** — so everything else is still checked,
+        // and a resting prop that overlaps another resting prop is caught like anything else.
+        if !is_floor_marking(kit, p.piece) {
+            let host = match resting_on(layout, kit, p) {
+                Some(Ok((_, host))) => Some(host),
+                // No host: `resting_on` has already recorded that as its own fault below, and
+                // forgiving nothing is the right behaviour for a prop that should not be there.
+                Some(Err(_)) => None,
+                None => None,
+            };
+            solid.push((i, f, host));
         }
     }
 
@@ -756,7 +844,7 @@ pub fn check_prop_placements(
         // The nearest surface within reach, if any. Nearest rather than "every surface": a chair
         // between two tables belongs to one of them, and requiring it to face both is unsatisfiable.
         let mut nearest: Option<(f32, &PropPlacement)> = None;
-        for q in layout.props.iter().filter(|q| kit.piece(q.piece).surface) {
+        for q in layout.props.iter().filter(|q| kit.is_surface(q.piece)) {
             let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
             if d <= SEAT_ADDRESSES_SURFACE_WITHIN && nearest.is_none_or(|(bd, _)| d < bd) {
                 nearest = Some((d, q));
@@ -784,10 +872,21 @@ pub fn check_prop_placements(
         }
     }
 
-    for (n, (i, a)) in solid.iter().enumerate() {
-        for (j, b) in solid.iter().skip(n + 1) {
+    for (n, (i, a, a_host)) in solid.iter().enumerate() {
+        for (j, b, b_host) in solid.iter().skip(n + 1) {
+            // The one forgiven pair: a prop and the surface it stands on.
+            if *a_host == Some(*j) || *b_host == Some(*i) {
+                continue;
+            }
             let ov = overlap_area(a, b);
-            if ov > 0.02 {
+            // ⚠️ The tolerance is RELATIVE for anything small, and it has to be. A flat 0.02 m² is a
+            // sane "they are touching, not intersecting" slack for furniture, but the dressing pass
+            // added props whose ENTIRE footprint is under it — a mug is 0.136 × 0.105 = 0.014 m² —
+            // so two of them could occupy exactly the same point and never reach the threshold. An
+            // absolute slack silently stops being a rule once the props get smaller than the slack.
+            // A quarter of the smaller of the two is the same judgement expressed proportionally.
+            let smallest = (a.hw * a.hd).min(b.hw * b.hd) * 4.0;
+            if ov > 0.02_f32.min(smallest * 0.25) {
                 faults.push(format!(
                     "{:?} at {:?} overlaps {:?} at {:?} by {ov:.2} m²",
                     layout.props[*i].piece,
@@ -824,7 +923,14 @@ pub fn check_prop_placements(
             continue;
         }
         for (band, cell, dir) in thresholds(&area.rect, &nav) {
-            for (i, f) in &solid {
+            for (i, f, _) in &solid {
+                // A prop standing ON another prop is not in anybody's way — its host is the thing
+                // occupying the doorway, and the host is checked on its own account. Flagging the mug
+                // as well as the table it sits on names the same defect twice and points at the wrong
+                // prop to move.
+                if !occupies_floor(kit, layout.props[*i].piece) {
+                    continue;
+                }
                 let ov = overlap_area(f, &band);
                 if ov > 0.02 {
                     faults.push(format!(
@@ -1158,8 +1264,22 @@ mod tests {
         for p in &l.props {
             let Some(rest) = resting_on(&l, &kit, p) else { continue };
             resting += 1;
-            let (top, host) = rest.unwrap_or_else(|e| panic!("{e}"));
-            assert!(kit.piece(host.piece).surface, "{:?} rests on a non-surface", p.piece);
+            let (top, host_ix) = rest.unwrap_or_else(|e| panic!("{e}"));
+            let host = &l.props[host_ix];
+            let want = kit.rests_on_bits(p.piece).expect("a resting piece asks for a class");
+            assert!(
+                kit.surface_bits(host.piece) & want != 0,
+                "{:?} rests on {:?}, which does not offer {:?}",
+                p.piece,
+                host.piece,
+                kit.rests_on(p.piece),
+            );
+            assert_eq!(
+                l.area_at_metres(host.pos).map(|a| a.id),
+                l.area_at_metres(p.pos).map(|a| a.id),
+                "{:?} took its height from a host in another room",
+                p.piece,
+            );
             assert!(top > 0.0, "{:?} would be seated at floor level", p.piece);
         }
         assert!(resting >= 4, "the Site ships resting dressing; found {resting}");
@@ -1190,15 +1310,198 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
         let mut l = shipped();
-        // Dead centre of the briefing room's mess table — maximum possible plan overlap.
+        // Wholly inside the briefing room's mess table — maximum possible plan overlap with the host
+        // — but clear of the folder and the mug the room already ships, which the rule DOES judge.
         l.props.push(PropPlacement {
             piece: SitePiece::Mug,
-            pos: (26.2, 24.4),
+            pos: (26.4, 24.2),
             yaw: 0.0,
             waive: None,
         });
         check_prop_placements(&l, &kit)
             .expect("a mug standing on a table is the point, not an overlap");
+    }
+
+    /// ...but the exemption is exactly ONE pair wide.
+    ///
+    /// The first cut of the rests-on work dropped every resting prop out of the overlap rule
+    /// altogether, which forgave far more than the one pair it meant to: two mugs authored at the
+    /// same spot on the same table were not a fault, and neither was a mug standing in a chair. The
+    /// prop-vs-**host** pair is the only thing a plan-view test genuinely cannot judge.
+    #[test]
+    fn two_mugs_in_the_same_spot_on_the_same_table_are_still_a_fault() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let mut l = shipped();
+        for _ in 0..2 {
+            l.props.push(PropPlacement {
+                piece: SitePiece::Mug,
+                pos: (26.2, 24.4),
+                yaw: 0.0,
+                waive: None,
+            });
+        }
+        let err = check_prop_placements(&l, &kit)
+            .expect_err("two mugs occupying one spot is a fault, host or no host");
+        assert!(
+            err.contains("overlaps"),
+            "the message must name the overlap: {err}"
+        );
+    }
+
+    /// **The surface class has to mean something.** A mug asks for a `worktop`; the specimen slab
+    /// offers only `support`.
+    ///
+    /// When `rests_on` first landed, `resting_on` bound the requested class purely to interpolate it
+    /// into an error string and then tested the host with a `bool` — so this exact arrangement was
+    /// accepted and a mug sat on the slab beside whatever was laid out on it. This is the test that
+    /// makes the two-sided match load-bearing rather than decorative.
+    #[test]
+    fn a_mug_may_not_rest_on_the_specimen_slab() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        // The premise, asserted rather than assumed: the slab is a surface, but not that class.
+        let want = kit
+            .rests_on_bits(SitePiece::Mug)
+            .expect("a mug rests on something");
+        assert!(kit.is_surface(SitePiece::Slab), "the slab is a surface");
+        assert_eq!(
+            kit.surface_bits(SitePiece::Slab) & want,
+            0,
+            "the slab must not offer what a mug asks for"
+        );
+
+        let l = shipped();
+        let slab = l
+            .props
+            .iter()
+            .find(|p| p.piece == SitePiece::Slab)
+            .expect("the research wing ships a slab");
+        let mut l2 = shipped();
+        l2.props.push(PropPlacement {
+            piece: SitePiece::Mug,
+            pos: slab.pos,
+            yaw: 0.0,
+            waive: None,
+        });
+        let err = check_prop_placements(&l2, &kit)
+            .expect_err("a mug on the specimen slab must be refused");
+        assert!(
+            err.contains("rests on") && err.contains("Mug"),
+            "the message must name the piece and the relation: {err}"
+        );
+    }
+
+    /// **A host across a wall is not a host.** The reach test is a radius and knows nothing of walls.
+    ///
+    /// Site rooms are separated by exactly one cell, so a 2.5 m radius reaches comfortably into the
+    /// next room; a prop authored near a party wall could take its height from a table it has no
+    /// physical relationship with, spawn cleanly, and read as a float. `area_at_metres` is what makes
+    /// the question expressible at all.
+    #[test]
+    fn a_prop_may_not_take_its_height_from_a_table_in_the_next_room() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        // Stripped to the two props under test, so the answer is about the wall and not about which
+        // of the Site's fourteen surfaces happened to be nearest.
+        let mut l = shipped();
+        l.props.retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
+
+        // Quarters x[0,5) and the galley x[6,11) are separated by the single cell x[5,6). A table
+        // just inside one and a mug just inside the other are 1.7 m apart — well within reach, and
+        // on opposite sides of a wall.
+        let table: (f32, f32) = (4.5, 30.0);
+        let mug: (f32, f32) = (6.2, 30.0);
+        assert!(
+            ((mug.0 - table.0).powi(2) + (mug.1 - table.1).powi(2)).sqrt()
+                < super::super::kit::RESTS_ON_REACH,
+            "the point of this test is that it IS within reach"
+        );
+        assert_ne!(
+            l.area_at_metres(mug).map(|a| a.id),
+            l.area_at_metres(table).map(|a| a.id),
+            "the two points must be in different areas for this to test anything"
+        );
+        for (piece, pos) in [(SitePiece::MessTable, table), (SitePiece::Mug, mug)] {
+            l.props.push(PropPlacement { piece, pos, yaw: 0.0, waive: None });
+        }
+        let mug_prop = l.props.last().expect("just pushed").clone();
+        let err = resting_on(&l, &kit, &mug_prop)
+            .expect("a mug rests on something")
+            .expect_err("a host on the other side of a wall must not count");
+        assert!(
+            err.contains("Kitchen"),
+            "the message must name the room it looked in: {err}"
+        );
+    }
+
+    /// The host pick is total, and the lint cannot prove it.
+    ///
+    /// `tests/determinism_lint.rs` scans for `min_by`/`sort_by`, so a hand-rolled loop like
+    /// `resting_on`'s passes it silently — the totality claim in that function's doc comment is
+    /// exactly the kind of comment this repo has learned not to trust. Two hosts at *identical*
+    /// distance must still be separated, by position, in file order or reversed.
+    #[test]
+    fn two_hosts_at_equal_distance_are_broken_by_position() {
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+            .expect("the shipped kit must load");
+        let build = |reversed: bool| {
+            let mut l = shipped();
+            // Every shipped surface removed: otherwise the briefing room's own mess table sits
+            // nearer than either of the two this test is trying to make tie.
+            l.props
+                .retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
+            let mut tables = vec![(26.0, 24.4), (26.8, 24.4)];
+            if reversed {
+                tables.reverse();
+            }
+            for pos in tables {
+                l.props.push(PropPlacement {
+                    piece: SitePiece::MessTable,
+                    pos,
+                    yaw: 0.0,
+                    waive: None,
+                });
+            }
+            l.props.push(PropPlacement {
+                piece: SitePiece::Mug,
+                // Exactly equidistant from both.
+                pos: (26.4, 24.4),
+                yaw: 0.0,
+                waive: None,
+            });
+            let mug = l.props.last().expect("just pushed").clone();
+            let (_, host_ix) = resting_on(&l, &kit, &mug)
+                .expect("a mug rests on something")
+                .unwrap_or_else(|e| panic!("{e}"));
+            l.props[host_ix].pos
+        };
+        assert_eq!(
+            build(false),
+            build(true),
+            "a tie broken by authoring order would make the Site's dressing depend on file order"
+        );
+        assert_eq!(build(false), (26.0, 24.4), "the lower x wins the tie");
+    }
+
+    /// **Which room is this?** — the question nothing could ask before 2026-08-02.
+    #[test]
+    fn every_authored_area_answers_for_its_own_cells_and_nothing_else() {
+        let l = shipped();
+        for a in &l.areas {
+            for c in a.rect.cells() {
+                assert_eq!(
+                    l.area_at(c),
+                    Some(a.id),
+                    "{:?} does not claim its own cell {c:?}",
+                    a.id
+                );
+            }
+        }
+        // Off the map entirely is `None`, not a nearest-guess. "Nowhere" is a real answer — the
+        // corridor gaps between wings are floorless, and a hub verb must not fire in one.
+        assert_eq!(l.area_at(IVec2::new(-5, -5)), None);
+        assert_eq!(l.area_at(IVec2::new(9_999, 9_999)), None);
     }
 
     /// The kit records the measured facing, and it is the quarter turn that caused the bug.

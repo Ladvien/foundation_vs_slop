@@ -59,6 +59,15 @@
         ( id: Containment, label: "CONTAINMENT",     rect: (x: 14, z:  2, w: 16, h: 10) ),
         ( id: Monitoring,  label: "MONITORING",      rect: (x: 30, z:  2, w:  4, h: 10) ),
         ( id: Corridor,    label: "SPINE",           rect: (x:  0, z: 12, w: 34, h:  2) ),
+        // `Corridor` is the ONE id that may be declared more than once — see `SiteLayout::validate`.
+        // These three runs of floor were unclaimed until 2026-08-02, which was invisible while an
+        // area was only ever something you looked a rect up from. `layout::area_at` asks the reverse
+        // question, and a player standing on floor that belongs to no area is *nowhere*: no room
+        // tone, no placard, and every presence-gated panel silent. They were unlit for the same
+        // reason, `light_the_site` being another per-area pass.
+        ( id: Corridor,    label: "SPINE",           rect: (x:  0, z: 24, w: 24, h:  2) ),
+        ( id: Corridor,    label: "CONNECTOR",       rect: (x:  8, z: 14, w:  2, h: 10) ),
+        ( id: Corridor,    label: "CONNECTOR",       rect: (x: 26, z: 20, w:  2, h:  2) ),
         ( id: Records,     label: "RECORDS",         rect: (x:  0, z: 14, w:  8, h:  8) ),
         ( id: Research,    label: "RESEARCH",        rect: (x: 10, z: 14, w: 12, h: 10) ),
         ( id: Requisition, label: "REQUISITION",     rect: (x: 24, z: 14, w:  8, h:  6) ),

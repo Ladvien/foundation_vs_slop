@@ -108,14 +108,31 @@ pub struct KitPiece {
     #[serde(default)]
     pub front: Option<f32>,
 
-    /// A horizontal work or dining surface that seating should address — a table, a counter, a
-    /// console. Seats near one are required to face it (`layout::check_prop_placements`).
+    /// **The surface classes this piece OFFERS** — a table, a counter, a console, the slab.
+    /// Seats near one are required to face it (`layout::check_prop_placements`), and it is what a
+    /// [`Self::rests_on`] piece may be seated on.
     ///
-    /// The furniture manifest expresses the same idea as `surfaces: ["support", "worktop"]`
-    /// (`placement::manifest::ManifestItem`); the Site kit needs only the boolean, because the Site's
-    /// surface *vocabulary* is one class — see [`Self::rests_on`].
+    /// # Why a set of classes and not a `bool`
+    ///
+    /// This was `surface: bool` when `rests_on` landed on 2026-08-02, and the pairing was decorative:
+    /// `resting_on` bound the requested class only to interpolate it into an error string, then tested
+    /// the host with a boolean. A mug asking for `"worktop"` seated happily on anything flat — the
+    /// specimen slab included.
+    ///
+    /// Two sides, matched by bit — `surface_bits(rests_on) & offered != 0` — is the contract
+    /// `placement::manifest::validate_manifest` already enforces for the dungeon's furniture, and
+    /// naming it the same thing (`surfaces`) is what lets the two vocabularies converge rather than
+    /// drift. Tutenel et al. 2010 is the reason it is a set and not a single token: what a piece
+    /// OFFERS (the feature axis) is separate from what it is FOR (the service axis), and one top can
+    /// legitimately offer several classes.
+    ///
+    /// The Site's vocabulary is `placement::furnish::SURFACE_CLASSES` verbatim: `"support"` is any
+    /// horizontal top, `"worktop"` is a desk or table people work and eat at. **The slab offers only
+    /// `"support"`** — it is where a specimen is laid out, and a mug on it would read as somebody's
+    /// coffee beside an anomaly. That distinction is the whole point of the class surviving to the
+    /// match.
     #[serde(default)]
-    pub surface: bool,
+    pub surfaces: Vec<String>,
 
     /// **This piece sits on top of another piece rather than on the floor.**
     ///
@@ -126,8 +143,8 @@ pub struct KitPiece {
     ///
     /// # Derived, never authored
     ///
-    /// The height comes from the **hosting piece**, found at build time as the nearest prop within
-    /// [`RESTS_ON_REACH`] whose kit entry has `surface: true`. That is the same
+    /// The height comes from the **hosting piece**, found at build time as the nearest prop **in the
+    /// same area** within [`RESTS_ON_REACH`] that offers this class in its `surfaces`. That is the same
     /// derive-don't-author discipline `visuals::wall_panels` (faces from floor edges),
     /// `corner_vertices`, `light_the_site` (a wing's fixtures from its rect), the slab spot (from the
     /// authored `Slab`) and `people::post_positions` all follow. Move the table and the mug moves;
@@ -138,10 +155,8 @@ pub struct KitPiece {
     /// mug embedded in the floor that no test would ever notice.
     ///
     /// The token is a surface *class*, matching `placement::furnish::SURFACE_CLASSES`' vocabulary
-    /// rather than inventing a second one. The Site offers one class today (`"support"`); the manifest
-    /// side additionally distinguishes `"worktop"`. Keeping the token — instead of a bare `bool` —
-    /// is what lets the two vocabularies converge when the Site's dressing moves onto the shared
-    /// constraint IR (`slop/research/2026-07-24-world-population-grammar.md`, Stage A).
+    /// rather than inventing a second one, and it is matched against the host's [`Self::surfaces`] by
+    /// bit — see that field for why the pairing has to be two-sided to mean anything.
     #[serde(default)]
     pub rests_on: Option<String>,
 
@@ -289,6 +304,43 @@ impl SiteKit {
         self.piece(piece).rests_on.as_deref()
     }
 
+    /// The class bit `piece` requires of a host, if it rests on one — see [`KitPiece::rests_on`].
+    ///
+    /// An unknown token maps to `0`, which matches nothing. That is not a silent drop: it cannot
+    /// reach here, because [`validate_site_kit`] rejects an unrecognised token at load.
+    pub fn rests_on_bits(&self, piece: SitePiece) -> Option<u32> {
+        self.rests_on(piece)
+            .map(crate::placement::furnish::surface_bits)
+    }
+
+    /// The OR of the classes `piece` OFFERS as a host — see [`KitPiece::surfaces`].
+    pub fn surface_bits(&self, piece: SitePiece) -> u32 {
+        self.piece(piece)
+            .surfaces
+            .iter()
+            .map(|s| crate::placement::furnish::surface_bits(s))
+            .fold(0, |acc, b| acc | b)
+    }
+
+    /// Does `piece` offer any surface at all? The question the seat-facing rule asks, where *which*
+    /// class a top offers is irrelevant — a chair addresses the thing it is pulled up to whatever
+    /// that thing is for.
+    pub fn is_surface(&self, piece: SitePiece) -> bool {
+        self.surface_bits(piece) != 0
+    }
+
+    /// **How high the top of `piece` stands** — the number a resting prop is seated at.
+    ///
+    /// Every transform `visuals::place` applies to a host, in the same order it applies them:
+    /// `y_offset` lifts the piece off the deck, `scale` is the uniform art correction and `y_scale`
+    /// the architectural stretch. Reading only `height * y_scale` — as this did when `rests_on`
+    /// landed — is correct exactly while every surface piece is scale 1.0 and offset 0.0, and
+    /// silently floats or sinks the dressing the moment one is not.
+    pub fn top_height(&self, piece: SitePiece) -> f32 {
+        let k = self.piece(piece);
+        k.y_offset + k.height * k.scale * self.y_scale(piece)
+    }
+
     /// The kit entry for `piece`.
     pub fn piece(&self, piece: SitePiece) -> &KitPiece {
         use SitePiece::*;
@@ -391,17 +443,33 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
         // otherwise the piece can never be seated and would silently sit on the floor. Checked at the
         // door in the same spirit as `placement::manifest::validate_manifest`'s two-sided contract —
         // "a scatter class no item in the kit offers is a load-time reject naming the item".
-        if let Some(class) = &entry.rests_on {
+        for class in &entry.surfaces {
             if crate::placement::furnish::surface_bits(class) == 0 {
+                return Err(format!(
+                    "site kit: {piece:?} offers surface class {class:?}, which is not one. The \
+                     vocabulary is `placement::furnish::SURFACE_CLASSES`."
+                ));
+            }
+        }
+        if let Some(class) = &entry.rests_on {
+            let want = crate::placement::furnish::surface_bits(class);
+            if want == 0 {
                 return Err(format!(
                     "site kit: {piece:?} rests on {class:?}, which is not a surface class. The \
                      vocabulary is `placement::furnish::SURFACE_CLASSES`."
                 ));
             }
-            if !SitePiece::ALL.iter().any(|p| kit.piece(*p).surface) {
+            // The two-sided half. Asking "does ANY piece have a surface" — which is what this checked
+            // when `surfaces` was a `bool` — passes a kit in which nothing offers the class actually
+            // requested, and the failure then surfaces as a placement fault per authored prop rather
+            // than as one sentence about the kit.
+            if !SitePiece::ALL
+                .iter()
+                .any(|p| kit.surface_bits(*p) & want != 0)
+            {
                 return Err(format!(
-                    "site kit: {piece:?} rests on {class:?} but no piece in this kit offers a \
-                     surface — it could never be seated"
+                    "site kit: {piece:?} rests on {class:?} but no piece in this kit OFFERS that \
+                     class in its `surfaces` — it could never be seated"
                 ));
             }
         }
@@ -576,7 +644,7 @@ mod tests {
             y_offset: 0.0,
             footprint: (0.3, 0.3),
             front: None,
-            surface: false,
+            surfaces: Vec::new(),
             rests_on: None,
             scale: 1.0,
         };

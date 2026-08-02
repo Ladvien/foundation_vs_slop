@@ -415,6 +415,11 @@ pub fn run() {
                 // never reach `snapshot_hash`. The Site's GAMEPLAY half (`SitePlugin`) is separate and
                 // IS harness-visible.
                 site::SiteVisualsPlugin,
+                // Where in the hub the player is standing. Windowed-only for the same reason and by
+                // the same construction — it follows a `PlayerAvatar`, which is a `Transform` with no
+                // `Health`. Registered here rather than inside `SiteVisualsPlugin` because it owns a
+                // resource that UI plugins outside `site::` read.
+                site::SitePresencePlugin,
             ),
             // Windowed game-system UI (HUD, menus, state machine) + world-space dialogue bubbles.
             // Both registered only here, never in the headless harness, so they stay outside the

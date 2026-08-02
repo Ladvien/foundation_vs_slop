@@ -43,7 +43,7 @@
     wall_window: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-large.glb", height: 1.0, footprint: (0.30, 1.00)),
     wall_low: (glb: "kenney_prototype-kit/Models/GLB format/wall-low.glb", height: 0.5, footprint: (0.20, 1.00)),
     // A low block reads as a slab in greybox terms; the shipped kit gets a real treatment bed.
-    slab: (glb: "kenney_prototype-kit/Models/GLB format/shape-cube-half.glb", height: 0.5, footprint: (1.00, 1.00), surface: true),
+    slab: (glb: "kenney_prototype-kit/Models/GLB format/shape-cube-half.glb", height: 0.5, footprint: (1.00, 1.00), surfaces: ["support"]),
     column: (glb: "kenney_prototype-kit/Models/GLB format/column.glb", height: 1.0, footprint: (0.20, 0.20)),
 
     // ── Dressing ──
@@ -61,17 +61,17 @@
     bunk: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
     locker: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding.glb", height: 1.0, y_offset: 0.0, footprint: (0.35, 0.70) ),
     bedside_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube-rounded.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    galley_counter: ( glb: "kenney_prototype-kit/Models/GLB format/shape-slope.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), surface: true ),
-    mess_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00), surface: true ),
+    galley_counter: ( glb: "kenney_prototype-kit/Models/GLB format/shape-slope.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), surfaces: ["support", "worktop"] ),
+    mess_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00), surfaces: ["support", "worktop"] ),
     stool: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
     coffee_machine: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-half.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 1.00) ),
     water_dispenser: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-cylinder.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
     bench: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism-low.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
     vending_machine: ( glb: "kenney_prototype-kit/Models/GLB format/door-garage.glb", height: 1.0, y_offset: 0.0, footprint: (0.35, 1.10) ),
     chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon-half.glb", height: 1.0, y_offset: 0.0, footprint: (0.43, 1.00), front: Some(90.0) ),
-    map_table: ( glb: "kenney_prototype-kit/Models/GLB format/target-a-round.glb", height: 1.0, y_offset: 0.0, footprint: (0.12, 0.50), surface: true ),
-    control_desk: ( glb: "kenney_prototype-kit/Models/GLB format/lever-double.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.50), surface: true ),
-    surveillance_console: ( glb: "kenney_prototype-kit/Models/GLB format/lever-single.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.30), surface: true ),
+    map_table: ( glb: "kenney_prototype-kit/Models/GLB format/target-a-round.glb", height: 1.0, y_offset: 0.0, footprint: (0.12, 0.50), surfaces: ["support", "worktop"] ),
+    control_desk: ( glb: "kenney_prototype-kit/Models/GLB format/lever-double.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.50), surfaces: ["support", "worktop"] ),
+    surveillance_console: ( glb: "kenney_prototype-kit/Models/GLB format/lever-single.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.30), surfaces: ["support", "worktop"] ),
     server_rack: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00) ),
     command_chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), front: Some(90.0) ),
 
@@ -87,8 +87,8 @@
     storage_crate: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-round.glb", height: 0.15, footprint: (0.5, 0.5) ),
     utility_cart: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding-double.glb", height: 0.8, footprint: (0.35, 0.9) ),
     tube_rack: ( glb: "kenney_prototype-kit/Models/GLB format/column-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
-    data_folder: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-square-small.glb", height: 0.15, footprint: (0.5, 0.5), rests_on: Some("support") ),
+    data_folder: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-square-small.glb", height: 0.15, footprint: (0.5, 0.5), rests_on: Some("worktop") ),
     medical_vial: ( glb: "kenney_prototype-kit/Models/GLB format/column-rounded-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
-    mug: ( glb: "kenney_prototype-kit/Models/GLB format/hat-cap.glb", height: 0.15, footprint: (0.335, 0.22), rests_on: Some("support") ),
-    books: ( glb: "kenney_prototype-kit/Models/GLB format/hat-hard.glb", height: 0.175, footprint: (0.33, 0.24), rests_on: Some("support") ),
+    mug: ( glb: "kenney_prototype-kit/Models/GLB format/hat-cap.glb", height: 0.15, footprint: (0.335, 0.22), rests_on: Some("worktop") ),
+    books: ( glb: "kenney_prototype-kit/Models/GLB format/hat-hard.glb", height: 0.175, footprint: (0.33, 0.24), rests_on: Some("worktop") ),
 )
