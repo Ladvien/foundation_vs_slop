@@ -420,6 +420,7 @@ pub struct ActivitiesPlugin;
 impl Plugin for ActivitiesPlugin {
     fn build(&self, app: &mut App) {
         crate::input::claim_bindings(app);
+        crate::site::claim_current_area(app);
         app.add_message::<TherapyRequest>()
             // The panel opens itself when the player walks into Activities. Presence OFFERS; the key
             // still ACTS — `therapy_input` below is gated on the Site, not on the room.

@@ -45,6 +45,7 @@ pub struct ResearchHudPlugin;
 
 impl Plugin for ResearchHudPlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
         app
             // **The panel opens itself when you walk in.** Experiments happen at the slab. Paired
             // with the curriculum panel, which gates on the same room from a different region.

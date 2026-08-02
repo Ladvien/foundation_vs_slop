@@ -182,6 +182,7 @@ pub struct BriefingPlugin;
 
 impl Plugin for BriefingPlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
         // ── The war room, at the Site ────────────────────────────────────────────────────────────
         //
         // `ui/briefing` has rendered `BRANCH UNIVERSE 0x… CLUTTER ▓▓▓░░ INFESTATION ▓▓░░░` since

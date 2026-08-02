@@ -320,6 +320,7 @@ pub struct SiteHudPlugin;
 
 impl Plugin for SiteHudPlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
         app.add_message::<CycleSpecimenRequest>()
             // **The panel opens itself when you walk in.** The curriculum and the specimen selector
             // belong with the experiments they feed, so this shares the research wing with

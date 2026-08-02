@@ -103,6 +103,28 @@ pub fn in_area(area: AreaId) -> impl Fn(Res<CurrentArea>) -> bool + Clone {
     move |current: Res<CurrentArea>| current.0 == Some(area)
 }
 
+/// **Claim the resources a room-gated panel reads, so its run condition cannot panic.**
+///
+/// A missing `Res<T>` in Bevy 0.19 does not skip a system — it **panics on parameter validation**,
+/// and a run condition is validated like any other system. So the moment [`panel_wanted`] went onto
+/// `RecordsPlugin`, `O5Plugin` and friends, every one of them acquired a hard dependency on a
+/// resource that only `SitePresencePlugin` inserts.
+///
+/// That is invisible in the shipped game, because `lib::run` registers all of them together. It is
+/// **not** invisible to a test that builds a subset — `tests/replay.rs`'s
+/// `returning_to_the_site_after_a_run_does_not_panic` mirrors the windowed plugin list *without*
+/// `SitePresencePlugin`, and it caught this. Its own comment predicted the failure mode word for
+/// word: *"a missing-`Res` panic is parameter validation, which fires the first time each system
+/// actually runs"*. One panic then poisoned the `serial_guard` mutex and took four more tests with it.
+///
+/// The rule this restores is already written down in `input::claim_bindings` and `ui::mod`:
+/// **the plugin that registers a reader claims the resource.** `init_resource` is idempotent and
+/// never overwrites an inserted value, so claiming here cannot fight `SitePresencePlugin`.
+pub fn claim_current_area(app: &mut App) {
+    app.init_resource::<CurrentArea>();
+    app.add_message::<AreaEntered>();
+}
+
 /// **Should this room's panel be up, and is it not?** — the spawn half of an auto-opening panel.
 ///
 /// Keyed on the panel's own root component rather than on a message, so the answer is a fact about
@@ -271,6 +293,37 @@ mod tests {
     /// A marker standing in for a panel root.
     #[derive(Component)]
     struct FakePanel;
+
+    /// **A room-gated panel must not panic in an app that lacks `SitePresencePlugin`.**
+    ///
+    /// This is the regression test for the defect `tests/replay.rs` caught on 2026-08-02. Putting
+    /// `panel_wanted` on `RecordsPlugin`, `O5Plugin`, `BriefingPlugin` and friends gave every one of
+    /// them a hard dependency on a resource only `SitePresencePlugin` inserts — and in Bevy 0.19 a
+    /// missing `Res` in a run condition **panics on parameter validation** rather than skipping.
+    ///
+    /// Invisible in the shipped game, where `lib::run` registers them together. Very visible to a test
+    /// that builds a subset, which is what the windowed-plugin-set replay test does — and one panic
+    /// there poisoned the `serial_guard` mutex and took four more tests down with it.
+    ///
+    /// Lives here, in the fast GPU-free gate, so the next person finds out in a second rather than in
+    /// a 53-minute harness run.
+    #[test]
+    fn a_room_gate_is_safe_in_an_app_that_never_registered_the_presence_plugin() {
+        let mut app = App::new();
+        // Exactly what a consumer plugin does, and nothing else — no `SitePresencePlugin`.
+        claim_current_area(&mut app);
+        app.init_resource::<Ran>().add_systems(
+            Update,
+            (|mut r: ResMut<Ran>| r.0 += 1).run_if(panel_wanted::<FakePanel>(AreaId::Records)),
+        );
+        app.update(); // would panic on `Res<CurrentArea>` without the claim
+        assert_eq!(
+            app.world().resource::<Ran>().0,
+            0,
+            "an unclaimed default is 'nowhere', so the panel stays shut — the claim must not \
+             invent a room"
+        );
+    }
 
     /// The panel spawns once on entry and is torn down once on leaving — never respawned per frame.
     ///

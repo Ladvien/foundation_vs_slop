@@ -433,6 +433,9 @@ pub struct O5Plugin;
 
 impl Plugin for O5Plugin {
     fn build(&self, app: &mut App) {
+        // The requisition panel's run condition reads `CurrentArea`; a missing `Res` in a run
+        // condition PANICS on parameter validation. See `site::presence::claim_current_area`.
+        crate::site::claim_current_area(app);
         app.init_resource::<O5Standing>()
             .init_resource::<ExpeditionTally>()
             .init_resource::<Requisitioned>()

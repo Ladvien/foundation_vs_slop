@@ -521,6 +521,7 @@ pub struct RecordsPlugin;
 impl Plugin for RecordsPlugin {
     fn build(&self, app: &mut App) {
         use crate::ui::state::{despawn_scoped, AppState};
+        crate::site::claim_current_area(app);
         app.init_resource::<Records>()
             .add_message::<SeedMisinformation>()
             // The clickable FILE / PULL buttons send this; `records_input` and

@@ -74,7 +74,8 @@ pub use audio::SiteAudioPlugin;
 pub use signage::SiteSignagePlugin;
 pub use cutaway::SiteCutawayPlugin;
 pub use presence::{
-    in_area, panel_stale, panel_wanted, AreaEntered, CurrentArea, SitePresencePlugin,
+    claim_current_area, in_area, panel_stale, panel_wanted, AreaEntered, CurrentArea,
+    SitePresencePlugin,
 };
 pub use review::{ExpeditionTally, O5Plugin, Requisitioned};
 pub use visuals::SiteVisualsPlugin;

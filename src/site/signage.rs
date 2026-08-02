@@ -152,6 +152,7 @@ pub struct SiteSignagePlugin;
 
 impl Plugin for SiteSignagePlugin {
     fn build(&self, app: &mut App) {
+        crate::site::claim_current_area(app);
         app.add_systems(
             OnEnter(AppState::Site),
             spawn_signage.after(layout::spawn_frame),
