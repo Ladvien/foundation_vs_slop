@@ -56,6 +56,19 @@ pub struct ManifestItem {
     // an accurate reservation. Defaults to (0,0) — a centred mesh needs no correction.
     #[serde(default)]
     pub pivot: (f32, f32),
+    // Vertical seat, metres — the Y twin of `pivot`, which is XZ-only.
+    //
+    // Every mesh in this kit is authored base-at-0 (`docs/artist_guide.md` §3), so a prop placed at a
+    // floor cell rests ON the floor and needs nothing. This exists for the pieces that are meant to be
+    // **recessed INTO** it: `ozea/floor_grate.glb` and `ozea/floor_light.glb` are 0.06 m hazard-station
+    // plates that should read as set into the deck, not as a step standing on it.
+    //
+    // They used to get that by accident — the meshes were centre-origined, so half of each sank below
+    // y = 0 on its own. Re-origining the Ozea kit to one convention (2026-08-01) removed the accident
+    // and left the intent with nowhere to live, which is what this field is. A negative value sinks;
+    // the default 0.0 means "sits on the floor", which is right for every other row.
+    #[serde(default)]
+    pub y_offset: f32,
 }
 
 /// A parsed furniture manifest.
@@ -82,8 +95,8 @@ pub const MAX_TILED_PROTOTYPES: usize = 31;
 /// (plugin build) decides how loudly to surface a malformed manifest. Also enforces the WFC
 /// [`MAX_TILED_PROTOTYPES`] cap so a data-only kit swap can never crash the solver later.
 pub fn parse_manifest(text: &str) -> Result<FurnitureManifest, String> {
-    let manifest =
-        ron::from_str::<FurnitureManifest>(text).map_err(|e| format!("manifest parse error: {e}"))?;
+    let manifest = ron::from_str::<FurnitureManifest>(text)
+        .map_err(|e| format!("manifest parse error: {e}"))?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -182,7 +195,12 @@ mod tests {
         )"#;
         let m = parse_manifest(text).expect("valid manifest");
         assert_eq!(m.items.len(), 2);
-        assert!(matches!(m.items[0].role, Role::Anchor { host: Host::Ceiling }));
+        assert!(matches!(
+            m.items[0].role,
+            Role::Anchor {
+                host: Host::Ceiling
+            }
+        ));
         assert!(matches!(m.items[1].role, Role::Freestanding));
         assert_eq!(m.by_role(|r| matches!(r, Role::Freestanding)).len(), 1);
         assert_eq!(m.items[1].affordances, vec!["sit".to_string()]);
@@ -214,8 +232,12 @@ mod tests {
                   role: Scatter(surface: "worktop"), footprint: (0.3, 0.3) ),
             ],
         )"#;
-        let err = parse_manifest(unprovided).expect_err("a provider-less scatter class must be rejected");
-        assert!(err.contains("lamp") && err.contains("worktop"), "error names prop + class: {err}");
+        let err =
+            parse_manifest(unprovided).expect_err("a provider-less scatter class must be rejected");
+        assert!(
+            err.contains("lamp") && err.contains("worktop"),
+            "error names prop + class: {err}"
+        );
 
         // (2) An unknown token in `surfaces` (the typo'd-provider case) → rejected at the door.
         let bad_provider = r#"(
@@ -224,8 +246,12 @@ mod tests {
                   footprint: (1.9, 0.9), surfaces: ["workop"] ),
             ],
         )"#;
-        let err = parse_manifest(bad_provider).expect_err("an unknown surfaces token must be rejected");
-        assert!(err.contains("desk") && err.contains("workop"), "error names item + token: {err}");
+        let err =
+            parse_manifest(bad_provider).expect_err("an unknown surfaces token must be rejected");
+        assert!(
+            err.contains("desk") && err.contains("workop"),
+            "error names item + token: {err}"
+        );
 
         // (3) An unknown token in a `Scatter` role (e.g. the playbook's old "media") → rejected.
         let bad_target = r#"(
@@ -234,8 +260,12 @@ mod tests {
                   role: Scatter(surface: "media"), footprint: (0.9, 0.3) ),
             ],
         )"#;
-        let err = parse_manifest(bad_target).expect_err("an unknown scatter class must be rejected");
-        assert!(err.contains("tv") && err.contains("media"), "error names prop + token: {err}");
+        let err =
+            parse_manifest(bad_target).expect_err("an unknown scatter class must be rejected");
+        assert!(
+            err.contains("tv") && err.contains("media"),
+            "error names prop + token: {err}"
+        );
     }
 
     #[test]
@@ -249,8 +279,12 @@ mod tests {
             ));
         }
         let text = format!("( items: [ {body} ] )");
-        let err = parse_manifest(&text).expect_err("more than the cap of Tiled items must be rejected");
-        assert!(err.contains("Tiled"), "error should name the Tiled cap: {err}");
+        let err =
+            parse_manifest(&text).expect_err("more than the cap of Tiled items must be rejected");
+        assert!(
+            err.contains("Tiled"),
+            "error should name the Tiled cap: {err}"
+        );
     }
 
     /// Every `glb` path in the SHIPPED manifest resolves to a real file under `assets/`.

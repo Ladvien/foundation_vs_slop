@@ -74,6 +74,22 @@ characters are under `SCP_Characters/`, for the procedural mushrooms under
    open mesh produces gibs with holes. Welded, closed meshes look right.
 6. **No malformed stray geometry.** A 10-metre shelf FBX forced the kit swap to
    `Shelf D` (see `assets/config/config.ron:157`). Clean your bbox before export.
+7. **Origin at the base, centred in XZ.** The bounding box's `Y` minimum sits at
+   `0`, and its `X`/`Z` centre sits at `0`. A multi-object asset re-origins as one
+   rigid **group**, not per object.
+
+   This is not a style preference — the game seats a piece by its transform and
+   scales it *about its origin*. `site::kit::y_scale` is `target / authored`, so a
+   centre-origined 2.0 m wall asked to reach `WALL_HEIGHT` grows half its gain
+   **downward**: `Y[-1.2, +1.2]`, half the wall underground and 1.17 m standing
+   against 2.4 m intended. Nothing errors. The wall is just short, and its corners
+   stop squaring — which is how a player found it (2026-08-01) rather than a test.
+
+   `scripts/fbx_to_glb.py --reorigin-base` and `scripts/blend_to_glb.py` both do
+   this via `scripts/mesh_origin.py`; the `--reorigin-base` flag is **required**
+   for anything destined for a kit. `tests/ozea_asset.rs` pins it against the
+   bytes. Genuinely asymmetric pieces (a pipe elbow) still centre their *bounding
+   box* — put the asymmetry in the mesh, not in the pivot.
 
 ### Strongly preferred
 

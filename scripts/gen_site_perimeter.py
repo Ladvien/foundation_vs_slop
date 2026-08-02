@@ -22,7 +22,13 @@ FLOOR = [
 
 # Cells the ASYNC aperture occupies — its own frame is placed by the spawner, so no wall may sit on
 # top of it or the doorway is bricked up.
-DOOR_KEEP_OUT = {(x, 1) for x in range(5, 9)}
+#
+# TWO cells, not four. `doorframe_double.glb` is 2.003 m along its span, so centred on the gap it
+# covers exactly x=6..7; holding x=5..8 clear (as this did until 2026-08-01) left a metre of open
+# perimeter either side of the frame with nothing standing in it. The flanks are walled by falling
+# out of this set, and `SiteLayout::validate` now checks the frame's span against it — see
+# `the_async_doorway_gap_matches_the_frame`.
+DOOR_KEEP_OUT = {(x, 1) for x in range(6, 8)}
 
 cells = set()
 for x, z, w, h in FLOOR:

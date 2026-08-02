@@ -24,9 +24,9 @@
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
+use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::layout::SiteLayout;
 use super::nav::SiteNav;
-use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::pieces::SitePiece;
 use crate::ui::state::AppState;
 
@@ -137,6 +137,64 @@ impl Plugin for SiteVisualsPlugin {
 #[derive(Resource, Deref)]
 pub struct SiteLayoutRes(pub SiteLayout);
 
+/// The cells where two wall runs meet — derived from the layout, never authored.
+///
+/// A junction is a cell carrying **both** a yaw-0 and a yaw-90 [`SitePiece::Wall`]. That is how
+/// `site67.ron` draws its 12 corners: two 0.10 m slabs crossed on one cell, which leaves the outer
+/// corner as two exposed slab ends. The kit has always carried a `wall_corner` cap for exactly this,
+/// it is validated, it is in `SitePiece::ALL` — and until now nothing ever placed one. Shipped,
+/// dressed and unreachable.
+///
+/// **Derived rather than authored** so a future edit to the layout cannot forget a corner, and so the
+/// piece is reachable by construction instead of by remembering. Yaw is compared on the half-turn
+/// (`rem_euclid(180)`): a wall at 180° lies along the same axis as one at 0°, so treating them as
+/// different orientations would invent junctions that are really just a slab facing the other way.
+fn corner_cells(l: &SiteLayout) -> std::collections::HashSet<(i32, i32)> {
+    let mut axes: std::collections::HashMap<(i32, i32), u32> = std::collections::HashMap::new();
+    for w in &l.walls {
+        if w.piece != SitePiece::Wall {
+            continue; // a Column standing in the spine is not a junction
+        }
+        let half = w.yaw.rem_euclid(180.0);
+        // Two axis bits, so "has both" is one mask test and a float yaw never reaches a hash key.
+        let bit = if !(45.0..135.0).contains(&half) { 1 } else { 2 };
+        *axes.entry(w.cell).or_insert(0) |= bit;
+    }
+    axes.into_iter()
+        .filter(|(_, m)| *m == 3)
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// Which way a junction's cap faces, in degrees about +Y.
+///
+/// Derived from which neighbours continue a wall: the corner turns *away* from the two directions the
+/// runs leave in. Yaw 0 is the corner whose arms point +X and +Z.
+///
+/// **The shipped Ozea cap is a 0.22 × 0.22 square post, so this yaw is currently invisible.** It is
+/// computed anyway because the greybox kit's corner is an L (`kenney .../wall-corner.glb`), and an
+/// L pointed the wrong way at three of four junctions is a silent, per-corner wrongness nobody would
+/// trace back here. `SITE_KIT_PATH` is one line; this keeps a kit swap from needing a second one.
+fn corner_yaw(l: &SiteLayout, cell: (i32, i32)) -> f32 {
+    let has_wall = |c: (i32, i32)| {
+        l.walls
+            .iter()
+            .any(|w| w.piece == SitePiece::Wall && w.cell == c)
+    };
+    let (x, z) = cell;
+    let (px, nx) = (has_wall((x + 1, z)), has_wall((x - 1, z)));
+    let (pz, nz) = (has_wall((x, z + 1)), has_wall((x, z - 1)));
+    match (px, pz, nx, nz) {
+        (true, true, _, _) => 0.0,
+        (_, true, true, _) => 90.0,
+        (_, _, true, true) => 180.0,
+        (true, _, _, true) => 270.0,
+        // Runs that do not leave in two perpendicular directions are a crossing, not a corner (the
+        // spine's T-junctions). A square post is right there and orientation is moot.
+        _ => 0.0,
+    }
+}
+
 /// One GLB piece, placed. The scene rides a **cosmetic child** — the same discipline every creature
 /// spawn uses, because an async scene load attaching `Children`/`SceneInstance` to an entity other
 /// systems query is the archetype churn `sim_harness` was hardened against.
@@ -168,6 +226,60 @@ fn place(
         .with_child((WorldAssetRoot(scene), Transform::default()));
 }
 
+/// Bevy's `Rectangle` is authored in the XY plane with a **+Z normal**, so its width axis is world X.
+/// Every doorframe in every kit here is thin along X and spans Z — Ozea's `SM_DoorFrame_Double` and
+/// Kenney's `wall-doorway` alike — so a frame's opening plane faces ±X. The two native axes differ by
+/// a quarter turn, and handing both the same unmodified `door.yaw` is what stood the quad *across* the
+/// frame rather than in it, for ANY value of that yaw. `-90` puts the lit face toward the hall.
+const APERTURE_QUAD_YAW_OFFSET: f32 = -90.0;
+
+/// Metres the quad is pushed back INTO the frame, so the jambs crop its edges instead of the two
+/// z-fighting. It rides the quad's own normal: as a bare world-space `+Z` nudge — which is what it
+/// was — it slid sideways along the frame at every yaw but zero.
+const APERTURE_RECESS: f32 = 0.02;
+
+/// The ASYNC aperture: a quad standing in the doorframe's clear opening.
+///
+/// Sized from the kit's measured `opening`, which is an **art** fact about the frame. It was sized
+/// from `DoorPlacement::trigger_half_extents` until 2026-08-01 — a gameplay volume, generous on
+/// purpose so it catches a walking avatar — which made a 3.2 m quad for a 1.6 m hole. The material is
+/// `AlphaMode::Opaque` deliberately (the aperture must occlude), so that overhang did not fade out at
+/// the edges: it punched an opaque hole through the wall either side of the door.
+///
+/// `assets/shaders/async_aperture.wgsl` remaps `mesh.uv` to `[-1, 1]` and marches on `uv.x`, with no
+/// aspect uniform to compensate — so the corridor illusion is stretched by whatever the quad's aspect
+/// happens to be. At 1.600 × 1.642 that is very nearly square, which is what it was written assuming;
+/// at the old 3.2 × 2.0 it was stretched 1.6:1. Tuning the shader itself is FVS-G-5 and still open.
+fn spawn_aperture_quad(
+    commands: &mut Commands,
+    kit: &crate::site::kit::SiteKit,
+    meshes: &mut Assets<Mesh>,
+    aperture_mats: &mut Assets<AsyncApertureMaterial>,
+    frame_at: Vec3,
+    yaw_deg: f32,
+) {
+    // Width is authored as-is because `place` scales Y only; height rides the frame's own y_scale, so
+    // the quad grows exactly as much as the opening it fills does.
+    let (ow, oh) = kit.wall_doorway_wide.opening;
+    let oh = oh * kit.y_scale(SitePiece::WallDoorwayWide);
+    let quad = meshes.add(Rectangle::new(ow, oh));
+    let mat = aperture_mats.add(AsyncApertureMaterial {
+        settings: ApertureUniform::default(),
+    });
+    let rot = Quat::from_rotation_y((yaw_deg + APERTURE_QUAD_YAW_OFFSET).to_radians());
+    let normal = rot * Vec3::Z;
+    commands.spawn((
+        SiteVisual,
+        ApertureQuad,
+        Mesh3d(quad),
+        MeshMaterial3d(mat),
+        NotShadowCaster, // anomalous portal quad: casts no shadow (see world::setup_lighting)
+        // The opening starts at the floor, so the quad's centre is half its height up.
+        Transform::from_translation(frame_at + Vec3::Y * oh * 0.5 - normal * APERTURE_RECESS)
+            .with_rotation(rot),
+    ));
+}
+
 fn spawn_site_geometry(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -181,48 +293,103 @@ fn spawn_site_geometry(
     light_the_site(&mut commands, l);
     for r in &l.floor {
         for c in r.cells() {
-            place(&mut commands, &assets, &kit, SitePiece::Floor, l.cell_center(c), 0.0);
+            place(
+                &mut commands,
+                &assets,
+                &kit,
+                SitePiece::Floor,
+                l.cell_center(c),
+                0.0,
+            );
         }
     }
     for w in &l.walls {
         let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
         place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
     }
+    // Cap every junction. ADDITIVE — the two crossed slabs stay and the cap covers the seam where
+    // they meet; it does not replace them. Substituting it was the first attempt and it was wrong:
+    // `SM_Wall_CornerCap` is a 0.22 m post, so swapping it in deleted a full metre of wall from each
+    // run and left a pole standing in the gap — which is precisely what the player had reported.
+    for cell in corner_cells(l) {
+        let at = l.cell_center(IVec2::new(cell.0, cell.1));
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallCorner,
+            at,
+            corner_yaw(l, cell),
+        );
+    }
     for p in &l.props {
         place(&mut commands, &assets, &kit, p.piece, l.point(p.pos), p.yaw);
     }
 
-    // The ASYNC door: a wide frame, plus the trigger volume inside it.
-    let door_at = l.point(l.door.pos);
-    place(&mut commands, &assets, &kit, SitePiece::WallDoorwayWide, door_at, l.door.yaw);
+    // The ASYNC door: a wide frame standing IN the perimeter gap, plus the trigger volume on the floor
+    // in front of it. Two positions, deliberately — `frame_pos` is not floor and `pos` must be, so one
+    // field could never have served both. It served `pos`, and the frame stood a metre out in the hall.
+    let frame_at = l.point(l.door.frame_pos);
+    place(
+        &mut commands,
+        &assets,
+        &kit,
+        SitePiece::WallDoorwayWide,
+        frame_at,
+        l.door.yaw,
+    );
     let (hx, hy, hz) = l.door.trigger_half_extents;
     commands.spawn((
         SiteVisual,
-        AsyncDoor { half_extents: Vec3::new(hx, hy, hz) },
-        Transform::from_translation(door_at),
+        AsyncDoor {
+            half_extents: Vec3::new(hx, hy, hz),
+        },
+        Transform::from_translation(l.point(l.door.pos)),
     ));
-    // The aperture itself: a quad standing in the frame's opening, recessed a couple of centimetres so
-    // the frame geometry crops its edges rather than the two z-fighting. Sized to `DOORWAY_HEIGHT` so
-    // it fills the opening the kit actually leaves.
-    let opening_w = hx * 2.0;
-    let opening_h = crate::dungeon::DOORWAY_HEIGHT;
-    let quad = meshes.add(Rectangle::new(opening_w, opening_h));
-    let mat = aperture_mats.add(AsyncApertureMaterial { settings: ApertureUniform::default() });
-    commands.spawn((
-        SiteVisual,
-        ApertureQuad,
-        Mesh3d(quad),
-        MeshMaterial3d(mat),
-        NotShadowCaster, // anomalous portal quad: casts no shadow (see world::setup_lighting)
-        Transform::from_translation(door_at + Vec3::new(0.0, opening_h * 0.5, 0.02))
-            .with_rotation(Quat::from_rotation_y(l.door.yaw.to_radians())),
-    ));
+    // The header course. The frame reaches `DOORWAY_HEIGHT` and the walls beside it `WALL_HEIGHT`, so
+    // without this the perimeter has a 0.40 m slot straight through it above the door — you see the
+    // void over the lintel. `DOORWAY_HEIGHT`'s doc has always said "the wall runs continuous above
+    // it"; the dungeon honoured that and the Site never had. The cells come from the layout, so the
+    // course cannot disagree with the gap `validate` checks the frame against.
+    for cell in l.doorway_gap_cells() {
+        let at = l.cell_center(cell) + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT;
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallHeader,
+            at,
+            l.door.yaw,
+        );
+    }
+    spawn_aperture_quad(
+        &mut commands,
+        &kit,
+        &mut meshes,
+        &mut aperture_mats,
+        frame_at,
+        l.door.yaw,
+    );
 
     // Containment cells: the glazed front, and an empty marker the specimen body will fill.
     for c in &l.cells {
         let at = l.point(c.pos);
-        place(&mut commands, &assets, &kit, SitePiece::WallWindow, at, c.yaw);
-        commands.spawn((SiteVisual, ContainmentCell { index: c.index, pos: at }, Transform::from_translation(at)));
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallWindow,
+            at,
+            c.yaw,
+        );
+        commands.spawn((
+            SiteVisual,
+            ContainmentCell {
+                index: c.index,
+                pos: at,
+            },
+            Transform::from_translation(at),
+        ));
     }
 
     // Operative avatars. The first is the one the player drives.
@@ -246,7 +413,14 @@ fn spawn_site_geometry(
             e.insert(PlayerAvatar);
         }
     }
-    info!("site: built Site-67 ({} floor runs, {} cells)", l.floor.len(), l.cells.len());
+    // The corner count is how the derived rule is verified at runtime — `site67.ron` authors no
+    // corners at all, so a 0 here means the derivation stopped matching the layout.
+    info!(
+        "site: built Site-67 ({} floor runs, {} cells, {} wall corners)",
+        l.floor.len(),
+        l.cells.len(),
+        corner_cells(l).len()
+    );
 }
 
 fn focus_camera_on_site(
@@ -340,9 +514,15 @@ fn command_avatar(
         return;
     }
     let (camera, cam_tf) = *camera;
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
-    let Some(d) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+        return;
+    };
+    let Some(d) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) else {
+        return;
+    };
     let point = ray.get_point(d);
     if !nav.is_walkable(nav.world_to_cell(point)) {
         return; // clicking a wall is not an order
@@ -449,7 +629,9 @@ fn return_camera_to_squad(
 ) {
     // No valid anchor means no living squad to look at (`squad` clears it on an empty roster), and
     // the terminal screens own the view at that point. Leave the camera where it is.
-    let Some(anchor) = anchor.filter(|a| a.valid) else { return };
+    let Some(anchor) = anchor.filter(|a| a.valid) else {
+        return;
+    };
     crate::camera::snap_camera_to(anchor.pos, &mut rig, &mut cams);
 }
 
@@ -514,7 +696,9 @@ fn fill_containment_cells(
     let Some(site) = site else { return };
     // `Option`, always: Bevy REMOVES the relationship target when it empties, so a Site holding nothing
     // matches nothing — which reads as "no Site" if you query it bare. That is the first expedition.
-    let Ok(roster) = rosters.get(site.0) else { return };
+    let Ok(roster) = rosters.get(site.0) else {
+        return;
+    };
 
     let mut held: Vec<(u64, Entity)> = roster
         .iter()
@@ -541,12 +725,9 @@ fn fill_containment_cells(
             SiteVisual,
             Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)).with_scale(Vec3::splat(0.6)),
             Visibility::Inherited,
-            WorldAssetRoot(
-                assets.load(
-                    GltfAssetLabel::Scene(0)
-                        .from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
-                ),
-            ),
+            WorldAssetRoot(assets.load(
+                GltfAssetLabel::Scene(0).from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
+            )),
         ));
         let _ = cell.pos;
     }

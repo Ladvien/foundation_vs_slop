@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use rayon::prelude::*;
 
 use crate::dungeon::{Dungeon, WALL_HEIGHT};
-use crate::rng::{seeded, DetRng};
+use crate::rng::{DetRng, seeded};
 
 use super::ir::{
     Candidate, Constraint, Dof, Host, Modality, Outcome, Placement, PlacementProblem, Predicate,
@@ -30,7 +30,7 @@ use super::ir::{
 };
 use super::manifest::{FurnitureManifest, ManifestItem};
 use super::scatter;
-use super::{splitmix64, PlacedIn, PlacementSolvers, PLACEMENT_SEED};
+use super::{PLACEMENT_SEED, PlacedIn, PlacementSolvers, splitmix64};
 
 /// Global furniture scale. The kit is authored in real-world metres and the dungeon now has ~8 ft
 /// (`WALL_HEIGHT` = 2.4 m) ceilings, so furniture renders at native 1:1 — a 2.05 m door and 2.15 m
@@ -113,6 +113,10 @@ struct SpawnReq {
     /// `footprint` the placement solver reserved is what actually occupies the floor and an off-centre
     /// mesh never pokes through the wall its footprint clears.
     pivot: Vec2,
+    /// The item's vertical seat (rendered metres) — see [`ManifestItem::y_offset`]. Negative sinks a
+    /// piece INTO the floor, which is what the recessed Ozea deck plates want now that the kit is
+    /// uniformly base-at-0 and no longer half-buries them by accident. `0.0` for everything else.
+    y_offset: f32,
 }
 
 /// True when a manifest item offers affordance `aff` (e.g. "sit", "emit") — the portable, kit-agnostic
@@ -143,7 +147,10 @@ pub(crate) const SURFACE_CLASSES: &[(&str, u32)] =
 /// time, so a typo'd token errors at the door instead of silently dropping props at furnish time. Used
 /// both for a support's provided classes and a scatter prop's required class.
 pub(crate) fn surface_bits(token: &str) -> u32 {
-    SURFACE_CLASSES.iter().find(|(t, _)| *t == token).map_or(0, |(_, b)| *b)
+    SURFACE_CLASSES
+        .iter()
+        .find(|(t, _)| *t == token)
+        .map_or(0, |(_, b)| *b)
 }
 
 /// The surface classes a support piece provides — the OR of [`surface_bits`] over its `surfaces` field
@@ -151,7 +158,10 @@ pub(crate) fn surface_bits(token: &str) -> u32 {
 /// nothing, so no prop ever rests on it). Sourced from `surfaces`, NOT `affordances`: what a piece
 /// OFFERS (the feature axis) is separate from what it is FOR (the service axis) — Tutenel et al. 2010.
 fn provided_surfaces(item: &ManifestItem) -> u32 {
-    item.surfaces.iter().map(|s| surface_bits(s)).fold(0, |acc, b| acc | b)
+    item.surfaces
+        .iter()
+        .map(|s| surface_bits(s))
+        .fold(0, |acc, b| acc | b)
 }
 
 /// The surface class a scatter prop requires, from its `Role::Scatter { surface }` token. A non-Scatter
@@ -240,11 +250,9 @@ fn room_profile<'a>(
             continue;
         }
         // A same-group partner not already chosen...
-        if let Some(partner) = freestanding
-            .iter()
-            .copied()
-            .find(|it| it.group.as_deref() == Some(group.as_str()) && !chosen.iter().any(|c| c.key == it.key))
-        {
+        if let Some(partner) = freestanding.iter().copied().find(|it| {
+            it.group.as_deref() == Some(group.as_str()) && !chosen.iter().any(|c| c.key == it.key)
+        }) {
             // ...swaps into a slot holding a non-grouped item (never evict another group's member).
             if let Some(slot) = chosen.iter().position(|it| it.group.is_none()) {
                 chosen[slot] = partner;
@@ -454,7 +462,10 @@ pub fn furnish_regions(
         // mesh's bounding-box centre — not its (often off-centre) authored origin — lands on `req.pos`.
         // This is what makes the symmetric footprint an accurate reservation, so an against-wall piece
         // sits flush instead of poking its far side through the wall (README: furniture through a wall).
-        let origin = req.pos - req.rot * Vec3::new(req.pivot.x, 0.0, req.pivot.y);
+        // The XZ recentre is rotated with the piece; the vertical seat is NOT — "sunk 3 cm into the
+        // deck" means the same thing at every yaw, so it is added in world space after the rotation.
+        let origin =
+            req.pos - req.rot * Vec3::new(req.pivot.x, 0.0, req.pivot.y) + Vec3::Y * req.y_offset;
         let mut entity = commands.spawn((
             crate::session::run_scoped(),
             PlacedIn(req.region),
@@ -525,6 +536,7 @@ fn furnish_region(
                 emits: affords(item, "emit"),
                 screen: affords(item, "screen"),
                 pivot: Vec2::ZERO, // ceiling light hangs at the cell centre; no recentre
+                y_offset: 0.0,     // an anchor is positioned outright, not seated on a floor
             });
         }
     }
@@ -564,8 +576,9 @@ fn furnish_region(
                     // squashes that wall to knee height — otherwise it floats in the cutaway gap.
                     cutaway_outward: Some(-normal),
                     emits: affords(light, "emit"),
-                    screen: false, // a wall sconce is never a screen
+                    screen: false,     // a wall sconce is never a screen
                     pivot: Vec2::ZERO, // mounted on the wall plane deliberately; no recentre
+                    y_offset: 0.0,     // ditto — the sconce's height is WALL_LIGHT_HEIGHT
                 });
                 kept += 1;
                 if kept >= budget {
@@ -632,7 +645,13 @@ fn furnish_region(
             // Keep the doorway approach clear: a prop dropped in a corridor mouth blocks the only way
             // in/out (player request 2026-07-19). `region.openings` carries each doorway's interior cell
             // + pierced wall, so reject any footprint overlapping a doorway keep-clear band.
-            if !dungeon.footprint_clears_openings(pos, half, p.yaw, &region.openings, DOORWAY_KEEP_CLEAR) {
+            if !dungeon.footprint_clears_openings(
+                pos,
+                half,
+                p.yaw,
+                &region.openings,
+                DOORWAY_KEEP_CLEAR,
+            ) {
                 continue;
             }
             if kept_pos.iter().any(|q| q.distance(pos) < TILED_MIN_GAP) {
@@ -650,6 +669,7 @@ fn furnish_region(
                     emits: affords(item, "emit"),
                     screen: affords(item, "screen"),
                     pivot: footprint_pivot(item),
+                    y_offset: seat_offset(item),
                 },
                 half,
                 p.yaw,
@@ -696,7 +716,13 @@ fn furnish_region(
                 }
                 // Keep the doorway approach clear (player request 2026-07-19): a freestanding piece in a
                 // corridor mouth blocks the room's entrance. Same opening-band reject as the tiled pass.
-                if !dungeon.footprint_clears_openings(pos, half, p.yaw, &region.openings, DOORWAY_KEEP_CLEAR) {
+                if !dungeon.footprint_clears_openings(
+                    pos,
+                    half,
+                    p.yaw,
+                    &region.openings,
+                    DOORWAY_KEEP_CLEAR,
+                ) {
                     continue;
                 }
                 // No mesh-in-mesh: the Metropolis overlap term is soft, so hard-reject a piece that would
@@ -713,6 +739,7 @@ fn furnish_region(
                     emits: affords(item, "emit"),
                     screen: affords(item, "screen"),
                     pivot: footprint_pivot(item),
+                    y_offset: seat_offset(item),
                 });
                 placed_fp.push((pos, half, p.yaw));
                 // Collect any piece that OFFERS a surface (its `surfaces` field is non-empty) as a
@@ -774,6 +801,7 @@ fn furnish_region(
                         emits: affords(item, "emit"),
                         screen: affords(item, "screen"),
                         pivot: footprint_pivot(item),
+                        y_offset: seat_offset(item),
                     });
                 }
             }
@@ -840,7 +868,10 @@ fn solve_placements(
 /// asked to face a screen so a sofa faces its TV. The relation is selected by AFFORDANCE ("sit" faces
 /// "emit"), not by hardcoded asset keys, so it survives an asset-kit swap; its arrangement strength is
 /// scaled by `coherence` in the solver's cost.
-fn freestanding_constraints(profile: &[&ManifestItem], density: &PlacementDensity) -> Vec<Constraint> {
+fn freestanding_constraints(
+    profile: &[&ManifestItem],
+    density: &PlacementDensity,
+) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     let mut id = 0u32;
     // Back-to-wall: HARD for pieces that must sit flush to a wall (plumbing fixtures, a fridge —
@@ -938,7 +969,10 @@ pub fn furniture_room_visibility(
         return;
     }
     // Once per call, not once per region: a squad is a handful of units, a dungeon is many rooms.
-    let occupied: Vec<IVec2> = units.iter().map(|t| dungeon.world_to_cell(t.translation)).collect();
+    let occupied: Vec<IVec2> = units
+        .iter()
+        .map(|t| dungeon.world_to_cell(t.translation))
+        .collect();
 
     // Grow the revealed set: a region is revealed once a unit stands inside it. Already-revealed regions
     // are skipped (one-way), so this settles to a cheap membership check.
@@ -972,7 +1006,17 @@ fn footprint_half(item: &ManifestItem) -> Vec2 {
 /// shifts the model by (see [`ManifestItem::pivot`]) so an off-centre mesh recentres on its placement
 /// point. `(0,0)` for a centred piece.
 fn footprint_pivot(item: &ManifestItem) -> Vec2 {
-    Vec2::new(item.pivot.0 * FURNITURE_SCALE, item.pivot.1 * FURNITURE_SCALE)
+    Vec2::new(
+        item.pivot.0 * FURNITURE_SCALE,
+        item.pivot.1 * FURNITURE_SCALE,
+    )
+}
+
+/// A manifest item's vertical seat in rendered (scaled) metres — see [`ManifestItem::y_offset`].
+/// Scaled alongside [`footprint_pivot`] for the same reason: both are authored in mesh metres, and a
+/// kit rendered at a different `FURNITURE_SCALE` must sink its recessed plates by the same fraction.
+fn seat_offset(item: &ManifestItem) -> f32 {
+    item.y_offset * FURNITURE_SCALE
 }
 
 /// Does a yaw-snapped footprint centred at `center` overlap any already-placed one? Each `placed` entry
@@ -983,7 +1027,11 @@ fn footprint_pivot(item: &ManifestItem) -> Vec2 {
 fn footprint_overlaps(center: Vec3, half: Vec2, yaw: f32, placed: &[(Vec3, Vec2, f32)]) -> bool {
     let swap = |h: Vec2, y: f32| -> Vec2 {
         let quarter = (y / std::f32::consts::FRAC_PI_2).round() as i32 & 3;
-        if quarter % 2 == 1 { Vec2::new(h.y, h.x) } else { h }
+        if quarter % 2 == 1 {
+            Vec2::new(h.y, h.x)
+        } else {
+            h
+        }
     };
     let a = swap(half, yaw);
     placed.iter().any(|(c, h, y)| {
@@ -1088,6 +1136,7 @@ mod tests {
             group: None,
             height: 0.0,
             pivot: (0.0, 0.0),
+            y_offset: 0.0,
         }
     }
 
@@ -1096,17 +1145,30 @@ mod tests {
         // Regression for "a prop rests on a bed": a bed *affords* sleep but *offers* no surface, so no
         // scatter prop can rest on it. `provided_surfaces` reads only the `surfaces` field, kept separate
         // from `affordances` (the service axis) — Tutenel et al. 2010's feature/service split.
-        let bed = ManifestItem { surfaces: Vec::new(), ..item("bed", &["bedroom"], &["sleep"]) };
+        let bed = ManifestItem {
+            surfaces: Vec::new(),
+            ..item("bed", &["bedroom"], &["sleep"])
+        };
         let desk = ManifestItem {
             surfaces: vec!["support".into(), "worktop".into()],
             ..item("desk", &["office"], &[])
         };
-        assert_eq!(provided_surfaces(&bed), 0, "a bed offers no surface — nothing rests on it");
-        assert_ne!(provided_surfaces(&desk), 0, "a desk offers support+worktop surfaces");
+        assert_eq!(
+            provided_surfaces(&bed),
+            0,
+            "a bed offers no surface — nothing rests on it"
+        );
+        assert_ne!(
+            provided_surfaces(&desk),
+            0,
+            "a desk offers support+worktop surfaces"
+        );
         // The strong guard: even a surface token wrongly left in `affordances` is ignored — the bug
         // cannot recur by re-tagging a bed, because surfaces come ONLY from the `surfaces` field.
-        let bed_mistagged =
-            ManifestItem { surfaces: Vec::new(), ..item("bed2", &["bedroom"], &["sleep", "support"]) };
+        let bed_mistagged = ManifestItem {
+            surfaces: Vec::new(),
+            ..item("bed2", &["bedroom"], &["sleep", "support"])
+        };
         assert_eq!(
             provided_surfaces(&bed_mistagged),
             0,
@@ -1141,7 +1203,12 @@ mod tests {
         let refs: Vec<&ManifestItem> = items.iter().collect();
         let living = vec!["room".to_string(), "living".to_string()];
         for region_id in [0u32, 3, 4, 7, 8, 11] {
-            let profile = room_profile(region_id, &living, &refs, TEST_DENSITY.freestanding_per_room);
+            let profile = room_profile(
+                region_id,
+                &living,
+                &refs,
+                TEST_DENSITY.freestanding_per_room,
+            );
             let has_seat = profile.iter().any(|it| affords(it, "sit"));
             let has_screen = profile.iter().any(|it| affords(it, "emit"));
             assert!(
@@ -1222,10 +1289,11 @@ mod tests {
         let refs: Vec<&ManifestItem> = items.iter().collect();
         let living = vec!["room".to_string(), "living".to_string()];
         let keys = |rid| {
-            let mut k: Vec<&str> = room_profile(rid, &living, &refs, TEST_DENSITY.freestanding_per_room)
-                .iter()
-                .map(|it| it.key.as_str())
-                .collect();
+            let mut k: Vec<&str> =
+                room_profile(rid, &living, &refs, TEST_DENSITY.freestanding_per_room)
+                    .iter()
+                    .map(|it| it.key.as_str())
+                    .collect();
             k.sort_unstable();
             k
         };
@@ -1362,7 +1430,8 @@ mod tests {
         let refs: Vec<&ManifestItem> = items.iter().collect();
         let cs = freestanding_constraints(&refs, &TEST_DENSITY);
         assert!(
-            cs.iter().any(|c| matches!(c.predicate, Predicate::Facing(_))),
+            cs.iter()
+                .any(|c| matches!(c.predicate, Predicate::Facing(_))),
             "a seat + screen (by affordance) should emit a Facing relation regardless of asset keys"
         );
         assert!(
@@ -1397,10 +1466,15 @@ mod tests {
         // An "office" room → room_profile prefers the desk, which OFFERS a surface (`surfaces` field).
         dungeon.regions.push(Region {
             id: 0,
-            rect: Rect2 { min: [1, 1], max: [11, 11] },
+            rect: Rect2 {
+                min: [1, 1],
+                max: [11, 11],
+            },
             openings: Vec::new(),
             adjacency: Vec::new(),
-            props: PropertyBag { tags: vec!["room".into(), "office".into()] },
+            props: PropertyBag {
+                tags: vec!["room".into(), "office".into()],
+            },
         });
 
         // Load the shipped placement slice from the unified game config (manifest + solver weights).
@@ -1442,7 +1516,10 @@ mod tests {
             .iter()
             .filter(|r| scatter_glbs.contains(r.glb.as_str()) && r.pos.y > 0.05)
             .count();
-        assert!(on_surface >= 1, "a scatter prop should rest on a support (found {on_surface})");
+        assert!(
+            on_surface >= 1,
+            "a scatter prop should rest on a support (found {on_surface})"
+        );
 
         // Phase 1: every floor-level piece (y≈0) sits on real floor — nothing escaped into a wall/void.
         for r in &reqs {

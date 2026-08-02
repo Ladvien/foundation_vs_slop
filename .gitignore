@@ -60,3 +60,6 @@ assets/config/bake_history/
 # Evidence written by `visual_capture::title_screen_matches_golden` when it fails — for one
 # review, never committed. The golden beside it IS committed.
 tests/golden/*.actual.png
+
+# Blender/python leaves these beside the conversion scripts.
+scripts/__pycache__/

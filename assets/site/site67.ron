@@ -60,8 +60,11 @@
     //
     // Safe by construction: `is_walkable = is_floor && !wall`, and every cell below is NOT floor, so
     // no wall here can change walkability or break `SiteLayout::validate`'s connectivity flood-fill.
-    // The four cells the ASYNC aperture occupies (x=5..8, z=1) are held clear so the doorway the
-    // spawner places is not bricked up behind a wall.
+    // The two cells the ASYNC aperture occupies (x=6..7, z=1) are held clear so the doorway the
+    // spawner places is not bricked up behind a wall. TWO, not four: `doorframe_double.glb` spans
+    // 2.003 m, so centred on the gap it covers exactly these two. Holding x=5..8 clear — as this did
+    // until 2026-08-01 — left a metre of open perimeter either side of the frame with nothing in it.
+    // `SiteLayout::validate` now checks the frame's span against the gap, so the two cannot drift.
     //
     // Openings are the ABSENCE of wall: the wings meet the spine along z=12/z=14 with nothing between
     // them, which is why the flood-fill still reaches every area.
@@ -99,9 +102,11 @@
         ( piece: Wall,       cell: (  3, 22), yaw:  90.0 ),
         ( piece: Wall,       cell: (  4,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  4, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  5,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  5, 22), yaw:  90.0 ),
         ( piece: Wall,       cell: (  6, 22), yaw:  90.0 ),
         ( piece: Wall,       cell: (  7, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  8,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  8, 14), yaw:   0.0 ),
         ( piece: Wall,       cell: (  8, 14), yaw:  90.0 ),
         ( piece: Wall,       cell: (  8, 15), yaw:   0.0 ),
@@ -283,6 +288,19 @@
         ( piece: FloorButton, pos: ( 7.5,  3.5), yaw:  0.0 ),
         // Wayfinding toward the aperture, read from the spine.
         ( piece: ArrowDecal, pos: ( 6.5, 11.5), yaw: 180.0 ),
+        // The counters. `WallLow` was dressed in the kit, given a 0.9 m target and listed in
+        // `SitePiece::ALL` since the Site shipped, and placed NOWHERE — the piece its own kit entry
+        // describes as "the Records desk and the Requisition counter" had no author. A run along X
+        // takes yaw 90, same as the walls: `wall_low.glb` is 0.20 m thin on X and 1.00 m long on Z.
+        //
+        // Props do not feed nav (`is_walkable` reads the `walls` list only), so a counter is walked
+        // through, exactly like the crates and pipes above. That is pre-existing for all dressing.
+        ( piece: WallLow,    pos: ( 2.5, 16.5), yaw:  90.0 ),   // records desk
+        ( piece: WallLow,    pos: ( 3.5, 16.5), yaw:  90.0 ),
+        ( piece: WallLow,    pos: ( 4.5, 16.5), yaw:  90.0 ),
+        ( piece: WallLow,    pos: (27.5, 18.5), yaw:  90.0 ),   // requisition counter
+        ( piece: WallLow,    pos: (28.5, 18.5), yaw:  90.0 ),
+        ( piece: WallLow,    pos: (29.5, 18.5), yaw:  90.0 ),
         // Wing colour-codes — THIS is what makes the hub learnable without signage (design doc §2.1).
         ( piece: AreaDecal,  pos: ( 3.5, 17.5), yaw:   0.0 ),   // records
         ( piece: AreaDecal,  pos: (15.5, 18.5), yaw:   0.0 ),   // research
@@ -304,7 +322,23 @@
 
     // The ASYNC door. Walking an avatar into the trigger calls `NextState::set(RunState::Active)` —
     // FVS-A-5 already implements that transition end to end, so the door needs NO new state machinery.
-    door: ( pos: (6.5, 2.5), yaw: 0.0, trigger_half_extents: (1.6, 1.2, 0.7) ),
+    //
+    // `pos` and `frame_pos` are two different things and were conflated until 2026-08-01. `pos` is the
+    // TRIGGER centre and carries a real invariant — `validate` flood-fills to it, so it must sit on
+    // reachable floor, and the z=1 perimeter row is not floor and cannot host it. `frame_pos` is where
+    // the FRAME stands: in the gap, on the wall line (cell centres there are z=1.5), centred on the two
+    // held-clear cells at x=7.0. Placing the frame at `pos` stood it a metre out on the hall floor.
+    //
+    // `yaw: 90.0` because the z=1 run separates along Z — the same convention the walls header states,
+    // and `doorframe_double.glb` is thin along X exactly like `SM_Wall_1x2`. It was authored 0.0, which
+    // turned the frame across the run. The trigger extents corroborate the fix rather than the bug:
+    // hx=1.6 is ACROSS the opening and hz=0.7 is THROUGH it, which is only true of an X-running door.
+    door: (
+        pos:                  (7.0, 2.5),
+        frame_pos:            (7.0, 1.5),
+        yaw:                  90.0,
+        trigger_half_extents: (1.6, 1.2, 0.7),
+    ),
 
     // Operatives idle in the briefing room — the far end, so leaving means walking the length of the
     // Site past the cells.

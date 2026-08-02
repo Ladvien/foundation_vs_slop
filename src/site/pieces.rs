@@ -41,10 +41,16 @@ pub enum SitePiece {
     Floor,
     Wall,
     WallCorner,
-    /// A 2 m opening between areas. Pair with [`SitePiece::Lintel`] to fill the header course.
+    /// A doorway between areas. The frame carries its own header, so nothing pairs with it.
+    ///
+    /// (This said "pair with `SitePiece::Lintel` to fill the header course" — a variant that has never
+    /// existed, so the link did not even resolve.)
     WallDoorway,
     /// The wide opening the ASYNC aperture sits in.
     WallDoorwayWide,
+    /// The header course over a doorway — the band of wall between `DOORWAY_HEIGHT` and
+    /// `WALL_HEIGHT`, without which the perimeter has a slot straight through it above the door.
+    WallHeader,
     /// Glazing for a containment cell front.
     WallWindow,
     /// Waist-high run: counters, records desks, the requisition bar.
@@ -91,10 +97,16 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
     match piece {
         // Full-height architecture.
         Wall | WallCorner | WallWindow | Column => Some(crate::dungeon::WALL_HEIGHT),
-        // A doorway must leave a 2.0 m opening; the header course above it is a separate `WallLow`
-        // placed at y = 2.0 by the spawner.
+        // The frame's OUTER height. What the player walks through is smaller and is a separate art
+        // fact — `kit::DoorPiece::opening`, which the ASYNC aperture quad is built from. (This said a
+        // separate `WallLow` header course was placed above it at y = 2.0. No spawner ever did that.)
         WallDoorway | WallDoorwayWide => Some(crate::dungeon::DOORWAY_HEIGHT),
-        // Waist-high: a counter you can stand at.
+        // What is LEFT of the wall above a doorway — derived, never a literal, so the two heights
+        // cannot drift apart and reopen the slot. `DOORWAY_HEIGHT`'s own doc says "the wall runs
+        // continuous above it"; the dungeon honoured that and the Site did not until 2026-08-01.
+        WallHeader => Some(crate::dungeon::WALL_HEIGHT - crate::dungeon::DOORWAY_HEIGHT),
+        // Waist-high: a counter you can stand at. Authored in `site67.ron`'s props as the Records desk
+        // and the Requisition counter.
         WallLow => Some(0.9),
         // Native height is the intent — dressing, decals, and the specimen stand-in.
         Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal
@@ -103,7 +115,6 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
 }
 
 impl SitePiece {
-
     /// Every piece the kit defines — so a test can walk the whole table.
     pub const ALL: &'static [SitePiece] = &[
         SitePiece::Floor,
@@ -111,6 +122,7 @@ impl SitePiece {
         SitePiece::WallCorner,
         SitePiece::WallDoorway,
         SitePiece::WallDoorwayWide,
+        SitePiece::WallHeader,
         SitePiece::WallWindow,
         SitePiece::WallLow,
         SitePiece::Column,
@@ -141,7 +153,10 @@ mod tests {
             .map(|(_, glb)| glb)
             .filter(|rel| !std::path::Path::new("assets").join(rel).exists())
             .collect();
-        assert!(missing.is_empty(), "Site pieces name GLBs that are not in assets/: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "Site pieces name GLBs that are not in assets/: {missing:?}"
+        );
     }
 
     #[test]
@@ -149,9 +164,18 @@ mod tests {
         // Policy only — heights the GAME requires, independent of any kit. The old version of this
         // test asserted a SCALE, which silently baked in the Kenney 1 m module and would have passed
         // just as happily against an Ozea kit it was sizing wrong.
-        assert_eq!(target_height(SitePiece::Wall), Some(crate::dungeon::WALL_HEIGHT));
-        assert_eq!(target_height(SitePiece::Column), Some(crate::dungeon::WALL_HEIGHT));
-        assert_eq!(target_height(SitePiece::WallDoorway), Some(crate::dungeon::DOORWAY_HEIGHT));
+        assert_eq!(
+            target_height(SitePiece::Wall),
+            Some(crate::dungeon::WALL_HEIGHT)
+        );
+        assert_eq!(
+            target_height(SitePiece::Column),
+            Some(crate::dungeon::WALL_HEIGHT)
+        );
+        assert_eq!(
+            target_height(SitePiece::WallDoorway),
+            Some(crate::dungeon::DOORWAY_HEIGHT)
+        );
         // Dressing and decals are authored at the size they want; a decal scaled in Y would z-fight
         // the floor it sits on.
         assert_eq!(target_height(SitePiece::Crate), None);
@@ -160,18 +184,56 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_kit_clears_an_operative_through_its_doorways() {
-        // The Valkyrie renders at ~1.82 m. A doorway that ends up shorter is a wall with a mouse
-        // hole — and now that scale is kit-derived, this has to hold for EVERY kit, not just the one
-        // whose module height used to be a constant.
+    fn every_shipped_kit_opens_its_doorways_at_the_floor_and_measures_the_hole() {
+        // ⚠️ This was `..._clears_an_operative_through_its_doorways`, and it asserted
+        // `height * y_scale > 1.82` — the Valkyrie's render height. That number collapses to
+        // `target_height` for any piece that has one, so it was very nearly tautological; worse, it
+        // measured the frame's OUTLINE, and what an operative would walk through is the hole. The two
+        // differ by a third: `doorframe_double` is 2.00 m tall rendered and its opening is 1.64 m.
+        //
+        // Measured, the Ozea doorways do NOT clear a 1.82 m operative, and that is accepted rather
+        // than overlooked: the wide one is the ASYNC aperture, a portal whose trigger fires before an
+        // avatar reaches the frame, and the single one is not placed in the shipped layout at all.
+        // The alternative was scaling the frame 23% in Y alone to force a 2 m hole, which stretches
+        // its trim. So this pins what is actually true — the opening starts at the floor, it is a hole
+        // inside a real frame, and it is big enough to read as a door.
         use crate::site::kit::load_site_kit;
-        for path in [crate::site::kit::SITE_KIT_PATH, crate::site::kit::GREYBOX_KIT_PATH] {
+        for path in [
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::GREYBOX_KIT_PATH,
+        ] {
             let kit = load_site_kit(path).unwrap_or_else(|e| panic!("{path}: {e}"));
             for piece in [SitePiece::WallDoorway, SitePiece::WallDoorwayWide] {
-                let final_h = kit.piece(piece).height * kit.y_scale(piece);
+                let door = match piece {
+                    SitePiece::WallDoorway => &kit.wall_doorway,
+                    _ => &kit.wall_doorway_wide,
+                };
+                // Every kit mesh is base-at-0 (`artist_guide` §3 rule 7) and `place` scales about the
+                // entity origin, so the rendered span is `[y_offset, y_offset + final_h]`. A doorway
+                // must start at the floor: an opening whose sill is 30 cm up is a window. THIS is the
+                // assertion with teeth — it pins where the opening sits, not just how tall it is. See
+                // `tests/ozea_asset.rs::every_ozea_mesh_is_base_origined_and_xz_centred`.
+                let base = kit.y_offset(piece);
                 assert!(
-                    final_h > 1.82,
-                    "{path}: {piece:?} ends up {final_h:.2} m — an operative cannot walk through it"
+                    base.abs() < 0.01,
+                    "{path}: {piece:?} sits at y={base:.3}, so its opening starts {base:.3} m off the \
+                     floor rather than at it"
+                );
+                // The hole is a hole: strictly inside the frame, and tall enough to read as a door
+                // rather than a hatch. `opening` is authored scale, so the rendered height rides
+                // `y_scale` exactly as the frame does.
+                let opening_h = door.opening.1 * kit.y_scale(piece);
+                let frame_h = door.mesh.height * kit.y_scale(piece);
+                assert!(
+                    door.opening.1 < door.mesh.height,
+                    "{path}: {piece:?} opening {:?} is not inside its {} m frame — measured from the \
+                     bounding box instead of between the jambs?",
+                    door.opening,
+                    door.mesh.height
+                );
+                assert!(
+                    opening_h > 1.5 && opening_h < frame_h,
+                    "{path}: {piece:?} renders a {opening_h:.2} m opening in a {frame_h:.2} m frame"
                 );
             }
         }

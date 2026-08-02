@@ -31,6 +31,13 @@ use super::pieces::SitePiece;
 /// Path to the authored layout, cwd-relative like `config::GAME_CONFIG_PATH`.
 pub const SITE_LAYOUT_PATH: &str = "assets/site/site67.ron";
 
+/// Cells a doorway piece spans.
+///
+/// Both shipped doorway meshes are authored **two tiles** wide —
+/// `tests/ozea_asset.rs::the_prop_is_authored_in_metres_on_the_games_grid` pins that against the
+/// bytes — so this is a fact about `TILE_SIZE` and the art contract, not about which kit is worn.
+const DOORWAY_CELLS: i32 = 2;
+
 /// The six areas from the design doc §2.4. An enum rather than a string so a typo is a compile error
 /// and so [`SiteLayout::validate`] can prove all six are present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -83,7 +90,8 @@ impl Rect {
         self.x < o.x + o.w && o.x < self.x + self.w && self.z < o.z + o.h && o.z < self.z + self.h
     }
     pub fn cells(&self) -> impl Iterator<Item = IVec2> + '_ {
-        (self.z..self.z + self.h).flat_map(move |z| (self.x..self.x + self.w).map(move |x| IVec2::new(x, z)))
+        (self.z..self.z + self.h)
+            .flat_map(move |z| (self.x..self.x + self.w).map(move |x| IVec2::new(x, z)))
     }
     pub fn is_empty(&self) -> bool {
         self.w <= 0 || self.h <= 0
@@ -133,7 +141,16 @@ pub struct CellPlacement {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DoorPlacement {
+    /// The TRIGGER centre, in metres. Must sit on reachable floor — [`SiteLayout::validate`]
+    /// flood-fills to it, because a hub whose exit cannot be walked to is a prison.
     pub pos: (f32, f32),
+    /// Where the FRAME stands, in metres.
+    ///
+    /// **Separate from [`Self::pos`], and that separation is the whole point.** The frame belongs in
+    /// the perimeter gap — which is deliberately *not* floor, so it can never be the trigger's home —
+    /// while the trigger belongs on the floor in front of it. Sharing one field placed the frame a
+    /// metre out in the hall, standing free of the wall it is supposed to fill.
+    pub frame_pos: (f32, f32),
     pub yaw: f32,
     /// Trigger half-extents in metres (x, y, z), before yaw.
     pub trigger_half_extents: (f32, f32, f32),
@@ -242,7 +259,10 @@ impl SiteLayout {
         // No area declared twice — two rects claiming one id makes "where is Records?" ambiguous.
         for (i, a) in self.areas.iter().enumerate() {
             if self.areas[..i].iter().any(|b| b.id == a.id) {
-                return Err(format!("site layout: area {:?} declared more than once", a.id));
+                return Err(format!(
+                    "site layout: area {:?} declared more than once",
+                    a.id
+                ));
             }
             if a.rect.is_empty() {
                 return Err(format!("site layout: area {:?} has an empty rect", a.id));
@@ -253,14 +273,20 @@ impl SiteLayout {
         for (i, a) in self.areas.iter().enumerate() {
             for b in &self.areas[i + 1..] {
                 if a.rect.overlaps(&b.rect) {
-                    return Err(format!("site layout: areas {:?} and {:?} overlap", a.id, b.id));
+                    return Err(format!(
+                        "site layout: areas {:?} and {:?} overlap",
+                        a.id, b.id
+                    ));
                 }
             }
         }
         // Every area must actually have floor under it.
         for a in &self.areas {
             if !a.rect.cells().all(|c| self.is_floor(c)) {
-                return Err(format!("site layout: area {:?} has cells with no floor", a.id));
+                return Err(format!(
+                    "site layout: area {:?} has cells with no floor",
+                    a.id
+                ));
             }
         }
         // Operatives must start somewhere they can stand.
@@ -274,14 +300,20 @@ impl SiteLayout {
             }
         }
         // The door trigger must be reachable, or the hub is a prison.
-        let dc = IVec2::new(self.door.pos.0.floor() as i32, self.door.pos.1.floor() as i32);
+        let dc = IVec2::new(
+            self.door.pos.0.floor() as i32,
+            self.door.pos.1.floor() as i32,
+        );
         if !self.is_walkable(dc) {
-            return Err(format!("site layout: the ASYNC door at {dc:?} is not on walkable floor"));
+            return Err(format!(
+                "site layout: the ASYNC door at {dc:?} is not on walkable floor"
+            ));
         }
         let (hx, hy, hz) = self.door.trigger_half_extents;
         if hx <= 0.0 || hy <= 0.0 || hz <= 0.0 {
             return Err("site layout: the door trigger has a non-positive extent".into());
         }
+        self.validate_doorway_gap()?;
         // Cell display indices must be unique and dense, so "specimen N goes in cell N" is unambiguous.
         let mut idx: Vec<u32> = self.cells.iter().map(|c| c.index).collect();
         // SORT-OK: the input is an authored RON list, never an ECS query — `site67.ron` yields its
@@ -310,9 +342,99 @@ impl SiteLayout {
             }
         }
         if !seen.contains(&dc) {
-            return Err("site layout: the ASYNC door is unreachable from the operative spawn".into());
+            return Err(
+                "site layout: the ASYNC door is unreachable from the operative spawn".into(),
+            );
         }
         Ok(())
+    }
+
+    /// The perimeter gap the ASYNC frame stands in must be exactly as wide as the frame.
+    ///
+    /// **This is the check whose absence let the signature image break.** The perimeter holds cells
+    /// clear so the spawner's doorway is not bricked up, and the spawner stands a frame in them —
+    /// but nothing made the two agree. They did not: four cells (4.0 m) were held for a 2.003 m
+    /// frame, so a metre of perimeter either side of the aperture was simply open, and the frame
+    /// itself was authored at the trigger's position, a metre out on the hall floor.
+    ///
+    /// The doorway pieces are authored **two tiles** wide — `tests/ozea_asset.rs`'s
+    /// `the_prop_is_authored_in_metres_on_the_games_grid` pins that against the bytes — so the gap is
+    /// two cells and the frame sits centred on the edge they share. Kit-independent by construction:
+    /// it is a fact about `TILE_SIZE` and the layout, not about which mesh is worn.
+    fn validate_doorway_gap(&self) -> Result<(), String> {
+        let f = self.door.frame_pos;
+        let cells = self.doorway_gap_cells();
+        if cells.is_empty() {
+            return Err(format!(
+                "site layout: the ASYNC frame at {f:?} is not standing in a held-clear perimeter \
+                 cell — it is floor, or already carries a wall"
+            ));
+        }
+        let span = cells.len() as i32;
+        if span != DOORWAY_CELLS {
+            return Err(format!(
+                "site layout: the ASYNC doorway gap is {span} cells but the frame spans \
+                 {DOORWAY_CELLS} — hold exactly {DOORWAY_CELLS} clear in \
+                 scripts/gen_site_perimeter.py's DOOR_KEEP_OUT, or the perimeter stands open beside \
+                 the aperture"
+            ));
+        }
+        // ...and the frame is centred on the gap. `cells[0]` is the low cell's INDEX, so the run's
+        // low edge is there and its centre is half a span further along the run.
+        let step = self.doorway_run_step().as_vec2();
+        let centre = cells[0].as_vec2() + step * (span as f32 * 0.5) + (Vec2::ONE - step) * 0.5;
+        let want = Vec2::new(f.0, f.1);
+        if (centre - want).length() > 1e-3 {
+            return Err(format!(
+                "site layout: the ASYNC frame is authored at {f:?} but its gap is centred on \
+                 ({}, {}) — an off-centre frame leaves an uneven reveal",
+                centre.x, centre.y
+            ));
+        }
+        Ok(())
+    }
+
+    /// Which way the wall run the ASYNC door sits in travels, as a unit cell step.
+    ///
+    /// The same half-turn convention the walls are authored on (see `site67.ron`'s walls header): a
+    /// wall at yaw 90 separates along Z, so its RUN goes along X.
+    fn doorway_run_step(&self) -> IVec2 {
+        if (45.0..135.0).contains(&self.door.yaw.rem_euclid(180.0)) {
+            IVec2::X
+        } else {
+            IVec2::Y
+        }
+    }
+
+    /// The contiguous held-clear perimeter cells the ASYNC frame stands in, low end first.
+    ///
+    /// Empty when the frame is not in a gap at all. **Derived rather than authored**, so the
+    /// validator and the spawner cannot disagree about which cells the doorway occupies: the header
+    /// course ([`SitePiece::WallHeader`]) is placed on exactly these, and a gap that stops matching
+    /// the frame is rejected at load by [`Self::validate`].
+    pub fn doorway_gap_cells(&self) -> Vec<IVec2> {
+        let f = self.door.frame_pos;
+        let start = IVec2::new(f.0.floor() as i32, f.1.floor() as i32);
+        // A gap cell: outside the floor (so it can never affect walkability) and carrying no wall.
+        let is_gap =
+            |c: IVec2| !self.is_floor(c) && !self.walls.iter().any(|w| w.cell == (c.x, c.y));
+        if !is_gap(start) {
+            return Vec::new();
+        }
+        let step = self.doorway_run_step();
+        // Walk the contiguous gap both ways. The width is checked by `validate_doorway_gap`; the cap
+        // here only stops a layout that opens a whole side from walking forever.
+        let (mut lo, mut hi) = (start, start);
+        for _ in 0..DOORWAY_CELLS * 4 {
+            if is_gap(lo - step) {
+                lo -= step;
+            }
+            if is_gap(hi + step) {
+                hi += step;
+            }
+        }
+        let span = (hi - lo).dot(step) + 1;
+        (0..span).map(|i| lo + step * i).collect()
     }
 }
 
@@ -342,7 +464,11 @@ mod tests {
         let s0 = l.spawns[0];
         let seen = l.reachable_from(IVec2::new(s0.0.floor() as i32, s0.1.floor() as i32));
         for a in &l.areas {
-            assert!(a.rect.cells().any(|c| seen.contains(&c)), "area {:?} unreachable", a.id);
+            assert!(
+                a.rect.cells().any(|c| seen.contains(&c)),
+                "area {:?} unreachable",
+                a.id
+            );
         }
         let dc = IVec2::new(l.door.pos.0.floor() as i32, l.door.pos.1.floor() as i32);
         assert!(seen.contains(&dc), "the ASYNC door is unreachable");
@@ -354,10 +480,21 @@ mod tests {
         // hub, and that must fail at load rather than at the player.
         let mut l = shipped();
         for x in 0..34 {
-            l.walls.push(WallPlacement { piece: SitePiece::Wall, cell: (x, 12), yaw: 0.0 });
-            l.walls.push(WallPlacement { piece: SitePiece::Wall, cell: (x, 13), yaw: 0.0 });
+            l.walls.push(WallPlacement {
+                piece: SitePiece::Wall,
+                cell: (x, 12),
+                yaw: 0.0,
+            });
+            l.walls.push(WallPlacement {
+                piece: SitePiece::Wall,
+                cell: (x, 13),
+                yaw: 0.0,
+            });
         }
-        assert!(l.validate().is_err(), "a wall sealing the spine must be rejected");
+        assert!(
+            l.validate().is_err(),
+            "a wall sealing the spine must be rejected"
+        );
     }
 
     #[test]
@@ -379,14 +516,20 @@ mod tests {
         let mut l = shipped();
         let first = l.areas[0].rect;
         l.areas[1].rect = first;
-        assert!(l.validate().is_err(), "two areas on the same cells must be rejected");
+        assert!(
+            l.validate().is_err(),
+            "two areas on the same cells must be rejected"
+        );
     }
 
     #[test]
     fn validation_rejects_a_spawn_in_the_void() {
         let mut l = shipped();
         l.spawns[0] = (-9999.0, -9999.0);
-        assert!(l.validate().is_err(), "a spawn off the floor must be rejected");
+        assert!(
+            l.validate().is_err(),
+            "a spawn off the floor must be rejected"
+        );
     }
 
     #[test]
