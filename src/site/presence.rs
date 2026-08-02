@@ -211,6 +211,9 @@ mod tests {
             ("requisition", Some(AreaId::Requisition), Region::BottomLeft),
             ("research experiments", Some(AreaId::Research), Region::TopRight),
             ("thaumiel curriculum", Some(AreaId::Research), Region::TopLeft),
+            ("paratherapy", Some(AreaId::Activities), Region::BottomLeft),
+            ("war room", Some(AreaId::WarRoom), Region::MidLeft),
+            ("room name", None, Region::TopCenter),
             // Not room-gated: the teaching line follows the player everywhere in the hub, which is
             // the point of it. Listed so it is weighed against every room rather than forgotten.
             ("hint", None, Region::MidCenter),
