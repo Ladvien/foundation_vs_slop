@@ -10,18 +10,36 @@
 // and floor are on integer cells for greybox readability, props and cells are in metres so they need
 // not sit on the grid.
 //
-// LAYOUT — a spine corridor at z=12..14 with the six areas hanging off it:
+// LAYOUT — two spine corridors, with every area hanging off one of them:
 //
-//        z=30  +----------------------------------[ BRIEFING ]---+
-//        z=22  |  [ RECORDS ]  [  RESEARCH  ]  [REQ]  \_connector_/
-//        z=14  |
-//        z=12  +======================= SPINE ========================+
-//        z=2   |  [ ASYNC DOOR HALL ]        [   CONTAINMENT WING   ] |
-//              x=0                                                 x=34
+//        z=2   |  [ ASYNC DOOR HALL ]      [  CONTAINMENT WING  ] [MON] |
+//        z=12  +========================= SPINE ========================+
+//        z=14  |  [ RECORDS ] | [  RESEARCH  ]  [REQ]  \_connector_/    |
+//        z=22  |              |               |        [ BRIEFING ]     |
+//        z=24  +=================== SOUTH SPINE ========+ [ BRIEFING ]   |
+//        z=26  | [QUARTERS] [GALLEY] [ACTIV] [WAR ROOM] | [ BRIEFING ]   |
+//              x=0                                                    x=34
 //
 // The operatives idle in the briefing room, so reaching the door is a walk THROUGH the Site — past the
 // cells holding what you already caught. That is the loop made spatial, and it is why the briefing room
 // is the far end rather than beside the door.
+//
+// THE LIVING HALF (2026-08-02) — quarters, galley, activities, war room, monitoring.
+//
+// The first six areas each existed because a MECHANIC needed a location (design doc §2.4 names the
+// system in every row). These five invert that: the space comes first, because a site that contains
+// anomalies is also somewhere people sleep and eat, and a hub with none of that reads as a facility
+// diagram. Director's call, stated here because it is the opposite of the rule the first six followed.
+//
+// They fit in voids that were ALREADY INSIDE the perimeter — the column between records and research,
+// the block south of research, and the strip east of containment. Floor grows 664 -> 852 cells, and the
+// bounding box does not move: x[0,33], z[2,29] before and after. The Site gets denser, not bigger, so
+// no walk across it gets longer. That matters because `docs/2026-08-01-two-live-layers.md` made visit
+// duration a priced resource: time at the Site is time the expedition is unsupervised.
+//
+// The WAR ROOM and MONITORING are `RunState::Idle` only. §5 of that same doc records that supervising
+// the squad you left unattended was deliberately blocked; these rooms plan the NEXT expedition and
+// review the LAST one, and go dark during a live visit.
 // =================================================================================================
 (
     // Far outside any dungeon extent. The Site's isolation from fog, the knee-wall cutaway, the light
@@ -33,11 +51,17 @@
     areas: [
         ( id: AsyncDoor,   label: "ASYNC APERTURE",  rect: (x:  0, z:  2, w: 12, h: 10) ),
         ( id: Containment, label: "CONTAINMENT",     rect: (x: 14, z:  2, w: 16, h: 10) ),
+        ( id: Monitoring,  label: "MONITORING",      rect: (x: 30, z:  2, w:  4, h: 10) ),
         ( id: Corridor,    label: "SPINE",           rect: (x:  0, z: 12, w: 34, h:  2) ),
         ( id: Records,     label: "RECORDS",         rect: (x:  0, z: 14, w:  8, h:  8) ),
         ( id: Research,    label: "RESEARCH",        rect: (x: 10, z: 14, w: 12, h: 10) ),
         ( id: Requisition, label: "REQUISITION",     rect: (x: 24, z: 14, w:  8, h:  6) ),
         ( id: Briefing,    label: "BRIEFING",        rect: (x: 24, z: 22, w: 10, h:  8) ),
+        // The living half (2026-08-02). Four rooms off the south spine.
+        ( id: Quarters,    label: "QUARTERS",        rect: (x:  0, z: 26, w:  5, h:  4) ),
+        ( id: Kitchen,     label: "GALLEY",          rect: (x:  6, z: 26, w:  5, h:  4) ),
+        ( id: Activities,  label: "ACTIVITIES",      rect: (x: 12, z: 26, w:  5, h:  4) ),
+        ( id: WarRoom,     label: "WAR ROOM",        rect: (x: 18, z: 26, w:  5, h:  4) ),
     ],
 
     // Rect RUNS, not per-cell: a 16x10 wing is one row instead of 160, and `site::nav`'s walkable mask
@@ -46,12 +70,19 @@
     floor: [
         (x:  0, z:  2, w: 12, h: 10),   // async door hall
         (x: 14, z:  2, w: 16, h: 10),   // containment wing
+        (x: 30, z:  2, w:  4, h: 10),   // monitoring — beside the cells it watches
         (x:  0, z: 12, w: 34, h:  2),   // the spine
         (x:  0, z: 14, w:  8, h:  8),   // records office
+        (x:  8, z: 14, w:  2, h: 10),   // connector: spine -> south spine
         (x: 10, z: 14, w: 12, h: 10),   // research wing
         (x: 24, z: 14, w:  8, h:  6),   // requisition
         (x: 26, z: 20, w:  2, h:  2),   // connector: requisition -> briefing
         (x: 24, z: 22, w: 10, h:  8),   // briefing room
+        (x:  0, z: 24, w: 24, h:  2),   // the SOUTH spine
+        (x:  0, z: 26, w:  5, h:  4),   // quarters
+        (x:  6, z: 26, w:  5, h:  4),   // galley
+        (x: 12, z: 26, w:  5, h:  4),   // activities
+        (x: 18, z: 26, w:  5, h:  4),   // war room
     ],
 
     // THE PERIMETER — generated, not hand-typed, by walking every non-floor cell orthogonally
@@ -116,50 +147,68 @@
         ( piece: Wall,       cell: ( -1, 21), yaw:   0.0 ),
         ( piece: Wall,       cell: ( -1, 22), yaw:   0.0 ),
         ( piece: Wall,       cell: ( -1, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( -1, 23), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( -1, 24), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 25), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 26), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 27), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 28), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 29), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 30), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( -1, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  0,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  0, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  0, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  0, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  1,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  1, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  1, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  1, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  2,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  2, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  2, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  2, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  3,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  3, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  3, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  3, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  4,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  4, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  4, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  4, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  5,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: (  5, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  5, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  5, 26), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  5, 26), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  5, 27), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  5, 28), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  5, 29), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  5, 30), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  5, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  6, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  6, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  6, 30), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  7, 22), yaw:   0.0 ),
         ( piece: Wall,       cell: (  7, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  7, 23), yaw:   0.0 ),
+        ( piece: Wall,       cell: (  7, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  7, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  8,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: (  8, 14), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 14), yaw:  90.0 ),
-        ( piece: Wall,       cell: (  8, 15), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 16), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 17), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 18), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 19), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 20), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 21), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 22), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  8, 22), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  8, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: (  9,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: (  9, 14), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 14), yaw:  90.0 ),
-        ( piece: Wall,       cell: (  9, 15), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 16), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 17), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 18), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 19), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 20), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 21), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 22), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 23), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 24), yaw:   0.0 ),
-        ( piece: Wall,       cell: (  9, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: (  9, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 10,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 10, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 10, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 11,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 11, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 11, 26), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 11, 26), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 11, 27), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 11, 28), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 11, 29), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 11, 30), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 11, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 12,  1), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 12,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 12,  2), yaw:   0.0 ),
@@ -173,7 +222,7 @@
         ( piece: Wall,       cell: ( 12, 10), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 12, 11), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 12, 11), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 12, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 12, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 13,  1), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 13,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 13,  2), yaw:   0.0 ),
@@ -187,23 +236,29 @@
         ( piece: Wall,       cell: ( 13, 10), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 13, 11), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 13, 11), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 13, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 13, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 14,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 14, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 14, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 15,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 15, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 15, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 16,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 16, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 16, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 17,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 17, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 17, 26), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 17, 26), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 17, 27), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 17, 28), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 17, 29), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 17, 30), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 17, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 18,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 18, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 18, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 19,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 19, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 19, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 20,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 20, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 20, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 21,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 21, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 21, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 22,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 22, 14), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 22, 14), yaw:  90.0 ),
@@ -216,8 +271,8 @@
         ( piece: Wall,       cell: ( 22, 21), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 22, 22), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 22, 23), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 22, 24), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 22, 24), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 22, 23), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 22, 30), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 23,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 23, 14), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 23, 14), yaw:  90.0 ),
@@ -232,9 +287,9 @@
         ( piece: Wall,       cell: ( 23, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 23, 22), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 23, 23), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 23, 24), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 23, 25), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 23, 23), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 23, 26), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 23, 26), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 23, 27), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 23, 28), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 23, 29), yaw:   0.0 ),
@@ -264,27 +319,15 @@
         ( piece: Wall,       cell: ( 29, 20), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 29, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 29, 30), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 30,  1), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 30,  1), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 30,  2), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  3), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  4), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  5), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  6), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  7), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  8), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30,  9), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30, 10), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30, 11), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 30, 11), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 30, 20), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 30, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 30, 30), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 31, 11), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 31,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 31, 20), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 31, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 31, 30), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 32, 11), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 32,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 32, 14), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 32, 14), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 32, 15), yaw:   0.0 ),
@@ -296,12 +339,22 @@
         ( piece: Wall,       cell: ( 32, 20), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 32, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 32, 30), yaw:  90.0 ),
-        ( piece: Wall,       cell: ( 33, 11), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 33,  1), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 33, 14), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 33, 21), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 33, 30), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 34,  1), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  1), yaw:  90.0 ),
+        ( piece: Wall,       cell: ( 34,  2), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  3), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  4), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  5), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  6), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  7), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  8), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34,  9), yaw:   0.0 ),
+        ( piece: Wall,       cell: ( 34, 10), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 34, 11), yaw:   0.0 ),
-        ( piece: Wall,       cell: ( 34, 11), yaw:  90.0 ),
         ( piece: Wall,       cell: ( 34, 12), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 34, 13), yaw:   0.0 ),
         ( piece: Wall,       cell: ( 34, 14), yaw:   0.0 ),

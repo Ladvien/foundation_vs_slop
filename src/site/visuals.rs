@@ -775,6 +775,55 @@ fn area_light(id: super::layout::AreaId) -> AreaLight {
             fill_lumens:  75_000.0,
             range: 9.0,
         },
+
+        // ── The living half (2026-08-02) ──
+        //
+        // These five are lit to say "people are here", which mostly means WARMER and, in one case,
+        // DIMMER than any working room. The point of walking from containment's 6500 K into quarters'
+        // 2400 K is that the second one feels like somewhere you would take your boots off.
+
+        // The dimmest room in the Site after the ASYNC hall, and the warmest anywhere. A bunk room lit
+        // to working brightness is a barracks inspection, not somewhere anyone sleeps. This is the
+        // SECOND deliberate exception to "every room out-keys the spine" — see the lighting test.
+        Quarters => AreaLight {
+            kelvin: 2400.0,
+            key_lumens: 105_000.0,
+            fill_lumens: 62_000.0,
+            range: 8.0,
+        },
+        // Galley: warm, but bright enough to work in — between the quarters and a workroom, which is
+        // exactly what a mess is.
+        Kitchen => AreaLight {
+            kelvin: 3000.0,
+            key_lumens: 210_000.0,
+            fill_lumens: 130_000.0,
+            range: 8.5,
+        },
+        // Training and recreation. Brighter and less warm than the galley: you can read a board or spot
+        // someone lifting, but it is still not a laboratory.
+        Activities => AreaLight {
+            kelvin: 3500.0,
+            key_lumens: 225_000.0,
+            fill_lumens: 140_000.0,
+            range: 8.5,
+        },
+        // Planning light: neutral and even, because this is the one room where the player is reading a
+        // map, and a colour cast would lie about what is on it.
+        WarRoom => AreaLight {
+            kelvin: 4500.0,
+            key_lumens: 240_000.0,
+            fill_lumens: 150_000.0,
+            range: 8.5,
+        },
+        // Console light — cool, and deliberately a shade below containment's 6500 K, which it stands
+        // beside and watches, so the boundary between them still reads rather than merging into one
+        // continuous white space.
+        Monitoring => AreaLight {
+            kelvin: 6000.0,
+            key_lumens: 200_000.0,
+            fill_lumens: 125_000.0,
+            range: 8.5,
+        },
     }
 }
 
@@ -800,6 +849,12 @@ const SLAB_SPOT_Y: f32 = 2.15;
 /// Returns linear (not gamma-encoded) values because `PointLight::color` is a linear radiometric
 /// multiplier — feeding it `Color::srgb` would apply the transfer function a second time and wash
 /// every temperature toward white.
+// The coefficients below are transcribed VERBATIM from Kim et al. (2002), and several carry more
+// digits than `f32` can represent — which is exactly what `excessive_precision` fires on. They stay at
+// full published precision anyway, because the point of a cited constant is that a reader can check it
+// against the paper. Rounding them to f32's ~7 significant digits would silently make this table
+// something you can no longer verify, to save nothing: the compiler rounds them identically either way.
+#[allow(clippy::excessive_precision)]
 fn blackbody_srgb(kelvin: f32) -> Color {
     let t = kelvin.clamp(1667.0, 25000.0);
     let (t2, t3) = (t * t, t * t * t);
@@ -861,7 +916,7 @@ fn blackbody_srgb(kelvin: f32) -> Color {
 /// screen-space, so it costs no shadow map — because the thing that made the hub read as a floorplan
 /// was that nothing touched the floor. A prop with no contact shadow is a decal.
 ///
-/// **Shadow budget: one shadow-mapping light per area, seven in total.** A point light's shadow map is
+/// **Shadow budget: one shadow-mapping light per area, twelve in total.** A point light's shadow map is
 /// six faces, so enabling it on all ~29 fixtures would be a very different bill. `light::
 /// spawn_fixture_lights` still sets `shadow_maps_enabled: false` on every dungeon fixture — but those
 /// spawn per revealed room and can reach hundreds, whereas the Site's set is fixed and small enough to
@@ -1162,7 +1217,15 @@ fn return_camera_to_squad(
 /// leaving the Site state stops this system, so there is no bool to keep in step.
 fn enter_the_door(
     doors: Query<(&AsyncDoor, &Transform)>,
-    avatars: Query<&Transform, With<SiteAvatar>>,
+    // `With<PlayerAvatar>`, NOT `With<SiteAvatar>`. Leaving on an expedition is a decision the player
+    // makes, so only the body the player drives may make it.
+    //
+    // This was `With<SiteAvatar>` and behaved identically, because `command_avatar` only ever moves the
+    // player's avatar and the other four have never taken a step. That is about to stop being true: the
+    // Site is being staffed with researchers and engineers who walk to their posts, and the ASYNC hall
+    // is a room on the way to other rooms. Under the old query a cook crossing the hall would have
+    // begun an expedition. Narrowed here, while it is still a latent bug rather than a live one.
+    avatars: Query<&Transform, With<PlayerAvatar>>,
     run_state: Res<State<crate::session::RunState>>,
     mut next_run: ResMut<NextState<crate::session::RunState>>,
     mut next_app: ResMut<NextState<AppState>>,
@@ -1354,17 +1417,24 @@ mod tests {
     ///
     /// (Written first as a blanket "every room beats the spine", which failed on exactly the room the
     /// exception exists for. The rule below is the one the design actually holds.)
+    ///
+    /// **Two rooms are darker than the corridor, for opposite reasons.** The ASYNC hall is dark so the
+    /// aperture is the brightest thing in it. The quarters are dark because people sleep there. Both
+    /// are listed explicitly rather than allowed by a `<=`, so adding a third dim room is a decision
+    /// someone has to make here rather than something that slips through.
     #[test]
-    fn the_spine_is_dimmer_than_the_rooms_it_joins_except_the_lit_by_portal_hall() {
+    fn the_spine_is_dimmer_than_the_working_rooms_and_brighter_than_the_dark_two() {
         use super::super::layout::AreaId;
         let spine = area_light(AreaId::Corridor);
+        // Deliberately dimmer than the connective tissue, each for a stated reason.
+        const DARK_ON_PURPOSE: &[AreaId] = &[AreaId::AsyncDoor, AreaId::Quarters];
         for id in AreaId::REQUIRED {
             let room = area_light(*id);
-            if *id == AreaId::AsyncDoor {
+            if DARK_ON_PURPOSE.contains(id) {
                 assert!(
                     room.key_lumens < spine.key_lumens,
-                    "the ASYNC hall must stay darker than the spine ({} vs {}) or the aperture stops \
-                     being the brightest thing in it",
+                    "{id:?} is on the dark-on-purpose list but keys at {} against the spine's {} — \
+                     either light it or take it off the list",
                     room.key_lumens,
                     spine.key_lumens
                 );
@@ -1378,8 +1448,22 @@ mod tests {
                 spine.key_lumens
             );
         }
-        // Containment is the high-key room; requisition the warmest.
+        // Containment is the high-key room; requisition is warmer than records.
         assert!(area_light(AreaId::Containment).kelvin > area_light(AreaId::Briefing).kelvin);
         assert!(area_light(AreaId::Requisition).kelvin < area_light(AreaId::Records).kelvin);
+        // The living half reads warm against the working half. Quarters is the warmest room in the
+        // Site and monitoring the coolest after containment — that spread IS the wayfinding.
+        assert!(
+            area_light(AreaId::Quarters).kelvin <= area_light(AreaId::Requisition).kelvin,
+            "the quarters must be the warmest room in the Site"
+        );
+        assert!(
+            area_light(AreaId::Monitoring).kelvin < area_light(AreaId::Containment).kelvin,
+            "monitoring must stay cooler than the wing it watches, or the boundary stops reading"
+        );
+        assert!(
+            area_light(AreaId::Kitchen).kelvin < area_light(AreaId::WarRoom).kelvin,
+            "the galley must be warmer than the planning room"
+        );
     }
 }

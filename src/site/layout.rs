@@ -38,8 +38,21 @@ pub const SITE_LAYOUT_PATH: &str = "assets/site/site67.ron";
 /// bytes — so this is a fact about `TILE_SIZE` and the art contract, not about which kit is worn.
 const DOORWAY_CELLS: i32 = 2;
 
-/// The six areas from the design doc §2.4. An enum rather than a string so a typo is a compile error
-/// and so [`SiteLayout::validate`] can prove all six are present.
+/// The areas of Site-67. An enum rather than a string so a typo is a compile error and so
+/// [`SiteLayout::validate`] can prove every one of them is present.
+///
+/// # Two generations, and the difference is deliberate
+///
+/// The **first six** are the design doc's §2.4 table, where every row named the system that needed a
+/// location: the ASYNC door needed FVS-A-5, containment needed FVS-D-4, research needed the Thaumiel
+/// tree. The area existed because a mechanic had nowhere to happen.
+///
+/// The **second five** (2026-08-02) invert that: the space comes first and the mechanics follow. They
+/// exist because a Foundation site that contains anomalies is also somewhere people *live* — they
+/// sleep, eat, train, plan and watch — and a hub with none of that reads as a facility diagram. That
+/// is a Director's call and it is worth stating plainly here, because it is the opposite of the rule
+/// the first six were chosen by, and the repo's named top process risk is shipping a room with no
+/// verb in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum AreaId {
@@ -55,13 +68,24 @@ pub enum AreaId {
     Requisition,
     /// The O5 performance review; the Director's standing (FVS-P-1).
     Briefing,
-    /// The spine that joins them. Not one of the six, but it is floor and it must be walkable.
+    /// Where the operatives and staff sleep. Bunks, lockers, personal effects.
+    Quarters,
+    /// The galley. Where a shift starts and where people are found between tasks.
+    Kitchen,
+    /// Training and recreation — the room that offsets what the field does to people.
+    Activities,
+    /// Plan the next expedition. **`RunState::Idle` only** — see `docs/2026-08-01-two-live-layers.md`
+    /// §5: you may not supervise the squad you left unattended, so this room is dark during a visit.
+    WarRoom,
+    /// Watches the containment wing it stands beside. Same `RunState::Idle` rule as [`Self::WarRoom`].
+    Monitoring,
+    /// The spines that join them. Not a destination, but it is floor and it must be walkable.
     Corridor,
 }
 
 impl AreaId {
-    /// The six the design doc requires. `Corridor` is deliberately absent — it is connective tissue,
-    /// not a destination.
+    /// Every area the layout must contain. `Corridor` is deliberately absent — it is connective
+    /// tissue, not a destination.
     pub const REQUIRED: &'static [AreaId] = &[
         AreaId::AsyncDoor,
         AreaId::Containment,
@@ -69,6 +93,11 @@ impl AreaId {
         AreaId::Records,
         AreaId::Requisition,
         AreaId::Briefing,
+        AreaId::Quarters,
+        AreaId::Kitchen,
+        AreaId::Activities,
+        AreaId::WarRoom,
+        AreaId::Monitoring,
     ];
 }
 
@@ -444,6 +473,64 @@ mod tests {
 
     fn shipped() -> SiteLayout {
         SiteLayout::load().expect("the shipped site67.ron must parse and validate")
+    }
+
+    /// **The floor plan has two sources of truth, and this is the only thing keeping them equal.**
+    ///
+    /// `scripts/gen_site_perimeter.py` carries a hand-duplicated copy of `site67.ron`'s `floor:` list
+    /// in its `FLOOR` literal, because it is a standalone script with no RON parser. Nothing made the
+    /// two agree until 2026-08-02.
+    ///
+    /// Drift here is close to undetectable by eye and catastrophic in a specific way: the generator
+    /// emits the perimeter of a building that does not exist, so the new floor keeps the OLD layout's
+    /// wall cells sitting **on top of it** — and `is_walkable = is_floor && !wall`, so those become
+    /// unwalkable holes in the middle of a room, while the walls the new floor actually needs are
+    /// never emitted at all. A room you cannot cross, ringed by nothing.
+    ///
+    /// Parsed with a regex rather than by importing Python: the point is to compare the two authored
+    /// lists, and a parser that shares code with either one would not.
+    #[test]
+    fn the_perimeter_generator_agrees_with_the_layout_about_where_the_floor_is() {
+        let script = std::fs::read_to_string("scripts/gen_site_perimeter.py")
+            .expect("the perimeter generator must be readable from the crate root");
+        let body = script
+            .split_once("FLOOR = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(inner, _)| inner)
+            .expect("gen_site_perimeter.py must define a FLOOR = [ ... ] literal");
+
+        let mut from_script: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for line in body.lines() {
+            let Some(open) = line.find('(') else { continue };
+            let Some(close) = line[open..].find(')') else {
+                continue;
+            };
+            let nums: Vec<i32> = line[open + 1..open + close]
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect();
+            if let [x, z, w, h] = nums[..] {
+                from_script.push((x, z, w, h));
+            }
+        }
+
+        let from_layout: Vec<(i32, i32, i32, i32)> = shipped()
+            .floor
+            .iter()
+            .map(|r| (r.x, r.z, r.w, r.h))
+            .collect();
+
+        assert!(
+            !from_script.is_empty(),
+            "parsed no rects out of the script's FLOOR list — has its formatting changed?"
+        );
+        assert_eq!(
+            from_script, from_layout,
+            "scripts/gen_site_perimeter.py's FLOOR list has drifted from site67.ron's floor: list. \
+             Make them identical and RE-RUN the script over the walls: block — a stale perimeter \
+             leaves wall cells standing on floor, which `is_walkable` reads as holes you cannot \
+             walk through."
+        );
     }
 
     #[test]
