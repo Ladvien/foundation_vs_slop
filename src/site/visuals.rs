@@ -78,11 +78,23 @@ pub struct AsyncDoor {
 pub struct ContainmentCell {
     pub index: u32,
     pub pos: Vec3,
+    /// The cell's authored yaw, kept so the occupant can be placed INSIDE the booth rather than in
+    /// the plane of its glass — see `cell_interior_dir`.
+    pub yaw: f32,
 }
 
 /// The body currently shown inside a cell, if that cell is occupied.
 #[derive(Component)]
 pub struct CellOccupant;
+
+/// The examination slab in the research wing. Spawned beside the `Slab` prop, at the height of its
+/// bed platform, so a study subject can simply be parented to it.
+#[derive(Component)]
+pub struct StudySlab;
+
+/// The body currently lying on the slab, if anything is being studied.
+#[derive(Component)]
+pub struct SlabOccupant;
 
 /// The GLB child of a [`SiteAvatar`]. Carries the cosmetic animation state, never the avatar itself —
 /// the same split `squad::FigurineModel` makes, and for the same reason (issue #18).
@@ -160,7 +172,7 @@ impl Plugin for SiteVisualsPlugin {
                     .run_if(in_state(AppState::Site)),
             )
             // Cells fill outside the Site state too, so walking in never catches them mid-populate.
-            .add_systems(Update, fill_containment_cells);
+            .add_systems(Update, (fill_containment_cells, lay_out_the_study_subject));
     }
 }
 
@@ -311,6 +323,62 @@ fn spawn_aperture_quad(
     ));
 }
 
+/// Height of the examination slab's bed platform, in metres — where a study subject lies.
+///
+/// Measured off `slab.glb` (`SM_MedPod_Treatment_Bed`): the widest horizontal band of the mesh is at
+/// y ≈ 0.55–0.60, which is the mattress. Not guessed, and not the mesh's 1.72 m overall height, which
+/// is the raised canopy at the head end.
+const SLAB_SURFACE_Y: f32 = 0.60;
+
+/// How deep a containment booth runs behind its glazed front, in metres. Two cells, matching the 2 m
+/// span of `wall_window` itself, so a cell is square in plan.
+const CELL_DEPTH: f32 = 2.0;
+
+/// Which way a containment cell's interior lies, given its authored yaw.
+///
+/// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
+/// the kit), so the glass faces `rot(yaw) · X` and the booth runs the other way.
+fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
+    -(Quat::from_rotation_y(yaw_deg.to_radians()) * Vec3::X)
+}
+
+/// Build the booth behind a containment cell's glass: two side walls and a back.
+///
+/// **Derived from the cell's own placement, never authored** — the same discipline `corner_cells`
+/// uses, so adding a seventh cell to `site67.ron` gets an enclosure for free and no cell can be left
+/// as a bare pane by forgetting to type one.
+///
+/// Until 2026-08-01 a cell WAS a bare pane: `site67.ron`'s `cells:` authors one `WallWindow` and
+/// nothing around it, so a containment wing holding nothing read as six sheets of glass standing on
+/// an open deck. That undercuts the whole point of FVS-D-4 — the player is supposed to walk past a
+/// rack of the things they brought home, and a rack has to look like one when it is empty.
+///
+/// Sides run along the interior direction and are therefore a quarter-turn from the glass; the back
+/// is parallel to it. Everything is `Wall`, which is 1 m long, so a 2 m run is two pieces.
+fn enclose_containment_cell(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    kit: &crate::site::kit::SiteKit,
+    at: Vec3,
+    yaw_deg: f32,
+) {
+    let rot = Quat::from_rotation_y(yaw_deg.to_radians());
+    let inward = cell_interior_dir(yaw_deg);
+    let span = rot * Vec3::Z;
+    // Sides: at both ends of the glass, stepping one metre at a time into the booth.
+    for side in [-1.0f32, 1.0] {
+        for step in [0.5f32, 1.5] {
+            let p = at + span * side * (CELL_DEPTH * 0.5) + inward * step;
+            place(commands, assets, kit, SitePiece::Wall, p, yaw_deg + 90.0);
+        }
+    }
+    // Back: parallel to the glass, at the far end of the booth.
+    for side in [-0.5f32, 0.5] {
+        let p = at + inward * CELL_DEPTH + span * side;
+        place(commands, assets, kit, SitePiece::Wall, p, yaw_deg);
+    }
+}
+
 fn spawn_site_geometry(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -355,7 +423,19 @@ fn spawn_site_geometry(
         );
     }
     for p in &l.props {
-        place(&mut commands, &assets, &kit, p.piece, l.point(p.pos), p.yaw);
+        let at = l.point(p.pos);
+        place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
+        // The slab is the one prop with a gameplay meaning attached, so it also gets a marker at the
+        // height of its bed platform for `lay_out_the_study_subject` to parent a body to.
+        if p.piece == SitePiece::Slab {
+            commands.spawn((
+                SiteVisual,
+                StudySlab,
+                Transform::from_translation(at + Vec3::Y * SLAB_SURFACE_Y)
+                    .with_rotation(Quat::from_rotation_y(p.yaw.to_radians())),
+                Visibility::Inherited,
+            ));
+        }
     }
 
     // The ASYNC door: a wide frame standing IN the perimeter gap, plus the trigger volume on the floor
@@ -403,7 +483,8 @@ fn spawn_site_geometry(
         l.door.yaw,
     );
 
-    // Containment cells: the glazed front, and an empty marker the specimen body will fill.
+    // Containment cells: the glazed front, the booth behind it, and an empty marker the specimen body
+    // will fill.
     for c in &l.cells {
         let at = l.point(c.pos);
         place(
@@ -414,11 +495,13 @@ fn spawn_site_geometry(
             at,
             c.yaw,
         );
+        enclose_containment_cell(&mut commands, &assets, &kit, at, c.yaw);
         commands.spawn((
             SiteVisual,
             ContainmentCell {
                 index: c.index,
                 pos: at,
+                yaw: c.yaw,
             },
             Transform::from_translation(at),
         ));
@@ -603,6 +686,51 @@ fn drive_avatars(
             // Wedged in a corner: drop the order rather than vibrate against the wall forever.
             goal.0 = None;
         }
+    }
+}
+
+/// Put the specimen under study on the slab, and take it off again when nothing is being studied.
+///
+/// **Makes an existing system visible instead of inventing one.** `research::lab::StudySubject` is
+/// documented as "the specimen currently on the slab", and the research HUD says *NO SPECIMEN ON THE
+/// SLAB — CONTAIN ONE FIRST* — but until 2026-08-01 there was no slab anywhere in the world and the
+/// research wing was bare floor. The subject is chosen by `research::lab::keep_a_study_subject`; this
+/// only shows what it already decided, so it adds no gameplay rule of its own.
+///
+/// Cosmetic, `Update`, and it spawns nothing carrying `Health` — the module's invariant holds.
+fn lay_out_the_study_subject(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    kit: Res<crate::site::SiteKitRes>,
+    subject: Res<crate::research::StudySubject>,
+    slabs: Query<Entity, With<StudySlab>>,
+    occupants: Query<Entity, With<SlabOccupant>>,
+) {
+    let wanted = subject.0.is_some();
+    let present = occupants.iter().next().is_some();
+    if wanted == present {
+        return; // already agrees with the research state
+    }
+    if !wanted {
+        for e in &occupants {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+    for slab in &slabs {
+        commands.entity(slab).with_child((
+            SlabOccupant,
+            SiteVisual,
+            // The same stand-in a containment cell uses, and for the same reason: `Specimen` records
+            // only `captured: Entity` and that entity dies with the expedition, so the Site genuinely
+            // does not know the species. Lying down rather than standing — it is on a table.
+            Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(0.45)),
+            Visibility::Inherited,
+            WorldAssetRoot(assets.load(
+                GltfAssetLabel::Scene(0).from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),
+            )),
+        ));
     }
 }
 
@@ -810,7 +938,10 @@ fn fill_containment_cells(
         commands.entity(*cell_entity).with_child((
             CellOccupant,
             SiteVisual,
-            Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)).with_scale(Vec3::splat(0.6)),
+            // Half a booth in, not at the origin: the cell entity sits exactly where the GLASS is, so
+            // a body at (0,0,0) stood inside the pane it is meant to be seen through.
+            Transform::from_translation(cell_interior_dir(cell.yaw) * (CELL_DEPTH * 0.5))
+                .with_scale(Vec3::splat(0.6)),
             Visibility::Inherited,
             WorldAssetRoot(assets.load(
                 GltfAssetLabel::Scene(0).from_asset(kit.glb(SitePiece::SpecimenStandin).to_owned()),

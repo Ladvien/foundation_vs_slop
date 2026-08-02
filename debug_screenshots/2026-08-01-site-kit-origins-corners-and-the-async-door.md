@@ -109,6 +109,24 @@ sat level at chest height a metre to the side. Nothing animated Site avatars at 
 `anim::BlendSource` on the model child and a `drive_avatar_animation` driver, the same seam the squad
 uses, so they idle and walk.
 
+## The third pass: the two content gaps
+
+**Containment cells were bare panes.** `site67.ron`'s `cells:` authors one `WallWindow` and nothing
+around it, so a wing holding nothing read as six sheets of glass on an open deck — which undercuts
+FVS-D-4, since "a rack of the things you brought home" only lands if a cell looks like one when it is
+empty. `enclose_containment_cell` now derives a booth (two sides and a back) from the cell's own
+placement, the same way `corner_cells` derives its caps, so a seventh cell gets one for free. The
+occupant also moved: it was spawned at the cell entity's origin, which is exactly where the GLASS is,
+so a held specimen stood inside the pane it is meant to be seen through.
+
+**The research wing had no slab.** `research::lab::StudySubject` is documented as "the specimen
+currently on the slab" and the HUD says *NO SPECIMEN ON THE SLAB — CONTAIN ONE FIRST*, but no slab
+existed anywhere in the world and the wing was bare floor. `assets/ozea/slab.glb`
+(`SM_MedPod_Treatment_Bed`, from the same pack as the cryo pod) is now its centrepiece, and
+`lay_out_the_study_subject` puts the studied specimen on it — bed platform measured at y = 0.60, not
+guessed. It adds no gameplay rule: the subject is still chosen by `keep_a_study_subject`; this only
+shows what that already decided.
+
 ## Knowingly left
 
 - **`wall_low` is still squashed** 2.00 → 0.9 (0.45×). Shortening a panel properly is an authoring
@@ -118,10 +136,6 @@ uses, so they idle and walk.
 - **The aperture's shader** (FVS-G-5). Its uniforms were authored blind and are still guesses. Worth
   noting the geometry fix helps it: the shader marches on `uv.x` with no aspect uniform, so the old
   3.2 × 2.0 quad stretched the corridor illusion 1.6:1 and the corrected one is nearly square.
-- **Containment cell fronts are free-standing panes.** Six glazed panels in an open room with nothing
-  behind or beside them; they only read as cells once specimens fill them. That is the authored
-  `cells:` design, not a regression.
-- **The research wing is entirely undressed** — a large empty floor with one decal.
 - **The Ozea doorways do not clear a 1.82 m operative** — the wide frame's hole is 1.64 m rendered.
   Accepted rather than overlooked: it is a portal whose trigger fires before an avatar reaches the
   frame, and the alternative was scaling the frame 23% in Y alone, which stretches its trim. The test

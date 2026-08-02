@@ -55,6 +55,8 @@ pub enum SitePiece {
     WallWindow,
     /// Waist-high run: counters, records desks, the requisition bar.
     WallLow,
+    /// The examination slab in the research wing — where `research::lab::StudySubject` lies.
+    Slab,
     Column,
     // ── Dressing ──
     Crate,
@@ -109,7 +111,7 @@ pub fn target_height(piece: SitePiece) -> Option<f32> {
         // and the Requisition counter.
         WallLow => Some(0.9),
         // Native height is the intent — dressing, decals, and the specimen stand-in.
-        Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal
+        Floor | Crate | Pipe | PipeCorner | FloorButton | AreaDecal | ArrowDecal | Slab
         | SpecimenStandin => None,
     }
 }
@@ -126,6 +128,7 @@ impl SitePiece {
         SitePiece::WallWindow,
         SitePiece::WallLow,
         SitePiece::Column,
+        SitePiece::Slab,
         SitePiece::Crate,
         SitePiece::Pipe,
         SitePiece::PipeCorner,

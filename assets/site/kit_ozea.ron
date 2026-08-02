@@ -97,6 +97,11 @@
     // fit, kept because a counter is the cheapest way to furnish a room and this is the only panel
     // in the promoted set with a 1 m footprint.
     wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00),
+    // The examination slab: `SM_MedPod_Treatment_Bed` (E_001), the same pack the cryo pod comes from,
+    // so the research wing and the containment wing read as one facility. Native size is the intent —
+    // it is furniture, not architecture — and its bed platform sits at y = 0.60, which is where
+    // `site::visuals::SLAB_SURFACE_Y` lays the study subject.
+    slab:              (glb: "ozea/slab.glb",                 height: 1.72),
     // `SM_Pylonne`, authored 1.10 m in the pack and re-authored to 2.40 here. It was the worst
     // offender of the lot: at its native height `y_scale` stretched it **2.18×**.
     column:            (glb: "ozea/column.glb",               height: 2.40),

@@ -42,6 +42,8 @@
     wall_header: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-cutout-small.glb", height: 1.0),
     wall_window: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-large.glb", height: 1.0),
     wall_low: (glb: "kenney_prototype-kit/Models/GLB format/wall-low.glb", height: 0.5),
+    // A low block reads as a slab in greybox terms; the shipped kit gets a real treatment bed.
+    slab: (glb: "kenney_prototype-kit/Models/GLB format/shape-cube-half.glb", height: 0.5),
     column: (glb: "kenney_prototype-kit/Models/GLB format/column.glb", height: 1.0),
 
     // ── Dressing ──

@@ -323,6 +323,11 @@
         ( piece: FloorButton, pos: ( 5.5,  3.5), yaw:  0.0 ),
         ( piece: FloorButton, pos: ( 6.5,  3.5), yaw:  0.0 ),
         ( piece: FloorButton, pos: ( 7.5,  3.5), yaw:  0.0 ),
+        // The examination slab, in the middle of the research wing (x10..21, z14..23). The research
+        // system has always had a "slab" — `research::lab::StudySubject` is documented as "the
+        // specimen currently on the slab" and the HUD says NO SPECIMEN ON THE SLAB — and until
+        // 2026-08-01 it existed only as text over an empty floor.
+        ( piece: Slab,       pos: (15.5, 18.5), yaw:  90.0 ),
         // Wayfinding toward the aperture, read from the spine.
         ( piece: ArrowDecal, pos: ( 6.5, 11.5), yaw: 180.0 ),
         // The counters. `WallLow` was dressed in the kit, given a 0.9 m target and listed in
