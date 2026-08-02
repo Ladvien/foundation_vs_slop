@@ -247,7 +247,7 @@ impl MetropolisSolver {
         for (i, a) in objs.iter().enumerate() {
             // In-bounds: hinge penalty for any part of the footprint past a wall. Shared with the
             // Site's authored-placement check via `ir::escapes_bounds` — one definition of "inside".
-            bounds += crate::placement::ir::escapes_bounds(a, (rx0, rx1, rz0, rz1)) as f64;
+            bounds += crate::placement::ir::escapes_bounds(a, (rx0, rx1, rz0, rz1));
             // Back-to-wall attraction is NOT applied unconditionally here: it is emitted per piece as
             // an explicit `AgainstWall` constraint (see `freestanding_constraints`) and scored once in
             // `constraint_cost`. Scoring it here too would double-count `w_wall` (~2× the tuned pull).
@@ -583,4 +583,49 @@ mod tests {
         };
         assert_eq!(run(), run());
     }
+
+    /// **The solver lands in the SAME PLACE it did before**, bit for bit, for a fixed seed.
+    ///
+    /// `deterministic_under_seed` above proves the solver agrees with *itself* — `run() == run()` —
+    /// which is a different and much weaker claim. It cannot see a change to the cost function at all,
+    /// because both halves of its comparison move together.
+    ///
+    /// That gap was not hypothetical. Hoisting the in-bounds hinge into `ir::escapes_bounds` on
+    /// 2026-08-02 initially summed the four terms in `f32` and widened afterwards, where the original
+    /// widened each term first. Measured over 400k random inputs, those disagree in **53%** of cases.
+    /// The whole suite stayed green, because nothing pinned where the furniture actually went.
+    ///
+    /// So: a change here means the dungeon furnishes differently for every seed. If that was
+    /// deliberate, re-pin these numbers and say so in the commit. If it was not, something in the cost
+    /// function moved and this is the only thing that will tell you.
+    #[test]
+    fn the_solved_layout_is_pinned_for_a_fixed_seed() {
+        let r = region();
+        let problem = PlacementProblem {
+            region: &r,
+            candidates: vec![item(1.6, 0.7), item(0.9, 0.6)].into(),
+            constraints: Vec::new(),
+        };
+        let solver = MetropolisSolver::new(weights());
+        let mut rng = seeded(11);
+        let got: Vec<(u32, u32)> = match solver.solve(&problem, &mut rng).expect("solve") {
+            Outcome::Ranked(v) => v[0]
+                .1
+                .iter()
+                .map(|p| (p.pos[0].to_bits(), p.pos[2].to_bits()))
+                .collect(),
+            _ => panic!("expected ranked"),
+        };
+        assert_eq!(
+            got, PINNED_LAYOUT_SEED_11,
+            "the solver no longer lands where it did — the dungeon now furnishes differently for \
+             EVERY seed. Deliberate? Re-pin and say so. Not deliberate? Something moved in the cost \
+             function; `escapes_bounds`/`overlap_area` in `placement::ir` are the shared geometry."
+        );
+    }
 }
+
+/// Bit-exact solver output for seed 11 — see `the_solved_layout_is_pinned_for_a_fixed_seed`.
+#[cfg(test)]
+const PINNED_LAYOUT_SEED_11: &[(u32, u32)] =
+    &[(1081317365, 1074081542), (1074665548, 1063516872)];

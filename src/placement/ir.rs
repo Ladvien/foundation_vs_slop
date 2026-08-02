@@ -119,12 +119,24 @@ pub fn overlap_area(a: &Footprint, b: &Footprint) -> f32 {
 ///
 /// A hinge sum rather than a boolean so a solver can descend it and a checker can report *how far*
 /// out the offender is — "0.15 m through the west wall" is actionable; "invalid" is not.
+///
+/// # Returns `f64`, and that is not cosmetic
+///
+/// Each term is widened to `f64` **before** the sum, which is what `metropolis` did when this lived
+/// there as a private expression. Summing the four hinges in `f32` and widening the total afterwards
+/// is a different number — `f32` addition rounds at every step — and this feeds a simulated-annealing
+/// cost, where a difference in the last bits changes which proposals are accepted and therefore where
+/// the furniture ends up for a given seed.
+///
+/// I wrote it the other way round first. Nothing caught it: the placement tests assert that solving
+/// *succeeds*, not that it lands in the same place, so a silent layout shift would have ridden out on
+/// a green suite.
 #[inline]
-pub fn escapes_bounds(f: &Footprint, bounds: (f32, f32, f32, f32)) -> f32 {
+pub fn escapes_bounds(f: &Footprint, bounds: (f32, f32, f32, f32)) -> f64 {
     let (ahw, ahd) = f.half_extents();
     let (x0, x1, z0, z1) = bounds;
     let (bx0, bx1, bz0, bz1) = (x0 + ahw, x1 - ahw, z0 + ahd, z1 - ahd);
-    let over = |v: f32| v.max(0.0);
+    let over = |v: f32| -> f64 { v.max(0.0) as f64 };
     over(bx0 - f.x) + over(f.x - bx1) + over(bz0 - f.z) + over(f.z - bz1)
 }
 
@@ -370,3 +382,55 @@ impl std::fmt::Display for SolveError {
 }
 
 impl std::error::Error for SolveError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`escapes_bounds`] widens each hinge to `f64` BEFORE summing, and that is load-bearing.
+    ///
+    /// This exists because the refactor that created this function got it wrong in the other
+    /// direction — summing in `f32` and widening the total — and the whole suite stayed green.
+    /// `metropolis`'s own `deterministic_under_seed` could not see it (both halves of `run() == run()`
+    /// move together), and even the bit-pinned layout test could not: in a *converged* solve every
+    /// piece is in bounds, so all four hinges are zero and the two summations agree exactly.
+    ///
+    /// The difference only shows when a piece genuinely does not fit, which is exactly the case a
+    /// checker is for. The input below is a footprint larger than its room in both axes — all four
+    /// hinges positive — where the two orders differ in the last bits.
+    #[test]
+    fn the_hinge_sum_is_accumulated_in_f64_not_f32() {
+        let f = Footprint {
+            x: 0.685_108_4,
+            z: 0.121_921_23,
+            yaw: 0.0,
+            hw: 1.133_890_7,
+            hd: 1.855_970_6,
+        };
+        let bounds = (0.0, 1.094_911_6, 0.0, 1.860_573_1);
+        let got = escapes_bounds(&f, bounds);
+
+        // Each term widened first, then summed — the reference semantics.
+        let (ahw, ahd) = f.half_extents();
+        let (bx0, bx1) = (bounds.0 + ahw, bounds.1 - ahw);
+        let (bz0, bz1) = (bounds.2 + ahd, bounds.3 - ahd);
+        let w = |v: f32| -> f64 { v.max(0.0) as f64 };
+        let want = w(bx0 - f.x) + w(f.x - bx1) + w(bz0 - f.z) + w(f.z - bz1);
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "escapes_bounds must accumulate in f64; got {got:?}, want {want:?}"
+        );
+
+        // ...and that it is NOT the f32-accumulated answer, or this test proves nothing.
+        let n = |v: f32| -> f32 { v.max(0.0) };
+        let f32_sum =
+            (n(bx0 - f.x) + n(f.x - bx1) + n(bz0 - f.z) + n(f.z - bz1)) as f64;
+        assert_ne!(
+            got.to_bits(),
+            f32_sum.to_bits(),
+            "this input no longer distinguishes the two summation orders — find another, or the \
+             test has stopped guarding anything"
+        );
+    }
+}
