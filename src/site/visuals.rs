@@ -28,6 +28,7 @@ use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
 use super::layout::SiteLayout;
 use super::nav::SiteNav;
 use super::pieces::SitePiece;
+use crate::anim;
 use crate::ui::state::AppState;
 
 /// Collision half-extent for an avatar, matching the squad's own footprint so the Site's doorways feel
@@ -40,6 +41,9 @@ const ARRIVE_EPS: f32 = 0.15;
 /// The Valkyrie figurine's authored render scale (mirrors `squad`'s, so an operative is the same size
 /// here as in the field).
 const FIGURINE_SCALE: f32 = 1.13;
+/// Time constant for smoothing an operative's measured speed before it drives the blend. Matches the
+/// squad's `LOCO_SMOOTH_TAU` in spirit: long enough that a single stuttery frame cannot flip the pose.
+const AVATAR_LOCO_TAU: f32 = 0.12;
 
 /// Marker on any entity belonging to the Site's presentation.
 #[derive(Component)]
@@ -80,6 +84,21 @@ pub struct ContainmentCell {
 #[derive(Component)]
 pub struct CellOccupant;
 
+/// The GLB child of a [`SiteAvatar`]. Carries the cosmetic animation state, never the avatar itself —
+/// the same split `squad::FigurineModel` makes, and for the same reason (issue #18).
+#[derive(Component)]
+struct AvatarModel;
+
+/// Smoothed locomotion for one operative's model, so the blend does not chatter frame to frame.
+///
+/// `last` is the parent's position at the previous frame: Site avatars are moved by writing
+/// `Transform` directly (`drive_avatars`), so unlike a squad `Unit` there is no `Velocity` to read.
+#[derive(Component, Default)]
+struct AvatarLoco {
+    speed: f32,
+    last: Option<Vec3>,
+}
+
 pub struct SiteVisualsPlugin;
 
 impl Plugin for SiteVisualsPlugin {
@@ -100,7 +119,19 @@ impl Plugin for SiteVisualsPlugin {
         app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
             .insert_resource(nav)
             .insert_resource(SiteLayoutRes(layout))
-            .add_systems(Startup, spawn_site_geometry)
+            // AFTER the graph exists: `spawn_site_geometry` pins `ValkyrieAnim`'s graph and slots on
+            // each operative's model child as an `anim::BlendSource`, and Bevy is otherwise free to
+            // order two `Startup` systems either way round. The squad states the same constraint for
+            // `spawn_unit`; the Site is the second spawner and needs it just as much.
+            .add_systems(
+                Startup,
+                spawn_site_geometry.after(crate::squad::build_valkyrie_anim),
+            )
+            // Cosmetic, so `Update` — never `FixedUpdate` (`docs/animation.md`). Deliberately NOT
+            // gated on `AppState::Site`: `apply_pose_blenders` snaps weights on its first pass, so a
+            // blender that had never been driven would prime to all-zero and show one frame of bind
+            // pose the moment the player walks in. Five avatars is not a cost worth that.
+            .add_systems(Update, drive_avatar_animation)
             .add_systems(Update, super::aperture::drive_aperture_charge)
             .add_systems(OnEnter(AppState::Site), focus_camera_on_site)
             .add_systems(OnEnter(AppState::InGame), return_camera_to_squad)
@@ -287,6 +318,7 @@ fn spawn_site_geometry(
     layout: Res<SiteLayoutRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut aperture_mats: ResMut<Assets<AsyncApertureMaterial>>,
+    valk: Res<crate::squad::ValkyrieAnim>,
 ) {
     let l = &layout.0;
     // Lights first, because nothing below is visible without them — see `light_the_site`.
@@ -403,11 +435,25 @@ fn spawn_site_geometry(
             Visibility::Inherited,
         ));
         e.with_child((
+            AvatarModel,
             WorldAssetRoot(
                 assets.load(GltfAssetLabel::Scene(0).from_asset("characters/valkyrie.glb")),
             ),
             Transform::from_scale(Vec3::splat(FIGURINE_SCALE))
                 .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            // Without this the operatives stand in the GLB's BIND POSE — arms straight out, rifle
+            // held level at chest height a metre to the side, which reads as a lance run through
+            // each of them. The mesh was never wrong: `rifle` measures 0.902 m composed through its
+            // whole node chain. Nothing was animating them, so nothing ever left the rest pose.
+            //
+            // Same seam the squad uses (`squad::spawn_unit`): the cosmetic state rides the MODEL
+            // child, never the entity other systems query, and `anim::attach_pose_blenders` wires
+            // the streamed-in `AnimationPlayer` to the nearest `BlendSource` ancestor — this entity.
+            anim::BlendSource {
+                graph: valk.graph.clone(),
+                slots: valk.slots.clone(),
+            },
+            AvatarLoco::default(),
         ));
         if i == 0 {
             e.insert(PlayerAvatar);
@@ -557,6 +603,47 @@ fn drive_avatars(
             // Wedged in a corner: drop the order rather than vibrate against the wall forever.
             goal.0 = None;
         }
+    }
+}
+
+/// Ease each operative's animation blend from how far its avatar actually moved this frame.
+///
+/// **Cosmetic, `Update` only**, and it writes nothing but a `PoseBlender` — so it cannot reach
+/// `snapshot_hash`, exactly as `docs/animation.md` requires of the whole animation layer.
+///
+/// Simpler than `squad::drive_valkyrie_animation` because a hub avatar is simpler: `drive_avatars`
+/// turns it to face the way it actually moved, so travel is always straight ahead in its own frame
+/// (`theta = 0`), and nobody aims or fires in the Site. What is left is idle ↔ walk ↔ run, which is
+/// the whole of what a hub needs.
+fn drive_avatar_animation(
+    time: Res<Time>,
+    avatars: Query<&Transform, With<SiteAvatar>>,
+    mut models: Query<(&ChildOf, &mut anim::PoseBlender, &mut AvatarLoco), With<AvatarModel>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    // Same exponential form the squad's smoothing uses — frame-rate independent, so the blend looks
+    // the same at 30 and 240 fps.
+    let ease = 1.0 - (-dt / AVATAR_LOCO_TAU).exp();
+    for (child_of, mut blender, mut loco) in &mut models {
+        let Ok(tf) = avatars.get(child_of.parent()) else {
+            continue; // parent is not an avatar (or was despawned)
+        };
+        let raw = match loco.last {
+            // First frame: no previous position, so no speed can be measured yet. Starting at 0 shows
+            // the idle clip, which is the correct pose for an operative that has not been ordered.
+            None => 0.0,
+            Some(prev) => (tf.translation - prev).with_y(0.0).length() / dt,
+        };
+        loco.last = Some(tf.translation);
+        loco.speed += (raw - loco.speed) * ease;
+        let weights = crate::squad::valkyrie_weights(loco.speed, 0.0, false, false);
+        if let Err(e) = blender.set_targets(&weights) {
+            error!("site avatar: {e}");
+        }
+        blender.set_ground_speed(loco.speed);
     }
 }
 

@@ -77,6 +77,38 @@ construction rather than by tuning. Nothing is squashed; `y_scale` is 1.0.
   the gap, which is deliberately *not* floor) as separate fields. One field could never have served
   both, and it served the trigger.
 
+## The second pass: what a full visual tour found
+
+The fixes above were verified from two camera angles. That was not enough. A deliberate tour —
+seventeen vantage points across every area, plus the floor at maximum zoom — found three more, none
+of which any test could have caught.
+
+**The corner fix was half a fix.** `corner_cells` caps a cell carrying *both* a yaw-0 and a yaw-90
+wall, which is a **concave** junction — there were 12. Every **convex** corner (each room's outside
+corner) had nothing at all: `gen_site_perimeter.py` only walled cells *orthogonally* adjacent to
+floor, and a run passes THROUGH those and turns at a *diagonal* one. So the two runs stopped 0.5 m
+short of where their centrelines cross, leaving an open notch you could see straight through — **16
+of them**, which is the player's "the corners at the walls are not connected" still true at every
+outside corner. The generator now also emits crossed slabs at cells touching floor only diagonally,
+and because such a cell then carries both yaws, `corner_cells` caps it for free: **28 junctions, up
+from 12.**
+
+⚠️ The obvious criterion — "a wall arrives on each axis" — is a trap. It is satisfied by cells the
+fix itself creates, so iterating to a fixed point walls in every void *between* rooms: 18 cells
+becomes 129 and keeps climbing. Keying on the **floor** instead is a fact about the layout and
+terminates in one pass by construction.
+
+**The aperture was single-sided.** From the Q/E detents that look at the Site from outside, the ASYNC
+door was a see-through hole in the exterior wall with the hall floor visible through it. `Material`
+has no `cull_mode` hook, so `specialize` now clears `primitive.cull_mode`.
+
+**The operatives were in the bind pose.** Each carried what looked like a 4 m lance run through their
+chest. The mesh was never wrong — `rifle` measures **0.902 m** composed through its entire node chain
+— it is a non-skinned child of `hand_r`, and in the rest pose that arm is straight out, so the rifle
+sat level at chest height a metre to the side. Nothing animated Site avatars at all. They now carry
+`anim::BlendSource` on the model child and a `drive_avatar_animation` driver, the same seam the squad
+uses, so they idle and walk.
+
 ## Knowingly left
 
 - **`wall_low` is still squashed** 2.00 → 0.9 (0.45×). Shortening a panel properly is an authoring
@@ -86,6 +118,10 @@ construction rather than by tuning. Nothing is squashed; `y_scale` is 1.0.
 - **The aperture's shader** (FVS-G-5). Its uniforms were authored blind and are still guesses. Worth
   noting the geometry fix helps it: the shader marches on `uv.x` with no aspect uniform, so the old
   3.2 × 2.0 quad stretched the corridor illusion 1.6:1 and the corrected one is nearly square.
+- **Containment cell fronts are free-standing panes.** Six glazed panels in an open room with nothing
+  behind or beside them; they only read as cells once specimens fill them. That is the authored
+  `cells:` design, not a regression.
+- **The research wing is entirely undressed** — a large empty floor with one decal.
 - **The Ozea doorways do not clear a 1.82 m operative** — the wide frame's hole is 1.64 m rendered.
   Accepted rather than overlooked: it is a portal whose trigger fires before an avatar reaches the
   frame, and the alternative was scaling the frame 23% in Y alone, which stretches its trim. The test

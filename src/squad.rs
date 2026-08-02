@@ -453,8 +453,8 @@ const DIR_HOLD_SPEED: f32 = 0.05;
 /// Research Room's spawn button can pass it to [`spawn_unit`].
 #[derive(Resource)]
 pub(crate) struct ValkyrieAnim {
-    graph: Handle<AnimationGraph>,
-    slots: Arc<[anim::Slot]>,
+    pub(crate) graph: Handle<AnimationGraph>,
+    pub(crate) slots: Arc<[anim::Slot]>,
 }
 
 /// Cosmetically smoothed locomotion parameters for one figurine. Lives on the `FigurineModel` child
@@ -476,7 +476,7 @@ struct LocoSmooth {
 /// exists only on the leaf clips (`weight = active_animation.weight * graph_node.weight`), so an
 /// intermediate "action layer" node could not be faded per unit. Masking the two action clips
 /// individually gets the same layering with none of that problem.
-fn build_valkyrie_anim(
+pub(crate) fn build_valkyrie_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
@@ -591,7 +591,12 @@ fn build_lower_body_mask(
 /// exactly 1, which is what lets `anim::apply_pose_blenders` ease every weight at one rate without the
 /// mixture drifting — and, because the action clips are masked out of the lower body, what makes the
 /// legs keep walking at full strength while the upper body aims or recoils (§36.4.1/§36.4.3).
-fn valkyrie_weights(speed: f32, theta: f32, aiming: bool, firing: bool) -> [f32; N_SLOTS] {
+pub(crate) fn valkyrie_weights(
+    speed: f32,
+    theta: f32,
+    aiming: bool,
+    firing: bool,
+) -> [f32; N_SLOTS] {
     let alpha = if firing || aiming { ACTION_ALPHA } else { 0.0 };
     let mut weights = [0.0f32; N_SLOTS];
     for (slot, w) in anim::blend::locomotion_weights(speed, theta, aiming).iter().enumerate() {

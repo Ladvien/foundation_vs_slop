@@ -48,9 +48,51 @@ def row(piece, cell, yaw):
     return f"        ( piece: {piece + ',':11s} cell: ({cell[0]:3d},{cell[1]:3d}), yaw: {yaw:5.1f} ),"
 
 
+walled = {c for c in boundary if c not in DOOR_KEEP_OUT}
+
+# THE OUTSIDE OF EVERY CORNER.
+#
+# `boundary` only holds cells ORTHOGONALLY adjacent to floor, which is every cell a run passes
+# through — and none of the cells a run TURNS at. At a room's outer (convex) corner the diagonal cell
+# touches floor only diagonally, so it got no wall, and the two runs stopped 0.5 m short of the point
+# where their centrelines cross: an open notch you could see straight through, at all 18 of them.
+# Screenshotting the perimeter on 2026-08-01 is what found it; the earlier corner-cap work had capped
+# only the 12 CONCAVE junctions, which are the cells that do sit in `boundary`.
+#
+# A convex corner is a cell that touches floor ONLY diagonally: the runs on both sides of it are
+# enclosing the same room, and the cell is the point they turn around. Crossed slabs are the fix for
+# the same reason they are at a concave junction — each 1 m panel reaches its neighbouring run
+# exactly, using only grid-native pieces — and because the cell then carries both yaws,
+# `site::visuals::corner_cells` picks it up and caps the seam with no extra code.
+#
+# **Defined from the FLOOR, never from the walls**, and that is load-bearing. Deriving it instead from
+# "a wall arrives on each axis" looks equivalent and is not: adding a wall creates fresh cells that
+# satisfy it, and iterating to a fixed point walls in every void BETWEEN rooms — 18 cells becomes 129
+# and still climbing. Keying on floor is a fact about the layout, so it is a single pass by
+# construction. It deliberately leaves the notches where two DIFFERENT rooms' rings pass each other
+# across a void (e.g. the containment wing against the spine); those are outside any room and read as
+# the gap between two buildings, which is what they are.
+#
+# Every cell added here is NON-floor, so `is_walkable = is_floor && !wall` is untouched and the
+# layout validator's connectivity flood-fill cannot change.
+corners = set()
+for (x, z) in cells:
+    for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+        c = (x + dx, z + dz)
+        if c in cells or c in walled or c in DOOR_KEEP_OUT:
+            continue
+        # Only diagonal contact — an orthogonal neighbour means a run passes through, not turns.
+        if any((c[0] + ox, c[1] + oz) in cells for ox, oz in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+            continue
+        corners.add(c)
+
 rows = []
-for cell in sorted(boundary):
+for cell in sorted(set(boundary) | corners):
     if cell in DOOR_KEEP_OUT:
+        continue
+    if cell in corners:
+        rows.append(row("Wall", cell, 0.0))
+        rows.append(row("Wall", cell, 90.0))
         continue
     dirs = boundary[cell]
     along_x = any(d[0] for d in dirs)   # floor lies east/west -> wall is thin in X
