@@ -98,6 +98,12 @@ pub fn area_tone(id: AreaId) -> AreaTone {
         // and it is Farrow's room, the one place in the Site whose job is to remember.
         AreaId::Records => AreaTone { clips: CLOCK, min_gap: 9.0, max_gap: 17.0, radius: 4.0 },
 
+        // **Inside a cell.** The same water as the block outside, but close and quick — you are in a
+        // 3 m room with the thing, and the radius has to be small enough that a drip cannot read as
+        // coming from the corridor. The densest tone in the Site, which is the point: this is the
+        // room the player has most reason to want to leave.
+        AreaId::ContainmentCell => AreaTone { clips: DRIPS, min_gap: 4.0, max_gap: 8.0, radius: 1.6 },
+
         // The containment wing drips, and it is the busiest tone in the building. Six sealed booths
         // and a coolant loop; the reason to make it the densest is that it is the room the player has
         // most reason to be uneasy in, and the acoustic program's §4 point is that ambience is where
@@ -264,6 +270,7 @@ mod tests {
         for id in [
             AreaId::AsyncDoor,
             AreaId::Containment,
+            AreaId::ContainmentCell,
             AreaId::Research,
             AreaId::Records,
             AreaId::Requisition,

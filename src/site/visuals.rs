@@ -522,6 +522,12 @@ const SLAB_SURFACE_Y: f32 = 0.60;
 /// span of `wall_window` itself, so a cell is square in plan.
 pub(crate) const CELL_DEPTH: f32 = 2.0;
 
+/// Half the depth of a containment CELL ROOM, in metres — the 3x3 rects `site67.ron` authors.
+///
+/// Used to find the room's corridor-facing wall from its authored centre, so the observation window
+/// follows the room rather than being a second coordinate that can disagree with it.
+pub(crate) const CELL_ROOM_HALF_DEPTH: f32 = 1.5;
+
 /// Which way a containment cell's interior lies, given its authored yaw.
 ///
 /// `wall_window` is thin along local X and 2 m long along local Z (same convention as every wall in
@@ -611,6 +617,31 @@ fn spawn_site_geometry(
             });
         }
     }
+    // ── DOORWAYS ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // **Site-67 has doors now.** The old hub had none — an opening was the absence of wall, so a room
+    // stood open along a whole shared edge — and that was inherited from `placement::furnish`'s
+    // Backrooms art direction (*"No doors — the Backrooms look leaves every opening as a bare
+    // doorway"*), which is a decision about the DUNGEON. The Director corrected it on 2026-08-02: the
+    // hub is a Foundation facility, and facilities have doors.
+    //
+    // The frame stands ON the doorway cell, which is floor — see `layout::Doorway` for why an opening
+    // has to be floor rather than a hole in the floor. The header course closes the 0.40 m band above
+    // it, without which the perimeter has a slot straight through it at head height; the same fix the
+    // ASYNC aperture needed on 2026-08-01.
+    for d in &l.doorways {
+        let at = l.cell_center(IVec2::new(d.cell.0, d.cell.1));
+        place(&mut commands, &assets, &kit, SitePiece::WallDoorway, at, d.yaw);
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            SitePiece::WallHeader,
+            at + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT,
+            d.yaw,
+        );
+    }
+
     // Anything the layout puts on a wall cell that is NOT a plain wall (a column standing in a run,
     // say) still stands where it was authored: it is furniture on a cell, not a face on an edge.
     for w in &l.walls {
@@ -722,17 +753,30 @@ fn spawn_site_geometry(
 
     // Containment cells: the glazed front, the booth behind it, and an empty marker the specimen body
     // will fill.
+    // **A cell is a ROOM now, so it needs no booth.** `enclose_containment_cell` used to build two
+    // side walls and a back behind each pane, because a cell was a 2 m alcove standing on the open
+    // deck of the containment wing. The twelve cells are authored rects in `areas:`/`floor:` as of
+    // 2026-08-02, so the perimeter pass walls them like every other room and building a second
+    // enclosure inside the first would put two walls in one place.
+    //
+    // What survives is the OBSERVATION WINDOW: a cell you can only see into by opening its door is a
+    // cupboard, and the containment wing's whole job is to be a rack of held things you walk past.
+    // The window goes in the corridor-facing wall beside the door — `window_offset` is one cell to the
+    // side of the doorway, which is the only part of that wall guaranteed to be solid.
     for c in &l.cells {
         let at = l.point(c.pos);
+        // The wall between this cell and the cell row: half the room's depth from its centre, on the
+        // side its `yaw` faces. Derived from the authored centre, never a second authored number.
+        let facing = Quat::from_rotation_y(c.yaw.to_radians()) * Vec3::Z;
+        let window_at = at + facing * (CELL_ROOM_HALF_DEPTH) + facing.cross(Vec3::Y) * 1.0;
         place(
             &mut commands,
             &assets,
             &kit,
             SitePiece::WallWindow,
-            at,
-            c.yaw,
+            window_at,
+            c.yaw + 90.0,
         );
-        enclose_containment_cell(&mut commands, &assets, &kit, at, c.yaw);
         commands.spawn((
             SiteVisual,
             ContainmentCell {
@@ -908,6 +952,16 @@ struct AreaLight {
 fn area_light(id: super::layout::AreaId) -> AreaLight {
     use super::layout::AreaId::*;
     match id {
+        // **A cell.** Colder and harder than the corridor outside it, and deliberately over-lit for
+        // its size: this is a room designed so that nothing in it is ever in shadow, which is what a
+        // containment cell is FOR. Short range because it is 3x3 — a 10 m falloff in a 3 m room just
+        // spills through the doorway and lights the corridor twice.
+        ContainmentCell => AreaLight {
+            kelvin: 6900.0,
+            key_lumens: 300_000.0,
+            fill_lumens: 210_000.0,
+            range: 5.0,
+        },
         // Clinical and high-key. This is the one room that must look like it is inspected daily.
         Containment => AreaLight {
             kelvin: 6500.0,

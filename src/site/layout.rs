@@ -58,8 +58,23 @@ const DOORWAY_CELLS: i32 = 2;
 pub enum AreaId {
     /// Leave on an expedition. The only exit.
     AsyncDoor,
-    /// Captured specimens, visibly held, one cell each (FVS-D-4).
+    /// The containment block's corridor — the row the cells open off.
+    ///
+    /// Until 2026-08-02 this WAS the containment wing: a 16x10 room with six glazed booths standing in
+    /// it. The Director's call was that a cell should be a room you walk into, so the wing became a
+    /// corridor and the booths became [`Self::ContainmentCell`].
     Containment,
+    /// **One cell — a room, not a booth** (FVS-D-4). Declared TWELVE times.
+    ///
+    /// Repeatable, like [`Self::Corridor`] and for a related reason: "where is Records?" is a question
+    /// with one answer, and "where is a containment cell?" is not. Each carries its own `label`
+    /// (`CELL 01`..`CELL 12`), which is what the signage and the room tone read, so they are
+    /// distinguishable to the player without being distinguishable to the type system.
+    ///
+    /// A booth was 2 m deep behind a pane and you could only ever look at it. A cell is 3x3 with a
+    /// door, which means the specimen inside is something you can stand next to — and, once the door
+    /// carries a `Clearance`, something you can be refused.
+    ContainmentCell,
     /// Run experiments on specimens; the Thaumiel tree (Push 4).
     Research,
     /// Read and write reports — where knowledge propagates between runs (Push 10).
@@ -89,6 +104,7 @@ impl AreaId {
     pub const REQUIRED: &'static [AreaId] = &[
         AreaId::AsyncDoor,
         AreaId::Containment,
+        AreaId::ContainmentCell,
         AreaId::Research,
         AreaId::Records,
         AreaId::Requisition,
@@ -99,6 +115,17 @@ impl AreaId {
         AreaId::WarRoom,
         AreaId::Monitoring,
     ];
+
+    /// **May this id be declared more than once?**
+    ///
+    /// Only for ids where "where is the X?" is not a question with a single answer. A corridor is
+    /// connective tissue — the Site has a north spine, a south spine, a service ring and two
+    /// connectors — and a containment cell is one of twelve. Everything else is a destination, and a
+    /// second rect claiming a destination's id makes the hub ambiguous to every system that looks one
+    /// up by id.
+    pub fn repeatable(self) -> bool {
+        matches!(self, AreaId::Corridor | AreaId::ContainmentCell)
+    }
 }
 
 /// An axis-aligned rect of cells, `[x, x+w)` × `[z, z+h)`.
@@ -215,6 +242,40 @@ pub struct DoorPlacement {
     pub trigger_half_extents: (f32, f32, f32),
 }
 
+/// **An interior doorway** — one cell of floor punched through a wall row, and the frame in it.
+///
+/// # Site-67 has doors now, and the rule it broke was never its own
+///
+/// Until 2026-08-02 an opening here was the *absence* of wall, so a room could stand open along a
+/// whole side. That was inherited from `placement::furnish`'s Backrooms art direction — *"No doors —
+/// the Backrooms look leaves every opening as a bare doorway"* — which is a decision about the
+/// **dungeon**, where the liminal emptiness is the point. Site-67 is a Foundation facility that
+/// contains anomalies. It has doors.
+///
+/// # Why the doorway cell is FLOOR
+///
+/// Walls are cells here, so a wall row between two rooms is solid. Making one cell of it floor is
+/// what turns a solid row into a door: the flood-fill in [`SiteLayout::validate`] passes straight
+/// through, so the hub stays provably connected, while the perimeter pass walls the cells either
+/// side because they are non-floor adjacent to floor. A one-cell gap is a door; a whole shared edge
+/// is an open side.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Doorway {
+    /// The floor cell the opening occupies. The frame stands at its centre.
+    pub cell: (i32, i32),
+    /// Yaw of the frame, degrees. Same convention as every wall: a frame separating along X is 90.
+    pub yaw: f32,
+    /// **The clearance a person needs to pass**, or `None` for an unrestricted door.
+    ///
+    /// `personnel::Clearance` is documented as *"a CEILING ON INFORMATION, not a rank and not an XP
+    /// ladder"*, and both confusions are named amateur tells. A door reading it is the first place
+    /// that ceiling becomes something the player meets rather than something the roster asserts.
+    pub clearance: Option<crate::personnel::Clearance>,
+    /// What is on the other side, for the refusal message. Player-facing copy, like `Area::label`.
+    pub label: String,
+}
+
 /// The whole authored hub.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +292,9 @@ pub struct SiteLayout {
     pub props: Vec<PropPlacement>,
     pub cells: Vec<CellPlacement>,
     pub door: DoorPlacement,
+    /// Every interior doorway. The ASYNC aperture is [`Self::door`] and is a different thing — it is
+    /// the way OUT of the hub, with a state transition behind it rather than a leaf that slides.
+    pub doorways: Vec<Doorway>,
     /// Where operative avatars stand at the start of an idle period.
     pub spawns: Vec<(f32, f32)>,
 }
@@ -352,7 +416,7 @@ impl SiteLayout {
         // quiet and no room-tone emitter owns the air. They were also unlit, `light_the_site` being
         // another per-area pass.
         for (i, a) in self.areas.iter().enumerate() {
-            if a.id != AreaId::Corridor && self.areas[..i].iter().any(|b| b.id == a.id) {
+            if !a.id.repeatable() && self.areas[..i].iter().any(|b| b.id == a.id) {
                 return Err(format!(
                     "site layout: area {:?} declared more than once",
                     a.id
@@ -469,7 +533,7 @@ impl SiteLayout {
             return Err(format!(
                 "site layout: the ASYNC doorway gap is {span} cells but the frame spans \
                  {DOORWAY_CELLS} — hold exactly {DOORWAY_CELLS} clear in \
-                 scripts/gen_site_perimeter.py's DOOR_KEEP_OUT, or the perimeter stands open beside \
+                 scripts/gen_site67.py's DOOR_KEEP_OUT, or the perimeter stands open beside \
                  the aperture"
             ));
         }
@@ -682,13 +746,17 @@ pub(crate) fn resting_on(
 ) -> Option<Result<(f32, usize), String>> {
     let class = kit.rests_on(p.piece)?;
     let want = kit.rests_on_bits(p.piece)?;
-    let area = layout.area_at_metres(p.pos).map(|a| a.id);
+    // Compared by RECT, not by id. `AreaId::ContainmentCell` is declared twelve times — repeatable,
+    // like `Corridor` — so two different cell rooms share an id, and scoping by id would let a mug in
+    // CELL 02 take its height from a table in CELL 01 through the wall between them. The rect is what
+    // makes an area a *place*.
+    let area = layout.area_at_metres(p.pos).map(|a| a.rect);
     let mut best: Option<(f32, f32, f32, usize)> = None;
     for (ix, q) in layout.props.iter().enumerate() {
         if kit.surface_bits(q.piece) & want == 0 || std::ptr::eq(q, p) {
             continue;
         }
-        if layout.area_at_metres(q.pos).map(|a| a.id) != area {
+        if layout.area_at_metres(q.pos).map(|a| a.rect) != area {
             continue;
         }
         let d = ((q.pos.0 - p.pos.0).powi(2) + (q.pos.1 - p.pos.1).powi(2)).sqrt();
@@ -715,7 +783,9 @@ pub(crate) fn resting_on(
             p.piece,
             p.pos,
             super::kit::RESTS_ON_REACH,
-            area.map_or_else(|| "the corridor".to_string(), |a| format!("{a:?}")),
+            layout
+                .area_at_metres(p.pos)
+                .map_or_else(|| "the corridor".to_string(), |a| a.label.clone()),
         )),
     })
 }
@@ -999,59 +1069,77 @@ mod tests {
 
     /// **The floor plan has two sources of truth, and this is the only thing keeping them equal.**
     ///
-    /// `scripts/gen_site_perimeter.py` carries a hand-duplicated copy of `site67.ron`'s `floor:` list
-    /// in its `FLOOR` literal, because it is a standalone script with no RON parser. Nothing made the
-    /// two agree until 2026-08-02.
+    /// **The authored walls must BE the boundary of the authored floor.**
     ///
-    /// Drift here is close to undetectable by eye and catastrophic in a specific way: the generator
-    /// emits the perimeter of a building that does not exist, so the new floor keeps the OLD layout's
-    /// wall cells sitting **on top of it** — and `is_walkable = is_floor && !wall`, so those become
-    /// unwalkable holes in the middle of a room, while the walls the new floor actually needs are
-    /// never emitted at all. A room you cannot cross, ringed by nothing.
+    /// This replaces a test that compared `site67.ron`'s `floor:` against a hand-duplicated copy of
+    /// it inside `gen_site_perimeter.py`. That script is gone: `scripts/gen_site67.py` now derives the
+    /// floor AND the perimeter in one pass, so the two cannot disagree at generation time. The drift
+    /// that remains is somebody hand-editing the RON afterwards, and comparing against a *script* can
+    /// never catch that — so this asserts the invariant itself instead.
     ///
-    /// Parsed with a regex rather than by importing Python: the point is to compare the two authored
-    /// lists, and a parser that shares code with either one would not.
+    /// The failure it guards is unchanged and still nasty: `is_walkable = is_floor && !wall`, so a
+    /// stale wall cell standing on floor is an unwalkable hole in the middle of a room, and a missing
+    /// one is a gap you can see straight through. Neither shows up anywhere else.
     #[test]
-    fn the_perimeter_generator_agrees_with_the_layout_about_where_the_floor_is() {
-        let script = std::fs::read_to_string("scripts/gen_site_perimeter.py")
-            .expect("the perimeter generator must be readable from the crate root");
-        let body = script
-            .split_once("FLOOR = [")
-            .and_then(|(_, rest)| rest.split_once(']'))
-            .map(|(inner, _)| inner)
-            .expect("gen_site_perimeter.py must define a FLOOR = [ ... ] literal");
-
-        let mut from_script: Vec<(i32, i32, i32, i32)> = Vec::new();
-        for line in body.lines() {
-            let Some(open) = line.find('(') else { continue };
-            let Some(close) = line[open..].find(')') else {
-                continue;
-            };
-            let nums: Vec<i32> = line[open + 1..open + close]
-                .split(',')
-                .filter_map(|t| t.trim().parse().ok())
-                .collect();
-            if let [x, z, w, h] = nums[..] {
-                from_script.push((x, z, w, h));
-            }
-        }
-
-        let from_layout: Vec<(i32, i32, i32, i32)> = shipped()
+    fn every_wall_cell_is_exactly_the_boundary_of_the_floor() {
+        let l = shipped();
+        let floor: std::collections::HashSet<(i32, i32)> = l
             .floor
             .iter()
-            .map(|r| (r.x, r.z, r.w, r.h))
+            .flat_map(|r| r.cells().map(|c| (c.x, c.y)).collect::<Vec<_>>())
             .collect();
 
+        // Orthogonally adjacent to floor, or touching it only diagonally (a room's convex corner —
+        // the notch you could see through at all eighteen of them until 2026-08-01).
+        let mut want: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        for &(x, z) in &floor {
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = (x + dx, z + dz);
+                if !floor.contains(&n) {
+                    want.insert(n);
+                }
+            }
+        }
+        let ortho = want.clone();
+        for &(x, z) in &floor {
+            for (dx, dz) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                let c = (x + dx, z + dz);
+                if floor.contains(&c) || ortho.contains(&c) {
+                    continue;
+                }
+                if [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(ox, oz)| floor.contains(&(c.0 + ox, c.1 + oz)))
+                {
+                    continue;
+                }
+                want.insert(c);
+            }
+        }
+        // ...minus the ASYNC aperture's own gap, which its frame fills.
+        for c in l.doorway_gap_cells() {
+            want.remove(&(c.x, c.y));
+        }
+
+        let got: std::collections::HashSet<(i32, i32)> = l
+            .walls
+            .iter()
+            .filter(|w| w.piece == SitePiece::Wall)
+            .map(|w| w.cell)
+            .collect();
+
+        let missing: Vec<_> = want.difference(&got).copied().collect();
+        let extra: Vec<_> = got.difference(&want).copied().collect();
         assert!(
-            !from_script.is_empty(),
-            "parsed no rects out of the script's FLOOR list — has its formatting changed?"
-        );
-        assert_eq!(
-            from_script, from_layout,
-            "scripts/gen_site_perimeter.py's FLOOR list has drifted from site67.ron's floor: list. \
-             Make them identical and RE-RUN the script over the walls: block — a stale perimeter \
-             leaves wall cells standing on floor, which `is_walkable` reads as holes you cannot \
-             walk through."
+            missing.is_empty() && extra.is_empty(),
+            "the walls: block is not the boundary of the floor: list. Re-run \
+             `python3 scripts/gen_site67.py` and splice its WALLS block.\n  \
+             {} cells missing (a gap you can see through): {:?}\n  \
+             {} cells extra (an unwalkable hole standing on floor): {:?}",
+            missing.len(),
+            &missing[..missing.len().min(12)],
+            extra.len(),
+            &extra[..extra.len().min(12)],
         );
     }
 
@@ -1085,11 +1173,11 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
 
-        // A 2.29 m bunk at yaw 0 centred 1.0 m into a room whose west wall is at x = 0.
+        // A 2.29 m bunk at yaw 0 centred half a metre inside the quarters' west wall (x = 5).
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Bunk,
-            pos: (1.0, 29.0),
+            pos: (6.5, 38.0),
             yaw: 0.0,
             waive: None,
         });
@@ -1133,10 +1221,10 @@ mod tests {
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            // Between the galley's two mess tables. Moved here 2026-08-02: the old fixture at
-            // (7.6, 30.6) landed inside a stool once the galley was re-laid out to clear its
-            // doorway, and an overlap fault masked the facing fault this test is about.
-            pos: (8.5, 29.7),
+            // Beside the galley's northern mess table, which moved with the room to (17.5, 37.6)
+            // when the Site tripled in 2026-08-02. Clear of the room's walls, so the WALL rule cannot
+            // fire first and mask the facing fault this test is about.
+            pos: (18.6, 37.6),
             yaw: 0.0,
             waive: None,
         });
@@ -1170,11 +1258,12 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
 
-        // A locker planted in the galley's opening onto the south spine (z = 26 is the way in).
+        // A locker planted in the galley's opening onto the south spine — its doorway is cell
+        // (17, 34), so z = 35 is the first row inside the room and the way in.
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Locker,
-            pos: (8.5, 26.4),
+            pos: (17.5, 35.4),
             yaw: 0.0,
             waive: None,
         });
@@ -1224,9 +1313,9 @@ mod tests {
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            // Quarters is x[0,5); x = 5 is wall. Forward is `(sin yaw, cos yaw)` and `front` is
+            // Quarters is x[6,11); x = 11 is wall. Forward is `(sin yaw, cos yaw)` and `front` is
             // +90°, so an authored yaw of 0 faces +X — straight into that wall.
-            pos: (4.5, 31.5),
+            pos: (10.5, 41.5),
             yaw: 0.0,
             waive: None,
         });
@@ -1240,7 +1329,7 @@ mod tests {
         let mut l = shipped();
         l.props.push(PropPlacement {
             piece: SitePiece::Chair,
-            pos: (4.5, 31.5),
+            pos: (10.5, 41.5),
             yaw: 180.0,
             waive: None,
         });
@@ -1275,8 +1364,8 @@ mod tests {
                 kit.rests_on(p.piece),
             );
             assert_eq!(
-                l.area_at_metres(host.pos).map(|a| a.id),
-                l.area_at_metres(p.pos).map(|a| a.id),
+                l.area_at_metres(host.pos).map(|a| a.rect),
+                l.area_at_metres(p.pos).map(|a| a.rect),
                 "{:?} took its height from a host in another room",
                 p.piece,
             );
@@ -1310,11 +1399,11 @@ mod tests {
         let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
             .expect("the shipped kit must load");
         let mut l = shipped();
-        // Wholly inside the briefing room's mess table — maximum possible plan overlap with the host
-        // — but clear of the folder and the mug the room already ships, which the rule DOES judge.
+        // Wholly inside the briefing room's mess table (moved with the room to (50.2, 21.4)) —
+        // maximum plan overlap with the host, but clear of the folder and mug the room ships.
         l.props.push(PropPlacement {
             piece: SitePiece::Mug,
-            pos: (26.4, 24.2),
+            pos: (50.4, 21.2),
             yaw: 0.0,
             waive: None,
         });
@@ -1336,7 +1425,7 @@ mod tests {
         for _ in 0..2 {
             l.props.push(PropPlacement {
                 piece: SitePiece::Mug,
-                pos: (26.2, 24.4),
+                pos: (50.2, 21.4),
                 yaw: 0.0,
                 waive: None,
             });
@@ -1407,20 +1496,21 @@ mod tests {
         let mut l = shipped();
         l.props.retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
 
-        // Quarters x[0,5) and the galley x[6,11) are separated by the single cell x[5,6). A table
-        // just inside one and a mug just inside the other are 1.7 m apart — well within reach, and
-        // on opposite sides of a wall.
-        let table: (f32, f32) = (4.5, 30.0);
-        let mug: (f32, f32) = (6.2, 30.0);
+        // CELL 01 x[22,25) and CELL 02 x[26,29) are separated by the single wall column x = 25. A
+        // table just inside one and a mug just inside the other are 2 m apart — well within reach,
+        // and on opposite sides of a wall.
+        let table: (f32, f32) = (24.5, 3.5);
+        let mug: (f32, f32) = (26.5, 3.5);
         assert!(
             ((mug.0 - table.0).powi(2) + (mug.1 - table.1).powi(2)).sqrt()
                 < super::super::kit::RESTS_ON_REACH,
             "the point of this test is that it IS within reach"
         );
         assert_ne!(
-            l.area_at_metres(mug).map(|a| a.id),
-            l.area_at_metres(table).map(|a| a.id),
-            "the two points must be in different areas for this to test anything"
+            l.area_at_metres(mug).map(|a| a.rect),
+            l.area_at_metres(table).map(|a| a.rect),
+            "the two points must be in different ROOMS — and by rect, not by id: both of these are \
+             `ContainmentCell`, which is exactly the case that made scoping by id wrong"
         );
         for (piece, pos) in [(SitePiece::MessTable, table), (SitePiece::Mug, mug)] {
             l.props.push(PropPlacement { piece, pos, yaw: 0.0, waive: None });
@@ -1430,8 +1520,9 @@ mod tests {
             .expect("a mug rests on something")
             .expect_err("a host on the other side of a wall must not count");
         assert!(
-            err.contains("Kitchen"),
-            "the message must name the room it looked in: {err}"
+            err.contains("CELL 02"),
+            "the message must name the room it looked in, in the room's own player-facing words \
+             rather than as an enum variant — `Kitchen` is the variant and `GALLEY` is the room: {err}"
         );
     }
 
@@ -1451,7 +1542,9 @@ mod tests {
             // nearer than either of the two this test is trying to make tie.
             l.props
                 .retain(|p| !kit.is_surface(p.piece) && kit.rests_on(p.piece).is_none());
-            let mut tables = vec![(26.0, 24.4), (26.8, 24.4)];
+            // Exact halves: 0.4 apart is NOT equidistant in f32, and the rounding decided the tie
+            // before the tiebreak could — which made the test pass for the wrong reason.
+            let mut tables = vec![(50.0, 21.5), (51.0, 21.5)];
             if reversed {
                 tables.reverse();
             }
@@ -1466,7 +1559,7 @@ mod tests {
             l.props.push(PropPlacement {
                 piece: SitePiece::Mug,
                 // Exactly equidistant from both.
-                pos: (26.4, 24.4),
+                pos: (50.5, 21.5),
                 yaw: 0.0,
                 waive: None,
             });
@@ -1481,7 +1574,7 @@ mod tests {
             build(true),
             "a tie broken by authoring order would make the Site's dressing depend on file order"
         );
-        assert_eq!(build(false), (26.0, 24.4), "the lower x wins the tie");
+        assert_eq!(build(false), (50.0, 21.5), "the lower x wins the tie");
     }
 
     /// **Which room is this?** — the question nothing could ask before 2026-08-02.
