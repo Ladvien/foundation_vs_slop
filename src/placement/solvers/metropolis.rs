@@ -80,29 +80,13 @@ impl MetropolisSolver {
     }
 }
 
-/// One object's live state during optimization: centre (x, z) in world/tile coords + yaw about +Y.
-#[derive(Clone, Copy)]
-struct Obj {
-    x: f32,
-    z: f32,
-    yaw: f32,
-    // Native footprint half-extents (before yaw); AABB half-extents are swapped at 90°/270°.
-    hw: f32,
-    hd: f32,
-}
+/// One object being annealed. **This is `ir::Footprint`** — the shared definition of a placed
+/// object's floor footprint, moved out of this solver on 2026-08-02 so Site-67's hand-authored
+/// placements could be checked against the same geometry the dungeon's solved ones are. See the type's
+/// own doc for why that mattered; the short version is that the Site had no overlap or bounds check at
+/// all, because those rules lived in here as private energy terms.
+type Obj = crate::placement::ir::Footprint;
 
-impl Obj {
-    /// Axis-aligned half-extents given the current (quarter-turn) yaw.
-    fn half_extents(&self) -> (f32, f32) {
-        // Quarter-turn furniture: at 90°/270° width and depth swap.
-        let quarter = (self.yaw / FRAC_PI_2).round() as i32 & 3;
-        if quarter % 2 == 1 {
-            (self.hd, self.hw)
-        } else {
-            (self.hw, self.hd)
-        }
-    }
-}
 
 /// Interior bounds (min/max object-centre coords) after wall inset — computed per footprint at eval.
 struct Bounds {
@@ -261,10 +245,9 @@ impl MetropolisSolver {
         let mut bounds = 0.0;
 
         for (i, a) in objs.iter().enumerate() {
-            let (ahw, ahd) = a.half_extents();
-            // In-bounds: quadratic penalty for any part of the footprint past a wall.
-            let (bx0, bx1, bz0, bz1) = (rx0 + ahw, rx1 - ahw, rz0 + ahd, rz1 - ahd);
-            bounds += over(bx0 - a.x) + over(a.x - bx1) + over(bz0 - a.z) + over(a.z - bz1);
+            // In-bounds: hinge penalty for any part of the footprint past a wall. Shared with the
+            // Site's authored-placement check via `ir::escapes_bounds` — one definition of "inside".
+            bounds += crate::placement::ir::escapes_bounds(a, (rx0, rx1, rz0, rz1)) as f64;
             // Back-to-wall attraction is NOT applied unconditionally here: it is emitted per piece as
             // an explicit `AgainstWall` constraint (see `freestanding_constraints`) and scored once in
             // `constraint_cost`. Scoring it here too would double-count `w_wall` (~2× the tuned pull).
@@ -403,15 +386,7 @@ fn rand_range(rng: &mut ChaCha8Rng, lo: f32, hi: f32) -> f32 {
 
 /// AABB overlap area of two oriented (quarter-turn) footprints.
 fn aabb_overlap_area(a: &Obj, b: &Obj) -> f32 {
-    let (ahw, ahd) = a.half_extents();
-    let (bhw, bhd) = b.half_extents();
-    let ox = (ahw + bhw) - (a.x - b.x).abs();
-    let oz = (ahd + bhd) - (a.z - b.z).abs();
-    if ox > 0.0 && oz > 0.0 {
-        ox * oz
-    } else {
-        0.0
-    }
+    crate::placement::ir::overlap_area(a, b)
 }
 
 /// Room interior extents in world/tile coords, inset for the wall slab. Object centres live inside.

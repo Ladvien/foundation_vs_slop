@@ -124,6 +124,34 @@ impl Plugin for SiteVisualsPlugin {
                 return;
             }
         };
+        // ...and run every authored prop through the SAME placement rules the dungeon's solved
+        // furniture obeys. The Site is hand-authored on purpose, which is exactly why it needs this:
+        // nothing else stands between a typo'd coordinate and a bunk halfway through a wall.
+        //
+        // Read from the kit resource rather than re-loading the file: `SitePlugin` inserts
+        // `SiteKitRes` and this plugin is added after it, so the kit is the one already validated.
+        match app.world().get_resource::<crate::site::SiteKitRes>() {
+            Some(kit) => match super::layout::check_prop_placements(&layout, &kit.0) {
+                Ok(waived) => {
+                    for w in waived {
+                        info!("site: prop placement {w}");
+                    }
+                }
+                Err(e) => {
+                    error!("{e}");
+                    return;
+                }
+            },
+            // The kit is inserted by `SitePlugin::build`. If it is absent the plugins were reordered,
+            // and silently skipping the check is how the rule quietly stops applying — so say so.
+            None => {
+                error!(
+                    "site: SiteKitRes is missing at SiteVisualsPlugin::build, so prop placements \
+                     CANNOT be checked — Site-67 will not be built. Add SitePlugin before it."
+                );
+                return;
+            }
+        }
         let nav = SiteNav::bake(&layout);
         // `leave_for_the_site` reads the binding table non-optionally, and the plugin that registers a
         // reader is what guarantees the resource exists — the same contract `camera` states.

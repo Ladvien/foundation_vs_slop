@@ -53,6 +53,26 @@ pub struct KitPiece {
     pub glb: String,
     /// The mesh's authored height in metres, as it sits in the file.
     pub height: f32,
+    /// The mesh's authored XZ footprint `(width, depth)` in metres, before yaw.
+    ///
+    /// **Required, and measured — never guessed**, on the same terms as [`Self::height`] and
+    /// [`DoorPiece::opening`]. `scripts/fbx_to_glb.py` writes every mesh's W/H/D to an `INVENTORY.md`
+    /// beside its output; these are those numbers.
+    ///
+    /// # What it is for
+    ///
+    /// `site::layout::check_prop_placements` runs every authored prop in `site67.ron` through the
+    /// **same** overlap and in-bounds rules the dungeon's solver anneals against
+    /// (`placement::ir::overlap_area` / `escapes_bounds`). It cannot do that without knowing how much
+    /// floor a piece actually covers, and before 2026-08-02 the kit did not say — so the Site's props
+    /// were the one placement path in the game that nothing checked. The first furnishing pass put
+    /// three bunks through a wall and a control desk a metre into a corridor.
+    ///
+    /// Note this is the FOOTPRINT, not the reservation: `placement::manifest::ManifestItem` carries a
+    /// deliberately symmetric footprint plus a `pivot` for off-centre meshes. The Site kit needs no
+    /// pivot because every Ozea mesh is XZ-centred by conversion (`--reorigin-base`), which
+    /// `tests/ozea_asset.rs` pins.
+    pub footprint: (f32, f32),
     /// Metres to lift this piece off the ground plane. Defaults to 0 — only floor **inlays** need it.
     ///
     /// **This is a geometric fix, not a depth-buffer one.** The Ozea floor plate is 0.06 m thick and
@@ -400,6 +420,7 @@ mod tests {
             glb: "ozea/pipe.fbx".into(),
             height: 1.0,
             y_offset: 0.0,
+            footprint: (0.3, 0.3),
         };
         assert!(
             validate_site_kit(&kit).is_err(),

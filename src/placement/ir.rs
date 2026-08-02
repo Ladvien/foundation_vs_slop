@@ -56,6 +56,78 @@ impl Rect2 {
     }
 }
 
+/// One placed object's axis-aligned floor footprint: where it is, which way it faces, and how much
+/// room it takes.
+///
+/// # Why this lives in the IR rather than in a solver
+///
+/// The two rules that stop furniture being nonsense — *pieces do not interpenetrate* and *a piece
+/// stays inside the room it was placed in* — were, until 2026-08-02, private to
+/// `solvers::metropolis`: an `Obj` struct plus `aabb_overlap_area`, scored as built-in energy terms
+/// rather than as [`Constraint`]s. That worked for the dungeon, whose furniture is *solved*.
+///
+/// It left the **Site** unprotected, because Site-67 is hand-authored: `site67.ron` types positions
+/// directly and never enters a solver, so nothing checked them. The first pass at furnishing the
+/// living half put three bunks 15 cm through a wall, ran a 3.68 m control desk a metre out into a
+/// corridor, and sat three bedside tables inside their own bunks — none of it visible in a
+/// screenshot at play zoom.
+///
+/// So the geometry moved here, where both callers can reach it, and there is exactly **one**
+/// definition of "do these two overlap" and "is this inside its room". A second copy for the Site
+/// would have been a second answer to the same question, which is the failure mode this codebase
+/// spends most of its comments avoiding.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Footprint {
+    pub x: f32,
+    pub z: f32,
+    /// Yaw about +Y, radians.
+    pub yaw: f32,
+    /// Native half-extents BEFORE yaw. The axis-aligned pair is [`Self::half_extents`].
+    pub hw: f32,
+    pub hd: f32,
+}
+
+impl Footprint {
+    /// Axis-aligned half-extents at the current yaw.
+    ///
+    /// **Quarter-turn furniture:** at 90°/270° width and depth swap, and nothing between is modelled.
+    /// That is a real limit of this representation and it is the right one here — every placement in
+    /// this game is authored or solved on quarter turns, and an oriented box would make the overlap
+    /// test a separating-axis problem for no gain anyone can see.
+    #[inline]
+    pub fn half_extents(&self) -> (f32, f32) {
+        if self.yaw.sin().abs() > 0.5 {
+            (self.hd, self.hw)
+        } else {
+            (self.hw, self.hd)
+        }
+    }
+}
+
+/// Area (m²) by which two footprints interpenetrate. `0.0` when they are clear of each other.
+#[inline]
+pub fn overlap_area(a: &Footprint, b: &Footprint) -> f32 {
+    let (ahw, ahd) = a.half_extents();
+    let (bhw, bhd) = b.half_extents();
+    let ox = (ahw + bhw) - (a.x - b.x).abs();
+    let oz = (ahd + bhd) - (a.z - b.z).abs();
+    if ox > 0.0 && oz > 0.0 { ox * oz } else { 0.0 }
+}
+
+/// How far (metres, summed over the axes it breaches) a footprint sticks out past `bounds`, given as
+/// the interior extents `(x0, x1, z0, z1)`. `0.0` when the whole footprint is inside.
+///
+/// A hinge sum rather than a boolean so a solver can descend it and a checker can report *how far*
+/// out the offender is — "0.15 m through the west wall" is actionable; "invalid" is not.
+#[inline]
+pub fn escapes_bounds(f: &Footprint, bounds: (f32, f32, f32, f32)) -> f32 {
+    let (ahw, ahd) = f.half_extents();
+    let (x0, x1, z0, z1) = bounds;
+    let (bx0, bx1, bz0, bz1) = (x0 + ahw, x1 - ahw, z0 + ahd, z1 - ahd);
+    let over = |v: f32| v.max(0.0);
+    over(bx0 - f.x) + over(f.x - bx1) + over(bz0 - f.z) + over(f.z - bz1)
+}
+
 /// A doorway / corridor mouth on a region's boundary — derived from the coarse `CellData.open`
 /// links + the corridor carve. `cell` is the interior floor cell at lane 0 of the opening, `dir` the
 /// wall it pierces (N/E/S/W), and `width` the number of open lanes (≥1) — the doorway necks down from
