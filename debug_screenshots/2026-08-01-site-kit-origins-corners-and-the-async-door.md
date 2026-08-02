@@ -151,6 +151,29 @@ next full panel begins. Nothing overshoots and nothing is left out. `site67.ron`
 on those cells, because that is what `is_walkable` and the validator read; only the *rendering*
 changed.
 
+## The fifth pass: the walls were not standing on the floor's edge
+
+The player, again: *"the floor grid doesn't really line up with the panels."*
+
+A wall cell is a whole 1 m cell, but the panel in it is 0.10 m thick and was drawn at the cell
+**centre** — half a cell away from the floor it encloses. That left a **0.45 m band of nothing**
+between the floor's edge and the wall's inner face, right round the perimeter, visible as a strip of
+void at the foot of every wall.
+
+It is also exactly why the grid did not line up. Floor seams fall on cell **boundaries** (integers);
+the wall line sat on a cell **centre**. *Along* a run the two always agreed — a 1 m panel centred on
+a cell centre spans integer to integer, the same seams the plates use — so only the across-run axis
+was ever out, by half a tile.
+
+`wall_seat` now offsets every panel half a cell **toward the floor**, putting its centreline on the
+floor's edge: 0.05 m over the plate, 0.05 m outside it, so the plate's cut edge is hidden under the
+wall and the grid reads continuous into it. The direction is derived per cell from where the floor
+actually is, so a wall between two rooms (floor on both sides) correctly stays centred, and a convex
+corner — which touches floor only diagonally — is resolved from its diagonal. Legs seat on the same
+line as the run they belong to, the cap lands where the two seated lines cross, and the ASYNC frame
+and its header take the same seat. `frame_pos` stays authored in CELL space, because that is what
+`validate_doorway_gap` checks; the seat is applied once, at render time.
+
 ## Knowingly left
 
 - **`wall_low` is still squashed** 2.00 → 0.9 (0.45×). Shortening a panel properly is an authoring

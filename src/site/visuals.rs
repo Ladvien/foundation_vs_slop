@@ -323,6 +323,54 @@ fn spawn_aperture_quad(
     ));
 }
 
+/// Half a cell: the distance from a wall cell's CENTRE to the floor edge beside it.
+const WALL_SEAT: f32 = 0.5;
+
+/// The offset that seats a wall's centreline on the **floor's edge** rather than on its cell centre.
+///
+/// A wall cell is a whole 1 m cell, but the panel in it is only 0.10 m thick, and it was drawn at the
+/// cell CENTRE — half a cell away from the floor it is supposed to enclose. That left a **0.45 m band
+/// of nothing** between the floor's edge and the wall's inner face, right round the perimeter, and it
+/// is why the floor's grid did not line up with the panels: floor seams fall on cell BOUNDARIES
+/// (integers) while the wall line sat on a cell CENTRE. Along a run they always agreed — a 1 m panel
+/// centred on a cell centre spans integer to integer — so only the across-run axis was out.
+///
+/// Seating it on the boundary puts the panel astride the floor's edge, 0.05 m either side, so the
+/// plate's cut edge is hidden under the wall and the grid reads continuous into it.
+///
+/// `thin` is the panel's thin axis (`IVec2::X` for a yaw-0 wall, `IVec2::Y` for yaw 90). A cell with
+/// floor on BOTH sides is a divider between two rooms and correctly stays centred; a convex corner
+/// touches floor only diagonally, which the second pass resolves. `site67.ron` currently has 226 wall
+/// placements, no dividers and no undecidable cells — `SiteLayout::validate` keeps it that way.
+fn wall_seat(l: &SiteLayout, cell: IVec2, thin: IVec2) -> Vec3 {
+    let step = Vec3::new(thin.x as f32, 0.0, thin.y as f32) * WALL_SEAT;
+    let (pos, neg) = (l.is_floor(cell + thin), l.is_floor(cell - thin));
+    if pos != neg {
+        return if pos { step } else { -step };
+    }
+    if pos && neg {
+        return Vec3::ZERO; // a divider between two rooms: the cell centre IS the right line
+    }
+    let perp = IVec2::new(thin.y, thin.x);
+    for s in [1, -1] {
+        for t in [1, -1] {
+            if l.is_floor(cell + thin * s + perp * t) {
+                return step * s as f32;
+            }
+        }
+    }
+    Vec3::ZERO
+}
+
+/// The thin axis of a panel placed at `yaw`, on the half-turn convention the walls are authored on.
+fn thin_axis(yaw_deg: f32) -> IVec2 {
+    if (45.0..135.0).contains(&yaw_deg.rem_euclid(180.0)) {
+        IVec2::Y
+    } else {
+        IVec2::X
+    }
+}
+
 /// Length of a corner leg, in metres — half a wall panel, so it reaches from the corner point (a cell
 /// CENTRE) to the cell edge where the next full panel begins.
 const WALL_LEG_LEN: f32 = 0.5;
@@ -415,8 +463,21 @@ fn spawn_site_geometry(
         if w.piece == SitePiece::Wall && junctions.contains(&w.cell) {
             continue;
         }
-        let at = l.cell_center(IVec2::new(w.cell.0, w.cell.1));
-        place(&mut commands, &assets, &kit, w.piece, at, w.yaw);
+        let cell = IVec2::new(w.cell.0, w.cell.1);
+        // Seated on the floor's edge, not the cell centre — see `wall_seat`.
+        let seat = if w.piece == SitePiece::Wall {
+            wall_seat(l, cell, thin_axis(w.yaw))
+        } else {
+            Vec3::ZERO
+        };
+        place(
+            &mut commands,
+            &assets,
+            &kit,
+            w.piece,
+            l.cell_center(cell) + seat,
+            w.yaw,
+        );
     }
     for cell in &junctions {
         let at = l.cell_center(IVec2::new(cell.0, cell.1));
@@ -447,13 +508,16 @@ fn spawn_site_geometry(
                 yaw,
             );
         }
-        // ...and the cap over the seam where they meet.
+        // ...and the cap where they meet, which is where the two SEATED lines cross — one seat per
+        // axis, summed, so the post lands on the floor's actual corner.
+        let c = IVec2::new(cell.0, cell.1);
+        let seam = wall_seat(l, c, IVec2::X) + wall_seat(l, c, IVec2::Y);
         place(
             &mut commands,
             &assets,
             &kit,
             SitePiece::WallCorner,
-            at,
+            at + seam,
             corner_yaw(l, *cell),
         );
     }
@@ -476,7 +540,17 @@ fn spawn_site_geometry(
     // The ASYNC door: a wide frame standing IN the perimeter gap, plus the trigger volume on the floor
     // in front of it. Two positions, deliberately — `frame_pos` is not floor and `pos` must be, so one
     // field could never have served both. It served `pos`, and the frame stood a metre out in the hall.
-    let frame_at = l.point(l.door.frame_pos);
+    //
+    // The frame seats on the run's line like every other panel does, so it does not stand half a cell
+    // proud of the wall it fills. `frame_pos` stays authored in CELL space — that is what
+    // `validate_doorway_gap` checks — and the seat is applied here, at render time, exactly once.
+    let door_thin = thin_axis(l.door.yaw);
+    let door_cell = IVec2::new(
+        l.door.frame_pos.0.floor() as i32,
+        l.door.frame_pos.1.floor() as i32,
+    );
+    let door_seat = wall_seat(l, door_cell, door_thin);
+    let frame_at = l.point(l.door.frame_pos) + door_seat;
     place(
         &mut commands,
         &assets,
@@ -499,7 +573,7 @@ fn spawn_site_geometry(
     // it"; the dungeon honoured that and the Site never had. The cells come from the layout, so the
     // course cannot disagree with the gap `validate` checks the frame against.
     for cell in l.doorway_gap_cells() {
-        let at = l.cell_center(cell) + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT;
+        let at = l.cell_center(cell) + door_seat + Vec3::Y * crate::dungeon::DOORWAY_HEIGHT;
         place(
             &mut commands,
             &assets,
