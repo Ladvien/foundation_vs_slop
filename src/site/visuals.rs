@@ -25,7 +25,7 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use super::aperture::{ApertureQuad, ApertureUniform, AsyncApertureMaterial};
-use super::layout::SiteLayout;
+use super::layout::{AreaId, SiteLayout};
 use super::nav::SiteNav;
 use super::pieces::SitePiece;
 use crate::anim;
@@ -972,7 +972,7 @@ const SITE_FIXTURE_Y: f32 = 2.6;
 /// stated goal that "pools overlap slightly instead of leaving dark bands between them" — which is a
 /// description of even fill, and even fill is what made the hub read as a floorplan rather than a
 /// building. Darkness between pools is what makes architecture legible; the gap is the point.
-const SITE_FIXTURE_SPACING: f32 = 8.0;
+const SITE_FIXTURE_SPACING: f32 = 11.0;
 
 /// One area's lighting character. **Per-wing colour is the wayfinding**, not just the mood: the design
 /// doc (§2.1) makes "learnable without signage" the hub's whole reason for being hand-authored, and
@@ -1214,6 +1214,18 @@ fn blackbody_srgb(kelvin: f32) -> Color {
 fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
     for area in &l.areas {
         let r = &area.rect;
+        // ⚠️ **A THRESHOLD GETS NO FIXTURE.** A doorway is a 1x1 area — it exists so that `area_at`
+        // is total over walkable floor and the sign above it can name what is beyond — and it is lit
+        // perfectly well by the rooms either side of it.
+        //
+        // This is the regression that took the Site to 5 fps and then lost the GPU device on
+        // 2026-08-02. Tripling the hub took it from 12 areas to 58, of which 30 are thresholds, and
+        // "one key light per area" quietly meant 58 SHADOW-CASTING point lights — 71-80 of them
+        // visible at once, at 1.5 M triangles. The per-area rule was fine at twelve areas and is a
+        // trap at fifty-eight: a rule that scales with a count nobody was watching.
+        if r.w <= 1 && r.h <= 1 {
+            continue;
+        }
         let spec = area_light(area.id);
         let color = blackbody_srgb(spec.kelvin);
         // At least one fixture per area however small, then one per `SPACING` in each axis.
@@ -1231,6 +1243,11 @@ fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
                 let fz = r.z as f32 + (iz as f32 + 0.5) * (r.h as f32 / nz as f32);
                 let at = l.point((fx, fz)) + Vec3::Y * SITE_FIXTURE_Y;
                 let is_key = ix == kx && iz == kz;
+                // **Shadows only where a destination earns them.** A point light's shadow is six
+                // cubemap faces, and the dungeon ships `shadow_maps_enabled: false` on every fixture
+                // it has. The Site can afford them in the ten rooms the player stops in; it cannot
+                // afford one per corridor run and one per cell, which is what "one per area" became.
+                let casts = is_key && !matches!(area.id, AreaId::Corridor | AreaId::ContainmentCell);
                 commands.spawn((
                     SiteVisual,
                     PointLight {
@@ -1241,8 +1258,12 @@ fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
                             spec.fill_lumens
                         },
                         range: spec.range,
-                        shadow_maps_enabled: is_key,
-                        contact_shadows_enabled: true,
+                        shadow_maps_enabled: casts,
+                        // Contact shadows on the KEY only. This was on for every fixture, which is a
+                        // per-light screen-space pass — affordable across twelve areas and not across
+                        // ninety-one lights. The fills exist to lift the floor, and a fill that casts
+                        // is a fill you can see doing it.
+                        contact_shadows_enabled: is_key,
                         ..default()
                     },
                     Transform::from_translation(at),
