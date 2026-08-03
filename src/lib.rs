@@ -89,7 +89,6 @@ pub mod elite_overlay;
 pub mod enemy;
 pub mod flowfield;
 pub mod fog;
-pub mod geom;
 pub mod gore;
 pub mod hair;
 pub mod health;
@@ -109,7 +108,6 @@ pub mod pathfind;
 pub mod personnel;
 pub mod psi_vision;
 pub mod placement;
-pub mod rng;
 /// SCP-999 — the friendly "Tickle Monster" comfort blob: seeks the most-anxious squad member and tickles
 /// away their FEAR (the game's one fear-*lowering* creature). Split gameplay/cosmetic plugins for the
 /// determinism gate; see the module docs.
@@ -146,8 +144,14 @@ pub mod time_control;
 pub mod ui;
 pub mod util;
 pub mod vhs;
-pub mod wfc;
 pub mod world;
+
+// ── The engine-free core, re-exported at the paths it had before the workspace split ───────────
+//
+// `crate::rng`, `crate::wfc`, `crate::geom` and `crate::placement::{ir, solver, solvers, scatter,
+// manifest}` all still resolve. That is deliberate: a split that also rewrote a thousand import
+// lines would be unreviewable, and the point of Stage 0b is a diff a human can check.
+pub use forge_core::{geom, rng, wfc};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;

@@ -27,7 +27,6 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::dungeon::WALL_THICKNESS;
 use crate::placement::ir::{
     Candidate, Capabilities, Constraint, Hardness, Locality, Modality, Outcome, Placement,
     PlacementProblem, Predicate, Region, Role, Scope, SolveError,
@@ -35,9 +34,6 @@ use crate::placement::ir::{
 use crate::placement::solver::Solver;
 use crate::rng::DetRng;
 
-/// Wall inset so a footprint edge stops short of the wall slab. Tracks `dungeon::WALL_THICKNESS`
-/// directly (one source of truth) so a change to the wall slab can't silently desync the layout inset.
-const WALL_INSET: f32 = WALL_THICKNESS;
 
 /// Tunable cost weights + MH schedule, loaded from RON (Merrell 2011 density terms).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,11 +68,21 @@ pub struct MetropolisWeights {
 
 pub struct MetropolisSolver {
     weights: MetropolisWeights,
+    /// How far a footprint edge must stop short of a room's outer cell centre, in tiles.
+    ///
+    /// **A constructor argument, not a constant.** It was `const WALL_INSET: f32 = WALL_THICKNESS`,
+    /// which is the game's wall slab — a fact about one game's architecture that this crate must not
+    /// know. The caller passes it (`dungeon::WALL_THICKNESS` in the game), so the comment that used to
+    /// claim it "tracks" that constant is now true by construction rather than by hope.
+    wall_inset: f32,
 }
 
 impl MetropolisSolver {
-    pub fn new(weights: MetropolisWeights) -> Self {
-        Self { weights }
+    pub fn new(weights: MetropolisWeights, wall_inset: f32) -> Self {
+        Self {
+            weights,
+            wall_inset,
+        }
     }
 }
 
@@ -132,7 +138,7 @@ impl Solver for MetropolisSolver {
         // Room interior in world/tile coords: cell centres span [min, max-1]; walls sit half a tile
         // beyond, so an object centre is free within [min-0.5+inset+half, max-0.5-inset-half].
         let r = problem.region;
-        let (rx0, rx1, rz0, rz1) = room_world_bounds(r);
+        let (rx0, rx1, rz0, rz1) = room_world_bounds(r, self.wall_inset);
 
         // Initial layout: each object dropped at a random in-bounds cell, random quarter-turn yaw.
         let mut cur: Vec<Obj> = objs_meta
@@ -389,12 +395,12 @@ fn aabb_overlap_area(a: &Obj, b: &Obj) -> f32 {
 }
 
 /// Room interior extents in world/tile coords, inset for the wall slab. Object centres live inside.
-fn room_world_bounds(r: &Region) -> (f32, f32, f32, f32) {
+fn room_world_bounds(r: &Region, wall_inset: f32) -> (f32, f32, f32, f32) {
     // Cell centres span [min, max-1]; the wall is half a tile beyond the outermost cell centre.
-    let rx0 = r.rect.min[0] as f32 - 0.5 + WALL_INSET;
-    let rx1 = (r.rect.max[0] - 1) as f32 + 0.5 - WALL_INSET;
-    let rz0 = r.rect.min[1] as f32 - 0.5 + WALL_INSET;
-    let rz1 = (r.rect.max[1] - 1) as f32 + 0.5 - WALL_INSET;
+    let rx0 = r.rect.min[0] as f32 - 0.5 + wall_inset;
+    let rx1 = (r.rect.max[0] - 1) as f32 + 0.5 - wall_inset;
+    let rz0 = r.rect.min[1] as f32 - 0.5 + wall_inset;
+    let rz1 = (r.rect.max[1] - 1) as f32 + 0.5 - wall_inset;
     (rx0, rx1, rz0, rz1)
 }
 
@@ -412,6 +418,12 @@ fn obj_bounds(o: &Obj, rx0: f32, rx1: f32, rz0: f32, rz1: f32) -> Bounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The game's `dungeon::WALL_THICKNESS`. Spelled out here rather than imported, because this
+    /// crate must not know the game's architecture — that is the whole reason the inset became a
+    /// constructor argument. If the game changes its wall slab these tests still hold; they assert
+    /// the solver respects *whatever* inset it is given.
+    const TEST_WALL_INSET: f32 = 0.14;
+
     use crate::placement::ir::{Dof, PropertyBag, Rect2, Role};
     use crate::rng::seeded;
 
@@ -469,7 +481,7 @@ mod tests {
             constraints: Vec::new(),
         };
         let mut rng = seeded(3);
-        let solver = MetropolisSolver::new(weights());
+        let solver = MetropolisSolver::new(weights(), TEST_WALL_INSET);
         let out = solver.solve(&problem, &mut rng).expect("solve");
         let placed = match out {
             Outcome::Ranked(mut v) => v.remove(0).1,
@@ -477,7 +489,7 @@ mod tests {
             Outcome::Partial { placed, .. } => placed,
         };
         assert_eq!(placed.len(), 3);
-        let (rx0, rx1, rz0, rz1) = room_world_bounds(&r);
+        let (rx0, rx1, rz0, rz1) = room_world_bounds(&r, TEST_WALL_INSET);
         // Reconstruct Objs to check bounds/overlap on the returned layout.
         let objs: Vec<Obj> = placed
             .iter()
@@ -529,7 +541,7 @@ mod tests {
                 guard: None,
             }],
         };
-        let solver = MetropolisSolver::new(weights());
+        let solver = MetropolisSolver::new(weights(), TEST_WALL_INSET);
         // Deterministic: a handful of seeds must all seat the fixture flush.
         for seed in [1u64, 7, 42] {
             let mut rng = seeded(seed);
@@ -547,7 +559,7 @@ mod tests {
                 hd: 0.3,
             };
             let (hw, hd) = o.half_extents();
-            let (rx0, rx1, rz0, rz1) = room_world_bounds(&r);
+            let (rx0, rx1, rz0, rz1) = room_world_bounds(&r, TEST_WALL_INSET);
             let d = ((o.x - hw) - rx0)
                 .min(rx1 - (o.x + hw))
                 .min((o.z - hd) - rz0)
@@ -568,7 +580,7 @@ mod tests {
             candidates: vec![item(1.6, 0.7), item(0.9, 0.6)].into(),
             constraints: Vec::new(),
         };
-        let solver = MetropolisSolver::new(weights());
+        let solver = MetropolisSolver::new(weights(), TEST_WALL_INSET);
         let run = || {
             let mut rng = seeded(11);
             match solver.solve(&problem, &mut rng).expect("solve") {
@@ -605,7 +617,7 @@ mod tests {
             candidates: vec![item(1.6, 0.7), item(0.9, 0.6)].into(),
             constraints: Vec::new(),
         };
-        let solver = MetropolisSolver::new(weights());
+        let solver = MetropolisSolver::new(weights(), TEST_WALL_INSET);
         let mut rng = seeded(11);
         let got: Vec<(u32, u32)> = match solver.solve(&problem, &mut rng).expect("solve") {
             Outcome::Ranked(v) => v[0]

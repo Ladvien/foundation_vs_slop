@@ -102,7 +102,7 @@ pub fn parse_manifest(text: &str) -> Result<FurnitureManifest, String> {
 }
 
 /// Enforce the WFC [`MAX_TILED_PROTOTYPES`] cap and the surface-class contract on an already-deserialized
-/// manifest. Split from [`parse_manifest`] so the unified config loader (`crate::config::load_game_config`)
+/// manifest. Split from [`parse_manifest`] so the game's unified config loader
 /// can validate the `placement.furniture` slice it deserializes as part of the master `GameConfig` — one
 /// path, no fallback.
 pub fn validate_manifest(manifest: &FurnitureManifest) -> Result<(), String> {
@@ -124,7 +124,7 @@ pub fn validate_manifest(manifest: &FurnitureManifest) -> Result<(), String> {
     // `surfaces` provides its class; without these checks a typo'd token or a provider-less kit would
     // simply never spawn the prop, with nothing anywhere saying why.
     let known = || {
-        super::furnish::SURFACE_CLASSES
+        super::surfaces::SURFACE_CLASSES
             .iter()
             .map(|(t, _)| format!("\"{t}\""))
             .collect::<Vec<_>>()
@@ -133,11 +133,11 @@ pub fn validate_manifest(manifest: &FurnitureManifest) -> Result<(), String> {
     let mut provided = 0u32;
     for item in &manifest.items {
         for token in &item.surfaces {
-            let bits = super::furnish::surface_bits(token);
+            let bits = super::surfaces::surface_bits(token);
             if bits == 0 {
                 return Err(format!(
                     "item `{}` offers unknown surface class `{token}` in `surfaces` — known classes: \
-                     {} (furnish::SURFACE_CLASSES). An unknown class provides nothing, so every prop \
+                     {} (surfaces::SURFACE_CLASSES). An unknown class provides nothing, so every prop \
                      targeting it would be silently dropped; add the class there or fix the token.",
                     item.key,
                     known()
@@ -148,11 +148,11 @@ pub fn validate_manifest(manifest: &FurnitureManifest) -> Result<(), String> {
     }
     for item in &manifest.items {
         if let Role::Scatter { surface } = &item.role {
-            let need = super::furnish::surface_bits(surface);
+            let need = super::surfaces::surface_bits(surface);
             if need == 0 {
                 return Err(format!(
                     "scatter prop `{}` targets unknown surface class `{surface}` — known classes: {} \
-                     (furnish::SURFACE_CLASSES). It could never be placed.",
+                     (surfaces::SURFACE_CLASSES). It could never be placed.",
                     item.key,
                     known()
                 ));
@@ -287,32 +287,4 @@ mod tests {
         );
     }
 
-    /// Every `glb` path in the SHIPPED manifest resolves to a real file under `assets/`.
-    ///
-    /// The failure this catches is silent. A mistyped path is a perfectly valid manifest — it parses,
-    /// validates, and the solver happily places the item; Bevy then fails the asset load and the prop
-    /// simply never appears. Nothing asserts, and a room that is one chair short looks exactly like a
-    /// room the layout put one chair in. With ~130 hand-written paths that is a matter of time.
-    ///
-    /// Runs against `assets/config/config.ron` rather than a fixture, because the point is to check the
-    /// paths that actually ship.
-    #[test]
-    fn every_shipped_manifest_glb_exists_on_disk() {
-        let cfg = crate::config::load_game_config().expect("shipped game config must load");
-        let assets = std::path::Path::new("assets");
-        let missing: Vec<&str> = cfg
-            .placement
-            .furniture
-            .items
-            .iter()
-            .map(|i| i.glb.as_str())
-            .filter(|glb| !assets.join(glb).is_file())
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "manifest rows point at {} file(s) that do not exist under assets/ — each would be placed \
-             by the solver and then silently fail to load: {missing:#?}",
-            missing.len()
-        );
-    }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "forge-core"
+version = "0.1.0"
+edition = "2024"
+description = "Engine-free world-building core: constraint IR, solvers, WFC, deterministic RNG."
+
+# **No `bevy`, and that is the point of the crate.** Everything here is plain data and arithmetic, so
+# it can be consumed by the game, by the headless search, and by a standalone editor without any of
+# them agreeing on a renderer. `placement/ir.rs` has stated this invariant since before there was a
+# crate to enforce it; the crate is what turns the comment into a compiler error.
+#
+# Adding a `bevy` dependency here is a design change, not a convenience — see
+# `docs/2026-08-03-forge-plan.md`.
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+ron = "0.12.2"
+rand = "0.10"
+rand_chacha = "0.10"

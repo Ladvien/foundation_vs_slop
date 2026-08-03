@@ -47,7 +47,10 @@ fn test_weights() -> MetropolisWeights {
 fn full_orchestrator() -> Orchestrator {
     let mut o = Orchestrator::new();
     o.register(Box::new(WfcSolver));
-    o.register(Box::new(MetropolisSolver::new(test_weights())));
+    o.register(Box::new(MetropolisSolver::new(
+        test_weights(),
+        crate::dungeon::WALL_THICKNESS,
+    )));
     o.register(Box::new(ConstraintSolver));
     o
 }

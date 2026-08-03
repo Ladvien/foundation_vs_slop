@@ -21,11 +21,9 @@
 mod acceptance;
 pub mod anomalies;
 pub mod furnish;
-pub mod ir;
-pub mod manifest;
-pub mod scatter;
-pub mod solver;
-pub mod solvers;
+// Re-exported from `forge-core` at their old paths — see `lib.rs`. `furnish` and `anomalies` stay
+// here because they are the Bevy boundary and the SCP content respectively.
+pub use forge_core::placement::{ir, manifest, scatter, solver, solvers};
 
 use bevy::prelude::*;
 
@@ -60,7 +58,11 @@ pub struct PlacementSolvers(pub Orchestrator);
 pub(crate) fn build_solvers(metropolis_weights: MetropolisWeights) -> Orchestrator {
     let mut orch = Orchestrator::new();
     orch.register(Box::new(WfcSolver));
-    orch.register(Box::new(MetropolisSolver::new(metropolis_weights)));
+    // The wall slab is the game's fact, not the solver's — see `MetropolisSolver::wall_inset`.
+    orch.register(Box::new(MetropolisSolver::new(
+        metropolis_weights,
+        crate::dungeon::WALL_THICKNESS,
+    )));
     orch.register(Box::new(ConstraintSolver));
     orch
 }
