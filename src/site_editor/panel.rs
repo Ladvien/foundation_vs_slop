@@ -67,6 +67,29 @@ const PALETTE_MAX_H: f32 = 300.0;
 /// piece, so arriving thumbnails never reflow the list under the cursor.
 const THUMB_SLOT: f32 = 34.0;
 
+/// **The editor panel is opaque, unlike every other panel in the game.**
+///
+/// `theme.panel` is `alpha 0.74`, and it is right for the HUD: a readout you glance at should not
+/// block the room you are glancing away from. Two of those stacked (root, then each palette row) still
+/// pass ~7% of what is behind them, which is invisible over the Site's dark floors and very visible
+/// over anything bright.
+///
+/// Measured: with the camera panned so a white-coated researcher stood behind the list, the figure
+/// read straight through the `DataFolder` and `MedicalVial` rows. A palette you cannot read is a
+/// broken tool, and an editor panel is a work surface rather than a heads-up display — so this is the
+/// theme's own panel hue at full opacity, and nothing else about the colour changes.
+const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
+
+/// A palette row at rest.
+///
+/// It cannot be `theme.panel`, which is what it used to be: that is [`PANEL_BG`]'s own hue at
+/// `alpha 0.74`, and over a now-opaque panel of the same hue it composites to very nearly the panel
+/// itself — forty-five rows that read as one undifferentiated column. So the row keeps the hue and
+/// takes a lighter value, which is the contrast the border was always doing half of.
+///
+/// Selected and hovered rows stay on `theme.panel_border`, as they were; those already had contrast.
+const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
+
 /// Build the panel. Mirrors `research_room::editor::spawn_palette`'s shape.
 pub fn spawn(
     commands: &mut Commands,
@@ -91,13 +114,15 @@ pub fn spawn(
     // bound to `MenuUp`/`MenuDown`. Building this panel out of `button_visual` therefore ate the
     // camera pan keys and Space/Enter the moment it opened. This is an editor, not a menu — the
     // keyboard belongs to the world.
-    commands
-        .spawn((EditorRoot, panel(theme, root), GlobalZIndex(Z_MENU)))
-        .with_children(|p| {
+    let mut editor = commands.spawn((EditorRoot, panel(theme, root), GlobalZIndex(Z_MENU)));
+    // Override, never a second `BackgroundColor` in the tuple above — a bundle carrying two of one
+    // component panics (CLAUDE.md § Bevy 0.19). See [`PANEL_BG`] for why it is opaque.
+    editor.insert(BackgroundColor(PANEL_BG));
+    editor.with_children(|p| {
             p.spawn(text_colored(
                 theme,
                 fonts,
-                "SITE-67 EDITOR",
+                "SITE-67 EDITOR  ·  F7",
                 theme.font_body,
                 theme.accent,
             ));
@@ -106,9 +131,15 @@ pub fn spawn(
             p.spawn(text_colored(
                 theme,
                 fonts,
-                "click a piece, then click the floor to place it\n\
-                 [ ] turn it · drag to move · Del delete\n\
-                 F7 close · Ctrl+Z undo · Ctrl+Y redo · Ctrl+S save",
+                // Three lines of keys was the panel's largest block of text and its least-read.
+                // Marschner, *Fundamentals of Computer Graphics* §27.7 on clutter: when everything is
+                // shown at once the display becomes "difficult or impossible for a viewer to
+                // understand", and the first remedy is an overview "showing less detail for each
+                // item". So: two lines, the close key moved onto the title where it is already being
+                // read, and the words that carried no information ("a piece", "the floor", "undo")
+                // dropped — a key list is reference, not prose.
+                "click place · [ ] aim · drag move · Del cut\n\
+                 Shift+[ ] turn placed · Ctrl+Z/Y · Ctrl+S",
                 theme.font_body * 0.8,
                 theme.text_muted,
             ));
@@ -182,7 +213,7 @@ pub fn spawn(
                             align_items: AlignItems::Center,
                             ..default()
                         },
-                        BackgroundColor(theme.panel),
+                        BackgroundColor(ROW_BG),
                         border_all(theme.panel_border),
                     ))
                         .with_children(|b| {
@@ -241,7 +272,7 @@ pub fn style_palette(
         } else if hovered.0 {
             theme.panel_border.with_alpha(0.30)
         } else {
-            theme.panel
+            ROW_BG
         };
         if bg.0 != want {
             bg.0 = want;
@@ -269,14 +300,15 @@ pub fn refresh_labels(
         }
     }
     for mut t in &mut mode {
+        // The selection clause appears only when there IS one. "selected none" is a clause that
+        // costs a reader's attention every frame to tell them nothing; `docs/ui.md` §1.4's rule that
+        // an unmet condition should state what the state IS is about a panel reading as broken, and
+        // the RULES section below still does that job.
         let sel = match state.selected {
-            Some(i) => format!("#{i}"),
-            None => "none".to_owned(),
+            Some(i) => format!("  ·  #{i} selected"),
+            None => String::new(),
         };
-        let want = format!(
-            "{:?} at {}\u{00b0}  ·  selected {sel}",
-            state.brush, state.brush_yaw
-        );
+        let want = format!("{:?}  ·  {}\u{00b0}{sel}", state.brush, state.brush_yaw);
         if t.0 != want {
             t.0 = want;
         }

@@ -47,9 +47,10 @@ const BOOTH: Vec3 = Vec3::new(4096.0, 0.0, 4096.0);
 /// stool from a chair.
 const THUMB_PX: u32 = 128;
 
-/// Frames to hold a staged piece after its mesh appears, before reading the render as done. One frame
-/// to render, one of slack for the material/skinning to settle.
-const SETTLE_FRAMES: u32 = 2;
+/// Frames to hold a staged piece after its mesh appears, before reading the render as done. Wide
+/// enough that a render-target change landing a frame late still leaves several good frames inside
+/// the window — see `Thumbnails::scratch`.
+const SETTLE_FRAMES: u32 = 4;
 
 /// How far the booth camera sits from the subject, as a multiple of the subject's largest dimension.
 const FRAMING: f32 = 1.7;
@@ -58,6 +59,11 @@ const FRAMING: f32 = 1.7;
 /// piece is staged while the rest of the game is still streaming in — but bounded, so one unloadable
 /// asset cannot leave the remaining forty rows blank forever.
 const MESH_WAIT_FRAMES: u32 = 600;
+
+/// The staged subject, carrying the scene handle so [`bake`] can ask whether it is actually ready to
+/// draw. See the note in `bake` on why a `Mesh3d` component is not that question.
+#[derive(Component)]
+pub struct Subject(Handle<WorldAsset>);
 
 /// Baked previews, one per `SitePiece::ALL` entry.
 #[derive(Resource)]
@@ -74,6 +80,14 @@ pub struct Thumbnails {
     settled: u32,
     /// Frames spent waiting for the staged piece's GLB to instantiate one.
     waited: u32,
+    /// A throwaway target that absorbs every frame in which no subject is staged.
+    ///
+    /// The camera is aimed at a *real* thumbnail only while its piece is definitely on the booth
+    /// floor; staging, loading and teardown frames all render in here and are never looked at. That
+    /// makes the bake insensitive to exactly when a `RenderTarget` change reaches the renderer —
+    /// measured behaviour is one frame later than it is written, which is precisely the kind of thing
+    /// a design should not have to know.
+    scratch: Handle<Image>,
     camera: Option<Entity>,
     booth: Option<Entity>,
     /// Whether the booth has been dismantled.
@@ -127,6 +141,11 @@ pub fn ensure(commands: &mut Commands, images: &mut Assets<Image>) -> Thumbnails
         })
         .collect();
 
+    let mut scratch_img =
+        Image::new_target_texture(THUMB_PX, THUMB_PX, TextureFormat::Rgba8UnormSrgb, None);
+    scratch_img.data = Some(vec![0; (THUMB_PX * THUMB_PX * 4) as usize]);
+    let scratch = images.add(scratch_img);
+
     // The booth's own lighting. Point lights, so nothing outside their range is touched, and no
     // shadows — a 128 px portrait cannot show one and every shadow map costs a pass.
     let booth = commands
@@ -156,6 +175,7 @@ pub fn ensure(commands: &mut Commands, images: &mut Assets<Image>) -> Thumbnails
 
     Thumbnails {
         images: handles,
+        scratch,
         next: 0,
         model: None,
         settled: 0,
@@ -176,6 +196,7 @@ pub fn bake(
     assets: Res<AssetServer>,
     children: Query<&Children>,
     meshes: Query<(), With<Mesh3d>>,
+    subjects: Query<&Subject>,
     mut cams: Query<
         (&mut Transform, &mut Projection, &mut RenderTarget),
         With<crate::ThumbnailCamera>,
@@ -199,7 +220,7 @@ pub fn bake(
         thumbs.settled = 0;
         thumbs.waited = 0;
         if thumbs.camera.is_none() {
-            thumbs.camera = Some(spawn_camera(&mut commands, &thumbs.images[ix]));
+            thumbs.camera = Some(spawn_camera(&mut commands, &thumbs.scratch));
         }
         return;
     };
@@ -207,7 +228,20 @@ pub fn bake(
     // A GLB scene instantiates over several frames; rendering before its meshes exist bakes an empty
     // square. Waiting on the mesh rather than on a frame count is what makes this independent of how
     // fast the disk is.
-    if !has_mesh(model, &children, &meshes) {
+    //
+    // **A `Mesh3d` component is not the same as a mesh that can be drawn.** The component appears as
+    // soon as the scene instantiates; the mesh and material *assets* it points at may still be
+    // uploading. Rendering in that window produces a blank square with no warning, and it did:
+    // `WallDoorwayWide`, `WallHeader` and `WallWindow` — three consecutive pieces, the ones whose GLBs
+    // the running level had not already pulled into the asset cache — baked empty while all 42 others
+    // came out fine. Nothing in the log said so, because from `bake`'s point of view every piece
+    // succeeded.
+    //
+    // So the gate is both signals: the component exists AND everything it depends on is loaded.
+    let staged_ready = subjects
+        .get(model)
+        .is_ok_and(|s| assets.is_loaded_with_dependencies(&s.0));
+    if !staged_ready || !has_mesh(model, &children, &meshes) {
         thumbs.waited += 1;
         if thumbs.waited > MESH_WAIT_FRAMES {
             // Give up on this one and keep walking. A piece whose GLB never instantiates would
@@ -250,7 +284,26 @@ pub fn bake(
         return;
     }
 
-    // Done with this one.
+    // Done with this one. **Park on the scratch target before letting go of the subject.**
+    //
+    // This system runs in `Update`, so a despawn lands before the render extracts, and the frame that
+    // follows draws an empty booth. Aimed at this piece's image, that frame cleared the thumbnail just
+    // baked — and it did not wipe all 45 because the next piece usually spent its load frames putting
+    // something back. Whether it did came down to how many frames that GLB took to instantiate, which
+    // is why the casualties were three specific pieces and why nothing in the log complained: from the
+    // baker's side every piece succeeded.
+    //
+    // Parking rather than re-aiming at the next image is what makes this robust. A real thumbnail is
+    // now the camera's target only while its subject is definitely standing there; every transitional
+    // frame — staging, loading, teardown — renders into a texture nobody reads.
+    if let Some(cam_entity) = thumbs.camera {
+        if let Ok((_, _, mut target)) = cams.get_mut(cam_entity) {
+            *target = RenderTarget::Image(ImageRenderTarget {
+                handle: thumbs.scratch.clone(),
+                scale_factor: 1.0,
+            });
+        }
+    }
     commands.entity(model).despawn();
     thumbs.model = None;
     thumbs.next += 1;
@@ -269,6 +322,7 @@ fn stage(
     commands
         .spawn((
             Name::new("site editor thumbnail subject"),
+            Subject(scene.clone()),
             // The same two scales `site::visuals::place` applies, so the portrait shows the piece at
             // the size it will actually be in the hub rather than at whatever the artist exported.
             Transform::from_translation(BOOTH + Vec3::Y * kit.y_offset(piece)).with_scale(
@@ -296,9 +350,18 @@ fn spawn_camera(commands: &mut Commands, first_target: &Handle<Image>) -> Entity
                 // Before the main camera, so the palette shows this frame's bake rather than last
                 // frame's.
                 order: -1,
-                // Transparent, so a thumbnail sits on the button's own colour rather than a black
-                // tile. This is a `Camera` field; `ClearColorConfig` is not a component.
-                clear_color: ClearColorConfig::Custom(Color::NONE),
+                // **An opaque tile, not a transparent cut-out.** This is a `Camera` field;
+                // `ClearColorConfig` is not a component.
+                //
+                // It was `Color::NONE`, so a thumbnail was a silhouette floating on the row's own
+                // colour. That works for a chunky crate and fails for thin or glazed geometry: with
+                // the clear at alpha 0, a surface that writes partial alpha composites to almost
+                // nothing, and `WallDoorwayWide`, `WallHeader` and `WallWindow` baked to empty
+                // squares — no warning, because from the baker's side all 45 pieces succeeded.
+                //
+                // A fixed backing also makes the row read the same whether it is at rest, hovered or
+                // armed, which the silhouette did not.
+                clear_color: ClearColorConfig::Custom(Color::srgb(0.14, 0.135, 0.125)),
                 ..default()
             },
             // `RenderTarget` IS its own component in Bevy 0.19 — it is one of `Camera`'s `#[require]`s

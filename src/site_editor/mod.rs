@@ -553,21 +553,34 @@ fn keyboard_edits(
         return;
     }
 
-    // `[` / `]` turn the SELECTION if there is one, otherwise the brush — so the key means "rotate
-    // the thing I am working on" either way, and a piece can be aimed before it is placed.
-    let turn = if keys.just_pressed(KeyCode::BracketRight) {
+    // **`[` / `]` aim the BRUSH — the ghost, the thing about to be placed.**
+    //
+    // They used to aim the selection when there was one and fall through to the brush otherwise, on
+    // the theory that the key means "rotate what I am working on". In practice that made rotation
+    // feel like it never worked: placing a piece selects it, so the very next `]` turned the prop you
+    // had just put down instead of aiming the next one, and the ghost — the only thing on screen
+    // showing a facing — sat still. Aiming before placing is the common act by a wide margin, and it
+    // is the one with a live preview, so it gets the bare key.
+    //
+    // Turning something already placed is still one key pair, just held with SHIFT, and it is the
+    // rarer act: a placed prop can also be deleted and re-dropped, which is what people did anyway.
+    let step = if keys.just_pressed(KeyCode::BracketRight) {
         pick::YAW_STEP_DEG
     } else if keys.just_pressed(KeyCode::BracketLeft) {
         -pick::YAW_STEP_DEG
     } else {
         0.0
     };
+    let shifted = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+    if step != 0.0 && !shifted {
+        state.brush_yaw = pick::snap_yaw(state.brush_yaw + step);
+        state.status = format!("{:?} facing {}\u{00b0}", state.brush, state.brush_yaw);
+        return;
+    }
+    let turn = if shifted { step } else { 0.0 };
 
     let Some(index) = state.selected else {
-        if turn != 0.0 {
-            state.brush_yaw = pick::snap_yaw(state.brush_yaw + turn);
-            state.status = format!("{:?} facing {}\u{00b0}", state.brush, state.brush_yaw);
-        }
         return;
     };
 

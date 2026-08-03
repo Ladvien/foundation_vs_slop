@@ -1,0 +1,101 @@
+// **This game's tag vocabulary.** The mechanism lives in `emerge_core::vocab`; the tokens live here,
+// because a library shared between games must not carry one game's idea of what a prop can be.
+//
+// Four rules, all enforced by `Vocabularies::validate_tables` and `validate_library`:
+//
+//   1. A token not in a table is an ERROR naming the descriptor, the axis and the token. The whole
+//      reason this file exists is `docs/2026-08-03-asset-schema-audit.md` §2: of eight free-text
+//      affordance tokens shipped, FOUR were never read by anything, and nothing ever said so.
+//   2. Tokens take their bit from their POSITION. **Append freely; never reorder or delete.**
+//      Reordering silently re-points every mask already computed.
+//   3. Every token carries a note. A token nobody can describe in a sentence is a token whose meaning
+//      has not been decided yet — which is exactly how `sleep`/`store`/`decor`/`hygiene` happened.
+//   4. `surfaces` is checked from BOTH sides: a class something needs and nothing offers is an error,
+//      because a prop that can never be placed looks exactly like a prop nobody authored.
+//
+// The three semantic axes are all IMMUTABLE properties — what a thing IS, DOES, and LOOKS LIKE.
+// Dynamic state (is it lit, is someone sitting on it) belongs on the entity at runtime, never here.
+// The split is Kapadia et al.'s: attributes "identify immutable properties of a smart object such as
+// its role (e.g., a button or a person) which never changes", as against `IsPressed`/`IsStanding`.
+(
+    // WHAT A THING IS.
+    //
+    // Seeded from the 14 `category` values already authored across `assets/config/*.ron`. Those were
+    // hand-curated by whoever dressed the kit and then never read by anything (`category` has no
+    // consumer and carries `#[allow(dead_code)]`) — so this axis is not new vocabulary, it is the
+    // existing vocabulary finally being enforced.
+    kind: (
+        tokens: [
+            ( name: "appliance",  note: "a machine that does something when powered" ),
+            ( name: "bed",        note: "a thing to lie on" ),
+            ( name: "bin",        note: "a thing to put refuse in" ),
+            ( name: "container",  note: "a thing that holds other things — crates, boxes" ),
+            ( name: "decor",      note: "present to be looked at; no other function" ),
+            ( name: "door",       note: "fills an opening and can be passed through" ),
+            ( name: "fixture",    note: "fixed to the building — pipes, buttons, vents" ),
+            ( name: "light",      note: "a lamp, sconce or luminous panel" ),
+            ( name: "plant",      note: "a growing thing" ),
+            ( name: "prop",       note: "small hand-scale dressing with no stronger classification" ),
+            ( name: "seating",    note: "a thing to sit on — chairs, stools, benches" ),
+            ( name: "storage",    note: "a thing to store in — shelving, lockers, racks" ),
+            ( name: "structure",  note: "the building itself — floors, walls, corners, headers" ),
+            ( name: "table",      note: "a thing with a top to work or eat at" ),
+
+            // Beyond the shipped `category` list. `marking` is what `is_floor_marking`'s HEIGHT
+            // HEURISTIC was standing in for — the audit records that threshold misclassifying a mug.
+            // Stated, it cannot be guessed wrong.
+            ( name: "marking",    note: "paint, decal or sign applied to a surface — carries no volume" ),
+            ( name: "food",       note: "a thing that can be eaten or drunk" ),
+        ],
+    ),
+
+    // WHAT A THING DOES TO THE WORLD, and what it needs in order to. This is the axis gameplay
+    // matches on, so it is the axis to be strictest about.
+    //
+    // NOTE what is deliberately absent. `sit` and `back_to_wall` were affordance tokens, but they are
+    // PLACEMENT CONSTRAINTS, not effects — under this schema `sit` is a socket with a role and
+    // `back_to_wall` is a mount plus clearance. Carrying them here would be two spellings of one idea.
+    // `sleep`, `store`, `decor` and `hygiene` are absent because nothing has ever read them; they come
+    // back the day something does, one row at a time.
+    effects: (
+        tokens: [
+            ( name: "emit",             note: "casts light into the world. The one shipped tag with real gameplay consequence: light::LightEmitter -> LightField -> crab/manca photophobia, SCP-150 steering, mold recoil, mushroom phototropism" ),
+            ( name: "screen",           note: "a lit display surface. Cosmetic (light::ScreenEmitter), windowed-only and determinism-neutral" ),
+            ( name: "uses-electricity", note: "stops working when the power does" ),
+            ( name: "stamina-recharge", note: "restores stamina to whoever uses it" ),
+        ],
+    ),
+
+    // WHAT A THING LOOKS LIKE. Never matched by gameplay — present so an author can find a piece by
+    // eye in a library of hundreds.
+    //
+    // The one axis with NO shipped source: the existing schema records no appearance data at all. It
+    // is seeded small and on purpose. Add a token the first time you want to search by it.
+    look: (
+        tokens: [
+            ( name: "white",   note: "" ),
+            ( name: "grey",    note: "" ),
+            ( name: "black",   note: "" ),
+            ( name: "brown",   note: "" ),
+            ( name: "orange",  note: "the kit's accent colour" ),
+            ( name: "metal",   note: "bare or brushed metal" ),
+            ( name: "plastic", note: "" ),
+            ( name: "glass",   note: "" ),
+            ( name: "worn",    note: "scuffed, chipped, used" ),
+            ( name: "clean",   note: "clinical, unmarked" ),
+        ],
+    ),
+
+    // SUPPORT-SURFACE CLASSES. The two-sided axis, and the only vocabulary this project already had.
+    //
+    // `placement::surfaces` has called its table "THE single source of truth" since before there was a
+    // crate; these are its two tokens, unchanged. A support piece OFFERS the OR of its `surfaces`; a
+    // prop REQUIRES the bit for its `Mount::OnSurface { class }`, and rests only where they intersect.
+    // Typed rather than a generic shelf, per Tutenel et al. 2010 and Infinigen Indoors.
+    surfaces: (
+        tokens: [
+            ( name: "support", note: "any support top — a drawer, table or desk. Never a bed" ),
+            ( name: "worktop", note: "a desk or table worktop specifically" ),
+        ],
+    ),
+)

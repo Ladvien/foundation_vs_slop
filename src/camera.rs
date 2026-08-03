@@ -281,6 +281,12 @@ fn drive_camera(
     anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
     // Inert `false` in the harness (nothing writes it there), exactly like `SimBlocked` above.
     orders_blocked: Res<crate::time_control::OrdersBlocked>,
+    // **The wheel belongs to whatever is under the cursor.** A scrolling panel and a zooming camera
+    // both want it, and reading the raw wheel here meant a scroll over the editor's 45-row palette
+    // scrolled the list *and* zoomed the world out from under it. Every pickable widget carries
+    // `Hovered` and every readout is `Pickable::IGNORE`, so this is the same one-query answer
+    // `selection.rs` already uses for "is the cursor over a control?".
+    hovered_ui: Query<&bevy::picking::hover::Hovered>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
     camera: Single<(&mut Transform, &mut Projection), With<crate::MainCamera>>,
@@ -305,7 +311,7 @@ fn drive_camera(
         }
     }
 
-    if scroll.delta.y != 0.0 {
+    if scroll.delta.y != 0.0 && !hovered_ui.iter().any(|h| h.0) {
         rig.height = (rig.height - scroll.delta.y * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 

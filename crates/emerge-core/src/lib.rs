@@ -36,4 +36,5 @@ pub mod map;
 pub mod placement;
 pub mod rng;
 pub mod ron_surgery;
+pub mod vocab;
 pub mod wfc;

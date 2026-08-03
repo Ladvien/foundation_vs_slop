@@ -93,7 +93,7 @@ pub fn drive_ghost(
         }
     }
 
-    let at_world = ghost_translation(&layout.0, &kit.0, piece, pos);
+    let at_world = ghost_translation(&layout.0, &kit.0, piece, pos, yaw);
     match existing {
         Some(e) => {
             if let Ok(mut tf) = transforms.get_mut(e) {
@@ -108,15 +108,45 @@ pub fn drive_ghost(
     }
 }
 
-/// Where the ghost's origin goes — the same arithmetic `site::visuals` uses for a real prop, minus the
-/// `resting_on` lift, because a ghost has no host until it is actually placed.
+/// Where the ghost's origin goes — the same arithmetic `site::visuals` uses for a real prop,
+/// **including the `resting_on` lift**.
+///
+/// # This is how you put something on a table
+///
+/// The lift used to be omitted here, on the reasoning that "a ghost has no host until it is actually
+/// placed". That is true of the *record* and false of the *preview*: a mug dropped over a worktop will
+/// be lifted onto it by `site::visuals`, so a ghost drawn on the floor is showing a position the game
+/// is about to overrule. `containment::cordon`'s rule about previews applies exactly — a preview drawn
+/// somewhere the thing will not be *"is worse than no preview, because it is a promise the game then
+/// breaks."*
+///
+/// Stacking therefore needs no new mechanism and no host field on `PropPlacement`. The host is derived
+/// from position by [`crate::site::layout::resting_on`], the same call `visuals` makes; showing it is
+/// the whole feature. Point at the floor and the mug sits on the floor; move over a table and it rises
+/// onto the table in front of you.
 fn ghost_translation(
     layout: &crate::site::layout::SiteLayout,
     kit: &SiteKit,
     piece: SitePiece,
     pos: (f32, f32),
+    yaw: f32,
 ) -> Vec3 {
-    layout.point(pos) + Vec3::Y * kit.y_offset(piece)
+    let base = layout.point(pos) + Vec3::Y * kit.y_offset(piece);
+    // `resting_on` wants a placement, and the ghost is a placement that does not exist yet — so it is
+    // asked about the one the next click would create. `waive: None`: a preview must show what the
+    // rules will actually do, never what an exemption would let through.
+    let prospective = crate::site::layout::PropPlacement {
+        piece,
+        pos,
+        yaw,
+        waive: None,
+    };
+    match crate::site::layout::resting_on(layout, kit, &prospective) {
+        // `Err` is "this piece needs a host and there is none here" — the fault list already says so
+        // in words, and floating the ghost would be a second, wordless claim about the same thing.
+        Some(Ok((lift, _host))) => base + Vec3::Y * lift,
+        _ => base,
+    }
 }
 
 /// Fade the ghost's materials once its GLB has instantiated them.
