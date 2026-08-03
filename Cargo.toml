@@ -34,6 +34,9 @@ required-features = ["test-harness"]
 # at its old paths by `lib.rs` and `placement/mod.rs`, so `crate::rng` / `crate::placement::ir` still
 # resolve everywhere they did before the split.
 emerge-core = { path = "crates/emerge-core" }
+# The runtime half of emerge: turns a library and a map into entities. `src/emerge_map.rs` uses it to
+# load what `emerge-mapper` writes, which is the step that makes the editor's output real.
+emerge-bevy = { path = "crates/emerge-bevy" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

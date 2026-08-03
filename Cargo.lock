@@ -2893,6 +2893,7 @@ dependencies = [
  "bevy",
  "bincode",
  "clap",
+ "emerge-bevy",
  "emerge-core",
  "image",
  "indicatif",

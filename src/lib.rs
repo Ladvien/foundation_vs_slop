@@ -85,6 +85,7 @@ pub mod director;
 pub mod dungeon;
 /// Evolved-elite runtime overlay: `FVS_*_ELITE` env vars install a search elite (behaviour / world / audio
 /// / levels config slices, or an RL `NeuralPolicy`) at startup without editing `config.ron`.
+pub mod emerge_map;
 pub mod elite_overlay;
 pub mod enemy;
 pub mod flowfield;
@@ -264,6 +265,10 @@ pub fn run() {
     // itself is untouched, so what is being edited is the real hub rather than a preview of it.
     #[cfg(debug_assertions)]
     site_editor::install_if_requested(&mut app);
+
+    // Dev-only: load a map authored in `emerge-mapper` (`FVS_EMERGE_MAP=<name>`). Adds nothing at all
+    // when the variable is absent — see `emerge_map::install_if_requested`.
+    emerge_map::install_if_requested(&mut app);
 
     app
         // Keep rendering at full rate even when the window is unfocused/occluded, so the game
