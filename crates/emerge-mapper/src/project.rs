@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use emerge_core::library::Library;
 use emerge_core::map::{Map, MAP_VERSION};
+use emerge_core::naming;
 use emerge_core::vocab::{Masks, Vocabularies};
 
 /// Where a project's own files live, under its root. Inside `assets/` rather than beside it, so a
@@ -45,6 +46,17 @@ pub struct Project {
 impl Project {
     /// Read a project, or say exactly what is wrong with it.
     pub fn open(root: &Path, map_name: &str) -> Result<Project, String> {
+        // Forced, not checked: whatever was typed on the command line becomes the one spelling before
+        // anything else sees it, so there is no path through this program on which a map has a name
+        // the filesystem and the schema disagree about.
+        let name = naming::to_snake_case(map_name);
+        if name.is_empty() {
+            return Err(format!(
+                "`{map_name}` leaves nothing usable as a name. Names are snake_case — lowercase \
+                 letters, digits and single underscores, starting with a letter."
+            ));
+        }
+
         let vocab_path = root.join(VOCAB);
         let vocab = Vocabularies::parse(&read(&vocab_path)?)
             .map_err(|e| format!("{}: {e}", vocab_path.display()))?;
@@ -60,15 +72,29 @@ impl Project {
             .resolve(&vocab)
             .map_err(|e| format!("{}: {e}", library_path.display()))?;
 
-        let map_path = root.join(EMERGE_DIR).join(map_name);
+        let map_path = root.join(EMERGE_DIR).join(naming::map_file_name(&name));
         // A map that does not exist yet is a new map, not an error: this is how an author starts one.
         // A map that exists and does not parse IS an error — silently replacing it with an empty one
         // would destroy their work on the first save.
         let map = if map_path.is_file() {
-            Map::parse(&read(&map_path)?).map_err(|e| format!("{}: {e}", map_path.display()))?
+            let loaded: Map =
+                Map::parse(&read(&map_path)?).map_err(|e| format!("{}: {e}", map_path.display()))?;
+            // A map's name and its file have to agree, or a rename leaves two files answering to one
+            // name and nobody can say which is the level.
+            if loaded.name != name {
+                return Err(format!(
+                    "{} calls itself `{}`. A map's name IS its file — rename the file to \
+                     `{}` or open it under its own name.",
+                    map_path.display(),
+                    loaded.name,
+                    naming::map_file_name(&loaded.name)
+                ));
+            }
+            loaded
         } else {
             Map {
                 version: MAP_VERSION,
+                name: name.clone(),
                 note: Some(format!("Authored in emerge-mapper. Library: {LIBRARY}.")),
                 ..Map::default()
             }
@@ -100,6 +126,12 @@ impl Project {
     /// decision was made that way.
     pub fn save(&mut self) -> Result<(), String> {
         self.map.validate()?;
+        // Follow a rename. The path is derived rather than remembered, so the file a map is in is
+        // always the file its name says it is.
+        self.map_path = self
+            .root
+            .join(EMERGE_DIR)
+            .join(naming::map_file_name(&self.map.name));
         let text = ron::ser::to_string_pretty(&self.map, ron::ser::PrettyConfig::default())
             .map_err(|e| format!("map: serialize: {e}"))?;
         emerge_core::ron_surgery::save_atomic(&self.map_path, &text)?;

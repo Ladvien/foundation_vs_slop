@@ -14,6 +14,7 @@
 //! selection and it made rotation feel broken: placing selects, so the next `]` turned the piece you
 //! had just put down while the ghost — the only thing on screen showing a facing — sat still.
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
@@ -55,6 +56,26 @@ pub struct EditorState {
     pub status: String,
     /// Monotonic counter behind generated placement ids, so two crates never share a name.
     next_id: u32,
+    /// The raw text being typed into the name, or `None` when not renaming.
+    ///
+    /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
+    /// keystroke rather than an underscore the transform inserted, and "Site 67" reads back as
+    /// `site_67` while it is still being typed.
+    renaming: Option<String>,
+    /// What can be undone, most recent last. See [`Undo`].
+    undo: Vec<Undo>,
+}
+
+/// One reversible edit.
+///
+/// Only placements, and deliberately: the map's *size* and *name* are settings rather than edits, and
+/// folding them into the same stack would mean Ctrl+Z sometimes resized the map when an author meant
+/// to take back a crate. One undo stack, one kind of thing in it.
+enum Undo {
+    /// Remove the last `count` placements — the inverse of a place or a fill.
+    Added { count: usize },
+    /// Put a removed placement back where it was, at its old index.
+    Removed { index: usize, placed: Box<Placed> },
 }
 
 impl Default for EditorState {
@@ -64,6 +85,8 @@ impl Default for EditorState {
             brush_yaw: 0.0,
             status: String::new(),
             next_id: 0,
+            renaming: None,
+            undo: Vec::new(),
         }
     }
 }
@@ -146,6 +169,7 @@ struct StatusBlock;
 /// because a separator is a thing the reader has to parse and a column is not.
 #[derive(Component, Clone, Copy, PartialEq)]
 enum Field {
+    Name,
     Brush,
     Yaw,
     Map,
@@ -156,6 +180,7 @@ enum Field {
 impl Field {
     fn label(self) -> &'static str {
         match self {
+            Field::Name => "NAME",
             Field::Brush => "BRUSH",
             Field::Yaw => "YAW",
             Field::Map => "MAP",
@@ -176,8 +201,9 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
-                    keys,
-                    place_on_click,
+                    rename_keys,
+                    keys.run_if(not_renaming),
+                    place_on_click.run_if(not_renaming),
                     drive_ghost,
                     fade_ghost,
                     style_rows,
@@ -242,6 +268,8 @@ fn spawn_panel(
                 ("Q E", "turn view"),
                 ("WASD", "pan"),
                 ("wheel", "zoom"),
+                ("Ctrl+Z", "undo"),
+                ("N", "rename map"),
                 ("Ctrl+S", "save"),
             ] {
                 keys.spawn(Node {
@@ -285,7 +313,7 @@ fn spawn_panel(
             StatusBlock,
         ))
         .with_children(|s| {
-            for field in [Field::Brush, Field::Yaw, Field::Map, Field::Last] {
+            for field in [Field::Name, Field::Brush, Field::Yaw, Field::Map, Field::Last] {
                 s.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
@@ -550,6 +578,18 @@ fn refresh_status(
 
     for (field, mut text, mut colour) in &mut fields {
         let (want, tint) = match field {
+            // While renaming, the field shows what the name WILL be, not what was typed — that is
+            // what "forced" means, and seeing `site_67` appear as you type "Site 67" teaches the rule
+            // without anyone having to read it.
+            Field::Name => match &state.renaming {
+                // A caret, so an empty field reads as "waiting for you" rather than as the name
+                // having been wiped.
+                Some(raw) => (
+                    format!("{}_", emerge_core::naming::to_snake_case(raw)),
+                    ACCENT,
+                ),
+                None => (project.map.name.clone(), TEXT),
+            },
             Field::Brush => (brush.to_owned(), TEXT),
             Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
             Field::Map => (
@@ -576,6 +616,85 @@ fn refresh_status(
         }
         if colour.0 != tint {
             colour.0 = tint;
+        }
+    }
+}
+
+/// While a name is being typed, every other key belongs to the name.
+///
+/// `Option<Res<_>>` is not needed here because `EditorState` is `init_resource`d by this same plugin
+/// — but every run condition IS evaluated in Bevy 0.19, with no short-circuit, so a condition reading
+/// a resource some *other* plugin owns must take the option. Worth stating next to the one place that
+/// legitimately does not.
+fn not_renaming(state: Res<EditorState>) -> bool {
+    state.renaming.is_none()
+}
+
+/// Type a name. Snake case is applied to what is shown and to what is committed, so the illegal state
+/// is never reachable rather than merely being rejected at the end.
+fn rename_keys(
+    mut events: MessageReader<KeyboardInput>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    if state.renaming.is_none() {
+        // `N` starts a rename. Read from the buffered events like everything else here, so a keypress
+        // cannot both start the rename and be typed into it.
+        if keyboard.just_pressed(KeyCode::KeyN) {
+            // **Empty, not seeded with the current name.** Seeding it meant the first keystroke
+            // appended, so renaming `site_67_hub` to `galley_deck` produced
+            // `site_67_hubgalley_deck` — and it looked like it had worked, because the panel showed a
+            // name growing as expected. A real rename field starts with the old name SELECTED so
+            // typing replaces it; there is no selection model here, so the honest equivalent is to
+            // start blank. The old name is still on screen the moment you press Esc.
+            state.renaming = Some(String::new());
+            state.status = format!(
+                "type a new name for `{}` — Enter to keep it, Esc to leave it alone",
+                project.map.name
+            );
+        }
+        return;
+    }
+
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let raw = state.renaming.take().unwrap_or_default();
+                let name = emerge_core::naming::to_snake_case(&raw);
+                if name.is_empty() {
+                    state.status = "a map needs a name; nothing was changed".to_owned();
+                } else if name != project.map.name {
+                    let was = std::mem::replace(&mut project.map.name, name.clone());
+                    project.dirty = true;
+                    // The file follows the name on the next save, and the old one stays where it is
+                    // — deleting it here would destroy a file on a keystroke.
+                    state.status = format!("renamed `{was}` to `{name}` (Ctrl+S writes the new file)");
+                }
+            }
+            Key::Escape => {
+                state.renaming = None;
+                state.status = "name unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Space => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.push(' ');
+                }
+            }
+            Key::Character(s) => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.push_str(s);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -685,6 +804,7 @@ fn place_on_click(
     };
     project.map.placements.push(placed);
     project.dirty = true;
+    state.undo.push(Undo::Added { count: 1 });
 
     if let Some(e) = spawn_piece(&mut commands, &assets, &d, at, state.brush_yaw) {
         commands.entity(e).insert(Placement(id.clone()));
@@ -706,10 +826,28 @@ fn keys(
     hovered_ui: Query<&Hovered>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    placed: Query<(Entity, &Placement)>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
 ) {
     let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
+
+    if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
+        undo(&mut commands, &assets, &mut project, &mut state, &placed);
+        return;
+    }
+
+    if keyboard.just_pressed(KeyCode::Delete) && !hovered_ui.iter().any(|h| h.0) {
+        delete_under_cursor(
+            &mut commands,
+            window,
+            camera,
+            &mut project,
+            &mut state,
+            &placed,
+        );
+        return;
+    }
 
     if ctrl && keyboard.just_pressed(KeyCode::KeyS) {
         match project.save() {
@@ -751,6 +889,103 @@ fn keys(
     if step != 0.0 {
         state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
     }
+}
+
+/// Remove the placement nearest the cursor, within a piece's own reach.
+///
+/// Nearest-within-a-radius rather than a picking ray: the pieces are GLB scenes with no colliders, and
+/// a ray would need every one of them to be pickable — which would also make every one of them eat
+/// the click that places the next piece. The radius is the brush cell, so "delete what I am pointing
+/// at" means the same distance as "place one here".
+fn delete_under_cursor(
+    commands: &mut Commands,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+) {
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+        return;
+    };
+
+    let reach = project
+        .library
+        .descriptors
+        .get(state.brush)
+        .map(|d| crate::fill::cell_extents(d, state.brush_yaw))
+        .map(|(x, z)| x.max(z))
+        .unwrap_or(crate::fill::MIN_CELL);
+
+    // `sort`-free: one pass for the minimum, and ties broken by index so two pieces stacked exactly
+    // cannot make the choice depend on iteration order.
+    let mut best: Option<(usize, f32)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let d2 = (p.at.0 - hit.x).powi(2) + (p.at.1 - hit.z).powi(2);
+        if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
+            best = Some((i, d2));
+        }
+    }
+    let Some((index, _)) = best else {
+        state.status = "nothing here to remove".to_owned();
+        return;
+    };
+
+    let removed = project.map.placements.remove(index);
+    for (entity, marker) in placed {
+        if marker.0 == removed.id {
+            commands.entity(entity).despawn();
+        }
+    }
+    project.dirty = true;
+    state.status = format!("removed {}", removed.id);
+    state.undo.push(Undo::Removed {
+        index,
+        placed: Box::new(removed),
+    });
+}
+
+/// Take back the last edit.
+fn undo(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+) {
+    let Some(op) = state.undo.pop() else {
+        state.status = "nothing to undo".to_owned();
+        return;
+    };
+    match op {
+        Undo::Added { count } => {
+            let keep = project.map.placements.len().saturating_sub(count);
+            let gone: Vec<String> = project.map.placements.drain(keep..).map(|p| p.id).collect();
+            for (entity, marker) in placed {
+                if gone.contains(&marker.0) {
+                    commands.entity(entity).despawn();
+                }
+            }
+            state.status = format!("undid {} placement(s)", gone.len());
+        }
+        Undo::Removed { index, placed: p } => {
+            if let Some(d) = project.library.get(&p.descriptor).cloned() {
+                if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw) {
+                    commands.entity(e).insert(Placement(p.id.clone()));
+                }
+            }
+            state.status = format!("restored {}", p.id);
+            // Back at its old index, so a location referring to it by position in the list is not
+            // quietly re-pointed at its neighbour.
+            let at = index.min(project.map.placements.len());
+            project.map.placements.insert(at, *p);
+        }
+    }
+    project.dirty = true;
 }
 
 /// The `F` handler, split out so `keys` stays readable.
@@ -804,6 +1039,12 @@ fn flood_from_cursor(
         project.map.placements.push(p);
     }
     project.dirty = true;
+    // **One undo entry for the whole fill.** A fill is one act to the person who performed it, and an
+    // undo stack that made them press Ctrl+Z 1,408 times would be a stack that models the code rather
+    // than the work.
+    if count > 0 {
+        state.undo.push(Undo::Added { count });
+    }
     // A cap that stopped the fill has to say so — a truncated fill looks exactly like a finished one.
     state.status = if filled.truncated {
         format!(

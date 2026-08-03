@@ -35,6 +35,7 @@ pub mod geom;
 pub mod glb;
 pub mod library;
 pub mod map;
+pub mod naming;
 pub mod placement;
 pub mod rng;
 pub mod ron_surgery;

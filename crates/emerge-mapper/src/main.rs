@@ -9,7 +9,10 @@
 //! emerge-mapper [project-dir] [map-name]
 //! ```
 //!
-//! Both default to the repository they ship in (`.` and `site.map.ron`), so a bare
+//! The second argument is a **name**, not a filename: `emerge-mapper . site_67` opens (or starts)
+//! `assets/emerge/site_67.map.ron`. Names are snake_case and are *forced* into it rather than
+//! checked, so there is no path through this program on which a map is called something the
+//! filesystem and the schema disagree about. Both arguments default, so a bare
 //! `cargo run -p emerge-mapper` from the workspace root opens the shipped library.
 //!
 //! # Why it is a separate binary and not a mode of the game
@@ -43,7 +46,8 @@ use project::Project;
 fn main() {
     let mut args = std::env::args().skip(1);
     let root = PathBuf::from(args.next().unwrap_or_else(|| ".".to_owned()));
-    let map_name = args.next().unwrap_or_else(|| "site.map.ron".to_owned());
+    // A NAME, not a filename — `emerge-mapper . site_67` opens assets/emerge/site_67.map.ron.
+    let map_name = args.next().unwrap_or_else(|| "untitled_map".to_owned());
 
     // **Open the project before standing up the window.** A failure here is fatal and prints what is
     // wrong with which file; the alternative is an editor that comes up with an empty palette, which
@@ -56,6 +60,7 @@ fn main() {
         }
     };
 
+    let project_name = project.map.name.clone();
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -66,7 +71,7 @@ fn main() {
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: format!("emerge-mapper — {}", map_name),
+                        title: format!("emerge-mapper — {}", project_name),
                         // **Fullscreen for automated checks.** The way this editor gets verified is
                         // `scripts/vinput.py` driving a real kernel input device and
                         // `scripts/framestats.py` measuring the frame — and a virtual pointer is

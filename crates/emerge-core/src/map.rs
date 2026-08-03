@@ -60,6 +60,14 @@ pub const MAP_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct Map {
     pub version: u32,
+    /// What this map is called — **snake_case**, and it is also the file it lives in.
+    ///
+    /// One spelling, because a name is simultaneously a filename, a manifest key and something typed
+    /// into a shell, and those have different tolerances: two names differing only by case are one
+    /// file on some platforms and two on others. `crate::naming` forces it at the point of entry
+    /// rather than complaining afterwards.
+    #[serde(default)]
+    pub name: String,
     /// Where this map sits in the world: **the centre of its floor.**
     ///
     /// X and Z are centred on it, Y runs upward from it. That asymmetry is the honest one — a map is
@@ -100,6 +108,9 @@ impl Default for Map {
     fn default() -> Self {
         Map {
             version: MAP_VERSION,
+            // Empty, not "untitled": a substituted name is a name nobody chose, and the second one
+            // collides with the first. An unnamed map is a map that has to be named before it saves.
+            name: String::new(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
             placements: Vec::new(),
@@ -275,6 +286,22 @@ impl Map {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if !crate::naming::is_snake_case(&self.name) {
+            let suggestion = crate::naming::to_snake_case(&self.name);
+            return Err(if suggestion.is_empty() {
+                format!(
+                    "map: `{}` is not a usable name. Names are snake_case — lowercase letters, \
+                     digits and single underscores, starting with a letter.",
+                    self.name
+                )
+            } else {
+                format!(
+                    "map: `{}` is not snake_case. Call it `{suggestion}`.",
+                    self.name
+                )
+            });
+        }
+
         for (axis, v) in [("x", self.bounds.0), ("y", self.bounds.1), ("z", self.bounds.2)] {
             if !(v.is_finite() && v > 0.0) {
                 return Err(format!(
@@ -373,6 +400,7 @@ mod tests {
     fn table_map() -> Map {
         Map {
             version: MAP_VERSION,
+            name: "galley".into(),
             origin: (0.0, 0.0, 0.0),
             bounds: default_bounds(),
             placements: vec![
@@ -561,6 +589,7 @@ mod tests {
     fn a_note_is_optional_everywhere() {
         let text = r#"(
             version: 1,
+            name: "bare",
             origin: (0.0, 0.0, 0.0),
             placements: [
                 ( id: "a", descriptor: "crate", at: (1.0, 1.0), yaw: 0.0 ),
