@@ -131,7 +131,7 @@ impl Plugin for VhsPlugin {
 /// its own `Startup` system, so we insert lazily in `Update` on any camera still lacking it).
 fn ensure_camera_settings(
     mut commands: Commands,
-    cameras: Query<Entity, (With<Camera3d>, Without<VhsSettings>, Without<crate::ThumbnailCamera>)>,
+    cameras: Query<Entity, (With<crate::MainCamera>, Without<VhsSettings>)>,
 ) {
     for entity in &cameras {
         commands.entity(entity).insert(VhsSettings::default());

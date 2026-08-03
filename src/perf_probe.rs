@@ -178,7 +178,7 @@ impl Plugin for PerfProbePlugin {
 fn sample(
     time: Res<Time<Real>>,
     mut probe: ResMut<PerfProbe>,
-    camera: Option<Single<(&Camera, &GlobalTransform)>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
     rig: Option<Res<CameraRig>>,
     dungeon: Option<Res<Dungeon>>,
     // The census: only entities the renderer actually drew this frame.

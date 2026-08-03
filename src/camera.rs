@@ -183,6 +183,8 @@ fn setup_camera(
     let env_map = images.add(crate::world::interior_env_cubemap(cfg));
     commands.spawn((
         Camera3d::default(),
+        // The one camera every gameplay system means. See `crate::MainCamera`.
+        crate::MainCamera,
         // The one camera mesh picking is allowed to cast from. Required because
         // `dialogue::plugin` sets `MeshPickingSettings::require_markers = true` — see there for the
         // bug that forced it (a decorative light shaft was eating every click on the dialogue
@@ -238,7 +240,7 @@ impl CameraRig {
 
 /// Point the camera at `focus` immediately, without easing. For entering a *different place* (the Site,
 /// a run) rather than for per-frame motion.
-pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>) {
+pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, With<crate::MainCamera>>) {
     rig.focus = focus;
     // A glide aimed in the previous place (a conversation mid-flight when the run ended, say) must
     // not drag the camera back across the new one.
@@ -251,7 +253,7 @@ pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Tr
 fn focus_camera_on_spawn(
     dungeon: Res<Dungeon>,
     mut rig: ResMut<CameraRig>,
-    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    mut cams: Query<&mut Transform, With<crate::MainCamera>>,
 ) {
     snap_camera_to(dungeon.spawn_world(), &mut rig, &mut cams);
 }
@@ -281,7 +283,7 @@ fn drive_camera(
     orders_blocked: Res<crate::time_control::OrdersBlocked>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
-    camera: Single<(&mut Transform, &mut Projection), (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    camera: Single<(&mut Transform, &mut Projection), With<crate::MainCamera>>,
 ) {
     let allow_pan = !sim_blocked.0;
 

@@ -978,7 +978,7 @@ fn spawn_site_geometry(
 fn focus_camera_on_site(
     layout: Res<SiteLayoutRes>,
     mut rig: ResMut<crate::camera::CameraRig>,
-    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    mut cams: Query<&mut Transform, With<crate::MainCamera>>,
 ) {
     // Aim at the spine's middle so all six areas are within a short pan.
     let l = &layout.0;
@@ -1329,7 +1329,7 @@ fn light_the_site(commands: &mut Commands, l: &SiteLayout) {
 fn command_avatar(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<bevy::window::PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>,
     nav: Res<SiteNav>,
     mut avatars: Query<&mut AvatarGoal, With<PlayerAvatar>>,
 ) {
@@ -1593,7 +1593,7 @@ fn return_to_the_expedition(
 fn return_camera_to_squad(
     anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
     mut rig: ResMut<crate::camera::CameraRig>,
-    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    mut cams: Query<&mut Transform, With<crate::MainCamera>>,
 ) {
     // No valid anchor means no living squad to look at (`squad` clears it on an empty roster), and
     // the terminal screens own the view at that point. Leave the camera where it is.

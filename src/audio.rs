@@ -549,7 +549,7 @@ fn load_audio(mut commands: Commands, assets: Res<AssetServer>) {
 /// frame) — no panic, no unwrap.
 fn sync_listener(
     rig: Res<crate::camera::CameraRig>,
-    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    camera: Single<&GlobalTransform, With<crate::MainCamera>>,
     listener: Single<&mut Transform, (With<SpatialListener>, Without<Camera3d>)>,
 ) {
     let cam = camera.into_inner();
