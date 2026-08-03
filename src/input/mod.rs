@@ -263,10 +263,11 @@ pub enum Action {
     DevResearchRoom,
     DevForceVictory,
     DevRegionCapture,
+    DevSiteEditor,
 }
 
 impl Action {
-    pub const ALL: [Action; 39] = [
+    pub const ALL: [Action; 40] = [
         Action::CameraPanForward,
         Action::CameraPanBack,
         Action::CameraPanLeft,
@@ -306,6 +307,7 @@ impl Action {
         Action::DevResearchRoom,
         Action::DevForceVictory,
         Action::DevRegionCapture,
+        Action::DevSiteEditor,
     ];
 
     /// Dense index into [`KeyBindings`]'s table. A fixed array rather than a map, for the same
@@ -365,6 +367,7 @@ impl Action {
             DevResearchRoom => 36,
             DevForceVictory => 37,
             DevRegionCapture => 38,
+            DevSiteEditor => 39,
         }
     }
 
@@ -387,9 +390,8 @@ impl Action {
             CycleSpecimen | RunTopExperiment | FileFindings | CurateArchive | BuyCaptureDevice
             | BuyQuarantineCharge | BuyMedkit | TherapySession | DeepDebrief => Context::Site,
             MenuBack | MenuUp | MenuDown | MenuActivate => Context::Menu,
-            DevAiOverlay | DevPerfHud | DevResearchRoom | DevForceVictory | DevRegionCapture => {
-                Context::Dev
-            }
+            DevAiOverlay | DevPerfHud | DevResearchRoom | DevForceVictory | DevRegionCapture
+            | DevSiteEditor => Context::Dev,
         }
     }
 
@@ -454,6 +456,7 @@ impl Action {
             DevResearchRoom => "dev_research_room",
             DevForceVictory => "dev_force_victory",
             DevRegionCapture => "dev_region_capture",
+            DevSiteEditor => "dev_site_editor",
         }
     }
 
@@ -504,6 +507,7 @@ impl Action {
             DevResearchRoom => "DEV — RESEARCH ROOM",
             DevForceVictory => "DEV — FORCE VICTORY",
             DevRegionCapture => "DEV — CAPTURE A REGION",
+            DevSiteEditor => "DEV — SITE EDITOR",
         }
     }
 
@@ -584,6 +588,11 @@ impl Action {
             DevResearchRoom => Binding::one(Chord::plain(KeyCode::F6)),
             DevForceVictory => Binding::one(Chord::plain(KeyCode::F10)),
             DevRegionCapture => Binding::one(Chord::ctrl(KeyCode::KeyP)),
+            // F7, not a letter: the moment the editor's palette spawns, `menu_keyboard_nav` seeds
+            // `InputFocus` onto its first button and `KeyboardOwned::menu_focus` suppresses Space and
+            // Enter for every non-menu action. An F-key is unaffected, which is the same reason F6
+            // opens the Research Room.
+            DevSiteEditor => Binding::one(Chord::plain(KeyCode::F7)),
         }
     }
 }

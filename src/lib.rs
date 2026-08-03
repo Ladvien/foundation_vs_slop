@@ -74,6 +74,12 @@ pub mod scp610;
 /// stripped from release like `devshot`/`region_capture`/`perf_hud`.
 #[cfg(debug_assertions)]
 pub mod research_room;
+/// Dev-only **Site-67 editor** (`FVS_SITE_EDITOR=1`): an F7 palette for authoring the hub's dressing
+/// in the live isometric view, with `site::layout`'s placement rules checked per-edit instead of at
+/// load, writing back to `site67.ron` without destroying its comments. Debug-only, stripped from
+/// release like `research_room`/`devshot`/`region_capture`.
+#[cfg(debug_assertions)]
+pub mod site_editor;
 pub mod dialogue;
 pub mod director;
 pub mod dungeon;
@@ -178,6 +184,33 @@ pub struct NoteInputActive;
 #[derive(Resource)]
 pub struct ResearchRoomActive;
 
+/// Present only when the dev-only Site editor was requested (`FVS_SITE_EDITOR=1`, see
+/// [`site_editor`]). Its presence arms the F7 dressing palette over the real, unmodified Site — the
+/// hub still spawns from `site67.ron` exactly as in a normal launch, and the editor only adds an
+/// overlay and the ability to write that file back.
+///
+/// Defined here (always compiled, like [`ResearchRoomActive`] and [`DebugCaptureActive`]) so release
+/// and the headless harness keep ONE path: the only code that inserts it is `#[cfg(debug_assertions)]`,
+/// so it is never present there.
+#[derive(Resource)]
+pub struct SiteEditorActive;
+
+/// Marks a camera that renders a **thumbnail**, not the player's view.
+///
+/// The dev-only Site editor bakes a preview of every kit piece by staging it in a "photo booth" far
+/// from any real geometry and rendering it to an `Image`. That needs a second `Camera3d`, and a second
+/// `Camera3d` is a live hazard in this codebase: **nine** systems take `Single<.., With<Camera3d>>`
+/// (the audio listener, health-bar and enemy billboards, gore decals, dialogue bubbles, hair, SCP-999's
+/// eyes, and `camera::drive_camera` itself), and `Single` *silently skips its system* when the query
+/// does not match exactly one entity. Adding a camera without this marker would stop all nine with no
+/// error — the unregistered-system failure mode this repo keeps meeting.
+///
+/// So every one of those queries excludes it, `vhs.rs`-style. Declared here and always compiled — like
+/// [`ResearchRoomActive`] and [`DebugCaptureActive`] — so the filters are one path in every build, and
+/// only `#[cfg(debug_assertions)]` code ever spawns a camera carrying it.
+#[derive(Component)]
+pub struct ThumbnailCamera;
+
 /// Build and run the full windowed game. The headless test harness (`sim_harness`, behind the
 /// `test-harness` feature) constructs an equivalent `App` without render/winit/audio so the same
 /// gameplay plugins can be driven deterministically off-screen.
@@ -205,6 +238,12 @@ pub fn run() {
     // so the shipped binary and the headless harness never see it and keep one execution path.
     #[cfg(debug_assertions)]
     research_room::install_if_requested(&mut app);
+
+    // Dev-only Site editor (`FVS_SITE_EDITOR=1`): insert the `SiteEditorActive` marker that arms the
+    // F7 dressing palette at Site-67. Same shape and same gate as the Research Room above — the Site
+    // itself is untouched, so what is being edited is the real hub rather than a preview of it.
+    #[cfg(debug_assertions)]
+    site_editor::install_if_requested(&mut app);
 
     app
         // Keep rendering at full rate even when the window is unfocused/occluded, so the game
@@ -544,6 +583,13 @@ pub fn run() {
     // `Update`, never in the headless harness — outside the deterministic core and the shipped binary.
     #[cfg(debug_assertions)]
     app.add_plugins(research_room::ResearchRoomPlugin);
+
+    // Dev-only Site-67 editor (`FVS_SITE_EDITOR=1` + F7). Same contract as the Research Room above:
+    // debug-only, every system on `Update` and gated on `SiteEditorActive`, never in the headless
+    // harness. It edits `site67.ron`, which `site::layout` keeps out of the offline search on purpose,
+    // so the tool is outside the search by the same argument — see the module header.
+    #[cfg(debug_assertions)]
+    app.add_plugins(site_editor::SiteEditorPlugin);
 
     // The gestation "twitching lump" tell — WINDOWED-ONLY cosmetic (spawns child meshes on infested hosts),
     // so the headless deterministic core spawns nothing and its goldens are untouched. See

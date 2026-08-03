@@ -188,6 +188,12 @@ fn setup_camera(
         // bug that forced it (a decorative light shaft was eating every click on the dialogue
         // choices, and picking is opt-out by default).
         bevy::picking::mesh_picking::MeshPickingCamera,
+        // Which camera the transform gizmo casts through (dev-only `site_editor`, F7). Bevy makes the
+        // marker optional when exactly one camera exists, which is true today — it is written down
+        // anyway for the same reason `MeshPickingCamera` above is: a second camera added later would
+        // otherwise make the gizmo silently pick the wrong one, and a marker is cheaper to read than
+        // that bug is to find.
+        bevy::gizmos::transform_gizmo::TransformGizmoCamera,
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: rig.height,
@@ -214,11 +220,25 @@ fn setup_camera(
     ));
 }
 
-/// Aim the persistent camera at this run's squad spawn, so a new expedition opens on its own map with
-/// no lurch — the half of the old `setup_camera` that depends on the world.
+impl CameraRig {
+    /// The orthographic viewport height — how many world units tall the window shows.
+    pub fn zoom(&self) -> f32 {
+        self.height
+    }
+
+    /// Set the zoom, clamped to the same range the mouse wheel uses.
+    ///
+    /// Clamped rather than free so no caller can park the camera somewhere the player cannot get
+    /// back from with the wheel, and so `mycelia::perceptual`'s speed limit — which is a function of
+    /// this number — keeps the bounds its own tests assert.
+    pub fn set_zoom(&mut self, height: f32) {
+        self.height = height.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+}
+
 /// Point the camera at `focus` immediately, without easing. For entering a *different place* (the Site,
 /// a run) rather than for per-frame motion.
-pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, With<Camera3d>>) {
+pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>) {
     rig.focus = focus;
     // A glide aimed in the previous place (a conversation mid-flight when the run ended, say) must
     // not drag the camera back across the new one.
@@ -231,7 +251,7 @@ pub fn snap_camera_to(focus: Vec3, rig: &mut CameraRig, cams: &mut Query<&mut Tr
 fn focus_camera_on_spawn(
     dungeon: Res<Dungeon>,
     mut rig: ResMut<CameraRig>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
 ) {
     snap_camera_to(dungeon.spawn_world(), &mut rig, &mut cams);
 }
@@ -261,7 +281,7 @@ fn drive_camera(
     orders_blocked: Res<crate::time_control::OrdersBlocked>,
     mut rig: ResMut<CameraRig>,
     mut view: ResMut<CameraView>,
-    camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
+    camera: Single<(&mut Transform, &mut Projection), (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
 ) {
     let allow_pan = !sim_blocked.0;
 

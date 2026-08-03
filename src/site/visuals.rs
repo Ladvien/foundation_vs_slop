@@ -49,6 +49,19 @@ const AVATAR_LOCO_TAU: f32 = 0.12;
 #[derive(Component)]
 pub struct SiteVisual;
 
+/// Which `SiteLayout::props` record this body was spawned from.
+///
+/// Carried by dressing props only, and read by exactly one consumer: the dev-only Site editor, which
+/// needs to get from a prop under the cursor back to the source line that authored it. Positions are
+/// not a usable key — the shipped layout stacks four crates and lays three threshold pads in a row —
+/// and `props` records carry no id, so the spawn-order index is the identity.
+///
+/// **Indices are only valid against the layout that spawned them.** Anything that inserts or removes
+/// a record must renumber every body after it (`site_editor::edit`), or the editor starts writing to
+/// the wrong line.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropIndex(pub usize);
+
 pub use super::people::{CastId, Operative, SiteAvatar, Staff};
 
 /// Where this avatar is walking, if anywhere.
@@ -378,7 +391,7 @@ fn corner_yaw(panels: &std::collections::BTreeSet<WallPanel>, (x, z): (i32, i32)
 /// One GLB piece, placed. The scene rides a **cosmetic child** — the same discipline every creature
 /// spawn uses, because an async scene load attaching `Children`/`SceneInstance` to an entity other
 /// systems query is the archetype churn `sim_harness` was hardened against.
-fn place(
+pub(crate) fn place(
     commands: &mut Commands,
     assets: &AssetServer,
     kit: &crate::site::kit::SiteKit,
@@ -720,7 +733,7 @@ fn spawn_site_geometry(
             });
         }
     }
-    for p in &l.props {
+    for (ix, p) in l.props.iter().enumerate() {
         let mut at = l.point(p.pos);
         // A dressing prop that rests on a surface takes its height from the host it stands on —
         // derived, never authored (`kit::KitPiece::rests_on`). `check_prop_placements` has already
@@ -732,7 +745,18 @@ fn spawn_site_geometry(
                 Err(e) => warn!("site: {e}"),
             }
         }
-        place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
+        let e = place(&mut commands, &assets, &kit, p.piece, at, p.yaw);
+        // Which `site67.ron` record this body came from. The dev-only Site editor (F7) needs a way
+        // back from a prop the cursor is over to the line that authored it, and an index carried at
+        // spawn is the only honest answer — positions are not unique (four crates share a stack) and
+        // `props` records have no id of their own.
+        //
+        // Inert data on a body that carries no `Health`, so it contributes nothing to
+        // `sim_harness::snapshot_hash` and is invisible to the deterministic core. Unconditional, not
+        // `#[cfg(debug_assertions)]`, so release and debug spawn the same archetype — a marker that
+        // splits the archetype only in one build is the shape `dialogue::ensure_leader` documents as a
+        // determinism hazard.
+        commands.entity(e).insert(PropIndex(ix));
         // The slab is the one prop with a gameplay meaning attached, so it also gets a marker at the
         // height of its bed platform for `lay_out_the_study_subject` to parent a body to.
         if p.piece == SitePiece::Slab {
@@ -954,7 +978,7 @@ fn spawn_site_geometry(
 fn focus_camera_on_site(
     layout: Res<SiteLayoutRes>,
     mut rig: ResMut<crate::camera::CameraRig>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
 ) {
     // Aim at the spine's middle so all six areas are within a short pan.
     let l = &layout.0;
@@ -1569,7 +1593,7 @@ fn return_to_the_expedition(
 fn return_camera_to_squad(
     anchor: Option<Res<crate::squad_ai::cohesion::SquadAnchor>>,
     mut rig: ResMut<crate::camera::CameraRig>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut cams: Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
 ) {
     // No valid anchor means no living squad to look at (`squad` clears it on an empty roster), and
     // the terminal screens own the view at that point. Leave the camera where it is.

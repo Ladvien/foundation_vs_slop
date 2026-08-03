@@ -144,7 +144,7 @@ pub fn build_bubble(
 /// despawn orphans. Cosmetic → `Update` (never pinned state). Copies the `health.rs` billboard.
 pub fn track_bubbles(
     mut commands: Commands,
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
     owners: Query<(&Transform, &Visibility), Without<Bubble>>,
     mut bubbles: Query<(Entity, &Bubble, &mut Transform, &mut Visibility)>,
 ) {
