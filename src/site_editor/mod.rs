@@ -160,12 +160,8 @@ impl Plugin for SiteEditorPlugin {
     fn build(&self, app: &mut App) {
         let armed = resource_exists::<crate::SiteEditorActive>;
         app.init_resource::<EditorState>()
-            // The gizmo's own systems must not run while the editor is closed, or its handles would
-            // hang over the world in a normal launch. Its doc comment names this exact pattern.
             .add_observer(panel::on_palette_click)
             .add_systems(Startup, setup_thumbnails.run_if(armed))
-            // Runs whether or not the panel is open: the gizmo overlay camera exists from the moment
-            // `TransformGizmoPlugin` is registered, and it blanks the window until it is told not to.
             // The baker is deliberately NOT gated on the panel being open: it walks the kit once at
             // launch and then despawns its camera, so the previews are ready before they are wanted.
             .add_systems(

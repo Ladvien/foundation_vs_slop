@@ -108,7 +108,7 @@ pub fn spawn(
                 fonts,
                 "click a piece, then click the floor to place it\n\
                  [ ] turn it · drag to move · Del delete\n\
-                 F7 close · G gizmo · Ctrl+Z undo · Ctrl+S save",
+                 F7 close · Ctrl+Z undo · Ctrl+Y redo · Ctrl+S save",
                 theme.font_body * 0.8,
                 theme.text_muted,
             ));
