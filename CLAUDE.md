@@ -8,6 +8,49 @@
 - Ensure every feature added is correctly included in the RL/QD systems for evolving.
 - Keep the file /mnt/codex_fs/game_assets/projects/scp_characters/BEVY_GAME_INFO.md up to date with game info, to ensure our 3D artists are able to make assets that fit the game well. (The old `game_assets/SCP_Characters/` path no longer exists — the project moved under `projects/`.)
 - When items are complete, move them from `BACKLOG.md` to `BACKLOG_ARCHIVE.md`.  DO NOT DELETE `BACKLOG_ARCHIVE.md`.
+- **Read the vendored Bevy 0.19 source before writing Bevy code** — not bevy.org, which tracks `main`. See "Bevy 0.19" below.
+
+## Bevy 0.19 — read the vendored source, not the web
+
+We are pinned to **`bevy 0.19.0`**. bevy.org documents `main`, and it has been wrong for us more than
+once. Every Bevy question this project has answered *correctly* was answered by reading the local copy;
+every one answered from memory or the web cost a build-and-run cycle. **Check it before writing Bevy
+code, not after a failed build.**
+
+The authoritative copies are all local. `$BEVY` below is
+`~/.cargo/registry/src/index.crates.io-*/bevy-0.19.0`:
+
+| Source | Use it for |
+|---|---|
+| **`$BEVY/examples/` — 411 examples at exactly our version** | *"How do I use X?"* Grep here **first**. `3d/render_to_texture.rs`, `asset/asset_saving.rs`, `ui/`, `gizmos/`, `scene/`, `picking/` cover most of what this project reaches for. |
+| **Crate source** — `~/.cargo/registry/src/*/bevy_{ecs,camera,ui,ui_widgets,gizmos,scene,light,image,picking}-0.19.0/src/` | Settles any API question in seconds and cannot be stale. Field vs component, required components, exact signatures. |
+| **Rustdoc** — `cargo doc -p bevy --no-deps` → `target/doc/bevy/index.html` | Browsable index of the pinned API. `target/` is gitignored; rebuild after `cargo clean`. |
+| **`$BEVY/_release-content/migration_guides.md`** | What moved since 0.18. |
+
+### Traps already paid for
+
+Each of these cost real time. They are 0.19 facts, verified in the source above.
+
+- **A missing `Res<T>` panics the system**; it does not skip. Take `Option<Res<T>>`, or have the plugin
+  that registers the reader `init_resource` it.
+- **All run conditions are evaluated — there is no short-circuit.** A bare `Res<T>` in a `.run_if(..)`
+  closure panics whenever that resource is absent, even behind an earlier condition that returned
+  false. This shipped and crashed every launch that did not use the feature. Use `Option<Res<T>>`.
+- **`Single<..>` silently skips its system** on a non-unique match. So **any second camera breaks every
+  `Single<.., With<Camera3d>>`** — the audio listener, every billboard, `selection`, `drive_camera`.
+  Filter positively on `crate::MainCamera`, never on `With<Camera3d>` alone.
+- **A bundle containing two of the same component panics.** `button_visual()` already carries a `Node`;
+  `.insert()` afterwards to override, do not pass a second one in the tuple.
+- **`TransformGizmoPlugin` is unusable here.** Its overlay camera blanks an HDR main camera's output
+  (measured: 13,343 → 183 distinct colours) *and* spawns the second `Camera3d` above.
+- `Camera::clear_color` is a **field**; `RenderTarget` is a **separate component** (one of `Camera`'s
+  `#[require]`s). `AmbientLight` is a **component** in 0.19 and applies per-camera.
+- `add_plugins` tuples cap at **15** (`all_tuples!(impl_plugins_tuples, 0, 15, P, S)`,
+  `bevy_app-0.19.0/src/plugin.rs:186`). Nest to go further.
+- `Resource` is now a subtrait of `Component`; you cannot derive both.
+
+`docs/ui.md` §5 carries the UI-specific traps (grid placement panics, the 95-codepoint default font,
+`Pickable::IGNORE` on full-screen containers, layer ordering).
 
 ## Testing
 

@@ -24,11 +24,19 @@ three open issues:
 > 2. how to balance user control versus automatic model consistency maintenance?
 > 3. how to integrate both procedural and manual operations in the same iterative workflow?
 
-and answer it with three facilities borrowed from image editors, given richer semantics: **Locking**
-(this is immune to operations), **Scoping** (bound an operation's blast radius), **Grouping** (move the
-road and its buildings come along).
+and **sketch** three facilities borrowed from image editors: **Locking** (this is immune to
+operations), **Scoping** (bound an operation's blast radius), **Grouping** (move the road and its
+buildings come along).
 
-Alvarez et al. (FDG 2018) implement precisely that as a **lock brush**: the designer locks tiles, the
+**Read that as aspiration, not prior art.** §5.3 introduces them as *"possible facilities, which are
+inspired from image processing software, but have more advanced and complex semantics"*, in a paper
+whose own assessment is that integrating procedural generation with manual editing is *"so far as good
+as unaddressed"* — with preserving manual operations through regeneration called out as particularly
+difficult and the proposed fix a sketch. Nobody shipped this triad; it is a useful naming of the
+problem, and the design below is ours to prove. (Correction recorded in
+`2026-08-03-forge-plan-review.md` §4.)
+
+Alvarez et al. (FDG 2018) do implement the first of the three as a **lock brush**: the designer locks tiles, the
 room subdivides into mutable and immutable zones, and every generated suggestion preserves the locked
 ones. Their genotype stops being one-gene-per-tile and becomes a tree over zones — *"instead of
 manually editing a room first to later generate appealing solutions based on it, the user can now start
@@ -158,7 +166,8 @@ floor runs exactly, which turns "did I port it right" into a diff rather than a 
 ## Bibliography
 
 * Smelik, Tutenel, de Kraker & Bidarra, *Integrating procedural generation and manual editing of virtual
-  worlds* (2010) — `10.1145/1814256.1814258`. Lock / Scope / Group; the three open issues.
+  worlds* (2010) — `10.1145/1814256.1814258`. The three open issues; Lock / Scope / Group as *proposed*
+  facilities, never implemented there. See `2026-08-03-forge-plan-review.md` §4.
 * Tutenel, Bidarra, Smelik & de Kraker, *A declarative approach to procedural modeling of virtual
   worlds* (2010) — `10.1016/j.cag.2010.11.011`. Fine-grained control; surfaces vs affordances.
 * Alvarez et al., *Empowering quality diversity in dungeon design with interactive constrained
