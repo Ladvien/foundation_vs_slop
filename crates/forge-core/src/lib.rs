@@ -35,4 +35,5 @@ pub mod glb;
 pub mod map;
 pub mod placement;
 pub mod rng;
+pub mod ron_surgery;
 pub mod wfc;

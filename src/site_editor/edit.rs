@@ -24,7 +24,7 @@
 use crate::site::kit::SiteKit;
 use crate::site::layout::{prop_placement_report, PlacementFault, PropPlacement, SiteLayout};
 
-use super::source_map::SourceMap;
+use super::source_map::{Removed, SourceMap};
 
 /// How many edits are undoable. A bound rather than unbounded growth; the oldest is dropped.
 const UNDO_DEPTH: usize = 256;
@@ -52,10 +52,13 @@ enum EditOp {
     /// Delete the record at this index.
     Drop { index: usize },
     /// Put this record back at this index.
+    ///
+    /// `line` is a [`Removed`] rather than a bare `String` because restoring the bytes is not enough:
+    /// the record has to land back under the comment block it was under. See `ron_surgery::Removed`.
     Reinsert {
         index: usize,
         prop: PropPlacement,
-        line: String,
+        line: Removed,
     },
 }
 

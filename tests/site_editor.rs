@@ -158,8 +158,9 @@ fn deleting_a_prop_and_undoing_restores_the_file_byte_for_byte() {
         .remove_prop(commented)
         .unwrap_or_else(|e| panic!("remove_prop: {e}"));
     assert!(
-        trailing_comment(&removed).is_some(),
-        "the removed line should have carried the comment: {removed}"
+        trailing_comment(&removed.line).is_some(),
+        "the removed line should have carried the comment: {}",
+        removed.line
     );
     assert_ne!(map.render(), text, "the delete should have changed the file");
 
