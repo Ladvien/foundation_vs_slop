@@ -50,7 +50,22 @@ pub fn install_if_requested(app: &mut App) {
         return;
     }
 
-    match load(&name) {
+    // **Where to put it.** `Map::origin` is the map's own answer and is what ships; this override
+    // exists because the maps an author is testing are almost always authored at (0,0,0), and the
+    // game's camera is not there. `FVS_EMERGE_MAP_AT=x,z` (or `x,y,z`) drops the map somewhere you
+    // can see it without editing the file to look at it.
+    //
+    // It sets the SAME field rather than adding a second notion of where a map is — configuration,
+    // not a parallel path.
+    let at = std::env::var("FVS_EMERGE_MAP_AT").ok().and_then(|s| parse_at(&s));
+
+    match load(&name).map(|mut world| {
+        if let Some(origin) = at {
+            info!("emerge_map: FVS_EMERGE_MAP_AT — placing `{name}` at {origin:?}");
+            world.map.origin = origin;
+        }
+        world
+    }) {
         Ok(world) => {
             info!(
                 "emerge_map: loaded `{}` — {} placement(s) from {} descriptor(s)",
@@ -63,6 +78,26 @@ pub fn install_if_requested(app: &mut App) {
         // Loud and specific. The alternative is a world that comes up empty, which reads as "the
         // editor did not save" rather than as "the game could not find the vocabulary".
         Err(e) => error!("emerge_map: cannot load `{name}`: {e}"),
+    }
+}
+
+/// Parse `x,z` or `x,y,z` into a world origin. Two numbers means the floor stays at zero, which is
+/// what someone typing coordinates off a map almost always means.
+fn parse_at(s: &str) -> Option<(f32, f32, f32)> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match parts[..] {
+        [x, z] => Some((x, 0.0, z)),
+        [x, y, z] => Some((x, y, z)),
+        // Silence would be worse: a mistyped override that quietly did nothing would look like the
+        // map being in the wrong place for some other reason.
+        _ => {
+            error!("FVS_EMERGE_MAP_AT expects `x,z` or `x,y,z`, got `{s}`");
+            None
+        }
     }
 }
 
@@ -142,6 +177,17 @@ mod tests {
         });
         let err = EmergeWorld::new(library, map, vocab).err().unwrap_or_default();
         assert!(err.contains("does not define"), "{err}");
+    }
+
+    #[test]
+    fn the_placement_override_takes_two_or_three_numbers() {
+        assert_eq!(parse_at("10, -4"), Some((10.0, 0.0, -4.0)));
+        assert_eq!(parse_at("10,2,-4"), Some((10.0, 2.0, -4.0)));
+        assert_eq!(parse_at(" 1024 , 1024 "), Some((1024.0, 0.0, 1024.0)));
+        // A mistyped override must not quietly do nothing.
+        assert_eq!(parse_at("nowhere"), None);
+        assert_eq!(parse_at("1"), None);
+        assert_eq!(parse_at("1,2,3,4"), None);
     }
 
     /// The env var takes a NAME and is forced into the same spelling the editor uses, so a map saved

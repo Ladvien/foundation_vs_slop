@@ -133,18 +133,28 @@ impl Plugin for EmergePlugin {
     }
 }
 
-/// Where a piece's origin goes for a map position — **the** arithmetic, used by the editor's preview
-/// and by the game, so a map cannot look different in the two.
-pub fn origin_of(d: &Descriptor, at: (f32, f32), floor_y: f32) -> Vec3 {
+/// Where a piece's origin goes in the world — **the** arithmetic, used by the editor's preview and by
+/// the game, so a map cannot look different in the two.
+///
+/// # Map space is not world space
+///
+/// `Placed::at` is *"position in map space"* and `Map::origin` is *"where this map sits in the world:
+/// the centre of its floor"*. The first version added only the origin's Y and used `at` directly for
+/// X and Z, which is correct for exactly one map — the one at the origin — and silently wrong for
+/// every other. The editor authors at `(0, 0, 0)` so nothing showed it.
+///
+/// A map is a thing you place, not a thing that is already placed, and the whole point of the field
+/// is dropping the same authored room into two different corners of a level.
+pub fn origin_of(d: &Descriptor, at: (f32, f32), map_origin: (f32, f32, f32)) -> Vec3 {
     let lift = match &d.mount {
         Some(Mount::OnWall { height }) => *height,
         Some(Mount::OnCeiling) => 2.4,
         _ => 0.0,
     };
     Vec3::new(
-        at.0,
-        floor_y + lift + d.align.y_offset.unwrap_or(0.0),
-        at.1,
+        map_origin.0 + at.0,
+        map_origin.1 + lift + d.align.y_offset.unwrap_or(0.0),
+        map_origin.2 + at.1,
     )
 }
 
@@ -168,7 +178,7 @@ pub fn spawn_descriptor(
     masks: Masks,
     at: (f32, f32),
     yaw: f32,
-    floor_y: f32,
+    map_origin: (f32, f32, f32),
 ) -> Option<Entity> {
     let mesh = d.mesh.as_ref()?;
     let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
@@ -180,7 +190,7 @@ pub fn spawn_descriptor(
                 Name::new(d.id.clone()),
                 OfDescriptor(d.id.clone()),
                 Tags(masks),
-                Transform::from_translation(origin_of(d, at, floor_y))
+                Transform::from_translation(origin_of(d, at, map_origin))
                     .with_rotation(Quat::from_rotation_y(draw_yaw(d, yaw).to_radians()))
                     // Y is scaled separately: `stretch_y` is a project's architecture policy layered
                     // over the mesh's measured height, not an art correction.
@@ -194,7 +204,7 @@ pub fn spawn_descriptor(
 
 /// Spawn every placement in the map.
 fn spawn_world(mut commands: Commands, assets: Res<AssetServer>, world: Res<EmergeWorld>) {
-    let floor_y = world.map.origin.1;
+    let origin = world.map.origin;
     let mut spawned = 0usize;
     for p in &world.map.placements {
         let Some((d, masks)) = world.entry(&p.descriptor) else {
@@ -202,7 +212,7 @@ fn spawn_world(mut commands: Commands, assets: Res<AssetServer>, world: Res<Emer
             warn!("`{}` names undefined descriptor `{}`", p.id, p.descriptor);
             continue;
         };
-        if let Some(e) = spawn_descriptor(&mut commands, &assets, d, masks, p.at, p.yaw, floor_y) {
+        if let Some(e) = spawn_descriptor(&mut commands, &assets, d, masks, p.at, p.yaw, origin) {
             commands.entity(e).insert(Placement(p.id.clone()));
             spawned += 1;
         }
@@ -298,12 +308,37 @@ mod tests {
     fn the_mount_decides_the_height_above_the_maps_floor() {
         let mut floor = descriptor("crate");
         floor.mount = Some(Mount::OnFloor);
-        assert_eq!(origin_of(&floor, (2.0, 3.0), 0.0), Vec3::new(2.0, 0.0, 3.0));
-        assert_eq!(origin_of(&floor, (2.0, 3.0), 10.0), Vec3::new(2.0, 10.0, 3.0));
+        assert_eq!(
+            origin_of(&floor, (2.0, 3.0), (0.0, 0.0, 0.0)),
+            Vec3::new(2.0, 0.0, 3.0)
+        );
+        assert_eq!(
+            origin_of(&floor, (2.0, 3.0), (0.0, 10.0, 0.0)),
+            Vec3::new(2.0, 10.0, 3.0)
+        );
 
         let mut sconce = descriptor("sconce");
         sconce.mount = Some(Mount::OnWall { height: 1.8 });
-        assert_eq!(origin_of(&sconce, (0.0, 0.0), 10.0).y, 11.8);
+        assert_eq!(origin_of(&sconce, (0.0, 0.0), (0.0, 10.0, 0.0)).y, 11.8);
+    }
+
+    /// **A map is a thing you place.** `at` is map space and `origin` is where that space sits in the
+    /// world, so the same authored room dropped in two corners of a level lands in two corners.
+    ///
+    /// The first version added only the origin's Y and used `at` directly for X and Z — correct for
+    /// exactly one map, the one at the origin, which is the only one the editor ever authors.
+    #[test]
+    fn a_map_origin_moves_the_whole_map_on_every_axis() {
+        let mut d = descriptor("crate");
+        d.mount = Some(Mount::OnFloor);
+        assert_eq!(
+            origin_of(&d, (2.0, 3.0), (100.0, 5.0, -50.0)),
+            Vec3::new(102.0, 5.0, -47.0)
+        );
+        // And the offset is uniform: two pieces keep their spacing wherever the map goes.
+        let a = origin_of(&d, (0.0, 0.0), (100.0, 0.0, -50.0));
+        let b = origin_of(&d, (4.0, 1.0), (100.0, 0.0, -50.0));
+        assert_eq!(b - a, Vec3::new(4.0, 0.0, 1.0));
     }
 
     /// `y_offset` is a geometric correction and stacks with the mount's lift rather than replacing it.
@@ -315,6 +350,6 @@ mod tests {
             y_offset: Some(-0.06),
             ..Align::default()
         };
-        assert!((origin_of(&grate, (0.0, 0.0), 0.0).y + 0.06).abs() < 1e-6);
+        assert!((origin_of(&grate, (0.0, 0.0), (0.0, 0.0, 0.0)).y + 0.06).abs() < 1e-6);
     }
 }

@@ -19,7 +19,6 @@ use bevy::camera::visibility::ViewVisibility;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
-use emerge_core::descriptor::Mount;
 use emerge_core::map::Placed;
 
 use crate::keys::{self, Action, Context};
@@ -1022,6 +1021,7 @@ fn spawn_piece(
     d: &emerge_core::descriptor::Descriptor,
     at: (f32, f32),
     yaw: f32,
+    origin: (f32, f32, f32),
 ) -> Option<Entity> {
     emerge_bevy::spawn_descriptor(
         commands,
@@ -1032,7 +1032,8 @@ fn spawn_piece(
         emerge_core::vocab::Masks::default(),
         at,
         yaw,
-        0.0,
+        // The editor authors in the map's own space, so the origin it draws at is the map's own.
+        origin,
     )
 }
 
@@ -1048,7 +1049,7 @@ fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res
             );
             continue;
         };
-        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw) {
+        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, project.map.origin) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -1099,7 +1100,7 @@ fn place_on_click(
     project.dirty = true;
     state.undo.push(Undo::Added { count: 1 });
 
-    if let Some(e) = spawn_piece(&mut commands, &assets, &d, at, state.brush_yaw) {
+    if let Some(e) = spawn_piece(&mut commands, &assets, &d, at, state.brush_yaw, project.map.origin) {
         commands.entity(e).insert(Placement(id.clone()));
     }
     state.status = format!("placed {id} at ({}, {})", at.0, at.1);
@@ -1279,7 +1280,7 @@ fn undo(
         }
         Undo::Removed { index, placed: p } => {
             if let Some(d) = project.library.get(&p.descriptor).cloned() {
-                if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw) {
+                if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw, project.map.origin) {
                     commands.entity(e).insert(Placement(p.id.clone()));
                 }
             }
@@ -1458,7 +1459,7 @@ fn generate(
     let count = solved.placements.len();
     for p in solved.placements {
         if let Some(d) = project.library.get(&p.descriptor).cloned() {
-            if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw) {
+            if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw, project.map.origin) {
                 commands.entity(e).insert(Placement(p.id.clone()));
             }
         }
@@ -1518,7 +1519,7 @@ fn flood_from_cursor(
 
     let count = filled.placements.len();
     for p in filled.placements {
-        if let Some(e) = spawn_piece(commands, assets, &brush, p.at, p.yaw) {
+        if let Some(e) = spawn_piece(commands, assets, &brush, p.at, p.yaw, project.map.origin) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
         project.map.placements.push(p);
@@ -1597,12 +1598,12 @@ fn drive_ghost(
     match existing {
         Some(e) => {
             if let Ok(mut tf) = transforms.get_mut(e) {
-                tf.translation = emerge_bevy::origin_of(d, at, 0.0);
+                tf.translation = emerge_bevy::origin_of(d, at, project.map.origin);
                 tf.rotation = Quat::from_rotation_y(yaw.to_radians());
             }
         }
         None => {
-            if let Some(e) = spawn_piece(&mut commands, &assets, d, at, state.brush_yaw) {
+            if let Some(e) = spawn_piece(&mut commands, &assets, d, at, state.brush_yaw, project.map.origin) {
                 commands.entity(e).insert((Ghost, GhostOf(state.brush)));
             }
         }
