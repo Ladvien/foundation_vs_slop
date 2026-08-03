@@ -295,7 +295,7 @@ pub(crate) struct AudioAssets {
 /// by their group gain × the duck factor each frame. Master + mute stay on `GlobalVolume`.
 #[derive(Resource)]
 pub(crate) struct AudioBus {
-    music: f32,
+    pub(crate) music: f32,
     pub(crate) ambience: f32,
     pub(crate) sfx: f32,
     ui: f32,

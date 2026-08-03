@@ -1,3 +1,9 @@
+// The module under test is `#[cfg(debug_assertions)]`, so in a **release** test build it does not
+// exist and every path below fails to resolve. This file has to carry the same gate or it breaks the
+// release job — which is exactly how it shipped broken: `cargo test` runs the dev profile, so the
+// gap was invisible locally and only the `determinism (release profile)` CI job saw it.
+#![cfg(debug_assertions)]
+
 //! **The Site editor's writer contract** — that editing `site67.ron` in-game cannot damage it.
 //!
 //! GPU-free and `App`-free, so these run in the `cargo test` hard gate on every push.
