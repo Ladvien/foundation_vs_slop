@@ -1,8 +1,14 @@
 //! **The editor's chrome** — the palette, the fault list, and the status line.
 //!
 //! Built the way `research_room::editor` builds its palette: stock `bevy_ui` plus `ui::widgets`,
-//! spawned and despawned on toggle rather than hidden, at `Z_MENU` with a `TabGroup` so the shared
-//! menu systems give it hover tint and keyboard navigation for free.
+//! spawned and despawned on toggle rather than hidden, at `Z_MENU`.
+//!
+//! # It is deliberately NOT a menu
+//!
+//! It has no `TabGroup` and its rows are not `MenuButton`s, so `ui::widgets`' shared menu systems
+//! never take `InputFocus` from it. They otherwise would: `W`/`S` are bound to `MenuUp`/`MenuDown`, so
+//! a focusable panel silently ate the camera pan keys the moment it opened. The cost is that hover
+//! tinting is this module's own job ([`style_palette`]) rather than free.
 //!
 //! # One observer, not forty-five
 //!
@@ -23,13 +29,13 @@
 //! * `Val::Px` is scaled by `UiScale`; `text_colored` emits `FontSize::Rem`, so the panel follows the
 //!   accessibility text-scale setting without doing anything.
 
-use bevy::input_focus::tab_navigation::TabGroup;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea};
 
 use crate::site::pieces::SitePiece;
 use crate::ui::theme::{FontAssets, UiTheme, Z_MENU};
-use crate::ui::widgets::{button_visual, panel, text, text_colored};
+use crate::ui::widgets::{border_all, panel, text, text_colored};
 
 use super::EditorState;
 
@@ -79,13 +85,14 @@ pub fn spawn(
         ..default()
     };
 
+    // **No `TabGroup`, and the palette rows are not `MenuButton`s.** The shared menu systems
+    // (`ui::widgets::menu_keyboard_nav`, `focus_hovered_menu_button`) treat any `TabGroup` of
+    // `MenuButton`s as a navigable menu: they seed `InputFocus` onto the first row, and `W`/`S` are
+    // bound to `MenuUp`/`MenuDown`. Building this panel out of `button_visual` therefore ate the
+    // camera pan keys and Space/Enter the moment it opened. This is an editor, not a menu — the
+    // keyboard belongs to the world.
     commands
-        .spawn((
-            EditorRoot,
-            panel(theme, root),
-            GlobalZIndex(Z_MENU),
-            TabGroup::new(0),
-        ))
+        .spawn((EditorRoot, panel(theme, root), GlobalZIndex(Z_MENU)))
         .with_children(|p| {
             p.spawn(text_colored(
                 theme,
@@ -99,9 +106,9 @@ pub fn spawn(
             p.spawn(text_colored(
                 theme,
                 fonts,
-                "F7 close · drag to move · [ ] rotate\n\
-                 G gizmo mode · R translate/rotate · Del delete\n\
-                 Ctrl+Z undo · Ctrl+Y redo · Ctrl+S save",
+                "click a piece, then click the floor to place it\n\
+                 [ ] turn it · drag to move · Del delete\n\
+                 F7 close · G gizmo · Ctrl+Z undo · Ctrl+S save",
                 theme.font_body * 0.8,
                 theme.text_muted,
             ));
@@ -157,13 +164,15 @@ pub fn spawn(
                 // the kit is organised rather than the way the enum happens to be declared.
                 for piece in SitePiece::ALL {
                     let thumb = thumbs.and_then(|t| t.image(*piece));
-                    list.spawn((button_visual(theme), PaletteEntry(*piece)))
-                        // `button_visual` already carries a `Node` (min-width 220 px, centred — sized
-                        // for a menu button). Passing a second one in the same bundle is a **panic**,
-                        // not an override: Bevy rejects a bundle with duplicate components. Inserting
-                        // afterwards replaces it, which is what "a narrower button" actually means.
-                        .insert(Node {
-                            min_width: Val::Px(0.0),
+                    list.spawn((
+                        // `ui_widgets::Button` for the click, `Hovered` for the tint — but NOT
+                        // `ui::widgets::button_visual`, which also brings `MenuButton` + `TabIndex`
+                        // and would hand this panel to the menu keyboard systems. See the note on the
+                        // root above.
+                        bevy::ui_widgets::Button,
+                        Hovered::default(),
+                        PaletteEntry(*piece),
+                        Node {
                             width: Val::Percent(100.0),
                             padding: UiRect::axes(
                                 Val::Px(theme.space_sm),
@@ -172,7 +181,10 @@ pub fn spawn(
                             justify_content: JustifyContent::FlexStart,
                             align_items: AlignItems::Center,
                             ..default()
-                        })
+                        },
+                        BackgroundColor(theme.panel),
+                        border_all(theme.panel_border),
+                    ))
                         .with_children(|b| {
                             // The preview. A fixed-size box whether or not the bake has reached this
                             // piece yet, so rows never reflow as the thumbnails arrive.
@@ -213,6 +225,30 @@ pub fn on_palette_click(
     state.status = format!("{:?} armed — click the floor to place", entry.0);
 }
 
+/// Tint a palette row on hover, and mark the armed one.
+///
+/// `ui::widgets::style_menu_buttons` does this for `MenuButton`s, which these deliberately are not
+/// (see [`spawn`]), so the panel supplies its own. It also shows which piece is armed — the palette
+/// is a mode selector, and a mode you cannot see is one you forget you are in.
+pub fn style_palette(
+    state: Res<EditorState>,
+    mut rows: Query<(&PaletteEntry, &Hovered, &mut BackgroundColor)>,
+    theme: Res<UiTheme>,
+) {
+    for (entry, hovered, mut bg) in &mut rows {
+        let want = if entry.0 == state.brush {
+            theme.panel_border.with_alpha(0.55)
+        } else if hovered.0 {
+            theme.panel_border.with_alpha(0.30)
+        } else {
+            theme.panel
+        };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+}
+
 /// Repaint the status and mode lines. Cheap enough to run every frame, and guarded so it only writes
 /// when the text actually changes — the same shape as `research_room::editor::refresh_quantity_label`.
 pub fn refresh_labels(
@@ -238,8 +274,9 @@ pub fn refresh_labels(
             None => "none".to_owned(),
         };
         let want = format!(
-            "brush {:?}  ·  selected {sel}  ·  {}",
+            "{:?} at {}\u{00b0}  ·  selected {sel}  ·  {}",
             state.brush,
+            state.brush_yaw,
             if state.gizmo_mode { "GIZMO" } else { "DRAG" }
         );
         if t.0 != want {

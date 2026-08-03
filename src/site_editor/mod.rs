@@ -48,6 +48,7 @@
 //! every system on `Update`, and never registered in `sim_harness`.
 
 pub mod edit;
+pub mod ghost;
 pub mod gizmo;
 pub mod overlay;
 pub mod panel;
@@ -118,6 +119,11 @@ pub struct EditorState {
     pub drag: Drag,
     /// The piece a click on empty floor will place.
     pub brush: SitePiece,
+    /// The yaw that piece will be placed at. `[` / `]` turn it while nothing is selected, and the
+    /// ghost shows it — so a chair can be aimed *before* it exists rather than placed wrong and fixed.
+    pub brush_yaw: f32,
+    /// The music bus gain from before the editor opened, restored on close.
+    pub music_was: Option<f32>,
     /// Last thing that happened, shown in the panel.
     pub status: String,
     /// Whether the transform gizmo is driving the selection instead of ground drag.
@@ -137,6 +143,8 @@ impl Default for EditorState {
             hovered: None,
             drag: Drag::default(),
             brush: SitePiece::Crate,
+            brush_yaw: 0.0,
+            music_was: None,
             status: String::new(),
             gizmo_mode: false,
             panel_dirty: false,
@@ -206,6 +214,9 @@ impl Plugin for SiteEditorPlugin {
                         gizmo::commit_on_release,
                         panel::refresh_labels,
                         panel::refresh_faults,
+                        panel::style_palette,
+                        ghost::drive_ghost,
+                        ghost::fade_ghost,
                         draw_overlay,
                     )
                         // Chained: several of these take `ResMut<EditorState>`, so Bevy would
@@ -239,6 +250,7 @@ fn toggle_editor(
     cams: Option<Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>>,
     // Named `baked` rather than `thumbs` so it cannot shadow the module of that name.
     baked: Option<Res<thumbs::Thumbnails>>,
+    bus: Option<ResMut<crate::audio::AudioBus>>,
 ) {
     // Opening on arrival makes `FVS_SITE_EDITOR=1` a scriptable one-shot — launch and you are editing
     // — the same reason `research_room::enter_room_state` auto-clicks "NEW RUN". Unlike the Research
@@ -254,6 +266,10 @@ fn toggle_editor(
     if state.open {
         state.open = false;
         state.drag = Drag::Idle;
+        // Put the music back exactly as it was, rather than assuming it was at unity.
+        if let (Some(was), Some(mut bus)) = (state.music_was.take(), bus) {
+            bus.music = was;
+        }
         for e in &roots {
             commands.entity(e).despawn();
         }
@@ -277,6 +293,14 @@ fn toggle_editor(
                 return;
             }
         }
+    }
+    // Silence the adaptive music score while authoring. It is written to swell at threat and it has
+    // nothing to say about a room being dressed — a loop under an hour of furniture-nudging is a
+    // distraction, and the room tone is the part worth hearing anyway. Snapshotted, not zeroed-and-
+    // assumed, so closing the panel restores whatever it was.
+    if let Some(mut bus) = bus {
+        state.music_was = Some(bus.music);
+        bus.music = 0.0;
     }
     state.open = true;
     state.panel_dirty = true;
@@ -499,7 +523,29 @@ fn keyboard_edits(
         return;
     }
 
-    let Some(index) = state.selected else { return };
+    // Mode toggles come BEFORE the selection guard — needing a prop selected in order to switch
+    // manipulation mode is backwards, and it made `G` look broken on an empty selection.
+    if keys.just_pressed(KeyCode::KeyG) {
+        state.gizmo_mode = !state.gizmo_mode;
+    }
+
+    // `[` / `]` turn the SELECTION if there is one, otherwise the brush — so the key means "rotate
+    // the thing I am working on" either way, and a piece can be aimed before it is placed.
+    let turn = if keys.just_pressed(KeyCode::BracketRight) {
+        pick::YAW_STEP_DEG
+    } else if keys.just_pressed(KeyCode::BracketLeft) {
+        -pick::YAW_STEP_DEG
+    } else {
+        0.0
+    };
+
+    let Some(index) = state.selected else {
+        if turn != 0.0 {
+            state.brush_yaw = pick::snap_yaw(state.brush_yaw + turn);
+            state.status = format!("{:?} facing {}\u{00b0}", state.brush, state.brush_yaw);
+        }
+        return;
+    };
 
     if keys.just_pressed(KeyCode::Delete) {
         // Deleting a line that carries a comment destroys somebody's note, so say so rather than
@@ -518,13 +564,6 @@ fn keyboard_edits(
         return;
     }
 
-    let turn = if keys.just_pressed(KeyCode::BracketRight) {
-        pick::YAW_STEP_DEG
-    } else if keys.just_pressed(KeyCode::BracketLeft) {
-        -pick::YAW_STEP_DEG
-    } else {
-        0.0
-    };
     if turn != 0.0 {
         let Some(doc) = state.doc.as_ref() else { return };
         let Some(p) = doc.layout.props.get(index) else {
@@ -535,10 +574,6 @@ fn keyboard_edits(
             doc.move_prop(index, pos, yaw, kit)
         });
         sync_world(&mut state, &kit.0, &mut commands, &assets, &mut props);
-    }
-
-    if keys.just_pressed(KeyCode::KeyG) {
-        state.gizmo_mode = !state.gizmo_mode;
     }
 }
 
@@ -597,7 +632,7 @@ fn place_new(
     let prop = PropPlacement {
         piece,
         pos,
-        yaw: 0.0,
+        yaw: state.brush_yaw,
         waive: None,
     };
     commit(state, kit, |doc, kit| doc.insert_prop(prop, kit));
