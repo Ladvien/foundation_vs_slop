@@ -808,7 +808,7 @@ fn enemy_seek(
 /// form". Reads the reflex `SmileyState.mood` (`smiley_reflex`). Cosmetic → `Update`.
 #[allow(clippy::type_complexity)]
 fn update_smiley_faces(
-    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    camera: Single<&GlobalTransform, With<crate::MainCamera>>,
     enemies: Query<(&Transform, &Children, &SmileyState), With<Enemy>>,
     units: Query<&Transform, (With<Unit>, Without<Enemy>)>,
     mut faces: Query<

@@ -167,7 +167,7 @@ fn update_markers(
     time: Res<Time<Real>>,
     theme: Res<UiTheme>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>,
     zones: Query<(&ExtractionZone, &Transform)>,
     selected: Query<&Transform, (With<Unit>, With<Selected>)>,
     mut markers: Query<(&MarkerKind, &mut Node, &mut BackgroundColor)>,

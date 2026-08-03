@@ -321,7 +321,7 @@ fn run_pending_capture(
     mut state: ResMut<RegionCapture>,
     mut commands: Commands,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>,
     dungeon: Option<Res<Dungeon>>,
     cam_view: Option<Res<CameraView>>,
     app_state: Res<State<AppState>>,

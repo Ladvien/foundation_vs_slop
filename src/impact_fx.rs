@@ -146,7 +146,7 @@ fn drain_impacts(
     settings: Res<ImpactFxSettings>,
     assets: Res<ImpactAssets>,
     mut materials: ResMut<Assets<ImpactMaterial>>,
-    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
+    camera: Single<&GlobalTransform, With<crate::MainCamera>>,
     mut seed: Local<u32>,
 ) {
     if queue.0.is_empty() {

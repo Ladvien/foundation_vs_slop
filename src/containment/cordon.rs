@@ -87,7 +87,7 @@ fn preview_cordon(
     supply: Res<super::QuarantineSupply>,
     dungeon: Option<Res<crate::dungeon::Dungeon>>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform)>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
 ) {
     if *armed != ArmedTool::Quarantine || supply.0 == 0 {
         return;

@@ -247,7 +247,7 @@ fn toggle_editor(
     layout: Option<Res<SiteLayoutRes>>,
     kit: Option<Res<SiteKitRes>>,
     rig: Option<ResMut<crate::camera::CameraRig>>,
-    cams: Option<Query<&mut Transform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>>,
+    cams: Option<Query<&mut Transform, With<crate::MainCamera>>>,
     // Named `baked` rather than `thumbs` so it cannot shadow the module of that name.
     baked: Option<Res<thumbs::Thumbnails>>,
     bus: Option<ResMut<crate::audio::AudioBus>>,
@@ -349,7 +349,7 @@ fn enter_site_state(mut next: ResMut<NextState<AppState>>) {
 fn track_hover(
     mut state: ResMut<EditorState>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform)>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
     kit: Option<Res<SiteKitRes>>,
     ui_hover: Query<&Hovered>,
 ) {
@@ -374,7 +374,7 @@ fn drag_props(
     mut state: ResMut<EditorState>,
     mouse: Res<ButtonInput<MouseButton>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform)>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
     kit: Option<Res<SiteKitRes>>,
     capture: Res<crate::DebugCaptureActive>,
     ui_hover: Query<&Hovered>,
@@ -710,7 +710,7 @@ fn draw_overlay(
     theme: Res<UiTheme>,
     kit: Option<Res<SiteKitRes>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform)>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
 ) {
     let (Some(kit), Some(doc)) = (kit, state.doc.as_ref()) else {
         return;

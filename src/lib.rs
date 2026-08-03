@@ -195,6 +195,22 @@ pub struct ResearchRoomActive;
 #[derive(Resource)]
 pub struct SiteEditorActive;
 
+/// **The player's camera** — the one `camera::setup_camera` spawns, and the only one any gameplay or
+/// UI system means when it says "the camera".
+///
+/// Filtering on `With<Camera3d>` is not enough and never was, which cost a day to learn: adding
+/// `bevy::gizmos::transform_gizmo::TransformGizmoPlugin` makes `bevy_gizmos_render` spawn its **own**
+/// `Camera3d` at `order: 1` to draw the gizmo overlay layer. Every
+/// `Single<.., With<Camera3d>>` in the tree then matched two entities and — because `Single` *silently
+/// skips its system* rather than erroring — the audio listener, every billboard, `selection`'s
+/// click-to-command and `camera::drive_camera` all stopped at once, with no message anywhere. That is
+/// what "WASD does nothing and clicks do not land" turned out to be.
+///
+/// So the filter is **positive**: name the camera you mean. A future plugin may add a third camera;
+/// this stays correct.
+#[derive(Component)]
+pub struct MainCamera;
+
 /// Marks a camera that renders a **thumbnail**, not the player's view.
 ///
 /// The dev-only Site editor bakes a preview of every kit piece by staging it in a "photo booth" far

@@ -25,10 +25,10 @@
 //!
 //! # Why the camera carries [`crate::ThumbnailCamera`]
 //!
-//! Nine systems in this codebase take `Single<.., With<Camera3d>>`, and `Single` *silently skips its
-//! system* when there is not exactly one match. A second camera without that marker stops the audio
-//! listener, every billboard, and the camera controls, with no error anywhere. See the marker's own
-//! docs; every one of those queries now excludes it.
+//! Every camera-reading system in this tree filters on `crate::MainCamera` — a *positive* marker on
+//! the player's camera — because `With<Camera3d>` matches this one too, and `Single` silently skips
+//! its system rather than erroring. `ThumbnailCamera` is how *this* module finds its own camera back;
+//! it is not what protects everyone else. See `crate::MainCamera`.
 
 use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
 use bevy::image::Image;
@@ -288,8 +288,8 @@ fn spawn_camera(commands: &mut Commands, first_target: &Handle<Image>) -> Entity
     commands
         .spawn((
             Name::new("site editor thumbnail camera"),
-            // Without this marker, nine `Single<.., With<Camera3d>>` systems stop dead. See
-            // `crate::ThumbnailCamera`.
+            // How `bake` finds this camera again. What keeps it from breaking the rest of the game
+            // is that everything else filters positively on `crate::MainCamera`.
             crate::ThumbnailCamera,
             Camera3d::default(),
             Camera {

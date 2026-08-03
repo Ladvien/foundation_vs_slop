@@ -54,7 +54,7 @@ pub fn drive_ghost(
     layout: Option<Res<SiteLayoutRes>>,
     assets: Res<AssetServer>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform), Without<crate::ThumbnailCamera>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::MainCamera>>>,
     ghosts: Query<(Entity, &GhostPiece), With<Ghost>>,
     mut transforms: Query<&mut Transform, With<Ghost>>,
 ) {
