@@ -306,7 +306,10 @@ pub enum Modality {
 }
 
 /// An optional applicability condition on a constraint (an opaque token the compiler evaluates).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq`/`Eq` because `map::Interaction` carries one and wants to be comparable — this newtype
+/// is a `String`, so equality is exactly string equality and there is nothing to get wrong.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guard(pub String);
 
 /// A compiled rule: scope + predicate + modality + guard (the grammar decomposition, vetting §1/§7).
