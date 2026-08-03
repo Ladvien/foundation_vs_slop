@@ -82,6 +82,29 @@ pub struct ImportState {
     /// indexes candidates — the two lists are different things and one index into both would be a
     /// bug waiting for the first time their lengths differ.
     pub selected_library_id: Option<String>,
+    /// Packs the author has folded away.
+    pub folded_packs: std::collections::HashSet<String>,
+}
+
+/// Candidates grouped by the directory they came from, in scan order.
+///
+/// Scan order is sorted path order, so the groups come out stable across machines and never reorder
+/// — the same rule the palette follows and for the same reason (Samp 2011, via `docs/ui.md` §3.5).
+fn packs(candidates: &[Candidate]) -> Vec<(String, Vec<usize>)> {
+    let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+    for (ix, c) in candidates.iter().enumerate() {
+        let dir = c.mesh.rsplit_once('/').map_or(".", |(d, _)| d).to_owned();
+        match out.iter_mut().find(|(name, _)| *name == dir) {
+            Some((_, members)) => members.push(ix),
+            None => out.push((dir, vec![ix])),
+        }
+    }
+    out
+}
+
+/// The file name out of a path.
+fn leaf(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
 }
 
 impl ImportState {
@@ -159,6 +182,10 @@ impl Axis {
 #[derive(Component, Clone, Copy)]
 struct CandidateRow(usize);
 
+/// A pack heading in the candidate list. Clicking it folds the pack away.
+#[derive(Component, Clone)]
+struct PackHeader(String);
+
 /// One row for a tile already in the library, carrying its id.
 #[derive(Component, Clone)]
 struct LibraryRow(String);
@@ -200,6 +227,8 @@ const DIM: Color = Color::srgb(0.58, 0.56, 0.53);
 const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 const ACCENT: Color = Color::srgb(0.90, 0.66, 0.24);
 const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
+/// A group heading — quieter than a row, because it is a signpost.
+const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
 /// The measured footprint — what the placement rules reserve.
 const FOOTPRINT: Color = Color::srgb(0.35, 0.72, 0.85);
 /// The grid cells it occupies. Where this and the footprint differ is the tiling slack.
@@ -236,6 +265,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_tab_click)
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
+            .add_observer(on_pack_click)
             .add_observer(on_tag_chip);
     }
 }
@@ -849,6 +879,19 @@ fn move_selection(
     }
 }
 
+fn on_pack_click(
+    activate: On<Activate>,
+    headers: Query<&PackHeader>,
+    mut state: ResMut<ImportState>,
+) {
+    let Ok(header) = headers.get(activate.entity) else {
+        return;
+    };
+    if !state.folded_packs.remove(&header.0) {
+        state.folded_packs.insert(header.0.clone());
+    }
+}
+
 fn on_library_click(
     activate: On<Activate>,
     rows: Query<&LibraryRow>,
@@ -1079,7 +1122,62 @@ fn rebuild_candidates(
                 ));
                 return;
             }
-            for (ix, c) in state.candidates.iter().enumerate() {
+            // **Grouped by pack.** 319 rows is a list you scroll past; grouped by where they came
+            // from it is a dozen headings, and an author importing a kit wants that kit rather than
+            // an alphabet.
+            //
+            // The directory, not `kind` — a candidate has no `kind` yet, that being the thing import
+            // is FOR. The folder an artist put it in is the only categorisation that exists before
+            // anyone has looked at it, and it is usually the right one.
+            for (pack, members) in packs(&state.candidates) {
+                let folded = state.folded_packs.contains(&pack);
+                p.spawn((
+                    UiButton,
+                    Hovered::default(),
+                    PackHeader(pack.clone()),
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(6.0),
+                        margin: UiRect::top(Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(HEADER_BG),
+                ))
+                .with_children(|row| {
+                    row.spawn((
+                        Node {
+                            width: Val::Px(10.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new(if folded { ">" } else { "v" }),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                    row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        },
+                        Text::new(pack.clone()),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                    row.spawn((
+                        Text::new(format!("{}", members.len())),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                });
+                if folded {
+                    continue;
+                }
+                for ix in members {
+                let Some(c) = state.candidates.get(ix) else {
+                    continue;
+                };
                 p.spawn((
                     UiButton,
                     Hovered::default(),
@@ -1122,11 +1220,14 @@ fn rebuild_candidates(
                             flex_grow: 1.0,
                             ..default()
                         },
-                        Text::new(c.mesh.clone()),
+                        // The file's own name, not the full path — the pack heading already said
+                        // where it came from, and repeating it on 145 rows is the same word 145 times.
+                        Text::new(leaf(&c.mesh)),
                         TextColor(TEXT),
                         TextFont::from_font_size(10.0),
                     ));
                 });
+                }
             }
         });
     }

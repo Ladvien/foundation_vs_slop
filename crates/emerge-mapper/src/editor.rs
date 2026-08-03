@@ -44,6 +44,13 @@ const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
 /// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
 const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
+/// A category heading — quieter than a row, because it is a signpost rather than a thing to click on
+/// most of the time.
+const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
+
+/// Where a descriptor with no `kind` goes. Named rather than hidden: an untagged piece is work to do,
+/// and a palette that quietly omitted it would be a palette missing pieces.
+const UNSORTED: &str = "unsorted";
 /// The map's edge. Dim enough not to compete with the grid, bright enough to find.
 const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
 
@@ -63,6 +70,11 @@ pub struct EditorState {
     pub status: String,
     /// Monotonic counter behind generated placement ids, so two crates never share a name.
     next_id: u32,
+    /// Categories the author has folded away.
+    ///
+    /// A set of names rather than a per-row flag: the grouping is derived from the library every
+    /// rebuild, so a flag stored on a row would be lost the moment the library changed.
+    collapsed: std::collections::HashSet<String>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -92,6 +104,7 @@ impl Default for EditorState {
             brush_yaw: 0.0,
             status: String::new(),
             next_id: 0,
+            collapsed: std::collections::HashSet::new(),
             renaming: None,
             undo: Vec::new(),
         }
@@ -147,6 +160,14 @@ impl Axis {
 /// The value text of one axis row, refreshed as the size changes.
 #[derive(Component, Clone, Copy)]
 struct SizeReadout(Axis);
+
+/// The node the palette is rebuilt into, so collapsing a category can redraw it.
+#[derive(Component)]
+struct PaletteList;
+
+/// A category header. Clicking it folds the group away.
+#[derive(Component, Clone)]
+struct CategoryHeader(String);
 
 /// A palette row, carrying its library index so one observer can serve all of them.
 #[derive(Component, Clone, Copy)]
@@ -225,12 +246,18 @@ impl Plugin for EditorPlugin {
                     fade_ghost,
                     style_rows,
                     refresh_status,
+                    rebuild_palette.run_if(
+                        resource_changed::<Project>
+                            .or(resource_changed::<EditorState>)
+                            .or(run_once),
+                    ),
                     refresh_size,
                     refresh_triangle_total,
                     draw_bounds,
                 ),
             )
             .add_observer(on_row_click)
+            .add_observer(on_category_click)
             .add_observer(on_size_nudge);
     }
 }
@@ -473,62 +500,179 @@ fn spawn_panel(
                 ..default()
             },
             ScrollArea::default(),
-        ))
-        .with_children(|list| {
-            for (ix, d) in project.library.descriptors.iter().enumerate() {
-                list.spawn((
+            PaletteList,
+        ));
+    });
+}
+
+/// **The palette, grouped.**
+///
+/// Forty-one rows is a list you scroll past; grouped by what a thing IS it becomes a handful of
+/// headings you can skip. The grouping is the `kind` axis of the project's own vocabulary rather than
+/// a second taxonomy invented for the panel — `docs/ui.md` §1.2 names over-informing as the failure
+/// mode, and two competing category systems is the version of that which also makes people wrong.
+///
+/// Categories appear in VOCABULARY order and never in frequency or recency order. Samp 2011, via
+/// §3.5: a menu's cost is paid at first sight, so fix positions permanently — a palette that
+/// reshuffles as a map fills is one nobody builds a memory of.
+fn rebuild_palette(
+    mut commands: Commands,
+    project: Res<Project>,
+    state: Res<EditorState>,
+    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
+    lists: Query<Entity, With<PaletteList>>,
+) {
+    for list in &lists {
+        commands.entity(list).despawn_related::<Children>();
+        commands.entity(list).with_children(|p| {
+            for (category, members) in categories(&project) {
+                let folded = state.collapsed.contains(&category);
+                p.spawn((
                     UiButton,
                     Hovered::default(),
-                    PaletteRow(ix),
+                    CategoryHeader(category.clone()),
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(6.0),
+                        margin: UiRect::top(Val::Px(4.0)),
                         ..default()
                     },
-                    BackgroundColor(ROW_BG),
+                    BackgroundColor(HEADER_BG),
                 ))
                 .with_children(|row| {
-                    // A fixed slot whether or not the bake has reached this piece, so arriving
-                    // thumbnails never reflow the list under the cursor.
-                    let mut slot = row.spawn((
+                    // A caret, so folded and unfolded differ by shape and not only by what is below
+                    // them — an encoding that survives being glanced at.
+                    row.spawn((
                         Node {
-                            width: Val::Px(THUMB_SLOT),
-                            height: Val::Px(THUMB_SLOT),
-                            margin: UiRect::right(Val::Px(8.0)),
+                            width: Val::Px(10.0),
                             flex_shrink: 0.0,
                             ..default()
                         },
-                        BackgroundColor(SLOT_BG),
+                        Text::new(if folded { ">" } else { "v" }),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
                     ));
-                    if let Some(image) = thumbs.as_ref().and_then(|t| t.image(ix)) {
-                        // `ImageNode::new`, never `default()` — the default is an invisible 1x1
-                        // transparent texture.
-                        slot.insert(ImageNode::new(image));
-                    }
                     row.spawn((
                         Node {
                             flex_grow: 1.0,
                             ..default()
                         },
-                        Text::new(d.id.clone()),
-                        TextColor(TEXT),
-                        TextFont::from_font_size(11.0),
-                    ));
-                    // **What this piece costs**, right where it is chosen. A palette that shows only
-                    // names makes the expensive asset indistinguishable from the cheap one until a
-                    // room is full of it — the shipped kit has a vending machine at 70,286 triangles
-                    // against a median of 1,526, and nothing anywhere said so.
-                    row.spawn((
-                        Text::new(brief_count(project.triangles.get(ix).copied().unwrap_or(0))),
-                        TextColor(cost_tint(project.triangles.get(ix).copied().unwrap_or(0))),
+                        Text::new(category.to_uppercase()),
+                        TextColor(LABEL),
                         TextFont::from_font_size(10.0),
-                        TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                    ));
+                    row.spawn((
+                        Text::new(format!("{}", members.len())),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
                     ));
                 });
+
+                if folded {
+                    continue;
+                }
+                for ix in members {
+                    let Some(d) = project.library.descriptors.get(ix) else {
+                        continue;
+                    };
+                    p.spawn((
+                        UiButton,
+                        Hovered::default(),
+                        PaletteRow(ix),
+                        Node {
+                            width: Val::Percent(100.0),
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(ROW_BG),
+                    ))
+                    .with_children(|row| {
+                        let mut slot = row.spawn((
+                            Node {
+                                width: Val::Px(THUMB_SLOT),
+                                height: Val::Px(THUMB_SLOT),
+                                margin: UiRect::right(Val::Px(8.0)),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            BackgroundColor(SLOT_BG),
+                        ));
+                        if let Some(image) = thumbs.as_ref().and_then(|t| t.image(ix)) {
+                            slot.insert(ImageNode::new(image));
+                        }
+                        row.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                ..default()
+                            },
+                            Text::new(d.id.clone()),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(11.0),
+                        ));
+                        let tris = project.triangles.get(ix).copied().unwrap_or(0);
+                        row.spawn((
+                            Text::new(brief_count(tris)),
+                            TextColor(cost_tint(tris)),
+                            TextFont::from_font_size(10.0),
+                            TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                        ));
+                    });
+                }
             }
         });
-    });
+    }
+}
+
+/// The library grouped by its primary `kind`, in vocabulary order.
+///
+/// A descriptor's FIRST kind token is its category. Most carry exactly one — the converter maps the
+/// old `category` field straight across — and for the few that carry several, the first is the one
+/// the author wrote first, which is a better guess at "what this mainly is" than any rule this
+/// function could invent.
+fn categories(project: &Project) -> Vec<(String, Vec<usize>)> {
+    let mut out: Vec<(String, Vec<usize>)> = project
+        .vocab
+        .kind
+        .names()
+        .map(|n| (n.to_owned(), Vec::new()))
+        .collect();
+    // A home for anything untagged, LAST — it is a to-do list, not a category, and putting it first
+    // would give the least useful group the most valuable position.
+    out.push((UNSORTED.to_owned(), Vec::new()));
+
+    for (ix, d) in project.library.descriptors.iter().enumerate() {
+        let key = d.kind.first().map(String::as_str).unwrap_or(UNSORTED);
+        match out.iter_mut().find(|(name, _)| name == key) {
+            Some((_, members)) => members.push(ix),
+            // A token the vocabulary does not have cannot reach here — `Library::resolve` refuses it
+            // at load — but grouping it visibly beats dropping the row from the palette entirely.
+            None => {
+                if let Some((_, members)) = out.iter_mut().find(|(name, _)| name == UNSORTED) {
+                    members.push(ix);
+                }
+            }
+        }
+    }
+    // Empty categories are noise: the vocabulary has sixteen and a project may use six.
+    out.retain(|(_, members)| !members.is_empty());
+    out
+}
+
+/// Fold or unfold a category.
+fn on_category_click(
+    activate: On<Activate>,
+    headers: Query<&CategoryHeader>,
+    mut state: ResMut<EditorState>,
+) {
+    let Ok(header) = headers.get(activate.entity) else {
+        return;
+    };
+    if !state.collapsed.remove(&header.0) {
+        state.collapsed.insert(header.0.clone());
+    }
 }
 
 /// One observer for the whole palette. `Activate` carries the entity, so the index lives on the row
