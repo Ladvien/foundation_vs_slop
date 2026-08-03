@@ -15,6 +15,7 @@
 //! had just put down while the ghost — the only thing on screen showing a facing — sat still.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::camera::visibility::ViewVisibility;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
@@ -47,6 +48,11 @@ const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
 
 /// Edge of a palette row's preview box, logical px.
 const THUMB_SLOT: f32 = 30.0;
+
+/// Scene triangle counts worth colouring. Not limits — this machine draws far more than either — but
+/// the points at which an author should know what they have built.
+const BUSY_SCENE: usize = 1_000_000;
+const HEAVY_SCENE: usize = 5_000_000;
 
 #[derive(Resource)]
 pub struct EditorState {
@@ -165,6 +171,10 @@ struct Ghosted;
 #[derive(Component)]
 struct StatusBlock;
 
+/// The live cost readout, bottom right.
+#[derive(Component)]
+struct TriangleTotal;
+
 /// One labelled row of the readout. A field per line, rather than one string with separators in it,
 /// because a separator is a thing the reader has to parse and a column is not.
 #[derive(Component, Clone, Copy, PartialEq)]
@@ -196,7 +206,13 @@ impl Plugin for EditorPlugin {
         app.init_resource::<EditorState>()
             .add_systems(
                 Startup,
-                (crate::thumbs::setup, spawn_panel, spawn_existing).chain(),
+                (
+                    crate::thumbs::setup,
+                    spawn_panel,
+                    spawn_cost_readout,
+                    spawn_existing,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -209,6 +225,7 @@ impl Plugin for EditorPlugin {
                     style_rows,
                     refresh_status,
                     refresh_size,
+                    refresh_triangle_total,
                     draw_bounds,
                 ),
             )
@@ -218,6 +235,36 @@ impl Plugin for EditorPlugin {
 }
 
 // ── chrome ───────────────────────────────────────────────────────────────────────────────────────
+
+/// The cost readout, in its own root anchored bottom right.
+///
+/// Separate from the panel rather than a row in it: it is about the *scene*, not about the tool, and
+/// it belongs where the eye goes last rather than in the middle of the controls.
+fn spawn_cost_readout(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(12.0),
+                bottom: Val::Px(10.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            GlobalZIndex(100),
+            // Nothing here is clickable, and a readout that eats clicks is a readout that steals the
+            // corner of the map underneath it.
+            Pickable::IGNORE,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextColor(TEXT_DIM),
+                TextFont::from_font_size(11.0),
+                TriangleTotal,
+            ));
+        });
+}
 
 fn spawn_panel(
     mut commands: Commands,
@@ -457,9 +504,23 @@ fn spawn_panel(
                         slot.insert(ImageNode::new(image));
                     }
                     row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        },
                         Text::new(d.id.clone()),
                         TextColor(TEXT),
                         TextFont::from_font_size(11.0),
+                    ));
+                    // **What this piece costs**, right where it is chosen. A palette that shows only
+                    // names makes the expensive asset indistinguishable from the cheap one until a
+                    // room is full of it — the shipped kit has a vending machine at 70,286 triangles
+                    // against a median of 1,526, and nothing anywhere said so.
+                    row.spawn((
+                        Text::new(brief_count(project.triangles.get(ix).copied().unwrap_or(0))),
+                        TextColor(cost_tint(project.triangles.get(ix).copied().unwrap_or(0))),
+                        TextFont::from_font_size(10.0),
+                        TextLayout::new(Justify::Right, LineBreak::NoWrap),
                     ));
                 });
             }
@@ -696,6 +757,85 @@ fn rename_keys(
             }
             _ => {}
         }
+    }
+}
+
+/// **Triangles actually drawn this frame**, bottom right.
+///
+/// Visible entities, not resident ones — the same distinction `perf_probe` draws in the game, and for
+/// the same reason: a culled mesh costs memory, not frame time, and mixing them is how you end up
+/// optimising the wrong thing. It is here because a flood fill can lay down 1,400 pieces in one
+/// keystroke, and the moment to notice that costs 40 million triangles is while it is happening.
+fn refresh_triangle_total(
+    drawn: Query<(&ViewVisibility, &Mesh3d)>,
+    meshes: Res<Assets<Mesh>>,
+    mut readout: Query<(&mut Text, &mut TextColor), With<TriangleTotal>>,
+) {
+    let total: usize = drawn
+        .iter()
+        .filter(|(v, _)| v.get())
+        .filter_map(|(_, m)| meshes.get(&m.0))
+        .map(|m| match m.indices() {
+            Some(i) => i.len() / 3,
+            None => m.count_vertices() / 3,
+        })
+        .sum();
+
+    let want = format!("{} tris drawn", with_thousands(total));
+    for (mut text, mut colour) in &mut readout {
+        if text.0 != want {
+            text.0 = want.clone();
+        }
+        let tint = if total > HEAVY_SCENE {
+            DANGER
+        } else if total > BUSY_SCENE {
+            ACCENT
+        } else {
+            TEXT_DIM
+        };
+        if colour.0 != tint {
+            colour.0 = tint;
+        }
+    }
+}
+
+/// A triangle count at a glance: `1.5k`, `70k`, `4.2M`. Exact numbers belong in the total at the
+/// bottom; a palette row needs an order of magnitude.
+fn brief_count(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        n if n < 1_000 => format!("{n}"),
+        n if n < 100_000 => format!("{:.1}k", n as f32 / 1_000.0),
+        n if n < 1_000_000 => format!("{}k", n / 1_000),
+        n => format!("{:.1}M", n as f32 / 1_000_000.0),
+    }
+}
+
+/// Group a number for reading. The total is meant to be compared against itself over time, so the
+/// digits matter.
+fn with_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A piece worth a second look before filling a room with it, and one worth a first look.
+///
+/// Calibrated on the shipped kit rather than picked: its median is 1,526 triangles and its
+/// second-densest piece is 7,996, so 20k is well clear of everything except the one genuine outlier.
+fn cost_tint(triangles: usize) -> Color {
+    if triangles > emerge_core::import::BUSY_TRIANGLES {
+        DANGER
+    } else if triangles > 5_000 {
+        ACCENT
+    } else {
+        LABEL
     }
 }
 

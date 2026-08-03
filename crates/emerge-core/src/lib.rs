@@ -33,6 +33,8 @@ pub mod convert;
 pub mod descriptor;
 pub mod geom;
 pub mod glb;
+pub mod grid;
+pub mod import;
 pub mod library;
 pub mod map;
 pub mod naming;

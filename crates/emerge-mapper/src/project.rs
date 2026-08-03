@@ -41,6 +41,13 @@ pub struct Project {
     pub map_path: PathBuf,
     /// Whether there are edits not yet on disk.
     pub dirty: bool,
+    /// Triangles per library entry, in library order.
+    ///
+    /// Measured at open from each GLB's JSON chunk — accessor counts only, no vertex data — rather
+    /// than stored in the descriptor. Triangle count is a fact about the *file*, so keeping it in the
+    /// schema would mean a number that silently goes stale the first time an artist re-exports. This
+    /// costs a few milliseconds and cannot be wrong.
+    pub triangles: Vec<usize>,
 }
 
 impl Project {
@@ -108,6 +115,18 @@ impl Project {
             map_path.display()
         );
 
+        let triangles = library
+            .descriptors
+            .iter()
+            .map(|d| {
+                d.mesh
+                    .as_deref()
+                    .map(|m| root.join("assets").join(m))
+                    .and_then(|path| emerge_core::glb::Glb::open(&path).ok())
+                    .map_or(0, |g| emerge_core::import::triangles(&g))
+            })
+            .collect();
+
         Ok(Project {
             root: root.to_path_buf(),
             vocab,
@@ -116,6 +135,7 @@ impl Project {
             map,
             map_path,
             dirty: false,
+            triangles,
         })
     }
 
