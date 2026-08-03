@@ -31,6 +31,7 @@
 
 pub mod descriptor;
 pub mod geom;
+pub mod glb;
 pub mod map;
 pub mod placement;
 pub mod rng;

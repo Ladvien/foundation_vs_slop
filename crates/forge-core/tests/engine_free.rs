@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 /// Everything `forge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
-const ALLOWED_DEPS: &[&str] = &["serde", "ron", "rand", "rand_chacha"];
+const ALLOWED_DEPS: &[&str] = &["serde", "serde_json", "ron", "rand", "rand_chacha"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
 /// `bevy_math`/`bevy_ecs` are caught as readily as `bevy`.
