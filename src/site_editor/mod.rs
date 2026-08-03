@@ -382,12 +382,28 @@ fn drag_props(
     assets: Res<AssetServer>,
     mut props: Query<(Entity, &mut PropIndex, &mut Transform)>,
 ) {
+    // Every early return below logs when it swallows a click. This is not scaffolding: "I clicked and
+    // nothing happened" is the report this tool will keep generating, and a silent guard turns that
+    // into an afternoon of guessing. It costs one bool per frame and prints only on a press.
+    let click = mouse.just_pressed(MouseButton::Left);
     // The region-capture tool owns the mouse while it is armed, exactly as every consumer in
     // `selection.rs` respects.
     if capture.0 {
+        if click {
+            info!("site editor: click ignored — the region-capture tool owns the mouse");
+        }
         return;
     }
+    // Report before destructuring — the `Single`s are not `Copy`, so the match moves them.
+    let (have_window, have_camera, have_kit) = (window.is_some(), camera.is_some(), kit.is_some());
     let (Some(window), Some(camera), Some(kit)) = (window, camera, kit) else {
+        if click {
+            info!(
+                "site editor: click ignored — window={have_window} main-camera={have_camera} \
+                 kit={have_kit}. A `Single` matching 0 or 2+ entities silently skips its system, \
+                 which is what a second camera in the world does to this."
+            );
+        }
         return;
     };
     let (cam, cam_tf) = *camera;
@@ -398,8 +414,16 @@ fn drag_props(
     // to mutate `state`. The alternative — holding `&doc` across the match — is what the borrow
     // checker refuses, and rightly: `commit` replaces the document wholesale.
     let (at, hit, dragged_yaw) = {
-        let Some(doc) = state.doc.as_ref() else { return };
+        let Some(doc) = state.doc.as_ref() else {
+            if click {
+                info!("site editor: click ignored — no document open");
+            }
+            return;
+        };
         let Some(at) = pick::cursor_layout_point(&doc.layout, &window, cam, cam_tf) else {
+            if click {
+                info!("site editor: click ignored — the cursor ray never met the ground plane");
+            }
             return;
         };
         let hit = pick::prop_at(&doc.layout, &kit.0, at)
@@ -413,9 +437,18 @@ fn drag_props(
 
     match state.drag {
         Drag::Idle => {
-            if !mouse.just_pressed(MouseButton::Left) || over_ui {
+            if !click {
                 return;
             }
+            if over_ui {
+                info!("site editor: click ignored — the cursor is over a UI control");
+                return;
+            }
+            info!(
+                "site editor: click at layout {at:?} — over {:?}, brush {:?}",
+                hit.map(|(i, p, _)| (i, p)),
+                state.brush
+            );
             match hit {
                 Some((index, piece, pos)) => {
                     // Grab offset, so the prop keeps its position under the cursor instead of
