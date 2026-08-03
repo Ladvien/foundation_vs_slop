@@ -29,7 +29,9 @@
 
 mod devshot;
 mod editor;
+mod fill;
 mod project;
+mod thumbs;
 mod view;
 
 use std::path::PathBuf;
@@ -86,6 +88,6 @@ fn main() {
         )
         .insert_resource(project)
         .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
-        .add_plugins((view::ViewPlugin, editor::EditorPlugin, devshot::DevShotPlugin))
+        .add_plugins((view::ViewPlugin, editor::EditorPlugin, thumbs::ThumbsPlugin, devshot::DevShotPlugin))
         .run();
 }

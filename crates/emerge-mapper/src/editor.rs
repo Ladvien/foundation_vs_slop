@@ -34,6 +34,18 @@ const ROW_ARMED: Color = Color::srgb(0.30, 0.28, 0.24);
 const TEXT: Color = Color::srgb(0.86, 0.84, 0.80);
 const TEXT_DIM: Color = Color::srgb(0.58, 0.56, 0.53);
 const ACCENT: Color = Color::srgb(0.90, 0.66, 0.24);
+/// The key column. Brighter than the description beside it, because the key is what you scan for.
+const KEY: Color = Color::srgb(0.74, 0.71, 0.66);
+/// The readout's label column — quieter than its value, which is the thing that changes.
+const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
+const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
+/// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
+const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
+/// The map's edge. Dim enough not to compete with the grid, bright enough to find.
+const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+
+/// Edge of a palette row's preview box, logical px.
+const THUMB_SLOT: f32 = 30.0;
 
 #[derive(Resource)]
 pub struct EditorState {
@@ -56,6 +68,56 @@ impl Default for EditorState {
     }
 }
 
+/// A map-size nudge button: which axis, and by how much.
+#[derive(Component, Clone, Copy)]
+struct SizeNudge {
+    axis: Axis,
+    delta: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    fn label(self) -> &'static str {
+        match self {
+            Axis::X => "X",
+            Axis::Y => "Y",
+            Axis::Z => "Z",
+        }
+    }
+    fn get(self, b: (f32, f32, f32)) -> f32 {
+        match self {
+            Axis::X => b.0,
+            Axis::Y => b.1,
+            Axis::Z => b.2,
+        }
+    }
+    fn set(self, b: &mut (f32, f32, f32), v: f32) {
+        match self {
+            Axis::X => b.0 = v,
+            Axis::Y => b.1 = v,
+            Axis::Z => b.2 = v,
+        }
+    }
+    /// One click of this axis. X and Z move in whole rooms; Y moves in half a storey, because a
+    /// ceiling is the one dimension an author tunes rather than lays out.
+    fn step(self) -> f32 {
+        match self {
+            Axis::X | Axis::Z => 4.0,
+            Axis::Y => 0.5,
+        }
+    }
+}
+
+/// The value text of one axis row, refreshed as the size changes.
+#[derive(Component, Clone, Copy)]
+struct SizeReadout(Axis);
+
 /// A palette row, carrying its library index so one observer can serve all of them.
 #[derive(Component, Clone, Copy)]
 struct PaletteRow(usize);
@@ -76,15 +138,41 @@ struct GhostOf(usize);
 #[derive(Component)]
 struct Ghosted;
 
+/// The readout block, so the whole thing can be found in one query.
 #[derive(Component)]
-struct StatusLine;
+struct StatusBlock;
+
+/// One labelled row of the readout. A field per line, rather than one string with separators in it,
+/// because a separator is a thing the reader has to parse and a column is not.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum Field {
+    Brush,
+    Yaw,
+    Map,
+    /// The last thing that happened — the only line that is prose.
+    Last,
+}
+
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Field::Brush => "BRUSH",
+            Field::Yaw => "YAW",
+            Field::Map => "MAP",
+            Field::Last => "",
+        }
+    }
+}
 
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
-            .add_systems(Startup, (spawn_panel, spawn_existing).chain())
+            .add_systems(
+                Startup,
+                (crate::thumbs::setup, spawn_panel, spawn_existing).chain(),
+            )
             .add_systems(
                 Update,
                 (
@@ -94,15 +182,22 @@ impl Plugin for EditorPlugin {
                     fade_ghost,
                     style_rows,
                     refresh_status,
+                    refresh_size,
+                    draw_bounds,
                 ),
             )
-            .add_observer(on_row_click);
+            .add_observer(on_row_click)
+            .add_observer(on_size_nudge);
     }
 }
 
 // ── chrome ───────────────────────────────────────────────────────────────────────────────────────
 
-fn spawn_panel(mut commands: Commands, project: Res<Project>) {
+fn spawn_panel(
+    mut commands: Commands,
+    project: Res<Project>,
+    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
+) {
     let root = commands
         .spawn((
             Node {
@@ -128,18 +223,169 @@ fn spawn_panel(mut commands: Commands, project: Res<Project>) {
             TextColor(ACCENT),
             TextFont::from_font_size(15.0),
         ));
-        p.spawn((
-            Text::new("click place  |  [ ] aim  |  Q/E turn view\nWASD pan  |  wheel zoom  |  Ctrl+S save"),
-            TextColor(TEXT_DIM),
-            TextFont::from_font_size(11.0),
-        ));
-        p.spawn((
-            Text::new(""),
-            TextColor(TEXT),
-            TextFont::from_font_size(12.0),
-            StatusLine,
-        ));
+        // **The keys, inline and in a column.** A run-on line of `a | b | c` is one long thing to
+        // read and it wraps unpredictably at any panel width; two aligned columns are a table, and
+        // the eye finds a row in it without reading the others. Marschner §27.7 on clutter — the
+        // first remedy is showing *less detail per item*, and a key needs exactly two facts.
+        p.spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(1.0),
+            margin: UiRect::top(Val::Px(2.0)),
+            ..default()
+        })
+        .with_children(|keys| {
+            for (chord, what) in [
+                ("click", "place"),
+                ("[ ]", "aim"),
+                ("F", "flood fill"),
+                ("Del", "remove"),
+                ("Q E", "turn view"),
+                ("WASD", "pan"),
+                ("wheel", "zoom"),
+                ("Ctrl+S", "save"),
+            ] {
+                keys.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        // A fixed key column is what makes it a table rather than two ragged lists.
+                        Node {
+                            width: Val::Px(58.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new(chord),
+                        TextColor(KEY),
+                        TextFont::from_font_size(11.0),
+                        // **No wrap.** A chord containing a space (`Q E`, `[ ]`) is one token to a
+                        // reader and two to a line-breaker, and letting it wrap turned three of these
+                        // rows into two-line entries with the description stranded underneath.
+                        TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                    ));
+                    row.spawn((
+                        Text::new(what),
+                        TextColor(TEXT_DIM),
+                        TextFont::from_font_size(11.0),
+                    ));
+                });
+            }
+        });
 
+        // The readout, in the same two columns as the keys so the whole panel shares one left edge.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(1.0),
+                margin: UiRect::top(Val::Px(6.0)),
+                ..default()
+            },
+            StatusBlock,
+        ))
+        .with_children(|s| {
+            for field in [Field::Brush, Field::Yaw, Field::Map, Field::Last] {
+                s.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Node {
+                            width: Val::Px(62.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new(field.label()),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                    ));
+                    row.spawn((
+                        Text::new(""),
+                        TextColor(TEXT),
+                        TextFont::from_font_size(11.0),
+                        field,
+                    ));
+                });
+            }
+        });
+
+        // **Map size.** Stated, adjustable, and drawn in the world — an edge nothing shows is an
+        // edge nobody believes. It is also what gives the flood fill somewhere to stop.
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                margin: UiRect::top(Val::Px(8.0)),
+                ..default()
+            },
+        ))
+        .with_children(|s| {
+            s.spawn((
+                Text::new("MAP SIZE  (m)"),
+                TextColor(LABEL),
+                TextFont::from_font_size(10.0),
+            ));
+            for axis in [Axis::X, Axis::Y, Axis::Z] {
+                s.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Node {
+                            width: Val::Px(14.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        Text::new(axis.label()),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(11.0),
+                    ));
+                    for (glyph, delta) in [("-", -axis.step()), ("+", axis.step())] {
+                        row.spawn((
+                            UiButton,
+                            Hovered::default(),
+                            SizeNudge { axis, delta },
+                            Node {
+                                width: Val::Px(18.0),
+                                justify_content: JustifyContent::Center,
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            BackgroundColor(ROW_BG),
+                        ))
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new(glyph),
+                                TextColor(KEY),
+                                TextFont::from_font_size(11.0),
+                            ));
+                        });
+                    }
+                    row.spawn((
+                        Text::new(""),
+                        TextColor(TEXT),
+                        TextFont::from_font_size(11.0),
+                        SizeReadout(axis),
+                    ));
+                });
+            }
+        });
+
+        p.spawn((
+            Text::new("PLACE"),
+            TextColor(LABEL),
+            TextFont::from_font_size(10.0),
+            Node {
+                margin: UiRect::top(Val::Px(8.0)),
+                ..default()
+            },
+        ));
         p.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
@@ -165,6 +411,23 @@ fn spawn_panel(mut commands: Commands, project: Res<Project>) {
                     BackgroundColor(ROW_BG),
                 ))
                 .with_children(|row| {
+                    // A fixed slot whether or not the bake has reached this piece, so arriving
+                    // thumbnails never reflow the list under the cursor.
+                    let mut slot = row.spawn((
+                        Node {
+                            width: Val::Px(THUMB_SLOT),
+                            height: Val::Px(THUMB_SLOT),
+                            margin: UiRect::right(Val::Px(8.0)),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        BackgroundColor(SLOT_BG),
+                    ));
+                    if let Some(image) = thumbs.as_ref().and_then(|t| t.image(ix)) {
+                        // `ImageNode::new`, never `default()` — the default is an invisible 1x1
+                        // transparent texture.
+                        slot.insert(ImageNode::new(image));
+                    }
                     row.spawn((
                         Text::new(d.id.clone()),
                         TextColor(TEXT),
@@ -193,6 +456,68 @@ fn on_row_click(
     }
 }
 
+/// Grow or shrink one axis. Clamped at one cell rather than at zero: a map has to enclose something,
+/// and `Map::validate` refuses a non-positive extent — better to stop at the floor than to write a
+/// map the save will then reject.
+fn on_size_nudge(
+    activate: On<Activate>,
+    nudges: Query<&SizeNudge>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    let Ok(nudge) = nudges.get(activate.entity) else {
+        return;
+    };
+    let mut bounds = project.map.bounds;
+    let want = (nudge.axis.get(bounds) + nudge.delta).max(nudge.axis.step());
+    nudge.axis.set(&mut bounds, want);
+    if bounds != project.map.bounds {
+        project.map.bounds = bounds;
+        project.dirty = true;
+        state.status = format!(
+            "map is {:.0} x {:.1} x {:.0} m",
+            bounds.0, bounds.1, bounds.2
+        );
+    }
+}
+
+fn refresh_size(project: Res<Project>, mut readouts: Query<(&SizeReadout, &mut Text)>) {
+    for (readout, mut text) in &mut readouts {
+        let v = readout.0.get(project.map.bounds);
+        // One decimal only where it earns it — "32" reads faster than "32.0", and Y is the axis that
+        // actually lands on halves.
+        let want = if (v - v.round()).abs() < 1e-3 {
+            format!("{v:.0}")
+        } else {
+            format!("{v:.1}")
+        };
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+}
+
+/// Draw the map's extent as a wireframe box.
+///
+/// Gizmos rather than a mesh: the bounds are a statement about the map, not a thing in it, and a real
+/// box would be pickable, shadow-casting, and something a click could land on.
+fn draw_bounds(project: Res<Project>, mut gizmos: Gizmos) {
+    let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
+    let (floor, ceiling) = project.map.height_span();
+    let (w, h, d) = project.map.bounds;
+    let centre = Vec3::new(
+        (min_x + max_x) * 0.5,
+        (floor + ceiling) * 0.5,
+        (min_z + max_z) * 0.5,
+    );
+    // `cube`, not `cuboid` — 0.19 spells it `Gizmos::cube` and takes a transform whose SCALE is
+    // the box's size (`bevy_gizmos-0.19.0/src/gizmos.rs:637`).
+    gizmos.cube(
+        Transform::from_translation(centre).with_scale(Vec3::new(w, h, d)),
+        BOUNDS_LINE,
+    );
+}
+
 fn style_rows(
     state: Res<EditorState>,
     mut rows: Query<(&PaletteRow, &Hovered, &mut BackgroundColor)>,
@@ -214,24 +539,43 @@ fn style_rows(
 fn refresh_status(
     project: Res<Project>,
     state: Res<EditorState>,
-    mut lines: Query<&mut Text, With<StatusLine>>,
+    mut fields: Query<(&Field, &mut Text, &mut TextColor)>,
 ) {
     let brush = project
         .library
         .descriptors
         .get(state.brush)
         .map(|d| d.id.as_str())
-        .unwrap_or("—");
-    let want = format!(
-        "{brush}  |  {} deg\n{} placed{}\n{}",
-        state.brush_yaw,
-        project.map.placements.len(),
-        if project.dirty { "  |  UNSAVED" } else { "" },
-        state.status
-    );
-    for mut t in &mut lines {
-        if t.0 != want {
-            t.0 = want.clone();
+        .unwrap_or("none");
+
+    for (field, mut text, mut colour) in &mut fields {
+        let (want, tint) = match field {
+            Field::Brush => (brush.to_owned(), TEXT),
+            Field::Yaw => (format!("{} deg", state.brush_yaw), TEXT),
+            Field::Map => (
+                if project.dirty {
+                    format!("{} placed, unsaved", project.map.placements.len())
+                } else {
+                    format!("{} placed", project.map.placements.len())
+                },
+                if project.dirty { ACCENT } else { TEXT },
+            ),
+            // A refusal has to read differently from a success, or "NOT SAVED" scrolls past as if it
+            // were a receipt.
+            Field::Last => (
+                state.status.clone(),
+                if state.status.starts_with("NOT SAVED") {
+                    DANGER
+                } else {
+                    TEXT_DIM
+                },
+            ),
+        };
+        if text.0 != want {
+            text.0 = want;
+        }
+        if colour.0 != tint {
+            colour.0 = tint;
         }
     }
 }
@@ -354,8 +698,14 @@ fn short_id(descriptor_id: &str) -> &str {
     descriptor_id.rsplit('/').next().unwrap_or(descriptor_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn keys(
+    mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
+    assets: Res<AssetServer>,
+    hovered_ui: Query<&Hovered>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
 ) {
@@ -377,6 +727,20 @@ fn keys(
         return;
     }
 
+    // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
+    // at the map's edge — see `crate::fill`.
+    if keyboard.just_pressed(KeyCode::KeyF) && !hovered_ui.iter().any(|h| h.0) {
+        flood_from_cursor(
+            &mut commands,
+            &assets,
+            window,
+            camera,
+            &mut project,
+            &mut state,
+        );
+        return;
+    }
+
     let step = if keyboard.just_pressed(KeyCode::BracketRight) {
         YAW_STEP
     } else if keyboard.just_pressed(KeyCode::BracketLeft) {
@@ -387,6 +751,68 @@ fn keys(
     if step != 0.0 {
         state.brush_yaw = (state.brush_yaw + step).rem_euclid(360.0);
     }
+}
+
+/// The `F` handler, split out so `keys` stays readable.
+fn flood_from_cursor(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+) {
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+        return;
+    };
+    let Some(brush) = project.library.descriptors.get(state.brush).cloned() else {
+        return;
+    };
+
+    let start_id = state.next_id;
+    let mut n = start_id;
+    let short = short_id(&brush.id).to_owned();
+    let filled = match crate::fill::flood(
+        &project.map,
+        &brush,
+        (hit.x, hit.z),
+        state.brush_yaw,
+        || {
+            n += 1;
+            format!("{short}@{n}")
+        },
+    ) {
+        Ok(f) => f,
+        // A refusal is the answer, not a failure: "outside the map" and "something is already here"
+        // are both things the author needs told rather than worked around.
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    state.next_id = n;
+
+    let count = filled.placements.len();
+    for p in filled.placements {
+        if let Some(e) = spawn_piece(commands, assets, &brush, p.at, p.yaw) {
+            commands.entity(e).insert(Placement(p.id.clone()));
+        }
+        project.map.placements.push(p);
+    }
+    project.dirty = true;
+    // A cap that stopped the fill has to say so — a truncated fill looks exactly like a finished one.
+    state.status = if filled.truncated {
+        format!(
+            "filled {count} and STOPPED at the {} cell cap — fill again to continue",
+            crate::fill::MAX_CELLS
+        )
+    } else {
+        format!("filled {count} with {}", brush.id)
+    };
 }
 
 // ── the ghost ────────────────────────────────────────────────────────────────────────────────────

@@ -56,12 +56,32 @@ use crate::placement::ir::Guard;
 pub const MAP_VERSION: u32 = 1;
 
 /// One authored world.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Map {
     pub version: u32,
-    /// World-space offset of the map's own origin.
+    /// Where this map sits in the world: **the centre of its floor.**
+    ///
+    /// X and Z are centred on it, Y runs upward from it. That asymmetry is the honest one — a map is
+    /// a floor plan with headroom, and nobody builds below the floor — and centring the horizontal
+    /// axes is what makes "a 32 metre map" mean 16 metres in every direction rather than a quadrant.
+    ///
+    /// Corner-at-origin was the first attempt and it failed the moment it was used: the editor opens
+    /// looking at the origin, so half the visible ground was outside the map and a flood fill aimed at
+    /// the middle of the screen was refused as out of bounds. The bug was the convention, not the fill.
     pub origin: (f32, f32, f32),
+    /// **How big this map is**, in metres on each axis, measured from [`Self::origin`].
+    ///
+    /// A map without a stated size is not a smaller map, it is a map with no edges — and an edge is
+    /// what several things need in order to be answerable. A flood fill needs somewhere to stop; a
+    /// generator needs a domain to solve over; a validator needs to be able to say a placement is
+    /// outside. Leaving it implicit makes each of those invent its own answer, which is how three
+    /// slightly different ideas of "the level" end up in one codebase.
+    ///
+    /// Y is real and not decoration: a map is a volume, because `Mount::OnWall` and `OnCeiling` put
+    /// things above the floor and the ceiling height is what decides where.
+    #[serde(default = "default_bounds")]
+    pub bounds: (f32, f32, f32),
     pub placements: Vec<Placed>,
     #[serde(default)]
     pub locations: Vec<Location>,
@@ -69,6 +89,33 @@ pub struct Map {
     /// docs on why this is a field rather than a comment.
     #[serde(default)]
     pub note: Option<String>,
+}
+
+impl Default for Map {
+    /// **A new, empty, valid map** — not a zeroed struct.
+    ///
+    /// The derived `Default` would give `version: 0` and zero bounds, which `validate` rejects on both
+    /// counts. An editor starts a map from this, so "default" has to mean something an author can
+    /// immediately work in rather than something they must first repair.
+    fn default() -> Self {
+        Map {
+            version: MAP_VERSION,
+            origin: (0.0, 0.0, 0.0),
+            bounds: default_bounds(),
+            placements: Vec::new(),
+            locations: Vec::new(),
+            note: None,
+        }
+    }
+}
+
+/// A new map's size before anyone has said otherwise: 32 m square and one storey, so an author opens
+/// on 16 m of workable ground in every direction.
+///
+/// Not zero. A zero-sized map is a map every placement is outside of, so the first thing an author
+/// would do is see every piece flagged — a default should be somewhere to start work, not a puzzle.
+fn default_bounds() -> (f32, f32, f32) {
+    (32.0, 4.0, 32.0)
 }
 
 /// One instance of a descriptor, somewhere.
@@ -207,7 +254,37 @@ impl Map {
         Ok(())
     }
 
+    /// The map's floor rectangle in world metres: `(min_x, min_z, max_x, max_z)`.
+    ///
+    /// One place computes this, because a convention re-derived at three call sites is a convention
+    /// that will disagree with itself at one of them.
+    pub fn floor_rect(&self) -> (f32, f32, f32, f32) {
+        let (hx, hz) = (self.bounds.0 * 0.5, self.bounds.2 * 0.5);
+        (
+            self.origin.0 - hx,
+            self.origin.2 - hz,
+            self.origin.0 + hx,
+            self.origin.2 + hz,
+        )
+    }
+
+    /// Floor and ceiling heights in world metres. Y runs upward from the origin, not either side of
+    /// it — see [`Self::origin`].
+    pub fn height_span(&self) -> (f32, f32) {
+        (self.origin.1, self.origin.1 + self.bounds.1)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        for (axis, v) in [("x", self.bounds.0), ("y", self.bounds.1), ("z", self.bounds.2)] {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(format!(
+                    "map: bounds.{axis} is {v}. A map has to enclose something — a non-positive \
+                     extent makes every placement out of bounds and leaves a flood fill nowhere to \
+                     stop."
+                ));
+            }
+        }
+
         if self.version != MAP_VERSION {
             return Err(format!(
                 "map: version {} but this build reads {MAP_VERSION} — refusing to load rather than \
@@ -297,6 +374,7 @@ mod tests {
         Map {
             version: MAP_VERSION,
             origin: (0.0, 0.0, 0.0),
+            bounds: default_bounds(),
             placements: vec![
                 Placed {
                     id: "table_1".into(),
