@@ -72,6 +72,8 @@ pub enum Action {
     Fill,
     Remove,
     RenameMap,
+    OwnToggle,
+    Generate,
     PanForward,
     PanBack,
     PanLeft,
@@ -115,6 +117,8 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     b(Action::Remove, KeyCode::Delete, false, Context::Map, "Del", "remove"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
+    b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
+    b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
     // Declared W, A, S, D rather than W, S, A, D: the displayed row is these chords in order, and
     // "W, A, S, D" is how the shape is named everywhere. The census's order IS the reading order.
     b(Action::PanForward, KeyCode::KeyW, false, Context::Map, "W", "pan"),
@@ -246,6 +250,7 @@ mod tests {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::Save, Action::Undo,
             Action::AimLeft, Action::AimRight, Action::Fill, Action::Remove, Action::RenameMap,
+            Action::OwnToggle, Action::Generate,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleLayer,

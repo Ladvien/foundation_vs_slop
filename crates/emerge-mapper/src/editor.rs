@@ -70,11 +70,21 @@ pub struct EditorState {
     pub status: String,
     /// Monotonic counter behind generated placement ids, so two crates never share a name.
     next_id: u32,
+    /// Advanced on every solve, so pressing `G` twice offers a different arrangement rather than the
+    /// same one — a generator that cannot be asked again is one you have to undo to disagree with.
+    seed: u64,
     /// Categories the author has folded away.
     ///
     /// A set of names rather than a per-row flag: the grouping is derived from the library every
     /// rebuild, so a flag stored on a row would be lost the moment the library changed.
     collapsed: std::collections::HashSet<String>,
+    /// A pin waiting for its reason: the placement index, and what has been typed so far.
+    ///
+    /// `Placed::owned_because` is *a reason, never a bool*, on the schema's own argument: a bool lets
+    /// "I could not be bothered" and "this is the cell block's only entrance" look identical in a
+    /// diff. A canned reason supplied by the editor would be that bool wearing a sentence, so pinning
+    /// asks.
+    pinning: Option<(usize, String)>,
     /// The raw text being typed into the name, or `None` when not renaming.
     ///
     /// Raw, with the snake_case spelling applied for display and on commit — so a backspace undoes a
@@ -104,7 +114,9 @@ impl Default for EditorState {
             brush_yaw: 0.0,
             status: String::new(),
             next_id: 0,
+            seed: 1,
             collapsed: std::collections::HashSet::new(),
+            pinning: None,
             renaming: None,
             undo: Vec::new(),
         }
@@ -240,6 +252,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     rename_keys,
+                    pin_reason_keys,
                     keys.run_if(not_renaming).run_if(in_map_mode),
                     place_on_click.run_if(not_renaming).run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
@@ -835,7 +848,7 @@ fn refresh_status(
 /// a resource some *other* plugin owns must take the option. Worth stating next to the one place that
 /// legitimately does not.
 fn not_renaming(state: Res<EditorState>) -> bool {
-    state.renaming.is_none()
+    state.renaming.is_none() && state.pinning.is_none()
 }
 
 /// Placing belongs to map mode. Without this, `F` in import mode would flood the map with whatever
@@ -1157,6 +1170,19 @@ fn keys(
         return;
     }
 
+    // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
+    if keys::just_pressed(&keyboard, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
+        toggle_pin(window, camera, &mut project, &mut state);
+        return;
+    }
+
+    // **G continues the layout.** Learn the grammar from what is already placed, then fill the free
+    // cells with more of it — see `emerge_core::grammar`.
+    if keys::just_pressed(&keyboard, Action::Generate) {
+        generate(&mut commands, &assets, &mut project, &mut state, &placed);
+        return;
+    }
+
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
     if keys::just_pressed(&keyboard, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
@@ -1278,6 +1304,186 @@ fn undo(
         }
     }
     project.dirty = true;
+}
+
+/// Pin or unpin the placement nearest the cursor.
+///
+/// Unpinning is immediate; pinning asks for a reason first, because that is what the field is for.
+fn toggle_pin(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+) {
+    let Some(index) = nearest_placement(window, camera, project, state) else {
+        state.status = "nothing here to pin".to_owned();
+        return;
+    };
+    let Some(p) = project.map.placements.get_mut(index) else {
+        return;
+    };
+    if p.owned {
+        p.owned = false;
+        p.owned_because = None;
+        project.dirty = true;
+        state.status = format!("unpinned {}", p.id);
+    } else {
+        let id = p.id.clone();
+        state.pinning = Some((index, String::new()));
+        state.status = format!("why is {id} pinned? Enter to keep it, Esc to cancel");
+    }
+}
+
+/// The placement nearest the cursor, within a brush cell — shared by pin and delete so "the thing I
+/// am pointing at" means one distance rather than two.
+fn nearest_placement(
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &Project,
+    state: &EditorState,
+) -> Option<usize> {
+    let (window, camera) = (window?, camera?);
+    let (cam, cam_tf) = *camera;
+    let hit = cursor_ground(&window, cam, cam_tf)?;
+    let reach = project
+        .library
+        .descriptors
+        .get(state.brush)
+        .map(|d| crate::fill::cell_extents(d, state.brush_yaw))
+        .map(|(x, z)| x.max(z))
+        .unwrap_or(crate::fill::MIN_CELL);
+
+    let mut best: Option<(usize, f32)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let d2 = (p.at.0 - hit.x).powi(2) + (p.at.1 - hit.z).powi(2);
+        if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
+            best = Some((i, d2));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Type the reason a cell is pinned.
+fn pin_reason_keys(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    if state.pinning.is_none() {
+        return;
+    }
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some((index, reason)) = state.pinning.take() else {
+                    return;
+                };
+                let reason = reason.trim().to_owned();
+                if reason.is_empty() {
+                    state.status = "a pin needs a reason; nothing was pinned".to_owned();
+                    return;
+                }
+                let pinned_id = project.map.placements.get_mut(index).map(|p| {
+                    p.owned = true;
+                    p.owned_because = Some(reason.clone());
+                    p.id.clone()
+                });
+                if let Some(id) = pinned_id {
+                    project.dirty = true;
+                    state.status = format!("pinned {id}: {reason}");
+                }
+            }
+            Key::Escape => {
+                state.pinning = None;
+                state.status = "nothing pinned".to_owned();
+            }
+            Key::Backspace => {
+                if let Some((_, r)) = state.pinning.as_mut() {
+                    r.pop();
+                }
+            }
+            Key::Space => {
+                if let Some((_, r)) = state.pinning.as_mut() {
+                    r.push(' ');
+                }
+            }
+            Key::Character(c) => {
+                if let Some((_, r)) = state.pinning.as_mut() {
+                    r.push_str(c);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// **Continue the author's arrangement.** Learn, solve, replace the unpinned pieces.
+fn generate(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+) {
+    // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
+    // solver finishes rather than 4,096 cells of half-metre noise.
+    const CELL: f32 = 1.0;
+
+    let grammar = match emerge_core::grammar::learn(&project.map, CELL) {
+        Ok(g) => g,
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    state.seed = state.seed.wrapping_add(1);
+    let mut n = state.next_id;
+    let solved = match emerge_core::grammar::solve(&project.map, &grammar, CELL, state.seed, || {
+        n += 1;
+        format!("gen@{n}")
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    state.next_id = n;
+
+    // Everything unpinned is the sketch; the solve is the drawing. Despawn it and rebuild.
+    let doomed: Vec<String> = project
+        .map
+        .placements
+        .iter()
+        .filter(|p| !p.owned)
+        .map(|p| p.id.clone())
+        .collect();
+    for (entity, marker) in placed {
+        if doomed.contains(&marker.0) {
+            commands.entity(entity).despawn();
+        }
+    }
+    project.map.placements.retain(|p| p.owned);
+
+    let count = solved.placements.len();
+    for p in solved.placements {
+        if let Some(d) = project.library.get(&p.descriptor).cloned() {
+            if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw) {
+                commands.entity(e).insert(Placement(p.id.clone()));
+            }
+        }
+        project.map.placements.push(p);
+    }
+    project.dirty = true;
+    state.undo.push(Undo::Added { count });
+    state.status = format!(
+        "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
+        solved.owned_cells,
+        grammar.len() - 1
+    );
 }
 
 /// The `F` handler, split out so `keys` stays readable.
