@@ -177,11 +177,6 @@ impl Project {
             })
             .collect();
     }
-
-    /// The descriptor at a library index, and its resolved masks.
-    pub fn entry(&self, ix: usize) -> Option<(&emerge_core::descriptor::Descriptor, Masks)> {
-        Some((self.library.descriptors.get(ix)?, *self.masks.get(ix)?))
-    }
 }
 
 fn read(path: &Path) -> Result<String, String> {

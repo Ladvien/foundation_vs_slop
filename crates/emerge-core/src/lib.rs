@@ -42,5 +42,6 @@ pub mod naming;
 pub mod placement;
 pub mod rng;
 pub mod ron_surgery;
+pub mod stack;
 pub mod vocab;
 pub mod wfc;

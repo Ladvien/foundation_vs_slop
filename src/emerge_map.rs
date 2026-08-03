@@ -84,11 +84,20 @@ pub fn install_if_requested(app: &mut App) {
 /// Parse `x,z` or `x,y,z` into a world origin. Two numbers means the floor stays at zero, which is
 /// what someone typing coordinates off a map almost always means.
 fn parse_at(s: &str) -> Option<(f32, f32, f32)> {
-    let parts: Vec<f32> = s
-        .split(',')
-        .map(|p| p.trim().parse::<f32>())
-        .collect::<Result<_, _>>()
-        .ok()?;
+    // Every rejection says so. The first version returned `None` silently when a component would not
+    // parse and only complained about the wrong *count* — so `FVS_EMERGE_MAP_AT=80,11o` looked exactly
+    // like not setting the variable at all, which is the failure the paragraph below was written to
+    // prevent and did not.
+    let mut parts = Vec::new();
+    for p in s.split(',') {
+        match p.trim().parse::<f32>() {
+            Ok(v) => parts.push(v),
+            Err(e) => {
+                error!("FVS_EMERGE_MAP_AT: `{}` is not a number ({e})", p.trim());
+                return None;
+            }
+        }
+    }
     match parts[..] {
         [x, z] => Some((x, 0.0, z)),
         [x, y, z] => Some((x, y, z)),

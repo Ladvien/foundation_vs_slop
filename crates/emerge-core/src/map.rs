@@ -139,9 +139,22 @@ pub struct Placed {
     pub id: String,
     /// Which [`Descriptor`] this is an instance of.
     pub descriptor: String,
-    /// Position in map space, metres.
+    /// Position in map space, metres. **The floor plan only** — the height comes from the
+    /// descriptor's [`crate::descriptor::Mount`], never from the author, so a lamp cannot be authored
+    /// hovering 3 cm above the table it is meant to be standing on.
     pub at: (f32, f32),
     pub yaw: f32,
+    /// The [`Self::id`] of the placement this one **rests on**, for a descriptor that mounts
+    /// `OnSurface`.
+    ///
+    /// A reference rather than a Y coordinate, and that is the whole point: move the table and the
+    /// lamp goes with it. A stored height would be correct exactly until someone dragged the host, and
+    /// then silently wrong in a way that reads as the lamp being badly authored.
+    ///
+    /// `None` for everything that stands on the floor, hangs from the ceiling or fills a doorway —
+    /// those layers derive their height from the map, not from a neighbour.
+    #[serde(default)]
+    pub on: Option<String>,
     /// **Owned by the author** — a generator must route around it rather than through it.
     ///
     /// This is the lock in Smelik et al.'s sense and the `initial` domain in WFC's: an owned cell is a
@@ -265,18 +278,28 @@ impl Map {
         Ok(())
     }
 
-    /// The map's floor rectangle in world metres: `(min_x, min_z, max_x, max_z)`.
+    /// The map's floor rectangle **in map space**: `(min_x, min_z, max_x, max_z)`.
+    ///
+    /// Map space, because that is the space [`Placed::at`] is in and this rectangle exists to say
+    /// which `at` values are inside the map. It is a floor *plan*: centred on zero, and the same
+    /// rectangle wherever the map is standing.
+    ///
+    /// It used to return world metres — origin ± half — while every caller compared it against an
+    /// `at`. The two agree for a map at the origin, which is the only kind the editor authors, so the
+    /// disagreement was invisible: a map moved to `(100, 0, 0)` would have called every one of its own
+    /// placements out of bounds. Add [`Self::origin`] to draw it.
     ///
     /// One place computes this, because a convention re-derived at three call sites is a convention
     /// that will disagree with itself at one of them.
     pub fn floor_rect(&self) -> (f32, f32, f32, f32) {
         let (hx, hz) = (self.bounds.0 * 0.5, self.bounds.2 * 0.5);
-        (
-            self.origin.0 - hx,
-            self.origin.2 - hz,
-            self.origin.0 + hx,
-            self.origin.2 + hz,
-        )
+        (-hx, -hz, hx, hz)
+    }
+
+    /// A world point on the ground, expressed in map space — what a cursor hit has to become before
+    /// it can be compared against a [`Placed::at`] or written into one.
+    pub fn to_map_space(&self, world_xz: (f32, f32)) -> (f32, f32) {
+        (world_xz.0 - self.origin.0, world_xz.1 - self.origin.2)
     }
 
     /// Floor and ceiling heights in world metres. Y runs upward from the origin, not either side of
@@ -345,6 +368,28 @@ impl Map {
             }
         }
 
+        // **What rests on what.** Checked after every id is known, because a host may be authored
+        // below its guest in the file and order is not the author's problem.
+        for p in &self.placements {
+            let Some(host) = &p.on else { continue };
+            if host == &p.id {
+                return Err(format!(
+                    "map: placement `{}` rests on itself. Its height would be its own height, which \
+                     has no answer.",
+                    p.id
+                ));
+            }
+            if !seen.contains(&host.as_str()) {
+                return Err(format!(
+                    "map: placement `{}` rests on `{host}`, which does not exist. A piece whose host \
+                     is missing has no floor to stand on — placing it at zero would put it through \
+                     the ground.",
+                    p.id
+                ));
+            }
+        }
+        self.no_stacking_cycles()?;
+
         for loc in &self.locations {
             if loc.props.is_empty() {
                 return Err(format!(
@@ -391,6 +436,37 @@ impl Map {
         }
         Ok(())
     }
+
+    /// Nothing rests, however indirectly, on itself.
+    ///
+    /// A lamp on a table on that lamp has no height — the resolver would recurse forever looking for
+    /// a floor. Refusing here means [`crate::stack::resolve_y`] can walk the chain without a depth
+    /// cap it would have to invent a number for.
+    fn no_stacking_cycles(&self) -> Result<(), String> {
+        // Iterative rather than recursive: a map is author data and a deep chain must not blow the
+        // stack of whatever is reading it.
+        for start in &self.placements {
+            let mut seen_ids: Vec<&str> = vec![start.id.as_str()];
+            let mut at = start;
+            while let Some(host_id) = &at.on {
+                let Some(host) = self.placements.iter().find(|q| &q.id == host_id) else {
+                    // Already refused above; reaching it means this was called on its own.
+                    break;
+                };
+                if seen_ids.contains(&host.id.as_str()) {
+                    seen_ids.push(&host.id);
+                    return Err(format!(
+                        "map: these placements rest on each other in a loop: {}. Nothing in the \
+                         chain touches the floor, so none of them has a height.",
+                        seen_ids.join(" → ")
+                    ));
+                }
+                seen_ids.push(&host.id);
+                at = host;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +485,7 @@ mod tests {
                     descriptor: "mess_table".into(),
                     at: (4.0, 4.0),
                     yaw: 0.0,
+                    on: None,
                     owned: false,
                     owned_because: None,
                     patch: None,
@@ -419,6 +496,7 @@ mod tests {
                     descriptor: "stool".into(),
                     at: (4.0, 3.0),
                     yaw: 180.0,
+                    on: None,
                     owned: false,
                     owned_because: None,
                     patch: None,

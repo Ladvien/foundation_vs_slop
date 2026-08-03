@@ -259,9 +259,13 @@ impl Plugin for EditorPlugin {
                     style_rows,
                     refresh_status,
                     rebuild_palette.run_if(
+                        // `or_else`, not the deprecated `or`: 0.19 spells the lazy form this way,
+                        // and this project has already paid for the eager one — every run condition
+                        // being evaluated is what made a bare `Res<T>` behind an earlier `false`
+                        // panic on launch.
                         resource_changed::<Project>
-                            .or(resource_changed::<EditorState>)
-                            .or(run_once),
+                            .or_else(resource_changed::<EditorState>)
+                            .or_else(run_once),
                     ),
                     refresh_size,
                     refresh_triangle_total,
@@ -306,11 +310,9 @@ fn spawn_cost_readout(mut commands: Commands) {
         });
 }
 
-fn spawn_panel(
-    mut commands: Commands,
-    project: Res<Project>,
-    thumbs: Option<Res<crate::thumbs::Thumbnails>>,
-) {
+/// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither
+/// the project nor the thumbnails are read here — they were parameters that had stopped being used.
+fn spawn_panel(mut commands: Commands) {
     let root = commands
         .spawn((
             crate::tiles::MapRoot,
@@ -750,13 +752,15 @@ fn refresh_size(project: Res<Project>, mut readouts: Query<(&SizeReadout, &mut T
 /// Gizmos rather than a mesh: the bounds are a statement about the map, not a thing in it, and a real
 /// box would be pickable, shadow-casting, and something a click could land on.
 fn draw_bounds(project: Res<Project>, mut gizmos: Gizmos) {
+    // `floor_rect` is the floor PLAN — map space, centred on zero. Drawing happens in the world, so
+    // the origin goes back on here.
     let (min_x, min_z, max_x, max_z) = project.map.floor_rect();
     let (floor, ceiling) = project.map.height_span();
     let (w, h, d) = project.map.bounds;
     let centre = Vec3::new(
-        (min_x + max_x) * 0.5,
+        project.map.origin.0 + (min_x + max_x) * 0.5,
         (floor + ceiling) * 0.5,
-        (min_z + max_z) * 0.5,
+        project.map.origin.2 + (min_z + max_z) * 0.5,
     );
     // `cube`, not `cuboid` — 0.19 spells it `Gizmos::cube` and takes a transform whose SCALE is
     // the box's size (`bevy_gizmos-0.19.0/src/gizmos.rs:637`).
@@ -1010,6 +1014,17 @@ fn snap(v: f32) -> f32 {
     (v / SNAP).round() * SNAP
 }
 
+/// A world ground point as a snapped **map-space** `at`.
+///
+/// The conversion has to happen somewhere, and here is the only somewhere: `cursor_ground` answers in
+/// world metres and `Placed::at` is in map space. They agree only for a map at the origin — which is
+/// every map the editor has ever authored, so writing world coordinates straight into `at` looked
+/// right for as long as nobody moved a map.
+fn map_at(project: &Project, hit: Vec3) -> (f32, f32) {
+    let (x, z) = project.map.to_map_space((hit.x, hit.z));
+    (snap(x), snap(z))
+}
+
 /// Put a piece in the world — **through `emerge-bevy`**, which is also what the game uses.
 ///
 /// The editor used to own this arithmetic. It cannot: a preview that disagrees with the runtime by
@@ -1022,6 +1037,7 @@ fn spawn_piece(
     at: (f32, f32),
     yaw: f32,
     origin: (f32, f32, f32),
+    y: f32,
 ) -> Option<Entity> {
     emerge_bevy::spawn_descriptor(
         commands,
@@ -1034,12 +1050,58 @@ fn spawn_piece(
         yaw,
         // The editor authors in the map's own space, so the origin it draws at is the map's own.
         origin,
+        y,
     )
+}
+
+/// **Where every piece in the map stands.** Resolved together, because a lamp's height is its table's.
+///
+/// Returns the reason rather than a partial answer. A map whose stacking will not resolve is one an
+/// author has to be told about — drawing it half-right is how a lamp ends up looking badly authored
+/// when the real problem is the shelf it names.
+fn heights(project: &Project) -> Result<Vec<f32>, String> {
+    emerge_core::stack::resolve_y(&project.map, &project.library)
+}
+
+/// Draw the placements from `first` onward — what a fill or a generate just added.
+///
+/// The map is already complete when this runs, which is the point: heights are resolved once, over the
+/// finished map, so a piece added by the solver stands wherever the finished map says it does.
+fn spawn_range(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &Project,
+    state: &mut EditorState,
+    first: usize,
+) {
+    let ys = match heights(project) {
+        Ok(ys) => ys,
+        Err(e) => {
+            state.status = e.clone();
+            error!("{e}");
+            return;
+        }
+    };
+    for (i, p) in project.map.placements.iter().enumerate().skip(first) {
+        let (Some(d), Some(&y)) = (project.library.get(&p.descriptor), ys.get(i)) else {
+            continue;
+        };
+        if let Some(e) = spawn_piece(commands, assets, d, p.at, p.yaw, project.map.origin, y) {
+            commands.entity(e).insert(Placement(p.id.clone()));
+        }
+    }
 }
 
 /// Bring up whatever the map already holds.
 fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res<Project>) {
-    for p in &project.map.placements {
+    let ys = match heights(&project) {
+        Ok(ys) => ys,
+        Err(e) => {
+            error!("{e}");
+            return;
+        }
+    };
+    for (i, p) in project.map.placements.iter().enumerate() {
         let Some(d) = project.library.get(&p.descriptor) else {
             // Loud, not silent: a placement naming a descriptor the library does not have is a hole
             // in the map, and an author must be told which one rather than counting missing crates.
@@ -1049,7 +1111,8 @@ fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res
             );
             continue;
         };
-        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, project.map.origin) {
+        let Some(&y) = ys.get(i) else { continue };
+        if let Some(e) = spawn_piece(&mut commands, &assets, d, p.at, p.yaw, project.map.origin, y) {
             commands.entity(e).insert(Placement(p.id.clone()));
         }
     }
@@ -1085,7 +1148,30 @@ fn place_on_click(
     let Some(d) = project.library.descriptors.get(state.brush).cloned() else {
         return;
     };
-    let at = (snap(hit.x), snap(hit.z));
+    let at = map_at(&project, hit);
+
+    // **What it lands on.** A piece that mounts on a surface must find one under the cursor; the same
+    // question the ghost has been answering while the author moved the mouse here, asked once more at
+    // the moment it matters.
+    let ys = match heights(&project) {
+        Ok(ys) => ys,
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    let (y, host) =
+        match emerge_core::stack::placement_at(&project.map, &project.library, &ys, &d, at) {
+            Ok(found) => found,
+            // Refused, not floored. Dropping it at floor level is the behaviour this replaced: the
+            // piece appears, in the wrong place, and looks like an authoring mistake.
+            Err(e) => {
+                state.status = e;
+                return;
+            }
+        };
+    let on = host.map(|h| h.id.clone());
+
     state.next_id += 1;
     let id = format!("{}@{}", short_id(&d.id), state.next_id);
 
@@ -1094,16 +1180,28 @@ fn place_on_click(
         descriptor: d.id.clone(),
         at,
         yaw: state.brush_yaw,
+        on: on.clone(),
         ..Placed::default()
     };
     project.map.placements.push(placed);
     project.dirty = true;
     state.undo.push(Undo::Added { count: 1 });
 
-    if let Some(e) = spawn_piece(&mut commands, &assets, &d, at, state.brush_yaw, project.map.origin) {
+    if let Some(e) = spawn_piece(
+        &mut commands,
+        &assets,
+        &d,
+        at,
+        state.brush_yaw,
+        project.map.origin,
+        y,
+    ) {
         commands.entity(e).insert(Placement(id.clone()));
     }
-    state.status = format!("placed {id} at ({}, {})", at.0, at.1);
+    state.status = match on {
+        Some(host) => format!("placed {id} on {host}"),
+        None => format!("placed {id} at ({}, {})", at.0, at.1),
+    };
 }
 
 /// The tail of a descriptor id, so a generated placement id reads as `crate@7` rather than
@@ -1229,9 +1327,11 @@ fn delete_under_cursor(
 
     // `sort`-free: one pass for the minimum, and ties broken by index so two pieces stacked exactly
     // cannot make the choice depend on iteration order.
+    // Both sides in map space: `at` is authored there and the cursor answers in world metres.
+    let probe = project.map.to_map_space((hit.x, hit.z));
     let mut best: Option<(usize, f32)> = None;
     for (i, p) in project.map.placements.iter().enumerate() {
-        let d2 = (p.at.0 - hit.x).powi(2) + (p.at.1 - hit.z).powi(2);
+        let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
         if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
             best = Some((i, d2));
         }
@@ -1279,16 +1379,35 @@ fn undo(
             state.status = format!("undid {} placement(s)", gone.len());
         }
         Undo::Removed { index, placed: p } => {
-            if let Some(d) = project.library.get(&p.descriptor).cloned() {
-                if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw, project.map.origin) {
-                    commands.entity(e).insert(Placement(p.id.clone()));
-                }
-            }
             state.status = format!("restored {}", p.id);
+            let id = p.id.clone();
+            let descriptor = p.descriptor.clone();
             // Back at its old index, so a location referring to it by position in the list is not
-            // quietly re-pointed at its neighbour.
+            // quietly re-pointed at its neighbour. **Into the map before it is drawn**, because what
+            // it rests on decides how high it goes and that is a question about the map.
             let at = index.min(project.map.placements.len());
             project.map.placements.insert(at, *p);
+
+            // Drawn from the finished map. A failure here is loud rather than a piece that is in the
+            // file and not on the screen — the two disagreeing is exactly the state an author cannot
+            // see and would go on editing around.
+            match heights(project) {
+                Ok(ys) => {
+                    let d = project.library.get(&descriptor).cloned();
+                    let placed = project.map.placements.get(at).map(|q| (q.at, q.yaw));
+                    if let (Some(d), Some((pat, pyaw)), Some(&y)) = (d, placed, ys.get(at)) {
+                        if let Some(e) =
+                            spawn_piece(commands, assets, &d, pat, pyaw, project.map.origin, y)
+                        {
+                            commands.entity(e).insert(Placement(id));
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.status = format!("restored {id} but cannot draw it: {e}");
+                    error!("{e}");
+                }
+            }
         }
     }
     project.dirty = true;
@@ -1341,9 +1460,11 @@ fn nearest_placement(
         .map(|(x, z)| x.max(z))
         .unwrap_or(crate::fill::MIN_CELL);
 
+    // Both sides in map space: `at` is authored there and the cursor answers in world metres.
+    let probe = project.map.to_map_space((hit.x, hit.z));
     let mut best: Option<(usize, f32)> = None;
     for (i, p) in project.map.placements.iter().enumerate() {
-        let d2 = (p.at.0 - hit.x).powi(2) + (p.at.1 - hit.z).powi(2);
+        let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
         if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
             best = Some((i, d2));
         }
@@ -1456,15 +1577,13 @@ fn generate(
     }
     project.map.placements.retain(|p| p.owned);
 
+    // **Into the map first, drawn second.** The solver lays pieces on the floor grid; how high each
+    // one ends up is a question about the finished map, so the map has to be finished before it is
+    // asked.
     let count = solved.placements.len();
-    for p in solved.placements {
-        if let Some(d) = project.library.get(&p.descriptor).cloned() {
-            if let Some(e) = spawn_piece(commands, assets, &d, p.at, p.yaw, project.map.origin) {
-                commands.entity(e).insert(Placement(p.id.clone()));
-            }
-        }
-        project.map.placements.push(p);
-    }
+    let first = project.map.placements.len();
+    project.map.placements.extend(solved.placements);
+    spawn_range(commands, assets, project, state, first);
     project.dirty = true;
     state.undo.push(Undo::Added { count });
     state.status = format!(
@@ -1500,7 +1619,7 @@ fn flood_from_cursor(
     let filled = match crate::fill::flood(
         &project.map,
         &brush,
-        (hit.x, hit.z),
+        project.map.to_map_space((hit.x, hit.z)),
         state.brush_yaw,
         || {
             n += 1;
@@ -1518,12 +1637,9 @@ fn flood_from_cursor(
     state.next_id = n;
 
     let count = filled.placements.len();
-    for p in filled.placements {
-        if let Some(e) = spawn_piece(commands, assets, &brush, p.at, p.yaw, project.map.origin) {
-            commands.entity(e).insert(Placement(p.id.clone()));
-        }
-        project.map.placements.push(p);
-    }
+    let first = project.map.placements.len();
+    project.map.placements.extend(filled.placements);
+    spawn_range(commands, assets, project, state, first);
     project.dirty = true;
     // **One undo entry for the whole fill.** A fill is one act to the person who performed it, and an
     // undo stack that made them press Ctrl+Z 1,408 times would be a stack that models the code rather
@@ -1552,7 +1668,9 @@ fn drive_ghost(
     mut commands: Commands,
     assets: Res<AssetServer>,
     project: Res<Project>,
-    state: Res<EditorState>,
+    // Mutable for one reason: the status line is where "there is no worktop here" belongs, and the
+    // moment the author needs it is while the cursor is over the spot, not after the click.
+    mut state: ResMut<EditorState>,
     hovered_ui: Query<&Hovered>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
@@ -1585,8 +1703,37 @@ fn drive_ghost(
         return;
     };
 
-    let at = (snap(hit.x), snap(hit.z));
+    let at = map_at(&project, hit);
     let yaw = emerge_bevy::draw_yaw(d, state.brush_yaw);
+
+    // **The ghost stands where the piece would.** A lamp dragged over a table rises onto it, so the
+    // author sees the answer before committing to it rather than placing and then wondering. When
+    // there is no surface under a piece that needs one there is nothing truthful to draw — showing it
+    // on the floor would be a preview of something that will not happen.
+    let ys = match heights(&project) {
+        Ok(ys) => ys,
+        Err(_) => {
+            clear(&mut commands);
+            return;
+        }
+    };
+    let (y, _) = match emerge_core::stack::placement_at(&project.map, &project.library, &ys, d, at) {
+        Ok(found) => found,
+        // **The reason, while the cursor is still there.** `docs/ui.md` §1.4: an unmet condition is an
+        // instruction. A ghost that simply vanishes over bare floor reads as the editor being broken;
+        // the sentence says which surface the piece wants and leaves the author holding the answer.
+        Err(e) => {
+            clear(&mut commands);
+            // **Only when it changes.** This runs every frame the cursor sits over bare floor with a
+            // surface piece armed, and `ResMut` marks the resource changed on every mutable deref —
+            // `rebuild_palette` watches `resource_changed::<EditorState>`, so an unconditional write
+            // here would tear down and rebuild the whole palette at frame rate.
+            if state.status != e {
+                state.status = e;
+            }
+            return;
+        }
+    };
 
     let existing = ghosts.iter().find(|(_, g)| g.0 == state.brush).map(|(e, _)| e);
     for (e, g) in &ghosts {
@@ -1598,12 +1745,20 @@ fn drive_ghost(
     match existing {
         Some(e) => {
             if let Ok(mut tf) = transforms.get_mut(e) {
-                tf.translation = emerge_bevy::origin_of(d, at, project.map.origin);
+                tf.translation = emerge_bevy::origin_of(at, project.map.origin, y);
                 tf.rotation = Quat::from_rotation_y(yaw.to_radians());
             }
         }
         None => {
-            if let Some(e) = spawn_piece(&mut commands, &assets, d, at, state.brush_yaw, project.map.origin) {
+            if let Some(e) = spawn_piece(
+                &mut commands,
+                &assets,
+                d,
+                at,
+                state.brush_yaw,
+                project.map.origin,
+                y,
+            ) {
                 commands.entity(e).insert((Ghost, GhostOf(state.brush)));
             }
         }
