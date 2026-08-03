@@ -159,6 +159,25 @@ impl Project {
         Ok(())
     }
 
+    /// Re-measure the per-entry triangle counts after the library changes.
+    ///
+    /// Called when an import lands, so the palette's cost column covers the new piece rather than
+    /// silently reading zero for it.
+    pub fn remeasure_triangles(&mut self) {
+        self.triangles = self
+            .library
+            .descriptors
+            .iter()
+            .map(|d| {
+                d.mesh
+                    .as_deref()
+                    .map(|m| self.root.join("assets").join(m))
+                    .and_then(|path| emerge_core::glb::Glb::open(&path).ok())
+                    .map_or(0, |g| emerge_core::import::triangles(&g))
+            })
+            .collect();
+    }
+
     /// The descriptor at a library index, and its resolved masks.
     pub fn entry(&self, ix: usize) -> Option<(&emerge_core::descriptor::Descriptor, Masks)> {
         Some((self.library.descriptors.get(ix)?, *self.masks.get(ix)?))

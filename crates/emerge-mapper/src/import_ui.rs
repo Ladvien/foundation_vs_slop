@@ -169,6 +169,7 @@ impl Plugin for ImportUiPlugin {
                     rename_candidate,
                     move_selection.run_if(not_renaming_candidate),
                     cycle_mount.run_if(not_renaming_candidate),
+                    commit_candidate.run_if(not_renaming_candidate),
                     apply_mode,
                     rebuild_candidates.run_if(resource_changed::<ImportState>),
                     rebuild_detail.run_if(resource_changed::<ImportState>),
@@ -212,6 +213,7 @@ fn spawn_import_panel(mut commands: Commands) {
                 ("up down", "choose"),
                 ("I", "type an id"),
                 ("M", "layer"),
+                ("Enter", "add to library"),
                 ("R", "rescan"),
             ] {
                 p.spawn(Node {
@@ -425,6 +427,87 @@ fn cycle_mount(
         .map_or(0, |i| (i + 1) % options.len());
     c.proposed.mount = Some(options[next].clone());
     state.status = format!("layer: {}", mount_label(c.proposed.mount.as_ref()));
+}
+
+/// **Accept a candidate into the library.**
+///
+/// Validated first, and refused rather than repaired: a descriptor that fails the vocabulary is one
+/// an author has not finished, and writing a broken entry would make the next `Library::parse` fail
+/// for everyone rather than for the person who caused it.
+///
+/// The library is written immediately. An importer that batches its additions until some later save
+/// is one where a crash loses work an author believes they did — and the file is generated from the
+/// manifests today, so an unwritten addition would simply be regenerated away.
+fn commit_candidate(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<Mode>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Import || !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+    let Some(candidate) = state.current().cloned() else {
+        return;
+    };
+    if candidate.blocked() {
+        state.status = "this mesh cannot be measured, so there is nothing to add".to_owned();
+        return;
+    }
+    let descriptor = candidate.proposed.clone();
+    if descriptor.id.trim().is_empty() {
+        state.status = "give it an id first (I)".to_owned();
+        return;
+    }
+    if project.library.get(&descriptor.id).is_some() {
+        state.status = format!("`{}` is already in the library — rename it (I)", descriptor.id);
+        return;
+    }
+
+    // Validate against a library that ALREADY CONTAINS it, because the two-sided surface check is
+    // about the finished set: a piece that offers `worktop` makes another piece's `on worktop` legal,
+    // and checking it in isolation would reject the pair that fixes each other.
+    let mut trial = project.library.clone();
+    trial.descriptors.push(descriptor.clone());
+    if let Err(e) = trial.resolve(&project.vocab) {
+        state.status = format!("not added: {e}");
+        return;
+    }
+
+    project.library = trial;
+    // Masks and triangle counts are derived from the library, so they move with it.
+    match project.library.resolve(&project.vocab) {
+        Ok(masks) => project.masks = masks,
+        Err(e) => {
+            state.status = format!("not added: {e}");
+            return;
+        }
+    }
+    project.remeasure_triangles();
+    let path = project.root.join("assets/emerge/library.ron");
+    match project
+        .library
+        .to_ron()
+        .and_then(|text| emerge_core::ron_surgery::save_atomic(&path, &text))
+    {
+        Ok(()) => {
+            // Drop it from the candidate list: it is in the library now, and an importer that keeps
+            // offering what you have already taken is one you cannot tell your progress from.
+            let at = state.selected;
+            state.candidates.remove(at);
+            state.selected = at.min(state.candidates.len().saturating_sub(1));
+            state.summary = format!("{} mesh(es) left to import", state.candidates.len());
+            state.status = format!(
+                "added `{}` — it is in the palette now",
+                descriptor.id
+            );
+            info!("added `{}` to {}", descriptor.id, path.display());
+        }
+        Err(e) => {
+            state.status = format!("NOT WRITTEN: {e}");
+            error!("{e}");
+        }
+    }
 }
 
 /// Toggle one token on one axis.

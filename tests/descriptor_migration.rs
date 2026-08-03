@@ -228,9 +228,9 @@ fn the_committed_libraries_match_the_manifests() {
 
     for (source, manifest) in manifests() {
         let file = if source.starts_with("config.ron") {
-            "library.ron"
+            "library_from_manifests.ron"
         } else {
-            "library_kenney.ron"
+            "library_kenney_from_manifests.ron"
         };
         let path = Path::new("assets/emerge").join(file);
 

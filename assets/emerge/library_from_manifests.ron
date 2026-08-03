@@ -1,6 +1,6 @@
 (
     version: 1,
-    note: Some("The editor's working library. Seeded once from library_from_manifests.ron and OWNED BY emerge-mapper thereafter — its import mode appends here. The converter's output stays pinned separately, so a manifest that moves still fails a test without fighting an author's imports."),
+    note: Some("GENERATED from config.ron:placement.furniture by tests/descriptor_migration.rs. Do not hand-edit — regenerate with EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration."),
     descriptors: [
         (
             id: "lamp_tall",
