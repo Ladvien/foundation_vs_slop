@@ -1011,41 +1011,28 @@ fn snap(v: f32) -> f32 {
     (v / SNAP).round() * SNAP
 }
 
-/// Where a descriptor's origin goes for a given map position — the arithmetic the ghost and the real
-/// placement both use, so they cannot disagree.
-fn origin_of(d: &emerge_core::descriptor::Descriptor, at: (f32, f32)) -> Vec3 {
-    let lift = match &d.mount {
-        Some(Mount::OnWall { height }) => *height,
-        Some(Mount::OnCeiling) => 2.4,
-        _ => 0.0,
-    };
-    Vec3::new(at.0, lift + d.align.y_offset.unwrap_or(0.0), at.1)
-}
-
+/// Put a piece in the world — **through `emerge-bevy`**, which is also what the game uses.
+///
+/// The editor used to own this arithmetic. It cannot: a preview that disagrees with the runtime by
+/// half a degree of `front` or a centimetre of `y_offset` is a preview that lies, and the only way to
+/// be sure two places agree is for there to be one place. `emerge_bevy::spawn_descriptor` is it.
 fn spawn_piece(
     commands: &mut Commands,
     assets: &AssetServer,
     d: &emerge_core::descriptor::Descriptor,
     at: (f32, f32),
-    yaw_deg: f32,
+    yaw: f32,
 ) -> Option<Entity> {
-    let mesh = d.mesh.as_ref()?;
-    let scene: Handle<WorldAsset> =
-        assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
-    let scale = d.align.scale.unwrap_or(1.0);
-    // `front` is the mesh's own facing offset — the kit records it precisely so an authored yaw means
-    // the same thing for every piece. Adding it here is what stops chairs being placed sideways.
-    let yaw = yaw_deg + d.align.front.unwrap_or(0.0);
-    Some(
-        commands
-            .spawn((
-                Transform::from_translation(origin_of(d, at))
-                    .with_rotation(Quat::from_rotation_y(yaw.to_radians()))
-                    .with_scale(Vec3::splat(scale)),
-                Visibility::Inherited,
-            ))
-            .with_child((WorldAssetRoot(scene), Transform::default()))
-            .id(),
+    emerge_bevy::spawn_descriptor(
+        commands,
+        assets,
+        d,
+        // The editor draws before tags matter; the runtime resolves them from the library. Defaulting
+        // here keeps the signature honest rather than pretending the editor knows.
+        emerge_core::vocab::Masks::default(),
+        at,
+        yaw,
+        0.0,
     )
 }
 
@@ -1598,7 +1585,7 @@ fn drive_ghost(
     };
 
     let at = (snap(hit.x), snap(hit.z));
-    let yaw = state.brush_yaw + d.align.front.unwrap_or(0.0);
+    let yaw = emerge_bevy::draw_yaw(d, state.brush_yaw);
 
     let existing = ghosts.iter().find(|(_, g)| g.0 == state.brush).map(|(e, _)| e);
     for (e, g) in &ghosts {
@@ -1610,7 +1597,7 @@ fn drive_ghost(
     match existing {
         Some(e) => {
             if let Ok(mut tf) = transforms.get_mut(e) {
-                tf.translation = origin_of(d, at);
+                tf.translation = emerge_bevy::origin_of(d, at, 0.0);
                 tf.rotation = Quat::from_rotation_y(yaw.to_radians());
             }
         }

@@ -12,6 +12,10 @@ description = "A standalone world-building editor: author maps from an asset lib
 # `docs/2026-08-03-emerge-mapper-plan.md` is the design.
 [dependencies]
 emerge-core = { path = "../emerge-core" }
+# The runtime half. The editor spawns pieces through `emerge_bevy::spawn_descriptor` rather than its
+# own copy, so a map cannot look one way here and another in the game — the failure `bake.rs` and
+# `site_editor::source_map` demonstrated by independently growing the same RON writer.
+emerge-bevy = { path = "../emerge-bevy" }
 # The editor is a Bevy app in its own right, not a mode of the game. `sim_harness.rs` is the precedent
 # the plan cites for two binaries over one plugin graph — "not a second code path".
 # `bevy_dev_tools` is what carries `infinite_grid` — verified in the vendored source at
