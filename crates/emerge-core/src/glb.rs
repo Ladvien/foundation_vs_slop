@@ -93,6 +93,84 @@ pub const FRONT_MIN_OFFSET: f32 = 0.05;
 /// how `front` was derived: the top of a chair is its back, and that is what breaks the symmetry.
 pub const FRONT_UPPER_FRACTION: f32 = 0.45;
 
+/// Column-major 4x4 identity, in glTF's own layout.
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// A node's local transform: its `matrix` if it has one, else its TRS composed in glTF's order
+/// (translation * rotation * scale).
+fn node_matrix(node: &Value) -> [f32; 16] {
+    if let Some(m) = node.get("matrix").and_then(|m| m.as_array()) {
+        if m.len() == 16 {
+            let mut out = IDENTITY;
+            for (i, v) in m.iter().enumerate() {
+                out[i] = v.as_f64().unwrap_or(0.0) as f32;
+            }
+            return out;
+        }
+    }
+    let arr = |key: &str, fallback: [f32; 4]| -> [f32; 4] {
+        node.get(key)
+            .and_then(|v| v.as_array())
+            .filter(|a| a.len() >= 3)
+            .map(|a| {
+                let mut out = fallback;
+                for (i, v) in a.iter().take(4).enumerate() {
+                    out[i] = v.as_f64().unwrap_or(0.0) as f32;
+                }
+                out
+            })
+            .unwrap_or(fallback)
+    };
+    let t = arr("translation", [0.0, 0.0, 0.0, 0.0]);
+    let r = arr("rotation", [0.0, 0.0, 0.0, 1.0]);
+    let s = arr("scale", [1.0, 1.0, 1.0, 0.0]);
+
+    // Quaternion (x, y, z, w) to a rotation matrix, then scale the columns and set the translation.
+    let (x, y, z, w) = (r[0], r[1], r[2], r[3]);
+    let rot = [
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y + z * w),
+        2.0 * (x * z - y * w),
+        2.0 * (x * y - z * w),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + x * w),
+        2.0 * (x * z + y * w),
+        2.0 * (y * z - x * w),
+        1.0 - 2.0 * (x * x + y * y),
+    ];
+    [
+        rot[0] * s[0], rot[1] * s[0], rot[2] * s[0], 0.0, //
+        rot[3] * s[1], rot[4] * s[1], rot[5] * s[1], 0.0, //
+        rot[6] * s[2], rot[7] * s[2], rot[8] * s[2], 0.0, //
+        t[0], t[1], t[2], 1.0,
+    ]
+}
+
+/// `a * b`, column-major.
+fn mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
+        }
+    }
+    out
+}
+
+/// Transform a point by a column-major 4x4.
+fn apply(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+}
+
 impl Glb {
     /// Parse a `.glb` from bytes.
     pub fn parse(bytes: &[u8]) -> Result<Glb, String> {
@@ -146,7 +224,7 @@ impl Glb {
         Glb::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// **Does any node carry a transform that makes accessor bounds a lie?**
+    /// **Is this model assembled from parts, rather than authored as one?**
     ///
     /// Raw accessor bounds equal world extents only when no node scales or matrices the geometry.
     /// `tests/prop_footprint_contract.rs` reports and skips such meshes rather than misreading them,
@@ -160,56 +238,149 @@ impl Glb {
             if n.get("matrix").is_some() {
                 return true;
             }
-            n["scale"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|v| (v.as_f64().unwrap_or(1.0) - 1.0).abs() > 1e-3))
+            let non_default = |key: &str, default: f64| {
+                n[key].as_array().is_some_and(|a| {
+                    a.iter()
+                        .any(|v| (v.as_f64().unwrap_or(default) - default).abs() > 1e-3)
+                })
+            };
+            // **Translation counts.** It was missing, and that is how `animal-horse.glb` — whose head
+            // and legs are placed by translation alone — passed as a single authored mesh and got
+            // measured as a pile of parts at the origin.
+            non_default("scale", 1.0) || non_default("translation", 0.0) || non_default("rotation", 0.0)
         })
     }
 
     /// Axis-aligned bounds over every mesh primitive's `POSITION` accessor, from the accessors' own
     /// declared `min`/`max` — no vertex decoding needed.
+    /// Axis-aligned bounds over every mesh **as the scene places it**.
+    ///
+    /// # Node transforms are composed, not ignored
+    ///
+    /// A primitive's `POSITION` accessor declares min/max in the *mesh's own* space, and a glTF scene
+    /// then positions that mesh with a node transform. Reading the accessors alone therefore measures
+    /// a pile of parts at the origin rather than the assembled thing.
+    ///
+    /// That is not hypothetical. `animal-horse.glb` is built from parts placed by node
+    /// **translation** — head at `+0.25` in Y, legs spread on X and Z — and its accessor bounds say
+    /// 0.63 x 0.73 x 0.31 m while the horse standing in the scene is taller than that. The importer's
+    /// preview drew a mesh sticking out through the top of its own volume box, which is what a
+    /// measurement being wrong looks like when you finally render it. Every multi-part kit in this
+    /// project is built that way; the Ozea kit is single-node and was never affected, which is why
+    /// `tests/mesh_measurement.rs` passed against it for months.
+    ///
+    /// So this walks the scene graph, composes each node's TRS (or matrix) down the hierarchy, and
+    /// transforms the eight corners of every primitive's box before unioning them. A rotated node
+    /// makes the union larger than the true oriented box — that is the correct conservative answer for
+    /// a reservation, and stated here so nobody later mistakes it for slop.
     pub fn bounds(&self) -> Result<([f32; 3], [f32; 3]), String> {
-        let accessors = self.json["accessors"]
-            .as_array()
-            .ok_or_else(|| "glb: no accessors".to_owned())?;
-        let meshes = self.json["meshes"]
-            .as_array()
-            .ok_or_else(|| "glb: no meshes".to_owned())?;
-
         let mut lo = [f32::MAX; 3];
         let mut hi = [f32::MIN; 3];
         let mut seen = false;
-        for mesh in meshes {
-            let Some(prims) = mesh["primitives"].as_array() else {
+
+        // Roots: the default scene's nodes, or every node when a file declares none.
+        let roots: Vec<usize> = self
+            .json
+            .get("scenes")
+            .and_then(|s| s.as_array())
+            .and_then(|scenes| {
+                let ix = self.json["scene"].as_u64().unwrap_or(0) as usize;
+                scenes.get(ix)
+            })
+            .and_then(|s| s["nodes"].as_array())
+            .map(|n| n.iter().filter_map(|v| v.as_u64()).map(|v| v as usize).collect())
+            .unwrap_or_else(|| {
+                (0..self.json["nodes"].as_array().map_or(0, |n| n.len())).collect()
+            });
+
+        let mut stack: Vec<(usize, [f32; 16])> = roots.into_iter().map(|n| (n, IDENTITY)).collect();
+        // Bounded, because a malformed file can describe a cycle and this must not hang on one.
+        let mut budget = 100_000usize;
+        while let Some((node_ix, parent)) = stack.pop() {
+            budget = match budget.checked_sub(1) {
+                Some(b) => b,
+                None => return Err("glb: node hierarchy is cyclic or absurdly deep".to_owned()),
+            };
+            let Some(node) = self.json["nodes"].get(node_ix) else {
                 continue;
             };
-            for prim in prims {
-                let Some(ix) = prim["attributes"]["POSITION"].as_u64() else {
-                    continue;
-                };
-                let Some(acc) = accessors.get(ix as usize) else {
-                    continue;
-                };
-                let (Some(mn), Some(mx)) = (acc["min"].as_array(), acc["max"].as_array()) else {
-                    continue;
-                };
-                if mn.len() < 3 || mx.len() < 3 {
-                    continue;
+            let world = mul(&parent, &node_matrix(node));
+
+            if let Some(mesh_ix) = node["mesh"].as_u64() {
+                if self.accumulate_mesh(mesh_ix as usize, &world, &mut lo, &mut hi) {
+                    seen = true;
                 }
-                for c in 0..3 {
-                    lo[c] = lo[c].min(mn[c].as_f64().unwrap_or(0.0) as f32);
-                    hi[c] = hi[c].max(mx[c].as_f64().unwrap_or(0.0) as f32);
+            }
+            if let Some(kids) = node["children"].as_array() {
+                for k in kids.iter().filter_map(|v| v.as_u64()) {
+                    stack.push((k as usize, world));
                 }
-                seen = true;
             }
         }
+
+        // A file with meshes but no scene graph referencing them: measure them where they are.
+        if !seen {
+            let count = self.json["meshes"].as_array().map_or(0, |m| m.len());
+            for m in 0..count {
+                if self.accumulate_mesh(m, &IDENTITY, &mut lo, &mut hi) {
+                    seen = true;
+                }
+            }
+        }
+
         if !seen {
             return Err("glb: no POSITION accessor declared min/max bounds".to_owned());
         }
         Ok((lo, hi))
     }
 
-    /// Measure everything a descriptor's `extent` and `align` want.
+    /// Union one mesh's primitives, transformed by `world`, into `lo`/`hi`.
+    fn accumulate_mesh(
+        &self,
+        mesh_ix: usize,
+        world: &[f32; 16],
+        lo: &mut [f32; 3],
+        hi: &mut [f32; 3],
+    ) -> bool {
+        let Some(prims) = self.json["meshes"][mesh_ix]["primitives"].as_array() else {
+            return false;
+        };
+        let mut seen = false;
+        for prim in prims {
+            let Some(ix) = prim["attributes"]["POSITION"].as_u64() else {
+                continue;
+            };
+            let Some(acc) = self.json["accessors"].get(ix as usize) else {
+                continue;
+            };
+            let (Some(mn), Some(mx)) = (acc["min"].as_array(), acc["max"].as_array()) else {
+                continue;
+            };
+            if mn.len() < 3 || mx.len() < 3 {
+                continue;
+            }
+            let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) as f32;
+            let (a, b) = (
+                [f(&mn[0]), f(&mn[1]), f(&mn[2])],
+                [f(&mx[0]), f(&mx[1]), f(&mx[2])],
+            );
+            // Every corner, because a rotation maps the box's extremes to different corners.
+            for cx in [a[0], b[0]] {
+                for cy in [a[1], b[1]] {
+                    for cz in [a[2], b[2]] {
+                        let p = apply(world, [cx, cy, cz]);
+                        for c in 0..3 {
+                            lo[c] = lo[c].min(p[c]);
+                            hi[c] = hi[c].max(p[c]);
+                        }
+                    }
+                }
+            }
+            seen = true;
+        }
+        seen
+    }
+
     pub fn measure(&self) -> Result<Measured, String> {
         let (lo, hi) = self.bounds()?;
         let (w, h, d) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);

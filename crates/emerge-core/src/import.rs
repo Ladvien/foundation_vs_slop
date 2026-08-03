@@ -208,24 +208,14 @@ pub fn measure(path: &Path, rel: &str, library: &Library) -> Candidate {
         }
     };
 
-    // **A node transform makes accessor bounds a lie**, so everything below would be confidently
-    // wrong. Report and stop measuring rather than measuring something else.
-    if glb.has_node_transform() {
-        findings.push(Finding::blocking(
-            "a node in this file scales or matrices the geometry, so its accessor bounds are not its \
-             world size — nothing measured from it would be true"
-                .to_owned(),
-            "bake the transform into the vertices on export (`scripts/fbx_to_glb.py` does this)",
-        ));
-        return Candidate {
-            mesh: rel.to_owned(),
-            proposed,
-            measured: None,
-            front_detail: None,
-            triangles: triangles(&glb),
-            findings,
-        };
-    }
+    // A node transform used to be blocking, on the grounds that it makes accessor bounds a lie. It
+    // did — until `Glb::bounds` learned to compose the scene graph, which is the right fix and covers
+    // every multi-part kit in this project.
+    //
+    // What is still true is narrower and worth saying: `derive_front` reads raw vertex data, so its
+    // centroid is taken in mesh-local space and means nothing for a model assembled from placed
+    // parts. Bounds are trustworthy; the facing is not, and it is left unset rather than guessed.
+    let assembled = glb.has_node_transform();
 
     let measured = match glb.measure() {
         Ok(m) => m,
@@ -256,8 +246,17 @@ pub fn measure(path: &Path, rel: &str, library: &Library) -> Candidate {
         ..Align::default()
     };
 
-    let front_detail = glb.front_detail().ok();
-    proposed.align.front = glb.derive_front().ok().flatten();
+    let front_detail = if assembled { None } else { glb.front_detail().ok() };
+    proposed.align.front = if assembled {
+        findings.push(Finding::note(
+            "this model is assembled from parts placed by node transforms, so no facing is derived \
+             — the size is measured from the assembled scene, but a centroid over raw vertices would \
+             not be",
+        ));
+        None
+    } else {
+        glb.derive_front().ok().flatten()
+    };
 
     let tris = triangles(&glb);
     findings.extend(inspect(&measured, front_detail, tris, rel, library));

@@ -64,20 +64,19 @@ fn the_ozea_kit_raises_exactly_the_one_warning_we_know_about() {
     );
 }
 
-/// **One shipped mesh cannot be measured, and it is the right call.**
+/// **Every shipped mesh is measurable**, and getting there is the story of this file.
 ///
-/// `low_poly_flashlight.glb` carries non-uniform node scales on two small parts (`switch_base` at
-/// 0.16/0.28/0.06 and `switch_button`), so its accessor bounds are not its world size and anything
-/// measured from them would be confidently wrong. `tests/prop_footprint_contract.rs` skips this class
-/// for the same reason — *"a silently mismeasured pass would be worse than no pass"*.
+/// It first passed while checking three directories, and the editor — which walks the whole tree —
+/// reported one unmeasurable mesh. Widened, it named `low_poly_flashlight.glb`, whose non-uniform
+/// node scales made its accessor bounds meaningless.
 ///
-/// Nothing is broken by it today: `squad.rs` places the flashlight at a hardcoded scale and
-/// orientation rather than from a measured footprint. It would matter the moment someone wanted it in
-/// a library, and the fix is a re-export with the transform baked into the vertices.
-///
-/// So this pins the known one. A SECOND unmeasurable mesh fails, which is the point.
+/// The response was almost to pin that as a known exception. The real answer was that
+/// `Glb::bounds` should compose the scene graph instead of reading accessors alone — which it now
+/// does, so the flashlight measures correctly and so does every multi-part kit in the tree. A
+/// `Blocking` finding here means the importer refuses an asset the game already loads, and that is
+/// the importer being broken rather than strict.
 #[test]
-fn only_the_known_unmeasurable_mesh_is_unmeasurable() {
+fn nothing_shipped_is_unmeasurable() {
     // **The whole tree, not three directories.** The first version checked `ozea`,
     // `low_poly_furniture` and `kenney_prototype-kit` and passed — and the editor's own scan, which
     // walks everything under `assets/`, reported one unmeasurable mesh. A test that checks a subset
@@ -95,19 +94,14 @@ fn only_the_known_unmeasurable_mesh_is_unmeasurable() {
             blocked.push(format!("{}: {}", c.mesh, why.join("; ")));
         }
     }
-    assert_eq!(
-        blocked.len(),
-        1,
-        "expected only the known flashlight, got {}:\n  {}",
+    assert!(
+        blocked.is_empty(),
+        "{} shipped mesh(es) cannot be measured:\n  {}",
         blocked.len(),
         blocked.join("\n  ")
     );
-    assert!(
-        blocked[0].contains("low_poly_flashlight"),
-        "the unmeasurable mesh changed: {}",
-        blocked[0]
-    );
 }
+
 
 /// The proposal has to be usable, not merely produced: a descriptor with no footprint reserves no
 /// floor, and `check_prop_placements` would then let it overlap everything.
@@ -133,41 +127,62 @@ fn meshes_already_in_the_library_are_not_offered_again() {
     let root = Path::new("assets");
     let lib = library();
     let known: Vec<&str> = lib.descriptors.iter().filter_map(|d| d.mesh.as_deref()).collect();
-    for dir in ["low_poly_furniture", "kenney_prototype-kit"] {
-        let path = root.join(dir);
-        if !path.is_dir() {
-            continue;
-        }
-        for c in import::scan(root, &path, &lib).unwrap_or_else(|e| panic!("{e}")) {
-            assert!(
-                !known.contains(&c.mesh.as_str()),
-                "{} is already in the library and was offered anyway",
-                c.mesh
-            );
-        }
+    for c in import::scan(root, root, &lib).unwrap_or_else(|e| panic!("{e}")) {
+        assert!(
+            !known.contains(&c.mesh.as_str()),
+            "{} is already in the library and was offered anyway",
+            c.mesh
+        );
     }
 }
 
-/// Print the report for one kit. Not an assertion — the output being readable is most of the feature,
-/// and `cargo test -- --nocapture` is where anyone judging that will look.
+/// **An assembled model measures as it is assembled.**
+///
+/// `animal-horse.glb` is built from parts placed by node TRANSLATION — head lifted, legs spread —
+/// and `Glb::bounds` read only the accessors, which describe those parts in their own space. It
+/// therefore measured a pile at the origin. Nothing caught it until the import preview drew the mesh
+/// standing through the top of its own volume box, which is what a wrong measurement looks like once
+/// you finally render it.
+///
+/// The check is against the assembled extents rather than a pinned number, so it survives the asset
+/// being re-exported: the horse is taller than the tallest single part it is made of.
 #[test]
-fn the_report_reads_like_something_a_person_would_use() {
-    let root = Path::new("assets");
-    let candidates = import::scan(root, &root.join("ozea"), &library())
-        .unwrap_or_else(|e| panic!("{e}"));
-    for c in candidates.iter().take(6) {
-        println!("\n{}  ->  id `{}`", c.mesh, c.proposed.id);
-        if let Some(m) = c.measured {
-            println!(
-                "  {:.2} x {:.2} m footprint, {:.2} m tall, {} tris",
-                m.footprint.0, m.footprint.1, m.height, c.triangles
-            );
-        }
-        for f in &c.findings {
-            println!("  [{:?}] {}", f.severity, f.message);
-            if let Some(fix) = &f.fix {
-                println!("         -> {fix}");
-            }
+fn a_model_assembled_by_node_transforms_measures_as_assembled() {
+    let path = Path::new("assets/kenney_prototype-kit/Models/GLB format/animal-horse.glb");
+    let glb = emerge_core::glb::Glb::open(path).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        glb.has_node_transform(),
+        "this asset is the fixture BECAUSE its parts are placed by node transform — if that stopped \
+         being true, this test is measuring nothing"
+    );
+
+    let composed = glb.measure().unwrap_or_else(|e| panic!("{e}"));
+    // The raw accessor union, which is what the old code returned: parts stacked at the origin.
+    let raw_height = raw_accessor_height(path);
+    assert!(
+        composed.height > raw_height + 0.05,
+        "composed height {:.3} m should exceed the raw accessor union {:.3} m — if they match, the \
+         node transforms are not being composed",
+        composed.height,
+        raw_height
+    );
+}
+
+/// The union of every POSITION accessor's declared bounds, ignoring the scene graph — the number
+/// `Glb::bounds` used to return.
+fn raw_accessor_height(path: &Path) -> f32 {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{e}"));
+    let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes[20..20 + json_len]).unwrap_or_else(|e| panic!("{e}"));
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for mesh in json["meshes"].as_array().into_iter().flatten() {
+        for prim in mesh["primitives"].as_array().into_iter().flatten() {
+            let ix = prim["attributes"]["POSITION"].as_u64().unwrap_or(0) as usize;
+            let acc = &json["accessors"][ix];
+            lo = lo.min(acc["min"][1].as_f64().unwrap_or(0.0) as f32);
+            hi = hi.max(acc["max"][1].as_f64().unwrap_or(0.0) as f32);
         }
     }
+    hi - lo
 }

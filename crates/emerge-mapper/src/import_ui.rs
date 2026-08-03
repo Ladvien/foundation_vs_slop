@@ -123,6 +123,15 @@ struct CandidateList;
 #[derive(Component)]
 struct DetailPane;
 
+/// The candidate standing on the grid, so an author can see what they are about to accept.
+#[derive(Component)]
+struct Preview;
+
+/// Which candidate the live preview shows, so it is rebuilt only when the selection actually moves —
+/// respawning a GLB every frame would thrash the asset server and never finish loading.
+#[derive(Component)]
+struct PreviewOf(usize);
+
 /// The persistent line saying what the scan found.
 #[derive(Component)]
 struct ScanSummary;
@@ -139,6 +148,12 @@ const DIM: Color = Color::srgb(0.58, 0.56, 0.53);
 const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
 const ACCENT: Color = Color::srgb(0.90, 0.66, 0.24);
 const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
+/// The measured footprint — what the placement rules reserve.
+const FOOTPRINT: Color = Color::srgb(0.35, 0.72, 0.85);
+/// The grid cells it occupies. Where this and the footprint differ is the tiling slack.
+const CELLS: Color = Color::srgb(0.42, 0.38, 0.30);
+/// The volume, so a height is seen rather than only read.
+const EXTENT: Color = Color::srgb(0.24, 0.42, 0.50);
 
 pub struct ImportUiPlugin;
 
@@ -158,6 +173,8 @@ impl Plugin for ImportUiPlugin {
                     rebuild_candidates.run_if(resource_changed::<ImportState>),
                     rebuild_detail.run_if(resource_changed::<ImportState>),
                     refresh_lines,
+                    drive_preview,
+                    draw_preview_footprint.run_if(in_import_mode),
                 ),
             )
             .add_observer(on_candidate_click)
@@ -501,6 +518,109 @@ fn apply_mode(
     }
     for mut node in &mut map_root {
         node.display = map_shown;
+    }
+}
+
+fn in_import_mode(mode: Res<Mode>) -> bool {
+    *mode == Mode::Import
+}
+
+/// Keep one preview alive, showing the selected candidate at the origin with its PROPOSED alignment
+/// applied.
+///
+/// Proposed, not raw: the whole question an author is answering here is "will this sit right when the
+/// game places it", and showing the mesh as exported answers a different one. A candidate whose origin
+/// is 2 m off its base looks wrong in the file and correct here, which is the importer saying "I have
+/// a fix for that" in the only language that settles it.
+fn drive_preview(
+    mut commands: Commands,
+    mode: Res<Mode>,
+    assets: Res<AssetServer>,
+    state: Res<ImportState>,
+    previews: Query<(Entity, &PreviewOf), With<Preview>>,
+) {
+    let clear = |commands: &mut Commands| {
+        for (e, _) in &previews {
+            commands.entity(e).despawn();
+        }
+    };
+    if *mode != Mode::Import {
+        clear(&mut commands);
+        return;
+    }
+    let Some(c) = state.current() else {
+        clear(&mut commands);
+        return;
+    };
+    // A blocked candidate has no trustworthy alignment, so a preview of it would be a picture of a
+    // guess. The findings say why; an empty grid is the honest illustration.
+    if c.blocked() {
+        clear(&mut commands);
+        return;
+    }
+
+    for (e, of) in &previews {
+        if of.0 != state.selected {
+            commands.entity(e).despawn();
+        }
+    }
+    if previews.iter().any(|(_, of)| of.0 == state.selected) {
+        return;
+    }
+
+    let Some(mesh) = c.proposed.mesh.as_ref() else {
+        return;
+    };
+    let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
+    let a = &c.proposed.align;
+    // The pivot shifts the model so its bounding-box centre lands on the placement point, which is
+    // what makes the symmetric footprint an accurate reservation rather than an approximation.
+    let pivot = a.pivot.unwrap_or((0.0, 0.0));
+    commands
+        .spawn((
+            Preview,
+            PreviewOf(state.selected),
+            Transform::from_xyz(-pivot.0, a.y_offset.unwrap_or(0.0), -pivot.1)
+                .with_scale(Vec3::splat(a.scale.unwrap_or(1.0))),
+            Visibility::Inherited,
+        ))
+        .with_child((WorldAssetRoot(scene), Transform::default()));
+}
+
+/// Draw the footprint the placement rules will reserve, and the grid cells it occupies.
+///
+/// Two rectangles, deliberately: the measured footprint, and the cells a flood fill would step on.
+/// Where they differ is exactly the gap-or-overlap the findings describe in words, and a number in a
+/// sentence is much easier to skip than a line that plainly does not meet its neighbour.
+fn draw_preview_footprint(state: Res<ImportState>, mut gizmos: Gizmos) {
+    let Some(c) = state.current().filter(|c| !c.blocked()) else {
+        return;
+    };
+    let Some((w, d)) = c.proposed.extent.footprint else {
+        return;
+    };
+    let height = c.proposed.extent.height.unwrap_or(0.0);
+
+    // The mesh's own footprint, at the floor.
+    gizmos.rect(
+        Isometry3d::new(Vec3::new(0.0, 0.005, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        Vec2::new(w, d),
+        FOOTPRINT,
+    );
+    // The cells it will actually occupy.
+    let (cx, _) = emerge_core::grid::cells(w);
+    let (cz, _) = emerge_core::grid::cells(d);
+    gizmos.rect(
+        Isometry3d::new(Vec3::new(0.0, 0.01, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        Vec2::new(cx as f32 * emerge_core::grid::SNAP, cz as f32 * emerge_core::grid::SNAP),
+        CELLS,
+    );
+    // And the volume, so height is visible rather than only stated.
+    if height > 0.0 {
+        gizmos.cube(
+            Transform::from_xyz(0.0, height * 0.5, 0.0).with_scale(Vec3::new(w, height, d)),
+            EXTENT,
+        );
     }
 }
 
