@@ -218,9 +218,9 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     rename_keys,
-                    keys.run_if(not_renaming),
-                    place_on_click.run_if(not_renaming),
-                    drive_ghost,
+                    keys.run_if(not_renaming).run_if(in_map_mode),
+                    place_on_click.run_if(not_renaming).run_if(in_map_mode),
+                    drive_ghost.run_if(in_map_mode),
                     fade_ghost,
                     style_rows,
                     refresh_status,
@@ -273,6 +273,7 @@ fn spawn_panel(
 ) {
     let root = commands
         .spawn((
+            crate::import_ui::MapRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(12.0),
@@ -689,6 +690,12 @@ fn refresh_status(
 /// legitimately does not.
 fn not_renaming(state: Res<EditorState>) -> bool {
     state.renaming.is_none()
+}
+
+/// Placing belongs to map mode. Without this, `F` in import mode would flood the map with whatever
+/// the palette last had armed, which is a surprising amount of work to undo.
+fn in_map_mode(mode: Res<crate::import_ui::Mode>) -> bool {
+    *mode == crate::import_ui::Mode::Map
 }
 
 /// Type a name. Snake case is applied to what is shown and to what is committed, so the illegal state

@@ -64,34 +64,48 @@ fn the_ozea_kit_raises_exactly_the_one_warning_we_know_about() {
     );
 }
 
-/// Every shipped mesh is measurable. A `Blocking` finding means the importer would refuse it, and
-/// refusing an asset the game already loads would be the importer being broken rather than strict.
+/// **One shipped mesh cannot be measured, and it is the right call.**
+///
+/// `low_poly_flashlight.glb` carries non-uniform node scales on two small parts (`switch_base` at
+/// 0.16/0.28/0.06 and `switch_button`), so its accessor bounds are not its world size and anything
+/// measured from them would be confidently wrong. `tests/prop_footprint_contract.rs` skips this class
+/// for the same reason — *"a silently mismeasured pass would be worse than no pass"*.
+///
+/// Nothing is broken by it today: `squad.rs` places the flashlight at a hardcoded scale and
+/// orientation rather than from a measured footprint. It would matter the moment someone wanted it in
+/// a library, and the fix is a re-export with the transform baked into the vertices.
+///
+/// So this pins the known one. A SECOND unmeasurable mesh fails, which is the point.
 #[test]
-fn nothing_shipped_is_unmeasurable() {
+fn only_the_known_unmeasurable_mesh_is_unmeasurable() {
+    // **The whole tree, not three directories.** The first version checked `ozea`,
+    // `low_poly_furniture` and `kenney_prototype-kit` and passed — and the editor's own scan, which
+    // walks everything under `assets/`, reported one unmeasurable mesh. A test that checks a subset
+    // of what the tool does is a test that agrees with the tool right up until it matters.
     let root = Path::new("assets");
     let mut blocked = Vec::new();
-    for dir in ["ozea", "low_poly_furniture", "kenney_prototype-kit"] {
-        let path = root.join(dir);
-        if !path.is_dir() {
-            continue;
-        }
-        for c in import::scan(root, &path, &library()).unwrap_or_else(|e| panic!("{dir}: {e}")) {
-            if c.blocked() {
-                let why: Vec<&str> = c
-                    .findings
-                    .iter()
-                    .filter(|f| f.severity == Severity::Blocking)
-                    .map(|f| f.message.as_str())
-                    .collect();
-                blocked.push(format!("{}: {}", c.mesh, why.join("; ")));
-            }
+    for c in import::scan(root, root, &library()).unwrap_or_else(|e| panic!("scan: {e}")) {
+        if c.blocked() {
+            let why: Vec<&str> = c
+                .findings
+                .iter()
+                .filter(|f| f.severity == Severity::Blocking)
+                .map(|f| f.message.as_str())
+                .collect();
+            blocked.push(format!("{}: {}", c.mesh, why.join("; ")));
         }
     }
-    assert!(
-        blocked.is_empty(),
-        "{} shipped mesh(es) cannot be measured:\n  {}",
+    assert_eq!(
+        blocked.len(),
+        1,
+        "expected only the known flashlight, got {}:\n  {}",
         blocked.len(),
         blocked.join("\n  ")
+    );
+    assert!(
+        blocked[0].contains("low_poly_flashlight"),
+        "the unmeasurable mesh changed: {}",
+        blocked[0]
     );
 }
 

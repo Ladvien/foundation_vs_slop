@@ -33,6 +33,7 @@
 mod devshot;
 mod editor;
 mod fill;
+mod import_ui;
 mod project;
 mod thumbs;
 mod view;
@@ -93,6 +94,12 @@ fn main() {
         )
         .insert_resource(project)
         .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
-        .add_plugins((view::ViewPlugin, editor::EditorPlugin, thumbs::ThumbsPlugin, devshot::DevShotPlugin))
+        .add_plugins((
+            view::ViewPlugin,
+            editor::EditorPlugin,
+            thumbs::ThumbsPlugin,
+            import_ui::ImportUiPlugin,
+            devshot::DevShotPlugin,
+        ))
         .run();
 }
