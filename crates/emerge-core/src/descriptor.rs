@@ -98,6 +98,62 @@ pub struct Placement {
     pub group: Option<String>,
 }
 
+/// Every layer a piece can be put on, in the order an editor should cycle them.
+///
+/// The list is built from the project's surface vocabulary rather than hardcoded, because
+/// `OnSurface` is the one variant whose payload is a *token* — a project with a `worktop` and a
+/// `shelf` should offer both, and a project with neither should offer no surface mount at all rather
+/// than one that can never match.
+///
+/// Order is deliberate: the common cases first. Most pieces stand on the floor, and an author
+/// cycling to find `OnFloor` past four exotic variants is an author who will bind their own key.
+pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
+    let mut out = vec![
+        Mount::OnFloor,
+        Mount::OnSurface {
+            class: String::new(),
+        },
+        Mount::OnWall { height: 1.8 },
+        Mount::OnCeiling,
+        Mount::Tiled,
+        Mount::Overlay { on: Host::Floor },
+        Mount::Overlay { on: Host::Wall },
+        Mount::Overlay {
+            on: Host::Ceiling,
+        },
+        Mount::InOpening { clear: None },
+    ];
+    // Replace the placeholder with one entry per real class, so every offered mount can actually be
+    // satisfied by something in this project.
+    let at = out
+        .iter()
+        .position(|m| matches!(m, Mount::OnSurface { class } if class.is_empty()));
+    if let Some(at) = at {
+        out.remove(at);
+        for (i, class) in surfaces.iter().enumerate() {
+            out.insert(at + i, Mount::OnSurface { class: class.clone() });
+        }
+    }
+    out
+}
+
+/// A short label for a mount, for a panel that has one line to say it in.
+pub fn mount_label(mount: Option<&Mount>) -> String {
+    match mount {
+        None => "unset".to_owned(),
+        Some(Mount::OnFloor) => "on floor".to_owned(),
+        Some(Mount::OnSurface { class }) => format!("on {class}"),
+        Some(Mount::OnWall { height }) => format!("on wall at {height:.1} m"),
+        Some(Mount::OnCeiling) => "on ceiling".to_owned(),
+        Some(Mount::Tiled) => "tiled".to_owned(),
+        Some(Mount::Overlay { on }) => format!("overlay on {on:?}").to_lowercase(),
+        Some(Mount::InOpening { clear }) => match clear {
+            Some((w, h)) => format!("in opening {w:.2} x {h:.2} m"),
+            None => "in opening".to_owned(),
+        },
+    }
+}
+
 /// Corrections for what the artist got wrong. Every one is measured, never dialled by eye — the kit's
 /// own doc says so of `scale`, and the importer exists to make that true of the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -379,6 +435,49 @@ fn pick<T: Clone>(base: &[T], patch: &[T]) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The surface mount is the one whose payload is a project token, so the options have to come
+    /// from the project — offering `OnSurface { "worktop" }` where nothing offers a worktop is
+    /// offering a mount that can never be satisfied.
+    #[test]
+    fn mount_options_come_from_the_projects_surface_vocabulary() {
+        let none = mount_options(&[]);
+        assert!(
+            !none.iter().any(|m| matches!(m, Mount::OnSurface { .. })),
+            "a project with no surface classes must offer no surface mount"
+        );
+
+        let two = mount_options(&["support".to_owned(), "worktop".to_owned()]);
+        let classes: Vec<&str> = two
+            .iter()
+            .filter_map(|m| match m {
+                Mount::OnSurface { class } => Some(class.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(classes, ["support", "worktop"]);
+        assert!(
+            !two.iter().any(|m| matches!(m, Mount::OnSurface { class } if class.is_empty())),
+            "the placeholder must not survive into the offered list"
+        );
+    }
+
+    /// The common case comes first. An author cycling past four exotic variants to reach "on floor"
+    /// will bind their own key instead.
+    #[test]
+    fn the_first_option_is_the_one_most_pieces_want() {
+        assert_eq!(mount_options(&[])[0], Mount::OnFloor);
+    }
+
+    #[test]
+    fn every_mount_has_a_label_short_enough_for_one_line() {
+        for m in mount_options(&["worktop".to_owned()]) {
+            let label = mount_label(Some(&m));
+            assert!(!label.is_empty(), "{m:?} has no label");
+            assert!(label.len() <= 24, "{m:?} label is too long: {label}");
+        }
+        assert_eq!(mount_label(None), "unset");
+    }
 
     fn crate_desc() -> Descriptor {
         Descriptor {

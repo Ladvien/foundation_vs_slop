@@ -16,9 +16,11 @@
 //! A warning that does not say what to do about it is a warning that gets read once. Every
 //! [`emerge_core::import::Finding`] that has an obvious remedy carries it, and the panel shows both.
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
+use emerge_core::descriptor::{mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::project::Project;
@@ -38,7 +40,16 @@ pub struct ImportState {
     /// Whether the directory has been walked yet. Separate from `candidates.is_empty()`, which is
     /// also true of a directory with nothing new in it — and those two states want different words.
     pub scanned: bool,
+    /// What the last scan found. **Persistent**, and separate from [`Self::status`] on purpose: the
+    /// first version had one field, so "319 mesh(es) not in the library" was replaced by "layer: on
+    /// support" the moment anyone did anything, and the one number that says whether you have seen
+    /// the whole list was gone for the rest of the session.
+    pub summary: String,
+    /// The last thing that happened. Transient, and lives at the bottom where a changing line belongs.
     pub status: String,
+    /// The raw text being typed into the candidate's id, or `None` when not renaming. Snake case is
+    /// applied for display and on commit, exactly as the map's name is — one rule, one behaviour.
+    pub renaming: Option<String>,
 }
 
 impl ImportState {
@@ -55,6 +66,51 @@ struct ImportRoot;
 #[derive(Component)]
 pub struct MapRoot;
 
+/// One tag chip: which axis, and which token.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct TagChip {
+    axis: Axis,
+    /// Index into that axis's token table. The token itself lives in the vocabulary; carrying an
+    /// index rather than a `String` keeps the component `Copy` and cannot drift from the table.
+    token: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Kind,
+    Effects,
+    Look,
+    /// What this piece OFFERS a top for — the two-sided axis.
+    Surfaces,
+}
+
+impl Axis {
+    fn label(self) -> &'static str {
+        match self {
+            Axis::Kind => "KIND",
+            Axis::Effects => "DOES",
+            Axis::Look => "LOOKS",
+            Axis::Surfaces => "OFFERS",
+        }
+    }
+    fn tokens<'a>(self, v: &'a emerge_core::vocab::Vocabularies) -> &'a emerge_core::vocab::Vocabulary {
+        match self {
+            Axis::Kind => &v.kind,
+            Axis::Effects => &v.effects,
+            Axis::Look => &v.look,
+            Axis::Surfaces => &v.surfaces,
+        }
+    }
+    fn list<'a>(self, d: &'a mut emerge_core::descriptor::Descriptor) -> &'a mut Vec<String> {
+        match self {
+            Axis::Kind => &mut d.kind,
+            Axis::Effects => &mut d.effects,
+            Axis::Look => &mut d.look,
+            Axis::Surfaces => &mut d.offers.surfaces,
+        }
+    }
+}
+
 /// One candidate row, carrying its index.
 #[derive(Component, Clone, Copy)]
 struct CandidateRow(usize);
@@ -66,6 +122,14 @@ struct CandidateList;
 /// The node the selected candidate's detail is rebuilt into.
 #[derive(Component)]
 struct DetailPane;
+
+/// The persistent line saying what the scan found.
+#[derive(Component)]
+struct ScanSummary;
+
+/// The transient line saying what just happened.
+#[derive(Component)]
+struct ActionLine;
 
 const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
 const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
@@ -87,13 +151,17 @@ impl Plugin for ImportUiPlugin {
                 Update,
                 (
                     toggle_mode,
-                    move_selection,
+                    rename_candidate,
+                    move_selection.run_if(not_renaming_candidate),
+                    cycle_mount.run_if(not_renaming_candidate),
                     apply_mode,
                     rebuild_candidates.run_if(resource_changed::<ImportState>),
                     rebuild_detail.run_if(resource_changed::<ImportState>),
+                    refresh_lines,
                 ),
             )
-            .add_observer(on_candidate_click);
+            .add_observer(on_candidate_click)
+            .add_observer(on_tag_chip);
     }
 }
 
@@ -125,6 +193,8 @@ fn spawn_import_panel(mut commands: Commands) {
             for (chord, what) in [
                 ("Tab", "back to the map"),
                 ("up down", "choose"),
+                ("I", "type an id"),
+                ("M", "layer"),
                 ("R", "rescan"),
             ] {
                 p.spawn(Node {
@@ -152,12 +222,23 @@ fn spawn_import_panel(mut commands: Commands) {
             }
 
             p.spawn((
+                Text::new(""),
+                TextColor(DIM),
+                TextFont::from_font_size(10.0),
+                Node {
+                    margin: UiRect::top(Val::Px(6.0)),
+                    ..default()
+                },
+                ScanSummary,
+            ));
+
+            p.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(2.0),
                     max_height: Val::Px(300.0),
                     overflow: Overflow::scroll_y(),
-                    margin: UiRect::top(Val::Px(6.0)),
+                    margin: UiRect::top(Val::Px(4.0)),
                     ..default()
                 },
                 ScrollArea::default(),
@@ -172,6 +253,17 @@ fn spawn_import_panel(mut commands: Commands) {
                     ..default()
                 },
                 DetailPane,
+            ));
+
+            p.spawn((
+                Text::new(""),
+                TextColor(ACCENT),
+                TextFont::from_font_size(10.0),
+                Node {
+                    margin: UiRect::top(Val::Px(8.0)),
+                    ..default()
+                },
+                ActionLine,
             ));
         });
 }
@@ -208,7 +300,7 @@ fn scan(project: &Project, state: &mut ImportState) {
                 .iter()
                 .filter(|c| c.worst() == Some(Severity::Warn))
                 .count();
-            state.status = format!(
+            state.summary = format!(
                 "{} mesh(es) not in the library — {warned} with warnings, {blocked} unmeasurable",
                 found.len()
             );
@@ -217,10 +309,149 @@ fn scan(project: &Project, state: &mut ImportState) {
             state.scanned = true;
         }
         Err(e) => {
-            state.status = e;
+            state.summary = e;
             state.scanned = true;
         }
     }
+}
+
+fn not_renaming_candidate(state: Res<ImportState>) -> bool {
+    state.renaming.is_none()
+}
+
+/// Type an id for the selected candidate. Same rule as the map's name and the same behaviour: the
+/// spelling is forced as you type, and the field starts EMPTY so the first keystroke replaces rather
+/// than appends.
+fn rename_candidate(
+    mut events: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<Mode>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Import {
+        return;
+    }
+    if state.renaming.is_none() {
+        if keys.just_pressed(KeyCode::KeyI) && state.current().is_some() {
+            state.renaming = Some(String::new());
+            state.status = "type an id — Enter to keep it, Esc to leave it alone".to_owned();
+        }
+        return;
+    }
+
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let raw = state.renaming.take().unwrap_or_default();
+                let id = emerge_core::naming::to_snake_case(&raw);
+                if id.is_empty() {
+                    state.status = "an id cannot be empty; nothing was changed".to_owned();
+                } else {
+                    let at = state.selected;
+                    if let Some(c) = state.candidates.get_mut(at) {
+                        c.proposed.id = id.clone();
+                    }
+                    state.status = format!("id is `{id}`");
+                }
+            }
+            Key::Escape => {
+                state.renaming = None;
+                state.status = "id unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Space => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.push(' ');
+                }
+            }
+            Key::Character(s) => {
+                if let Some(raw) = state.renaming.as_mut() {
+                    raw.push_str(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `M` steps the layer this piece goes on.
+///
+/// A cycle rather than a menu because there are nine of them and the list is short enough to walk;
+/// the label says where you are, so nobody has to count presses.
+fn cycle_mount(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<Mode>,
+    project: Res<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Import || !keys.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+    let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
+    let options = mount_options(&surfaces);
+    let at = state.selected;
+    let Some(c) = state.candidates.get_mut(at) else {
+        return;
+    };
+    let next = c
+        .proposed
+        .mount
+        .as_ref()
+        .and_then(|m| options.iter().position(|o| o == m))
+        .map_or(0, |i| (i + 1) % options.len());
+    c.proposed.mount = Some(options[next].clone());
+    state.status = format!("layer: {}", mount_label(c.proposed.mount.as_ref()));
+}
+
+/// Toggle one token on one axis.
+fn on_tag_chip(
+    activate: On<Activate>,
+    chips: Query<&TagChip>,
+    project: Res<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    let Ok(chip) = chips.get(activate.entity) else {
+        return;
+    };
+    let Some(token) = chip
+        .axis
+        .tokens(&project.vocab)
+        .names()
+        .nth(chip.token)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let at = state.selected;
+    let Some(c) = state.candidates.get_mut(at) else {
+        return;
+    };
+    let list = chip.axis.list(&mut c.proposed);
+    match list.iter().position(|t| *t == token) {
+        Some(i) => {
+            list.remove(i);
+        }
+        // Kept in vocabulary order rather than click order, so two descriptors with the same tags
+        // serialize identically and a diff of the library shows real changes only.
+        None => {
+            list.push(token.clone());
+            let order: Vec<String> = chip
+                .axis
+                .tokens(&project.vocab)
+                .names()
+                .map(str::to_owned)
+                .collect();
+            list.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+        }
+    }
+    state.status = format!("{} tags updated", chip.axis.label().to_lowercase());
 }
 
 fn move_selection(
@@ -270,6 +501,24 @@ fn apply_mode(
     }
     for mut node in &mut map_root {
         node.display = map_shown;
+    }
+}
+
+/// The two one-line readouts. Cheap enough every frame, and guarded so they only write on change.
+fn refresh_lines(
+    state: Res<ImportState>,
+    mut summaries: Query<&mut Text, (With<ScanSummary>, Without<ActionLine>)>,
+    mut actions: Query<&mut Text, (With<ActionLine>, Without<ScanSummary>)>,
+) {
+    for mut t in &mut summaries {
+        if t.0 != state.summary {
+            t.0 = state.summary.clone();
+        }
+    }
+    for mut t in &mut actions {
+        if t.0 != state.status {
+            t.0 = state.status.clone();
+        }
     }
 }
 
@@ -354,24 +603,28 @@ fn rebuild_candidates(
 fn rebuild_detail(
     mut commands: Commands,
     state: Res<ImportState>,
+    project: Res<Project>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
     for pane in &panes {
         commands.entity(pane).despawn_related::<Children>();
         commands.entity(pane).with_children(|p| {
-            p.spawn((
-                Text::new(state.status.clone()),
-                TextColor(DIM),
-                TextFont::from_font_size(10.0),
-            ));
-
             let Some(c) = state.current() else {
                 return;
             };
 
+            // The id, showing what is being typed when it is being typed — with a caret, so an
+            // empty field reads as "waiting for you" rather than as the id having been wiped.
+            let (id_text, id_tint) = match &state.renaming {
+                Some(raw) => (
+                    format!("id  {}_", emerge_core::naming::to_snake_case(raw)),
+                    ACCENT,
+                ),
+                None => (format!("id  {}", c.proposed.id), TEXT),
+            };
             p.spawn((
-                Text::new(format!("id  {}", c.proposed.id)),
-                TextColor(TEXT),
+                Text::new(id_text),
+                TextColor(id_tint),
                 TextFont::from_font_size(12.0),
                 Node {
                     margin: UiRect::top(Val::Px(6.0)),
@@ -422,6 +675,88 @@ fn rebuild_detail(
                         ));
                     });
                 }
+            }
+
+            // **The layer.** `mount` is what replaced `Role`, `rests_on` and the height heuristic that
+            // once decided a 10.9 cm mug was a floor decal — so it is the one field worth putting on
+            // its own line rather than in a list of tags.
+            p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                margin: UiRect::top(Val::Px(4.0)),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Node {
+                        width: Val::Px(48.0),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    Text::new("layer"),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(10.0),
+                ));
+                row.spawn((
+                    Text::new(mount_label(c.proposed.mount.as_ref())),
+                    TextColor(if c.proposed.mount.is_some() { TEXT } else { ACCENT }),
+                    TextFont::from_font_size(11.0),
+                ));
+            });
+
+            // Tag chips, one row per axis. Every token the project has, lit when this piece carries
+            // it — so an author sees the whole vocabulary rather than having to remember it, which is
+            // the difference between a closed vocabulary being a help and being an obstacle.
+            for axis in [Axis::Kind, Axis::Effects, Axis::Look, Axis::Surfaces] {
+                let vocab = axis.tokens(&project.vocab);
+                if vocab.tokens.is_empty() {
+                    continue;
+                }
+                let held: Vec<String> = match axis {
+                    Axis::Kind => c.proposed.kind.clone(),
+                    Axis::Effects => c.proposed.effects.clone(),
+                    Axis::Look => c.proposed.look.clone(),
+                    Axis::Surfaces => c.proposed.offers.surfaces.clone(),
+                };
+                p.spawn((
+                    Text::new(axis.label()),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(9.0),
+                    Node {
+                        margin: UiRect::top(Val::Px(5.0)),
+                        ..default()
+                    },
+                ));
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(3.0),
+                    row_gap: Val::Px(3.0),
+                    ..default()
+                })
+                .with_children(|chips| {
+                    for (ix, name) in vocab.names().enumerate() {
+                        let on = held.iter().any(|h| h == name);
+                        chips
+                            .spawn((
+                                UiButton,
+                                Hovered::default(),
+                                TagChip { axis, token: ix },
+                                Node {
+                                    padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(if on { ROW_SELECTED } else { ROW_BG }),
+                            ))
+                            .with_children(|chip| {
+                                chip.spawn((
+                                    Text::new(name.to_owned()),
+                                    TextColor(if on { TEXT } else { LABEL }),
+                                    TextFont::from_font_size(10.0),
+                                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                                ));
+                            });
+                    }
+                });
             }
 
             for f in &c.findings {
