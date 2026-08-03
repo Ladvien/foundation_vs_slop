@@ -147,7 +147,7 @@ fn step_eye_bob(x: &mut Vec2, v: &mut Vec2, target: Vec2, omega: f32, zeta: f32,
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn update_scp999_eyes(
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
     time: Res<Time>,
     blobs: Query<(&GlobalTransform, &Scp999Motion, &BlobJiggle, &Children), With<Scp999>>,
     mut eyes: Query<(&mut Transform, &mut Scp999Eyes, &MeshMaterial3d<Scp999EyesMaterial>), Without<Scp999>>,

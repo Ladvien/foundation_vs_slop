@@ -726,7 +726,7 @@ fn drain_gore(
         Res<AutogibCache>,
         Res<crate::fog::FogGrid>,
     ),
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
     mut gib_seq: ResMut<GibSeq>,
 ) {
     if queue.0.is_empty() {

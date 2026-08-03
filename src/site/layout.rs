@@ -857,17 +857,65 @@ pub(crate) fn occupies_floor(kit: &super::kit::SiteKit, piece: SitePiece) -> boo
     !is_floor_marking(kit, piece) && kit.rests_on(piece).is_none()
 }
 
-pub fn check_prop_placements(
-    layout: &SiteLayout,
-    kit: &super::kit::SiteKit,
-) -> Result<Vec<String>, String> {
+/// What the placement rules found: every fault, and every prop that waived them.
+///
+/// Split out of [`check_prop_placements`] so the faults can be read as a **list** rather than as one
+/// joined string. The dev-only Site editor re-runs the rules after every drag and draws a marker on
+/// each offending prop, which means it needs them one by one; recovering them by splitting the error
+/// message would be a parser for a human-readable string, and it would break silently the first time
+/// that wording changed.
+#[derive(Debug, Default, Clone)]
+pub struct PlacementReport {
+    /// One entry per broken rule.
+    pub faults: Vec<PlacementFault>,
+    /// One message per prop carrying a `waive`, naming the reason.
+    pub waived: Vec<String>,
+}
+
+/// One broken placement rule, and which record(s) it is about.
+///
+/// The message alone was enough while these were only ever printed at startup. The Site editor draws
+/// each fault on the offending prop, which needs the record — and recovering it by parsing the piece
+/// name and position back out of the message would be a parser for prose.
+#[derive(Debug, Clone)]
+pub struct PlacementFault {
+    /// Index into [`SiteLayout::props`] — the prop to move.
+    pub prop: usize,
+    /// The other record, for a rule about a *pair*. Only the overlap rule sets this; it names both
+    /// props because either one moving would resolve it.
+    pub other: Option<usize>,
+    /// The human-readable message, unchanged from when these were strings.
+    pub message: String,
+}
+
+impl PlacementFault {
+    fn of(prop: usize, message: String) -> Self {
+        PlacementFault {
+            prop,
+            other: None,
+            message,
+        }
+    }
+
+    fn pair(prop: usize, other: usize, message: String) -> Self {
+        PlacementFault {
+            prop,
+            other: Some(other),
+            message,
+        }
+    }
+}
+
+/// Run every placement rule and collect the results. [`check_prop_placements`] is this plus the
+/// load-time string formatting — one implementation, two presentations.
+pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> PlacementReport {
     use crate::placement::ir::{escapes_bounds, facing_cosine, overlap_area, Footprint};
 
     let mut waived = Vec::new();
     // (index, footprint, host index) for every prop the OVERLAP rule applies to. `host` is the prop
     // this one RESTS ON, and it is the only pair the rule is allowed to forgive — see below.
     let mut solid: Vec<(usize, Footprint, Option<usize>)> = Vec::new();
-    let mut faults: Vec<String> = Vec::new();
+    let mut faults: Vec<PlacementFault> = Vec::new();
 
     for (i, p) in layout.props.iter().enumerate() {
         if let Some(reason) = &p.waive {
@@ -889,10 +937,13 @@ pub fn check_prop_placements(
             let label = area.label.as_str();
             let out = escapes_bounds(&f, area.rect.bounds_metres());
             if out > 0.02 {
-                faults.push(format!(
-                    "{:?} at {:?} yaw {} sticks {out:.2} m out of {label} — its footprint is {fw:.2} \
-                     x {fd:.2} m, so at this yaw it does not fit where it was put",
-                    p.piece, p.pos, p.yaw
+                faults.push(PlacementFault::of(
+                    i,
+                    format!(
+                        "{:?} at {:?} yaw {} sticks {out:.2} m out of {label} — its footprint is \
+                         {fw:.2} x {fd:.2} m, so at this yaw it does not fit where it was put",
+                        p.piece, p.pos, p.yaw
+                    ),
                 ));
             }
         }
@@ -926,12 +977,12 @@ pub fn check_prop_placements(
     // The height of a `rests_on` piece is derived from its host (`resting_on`), so a piece authored
     // away from every surface has no height to derive and would be seated at y = 0 — a mug sunk into
     // the deck, which spawns cleanly and logs nothing.
-    for p in &layout.props {
+    for (i, p) in layout.props.iter().enumerate() {
         if p.waive.is_some() {
             continue;
         }
         if let Some(Err(e)) = resting_on(layout, kit, p) {
-            faults.push(e);
+            faults.push(PlacementFault::of(i, e));
         }
     }
 
@@ -946,7 +997,7 @@ pub fn check_prop_placements(
     // Only pieces that HAVE a front are checked. A stool and a bench measure symmetric, so they get no
     // `front` in the kit and nothing is asserted about them: demanding a facing from a backless seat
     // would be inventing a fact about the art.
-    for p in &layout.props {
+    for (i, p) in layout.props.iter().enumerate() {
         if p.waive.is_some() {
             continue;
         }
@@ -971,15 +1022,18 @@ pub fn check_prop_placements(
             let want = (target.pos.1 - p.pos.1)
                 .atan2(target.pos.0 - p.pos.0)
                 .to_degrees();
-            faults.push(format!(
-                "{:?} at {:?} yaw {} is {:.0}° off the {:?} it is pulled up to {d:.2} m away — a seat \
-                 at a surface must face it. Try yaw {:.0}.",
-                p.piece,
-                p.pos,
-                p.yaw,
-                cos.clamp(-1.0, 1.0).acos().to_degrees(),
-                target.piece,
-                (90.0 - want - front).rem_euclid(360.0),
+            faults.push(PlacementFault::of(
+                i,
+                format!(
+                    "{:?} at {:?} yaw {} is {:.0}° off the {:?} it is pulled up to {d:.2} m away — \
+                     a seat at a surface must face it. Try yaw {:.0}.",
+                    p.piece,
+                    p.pos,
+                    p.yaw,
+                    cos.clamp(-1.0, 1.0).acos().to_degrees(),
+                    target.piece,
+                    (90.0 - want - front).rem_euclid(360.0),
+                ),
             ));
         }
     }
@@ -999,12 +1053,16 @@ pub fn check_prop_placements(
             // A quarter of the smaller of the two is the same judgement expressed proportionally.
             let smallest = (a.hw * a.hd).min(b.hw * b.hd) * 4.0;
             if ov > 0.02_f32.min(smallest * 0.25) {
-                faults.push(format!(
-                    "{:?} at {:?} overlaps {:?} at {:?} by {ov:.2} m²",
-                    layout.props[*i].piece,
-                    layout.props[*i].pos,
-                    layout.props[*j].piece,
-                    layout.props[*j].pos
+                faults.push(PlacementFault::pair(
+                    *i,
+                    *j,
+                    format!(
+                        "{:?} at {:?} overlaps {:?} at {:?} by {ov:.2} m²",
+                        layout.props[*i].piece,
+                        layout.props[*i].pos,
+                        layout.props[*j].piece,
+                        layout.props[*j].pos
+                    ),
                 ));
             }
         }
@@ -1045,12 +1103,16 @@ pub fn check_prop_placements(
                 }
                 let ov = overlap_area(f, &band);
                 if ov > 0.02 {
-                    faults.push(format!(
-                        "{:?} at {:?} stands in the way into {} — cell {cell:?} is an OPENING (the \
-                         floor continues {dir} out of the room), and {THRESHOLD_CLEAR:.1} m inside it \
-                         must stay clear so a person can walk in. Overlap {ov:.2} m². Move it against \
-                         a real wall, or waive it with a reason.",
-                        layout.props[*i].piece, layout.props[*i].pos, area.label
+                    faults.push(PlacementFault::of(
+                        *i,
+                        format!(
+                            "{:?} at {:?} stands in the way into {} — cell {cell:?} is an OPENING \
+                             (the floor continues {dir} out of the room), and \
+                             {THRESHOLD_CLEAR:.1} m inside it must stay clear so a person can walk \
+                             in. Overlap {ov:.2} m². Move it against a real wall, or waive it with \
+                             a reason.",
+                            layout.props[*i].piece, layout.props[*i].pos, area.label
+                        ),
                     ));
                 }
             }
@@ -1066,7 +1128,7 @@ pub fn check_prop_placements(
     //
     // Only pieces that declare a `front` are checked, for the reason that rule gives: demanding a
     // facing from a symmetric mesh would be inventing a fact about the art.
-    for p in &layout.props {
+    for (i, p) in layout.props.iter().enumerate() {
         if p.waive.is_some() {
             continue;
         }
@@ -1079,24 +1141,43 @@ pub fn check_prop_placements(
         let ahead = (p.pos.0 + yaw.sin() * reach, p.pos.1 + yaw.cos() * reach);
         let cell = IVec2::new(ahead.0.floor() as i32, ahead.1.floor() as i32);
         if !nav.is_walkable(cell) {
-            faults.push(format!(
-                "{:?} at {:?} yaw {} faces a wall — {reach:.2} m in front of it is cell {cell:?}, \
-                 which is not walkable floor. Turn it to face the room.",
-                p.piece, p.pos, p.yaw
+            faults.push(PlacementFault::of(
+                i,
+                format!(
+                    "{:?} at {:?} yaw {} faces a wall — {reach:.2} m in front of it is cell \
+                     {cell:?}, which is not walkable floor. Turn it to face the room.",
+                    p.piece, p.pos, p.yaw
+                ),
             ));
         }
     }
 
-    if faults.is_empty() {
-        Ok(waived)
+    PlacementReport { faults, waived }
+}
+
+/// The load-time check: `Ok` lists the waived props, `Err` reports every fault at once.
+///
+/// Reporting only the first fault would mean N build-run cycles to place N props, which is the whole
+/// reason this returns them together.
+pub fn check_prop_placements(
+    layout: &SiteLayout,
+    kit: &super::kit::SiteKit,
+) -> Result<Vec<String>, String> {
+    let report = prop_placement_report(layout, kit);
+    if report.faults.is_empty() {
+        Ok(report.waived)
     } else {
-        // Every fault at once. Reporting the first would mean N build-run cycles to place N props.
         Err(format!(
             "site layout: {} prop placement(s) break the placement rules —\n  {}\n\
              Fix the position/yaw, or give that prop a `waive: Some(\"reason\")` in site67.ron \
              stating why it is allowed to.",
-            faults.len(),
-            faults.join("\n  ")
+            report.faults.len(),
+            report
+                .faults
+                .iter()
+                .map(|f| f.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
         ))
     }
 }

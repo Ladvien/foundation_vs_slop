@@ -561,7 +561,7 @@ fn lerp_width(i: usize, particles: usize, root_w: f32, tip_w: f32) -> f32 {
 }
 
 fn update_hair_mesh(
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
     settings: Res<HairSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     rigs: Query<&HairRig>,

@@ -347,7 +347,7 @@ fn bar_zoom_scale(viewport_height: Option<f32>) -> f32 {
 /// mirror the owner's visibility (so a fog-hidden enemy's bar hides too). Orphaned bars despawn.
 fn update_health_bars(
     mut commands: Commands,
-    camera: Single<&GlobalTransform, With<Camera3d>>,
+    camera: Single<&GlobalTransform, (With<Camera3d>, Without<crate::ThumbnailCamera>)>,
     // Optional: `HealthPlugin` runs in the headless harness (`sim_harness.rs`) where `CameraPlugin`
     // — the only registrar of `CameraView` (`camera.rs:105`) — is absent. In Bevy 0.19 a missing
     // `Res<T>` PANICS the system rather than skipping it, so a non-optional read here would take
