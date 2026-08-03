@@ -1,0 +1,147 @@
+(
+    version: 1,
+    note: Some("GENERATED from furniture_kenney.ron by tests/descriptor_migration.rs. Do not hand-edit — regenerate with EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration."),
+    descriptors: [
+        (
+            id: "door",
+            mesh: Some("kenney_prototype-kit/Models/GLB format/door-sliding.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 0.3)),
+                height: Some(0.0),
+            ),
+            mount: Some(InOpening(
+                clear: None,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "door",
+            ],
+            effects: [
+                "pass",
+                "door",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "opening",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "wall_light",
+            mesh: Some("kenney_prototype-kit/Models/GLB format/indicator-round-e.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.3, 0.2)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "wall",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "crate",
+            mesh: Some("kenney_prototype-kit/Models/GLB format/crate-color.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.9, 0.9)),
+                height: Some(0.0),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "prop",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "column",
+            mesh: Some("kenney_prototype-kit/Models/GLB format/column.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.8, 0.8)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "structure",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+    ],
+)

@@ -1,0 +1,22 @@
+[package]
+name = "emerge-mapper"
+version = "0.1.0"
+edition = "2024"
+description = "A standalone world-building editor: author maps from an asset library, save what a game can load."
+
+# **This is the application; `emerge-core` is the part with no engine in it.** The split is not
+# decoration — `crates/emerge-core/tests/engine_free.rs` fails the build if anything in the core
+# reaches for `bevy`, which is what lets the same schema, solvers and validation run in the game, in
+# the headless search, and in here without the three agreeing on a renderer.
+#
+# `docs/2026-08-03-emerge-mapper-plan.md` is the design.
+[dependencies]
+emerge-core = { path = "../emerge-core" }
+# The editor is a Bevy app in its own right, not a mode of the game. `sim_harness.rs` is the precedent
+# the plan cites for two binaries over one plugin graph — "not a second code path".
+# `bevy_dev_tools` is what carries `infinite_grid` — verified in the vendored source at
+# `bevy_dev_tools-0.19.0/src/infinite_grid.rs`, reached as `bevy::dev_tools::infinite_grid`.
+# `jpeg` because the shipped kits embed PBR textures as JPEG and Bevy's defaults cover only PNG.
+bevy = { version = "0.19.0", features = ["jpeg", "bevy_dev_tools"] }
+ron = "0.12.2"
+serde = { version = "1.0.228", features = ["derive"] }

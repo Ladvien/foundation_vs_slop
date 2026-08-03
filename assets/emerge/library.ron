@@ -1,0 +1,1437 @@
+(
+    version: 1,
+    note: Some("GENERATED from config.ron:placement.furniture by tests/descriptor_migration.rs. Do not hand-edit — regenerate with EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration."),
+    descriptors: [
+        (
+            id: "lamp_tall",
+            mesh: Some("low_poly_furniture/glb/Lights/Ceiling Light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.61, 0.61)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "wall_light",
+            mesh: Some("low_poly_furniture/glb/Lights/Wall Light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.38, 0.2)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnWall(
+                height: 1.8,
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "wall",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "bin",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Bin.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.4, 0.4)),
+                height: Some(0.0),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "bin",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "globe",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Globe.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.33, 0.28)),
+                height: Some(0.3),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "plant_a",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Plant A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.52, 0.55)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "plant",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "plant_b",
+            mesh: Some("low_poly_furniture/glb/Miscellaneous/Plant B.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.18, 0.18)),
+                height: Some(0.25),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "plant",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "lamp",
+            mesh: Some("low_poly_furniture/glb/Lights/Lamp C.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.32, 0.32)),
+                height: Some(0.4),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "bed_double",
+            mesh: Some("low_poly_furniture/glb/Beds/Bed Double.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.278)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.72, 2.22)),
+                height: Some(0.714),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "bed",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "sofa",
+            mesh: Some("low_poly_furniture/glb/Sofas/Sofa A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.058)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((2.08, 0.88)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "table",
+            mesh: Some("low_poly_furniture/glb/Tables/Table A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.66, 0.71)),
+                height: Some(0.796),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                    "dining",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "chair",
+            mesh: Some("low_poly_furniture/glb/Chairs/Chair A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.057)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.41, 0.51)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "dining",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "drawer",
+            mesh: Some("low_poly_furniture/glb/Drawers/Drawer A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, -0.141)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.55, 0.6)),
+                height: Some(0.756),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "shelf",
+            mesh: Some("low_poly_furniture/glb/Shelves/Shelf D.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.23, 0.38)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "fridge",
+            mesh: Some("low_poly_furniture/glb/Kitchen/Fridge A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.157, -0.136)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.88, 0.61)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "kitchen",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "tv",
+            mesh: Some("low_poly_furniture/glb/Electronics/TV A.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.88, 0.8)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "crt_large",
+            mesh: Some("retro_tvs/retro_tv_large.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.88, 0.56)),
+                height: Some(0.66),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "crt_a",
+            mesh: Some("retro_tvs/retro_tv_a.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.89, 0.89)),
+                height: Some(0.66),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "crt_b",
+            mesh: Some("retro_tvs/retro_tv_b.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.51, 0.47)),
+                height: Some(0.45),
+            ),
+            mount: Some(OnSurface(
+                class: "support",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [
+                "emit",
+                "screen",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "bedroom",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "armchair",
+            mesh: Some("tinyliving/lovely_armchair.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.82, 0.74)),
+                height: Some(1.03),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "loveseat",
+            mesh: Some("tinyliving/lovely_loveseat.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.83, 0.75)),
+                height: Some(0.91),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "dining_chair",
+            mesh: Some("tinyliving/lovely_dining_chair.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.62, 0.66)),
+                height: Some(0.99),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "dining",
+                    "kitchen",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "pouffe",
+            mesh: Some("tinyliving/modern_pouffe.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.59, 0.6)),
+                height: Some(0.53),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "seating",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "coffee_table",
+            mesh: Some("tinyliving/sir_cumference_coffee_table.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.73, 0.73)),
+                height: Some(0.5),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "writing_desk",
+            mesh: Some("tinyliving/tiny_desk_for_tiny_living.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.81, 0.85)),
+                height: Some(1.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "office",
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "bookcase_tall",
+            mesh: Some("tinyliving/power_tower_bookcase.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.85, 0.59)),
+                height: Some(2.4),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "office",
+                    "living",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "dresser_tall",
+            mesh: Some("tinyliving/power_tower_dresser.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.52, 0.53)),
+                height: Some(1.51),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "dresser_stubby",
+            mesh: Some("tinyliving/stubby_cubby_dresser.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.68, 0.85)),
+                height: Some(1.36),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bedroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "tiered_shelf",
+            mesh: Some("tinyliving/tiered_shelf.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.3, 0.78)),
+                height: Some(1.04),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "storage",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "living",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "vanity",
+            mesh: Some("tinyliving/the_sinkz_bathroom_vanity.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.65, 0.68)),
+                height: Some(1.37),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "worktop",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "lavatory",
+            mesh: Some("tinyliving/compact_lavatory.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.39, 0.74)),
+                height: Some(0.89),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "appliance",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "desk_lamp_modern",
+            mesh: Some("tinyliving/the_modern_desk_lamp.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.25, 0.24)),
+                height: Some(0.56),
+            ),
+            mount: Some(OnSurface(
+                class: "worktop",
+            )),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "decor",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "barrel_acid",
+            mesh: Some("barrels/barrel_acid.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "barrel_acid_b",
+            mesh: Some("barrels/barrel_acid_b.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "barrel_metal",
+            mesh: Some("barrels/barrel_metal.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                    "kitchen",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "barrel_rusty",
+            mesh: Some("barrels/barrel_rusty.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.56, 0.56)),
+                height: Some(0.86),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "container",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "floor_grate",
+            mesh: Some("ozea/floor_grate.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.03),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.06),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "decor",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "floor_light",
+            mesh: Some("ozea/floor_light.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(-0.03),
+                pivot: Some((0.0, 0.0)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.0, 1.0)),
+                height: Some(0.06),
+            ),
+            mount: Some(Tiled),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "light",
+            ],
+            effects: [
+                "emit",
+            ],
+            look: [],
+            placement: (
+                rooms: [
+                    "hall",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "desk",
+            mesh: Some("low_poly_furniture/glb/Tables/Desk.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.347, -0.126)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.897, 0.895)),
+                height: Some(0.854),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [
+                    "support",
+                    "worktop",
+                ],
+                sockets: [],
+            ),
+            kind: [
+                "table",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "office",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+        (
+            id: "toilet",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Toilet.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.029, 0.124)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.592, 0.765)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            note: None,
+        ),
+        (
+            id: "sink",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Sink.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((-0.006, 0.09)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((0.444, 0.29)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: Some("bath"),
+            ),
+            note: None,
+        ),
+        (
+            id: "bath",
+            mesh: Some("low_poly_furniture/glb/Bathroom/Bath.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.0),
+                pivot: Some((0.545, 0.004)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.412, 0.781)),
+                height: Some(0.0),
+            ),
+            mount: Some(OnFloor),
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [
+                "fixture",
+            ],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [
+                    "bathroom",
+                ],
+                group: None,
+            ),
+            note: None,
+        ),
+    ],
+)

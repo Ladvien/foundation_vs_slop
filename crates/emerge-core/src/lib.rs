@@ -33,6 +33,7 @@ pub mod convert;
 pub mod descriptor;
 pub mod geom;
 pub mod glb;
+pub mod library;
 pub mod map;
 pub mod placement;
 pub mod rng;

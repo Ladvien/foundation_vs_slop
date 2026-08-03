@@ -2658,6 +2658,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "emerge-mapper"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "emerge-core",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "ena"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -63,3 +63,6 @@ tests/golden/*.actual.png
 
 # Blender/python leaves these beside the conversion scripts.
 scripts/__pycache__/
+
+# emerge-mapper writes maps next to the library it opens; test maps are not content.
+assets/emerge/*.map.ron

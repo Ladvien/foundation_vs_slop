@@ -204,3 +204,80 @@ fn the_shipped_vocabulary_parses_and_is_well_formed() {
         );
     }
 }
+
+/// **The committed libraries are what the manifests convert to — one per kit.**
+///
+/// `assets/emerge/library*.ron` is what `emerge-mapper` opens, and it is generated rather than
+/// authored, so the risk is not that someone edits one badly — it is that a manifest moves and the
+/// library quietly does not. This pins them together the way `bake::repin_replay` pins a golden: the
+/// files are committed, the test regenerates and compares, and the error says how to update them.
+///
+/// **One file per kit, not one merged file.** The first version concatenated both manifests and
+/// `Library::validate` caught it immediately: `wall_light` is declared by both. They are not two
+/// halves of a set, they are *alternatives* — `placement::acceptance_tests` uses the second to prove
+/// the solver is kit-agnostic by swapping it in. Merging them would have made every reference to a
+/// shared id ambiguous, which is exactly the failure that validator exists to name.
+///
+/// Regenerate with `EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration`, and commit the
+/// result *in the same change* as whatever moved the manifests — a library that drifts from its
+/// source is a palette offering pieces the game does not have.
+#[test]
+fn the_committed_libraries_match_the_manifests() {
+    let write = std::env::var("EMERGE_WRITE_LIBRARY").as_deref() == Ok("1");
+    let v = vocab();
+
+    for (source, manifest) in manifests() {
+        let file = if source.starts_with("config.ron") {
+            "library.ron"
+        } else {
+            "library_kenney.ron"
+        };
+        let path = Path::new("assets/emerge").join(file);
+
+        let descriptors = manifest
+            .items
+            .iter()
+            .map(|item| {
+                descriptor_from_manifest(item, POLICY).unwrap_or_else(|e| panic!("{source}: {e}"))
+            })
+            .collect::<Vec<_>>();
+        let built = emerge_core::library::Library {
+            version: emerge_core::library::LIBRARY_VERSION,
+            note: Some(format!(
+                "GENERATED from {source} by tests/descriptor_migration.rs. Do not hand-edit — \
+                 regenerate with EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration."
+            )),
+            descriptors,
+        };
+        let text = built.to_ron().unwrap_or_else(|e| panic!("{e}"));
+
+        if write {
+            emerge_core::ron_surgery::save_atomic(&path, &text).unwrap_or_else(|e| panic!("{e}"));
+            println!(
+                "wrote {} ({} descriptors from {source})",
+                path.display(),
+                built.descriptors.len()
+            );
+            continue;
+        }
+
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}\n\nGenerate it with:\n  EMERGE_WRITE_LIBRARY=1 cargo test --test \
+                 descriptor_migration",
+                path.display()
+            )
+        });
+        assert_eq!(
+            committed.trim_end(),
+            text.trim_end(),
+            "{} no longer matches what {source} converts to. Regenerate with:\n  \
+             EMERGE_WRITE_LIBRARY=1 cargo test --test descriptor_migration",
+            path.display()
+        );
+
+        // And it must load on its own terms, which is what emerge-mapper actually does.
+        let lib = emerge_core::library::Library::parse(&committed).unwrap_or_else(|e| panic!("{e}"));
+        lib.resolve(&v).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+}

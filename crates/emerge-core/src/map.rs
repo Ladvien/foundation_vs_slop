@@ -56,7 +56,7 @@ use crate::placement::ir::Guard;
 pub const MAP_VERSION: u32 = 1;
 
 /// One authored world.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Map {
     pub version: u32,
@@ -72,7 +72,7 @@ pub struct Map {
 }
 
 /// One instance of a descriptor, somewhere.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Placed {
     /// Unique within the map. Referenced by [`Location::props`], so it must be stable across edits —
@@ -207,7 +207,7 @@ impl Map {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.version != MAP_VERSION {
             return Err(format!(
                 "map: version {} but this build reads {MAP_VERSION} — refusing to load rather than \
