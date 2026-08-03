@@ -274,10 +274,8 @@ pub fn refresh_labels(
             None => "none".to_owned(),
         };
         let want = format!(
-            "{:?} at {}\u{00b0}  ·  selected {sel}  ·  {}",
-            state.brush,
-            state.brush_yaw,
-            if state.gizmo_mode { "GIZMO" } else { "DRAG" }
+            "{:?} at {}\u{00b0}  ·  selected {sel}",
+            state.brush, state.brush_yaw
         );
         if t.0 != want {
             t.0 = want;

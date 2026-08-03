@@ -49,7 +49,6 @@
 
 pub mod edit;
 pub mod ghost;
-pub mod gizmo;
 pub mod overlay;
 pub mod panel;
 pub mod pick;
@@ -126,8 +125,6 @@ pub struct EditorState {
     pub music_was: Option<f32>,
     /// Last thing that happened, shown in the panel.
     pub status: String,
-    /// Whether the transform gizmo is driving the selection instead of ground drag.
-    pub gizmo_mode: bool,
     /// Set by anything that changes the document; cleared by `panel::refresh_faults`.
     pub panel_dirty: bool,
     /// Whether the panel has been opened once this launch. Drives the open-on-arrival above.
@@ -146,7 +143,6 @@ impl Default for EditorState {
             brush_yaw: 0.0,
             music_was: None,
             status: String::new(),
-            gizmo_mode: false,
             panel_dirty: false,
             bootstrapped: false,
         }
@@ -164,18 +160,12 @@ impl Plugin for SiteEditorPlugin {
     fn build(&self, app: &mut App) {
         let armed = resource_exists::<crate::SiteEditorActive>;
         app.init_resource::<EditorState>()
-            .add_plugins(bevy::gizmos::transform_gizmo::TransformGizmoPlugin)
-            .insert_resource(gizmo::settings())
             // The gizmo's own systems must not run while the editor is closed, or its handles would
             // hang over the world in a normal launch. Its doc comment names this exact pattern.
-            .configure_sets(
-                PostUpdate,
-                bevy::gizmos::transform_gizmo::TransformGizmoSystems
-                    .run_if(armed)
-                    .run_if(|s: Res<EditorState>| s.open && s.gizmo_mode),
-            )
             .add_observer(panel::on_palette_click)
             .add_systems(Startup, setup_thumbnails.run_if(armed))
+            // Runs whether or not the panel is open: the gizmo overlay camera exists from the moment
+            // `TransformGizmoPlugin` is registered, and it blanks the window until it is told not to.
             // The baker is deliberately NOT gated on the panel being open: it walks the kit once at
             // launch and then despawns its camera, so the previews are ready before they are wanted.
             .add_systems(
@@ -209,9 +199,6 @@ impl Plugin for SiteEditorPlugin {
                         track_hover,
                         drag_props,
                         keyboard_edits,
-                        gizmo::track_focus,
-                        gizmo::cycle_mode,
-                        gizmo::commit_on_release,
                         panel::refresh_labels,
                         panel::refresh_faults,
                         panel::style_palette,
@@ -341,7 +328,24 @@ fn setup_thumbnails(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 ///
 /// Same shape and same reason as `research_room::enter_room_state`: the env var should not mean
 /// "launch, then click through the title card". Self-limiting via its `in_state(Title)` run condition.
-fn enter_site_state(mut next: ResMut<NextState<AppState>>) {
+fn enter_site_state(
+    mut next: ResMut<NextState<AppState>>,
+    title: Query<Entity, With<crate::ui::title::TitleRoot>>,
+) {
+    // **Do not leave `Title` until its screen actually exists.**
+    //
+    // Leaving on the first frame races the title screen's own `OnEnter` spawn: the state exits before
+    // those entities are there, so `OnExit(Title)`'s `despawn_scoped::<TitleRoot>` finds nothing and
+    // the menu is left hanging over the Site for the rest of the session. `TitleRoot` is a
+    // **full-screen node with an opaque background** at `Z_MENU` and no `Pickable::IGNORE`, so a leaked
+    // one does exactly two things: it hides the entire hub, and it swallows every world click.
+    //
+    // That is the whole of "the Site is black and I cannot place anything". Waiting on the entity —
+    // rather than on a frame count, which is a guess about scheduling — is what makes the handoff
+    // ordered instead of lucky.
+    if title.is_empty() {
+        return;
+    }
     next.set(AppState::Site);
 }
 
@@ -487,10 +491,7 @@ fn drag_props(
                 state.drag = Drag::Idle;
                 return;
             }
-            // In precision mode the gizmo owns movement, so a press on the body selects but never
-            // drags — otherwise both would write the same record from different positions in the same
-            // frame and the last one would win at random.
-            if !state.gizmo_mode && cursor_px.distance(start_px) > MIN_DRAG_PX {
+            if cursor_px.distance(start_px) > MIN_DRAG_PX {
                 state.drag = Drag::Moving { index, grab };
             }
         }
@@ -554,12 +555,6 @@ fn keyboard_edits(
         after_history(&mut state, outcome, "nothing to redo");
         sync_world(&mut state, &kit.0, &mut commands, &assets, &mut props);
         return;
-    }
-
-    // Mode toggles come BEFORE the selection guard — needing a prop selected in order to switch
-    // manipulation mode is backwards, and it made `G` look broken on an empty selection.
-    if keys.just_pressed(KeyCode::KeyG) {
-        state.gizmo_mode = !state.gizmo_mode;
     }
 
     // `[` / `]` turn the SELECTION if there is one, otherwise the brush — so the key means "rotate
