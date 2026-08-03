@@ -174,10 +174,18 @@ impl Plugin for SiteEditorPlugin {
                 Update,
                 thumbs::bake
                     .run_if(armed)
-                    .run_if(resource_exists::<thumbs::Thumbnails>)
-                    // `finished`, not `done()` — see the field's docs; gating on `done()` would
-                    // stop the system before it could dismantle its own booth.
-                    .run_if(|t: Res<thumbs::Thumbnails>| !t.finished()),
+                    // **`Option<Res<_>>`, never a bare `Res<_>`.** Bevy 0.19 evaluates EVERY run
+                    // condition — it does not stop once `armed` returns false — and a missing
+                    // `Res<T>` is a *panic* at parameter validation, not a skip (docs/ui.md §5
+                    // trap 2). `Thumbnails` is only created when the editor is armed, so a bare
+                    // `Res` here aborted the normal game launch on the very first frame, for
+                    // everyone, with the editor switched off. It shipped that way; do not undo this.
+                    //
+                    // `finished`, not `done()` — see the field's docs; gating on `done()` would stop
+                    // the system before it could dismantle its own booth.
+                    .run_if(|t: Option<Res<thumbs::Thumbnails>>| {
+                        t.is_some_and(|t| !t.finished())
+                    }),
             )
             .add_systems(
                 Update,
