@@ -74,8 +74,13 @@ pub struct Vocabulary {
 pub struct Token {
     pub name: String,
     /// What it means, and — where it has one — what reads it.
+    ///
+    /// A plain `String` rather than an `Option`, so the file reads `note: "..."` instead of
+    /// `note: Some("...")`. Empty is the absence, and it should be rare: a token nobody can describe
+    /// in a sentence is a token whose meaning has not been decided yet, which is exactly how
+    /// `sleep`/`store`/`decor`/`hygiene` shipped with no reader.
     #[serde(default)]
-    pub note: Option<String>,
+    pub note: String,
 }
 
 impl Vocabulary {
@@ -86,7 +91,7 @@ impl Vocabulary {
                 .iter()
                 .map(|(n, d)| Token {
                     name: (*n).to_owned(),
-                    note: Some((*d).to_owned()),
+                    note: (*d).to_owned(),
                 })
                 .collect(),
         }
@@ -488,7 +493,7 @@ mod tests {
                 .iter()
                 .map(|n| Token {
                     name: n.clone(),
-                    note: None,
+                    note: String::new(),
                 })
                 .collect(),
         };

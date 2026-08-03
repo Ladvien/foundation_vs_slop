@@ -15,7 +15,7 @@ use super::ir::Role;
 
 /// One catalogued asset. `glb` is a path under `assets/`; `footprint` is (width, depth) in metres
 /// (= tiles, since `TILE_SIZE` is 1 m). Fields default so a terse manifest stays valid.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestItem {
     pub key: String,

@@ -62,6 +62,40 @@ pub struct Descriptor {
     /// What it *looks like*: `"brown"`, `"rusted"`, `"metal"`. Never matched by gameplay; present so
     /// an author can search the palette the way they think about it.
     pub look: Vec<String>,
+
+    /// Hints for the generator — where this belongs and what it belongs *with*. See [`Placement`].
+    pub placement: Placement,
+
+    /// What this asset is and why it is set up the way it is, as data.
+    ///
+    /// Same argument as [`crate::map::Map::note`]: prose a serializer can lose is prose that gets
+    /// lost. The kit's own entries carry paragraphs of it — why `wall_low` is the one piece still
+    /// scaled, how `front` was derived — and today that survives only because nothing re-serializes
+    /// the file.
+    pub note: Option<String>,
+}
+
+/// Where a piece belongs, for whatever is placing it. **Not a semantic axis.**
+///
+/// `kind`/`effects`/`look` describe the thing itself; this describes where a *generator* should
+/// consider putting it. The distinction matters because both are lists of opaque strings and it would
+/// be very easy to have one list — which is precisely the free-text soup the audit found, where
+/// `affordances`, `tags` and `group` were three unvalidated vocabularies nobody could tell apart.
+///
+/// These two survive the migration on their merits: `furnish::room_profile` matches `rooms` against
+/// room types to choose a room's freestanding set, and items sharing a `group` are drawn together by
+/// a soft `Near` relation. Unlike `category` and the four unread affordance tokens, something reads
+/// them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Placement {
+    /// Room-type tokens this piece suits — *a toilet suits a bathroom*. Cross-validated against the
+    /// project's room types, the way `mycelia::validate_damp_coverage` already checks its own table
+    /// against `config.ron:dungeon.room_types`.
+    pub rooms: Vec<String>,
+    /// Pieces sharing a token are drawn together (a toilet and a basin), as a soft relation rather
+    /// than a hard constraint — a room that cannot fit both should still get one.
+    pub group: Option<String>,
 }
 
 /// Corrections for what the artist got wrong. Every one is measured, never dialled by eye — the kit's
@@ -117,7 +151,14 @@ pub enum Mount {
     OnCeiling,
     /// Fills a doorway. `clear` is the (width, height) of the hole in metres — not derivable from the
     /// mesh's own height, since jambs and a lintel sit inside its bounding box.
-    InOpening { clear: (f32, f32) },
+    ///
+    /// `None` means **nobody has measured it**, which is the honest state of the shipped
+    /// `furniture_kenney.ron` door: it carries `role: Anchor(host: Opening)` and no opening size,
+    /// because the manifest schema has no field for one. The Site kit does record it
+    /// (`DoorPiece::opening`, measured off the POSITION accessors), so a converted kit piece carries
+    /// `Some`. Making this required would have forced the converter to invent a number for a row that
+    /// has never had one.
+    InOpening { clear: Option<(f32, f32)> },
     /// Rests on another piece that offers this surface class.
     OnSurface { class: String },
     /// **Lies flat on a host surface** — a decal, a floor marking, a wall poster, a ceiling stain.
@@ -243,6 +284,14 @@ impl Descriptor {
             kind: pick(&self.kind, &patch.kind),
             effects: pick(&self.effects, &patch.effects),
             look: pick(&self.look, &patch.look),
+            placement: Placement {
+                rooms: pick(&self.placement.rooms, &patch.placement.rooms),
+                group: patch.placement.group.clone().or_else(|| self.placement.group.clone()),
+            },
+            // A patch that says nothing about the note inherits it. Replacing a note with silence
+            // needs `note: Some("")` — deliberate, because a note is somebody's reasoning and losing
+            // it should take an act.
+            note: patch.note.clone().or_else(|| self.note.clone()),
         }
     }
 

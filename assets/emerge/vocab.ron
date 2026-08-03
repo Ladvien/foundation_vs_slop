@@ -56,13 +56,23 @@
     // PLACEMENT CONSTRAINTS, not effects — under this schema `sit` is a socket with a role and
     // `back_to_wall` is a mount plus clearance. Carrying them here would be two spellings of one idea.
     // `sleep`, `store`, `decor` and `hygiene` are absent because nothing has ever read them; they come
-    // back the day something does, one row at a time.
+    // back the day something does, one row at a time. `support` is absent for a different reason: it
+    // was an affordance before surfaces got their own axis, and `furniture_kenney.ron:15,18` still
+    // authors it there. The live spelling is in `surfaces` below; migrating the dead one onto this
+    // axis would revive a word that was deliberately retired.
     effects: (
         tokens: [
             ( name: "emit",             note: "casts light into the world. The one shipped tag with real gameplay consequence: light::LightEmitter -> LightField -> crab/manca photophobia, SCP-150 steering, mold recoil, mushroom phototropism" ),
             ( name: "screen",           note: "a lit display surface. Cosmetic (light::ScreenEmitter), windowed-only and determinism-neutral" ),
             ( name: "uses-electricity", note: "stops working when the power does" ),
             ( name: "stamina-recharge", note: "restores stamina to whoever uses it" ),
+
+            // These two were nearly dropped as unreachable. The audit records `pass`/`door` as read
+            // by `constraint.rs:92` "and unreachable: no shipped row has Anchor{Opening}" — which is
+            // true of `config.ron` and FALSE of `furniture_kenney.ron`, whose `door` row is exactly
+            // that. A second kit is why the game has two manifests, and it is why this pair lives.
+            ( name: "pass",             note: "an opening something can be walked through; read by placement::solvers::constraint" ),
+            ( name: "door",             note: "fills an opening and can be opened; read by placement::solvers::constraint" ),
         ],
     ),
 

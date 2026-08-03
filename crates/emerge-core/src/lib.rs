@@ -29,6 +29,7 @@
 //! `placement::mod` binds to the game's run lifecycle; `placement::anomalies` is SCP content. Those
 //! are the game's, and `ir.rs:7` already named `furnish.rs` as the boundary before the split.
 
+pub mod convert;
 pub mod descriptor;
 pub mod geom;
 pub mod glb;
