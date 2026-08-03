@@ -21,9 +21,9 @@
 mod acceptance;
 pub mod anomalies;
 pub mod furnish;
-// Re-exported from `forge-core` at their old paths — see `lib.rs`. `furnish` and `anomalies` stay
+// Re-exported from `emerge-core` at their old paths — see `lib.rs`. `furnish` and `anomalies` stay
 // here because they are the Bevy boundary and the SCP content respectively.
-pub use forge_core::placement::{ir, manifest, scatter, solver, solvers};
+pub use emerge_core::placement::{ir, manifest, scatter, solver, solvers};
 
 use bevy::prelude::*;
 

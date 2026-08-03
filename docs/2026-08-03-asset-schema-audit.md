@@ -1,6 +1,6 @@
 # Asset schema, tags and reuse boundary — an audit
 
-**Why this exists.** `docs/2026-08-03-forge-plan.md` proposes a standalone world-building application.
+**Why this exists.** `docs/2026-08-03-emerge-mapper-plan.md` proposes a standalone world-building application.
 Its design rests on findings that took three deep passes over the tree to establish and that are
 expensive to re-derive. This is those findings, with locations, so the plan can be executed — or
 argued with — without repeating the search.

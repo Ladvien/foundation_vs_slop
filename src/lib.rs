@@ -151,7 +151,7 @@ pub mod world;
 // `crate::rng`, `crate::wfc`, `crate::geom` and `crate::placement::{ir, solver, solvers, scatter,
 // manifest}` all still resolve. That is deliberate: a split that also rewrote a thousand import
 // lines would be unreviewable, and the point of Stage 0b is a diff a human can check.
-pub use forge_core::{geom, rng, wfc};
+pub use emerge_core::{geom, rng, wfc};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;

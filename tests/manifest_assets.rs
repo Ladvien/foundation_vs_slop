@@ -1,7 +1,7 @@
 //! **The shipped furniture manifest points at files that exist.**
 //!
-//! Lifted out of `forge-core`'s `placement::manifest` when the workspace split landed (Stage 0b of
-//! `docs/2026-08-03-forge-plan.md`). It is a fact about *this game's* assets and *this game's*
+//! Lifted out of `emerge-core`'s `placement::manifest` when the workspace split landed (Stage 0b of
+//! `docs/2026-08-03-emerge-mapper-plan.md`). It is a fact about *this game's* assets and *this game's*
 //! `config.ron`, not about the manifest schema, so it belongs on the game side of the boundary — the
 //! crate must not know how a particular game loads its config.
 //!

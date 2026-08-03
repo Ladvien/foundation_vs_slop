@@ -1,4 +1,4 @@
-//! **forge-core** — the engine-free half of world building.
+//! **emerge-core** — the engine-free half of world building.
 //!
 //! Constraint IR, solver backends, Wave Function Collapse, Poisson/Delaunay geometry, and the seeded
 //! RNG they all draw from. Nothing here imports `bevy`, and nothing here knows what an SCP is.
@@ -7,13 +7,13 @@
 //!
 //! It always was engine-free — `placement/ir.rs` has carried the sentence *"Nothing here imports
 //! `bevy::`"* since long before this crate existed, and `wfc.rs`, `geom.rs` and `scatter.rs` each say
-//! the same about themselves. But a comment cannot fail a build. Now the manifest can: `forge-core`
+//! the same about themselves. But a comment cannot fail a build. Now the manifest can: `emerge-core`
 //! depends on `serde`, `ron`, `rand` and `rand_chacha`, so reaching for a `bevy` type or a game
 //! concept from in here does not compile.
 //!
 //! That matters because three consumers need this code and only one of them is the game: the game
 //! itself, the offline search (`bin/train`), and the standalone editor described in
-//! `docs/2026-08-03-forge-plan.md`. The editor is why the split happened now.
+//! `docs/2026-08-03-emerge-mapper-plan.md`. The editor is why the split happened now.
 //!
 //! # The module layout is deliberately unchanged
 //!

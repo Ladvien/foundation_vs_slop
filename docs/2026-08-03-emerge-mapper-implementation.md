@@ -1,8 +1,8 @@
-# Forge — implementation handoff
+# emerge-mapper — implementation handoff
 
-**For whoever picks this up next.** The design lives in `2026-08-03-forge-plan.md`; the evidence under
+**For whoever picks this up next.** The design lives in `2026-08-03-emerge-mapper-plan.md`; the evidence under
 it in `2026-08-03-asset-schema-audit.md`; the corrections that shaped it in
-`2026-08-03-forge-plan-review.md`. This file is the working state: what is built, what is next, the
+`2026-08-03-emerge-mapper-plan-review.md`. This file is the working state: what is built, what is next, the
 exact evidence for each decision so it need not be re-derived, and the traps already paid for.
 
 Read `CLAUDE.md` § "Bevy 0.19" before writing any Bevy code.
@@ -17,18 +17,19 @@ Read `CLAUDE.md` § "Bevy 0.19" before writing any Bevy code.
 | 0b — workspace split, engine-free core | **done** | `4f912bf` |
 | 1 — descriptor + map schemas | **done** | `99e911e` |
 | 1 — GLB measurement | **done** | `a8ad36f` |
-| 1 — RON surgery unification | **not started** | |
+| 1 — RON surgery unification | **done** | `c417c9d` |
+| 1 — rename to `emerge-*`, decisions recorded, `note:` fields | **done** | (this commit) |
 | 1 — vocabularies + converter + byte-pin | **not started** | |
-| 2 — `forge-bevy`, dungeon furniture migrates | not started | |
+| 2 — `emerge-bevy`, dungeon furniture migrates | not started | |
 | 3 — Site migrates, `required:` list | not started | |
-| 4 — `forge-editor`, delete `src/site_editor/` | not started | |
+| 4 — `emerge-mapper`, delete `src/site_editor/` | not started | |
 | 5 — mesh importer UI | not started | |
 | 6a / 6b — smart objects, single- then multi-actor | not started | |
 
-**Baseline to hold:** workspace `cargo test` = 36 suites / 1135 tests green;
+**Baseline to hold:** workspace `cargo test` = 36 suites / 1154 tests green;
 `cargo check --release --workspace --tests` compiles. `snapshot_hash` must not move through Stage 3.
 
-### What exists in `crates/forge-core/`
+### What exists in `crates/emerge-core/`
 
 | Module | Notes |
 |---|---|
@@ -36,8 +37,9 @@ Read `CLAUDE.md` § "Bevy 0.19" before writing any Bevy code.
 | `placement/{ir, solver, solvers/*, scatter, manifest}` | moved unedited except the two noted below |
 | `placement/surfaces` | **new home** of `SURFACE_CLASSES` / `surface_bits` / `provided_surfaces` / `required_surface`, extracted from `placement::furnish` (which is the Bevy boundary and could not host something `manifest::validate_manifest` needs). Re-exported from `furnish` at the old path. |
 | `descriptor` | the patch-shaped asset schema + `resolve()` |
-| `map` | placements, `owned`, and **locations** carrying interactions |
+| `map` | placements, `owned`, **locations** carrying interactions, and `note:` on everything addressable |
 | `glb` | hand-rolled reader, `measure()`, `origin_alignment()`, `derive_front()`, `front_detail()` |
+| `ron_surgery` | the shared RON writer: `scan_ron_leaves`/`find_block_value` (byte spans, nested values) and `LineDoc` (lines, flat lists). `bake.rs` and `site_editor::source_map` are now thin policy over it. |
 
 Two couplings were broken in 0b and must not come back:
 
@@ -46,7 +48,7 @@ Two couplings were broken in 0b and must not come back:
 - `manifest`'s `every_shipped_manifest_glb_exists_on_disk` called `crate::config`; it now lives in
   `tests/manifest_assets.rs` on the game side.
 
-`crates/forge-core/tests/engine_free.rs` is the ratchet: `ALLOWED_DEPS` is closed to
+`crates/emerge-core/tests/engine_free.rs` is the ratchet: `ALLOWED_DEPS` is closed to
 `{serde, serde_json, ron, rand, rand_chacha}`, and no non-comment line may name an engine crate.
 **Widening `ALLOWED_DEPS` in the same commit as the dependency is the intended workflow**, not a
 workaround — that is the review step it exists to force.
@@ -133,7 +135,7 @@ ones; the genotype becomes a tree over zones rather than one gene per tile. This
 prior art.** §5.3 names Locking, Scoping and Grouping, but as *"possible facilities, which are inspired
 from image processing software"*, in a paper whose own assessment is that integrating procedural
 generation with manual editing is *"so far as good as unaddressed."* The correction is recorded in
-`2026-08-03-forge-plan-review.md` §4 and applied in `2026-08-03-kitbash-editor.md`.
+`2026-08-03-emerge-mapper-plan-review.md` §4 and applied in `2026-08-03-kitbash-editor.md`.
 
 **Karth & Smith (FDG 2017)** — WFC *is* finite-domain constraint solving. This is why an owned tile is a
 **unary constraint** rather than a special case: `wfc::collapse_grid` already takes a per-cell `initial`
@@ -168,7 +170,7 @@ transforms.
 `splice_block`, `find_block_value`, `scalar_eq` (compares by parsed `ron::Value`, so `0x5C09191` and
 `96506257` are equal and the hex spelling survives). `site_editor/source_map.rs` has the line-oriented
 `replace_field`, `trailing_comment`, `comment_split` (quote-aware), `save_atomic`. Move the generic half
-into `forge-core`; leave `SourceMap` as a typed wrapper over it.
+into `emerge-core`; leave `SourceMap` as a typed wrapper over it.
 
 Keep both mechanisms — they solve different problems. `bake`'s span splicer works on nested config
 blocks; `source_map`'s line rewriter works because every record in `site67.ron` is exactly one line
@@ -192,7 +194,7 @@ spellings** and both become `Mount::OnSurface { class }`. `Role::Anchor { host: 
 `is_floor_marking`'s height heuristic becomes `Mount::Overlay { on: Floor }`, stated rather than
 inferred.
 
-### 3.2 Stage 2 — `forge-bevy`
+### 3.2 Stage 2 — `emerge-bevy`
 
 Loads descriptors + map, spawns, and attaches what does **not** survive spawn today: interned `Tags`,
 `SmartObject`, and `MountedOn` / `PlacedIn` **as Bevy relationships** rather than bare components. The
@@ -241,6 +243,9 @@ Bevy-specific ones are in `CLAUDE.md` § "Bevy 0.19". These are project-specific
 | **A leaked full-screen UI node hides the world *and* eats every click** | `TitleRoot` is 100%×100% with an opaque background and no `Pickable::IGNORE`. Leaving `Title` on its first frame raced `spawn_title`, so `OnExit` despawned nothing. Wait for the entity, not for a frame count. |
 | **The editor's placement was never broken** | A self-test drove it without a mouse: records 86 → 87, body spawned at the right world position, `mesh=true drawn=true`. It had been working into a blanked framebuffer the whole time. When something "does not work", prove which half. |
 | **Three bugs were invisible to a green suite** | A blanked framebuffer, a leaked node, a duplicate-component panic. All found by rendering a frame and measuring it. **Render and look, every stage.** |
+| **`ron::Value` cannot hold a variant's name** | Measured against `ron 0.12.2`: `Grid` and `Hex` both parse to `Ok(Value::Unit)`. `scalar_eq` therefore called every enum variant equal to every other, and a bake that flipped one reported "0 values changed" and wrote nothing. Any comparison of RON scalars must fall back to text when either side parses to `Unit`. |
+| **The RON serializer escapes an apostrophe** | `"the galley's near table"` is written `"the galley\'s near table"`. It round-trips correctly, so this is not a correctness bug — but a *textual* grep of a map for an author's note will miss it, and a tool diffing notes must compare parsed values, not bytes. |
+| **Restoring a deleted record needs more than its bytes** | Landing it at "wherever record *i* starts now" puts it below the comment block that came to belong to its successor. `site67.ron` threads 102 comment lines through 86 records. `ron_surgery::Removed` stores a relative gap for this. The editor's own undo test missed it for a year by picking a record that sits *after* a comment block, where the naive placement is accidentally right — **a green test on a lucky fixture proves nothing about the unlucky one.** |
 | **`pkill -f <name>` can match its own launcher** | It killed the shell that had just started the game, producing exit 143 and an empty log. Use `pgrep -f '[f]oo'` and kill by PID. |
 | **Linux truncates process names to 15 chars** | `pkill -x foundation_vs_slop` silently matches nothing, so old instances survive and answer the screenshot sentinel. Two instances tiled side by side produced a completely misleading capture. |
 
@@ -270,18 +275,31 @@ path was proven while the screen was blank.
 
 ---
 
-## 5. Open decisions
+## 5. Decisions taken 2026-08-03 — implement these, do not re-open them
 
-1. **Crate naming.** `forge-*` is a placeholder and nothing depends on it.
-2. **Map comments.** The surgical writer exists because `site67.ron` is 15% comments and the props list
-   carries more prose than data. An editor-owned map may not need it; a hand-authored one does. Decide
-   per file by who owns it, and say so *in* the file. `save_using_saver` (0.19) covers the
-   machine-owned half.
-3. **`stretch_y`.** Game policy (a 2.0 m wall mesh made to reach 2.4 m), not an art fact. Under the
-   patch model it is more honestly a project-level layer over the descriptor base than a descriptor
-   field. Currently on `Align` because that is where the Site kit kept it.
-4. **BSN.** The descriptor is patch-shaped so a `.bsn` port stays mechanical. Revisit the moment a
+Full reasoning in `2026-08-03-emerge-mapper-plan.md` § "Decided". The parts that change code:
+
+1. **Naming.** `emerge-mapper` is the application; `emerge-core` is the engine-free library (renamed
+   from `forge-core` in this session, `git mv` + a global rewrite); `emerge-bevy` is the runtime plugin.
+
+2. **Comments become fields.** Add `note: Option<String>` to `Map`, `Placed`, `Location` and
+   `Interaction`. An emerge map is then serialized with an ordinary serializer and **never**
+   text-spliced — the surgical writer is for `site67.ron` and `config.ron` only, which stay
+   hand-authored. `Placed::owned_because` is the same idea and already shipped; `note:` generalises it.
+
+3. **`stretch_y` moves off the descriptor** into a project patch layer. The descriptor records the
+   mesh's measured height; `project/*.patch.ron` layers this game's 2.4 m walls on top. Do this in the
+   converter (§3.1c) rather than after, so no descriptor is ever written with it.
+
+4. **The kitbash brush paints cells.** An owned cell is a unary constraint —
+   `wfc::collapse_grid` already takes a per-cell `initial` bitmask and `initial_domains_restrict_output`
+   already pins it. Do not add a piece-level ownership concept to the solver.
+
+## 6. Still open
+
+1. **BSN.** The descriptor is patch-shaped so a `.bsn` port stays mechanical. Revisit the moment a
    first-party `.bsn` asset loader lands — it is listed first under Bevy's "What's Next".
-5. **Phase 4 of the old plan is still open**: dressing the research wing and the containment cell
-   fronts (`BACKLOG.md:833-839`). Note `src/site/visuals.rs:579` `enclose_containment_cell` exists and
-   is **never called** — the enclosure may be half-written already.
+2. **Phase 4 of the old plan**: dressing the research wing and the containment cell fronts
+   (`BACKLOG.md:833-839`). Note `src/site/visuals.rs:592` `enclose_containment_cell` exists and is
+   **never called** — the enclosure may be half-written already, which is this repo's recurring bug
+   shape (see the unregistered-systems note in `TESTING.md`).

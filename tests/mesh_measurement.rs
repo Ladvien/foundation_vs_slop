@@ -1,6 +1,6 @@
 //! **The measurement library against the shipped kit.**
 //!
-//! `forge_core::glb` computes the numbers a descriptor records. This checks it against ground truth:
+//! `emerge_core::glb` computes the numbers a descriptor records. This checks it against ground truth:
 //! `assets/site/kit_ozea.ron`, whose heights and footprints were measured by hand (via
 //! `scripts/fbx_to_glb.py`'s `INVENTORY.md`) and have been the game's contract for months.
 //!
@@ -16,7 +16,7 @@ use std::path::Path;
 
 use foundation_vs_slop::site::kit::{load_site_kit, SITE_KIT_PATH};
 use foundation_vs_slop::site::pieces::SitePiece;
-use forge_core::glb::{Glb, OriginAlignment};
+use emerge_core::glb::{Glb, OriginAlignment};
 
 fn open(rel: &str) -> Glb {
     let path = Path::new("assets").join(rel);
@@ -214,9 +214,9 @@ fn a_seat_with_a_back_is_markedly_more_asymmetric_than_one_without() {
          vs most-asymmetric backless {backless:.4} m"
     );
     assert!(
-        backless < forge_core::glb::FRONT_MIN_OFFSET
-            && backed > forge_core::glb::FRONT_MIN_OFFSET,
+        backless < emerge_core::glb::FRONT_MIN_OFFSET
+            && backed > emerge_core::glb::FRONT_MIN_OFFSET,
         "FRONT_MIN_OFFSET ({}) must sit between them: {backless:.4} .. {backed:.4}",
-        forge_core::glb::FRONT_MIN_OFFSET
+        emerge_core::glb::FRONT_MIN_OFFSET
     );
 }

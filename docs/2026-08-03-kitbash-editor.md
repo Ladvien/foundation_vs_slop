@@ -34,7 +34,7 @@ whose own assessment is that integrating procedural generation with manual editi
 as unaddressed"* — with preserving manual operations through regeneration called out as particularly
 difficult and the proposed fix a sketch. Nobody shipped this triad; it is a useful naming of the
 problem, and the design below is ours to prove. (Correction recorded in
-`2026-08-03-forge-plan-review.md` §4.)
+`2026-08-03-emerge-mapper-plan-review.md` §4.)
 
 Alvarez et al. (FDG 2018) do implement the first of the three as a **lock brush**: the designer locks tiles, the
 room subdivides into mutable and immutable zones, and every generated suggestion preserves the locked
@@ -167,7 +167,7 @@ floor runs exactly, which turns "did I port it right" into a diff rather than a 
 
 * Smelik, Tutenel, de Kraker & Bidarra, *Integrating procedural generation and manual editing of virtual
   worlds* (2010) — `10.1145/1814256.1814258`. The three open issues; Lock / Scope / Group as *proposed*
-  facilities, never implemented there. See `2026-08-03-forge-plan-review.md` §4.
+  facilities, never implemented there. See `2026-08-03-emerge-mapper-plan-review.md` §4.
 * Tutenel, Bidarra, Smelik & de Kraker, *A declarative approach to procedural modeling of virtual
   worlds* (2010) — `10.1016/j.cag.2010.11.011`. Fine-grained control; surfaces vs affordances.
 * Alvarez et al., *Empowering quality diversity in dungeon design with interactive constrained

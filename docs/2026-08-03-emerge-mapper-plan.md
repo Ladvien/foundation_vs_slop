@@ -1,11 +1,14 @@
-# A standalone world-building application
+# emerge-mapper — a standalone world-building application
 
 **Status:** design, approved 2026-08-03. Nothing below is built.
 **Companions:** `2026-08-03-asset-schema-audit.md` (the findings this rests on),
-`2026-08-03-forge-plan-review.md` (the review that corrected it),
+`2026-08-03-emerge-mapper-plan-review.md` (the review that corrected it),
 `2026-08-03-kitbash-editor.md` (owned tiles + WFC, folds into Stage 1/4).
 
-*(Placeholder crate prefix `forge-` — rename freely; nothing depends on it.)*
+**The name.** The application is **emerge-mapper**, named 2026-08-03. Three crates carry it:
+`emerge-core` (engine-free schema, validation, solvers, RON surgery, mesh measurement), `emerge-bevy`
+(the runtime plugin the game consumes), and `emerge-mapper` (the standalone binary). The earlier
+`forge-` prefix was a placeholder and is gone.
 
 ## Context
 
@@ -85,17 +88,17 @@ moment a `.bsn` loader lands; it is first under "What's Next".
 
 ```
 crates/
-  forge-core/     engine-free. schema, validation, solvers, RON surgery, GLB measurement.
+  emerge-core/     engine-free. schema, validation, solvers, RON surgery, GLB measurement.
                   deps: serde, ron, rand, rand_chacha. NO bevy.
-  forge-bevy/     runtime plugin: load → spawn → tags, relationships, smart-object query.
-  forge-editor/   the standalone application (bin).
-src/              the game; depends on forge-core + forge-bevy.
+  emerge-bevy/     runtime plugin: load → spawn → tags, relationships, smart-object query.
+  emerge-mapper/   the standalone application (bin).
+src/              the game; depends on emerge-core + emerge-bevy.
 ```
 
 `sim_harness.rs` is the precedent for two apps over one plugin graph — same graph, device omitted,
 *"not a second code path."*
 
-Moves unedited into `forge-core`: `rng`, `wfc`, `geom`, `placement/{ir, solver, solvers/{wfc,
+Moves unedited into `emerge-core`: `rng`, `wfc`, `geom`, `placement/{ir, solver, solvers/{wfc,
 constraint}, scatter, manifest}`. Only real break: `solvers/metropolis.rs` reads
 `dungeon::WALL_THICKNESS` for one constant → parameter.
 
@@ -162,7 +165,7 @@ Sockets carry a `role` so allocation has a hook. A single-prop interaction is th
 nothing is lost, and the expensive retrofit is avoided. `ir::Guard(String)` (declared, unused) is the
 precondition slot.
 
-### `forge-bevy`
+### `emerge-bevy`
 
 Attaches what does not survive spawn today: interned `Tags`, `SmartObject`, and **`MountedOn` /
 `PlacedIn` as Bevy relationships** rather than bare components. The repo already runs three relationship
@@ -173,7 +176,7 @@ an index resource.
 Mind the documented gotchas: Bevy expresses an empty relationship target by *removing* the component
 (always `Option<&T>`), and target order is attach order, never a total order.
 
-### `forge-editor`
+### `emerge-mapper`
 
 `source_map`, `edit`, `thumbs`, `pick`, `overlay`, `ghost`, `panel` port across rather than being
 rewritten. Adopt from 0.19: **`InfiniteGridPlugin`** (importer ground plane), **Feathers number input**
@@ -201,9 +204,9 @@ A socket with no reachable clearance is a fault it can flag.
 | **0a** | Carry-over docs; local Bevy reference; CLAUDE.md section. No code. | a fresh session can execute 0b from the repo alone |
 | **0b** | Workspace split; move the engine-free 2,400 LOC. No new features. | goldens unchanged, 31/31 |
 | **1** | Descriptor (patch-shaped, with `clearance`) + map + **locations**; validation; unified RON surgery; converter from both schemas | converted descriptors reproduce today's semantics exactly |
-| **2** | `forge-bevy` loads/spawns; **dungeon furniture migrates first** (41 items, already string-keyed) | `snapshot_hash` unmoved |
+| **2** | `emerge-bevy` loads/spawns; **dungeon furniture migrates first** (41 items, already string-keyed) | `snapshot_hash` unmoved |
 | **3** | Site migrates; `required:` replaces the enum guarantee | `check_prop_placements` reports the same faults |
-| **4** | `forge-editor` reaches F7 parity; delete `src/site_editor/` | the 19 writer tests port and pass |
+| **4** | `emerge-mapper` reaches F7 parity; delete `src/site_editor/` | the 19 writer tests port and pass |
 | **5** | Mesh importer: measure, derive `front`, preview, emit | re-derives the shipped kit's 45 measurements |
 | **6a** | Smart objects, single-actor: index, query API, a `UseSmartObject` behaviour in `ai::utility` | one interaction drives an agent |
 | **6b** | **Multi-actor: role allocation + orchestration** | **four agents fill a four-seat table with no deadlock and no double-booking** |
@@ -226,10 +229,42 @@ allocation/orchestration the hard one.
 
 Bevy traps are in `CLAUDE.md` § "Bevy 0.19 — read the vendored source, not the web".
 
-## Open
+## Decided, 2026-08-03
 
-1. **Crate naming** — `forge-*` is a placeholder.
-2. **Map comments.** The surgical writer exists because `site67.ron` is 15% comments. Decide per file by
-   who owns it, and say so *in* the file. `save_using_saver` covers the machine-owned half.
-3. **`stretch_y`** — game policy, not art fact. Under the patch model it is a project-level patch layer
-   over the descriptor base, which dissolves the question.
+These were the plan's open questions. All four are now answered; they are recorded here rather than
+deleted, because the reasoning is what a future reader will want.
+
+1. **Naming** — `emerge-mapper`, with `emerge-core` and `emerge-bevy` under it. See the header.
+
+2. **Map comments: promote them to fields.** The surgical writer exists because `site67.ron` is 15%
+   comments, but for a *new* format that is solving the wrong problem — the answer is to stop having
+   comments the serializer can lose. Every addressable thing in a map carries an optional `note:`, so
+   an editor-owned map round-trips through an ordinary serializer with its prose intact.
+
+   The schema already had one of these before the question was asked: `Placed::owned_because` is a
+   reason stored as *data* precisely so nothing can strip it. `note:` is that generalised.
+
+   The split is per file class, and it is one path each: **hand-authored files** (`site67.ron`,
+   `config.ron`) keep text surgery, because their prose is a 48-line ASCII floor plan and paragraphs
+   introducing blocks of records — none of it attached to a record, so none of it has a field to live
+   in. **Emerge maps** are serialized normally and never text-spliced.
+
+3. **`stretch_y` is a project patch layer.** The descriptor states the mesh's real height; a
+   project-level patch layers the game's policy on top:
+
+   ```ron
+   // ozea/wall.descriptor.ron — the art
+   extent: ( height: 2.0 )
+   // project/fvs.patch.ron — this game's 2.4 m walls
+   "ozea/wall": ( align: ( stretch_y: Some(2.4) ) )
+   ```
+
+   This is the patch model doing the job it exists for, and it is what keeps one game's wall height out
+   of a library meant for several.
+
+4. **An author owns *cells*, not pieces.** The kitbash brush paints the grid cells a piece covers, and
+   an owned cell becomes a unary constraint. The solver needs no new concept for this:
+   `wfc::collapse_grid` already takes a per-cell `initial` domain bitmask, and
+   `initial_domains_restrict_output` already asserts that a pinned cell survives collapse. It is also
+   exactly Alvarez et al.'s lock brush, where locked tiles subdivide the room into mutable and
+   immutable zones. The cost — moving an owned piece means repainting — is accepted.

@@ -126,7 +126,7 @@ pub struct KitPiece {
     /// OFFERS (the feature axis) is separate from what it is FOR (the service axis), and one top can
     /// legitimately offer several classes.
     ///
-    /// The Site's vocabulary is `forge_core::placement::surfaces::SURFACE_CLASSES` verbatim: `"support"` is any
+    /// The Site's vocabulary is `emerge_core::placement::surfaces::SURFACE_CLASSES` verbatim: `"support"` is any
     /// horizontal top, `"worktop"` is a desk or table people work and eat at. **The slab offers only
     /// `"support"`** — it is where a specimen is laid out, and a mug on it would read as somebody's
     /// coffee beside an anomaly. That distinction is the whole point of the class surviving to the
@@ -154,7 +154,7 @@ pub struct KitPiece {
     /// rejects it and names the piece, because the alternative — silently seating it at y = 0 — is a
     /// mug embedded in the floor that no test would ever notice.
     ///
-    /// The token is a surface *class*, matching `forge_core::placement::surfaces::SURFACE_CLASSES`' vocabulary
+    /// The token is a surface *class*, matching `emerge_core::placement::surfaces::SURFACE_CLASSES`' vocabulary
     /// rather than inventing a second one, and it is matched against the host's [`Self::surfaces`] by
     /// bit — see that field for why the pairing has to be two-sided to mean anything.
     #[serde(default)]
@@ -449,7 +449,7 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
             if crate::placement::furnish::surface_bits(class) == 0 {
                 return Err(format!(
                     "site kit: {piece:?} offers surface class {class:?}, which is not one. The \
-                     vocabulary is `forge_core::placement::surfaces::SURFACE_CLASSES`."
+                     vocabulary is `emerge_core::placement::surfaces::SURFACE_CLASSES`."
                 ));
             }
         }
@@ -458,7 +458,7 @@ pub fn validate_site_kit(kit: &SiteKit) -> Result<(), String> {
             if want == 0 {
                 return Err(format!(
                     "site kit: {piece:?} rests on {class:?}, which is not a surface class. The \
-                     vocabulary is `forge_core::placement::surfaces::SURFACE_CLASSES`."
+                     vocabulary is `emerge_core::placement::surfaces::SURFACE_CLASSES`."
                 ));
             }
             // The two-sided half. Asking "does ANY piece have a surface" — which is what this checked

@@ -125,14 +125,14 @@ fn affords(item: &ManifestItem, aff: &str) -> bool {
     item.affordances.iter().any(|a| a == aff)
 }
 
-// The surface-class vocabulary moved to `forge_core::placement::surfaces` in the Stage-0b workspace
+// The surface-class vocabulary moved to `emerge_core::placement::surfaces` in the Stage-0b workspace
 // split: it is a closed token table and four pure functions, and it was only ever in this file by
 // accident of history. `manifest::validate_manifest` needs it, and `manifest` is engine-free — so the
 // vocabulary could not stay behind the Bevy boundary.
 //
 // Re-exported at the old path because this file and `site::kit` reach for
 // `placement::furnish::surface_bits` by name.
-pub(crate) use forge_core::placement::surfaces::{
+pub(crate) use emerge_core::placement::surfaces::{
     provided_surfaces, required_surface, surface_bits,
 };
 

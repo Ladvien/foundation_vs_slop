@@ -1,6 +1,6 @@
 //! **The crate boundary, enforced.**
 //!
-//! `forge-core` exists so that the constraint IR, the solvers, WFC and the seeded RNG can be consumed
+//! `emerge-core` exists so that the constraint IR, the solvers, WFC and the seeded RNG can be consumed
 //! by the game, by the offline search, and by a standalone editor without any of them agreeing on a
 //! renderer. That property was a *comment* for months — `ir.rs` has said "Nothing here imports
 //! `bevy::`" since long before there was a crate — and a comment cannot fail a build.
@@ -9,7 +9,7 @@
 //! These two tests are the ratchet, in the spirit of `tests/determinism_lint.rs` and
 //! `tests/panic_budget.rs`: cheap, GPU-free, and they fail at the door.
 //!
-//! Widening the dependency list is a design decision (see `docs/2026-08-03-forge-plan.md`), so it
+//! Widening the dependency list is a design decision (see `docs/2026-08-03-emerge-mapper-plan.md`), so it
 //! should cost an argument and a deliberate edit here — not a passing `cargo build`.
 //!
 //! # Which test actually catches what
@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Everything `forge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
+/// Everything `emerge-core` is allowed to depend on. Data and arithmetic, nothing that draws.
 const ALLOWED_DEPS: &[&str] = &["serde", "serde_json", "ron", "rand", "rand_chacha"];
 
 /// Crate names that would mean the boundary has been crossed, checked as substrings so
@@ -131,11 +131,11 @@ fn no_source_file_reaches_for_an_engine() {
 
     assert!(
         offenders.is_empty(),
-        "forge-core must stay engine-free, but {} line(s) reference an engine crate.\n  {}\n\n\
+        "emerge-core must stay engine-free, but {} line(s) reference an engine crate.\n  {}\n\n\
          This crate is what lets the game, the headless search and the standalone editor share the \
          placement stack without agreeing on a renderer. If a type genuinely needs to cross the \
          boundary, the answer is a plain-data type here and a conversion on the far side — not a \
-         dependency. See docs/2026-08-03-forge-plan.md.",
+         dependency. See docs/2026-08-03-emerge-mapper-plan.md.",
         offenders.len(),
         offenders.join("\n  ")
     );
@@ -144,14 +144,14 @@ fn no_source_file_reaches_for_an_engine() {
 #[test]
 fn the_dependency_list_stays_closed() {
     let manifest = std::fs::read_to_string(crate_root().join("Cargo.toml"))
-        .expect("forge-core must have a Cargo.toml");
+        .expect("emerge-core must have a Cargo.toml");
 
     // Only the `[dependencies]` table — a dev-dependency on something heavier would be a different
     // (and much less alarming) conversation.
     let deps = manifest
         .split("[dependencies]")
         .nth(1)
-        .expect("forge-core must declare a [dependencies] table");
+        .expect("emerge-core must declare a [dependencies] table");
     let deps = deps.split("\n[").next().unwrap_or(deps);
 
     for line in deps.lines() {
@@ -164,15 +164,15 @@ fn the_dependency_list_stays_closed() {
         };
         assert!(
             ALLOWED_DEPS.contains(&name),
-            "forge-core declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
+            "emerge-core declares `{name}`, which is not in its allowed set {ALLOWED_DEPS:?}.\n\
              Widening this is a design decision, not a convenience — see \
-             docs/2026-08-03-forge-plan.md. If it is genuinely warranted, add it to ALLOWED_DEPS in \
+             docs/2026-08-03-emerge-mapper-plan.md. If it is genuinely warranted, add it to ALLOWED_DEPS in \
              this test in the same commit, so the change is visible in review."
         );
         for marker in FORBIDDEN_DEP_MARKERS {
             assert!(
                 !name.contains(marker),
-                "forge-core declares `{name}` — the crate exists precisely so it does not depend on \
+                "emerge-core declares `{name}` — the crate exists precisely so it does not depend on \
                  an engine."
             );
         }

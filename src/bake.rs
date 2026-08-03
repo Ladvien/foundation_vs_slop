@@ -19,11 +19,11 @@ pub fn ron_slice<T: serde::Serialize>(v: &T) -> Result<String, String> {
     ron::ser::to_string_pretty(v, ron::ser::PrettyConfig::default()).map_err(|e| format!("serialize slice: {e}"))
 }
 
-// The RON *primitives* now live in `forge-core`, where the standalone editor can reach them: the
+// The RON *primitives* now live in `emerge-core`, where the standalone editor can reach them: the
 // byte-span leaf scanner, the block locator, and the value-not-spelling scalar comparison. What stays
 // here is the bake's POLICY — `splice_block` below, which decides when an edit would be dishonest and
-// refuses with prose about that specific situation. See `forge_core::ron_surgery`.
-use forge_core::ron_surgery::{find_block_value, scan_ron_leaves, scalar_eq, Leaf};
+// refuses with prose about that specific situation. See `emerge_core::ron_surgery`.
+use emerge_core::ron_surgery::{find_block_value, scan_ron_leaves, scalar_eq, Leaf};
 
 
 /// Rewrite the `<name>: ( … )` block in `config.ron` to hold `value_ron`, **substituting only the scalars
@@ -375,7 +375,7 @@ mod tests {
         assert!(out.contains("untouched: 7,"), "block end mis-located:\n{out}");
     }
 
-    // `scalar_eq`'s own behaviour is pinned where it now lives, in `forge_core::ron_surgery`. What is
+    // `scalar_eq`'s own behaviour is pinned where it now lives, in `emerge_core::ron_surgery`. What is
     // still this module's to prove is that the bake USES it correctly — see the `seed: 0x5C09191`
     // assertion in the splice test above, which is the case it was written for.
 

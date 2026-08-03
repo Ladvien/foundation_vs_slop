@@ -1,7 +1,7 @@
 # The game is the workspace root package; the engine-free half lives in `crates/`. See
-# `docs/2026-08-03-forge-plan.md` for why the split exists and what may cross the boundary.
+# `docs/2026-08-03-emerge-mapper-plan.md` for why the split exists and what may cross the boundary.
 [workspace]
-members = ["crates/forge-core"]
+members = ["crates/emerge-core"]
 
 [package]
 name = "foundation_vs_slop"
@@ -33,7 +33,7 @@ required-features = ["test-harness"]
 # The engine-free world-building core: constraint IR, solvers, WFC, geometry, seeded RNG. Re-exported
 # at its old paths by `lib.rs` and `placement/mod.rs`, so `crate::rng` / `crate::placement::ir` still
 # resolve everywhere they did before the split.
-forge-core = { path = "crates/forge-core" }
+emerge-core = { path = "crates/emerge-core" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

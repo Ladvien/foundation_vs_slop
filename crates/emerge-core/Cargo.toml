@@ -1,5 +1,5 @@
 [package]
-name = "forge-core"
+name = "emerge-core"
 version = "0.1.0"
 edition = "2024"
 description = "Engine-free world-building core: constraint IR, solvers, WFC, deterministic RNG."
@@ -10,7 +10,7 @@ description = "Engine-free world-building core: constraint IR, solvers, WFC, det
 # crate to enforce it; the crate is what turns the comment into a compiler error.
 #
 # Adding a `bevy` dependency here is a design change, not a convenience — see
-# `docs/2026-08-03-forge-plan.md`.
+# `docs/2026-08-03-emerge-mapper-plan.md`.
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 ron = "0.12.2"

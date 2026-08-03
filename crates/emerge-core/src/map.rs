@@ -20,6 +20,27 @@
 //! lost by starting here, and retrofitting group ownership after interactions ship would be a schema
 //! migration through every authored map.
 //!
+//! # Prose is a field, not a comment
+//!
+//! Every addressable thing here carries an optional `note:`. That is deliberate and it is what lets a
+//! map be written by an ordinary serializer.
+//!
+//! This project already knows what happens otherwise. `assets/site/site67.ron` is 15% comments and its
+//! props list carries more prose than data; `assets/config/config.ron` carries ~563 comment lines, and
+//! on 2026-07-16 a `to_string_pretty` bake deleted 279 of them. The response there was
+//! [`crate::ron_surgery`] — rewrite the file as text so the comments survive. That is the right answer
+//! for a file a human authored and a tool visits.
+//!
+//! For a format being designed now it is the wrong problem to solve. If the reasoning is a **field**,
+//! no serializer can lose it, no writer needs to be surgical, and the note survives a round-trip
+//! through any tool that understands the schema. [`Placed::owned_because`] was already this idea in
+//! one specific place — a reason stored as data precisely so nothing can strip it — and `note:`
+//! generalises it.
+//!
+//! So: an emerge map is serialized normally and **never** text-spliced. The surgical writer stays for
+//! `site67.ron` and `config.ron`, whose prose is a 48-line ASCII floor plan and paragraphs introducing
+//! blocks of records — none of it attached to a record, so none of it with a field to live in.
+//!
 //! # Versioning: refuse, never migrate
 //!
 //! `persist.rs` states the rule this follows and the reason it has no `#[serde(default)]` anywhere:
@@ -44,6 +65,10 @@ pub struct Map {
     pub placements: Vec<Placed>,
     #[serde(default)]
     pub locations: Vec<Location>,
+    /// What this map is and why it is laid out this way — the header prose, as data. See the module
+    /// docs on why this is a field rather than a comment.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One instance of a descriptor, somewhere.
@@ -74,6 +99,12 @@ pub struct Placed {
     /// Per-instance overrides layered over the descriptor. Absence inherits.
     #[serde(default)]
     pub patch: Option<Descriptor>,
+    /// Why this prop is here — the trailing `// records desk` of the old format, as data.
+    ///
+    /// Distinct from [`Self::owned_because`], which answers a narrower question a generator has to
+    /// respect. This one is for the reader.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// An invisible thing that owns a group of props and governs their use.
@@ -84,6 +115,10 @@ pub struct Location {
     /// [`Placed::id`]s this location governs. May be one.
     pub props: Vec<String>,
     pub interactions: Vec<Interaction>,
+    /// What this grouping *is* — "the galley's near table", "the bunk nobody uses". A location is
+    /// invisible, so without this it is the one thing in a map with no way to explain itself.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Something that can happen here.
@@ -98,6 +133,10 @@ pub struct Interaction {
     #[serde(default)]
     pub guard: Option<Guard>,
     pub effects: Vec<Effect>,
+    /// Why this interaction exists here, and anything a reader would otherwise have to infer from the
+    /// role counts.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// A part an agent can play in an interaction.
@@ -267,6 +306,7 @@ mod tests {
                     owned: false,
                     owned_because: None,
                     patch: None,
+                    note: None,
                 },
                 Placed {
                     id: "stool_1".into(),
@@ -276,11 +316,13 @@ mod tests {
                     owned: false,
                     owned_because: None,
                     patch: None,
+                    note: None,
                 },
             ],
             locations: vec![Location {
                 id: "galley_table".into(),
                 props: vec!["table_1".into(), "stool_1".into()],
+                note: Some("the galley's near table".into()),
                 interactions: vec![Interaction {
                     verb: "eat".into(),
                     roles: vec![RoleSlot {
@@ -295,8 +337,10 @@ mod tests {
                         drive: "stamina".into(),
                         rate: 0.2,
                     }],
+                    note: None,
                 }],
             }],
+            note: Some("a galley, for the schema tests".into()),
         }
     }
 
@@ -370,5 +414,83 @@ mod tests {
         let text =
             ron::ser::to_string_pretty(&m, ron::ser::PrettyConfig::default()).expect("serializes");
         assert_eq!(Map::parse(&text).expect("parses"), m);
+    }
+
+    /// **The reason `note:` is a field.** The same `to_string_pretty` that deleted 279 lines of
+    /// rationale from `config.ron` on 2026-07-16 carries these through untouched, because they are
+    /// data. No surgical writer, no comment-preserving pass, nothing to forget.
+    ///
+    /// The assertion is deliberately on the *serialized text* as well as the parsed value: a
+    /// round-trip through `PartialEq` would still pass if a future serializer config dropped the
+    /// field and the parser defaulted it back to `None` on both sides.
+    #[test]
+    fn prose_survives_an_ordinary_serializer_because_it_is_a_field() {
+        let mut m = table_map();
+        m.placements[0].note = Some("the slab the specimen goes on".into());
+
+        let text =
+            ron::ser::to_string_pretty(&m, ron::ser::PrettyConfig::default()).expect("serializes");
+        for prose in [
+            "a galley, for the schema tests",
+            "the slab the specimen goes on",
+        ] {
+            assert!(
+                text.contains(prose),
+                "`{prose}` was lost by the serializer:\n{text}"
+            );
+        }
+
+        let back = Map::parse(&text).expect("parses");
+        assert_eq!(
+            back, m,
+            "a note must survive the round trip, not just the write"
+        );
+        assert_eq!(
+            back.placements[0].note.as_deref(),
+            Some("the slab the specimen goes on")
+        );
+    }
+
+    /// A note is prose, so it may contain the things prose contains — including the `//` that would
+    /// have ended a comment, and quotes.
+    ///
+    /// **The serializer escapes more than it needs to.** Measured against `ron 0.12.2`: an apostrophe
+    /// inside a double-quoted string comes out as `\'`, so "the galley's near table" is written
+    /// `"the galley\'s near table"`. It parses back identically, which is the property that matters —
+    /// but it means a *textual* grep of a map file for an author's note can miss it, and a tool that
+    /// diffs notes must compare parsed values rather than bytes.
+    #[test]
+    fn a_note_may_contain_anything_prose_contains() {
+        for prose in [
+            r#"see docs/ui.md §5 // and the "kit" notes"#,
+            "the galley's near table",
+            "a\nnote\nover several lines",
+        ] {
+            let mut m = table_map();
+            m.note = Some(prose.to_owned());
+            let text = ron::ser::to_string_pretty(&m, ron::ser::PrettyConfig::default())
+                .expect("serializes");
+            assert_eq!(
+                Map::parse(&text).expect("parses").note.as_deref(),
+                Some(prose),
+                "prose did not survive:\n{text}"
+            );
+        }
+    }
+
+    /// Absence is the normal case — a map with nothing to explain must not be forced to say so.
+    #[test]
+    fn a_note_is_optional_everywhere() {
+        let text = r#"(
+            version: 1,
+            origin: (0.0, 0.0, 0.0),
+            placements: [
+                ( id: "a", descriptor: "crate", at: (1.0, 1.0), yaw: 0.0 ),
+            ],
+        )"#;
+        let m = Map::parse(text).expect("a map with no notes must parse");
+        assert_eq!(m.note, None);
+        assert_eq!(m.placements[0].note, None);
+        m.validate().expect("and validate");
     }
 }

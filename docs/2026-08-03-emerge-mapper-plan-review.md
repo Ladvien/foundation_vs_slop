@@ -1,6 +1,6 @@
-# Review of the forge plan — what the first draft got wrong
+# Review of the emerge-mapper plan — what the first draft got wrong
 
-A review of `2026-08-03-forge-plan.md` before any code was written. Recorded because three of its
+A review of `2026-08-03-emerge-mapper-plan.md` before any code was written. Recorded because three of its
 findings changed the schema, and two of them are the kind that are cheap now and a migration later.
 
 Everything below was re-verified against the vendored `bevy-0.19.0` source and the local paper corpus;
