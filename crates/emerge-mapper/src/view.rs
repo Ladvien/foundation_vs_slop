@@ -24,6 +24,8 @@ use std::f32::consts::TAU;
 use bevy::dev_tools::infinite_grid::{InfiniteGrid, InfiniteGridPlugin, InfiniteGridSettings};
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
+
+use crate::keys::{self, Action};
 use bevy::camera::ScalingMode;
 
 /// The editor's one 3D camera. See the module note.
@@ -141,10 +143,10 @@ fn drive(
     }
 
     let step = TAU / ROTATION_STEPS as f32;
-    if keys.just_pressed(KeyCode::KeyQ) {
+    if keys::just_pressed(&keys, Action::TurnViewLeft) {
         rig.goal_yaw += step;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
+    if keys::just_pressed(&keys, Action::TurnViewRight) {
         rig.goal_yaw -= step;
     }
     // Ease toward the detent rather than snapping, so a rapid double-tap reads as one smooth turn.
@@ -158,13 +160,13 @@ fn drive(
     // Pan along the SCREEN axes, not the world's, so "up" always means away from the viewer no matter
     // which detent the view is at.
     let mut wish = Vec2::ZERO;
-    for (key, dir) in [
-        (KeyCode::KeyW, Vec2::new(0.0, -1.0)),
-        (KeyCode::KeyS, Vec2::new(0.0, 1.0)),
-        (KeyCode::KeyA, Vec2::new(-1.0, 0.0)),
-        (KeyCode::KeyD, Vec2::new(1.0, 0.0)),
+    for (action, dir) in [
+        (Action::PanForward, Vec2::new(0.0, -1.0)),
+        (Action::PanBack, Vec2::new(0.0, 1.0)),
+        (Action::PanLeft, Vec2::new(-1.0, 0.0)),
+        (Action::PanRight, Vec2::new(1.0, 0.0)),
     ] {
-        if keys.pressed(key) {
+        if keys::pressed(&keys, action) {
             wish += dir;
         }
     }

@@ -33,7 +33,8 @@
 mod devshot;
 mod editor;
 mod fill;
-mod import_ui;
+mod keys;
+mod tiles;
 mod project;
 mod thumbs;
 mod view;
@@ -94,11 +95,15 @@ fn main() {
         )
         .insert_resource(project)
         .insert_resource(ClearColor(Color::srgb(0.035, 0.033, 0.030)))
+        // **One knob for the whole interface.** `UiScale` multiplies every `Val::Px` and every font
+        // size, so the panels grow together and nothing has to be re-tuned relative to anything else
+        // — the alternative is forty constants that drift apart the first time one is missed.
+        .insert_resource(UiScale(1.2))
         .add_plugins((
             view::ViewPlugin,
             editor::EditorPlugin,
             thumbs::ThumbsPlugin,
-            import_ui::ImportUiPlugin,
+            tiles::TilesPlugin,
             devshot::DevShotPlugin,
         ))
         .run();

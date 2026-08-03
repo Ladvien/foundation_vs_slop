@@ -22,6 +22,7 @@ use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
 use emerge_core::descriptor::Mount;
 use emerge_core::map::Placed;
 
+use crate::keys::{self, Action, Context};
 use crate::project::Project;
 use crate::view::{cursor_ground, MainCamera};
 
@@ -273,11 +274,11 @@ fn spawn_panel(
 ) {
     let root = commands
         .spawn((
-            crate::import_ui::MapRoot,
+            crate::tiles::MapRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(12.0),
-                top: Val::Px(12.0),
+                top: Val::Px(crate::tiles::TAB_STRIP_BOTTOM),
                 width: Val::Px(300.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
@@ -297,52 +298,53 @@ fn spawn_panel(
             TextColor(ACCENT),
             TextFont::from_font_size(15.0),
         ));
-        // **The keys, inline and in a column.** A run-on line of `a | b | c` is one long thing to
-        // read and it wraps unpredictably at any panel width; two aligned columns are a table, and
-        // the eye finds a row in it without reading the others. Marschner §27.7 on clutter — the
-        // first remedy is showing *less detail per item*, and a key needs exactly two facts.
+        // **The keys, inline and in a column — read from the census, never retyped.**
+        //
+        // `docs/ui.md` §3.5 records what happens otherwise: key allocation lived in five prose
+        // censuses and all five drifted to the same wrong answer. A panel that types its own key list
+        // is a sixth. This renders `keys::in_context`, so a binding that changes changes here.
+        //
+        // Two aligned columns rather than a run-on line: a run-on wraps unpredictably at any width,
+        // and the eye finds a row in a table without reading the others.
         p.spawn(Node {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(1.0),
             margin: UiRect::top(Val::Px(2.0)),
             ..default()
         })
-        .with_children(|keys| {
-            for (chord, what) in [
-                ("click", "place"),
-                ("[ ]", "aim"),
-                ("F", "flood fill"),
-                ("Del", "remove"),
-                ("Q E", "turn view"),
-                ("WASD", "pan"),
-                ("wheel", "zoom"),
-                ("Ctrl+Z", "undo"),
-                ("N", "rename map"),
-                ("Ctrl+S", "save"),
-            ] {
-                keys.spawn(Node {
+        .with_children(|list| {
+            for row_def in keys::rows(Context::Map)
+                .into_iter()
+                .chain(keys::rows(Context::Global))
+            {
+                list.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
+                    // A guaranteed gutter, so the widest chord still has air before its label.
+                    column_gap: Val::Px(10.0),
                     ..default()
                 })
                 .with_children(|row| {
                     row.spawn((
-                        // A fixed key column is what makes it a table rather than two ragged lists.
                         Node {
-                            width: Val::Px(58.0),
+                            // **`min_width`, not `width`.** A fixed width does not clip or shrink its
+                            // text — an over-long chord simply draws past the column and lands on top
+                            // of the label beside it, which is exactly what "W, A, S, D" did to
+                            // "pan". `min_width` keeps the column aligned for every row that fits and
+                            // lets the one that does not push its label right instead of through it.
+                            min_width: Val::Px(78.0),
                             flex_shrink: 0.0,
                             ..default()
                         },
-                        Text::new(chord),
+                        Text::new(row_def.chord.clone()),
                         TextColor(KEY),
                         TextFont::from_font_size(11.0),
-                        // **No wrap.** A chord containing a space (`Q E`, `[ ]`) is one token to a
-                        // reader and two to a line-breaker, and letting it wrap turned three of these
-                        // rows into two-line entries with the description stranded underneath.
+                        // No wrap: a chord with a space in it is one token to a reader and two to a
+                        // line-breaker.
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ));
                     row.spawn((
-                        Text::new(what),
+                        Text::new(row_def.does),
                         TextColor(TEXT_DIM),
                         TextFont::from_font_size(11.0),
                     ));
@@ -694,8 +696,8 @@ fn not_renaming(state: Res<EditorState>) -> bool {
 
 /// Placing belongs to map mode. Without this, `F` in import mode would flood the map with whatever
 /// the palette last had armed, which is a surprising amount of work to undo.
-fn in_map_mode(mode: Res<crate::import_ui::Mode>) -> bool {
-    *mode == crate::import_ui::Mode::Map
+fn in_map_mode(mode: Res<crate::tiles::Mode>) -> bool {
+    *mode == crate::tiles::Mode::Map
 }
 
 /// Type a name. Snake case is applied to what is shown and to what is committed, so the illegal state
@@ -709,7 +711,7 @@ fn rename_keys(
     if state.renaming.is_none() {
         // `N` starts a rename. Read from the buffered events like everything else here, so a keypress
         // cannot both start the rename and be typed into it.
-        if keyboard.just_pressed(KeyCode::KeyN) {
+        if keys::just_pressed(&keyboard, Action::RenameMap) {
             // **Empty, not seeded with the current name.** Seeding it meant the first keystroke
             // appended, so renaming `site_67_hub` to `galley_deck` produced
             // `site_67_hubgalley_deck` — and it looked like it had worked, because the panel showed a
@@ -977,14 +979,13 @@ fn keys(
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
 ) {
-    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
 
-    if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
+    if keys::just_pressed(&keyboard, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
     }
 
-    if keyboard.just_pressed(KeyCode::Delete) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, Action::Remove) && !hovered_ui.iter().any(|h| h.0) {
         delete_under_cursor(
             &mut commands,
             window,
@@ -996,7 +997,7 @@ fn keys(
         return;
     }
 
-    if ctrl && keyboard.just_pressed(KeyCode::KeyS) {
+    if keys::just_pressed(&keyboard, Action::Save) {
         match project.save() {
             Ok(()) => {
                 let path = project.map_path.display().to_string();
@@ -1014,7 +1015,7 @@ fn keys(
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keyboard.just_pressed(KeyCode::KeyF) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
         flood_from_cursor(
             &mut commands,
             &assets,
@@ -1026,9 +1027,9 @@ fn keys(
         return;
     }
 
-    let step = if keyboard.just_pressed(KeyCode::BracketRight) {
+    let step = if keys::just_pressed(&keyboard, Action::AimRight) {
         YAW_STEP
-    } else if keyboard.just_pressed(KeyCode::BracketLeft) {
+    } else if keys::just_pressed(&keyboard, Action::AimLeft) {
         -YAW_STEP
     } else {
         0.0

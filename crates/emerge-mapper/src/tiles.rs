@@ -1,8 +1,9 @@
-//! **Import mode** — what the measuring half has to say, where a person can read it.
+//! **Tile configuration** — bringing meshes in, and saying what they are.
 //!
-//! `emerge_core::import` does the work; this is the panel. Tab switches between placing pieces and
-//! bringing new ones in, because they are different jobs with different controls and one panel trying
-//! to hold both would be a panel that does neither well.
+//! The editor's second tab. `emerge_core::import` does the measuring; this is where an author reads
+//! it, gives a mesh an id, decides which layer it goes on and what it is tagged as, and accepts it
+//! into the library. Separate from the map tab because they are different jobs with different
+//! controls, and one panel trying to hold both would be a panel that does neither well.
 //!
 //! # The scan is lazy and says how big it was
 //!
@@ -23,14 +24,41 @@ use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
 use emerge_core::descriptor::{mount_label, mount_options};
 use emerge_core::import::{self, Candidate, Severity};
 
+use crate::keys::{self, Action, Context};
 use crate::project::Project;
 
 /// Which job the editor is doing.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
+    /// Place pieces and build the level.
     #[default]
     Map,
-    Import,
+    /// Bring meshes in and say what they are.
+    Tiles,
+}
+
+impl Mode {
+    /// The tabs, in the order they are shown. Map first: it is the job, and configuring tiles is
+    /// what you do in order to do it.
+    pub const ALL: [Mode; 2] = [Mode::Map, Mode::Tiles];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Map => "MAP",
+            Mode::Tiles => "TILES",
+        }
+    }
+
+    /// The number key that jumps straight here.
+    ///
+    /// A direct key per tab as well as `Tab` to cycle, because cycling is fine for two and useless
+    /// for four — and `docs/ui.md` §4.2 wants everything reachable by mouse reachable by keyboard.
+    pub fn action(self) -> crate::keys::Action {
+        match self {
+            Mode::Map => crate::keys::Action::MapTab,
+            Mode::Tiles => crate::keys::Action::TilesTab,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -50,6 +78,10 @@ pub struct ImportState {
     /// The raw text being typed into the candidate's id, or `None` when not renaming. Snake case is
     /// applied for display and on commit, exactly as the map's name is — one rule, one behaviour.
     pub renaming: Option<String>,
+    /// The library entry selected for removal, if one is. Separate from [`Self::selected`], which
+    /// indexes candidates — the two lists are different things and one index into both would be a
+    /// bug waiting for the first time their lengths differ.
+    pub selected_library_id: Option<String>,
 }
 
 impl ImportState {
@@ -58,9 +90,21 @@ impl ImportState {
     }
 }
 
-/// Root of the import panel, shown and hidden with the mode.
+/// One tab in the strip, carrying the mode it selects.
+#[derive(Component, Clone, Copy)]
+struct Tab(Mode);
+
+/// The tab's name, so the active one can be lit without touching its key.
 #[derive(Component)]
-struct ImportRoot;
+struct TabLabel;
+
+/// The tab's shortcut, styled a step quieter than the name.
+#[derive(Component)]
+struct TabKey;
+
+/// Root of the tiles panel, shown and hidden with the mode.
+#[derive(Component)]
+struct TilesRoot;
 
 /// Root of the map panel, so the mode can hide it.
 #[derive(Component)]
@@ -115,6 +159,10 @@ impl Axis {
 #[derive(Component, Clone, Copy)]
 struct CandidateRow(usize);
 
+/// One row for a tile already in the library, carrying its id.
+#[derive(Component, Clone)]
+struct LibraryRow(String);
+
 /// The node the candidate list is rebuilt into.
 #[derive(Component)]
 struct CandidateList;
@@ -140,6 +188,10 @@ struct ScanSummary;
 #[derive(Component)]
 struct ActionLine;
 
+/// Where the panels start, below the tab strip. One number, so the two panels cannot disagree about
+/// it and leave a tab half-covered.
+pub const TAB_STRIP_BOTTOM: f32 = 46.0;
+
 const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
 const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
 const ROW_SELECTED: Color = Color::srgb(0.30, 0.28, 0.24);
@@ -155,13 +207,13 @@ const CELLS: Color = Color::srgb(0.42, 0.38, 0.30);
 /// The volume, so a height is seen rather than only read.
 const EXTENT: Color = Color::srgb(0.24, 0.42, 0.50);
 
-pub struct ImportUiPlugin;
+pub struct TilesPlugin;
 
-impl Plugin for ImportUiPlugin {
+impl Plugin for TilesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Mode>()
             .init_resource::<ImportState>()
-            .add_systems(Startup, spawn_import_panel)
+            .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
                 (
@@ -170,27 +222,180 @@ impl Plugin for ImportUiPlugin {
                     move_selection.run_if(not_renaming_candidate),
                     cycle_mount.run_if(not_renaming_candidate),
                     commit_candidate.run_if(not_renaming_candidate),
+                    remove_tile.run_if(not_renaming_candidate),
                     apply_mode,
+                    style_tabs,
+                    tab_shortcuts,
                     rebuild_candidates.run_if(resource_changed::<ImportState>),
                     rebuild_detail.run_if(resource_changed::<ImportState>),
                     refresh_lines,
                     drive_preview,
-                    draw_preview_footprint.run_if(in_import_mode),
+                    draw_preview_footprint.run_if(in_tiles_mode),
                 ),
             )
+            .add_observer(on_tab_click)
             .add_observer(on_candidate_click)
+            .add_observer(on_library_click)
             .add_observer(on_tag_chip);
     }
 }
 
-fn spawn_import_panel(mut commands: Commands) {
+/// The tab strip. Always visible, above whichever panel is showing.
+///
+/// A key alone was not enough. `Tab` cycles the mode and always did, but a mode you can only reach by
+/// pressing something is a mode you have to be told about — and an editor that has to be explained
+/// has a bug in its front page. The strip says both things at once: which jobs exist, and which one
+/// you are doing.
+fn spawn_tab_strip(mut commands: Commands) {
     commands
         .spawn((
-            ImportRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(12.0),
                 top: Val::Px(12.0),
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(2.0),
+                ..default()
+            },
+            GlobalZIndex(101),
+        ))
+        .with_children(|p| {
+            for mode in Mode::ALL {
+                p.spawn((
+                    UiButton,
+                    Hovered::default(),
+                    Tab(mode),
+                    Node {
+                        padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                        align_items: AlignItems::Center,
+                        // A thick bottom border is the active marker: it reads at a glance and does
+                        // not depend on telling two dark greys apart, which `docs/ui.md` §1.3 rules
+                        // out as an encoding on its own.
+                        border: UiRect::bottom(Val::Px(3.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::NONE),
+                    BackgroundColor(ROW_BG),
+                ))
+                .with_children(|tab| {
+                    // **The tab states its key.** Cockburn et al. 2014 on the intermodal-transition
+                    // failure: offering a fast path beside a slow one does not work on its own, and
+                    // users plateau on the slow one. The key has to be visible at the moment of use,
+                    // which is `docs/ui.md` §4.2's "each chip states its key".
+                    tab.spawn((
+                        Text::new(crate::keys::chord(mode.action())),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(10.0),
+                        Node {
+                            margin: UiRect::right(Val::Px(7.0)),
+                            ..default()
+                        },
+                        TabKey,
+                    ));
+                    tab.spawn((
+                        Text::new(mode.label()),
+                        TextColor(LABEL),
+                        TextFont::from_font_size(13.0),
+                        TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                        TabLabel,
+                    ));
+                });
+            }
+        });
+}
+
+/// Clicking a tab selects it — and scans on the first visit to the tiles tab, exactly as the key
+/// does, so the two ways in behave the same.
+fn on_tab_click(
+    activate: On<Activate>,
+    tabs: Query<&Tab>,
+    project: Res<Project>,
+    mut mode: ResMut<Mode>,
+    mut state: ResMut<ImportState>,
+) {
+    let Ok(tab) = tabs.get(activate.entity) else {
+        return;
+    };
+    if *mode == tab.0 {
+        return;
+    }
+    *mode = tab.0;
+    if *mode == Mode::Tiles && !state.scanned {
+        scan(&project, &mut state);
+    }
+}
+
+/// Light the active tab. The inactive one stays legible rather than greyed to nothing — a tab you
+/// cannot read is a tab you do not know is there.
+fn style_tabs(
+    mode: Res<Mode>,
+    mut tabs: Query<(&Tab, &Hovered, &mut BackgroundColor, &mut BorderColor, &Children)>,
+    mut names: Query<&mut TextColor, (With<TabLabel>, Without<TabKey>)>,
+    mut chords: Query<&mut TextColor, (With<TabKey>, Without<TabLabel>)>,
+) {
+    for (tab, hovered, mut bg, mut border, children) in &mut tabs {
+        let active = tab.0 == *mode;
+        // The active tab continues the panel beneath it, so the two read as one surface rather than
+        // as a button sitting on top of a box.
+        let want_bg = if active {
+            PANEL_BG
+        } else if hovered.0 {
+            Color::srgb(0.16, 0.15, 0.14)
+        } else {
+            ROW_BG
+        };
+        if bg.0 != want_bg {
+            bg.0 = want_bg;
+        }
+        let want_border = if active { ACCENT } else { Color::NONE };
+        *border = BorderColor::all(want_border);
+
+        for child in children.iter() {
+            if let Ok(mut colour) = names.get_mut(child) {
+                let want = if active { TEXT } else { DIM };
+                if colour.0 != want {
+                    colour.0 = want;
+                }
+            }
+            if let Ok(mut colour) = chords.get_mut(child) {
+                let want = if active { ACCENT } else { LABEL };
+                if colour.0 != want {
+                    colour.0 = want;
+                }
+            }
+        }
+    }
+}
+
+/// The number keys jump straight to a tab, and scan on first arrival exactly as `Tab` and a click do.
+///
+/// Three ways in, one behaviour — `docs/ui.md` §4.2: everything reachable by mouse is reachable by
+/// keyboard and vice versa.
+fn tab_shortcuts(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    project: Res<Project>,
+    mut mode: ResMut<Mode>,
+    mut state: ResMut<ImportState>,
+) {
+    for want in Mode::ALL {
+        if keys::just_pressed(&keyboard, want.action()) && *mode != want {
+            *mode = want;
+            if want == Mode::Tiles && !state.scanned {
+                scan(&project, &mut state);
+            }
+            return;
+        }
+    }
+}
+
+fn spawn_tiles_panel(mut commands: Commands) {
+    commands
+        .spawn((
+            TilesRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(12.0),
+                top: Val::Px(TAB_STRIP_BOTTOM),
                 width: Val::Px(380.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
@@ -204,36 +409,39 @@ fn spawn_import_panel(mut commands: Commands) {
         ))
         .with_children(|p| {
             p.spawn((
-                Text::new("IMPORT"),
+                Text::new("TILE CONFIGURATION"),
                 TextColor(ACCENT),
                 TextFont::from_font_size(15.0),
             ));
-            for (chord, what) in [
-                ("Tab", "back to the map"),
-                ("up down", "choose"),
-                ("I", "type an id"),
-                ("M", "layer"),
-                ("Enter", "add to library"),
-                ("R", "rescan"),
-            ] {
+            // From the census, like the map panel's — see `crate::keys`.
+            for row_def in keys::rows(Context::Tiles)
+                .into_iter()
+                .chain(keys::rows(Context::Global))
+            {
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(10.0),
                     ..default()
                 })
                 .with_children(|row| {
                     row.spawn((
                         Node {
-                            width: Val::Px(64.0),
+                            // **`min_width`, not `width`.** A fixed width does not clip or shrink its
+                            // text — an over-long chord simply draws past the column and lands on top
+                            // of the label beside it, which is exactly what "W, A, S, D" did to
+                            // "pan". `min_width` keeps the column aligned for every row that fits and
+                            // lets the one that does not push its label right instead of through it.
+                            min_width: Val::Px(78.0),
                             flex_shrink: 0.0,
                             ..default()
                         },
-                        Text::new(chord),
+                        Text::new(row_def.chord.clone()),
                         TextColor(DIM),
                         TextFont::from_font_size(11.0),
                         TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ));
                     row.spawn((
-                        Text::new(what),
+                        Text::new(row_def.does),
                         TextColor(LABEL),
                         TextFont::from_font_size(11.0),
                     ));
@@ -290,19 +498,18 @@ fn spawn_import_panel(mut commands: Commands) {
 /// Tab swaps the job. `R` rescans, because meshes arrive while the editor is open — an importer that
 /// only sees what was on disk at launch is one you have to restart to use.
 fn toggle_mode(
-    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     project: Res<Project>,
     mut mode: ResMut<Mode>,
     mut state: ResMut<ImportState>,
 ) {
-    let want_scan = if keys.just_pressed(KeyCode::Tab) {
-        *mode = match *mode {
-            Mode::Map => Mode::Import,
-            Mode::Import => Mode::Map,
-        };
-        *mode == Mode::Import && !state.scanned
+    let want_scan = if keys::just_pressed(&keyboard, Action::NextTab) {
+        // Cycle, not toggle: a third tab then costs a row in `Mode::ALL` and nothing else.
+        let at = Mode::ALL.iter().position(|m| m == &*mode).unwrap_or(0);
+        *mode = Mode::ALL[(at + 1) % Mode::ALL.len()];
+        *mode == Mode::Tiles && !state.scanned
     } else {
-        *mode == Mode::Import && keys.just_pressed(KeyCode::KeyR)
+        *mode == Mode::Tiles && keys::just_pressed(&keyboard, Action::Rescan)
     };
 
     if want_scan {
@@ -343,15 +550,15 @@ fn not_renaming_candidate(state: Res<ImportState>) -> bool {
 /// than appends.
 fn rename_candidate(
     mut events: MessageReader<KeyboardInput>,
-    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     mut state: ResMut<ImportState>,
 ) {
-    if *mode != Mode::Import {
+    if *mode != Mode::Tiles {
         return;
     }
     if state.renaming.is_none() {
-        if keys.just_pressed(KeyCode::KeyI) && state.current().is_some() {
+        if keys::just_pressed(&keyboard, Action::TypeId) && state.current().is_some() {
             state.renaming = Some(String::new());
             state.status = "type an id — Enter to keep it, Esc to leave it alone".to_owned();
         }
@@ -405,12 +612,12 @@ fn rename_candidate(
 /// A cycle rather than a menu because there are nine of them and the list is short enough to walk;
 /// the label says where you are, so nobody has to count presses.
 fn cycle_mount(
-    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     project: Res<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if *mode != Mode::Import || !keys.just_pressed(KeyCode::KeyM) {
+    if *mode != Mode::Tiles || !keys::just_pressed(&keyboard, Action::CycleLayer) {
         return;
     }
     let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
@@ -439,12 +646,12 @@ fn cycle_mount(
 /// is one where a crash loses work an author believes they did — and the file is generated from the
 /// manifests today, so an unwritten addition would simply be regenerated away.
 fn commit_candidate(
-    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    if *mode != Mode::Import || !keys.just_pressed(KeyCode::Enter) {
+    if *mode != Mode::Tiles || !keys::just_pressed(&keyboard, Action::Accept) {
         return;
     }
     let Some(candidate) = state.current().cloned() else {
@@ -510,6 +717,77 @@ fn commit_candidate(
     }
 }
 
+/// **Take a tile back out of the library.**
+///
+/// The tiles tab lists what is IN the library above what could be added to it, because "configure the
+/// tiles" is both halves of that and an editor with an add and no remove is one where a mistyped
+/// import is permanent.
+///
+/// It refuses to remove a descriptor the open map is using. An orphaned placement is not an error the
+/// map can carry — it names a descriptor nothing defines, so the piece silently fails to appear and
+/// the author finds out by counting crates. Saying "12 placements use this" is the answer; deleting
+/// them on their behalf is not.
+fn remove_tile(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mode: Res<Mode>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if *mode != Mode::Tiles || !keys::just_pressed(&keyboard, Action::RemoveTile) {
+        return;
+    }
+    let Some(id) = state.selected_library_id.clone() else {
+        state.status = "select a library tile to remove it".to_owned();
+        return;
+    };
+
+    let used = project
+        .map
+        .placements
+        .iter()
+        .filter(|p| p.descriptor == id)
+        .count();
+    if used > 0 {
+        state.status = format!(
+            "`{id}` is used by {used} placement(s) in this map — remove those first"
+        );
+        return;
+    }
+
+    let Some(at) = project.library.descriptors.iter().position(|d| d.id == id) else {
+        return;
+    };
+    let mut trial = project.library.clone();
+    trial.descriptors.remove(at);
+    // Re-validate: removing a piece can strand another that rested on the surface it offered, and
+    // that is exactly the two-sided check's job.
+    match trial.resolve(&project.vocab) {
+        Ok(masks) => {
+            project.library = trial;
+            project.masks = masks;
+        }
+        Err(e) => {
+            state.status = format!("not removed: {e}");
+            return;
+        }
+    }
+    project.remeasure_triangles();
+
+    let path = project.root.join("assets/emerge/library.ron");
+    match project
+        .library
+        .to_ron()
+        .and_then(|text| emerge_core::ron_surgery::save_atomic(&path, &text))
+    {
+        Ok(()) => {
+            state.selected_library_id = None;
+            state.status = format!("removed `{id}` from the library");
+            info!("removed `{id}` from {}", path.display());
+        }
+        Err(e) => state.status = format!("NOT WRITTEN: {e}"),
+    }
+}
+
 /// Toggle one token on one axis.
 fn on_tag_chip(
     activate: On<Activate>,
@@ -555,19 +833,30 @@ fn on_tag_chip(
 }
 
 fn move_selection(
-    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     mut state: ResMut<ImportState>,
 ) {
-    if *mode != Mode::Import || state.candidates.is_empty() {
+    if *mode != Mode::Tiles || state.candidates.is_empty() {
         return;
     }
     let last = state.candidates.len() - 1;
-    if keys.just_pressed(KeyCode::ArrowDown) && state.selected < last {
+    if keys::just_pressed(&keyboard, Action::NextCandidate) && state.selected < last {
         state.selected += 1;
     }
-    if keys.just_pressed(KeyCode::ArrowUp) && state.selected > 0 {
+    if keys::just_pressed(&keyboard, Action::PrevCandidate) && state.selected > 0 {
         state.selected -= 1;
+    }
+}
+
+fn on_library_click(
+    activate: On<Activate>,
+    rows: Query<&LibraryRow>,
+    mut state: ResMut<ImportState>,
+) {
+    if let Ok(row) = rows.get(activate.entity) {
+        state.selected_library_id = Some(row.0.clone());
+        state.status = format!("`{}` selected — Del removes it", row.0);
     }
 }
 
@@ -578,6 +867,8 @@ fn on_candidate_click(
 ) {
     if let Ok(row) = rows.get(activate.entity) {
         state.selected = row.0;
+        // One selection at a time, or `Del` would have to guess which list it meant.
+        state.selected_library_id = None;
     }
 }
 
@@ -586,15 +877,15 @@ fn on_candidate_click(
 /// panel's rows eating clicks aimed at the world.
 fn apply_mode(
     mode: Res<Mode>,
-    mut import_root: Query<&mut Node, (With<ImportRoot>, Without<MapRoot>)>,
-    mut map_root: Query<&mut Node, (With<MapRoot>, Without<ImportRoot>)>,
+    mut import_root: Query<&mut Node, (With<TilesRoot>, Without<MapRoot>)>,
+    mut map_root: Query<&mut Node, (With<MapRoot>, Without<TilesRoot>)>,
 ) {
     if !mode.is_changed() {
         return;
     }
     let (import_shown, map_shown) = match *mode {
         Mode::Map => (Display::None, Display::Flex),
-        Mode::Import => (Display::Flex, Display::None),
+        Mode::Tiles => (Display::Flex, Display::None),
     };
     for mut node in &mut import_root {
         node.display = import_shown;
@@ -604,8 +895,8 @@ fn apply_mode(
     }
 }
 
-fn in_import_mode(mode: Res<Mode>) -> bool {
-    *mode == Mode::Import
+fn in_tiles_mode(mode: Res<Mode>) -> bool {
+    *mode == Mode::Tiles
 }
 
 /// Keep one preview alive, showing the selected candidate at the origin with its PROPOSED alignment
@@ -627,7 +918,7 @@ fn drive_preview(
             commands.entity(e).despawn();
         }
     };
-    if *mode != Mode::Import {
+    if *mode != Mode::Tiles {
         clear(&mut commands);
         return;
     }
@@ -732,11 +1023,50 @@ fn refresh_lines(
 fn rebuild_candidates(
     mut commands: Commands,
     state: Res<ImportState>,
+    project: Res<Project>,
     lists: Query<Entity, With<CandidateList>>,
 ) {
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
+            // **What is already a tile**, above what could become one. Both halves are "configuring
+            // the tiles", and an editor that can add but not remove makes a mistyped import permanent.
+            p.spawn((
+                Text::new(format!("IN LIBRARY  ({})", project.library.descriptors.len())),
+                TextColor(LABEL),
+                TextFont::from_font_size(9.0),
+            ));
+            for d in &project.library.descriptors {
+                let selected = state.selected_library_id.as_deref() == Some(d.id.as_str());
+                p.spawn((
+                    UiButton,
+                    Hovered::default(),
+                    LibraryRow(d.id.clone()),
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        ..default()
+                    },
+                    BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
+                ))
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new(d.id.clone()),
+                        TextColor(TEXT),
+                        TextFont::from_font_size(10.0),
+                    ));
+                });
+            }
+
+            p.spawn((
+                Text::new(format!("NOT YET IMPORTED  ({})", state.candidates.len())),
+                TextColor(LABEL),
+                TextFont::from_font_size(9.0),
+                Node {
+                    margin: UiRect::top(Val::Px(6.0)),
+                    ..default()
+                },
+            ));
             if state.candidates.is_empty() {
                 p.spawn((
                     Text::new(if state.scanned {
