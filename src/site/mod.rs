@@ -53,6 +53,7 @@ pub mod activities;
 pub mod aperture;
 pub mod audio;
 pub mod cutaway;
+pub mod descriptors;
 pub mod kit;
 pub mod layout;
 pub mod nav;
