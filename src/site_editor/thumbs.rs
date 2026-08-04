@@ -410,7 +410,7 @@ fn has_mesh(root: Entity, children: &Query<&Children>, meshes: &Query<(), With<M
 /// a mesh AABB, so it is available before the GLB finishes loading and agrees with what the placement
 /// rules think the piece measures.
 fn subject_extent(kit: &SiteKit, piece: SitePiece) -> f32 {
-    let (fw, fd) = kit.piece(piece).footprint;
+    let (fw, fd) = kit.footprint(piece);
     let h = kit.top_height(piece);
     fw.max(fd).max(h).max(0.25)
 }

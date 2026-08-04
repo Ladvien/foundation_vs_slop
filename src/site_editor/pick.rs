@@ -46,7 +46,7 @@ pub fn cursor_layout_point(
 /// `layout::check_prop_placements` uses, so what the editor lets you grab is exactly what the rules
 /// will measure.
 pub fn footprint(kit: &SiteKit, piece: SitePiece, pos: (f32, f32), yaw_deg: f32) -> Footprint {
-    let (fw, fd) = kit.piece(piece).footprint;
+    let (fw, fd) = kit.footprint(piece);
     Footprint {
         x: pos.0,
         z: pos.1,

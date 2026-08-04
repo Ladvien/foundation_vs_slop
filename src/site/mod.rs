@@ -53,7 +53,6 @@ pub mod activities;
 pub mod aperture;
 pub mod audio;
 pub mod cutaway;
-pub mod descriptors;
 pub mod kit;
 pub mod layout;
 pub mod nav;
@@ -150,7 +149,7 @@ impl Plugin for SitePlugin {
         // One path, no fallback: a malformed kit is a loud startup failure, exactly like
         // `config::load_game_config`. Falling back to a default here would render a Site with holes
         // in it and no indication why.
-        let k = kit::load_site_kit(kit::SITE_KIT_PATH)
+        let k = kit::load_site_kit(kit::SITE_KIT_PATH, kit::SITE_PROJECT_DIR)
             .unwrap_or_else(|e| panic!("site kit: {e}"));
         app.insert_resource(SiteKitRes(k));
         app.add_systems(Startup, spawn_site);

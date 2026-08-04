@@ -1,95 +1,50 @@
-// =================================================================================================
-// SITE-67 ART KIT — greybox (Kenney prototype kit)
-//
-// Which GLB each `site::pieces::SitePiece` wears. This was a `match` in Rust until 2026-08-01; making
-// it data means the Site is re-skinnable by authoring a file, which is how the rest of the game
-// already treats a kit (`placement::manifest` + `assets/config/furniture_kenney.ron`). ONE kit
-// mechanism in the game rather than two.
-//
-// This kit is deliberately GREYBOX: readable blocks, not art. It is the fallback every test builds
-// against, and it stays shipped even once a dressed kit exists — a hand-authored hub has to be
-// debuggable, and you cannot see a layout bug through good lighting.
-//
-// HEIGHT. Each entry carries the mesh's AUTHORED height in metres. The scale applied at spawn is
-// `target / authored` — what a wall must REACH is game policy (`pieces::target_height`), how tall the
-// artist made it is an art fact and belongs here. This kit is a uniform 1 m module except the low
-// wall (0.5 m), which is why a single constant used to work; Ozea is mixed and it no longer does.
-//
-// SCHEMA. Every piece is a required named field (`deny_unknown_fields`), so a kit that forgets one
-// fails at PARSE time naming the field. The alternative — a map — would turn a forgotten piece into
-// an invisible wall at runtime, which is precisely the bug that survives a playtest.
-//
-// Two rules the validator enforces, both about SILENT failures:
-//   * every path must end `.glb` (docs/artist_guide.md §3 — glTF 2.0 binary only);
-//   * no two pieces may share a mesh, or geometry the layout distinguishes renders identically and
-//     the hub stops being learnable.
-// =================================================================================================
+// The greybox swap fixture — Kenney's prototype kit, 1 m modules. Same ids as the shipped
+// kit; a different assets/emerge/site_greybox/ describing them. That is the swap: two
+// projects, one set of names, and a wall that stretches 2.4x here and 1.0x there.
 (
-    // ── Structure ──
-    floor: (glb: "kenney_prototype-kit/Models/GLB format/floor-square.glb", height: 1.0, footprint: (1.00, 1.00)),
-    wall: (glb: "kenney_prototype-kit/Models/GLB format/wall.glb", height: 1.0, footprint: (0.20, 1.00)),
-    wall_corner: (glb: "kenney_prototype-kit/Models/GLB format/wall-corner.glb", height: 1.0, footprint: (1.00, 1.00)),
-    // OPENING is the clear hole (jamb to jamb, floor to lintel underside), not the bounding box — the
-    // ASYNC aperture quad is sized from it. Measured from the meshes: both Kenney doorways put their
-    // lintel underside at y = 0.8, with jamb inner faces at |z| = 0.3 and 0.45 respectively.
-    wall_doorway: (mesh: (glb: "kenney_prototype-kit/Models/GLB format/wall-doorway.glb", height: 1.0, footprint: (0.30, 1.00)), opening: (0.600, 0.800)),
-    wall_doorway_wide: (mesh: (glb: "kenney_prototype-kit/Models/GLB format/wall-doorway-wide.glb", height: 1.0, footprint: (0.30, 1.50)), opening: (0.900, 0.800)),
-    // The header course over a doorway (0.40 m = WALL_HEIGHT − DOORWAY_HEIGHT). The Kenney kit has no
-    // short panel left that is thin along X — `wall-low` is the only one and `wall_low` has it — so
-    // this takes a full 1 m panel and lets `y_scale` squash it to 0.4. That is fine HERE and only
-    // here: this kit is readable blocks, and it already stretches `wall_low` 1.8x for the same reason.
-    // The shipped Ozea kit gets a properly cropped 0.40 m piece instead.
-    wall_header: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-cutout-small.glb", height: 1.0, footprint: (0.20, 1.00)),
-    door_plaque: (glb: "kenney_prototype-kit/Models/GLB format/indicator-square-b.glb", height: 0.18, footprint: (0.34, 0.12)),
-    wall_window: (glb: "kenney_prototype-kit/Models/GLB format/wall-window-large.glb", height: 1.0, footprint: (0.30, 1.00)),
-    wall_low: (glb: "kenney_prototype-kit/Models/GLB format/wall-low.glb", height: 0.5, footprint: (0.20, 1.00)),
-    // A low block reads as a slab in greybox terms; the shipped kit gets a real treatment bed.
-    slab: (glb: "kenney_prototype-kit/Models/GLB format/shape-cube-half.glb", height: 0.5, footprint: (1.00, 1.00), surfaces: ["support"]),
-    column: (glb: "kenney_prototype-kit/Models/GLB format/column.glb", height: 1.0, footprint: (0.20, 0.20)),
-
-    // ── Dressing ──
-    crate_: (glb: "kenney_prototype-kit/Models/GLB format/crate-color.glb", height: 1.0, footprint: (0.50, 0.50)),
-    pipe: (glb: "kenney_prototype-kit/Models/GLB format/pipe.glb", height: 1.0, footprint: (0.20, 0.17)),
-    pipe_corner: (glb: "kenney_prototype-kit/Models/GLB format/pipe-corner.glb", height: 1.0, footprint: (0.20, 0.50)),
-    floor_button: (glb: "kenney_prototype-kit/Models/GLB format/button-floor-square.glb", height: 1.0, footprint: (1.00, 1.00)),
-    area_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-square-a.glb", height: 1.0, footprint: (1.00, 1.00)),
-    arrow_decal: (glb: "kenney_prototype-kit/Models/GLB format/indicator-special-arrow.glb", height: 1.0, footprint: (1.00, 1.00)),
-    specimen_standin: (glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-detailed.glb", height: 1.0, footprint: (1.00, 1.00)),
-
-    // ── Furniture for the living half (2026-08-02) ──
-    // Greybox stand-ins. Shape-suggestive where a primitive allows it, but the point of this kit
-    // is to PROVE THE SWAP, not to be playable — every entry only has to be a distinct real mesh.
-    bunk: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    locker: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding.glb", height: 1.0, y_offset: 0.0, footprint: (0.35, 0.70) ),
-    bedside_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cube-rounded.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    galley_counter: ( glb: "kenney_prototype-kit/Models/GLB format/shape-slope.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), surfaces: ["support", "worktop"] ),
-    mess_table: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00), surfaces: ["support", "worktop"] ),
-    stool: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    coffee_machine: ( glb: "kenney_prototype-kit/Models/GLB format/shape-cylinder-half.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 1.00) ),
-    water_dispenser: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-cylinder.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    bench: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism-low.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00) ),
-    vending_machine: ( glb: "kenney_prototype-kit/Models/GLB format/door-garage.glb", height: 1.0, y_offset: 0.0, footprint: (0.35, 1.10) ),
-    chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hexagon-half.glb", height: 1.0, y_offset: 0.0, footprint: (0.43, 1.00), front: Some(90.0) ),
-    map_table: ( glb: "kenney_prototype-kit/Models/GLB format/target-a-round.glb", height: 1.0, y_offset: 0.0, footprint: (0.12, 0.50), surfaces: ["support", "worktop"] ),
-    control_desk: ( glb: "kenney_prototype-kit/Models/GLB format/lever-double.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.50), surfaces: ["support", "worktop"] ),
-    surveillance_console: ( glb: "kenney_prototype-kit/Models/GLB format/lever-single.glb", height: 1.0, y_offset: 0.0, footprint: (0.50, 0.30), surfaces: ["support", "worktop"] ),
-    server_rack: ( glb: "kenney_prototype-kit/Models/GLB format/shape-hollow-hexagon.glb", height: 1.0, y_offset: 0.0, footprint: (0.87, 1.00) ),
-    command_chair: ( glb: "kenney_prototype-kit/Models/GLB format/shape-triangular-prism.glb", height: 1.0, y_offset: 0.0, footprint: (1.00, 1.00), front: Some(90.0) ),
-
-    // ── Dressing: the lived-in layer (2026-08-02) ───────────────────────────────────────
-    // Heights and footprints are MEASURED, never guessed — Ozea's from the converter's own
-    // INVENTORY.md, the rest read out of the GLB's POSITION accessors.
-    // Stand-ins only: every entry has to be a DISTINCT real mesh, nothing more. All chosen
-    // base-origined so they do not sink through the deck.
-    trash_bin: ( glb: "kenney_prototype-kit/Models/GLB format/crate.glb", height: 0.5, footprint: (0.5, 0.5) ),
-    pallet: ( glb: "kenney_prototype-kit/Models/GLB format/floor-thick.glb", height: 0.2, footprint: (1.0, 1.0) ),
-    step_ladder: ( glb: "kenney_prototype-kit/Models/GLB format/ladder.glb", height: 1.0, footprint: (0.15, 0.55) ),
-    storage_box: ( glb: "kenney_prototype-kit/Models/GLB format/ladder-top.glb", height: 0.302, footprint: (0.4, 0.5) ),
-    storage_crate: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-round.glb", height: 0.15, footprint: (0.5, 0.5) ),
-    utility_cart: ( glb: "kenney_prototype-kit/Models/GLB format/door-sliding-double.glb", height: 0.8, footprint: (0.35, 0.9) ),
-    tube_rack: ( glb: "kenney_prototype-kit/Models/GLB format/column-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
-    data_folder: ( glb: "kenney_prototype-kit/Models/GLB format/button-floor-square-small.glb", height: 0.15, footprint: (0.5, 0.5), rests_on: Some("worktop") ),
-    medical_vial: ( glb: "kenney_prototype-kit/Models/GLB format/column-rounded-low.glb", height: 0.5, footprint: (0.2, 0.2), rests_on: Some("support") ),
-    mug: ( glb: "kenney_prototype-kit/Models/GLB format/hat-cap.glb", height: 0.15, footprint: (0.335, 0.22), rests_on: Some("worktop") ),
-    books: ( glb: "kenney_prototype-kit/Models/GLB format/hat-hard.glb", height: 0.175, footprint: (0.33, 0.24), rests_on: Some("worktop") ),
+    trash_bin: "site/trash_bin",
+    pallet: "site/pallet",
+    step_ladder: "site/step_ladder",
+    storage_box: "site/storage_box",
+    storage_crate: "site/storage_crate",
+    utility_cart: "site/utility_cart",
+    tube_rack: "site/tube_rack",
+    data_folder: "site/data_folder",
+    medical_vial: "site/medical_vial",
+    mug: "site/mug",
+    books: "site/books",
+    floor: "site/floor",
+    wall: "site/wall",
+    wall_corner: "site/wall_corner",
+    wall_doorway: "site/wall_doorway",
+    wall_doorway_wide: "site/wall_doorway_wide",
+    wall_header: "site/wall_header",
+    wall_window: "site/wall_window",
+    door_plaque: "site/door_plaque",
+    wall_low: "site/wall_low",
+    slab: "site/slab",
+    column: "site/column",
+    crate_: "site/crate",
+    pipe: "site/pipe",
+    pipe_corner: "site/pipe_corner",
+    floor_button: "site/floor_button",
+    area_decal: "site/area_decal",
+    arrow_decal: "site/arrow_decal",
+    specimen_standin: "site/specimen_standin",
+    bunk: "site/bunk",
+    locker: "site/locker",
+    bedside_table: "site/bedside_table",
+    galley_counter: "site/galley_counter",
+    mess_table: "site/mess_table",
+    stool: "site/stool",
+    coffee_machine: "site/coffee_machine",
+    water_dispenser: "site/water_dispenser",
+    bench: "site/bench",
+    vending_machine: "site/vending_machine",
+    chair: "site/chair",
+    map_table: "site/map_table",
+    control_desk: "site/control_desk",
+    surveillance_console: "site/surveillance_console",
+    server_rack: "site/server_rack",
+    command_chair: "site/command_chair",
 )

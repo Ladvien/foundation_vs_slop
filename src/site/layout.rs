@@ -843,7 +843,7 @@ pub(crate) fn resting_on(
 /// was, and `rests_on` is the part of that question the kit can now answer.
 pub(crate) fn is_floor_marking(kit: &super::kit::SiteKit, piece: SitePiece) -> bool {
     kit.rests_on(piece).is_none()
-        && kit.piece(piece).height * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
+        && kit.height(piece) * kit.y_scale(piece) <= FLOOR_MARKING_HEIGHT
 }
 
 /// Does this piece take up floor space — the question "can a person stand here, and is it in the
@@ -922,7 +922,7 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
             waived.push(format!("{:?} at {:?} — waived: {reason}", p.piece, p.pos));
             continue;
         }
-        let (fw, fd) = kit.piece(p.piece).footprint;
+        let (fw, fd) = kit.footprint(p.piece);
         let f = Footprint {
             x: p.pos.0,
             z: p.pos.1,
@@ -1001,7 +1001,7 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
         if p.waive.is_some() {
             continue;
         }
-        let Some(front) = kit.piece(p.piece).front else {
+        let Some(front) = kit.front(p.piece) else {
             continue;
         };
         // The nearest surface within reach, if any. Nearest rather than "every surface": a chair
@@ -1132,11 +1132,10 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
         if p.waive.is_some() {
             continue;
         }
-        let piece = kit.piece(p.piece);
-        let Some(front) = piece.front else { continue };
+        let Some(front) = kit.front(p.piece) else { continue };
         let yaw = (p.yaw + front).to_radians();
         // Far enough ahead to clear the prop's own footprint at any rotation, plus room for a person.
-        let (fw, fd) = piece.footprint;
+        let (fw, fd) = kit.footprint(p.piece);
         let reach = 0.5 * fw.max(fd) + FRONT_CLEAR;
         let ahead = (p.pos.0 + yaw.sin() * reach, p.pos.1 + yaw.cos() * reach);
         let cell = IVec2::new(ahead.0.floor() as i32, ahead.1.floor() as i32);
@@ -1359,7 +1358,10 @@ mod tests {
     /// message rather than N build-run cycles.
     #[test]
     fn every_authored_prop_obeys_the_placement_rules() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let waived = check_prop_placements(&shipped(), &kit).expect("the shipped Site must be legal");
         // Waivers are legal, but a silent drift toward "everything is waived" is not. If this ever
@@ -1378,7 +1380,10 @@ mod tests {
     /// bunk laid across a 5 m room so it pushes through the wall, and two props in the same place.
     #[test]
     fn a_prop_through_a_wall_or_inside_another_prop_is_refused() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
 
         // A 2.29 m bunk at yaw 0 centred half a metre inside the quarters' west wall, so it pushes
@@ -1424,7 +1429,10 @@ mod tests {
     /// be asserting something about the art that is not true.
     #[test]
     fn a_seat_at_a_surface_must_face_it_and_a_backless_one_is_exempt() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
 
         // A chair beside the galley's mess table, turned side-on to it.
@@ -1472,7 +1480,10 @@ mod tests {
     /// wall" that does not exist. Measured before the fix: 31 faults across ten props in five rooms.
     #[test]
     fn nothing_may_stand_in_the_way_into_a_room_but_a_corridor_is_all_threshold() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
 
         // A locker planted in the galley's own doorway. Found by asking the layout which cell that
@@ -1530,7 +1541,10 @@ mod tests {
     /// reach, which is exactly the gap this closes.
     #[test]
     fn a_fronted_prop_must_have_open_floor_in_front_of_it() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
 
         // A chair in the middle of the quarters' east wall, turned to face into it. No surface is
@@ -1569,7 +1583,10 @@ mod tests {
     /// from every surface would seat at y = 0, spawn cleanly, log nothing, and be buried in the deck.
     #[test]
     fn a_resting_prop_finds_its_host_and_a_stranded_one_is_refused() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let l = shipped();
 
@@ -1622,7 +1639,10 @@ mod tests {
     /// `is_floor_marking` takes, for the same reason.
     #[test]
     fn a_mug_on_a_table_does_not_count_as_overlapping_it() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let mut l = shipped();
         // Wholly inside the briefing room's mess table — maximum plan overlap with the host, offset
@@ -1647,7 +1667,10 @@ mod tests {
     /// prop-vs-**host** pair is the only thing a plan-view test genuinely cannot judge.
     #[test]
     fn two_mugs_in_the_same_spot_on_the_same_table_are_still_a_fault() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let mut l = shipped();
         for _ in 0..2 {
@@ -1675,7 +1698,10 @@ mod tests {
     /// makes the two-sided match load-bearing rather than decorative.
     #[test]
     fn a_mug_may_not_rest_on_the_specimen_slab() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         // The premise, asserted rather than assumed: the slab is a surface, but not that class.
         let want = kit
@@ -1717,7 +1743,10 @@ mod tests {
     /// the question expressible at all.
     #[test]
     fn a_prop_may_not_take_its_height_from_a_table_in_the_next_room() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         // Stripped to the two props under test, so the answer is about the wall and not about which
         // of the Site's fourteen surfaces happened to be nearest.
@@ -1769,7 +1798,10 @@ mod tests {
     /// distance must still be separated, by position, in file order or reversed.
     #[test]
     fn two_hosts_at_equal_distance_are_broken_by_position() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let build = |reversed: bool| {
             let mut l = shipped();
@@ -1840,18 +1872,21 @@ mod tests {
     /// The kit records the measured facing, and it is the quarter turn that caused the bug.
     #[test]
     fn the_seat_meshes_declare_the_front_that_was_measured_off_them() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         for seat in [SitePiece::Chair, SitePiece::CommandChair] {
             assert_eq!(
-                kit.piece(seat).front,
+                kit.front(seat),
                 Some(90.0),
                 "{seat:?} fronts local +X (backrest mass at -X), a quarter turn off the engine's +Z"
             );
         }
         for backless in [SitePiece::Stool, SitePiece::Bench] {
             assert_eq!(
-                kit.piece(backless).front,
+                kit.front(backless),
                 None,
                 "{backless:?} measured symmetric — it has no front and none may be asserted"
             );
@@ -1861,7 +1896,10 @@ mod tests {
     /// A waiver is a sentence, and it exempts exactly the prop that carries it.
     #[test]
     fn a_waived_prop_is_skipped_and_says_why() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(
+            crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped kit must load");
         let mut l = shipped();
         l.props.push(PropPlacement {

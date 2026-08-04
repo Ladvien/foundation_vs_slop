@@ -315,7 +315,7 @@ pub fn post_positions(
         .filter(|p| a.rect.contains_metres(p.pos))
         .filter(|p| super::layout::occupies_floor(kit, p.piece))
         .map(|p| {
-            let (fw, fd) = kit.piece(p.piece).footprint;
+            let (fw, fd) = kit.footprint(p.piece);
             (
                 Vec2::new(p.pos.0, p.pos.1),
                 Footprint {
@@ -501,7 +501,7 @@ mod tests {
     fn everyone_posted_to_a_room_gets_a_distinct_walkable_cell_clear_of_the_furniture() {
         // The acceptance the plan names, as a pure function so it runs in the hard gate with no `App`.
         let layout = SiteLayout::load().expect("the shipped layout must load");
-        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH)
+        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH, super::super::kit::SITE_PROJECT_DIR)
             .expect("the shipped kit must load");
         let nav = SiteNav::bake(&layout);
 
@@ -539,7 +539,7 @@ mod tests {
         // list because a booth is derived geometry rather than a kit prop, so a clearance rule written
         // against `props` alone silently does not cover the containment wing.
         let layout = SiteLayout::load().expect("layout");
-        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH).expect("kit");
+        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH, super::super::kit::SITE_PROJECT_DIR).expect("kit");
         let nav = SiteNav::bake(&layout);
         use crate::placement::ir::{overlap_area, Footprint};
 
@@ -577,7 +577,7 @@ mod tests {
         // Derived from authored data with no RNG and no query, so this is a property of the code rather
         // than of the data — but it is the property the whole "derive, do not author" stance rests on.
         let layout = SiteLayout::load().expect("layout");
-        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH).expect("kit");
+        let kit = super::super::kit::load_site_kit(super::super::kit::SITE_KIT_PATH, super::super::kit::SITE_PROJECT_DIR).expect("kit");
         let nav = SiteNav::bake(&layout);
         let a = post_positions(&layout, &kit, &nav, AreaId::Kitchen, 4);
         let b = post_positions(&layout, &kit, &nav, AreaId::Kitchen, 4);
