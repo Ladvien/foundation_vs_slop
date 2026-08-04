@@ -1,173 +1,54 @@
-// =================================================================================================
-// SITE-67 ART KIT — Ozea. **This is the shipped kit** (`site::kit::SITE_KIT_PATH`).
+// Ozea's low-poly sci-fi facility set. **Names pieces; does not describe them** — the
+// measurements are in assets/emerge/site/library.ron and this facility's architecture (2.4 m
+// walls, 2.0 m doorways, a 0.9 m counter) is in project.ron beside it.
 //
-// `kit_greybox.ron` remains beside it as the swap fixture, and the pair is the proof the seam works:
-// `site::kit::tests::the_site_kit_is_swappable_by_authoring_one_file` loads both and asserts the
-// Site's look — and its SCALES — differ with zero code edits. Before 2026-08-01 the kit was a `match`
-// in Rust and re-skinning the Site meant recompiling it.
-//
-// HEIGHT is the mesh's **authored** height in metres; the scale applied is `target / authored`
-// (`pieces::target_height` is the game's policy, this file is the art's fact). Every number below was
-// MEASURED by `scripts/fbx_to_glb.py`, which writes an `INVENTORY.md` beside the staged GLBs with each
-// mesh's W/H/D — never hand-guessed, and never re-derived from a mesh AABB at load, which would read
-// 100× large because the library is authored in centimetres.
-//
-// ── Every mesh here is base-at-0, and the wall family is authored to 2.40 ──
-//
-// Both were fixed on 2026-08-01 after the player reported *"the north and south wall doesn't square
-// into the east-and-west walls… looks like the floors point of origin may be off too."*
-//
-//   * **Origin.** 11 of the 16 meshes used to carry whatever pivot their source pack happened to have
-//     — walls and floors centre-origined, props base-origined. `y_scale` is applied about the entity
-//     origin, so a centre-origined 2.00 m wall scaled by 1.2 became Y[-1.2,+1.2]: half of it
-//     underground and 1.17 m standing against 2.40 m intended. `assets/ozea/README.md` has the full
-//     account; `tests/ozea_asset.rs` now pins the convention against the bytes.
-//   * **Height.** `wall`, `wall_corner`, `wall_window` and `column` are re-authored to a true 2.40 m
-//     by `scripts/ozea_wall_heights.py` — cut at a plain band and lengthened, so trim and skirting
-//     keep their authored proportions. Their `y_scale` is now a no-op **1.0**. This replaces a 1.2×
-//     stretch on the walls and a **2.18×** stretch on the column, the very distortion
-//     `assets/config/config.ron` cites as the reason the Ozea walls were never promoted into the
-//     dungeon furniture kit.
-//
-// `wall_low` is the one piece still scaled — 2.00 authored against a 0.9 target, a 0.45× squash. It is
-// knowingly left, because shortening a panel properly is an authoring decision, not a conversion flag.
-//
-// ── Why these meshes and not the obvious ones ──
-//
-// The Site grid is 1 m and `site::visuals::place` scales **only Y** — X and Z are hard 1.0, so a
-// mesh's footprint is used as authored. That single fact chose most of this file:
-//
-//   * `SM_Wall_Straight`, the natural pick, is **2.00 m long** and would span two cells. `SM_Wall_1x2`
-//     is the same kit's 1.00 m run and is the one that lands on the grid.
-//   * `SM_Wall_CornerCap` (0.22 m footprint) is the corner POST, not a 2 m corner panel — modular
-//     corners here are two runs meeting behind a post.
-//   * The floors are exactly 1.00 × 1.00, which is why they were the only pieces the earlier partial
-//     kit dared adopt.
-//
-// The two doorway pieces are deliberately NOT on the 1 m grid, and that is correct rather than a
-// compromise: `pieces::SitePiece::WallDoorway` is documented as a **2 m opening**, so a 2.06 m frame
-// is the intended size.
-//
-// ⚠️ Do NOT map containment cells from `Cellule`. `docs/2026-07-26-site-hub-and-operative-knowledge.md`
-// §7 measured it at 0.30 × 0.50 × 0.30 m — French *cellule* is a **battery** cell, not a room. The
-// real article is `Cryogenic_Stasis_Chamber`, promoted below as `cryo_pod.glb`, and its 1.00 × 1.02
-// footprint drops onto a single grid cell.
-// =================================================================================================
+// Every piece is a named field with deny_unknown_fields, so a kit that forgets one fails at
+// PARSE time naming the field. That is the guarantee this file exists to keep; the art moved
+// out from under it on 2026-08-03 and the guarantee did not.
 (
-    // ── Structure ──
-    // 1.00 × 1.00 floor plate, so one mesh is one cell.
-    //
-    // `y_offset: -0.06` sinks the plate so its TOP face lands exactly on y = 0. That plane is not
-    // arbitrary: it is where avatar feet stand, where `command_avatar` resolves a click order, and
-    // where `nav` puts every cell centre. Without this the plate's top would sit at +0.06 and
-    // everything that walks on it would stand 6 cm inside it. The greybox kit gets this for free —
-    // its floor is a zero-thickness plane already at y = 0.
-    floor:             (glb: "ozea/floor.glb",                height: 0.06, y_offset: -0.06, footprint: (1.00, 1.00)),
-    // 1.00 m run (`SM_Wall_1x2`), authored to a true 2.40 m — see the header note on heights.
-    wall:              (glb: "ozea/wall.glb",                 height: 2.40, footprint: (0.10, 1.00)),
-    // The corner POST — see the header note.
-    wall_corner:       (glb: "ozea/wall_corner.glb",          height: 2.40, footprint: (0.22, 0.22)),
-    // ── The two doorways, and the OPENING each actually leaves ──
-    //
-    // `opening` is the clear hole: jamb inner face to jamb inner face, floor to lintel underside. It
-    // is NOT derivable from `height`, and it is what the ASYNC aperture quad is built from. Measured
-    // from each mesh's POSITION accessors — for `doorframe_double` the jambs face each other at
-    // |z| = 0.800 and the lintel underside sits at y = 1.626, with small plinths at the jamb feet
-    // (|z| 0.646–0.715, up to y 0.203) that crop the quad's bottom corners, which is wanted.
-    //
-    // Until 2026-08-01 the quad was sized from `door.trigger_half_extents` instead — a GAMEPLAY
-    // volume, generous on purpose because it must catch a walking avatar — giving a 3.2 m quad
-    // against this 1.6 m hole. The aperture material is opaque by design, so that overhang punched
-    // through the wall either side of the door rather than fading out.
-    wall_doorway:      (mesh: (glb: "ozea/doorframe_single.glb", height: 2.01, footprint: (0.46, 2.06)), opening: (0.867, 1.705)),
-    // The ASYNC aperture's frame. The one mesh promoted before this pass.
-    wall_doorway_wide: (mesh: (glb: "ozea/doorframe_double.glb", height: 1.98, footprint: (0.40, 2.00)), opening: (1.600, 1.626)),
-    // The header course over a doorway: `WALL_HEIGHT` 2.40 − `DOORWAY_HEIGHT` 2.00 = a 0.40 m band.
-    // Without it the perimeter had a 0.40 × 2.00 m slot straight through it above the ASYNC door.
-    //
-    // Built by CROPPING the top 0.40 m off `SM_Wall_1x2` (`scripts/ozea_wall_heights.py`'s `HEADERS`),
-    // not by squashing a wall. A header course IS the top of the wall, so the crop keeps the wall's
-    // own top trim at its authored size and the piece lines up with the wall tops either side of the
-    // door by construction. `y_scale` is a no-op 1.0.
-    wall_header:       (glb: "ozea/wall_header.glb",          height: 0.40, footprint: (0.10, 1.00)),
-    // Containment-cell glazing — the player must be able to SEE what is held.
-    // The door plaque. `SM_DoorSign_Room` from Pack_SciFi_E_003, converted with `--reorigin-base` so
-    // it is XZ-centred with its base at y = 0 like every other mesh here (`tests/ozea_asset.rs`).
-    // Measured off the GLB's POSITION accessors: 0.336 wide, 0.180 tall, 0.120 deep.
-    door_plaque:       (glb: "ozea/door_plaque.glb", height: 0.18, footprint: (0.336, 0.12)),
-    wall_window:       (glb: "ozea/wall_window.glb",          height: 2.40, footprint: (0.20, 2.00)),
-    // Waist-high run: the Records desk and the Requisition counter. Authored 2.00 m and squashed to
-    // `target_height` 0.9 — the one piece in this kit whose scale is a real compromise rather than a
-    // fit, kept because a counter is the cheapest way to furnish a room and this is the only panel
-    // in the promoted set with a 1 m footprint.
-    wall_low:          (glb: "ozea/wall_low.glb",             height: 2.00, footprint: (0.20, 1.00)),
-    // The examination slab: `SM_MedPod_Treatment_Bed` (E_001), the same pack the cryo pod comes from,
-    // so the research wing and the containment wing read as one facility. Native size is the intent —
-    // it is furniture, not architecture — and its bed platform sits at y = 0.60, which is where
-    // `site::visuals::SLAB_SURFACE_Y` lays the study subject.
-    slab:              (glb: "ozea/slab.glb",                 height: 1.72, footprint: (2.17, 1.07), surfaces: ["support"]),
-    // `SM_Pylonne`, authored 1.10 m in the pack and re-authored to 2.40 here. It was the worst
-    // offender of the lot: at its native height `y_scale` stretched it **2.18×**.
-    column:            (glb: "ozea/column.glb",               height: 2.40, footprint: (0.50, 0.80)),
-
-    // ── Dressing ──
-    crate_:            (glb: "ozea/crate.glb",                height: 1.00, footprint: (1.00, 1.00)),
-    pipe:              (glb: "ozea/pipe.glb",                 height: 0.30, footprint: (0.30, 0.88)),
-    pipe_corner:       (glb: "ozea/pipe_corner.glb",          height: 0.30, footprint: (0.59, 0.59)),
-    // ── Floor inlays ──
-    // `y_offset` on all three, and it is not optional: these are the same 0.06/0.05 m thickness as the
-    // floor plate they lie on, so with both seated at y = 0 their top faces would be coplanar and the
-    // depth winner undefined — it renders as white squares flickering against grey ones, which is
-    // exactly what the player captured on 2026-08-01. See `KitPiece::y_offset`.
-    //
-    // **0.002, not 0.062.** The old value cleared a plate whose top sat at +0.03 because the mesh was
-    // centre-origined; now every mesh is base-at-0 and `floor` is sunk to put its top on y = 0, so an
-    // inlay only has to clear the *plane*. 2 mm, the same margin as before.
-    //
-    // The lit threshold pad at the aperture's mouth.
-    floor_button:      (glb: "ozea/floor_light.glb",          height: 0.06, y_offset: 0.002, footprint: (1.00, 1.00)),
-    // Wing colour-coding: learnability without signage (design doc §2.4).
-    area_decal:        (glb: "ozea/floor_line_cross.glb",     height: 0.05, y_offset: 0.002, footprint: (1.00, 1.00)),
-    arrow_decal:       (glb: "ozea/floor_line_straight.glb",  height: 0.05, y_offset: 0.002, footprint: (1.00, 1.00)),
-
-    // ── The specimen ──
-    // No longer a stand-in. `fill_containment_cells` puts one of these in a cell per held specimen,
-    // in capture order — so what the player walks past is a rack of cryo pods holding the things they
-    // brought home, which is the entire argument for the hub being a place rather than a menu.
-    specimen_standin:  (glb: "ozea/cryo_pod.glb",             height: 2.41, footprint: (1.00, 1.02)),
-
-    // ── Furniture for the living half (2026-08-02) ──
-    // Heights MEASURED by scripts/fbx_to_glb.py and copied from its INVENTORY.md, never guessed.
-    bunk: ( glb: "ozea/bunk.glb", height: 0.55, y_offset: 0.0, footprint: (2.29, 1.18) ),
-    locker: ( glb: "ozea/locker.glb", height: 1.90, y_offset: 0.0, footprint: (0.46, 1.10) ),
-    bedside_table: ( glb: "ozea/bedside_table.glb", height: 0.50, y_offset: 0.0, footprint: (0.40, 0.50) ),
-    galley_counter: ( glb: "ozea/galley_counter.glb", height: 0.75, y_offset: 0.0, footprint: (0.60, 1.40), surfaces: ["support", "worktop"] ),
-    mess_table: ( glb: "ozea/mess_table.glb", height: 1.20, y_offset: 0.0, footprint: (0.60, 0.60), surfaces: ["support", "worktop"] ),
-    stool: ( glb: "ozea/stool.glb", height: 0.98, y_offset: 0.0, footprint: (0.51, 0.41) ),
-    coffee_machine: ( glb: "ozea/coffee_machine.glb", height: 0.67, y_offset: 0.0, footprint: (0.40, 0.50) ),
-    water_dispenser: ( glb: "ozea/water_dispenser.glb", height: 1.20, y_offset: 0.0, footprint: (0.45, 0.45) ),
-    bench: ( glb: "ozea/bench.glb", height: 0.45, y_offset: 0.0, footprint: (0.55, 2.00) ),
-    vending_machine: ( glb: "ozea/vending_machine.glb", height: 1.95, y_offset: 0.0, footprint: (0.91, 1.15) ),
-    chair: ( glb: "ozea/chair.glb", height: 1.11, y_offset: 0.0, footprint: (0.57, 0.45), front: Some(90.0) ),
-    map_table: ( glb: "ozea/map_table.glb", height: 1.01, y_offset: 0.0, footprint: (1.46, 1.46), surfaces: ["support", "worktop"] ),
-    control_desk: ( glb: "ozea/control_desk.glb", height: 1.13, y_offset: 0.0, footprint: (1.47, 3.68), surfaces: ["support", "worktop"] ),
-    surveillance_console: ( glb: "ozea/surveillance_console.glb", height: 0.83, y_offset: 0.0, footprint: (0.58, 1.54), surfaces: ["support", "worktop"] ),
-    server_rack: ( glb: "ozea/server_rack.glb", height: 1.80, y_offset: 0.0, footprint: (0.74, 1.32) ),
-    command_chair: ( glb: "ozea/command_chair.glb", height: 1.10, y_offset: 0.0, footprint: (0.59, 0.55), front: Some(90.0) ),
-
-    // ── Dressing: the lived-in layer (2026-08-02) ───────────────────────────────────────
-    // Heights and footprints are MEASURED, never guessed — Ozea's from the converter's own
-    // INVENTORY.md, the rest read out of the GLB's POSITION accessors.
-    // `mug` and `books` come from assets/low_poly_furniture/ — Ozea has no human objects at all.
-    trash_bin: ( glb: "ozea/trash_bin.glb", height: 0.8, footprint: (0.41, 0.6) ),
-    pallet: ( glb: "ozea/pallet.glb", height: 0.13, footprint: (0.81, 1.21) ),
-    step_ladder: ( glb: "ozea/step_ladder.glb", height: 0.84, footprint: (0.67, 0.56) ),
-    storage_box: ( glb: "ozea/storage_box.glb", height: 0.37, footprint: (0.59, 0.5) ),
-    storage_crate: ( glb: "ozea/storage_crate.glb", height: 0.27, footprint: (0.5, 0.72) ),
-    utility_cart: ( glb: "ozea/utility_cart.glb", height: 0.9, footprint: (1.08, 0.81) ),
-    tube_rack: ( glb: "ozea/tube_rack.glb", height: 0.13, footprint: (0.05, 0.22), rests_on: Some("support") ),
-    data_folder: ( glb: "ozea/data_folder.glb", height: 0.04, footprint: (0.25, 0.2), rests_on: Some("worktop") ),
-    medical_vial: ( glb: "ozea/medical_vial.glb", height: 0.16, footprint: (0.07, 0.07), rests_on: Some("support") ),
-    mug: ( glb: "site_dressing/mug.glb", height: 0.109, footprint: (0.136, 0.105), rests_on: Some("worktop") ),
-    books: ( glb: "site_dressing/books.glb", height: 0.178, footprint: (0.306, 0.106), rests_on: Some("worktop"), scale: 0.6 ),
+    trash_bin: "site/trash_bin",
+    pallet: "site/pallet",
+    step_ladder: "site/step_ladder",
+    storage_box: "site/storage_box",
+    storage_crate: "site/storage_crate",
+    utility_cart: "site/utility_cart",
+    tube_rack: "site/tube_rack",
+    data_folder: "site/data_folder",
+    medical_vial: "site/medical_vial",
+    mug: "site/mug",
+    books: "site/books",
+    floor: "site/floor",
+    wall: "site/wall",
+    wall_corner: "site/wall_corner",
+    wall_doorway: "site/wall_doorway",
+    wall_doorway_wide: "site/wall_doorway_wide",
+    wall_header: "site/wall_header",
+    wall_window: "site/wall_window",
+    door_plaque: "site/door_plaque",
+    wall_low: "site/wall_low",
+    slab: "site/slab",
+    column: "site/column",
+    crate_: "site/crate",
+    pipe: "site/pipe",
+    pipe_corner: "site/pipe_corner",
+    floor_button: "site/floor_button",
+    area_decal: "site/area_decal",
+    arrow_decal: "site/arrow_decal",
+    specimen_standin: "site/specimen_standin",
+    bunk: "site/bunk",
+    locker: "site/locker",
+    bedside_table: "site/bedside_table",
+    galley_counter: "site/galley_counter",
+    mess_table: "site/mess_table",
+    stool: "site/stool",
+    coffee_machine: "site/coffee_machine",
+    water_dispenser: "site/water_dispenser",
+    bench: "site/bench",
+    vending_machine: "site/vending_machine",
+    chair: "site/chair",
+    map_table: "site/map_table",
+    control_desk: "site/control_desk",
+    surveillance_console: "site/surveillance_console",
+    server_rack: "site/server_rack",
+    command_chair: "site/command_chair",
 )

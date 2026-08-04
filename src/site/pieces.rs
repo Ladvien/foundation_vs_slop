@@ -267,7 +267,9 @@ mod tests {
 
     #[test]
     fn every_piece_maps_to_a_glb_that_exists_on_disk() {
-        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH)
+        let kit = crate::site::kit::load_site_kit(crate::site::kit::SITE_KIT_PATH,
+            crate::site::kit::SITE_PROJECT_DIR,
+        )
             .expect("the shipped greybox kit loads");
         // No precedent in the repo for this check, and it is the single most likely greybox failure:
         // a mistyped path is a silently missing prop at runtime, discovered by squinting at a screenshot.
@@ -323,16 +325,22 @@ mod tests {
         // its trim. So this pins what is actually true — the opening starts at the floor, it is a hole
         // inside a real frame, and it is big enough to read as a door.
         use crate::site::kit::load_site_kit;
-        for path in [
-            crate::site::kit::SITE_KIT_PATH,
-            crate::site::kit::GREYBOX_KIT_PATH,
+        for (path, project) in [
+            (
+                crate::site::kit::SITE_KIT_PATH,
+                crate::site::kit::SITE_PROJECT_DIR,
+            ),
+            (
+                crate::site::kit::GREYBOX_KIT_PATH,
+                crate::site::kit::GREYBOX_PROJECT_DIR,
+            ),
         ] {
-            let kit = load_site_kit(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let kit = load_site_kit(path, project).unwrap_or_else(|e| panic!("{path}: {e}"));
             for piece in [SitePiece::WallDoorway, SitePiece::WallDoorwayWide] {
-                let door = match piece {
-                    SitePiece::WallDoorway => &kit.wall_doorway,
-                    _ => &kit.wall_doorway_wide,
-                };
+                let (open_w, open_h) = kit
+                    .opening(piece)
+                    .unwrap_or_else(|| panic!("{path}: {piece:?} has no opening"));
+                let mesh_h = kit.height(piece);
                 // Every kit mesh is base-at-0 (`artist_guide` §3 rule 7) and `place` scales about the
                 // entity origin, so the rendered span is `[y_offset, y_offset + final_h]`. A doorway
                 // must start at the floor: an opening whose sill is 30 cm up is a window. THIS is the
@@ -347,14 +355,14 @@ mod tests {
                 // The hole is a hole: strictly inside the frame, and tall enough to read as a door
                 // rather than a hatch. `opening` is authored scale, so the rendered height rides
                 // `y_scale` exactly as the frame does.
-                let opening_h = door.opening.1 * kit.y_scale(piece);
-                let frame_h = door.mesh.height * kit.y_scale(piece);
+                let opening_h = open_h * kit.y_scale(piece);
+                let frame_h = mesh_h * kit.y_scale(piece);
                 assert!(
-                    door.opening.1 < door.mesh.height,
+                    open_h < mesh_h,
                     "{path}: {piece:?} opening {:?} is not inside its {} m frame — measured from the \
                      bounding box instead of between the jambs?",
-                    door.opening,
-                    door.mesh.height
+                    (open_w, open_h),
+                    mesh_h
                 );
                 assert!(
                     opening_h > 1.5 && opening_h < frame_h,

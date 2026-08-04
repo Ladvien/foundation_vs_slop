@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use foundation_vs_slop::site::kit::{load_site_kit, SITE_KIT_PATH};
+use foundation_vs_slop::site::kit::{load_site_kit, SITE_KIT_PATH, SITE_PROJECT_DIR};
 use foundation_vs_slop::site::pieces::SitePiece;
 use emerge_core::glb::{Glb, OriginAlignment};
 
@@ -27,13 +27,13 @@ fn open(rel: &str) -> Glb {
 /// placement rule reserves. Both were measured by hand; the library must agree.
 #[test]
 fn the_library_reproduces_the_kits_hand_measured_extents() {
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
 
     let mut checked = 0usize;
     let mut skipped = Vec::new();
     for piece in SitePiece::ALL {
-        let entry = kit.piece(*piece);
-        let path = Path::new("assets").join(&entry.glb);
+        let entry_piece = *piece;
+        let path = Path::new("assets").join(&kit.glb(entry_piece));
         if !path.is_file() {
             continue;
         }
@@ -44,31 +44,31 @@ fn the_library_reproduces_the_kits_hand_measured_extents() {
         // A node scale makes accessor bounds a lie. Report and skip, as
         // `tests/prop_footprint_contract.rs` does — a silently mismeasured pass is worse than none.
         if g.has_node_transform() {
-            skipped.push(entry.glb.clone());
+            skipped.push(kit.glb(entry_piece).clone());
             continue;
         }
-        let m = g.measure().unwrap_or_else(|e| panic!("{}: {e}", entry.glb));
+        let m = g.measure().unwrap_or_else(|e| panic!("{}: {e}", kit.glb(entry_piece)));
 
         // The kit records SCALED values, so undo the art correction before comparing to the file.
         let scale = kit.scale(*piece);
-        let (want_w, want_d) = entry.footprint;
+        let (want_w, want_d) = kit.footprint(entry_piece);
         let (got_w, got_d) = (m.footprint.0 * scale, m.footprint.1 * scale);
         let got_h = m.height * scale;
 
         // 2 cm: the kit's numbers were read off a generated inventory table and rounded.
         const TOL: f32 = 0.02;
         assert!(
-            (got_h - entry.height).abs() <= TOL,
+            (got_h - kit.height(entry_piece)).abs() <= TOL,
             "{}: kit says height {:.3} m, the mesh measures {:.3} m",
-            entry.glb,
-            entry.height,
+            kit.glb(entry_piece),
+            kit.height(entry_piece),
             got_h
         );
         assert!(
             (got_w - want_w).abs() <= TOL && (got_d - want_d).abs() <= TOL,
             "{}: kit says footprint {:?}, the mesh measures ({:.3}, {:.3})",
-            entry.glb,
-            entry.footprint,
+            kit.glb(entry_piece),
+            kit.footprint(entry_piece),
             got_w,
             got_d
         );
@@ -91,23 +91,23 @@ fn the_library_reproduces_the_kits_hand_measured_extents() {
 /// by hand. Reproducing exactly those two, and no others, is the test that the method is real.
 #[test]
 fn the_library_derives_the_two_fronts_the_kit_records_by_hand() {
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
 
     for piece in [SitePiece::Chair, SitePiece::CommandChair] {
-        let entry = kit.piece(piece);
-        let want = entry
-            .front
+        let entry_piece = piece;
+        let want = kit
+            .front(entry_piece)
             .unwrap_or_else(|| panic!("{piece:?} should carry a hand-measured front"));
-        let derived = open(&entry.glb)
+        let derived = open(kit.glb(entry_piece))
             .derive_front()
-            .unwrap_or_else(|e| panic!("{}: {e}", entry.glb))
-            .unwrap_or_else(|| panic!("{}: derived no front at all", entry.glb));
+            .unwrap_or_else(|e| panic!("{}: {e}", kit.glb(entry_piece)))
+            .unwrap_or_else(|| panic!("{}: derived no front at all", kit.glb(entry_piece)));
         // A quarter turn is the unit the kit authors in; anything inside an eighth of one resolves to
         // the same quarter.
         assert!(
             (derived - want).abs() <= 45.0,
             "{}: kit records front {want}°, the mesh derives {derived:.1}°",
-            entry.glb
+            kit.glb(entry_piece)
         );
     }
 }
@@ -117,17 +117,17 @@ fn the_library_derives_the_two_fronts_the_kit_records_by_hand() {
 /// true."
 #[test]
 fn a_backless_seat_derives_no_front() {
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
     for piece in [SitePiece::Stool, SitePiece::Bench] {
-        let entry = kit.piece(piece);
-        assert!(entry.front.is_none(), "{piece:?} should carry no front in the kit");
-        let derived = open(&entry.glb)
+        let entry_piece = piece;
+        assert!(kit.front(entry_piece).is_none(), "{piece:?} should carry no front in the kit");
+        let derived = open(kit.glb(entry_piece))
             .derive_front()
-            .unwrap_or_else(|e| panic!("{}: {e}", entry.glb));
+            .unwrap_or_else(|e| panic!("{}: {e}", kit.glb(entry_piece)));
         assert!(
             derived.is_none(),
             "{}: the kit records no front, but the mesh derives {derived:?}",
-            entry.glb
+            kit.glb(entry_piece)
         );
     }
 }
@@ -166,10 +166,10 @@ fn the_ozea_kit_classifies_as_base_at_origin_and_centred() {
 /// to bake the node scale.
 #[test]
 fn no_shipped_kit_mesh_looks_centimetre_authored() {
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
     for piece in SitePiece::ALL {
-        let entry = kit.piece(*piece);
-        let path = Path::new("assets").join(&entry.glb);
+        let entry_piece = *piece;
+        let path = Path::new("assets").join(&kit.glb(entry_piece));
         if !path.is_file() {
             continue;
         }
@@ -177,11 +177,11 @@ fn no_shipped_kit_mesh_looks_centimetre_authored() {
         if g.has_node_transform() {
             continue;
         }
-        let m = g.measure().unwrap_or_else(|e| panic!("{}: {e}", entry.glb));
+        let m = g.measure().unwrap_or_else(|e| panic!("{}: {e}", kit.glb(entry_piece)));
         assert!(
             !m.suspect_centimetres,
             "{} measures {:?} — that looks like centimetre data",
-            entry.glb,
+            kit.glb(entry_piece),
             m.footprint
         );
     }
@@ -195,9 +195,9 @@ fn no_shipped_kit_mesh_looks_centimetre_authored() {
 /// whole centroid method — needs revisiting, which is exactly when someone should be told.
 #[test]
 fn a_seat_with_a_back_is_markedly_more_asymmetric_than_one_without() {
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
     let asym = |p: SitePiece| -> f32 {
-        open(&kit.piece(p).glb)
+        open(kit.glb(p))
             .front_detail()
             .unwrap_or_else(|e| panic!("{e}"))
             .0

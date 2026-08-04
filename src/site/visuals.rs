@@ -464,7 +464,12 @@ fn spawn_aperture_quad(
 ) {
     // Width is authored as-is because `place` scales Y only; height rides the frame's own y_scale, so
     // the quad grows exactly as much as the opening it fills does.
-    let (ow, oh) = kit.wall_doorway_wide.opening;
+    let (ow, oh) = kit
+        .opening(SitePiece::WallDoorwayWide)
+        // `validate_site_kit` refuses a doorway with no recorded opening, so this is unreachable
+        // rather than a default — and a zero would be an invisible portal, which is the failure that
+        // check exists to prevent.
+        .unwrap_or((0.0, 0.0));
     let oh = oh * kit.y_scale(SitePiece::WallDoorwayWide);
     let quad = meshes.add(Rectangle::new(ow, oh));
     let mat = aperture_mats.add(AsyncApertureMaterial {

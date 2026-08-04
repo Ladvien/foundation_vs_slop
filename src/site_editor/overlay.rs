@@ -40,7 +40,7 @@ pub fn outline(
     yaw_deg: f32,
     color: Color,
 ) {
-    let (fw, fd) = kit.piece(piece).footprint;
+    let (fw, fd) = kit.footprint(piece);
     let at = layout.point(pos) + Vec3::Y * OUTLINE_LIFT;
     // `Rectangle` is authored in the XY plane; tip it into XZ, then apply the prop's own yaw.
     let rot = Quat::from_rotation_y(yaw_deg.to_radians()) * Quat::from_rotation_x(-FRAC_PI_2);
@@ -62,10 +62,10 @@ pub fn facing(
     yaw_deg: f32,
     color: Color,
 ) {
-    let Some(front) = kit.piece(piece).front else {
+    let Some(front) = kit.front(piece) else {
         return;
     };
-    let (fw, fd) = kit.piece(piece).footprint;
+    let (fw, fd) = kit.footprint(piece);
     let reach = 0.5 * fw.max(fd) + 0.35;
     let yaw = (yaw_deg + front).to_radians();
     let from = layout.point(pos) + Vec3::Y * OUTLINE_LIFT;

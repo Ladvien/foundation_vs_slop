@@ -14,7 +14,7 @@
 //! notice, because the file would still parse. So the contract is stated in bytes, not in "it still
 //! loads": a no-op save is byte-identical, and a one-prop move changes exactly one line.
 
-use foundation_vs_slop::site::kit::{load_site_kit, SITE_KIT_PATH};
+use foundation_vs_slop::site::kit::{load_site_kit, SITE_KIT_PATH, SITE_PROJECT_DIR};
 use foundation_vs_slop::site::layout::{
     check_prop_placements, PropPlacement, SiteLayout, SITE_LAYOUT_PATH,
 };
@@ -230,7 +230,7 @@ fn an_inserted_waiver_round_trips_with_its_reason() {
 #[test]
 fn a_move_that_overlaps_another_prop_is_caught_by_the_placement_checker() {
     let (_, layout) = shipped();
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
 
     check_prop_placements(&layout, &kit)
         .unwrap_or_else(|e| panic!("the shipped layout should be clean, but: {e}"));
@@ -260,13 +260,13 @@ fn a_move_that_overlaps_another_prop_is_caught_by_the_placement_checker() {
 
 fn doc() -> (String, EditorDoc) {
     let (text, layout) = shipped();
-    let kit = load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"));
+    let kit = load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"));
     let doc = EditorDoc::open(&layout, &kit).unwrap_or_else(|e| panic!("open: {e}"));
     (text, doc)
 }
 
 fn kit() -> foundation_vs_slop::site::kit::SiteKit {
-    load_site_kit(SITE_KIT_PATH).unwrap_or_else(|e| panic!("site kit: {e}"))
+    load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("site kit: {e}"))
 }
 
 #[test]

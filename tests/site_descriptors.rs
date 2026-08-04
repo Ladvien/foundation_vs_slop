@@ -1,223 +1,135 @@
-//! **The Site kit and its descriptors say the same thing.**
+//! **The Site kit resolves to the numbers the game used to compute.**
 //!
-//! `src/site/descriptors.rs` translates `SiteKit` into a descriptor library plus a policy. A
-//! translation nobody checks is a second description that drifts, and the drift would surface as the
-//! hub looking subtly wrong in one of the two tools that draw it.
+//! The kit named pieces *and* described them until 2026-08-03: a `glb`, a height, a footprint, a
+//! `front`, all inline, plus a `y_scale` computed as `target_height / height`. It now names pieces
+//! and the descriptor library describes them, with this facility's architecture layered on from
+//! `project.ron`.
 //!
-//! So this is a **semantic** pin, not only a byte one: every field, for every piece, compared against
-//! the accessor the game actually calls today. Byte-pinning the file alone would prove the generator
-//! is stable and prove nothing about whether it is right.
+//! That move is only safe if the numbers are identical, and "identical" is not something the type
+//! system can check across a file boundary. So this pins the **game-visible outcome**: the height a
+//! wall is drawn at, the opening an aperture is sized from, the top a mug is seated on. A test that
+//! only checked the files parse would have passed while every wall in the hub changed height.
 //!
-//! Regenerate the committed pair with:
-//!
-//! ```text
-//! EMERGE_WRITE_SITE=1 cargo test --test site_descriptors
-//! ```
+//! The numbers below are the ones the old computation produced, written as literals on purpose. A
+//! literal is the only kind of assertion that survives the code it was checking being deleted.
 
-use std::path::Path;
+use foundation_vs_slop::site::kit::{
+    id_of, load_site_kit, SiteKit, GREYBOX_KIT_PATH, GREYBOX_PROJECT_DIR, SITE_KIT_PATH,
+    SITE_PROJECT_DIR,
+};
+use foundation_vs_slop::site::pieces::{target_height, SitePiece};
 
-use emerge_core::descriptor::Mount;
-use emerge_core::library::Library;
-use emerge_core::policy::Policy;
-use foundation_vs_slop::site::descriptors::{self, id_of, SITE_PROJECT_DIR};
-use foundation_vs_slop::site::kit::{SiteKit, SITE_KIT_PATH};
-use foundation_vs_slop::site::pieces::SitePiece;
-
-fn kit() -> SiteKit {
-    let text = std::fs::read_to_string(SITE_KIT_PATH)
-        .unwrap_or_else(|e| panic!("{SITE_KIT_PATH}: {e}"));
-    ron::from_str(&text).unwrap_or_else(|e| panic!("{SITE_KIT_PATH}: {e}"))
+fn ozea() -> SiteKit {
+    load_site_kit(SITE_KIT_PATH, SITE_PROJECT_DIR).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// **Every measurement crosses unchanged.** This is the plan's Stage 1 gate — *"converted descriptors
-/// reproduce today's semantics exactly"* — checked against the accessors the game calls rather than
-/// against a copy of the file.
+fn greybox() -> SiteKit {
+    load_site_kit(GREYBOX_KIT_PATH, GREYBOX_PROJECT_DIR).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// **The architecture still lands where it did.** `y_scale` used to be `target / authored`, computed
+/// in `kit.rs`; it is now `stretch_y`, layered on from `project.ron`. Multiplying it back out must
+/// return the target the game asked for.
+///
+/// Checked for **both** kits, because they are the two halves of the swap and their authored heights
+/// are wildly different — a rule that only held for the kit which happens to be authored at the
+/// target height would hold vacuously.
 #[test]
-fn every_piece_converts_to_a_descriptor_that_says_the_same_thing() {
-    let kit = kit();
-    let library = descriptors::library(&kit);
-
-    assert_eq!(
-        library.descriptors.len(),
-        SitePiece::ALL.len(),
-        "the library must hold every piece the kit defines"
-    );
-
-    for piece in SitePiece::ALL {
-        let id = id_of(*piece);
-        let d = library
-            .get(&id)
-            .unwrap_or_else(|| panic!("{id} is missing from the converted library"));
-        let p = kit.piece(*piece);
-
-        assert_eq!(d.mesh.as_deref(), Some(p.glb.as_str()), "{id}: mesh");
-        assert_eq!(d.extent.height, Some(p.height), "{id}: height");
-        assert_eq!(d.extent.footprint, Some(p.footprint), "{id}: footprint");
-        assert_eq!(d.align.front, p.front, "{id}: front");
-        assert_eq!(d.offers.surfaces, p.surfaces, "{id}: surfaces");
-
-        // Absence means "no correction", so the two spellings have to be compared through the
-        // accessor rather than field to field.
-        assert_eq!(
-            d.align.scale.unwrap_or(1.0),
-            kit.scale(*piece),
-            "{id}: scale"
-        );
-        assert_eq!(
-            d.align.y_offset.unwrap_or(0.0),
-            kit.y_offset(*piece),
-            "{id}: y_offset"
-        );
-
-        // The layer. `rests_on` is the Site's word for `OnSurface`, and they use one vocabulary.
-        match (&d.mount, kit.rests_on(*piece)) {
-            (Some(Mount::OnSurface { class }), Some(want)) => {
-                assert_eq!(class, want, "{id}: rests_on");
-            }
-            (Some(Mount::OnSurface { class }), None) => {
-                panic!("{id}: converted to OnSurface({class}) but the kit says it stands on the floor")
-            }
-            (_, Some(want)) => panic!("{id}: the kit rests it on `{want}` and the descriptor does not"),
-            _ => {}
+fn every_piece_with_a_target_height_still_reaches_it() {
+    for (name, kit) in [("ozea", ozea()), ("greybox", greybox())] {
+        for piece in SitePiece::ALL {
+            let Some(target) = target_height(*piece) else {
+                // No policy height means native size, and native size means no stretch.
+                assert_eq!(
+                    kit.y_scale(*piece),
+                    1.0,
+                    "{name}/{piece:?}: nothing asked for a height, so nothing may stretch it"
+                );
+                continue;
+            };
+            let drawn = kit.height(*piece) * kit.y_scale(*piece);
+            assert!(
+                (drawn - target).abs() < 1e-3,
+                "{name}/{piece:?}: drawn at {drawn} m but this facility builds it to {target} m"
+            );
         }
     }
+}
 
-    // The doorways are the shape the old manifest could not express, and they cross exactly.
-    for (piece, door) in [
-        (SitePiece::WallDoorway, &kit.wall_doorway),
-        (SitePiece::WallDoorwayWide, &kit.wall_doorway_wide),
+/// **The literals.** These are what the old `target_height / height` division produced, and they are
+/// the numbers the hub is built out of. Written out rather than derived, because a derivation is only
+/// as good as the thing it derives from — and that thing is what moved.
+#[test]
+fn the_hubs_own_numbers_are_unchanged() {
+    let kit = ozea();
+
+    // Full-height architecture: 2.40 m, and the Ozea meshes are already authored there.
+    for piece in [
+        SitePiece::Wall,
+        SitePiece::WallCorner,
+        SitePiece::WallWindow,
+        SitePiece::Column,
     ] {
-        let id = id_of(piece);
-        let d = library.get(&id).unwrap_or_else(|| panic!("{id} missing"));
-        assert_eq!(
-            d.mount,
-            Some(Mount::InOpening {
-                clear: Some(door.opening)
-            }),
-            "{id}: clear opening"
-        );
+        assert_eq!(kit.y_scale(piece), 1.0, "{piece:?}");
+        assert!((kit.height(piece) - 2.40).abs() < 1e-3, "{piece:?}");
     }
+
+    // The counter: a 2 m wall mesh squashed to waist height. The one number in the shipped kit that
+    // is unmistakably policy rather than measurement.
+    assert!(
+        (kit.y_scale(SitePiece::WallLow) - 0.45).abs() < 1e-4,
+        "the Records desk is a 2 m wall at 0.45 — got {}",
+        kit.y_scale(SitePiece::WallLow)
+    );
+    assert!((kit.height(SitePiece::WallLow) * kit.y_scale(SitePiece::WallLow) - 0.9).abs() < 1e-3);
+
+    // The doorways, which the ASYNC aperture quad is sized from.
+    let (w, h) = kit
+        .opening(SitePiece::WallDoorwayWide)
+        .unwrap_or_else(|| panic!("the wide doorway has an opening"));
+    assert!(w > 0.0 && h > 0.0 && h < kit.height(SitePiece::WallDoorwayWide));
+    let (sw, _) = kit
+        .opening(SitePiece::WallDoorway)
+        .unwrap_or_else(|| panic!("the single doorway has an opening"));
+    assert!(w > sw, "the wide doorway opens wider");
+
+    // And the greybox fixture stretches where Ozea does not — the swap, in one number.
+    assert!(
+        (greybox().y_scale(SitePiece::Wall) - 2.4).abs() < 1e-3,
+        "a 1 m greybox module reaches 2.4 m by stretching 2.4x"
+    );
 }
 
-/// **The policy reproduces `y_scale` exactly, for every piece.**
-///
-/// This is the whole argument for the layer: the measurement is art and the target is this facility,
-/// and putting them in separate files must not change the number the game ends up drawing with. A
-/// piece with no target height must come out at 1.0 — absent, not `Some(1.0)` — because the kit's own
-/// `y_scale` returns 1.0 for it.
+/// A surface piece seats what rests on it at its *top*, and the top is every transform in order.
+/// `top_height` is what a mug's Y comes from, so it is worth pinning rather than trusting.
 #[test]
-fn the_policy_reproduces_the_kits_y_scale() {
-    let kit = kit();
-    let layered = descriptors::policy(&kit)
-        .apply(&descriptors::library(&kit))
-        .unwrap_or_else(|e| panic!("{e}"));
-
-    let mut stretched = 0usize;
+fn a_resting_prop_is_seated_on_the_hosts_actual_top() {
+    let kit = ozea();
     for piece in SitePiece::ALL {
-        let id = id_of(*piece);
-        let d = layered.get(&id).unwrap_or_else(|| panic!("{id} missing"));
-        let want = kit.y_scale(*piece);
-        assert_eq!(
-            d.align.stretch_y.unwrap_or(1.0),
-            want,
-            "{id}: y_scale — the layered library must draw exactly what the kit draws"
-        );
-        if d.align.stretch_y.is_some() {
-            stretched += 1;
-        }
-    }
-
-    // The architecture, and nothing else. If this ever covers the whole kit, a policy rule has
-    // escaped onto the furniture and every chair is being resized to a wall height.
-    assert!(
-        (1..SitePiece::ALL.len() / 2).contains(&stretched),
-        "{stretched} of {} pieces carry a stretch — the structural pieces should, the furniture \
-         should not",
-        SitePiece::ALL.len()
-    );
-
-    // **And the policy is doing real work.** Most of the Ozea kit is already authored at this
-    // facility's heights, so most ratios are 1.0 — but `WallLow` is a 2 m wall mesh squashed to a
-    // 0.9 m counter, and that number exists nowhere but here. A policy that had quietly become all
-    // 1.0 would pass every assertion above while describing nothing.
-    let counter = layered
-        .get(&id_of(SitePiece::WallLow))
-        .unwrap_or_else(|| panic!("wall_low missing"));
-    assert_eq!(counter.align.stretch_y, Some(kit.y_scale(SitePiece::WallLow)));
-    assert!(
-        counter.align.stretch_y.is_some_and(|s| (s - 1.0).abs() > 0.1),
-        "the counter's stretch is the clearest evidence the layer carries policy rather than \
-         restating measurements: {:?}",
-        counter.align.stretch_y
-    );
-}
-
-/// The converted library stands on its own: it parses, it has no duplicate ids, and every surface
-/// class something needs is a class something offers.
-#[test]
-fn the_converted_library_validates() {
-    let kit = kit();
-    let text = descriptors::library(&kit)
-        .to_ron()
-        .unwrap_or_else(|e| panic!("{e}"));
-    let parsed = Library::parse(&text).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(parsed.descriptors.len(), SitePiece::ALL.len());
-
-    let policy_text = descriptors::policy(&kit)
-        .to_ron()
-        .unwrap_or_else(|e| panic!("{e}"));
-    let policy = Policy::parse(&policy_text).unwrap_or_else(|e| panic!("{e}"));
-    // Every rule finds its target — `apply` refuses a rule that matches nothing, which is what makes
-    // a renamed piece a load error rather than a silently unstretched wall.
-    policy.apply(&parsed).unwrap_or_else(|e| panic!("{e}"));
-}
-
-/// **The committed pair is what the kit converts to**, and it opens as a project directory.
-///
-/// Same discipline as `the_committed_libraries_match_the_manifests`: the files are committed, the
-/// test regenerates and compares, and the error says how to update them. A generated file that drifts
-/// from its source is a description of a kit that no longer exists.
-#[test]
-fn the_committed_site_project_matches_the_kit() {
-    let write = std::env::var("EMERGE_WRITE_SITE").as_deref() == Ok("1");
-    let kit = kit();
-    let dir = Path::new(SITE_PROJECT_DIR);
-
-    let files = [
-        ("library.ron", descriptors::library(&kit).to_ron()),
-        ("project.ron", descriptors::policy(&kit).to_ron()),
-    ];
-
-    for (name, built) in files {
-        let path = dir.join(name);
-        let text = built.unwrap_or_else(|e| panic!("{name}: {e}"));
-
-        if write {
-            std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-            emerge_core::ron_surgery::save_atomic(&path, &text).unwrap_or_else(|e| panic!("{e}"));
-            println!("wrote {}", path.display());
+        if !kit.is_surface(*piece) {
             continue;
         }
-
-        let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "{}: {e}\n\nGenerate it with:\n  EMERGE_WRITE_SITE=1 cargo test --test \
-                 site_descriptors",
-                path.display()
-            )
-        });
-        assert_eq!(
-            committed,
-            text,
-            "{} is out of date with the Site kit. Regenerate with:\n  EMERGE_WRITE_SITE=1 cargo \
-             test --test site_descriptors",
-            path.display()
+        let expect =
+            kit.y_offset(*piece) + kit.height(*piece) * kit.scale(*piece) * kit.y_scale(*piece);
+        assert_eq!(kit.top_height(*piece), expect, "{piece:?}");
+        assert!(
+            kit.top_height(*piece) > 0.0,
+            "{piece:?} offers a surface at or below the deck"
         );
     }
+}
 
-    if !write {
-        // And the pair opens the way any project does — the layer, through its real entry point.
-        let layered = emerge_core::policy::layered_library(dir).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(layered.descriptors.len(), SitePiece::ALL.len());
+/// Every id a kit names exists in its project, and the two kits name the **same** ids — which is what
+/// makes them alternatives rather than two unrelated sets.
+#[test]
+fn both_kits_name_the_same_pieces_and_every_id_resolves() {
+    let (a, b) = (ozea(), greybox());
+    for piece in SitePiece::ALL {
+        let want = id_of(*piece);
+        assert_eq!(a.id(*piece), want, "the shipped kit's id convention");
+        assert_eq!(b.id(*piece), want, "the fixture must name the same pieces");
+        // Resolved means it is in the library; `load_site_kit` refuses otherwise.
+        assert!(!a.glb(*piece).is_empty(), "{piece:?} has geometry");
+        assert!(!b.glb(*piece).is_empty(), "{piece:?} has geometry");
     }
 }
