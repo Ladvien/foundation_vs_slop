@@ -25,8 +25,10 @@
 //! the seat, and where an occupant stands is the chair's own position. Sockets are what a mesh with
 //! several places to sit needs, and nothing in this kit has one.
 
+use bevy::prelude::*;
 use emerge_core::descriptor::Descriptor;
 use emerge_core::map::{Effect, Interaction, Location, RoleKind, RoleSlot};
+use emerge_core::smart::Booking;
 
 use super::kit::SiteKit;
 use super::layout::SiteLayout;
@@ -274,5 +276,142 @@ mod tests {
         let loc = locations.first().unwrap_or_else(|| panic!("no locations"));
         assert!(piece_of(&layout, &loc.props[0]).is_some());
         assert!(centre_of(&layout, loc).is_some());
+    }
+}
+
+
+// ── the runtime side ─────────────────────────────────────────────────────────────────────────────
+
+/// One derived place to sit, in the world.
+#[derive(Clone, Debug)]
+pub struct Spot {
+    pub location: String,
+    /// The surface's position, lifted to standing height — where a unit walks to.
+    pub at: Vec3,
+    /// How many seats are pulled up to it.
+    pub capacity: u8,
+}
+
+/// **The hub's smart locations, and who is using them.**
+///
+/// Built once at startup from the authored layout, because the hub's furniture does not move — a
+/// derivation re-run every tick would be the same answer at the cost of walking every prop pair.
+///
+/// The booking is the half that changes, and it is the reason this is one resource rather than two:
+/// *"a smart location will not start a second script to avoid concurrent access to its resources"*,
+/// so a query that could not see the bookings would keep offering a table that is full.
+#[derive(Resource, Default)]
+pub struct SmartHub {
+    pub spots: Vec<Spot>,
+    booking: Booking,
+    /// Who is seated where, so leaving releases the right place. Per unit rather than per location,
+    /// because a unit stops sitting for reasons the location never hears about — it fled, it died.
+    seated: Vec<(u64, String)>,
+}
+
+impl SmartHub {
+    /// Derive the hub's spots from its layout.
+    pub fn from_layout(layout: &SiteLayout, kit: &SiteKit) -> SmartHub {
+        let mut spots = Vec::new();
+        for loc in locations(layout, kit) {
+            let Some((x, z)) = centre_of(layout, &loc) else {
+                continue;
+            };
+            let capacity = loc
+                .interactions
+                .first()
+                .and_then(|i| i.roles.first())
+                .map_or(0, |r| r.max);
+            spots.push(Spot {
+                location: loc.id.clone(),
+                at: Vec3::new(x, 0.0, z),
+                capacity,
+            });
+        }
+        SmartHub {
+            spots,
+            booking: Booking::new(),
+            seated: Vec::new(),
+        }
+    }
+
+    /// The nearest spot with a free seat, and how far it is.
+    ///
+    /// **Free** means the location is not already full, not merely that it exists. Offering a full
+    /// table would put a unit in `SitAt`, walk it across the hub, and have it stand there — which
+    /// reads as broken pathing rather than as a busy table.
+    ///
+    /// Ties break on the location id, a total order over ids that do not change at runtime. Two
+    /// equidistant tables would otherwise be ranked by the order the derivation happened to emit
+    /// them, which is stable until somebody edits the layout above one of them.
+    pub fn nearest_free(&self, from: Vec3) -> Option<(Vec3, f32)> {
+        let mut best: Option<(&Spot, f32)> = None;
+        for spot in &self.spots {
+            if self.taken(&spot.location) >= usize::from(spot.capacity) {
+                continue;
+            }
+            let d = Vec3::new(spot.at.x - from.x, 0.0, spot.at.z - from.z).length();
+            let better = match best {
+                None => true,
+                Some((b, bd)) => (d, spot.location.as_str()) < (bd, b.location.as_str()),
+            };
+            if better {
+                best = Some((spot, d));
+            }
+        }
+        best.map(|(s, d)| (s.at, d))
+    }
+
+    /// How many units are seated at a location.
+    pub fn taken(&self, location: &str) -> usize {
+        self.seated.iter().filter(|(_, l)| l == location).count()
+    }
+
+    /// Seat `unit` at the nearest free spot, returning where it sits.
+    ///
+    /// Idempotent: a unit already seated keeps its place rather than being re-seated somewhere nearer,
+    /// because a unit that stood up and walked to a closer table every time one freed up would look
+    /// like it could not make up its mind.
+    pub fn take_seat(&mut self, unit: u64, from: Vec3) -> Option<Vec3> {
+        if let Some((_, at)) = self.seat_of(unit) {
+            return Some(at);
+        }
+        let mut best: Option<(&Spot, f32)> = None;
+        for spot in &self.spots {
+            if self.taken(&spot.location) >= usize::from(spot.capacity) {
+                continue;
+            }
+            let d = Vec3::new(spot.at.x - from.x, 0.0, spot.at.z - from.z).length();
+            let better = match best {
+                None => true,
+                Some((b, bd)) => (d, spot.location.as_str()) < (bd, b.location.as_str()),
+            };
+            if better {
+                best = Some((spot, d));
+            }
+        }
+        let (spot, _) = best?;
+        let (location, at) = (spot.location.clone(), spot.at);
+        self.seated.push((unit, location));
+        Some(at)
+    }
+
+    /// Where `unit` is sitting, if it is.
+    pub fn seat_of(&self, unit: u64) -> Option<(&str, Vec3)> {
+        let (_, location) = self.seated.iter().find(|(u, _)| *u == unit)?;
+        let spot = self.spots.iter().find(|s| &s.location == location)?;
+        Some((location.as_str(), spot.at))
+    }
+
+    /// Give up `unit`'s place. Returns whether it had one.
+    pub fn leave(&mut self, unit: u64) -> bool {
+        let before = self.seated.len();
+        self.seated.retain(|(u, _)| *u != unit);
+        self.seated.len() != before
+    }
+
+    /// The bookings, for anything that wants to run a whole cast rather than seat one unit.
+    pub fn booking(&mut self) -> &mut Booking {
+        &mut self.booking
     }
 }

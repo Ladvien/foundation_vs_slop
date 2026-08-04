@@ -525,6 +525,10 @@
             psi_sight: 16.0,     psi_sight_release: 17.5,
             ward_sight: 10.0,    ward_sight_release: 11.5,
             wounded_frac: 0.5,   wounded_frac_release: 0.55,
+            // How far a unit looks for somewhere to sit, and the release band. Deliberately shorter
+            // than every other sight: sitting down is what a unit does when there is nothing else,
+            // and a reach across the hub would have units leaving the squad to find a chair.
+            seat_sight: 5.0,     seat_sight_release: 6.5,
             leash: 6.0, leash_in: 4.0,
             squad_think_interval: 0.3,
         ),

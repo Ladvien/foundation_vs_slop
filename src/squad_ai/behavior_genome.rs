@@ -37,7 +37,7 @@ use crate::behavior_tuning::BehaviorTuning;
 /// tactical/combat-feel knobs (ORCA cohesion, boss senses, laser ballistics, crab pounce/carry,
 /// parasite leap shape, mycelia coupling) appended as one block so the original 54 indices — and the
 /// committed `elites_behavior.ron` written against them — are untouched.
-pub const N: usize = 89;
+pub const N: usize = 90;
 
 /// Hard `(min, max)` per knob, in the **same order** [`encode`]/[`decode`] walk the config. Each shipped
 /// value sits inside its range; the extremes are playable-but-different, never degenerate. Ordering
@@ -149,6 +149,17 @@ static BOUNDS: [(f32, f32); N] = [
     (0.005, 0.2), // mycelia_coupling.mat_meat_rate
     // perception (1)
     (0.1, 1.0),   // perception.squad_think_interval
+    // ── smart objects (1) ──
+    // **How far a unit will look for somewhere to sit.** Appended at the END of the vector on
+    // purpose: every knob before it keeps its index, so a genome from an older archive means the same
+    // thing for its first 89 values and only fails the length check — which is a re-bake, not a
+    // silent re-interpretation of somebody's elites.
+    //
+    // The upper bound is the fixed `seat_sight_release` (6.5), so the Schmitt band can never invert
+    // under mutation — feasible by construction, the same trick `perception.leash` uses at the other
+    // end. Search may turn sitting effectively off (1.0, shorter than a table's own reach) or let a
+    // unit cross most of a room for a chair; what it may not do is make the latch nonsense.
+    (1.0, 6.5),   // perception.seat_sight
 ];
 
 /// A behaviour config's evolvable subset, flattened. Meaningless without [`BOUNDS`]/[`decode`], which pin
@@ -264,6 +275,8 @@ pub fn encode(b: &BehaviorTuning) -> BehaviorGenome {
     v.push(b.mycelia_coupling.mat_meat_rate);
     // perception (1)
     v.push(b.perception.squad_think_interval);
+    // smart objects (1)
+    v.push(b.perception.seat_sight);
     debug_assert_eq!(v.len(), N, "encode walked the wrong number of knobs");
     BehaviorGenome(v)
 }
@@ -389,6 +402,8 @@ pub fn decode(g: &BehaviorGenome, base: &BehaviorTuning) -> Result<BehaviorTunin
     b.mycelia_coupling.mat_meat_rate = f!();
     // perception (1)
     b.perception.squad_think_interval = f!();
+    // smart objects (1)
+    b.perception.seat_sight = f!();
     debug_assert_eq!(i, N, "decode read the wrong number of knobs");
     Ok(b)
 }

@@ -158,7 +158,10 @@ pub(crate) fn scp1048_act(
         match active.mode {
             // Drift. `ActiveBehavior` carries no wander target for these brains, so the bear simply
             // holds — the level is small and a bear that stands and breathes reads as watchful.
-            Mode::Wander => state.anim = AnimState::RestIdle,
+            // The bear has no hub furniture and no squad perception, so `SitAt` can never be chosen
+            // for it — listed with `Wander` rather than swept into a `_` arm, because a wildcard here
+            // is how a mode the bear SHOULD handle would arrive and do nothing.
+            Mode::Wander | Mode::SitAt => state.anim = AnimState::RestIdle,
             // The endearing display. Each bear has a characteristic one, keyed off its spawn seed.
             Mode::Emote => {
                 state.anim = match emote_style(seed.0) {

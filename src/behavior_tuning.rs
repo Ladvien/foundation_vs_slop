@@ -48,6 +48,13 @@ pub struct PerceptionTuning {
     /// Medic trigger: health fraction below which a unit counts as wounded / above which it is released.
     pub wounded_frac: f32,
     pub wounded_frac_release: f32,
+    /// **How far a unit will look for somewhere to sit**, and the release band.
+    ///
+    /// Shorter than every other sight by design: sitting down is what a unit does when there is
+    /// nothing else, and a range that reached across the hub would have units crossing it to reach a
+    /// chair instead of staying with the squad. The leash (6.0) is the number this is scaled against.
+    pub seat_sight: f32,
+    pub seat_sight_release: f32,
     /// Cohesion leash radius (role.rs `LEASH`; perception's `LEASH_OUT`).
     pub leash: f32,
     /// Leash re-grab radius (inner band of the leash Schmitt trigger).
@@ -324,6 +331,8 @@ impl Default for BehaviorTuning {
                 ward_sight_release: 11.5,
                 wounded_frac: 0.5,
                 wounded_frac_release: 0.55,
+                seat_sight: 5.0,
+                seat_sight_release: 6.5,
                 leash: 6.0,
                 leash_in: 4.0,
                 squad_think_interval: 0.3,
@@ -520,6 +529,11 @@ pub fn validate_tuning(t: &BehaviorTuning) -> Result<(), String> {
     band("perception.psi", p.psi_sight, p.psi_sight_release)?;
     band("perception.ward", p.ward_sight, p.ward_sight_release)?;
     band("perception.wounded", p.wounded_frac, p.wounded_frac_release)?;
+    // The seat band. `behavior_genome` bounds `seat_sight` at or below the fixed release so mutation
+    // cannot invert it, but a hand-edited config has no such guard — and an inverted band here is a
+    // unit that sits and stands every think, which reads as a twitch rather than as a bad number.
+    positive("perception.seat_sight", p.seat_sight)?;
+    band("perception.seat", p.seat_sight, p.seat_sight_release)?;
     // The cohesion leash is a Schmitt trigger too: a unit strays past `leash` (the outer trigger) and is
     // released only inside `leash_in` (the inner re-grab). `latch_when_above` in `squad_ai::perception`
     // asserts the outer >= the inner, so an inverted band (e.g. an evolved `leash` mutated below the fixed

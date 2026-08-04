@@ -170,7 +170,7 @@ pub fn validate_rank_ladder(role: RoleId, behaviors: &[Behavior]) -> Result<(), 
 fn flee() -> Behavior {
     Behavior {
         mode: Mode::Flee,
-        rank: 6,
+        rank: 12,
         target: TargetKind::None,
         considerations: vec![Consideration {
             input: Input::Drive(DriveId::FEAR),
@@ -193,7 +193,7 @@ fn flee() -> Behavior {
 fn regroup() -> Behavior {
     Behavior {
         mode: Mode::Regroup,
-        rank: 5,
+        rank: 10,
         target: TargetKind::SquadAnchor,
         considerations: vec![gate(Fact::PastLeash)],
     }
@@ -203,7 +203,7 @@ fn regroup() -> Behavior {
 fn follow_anchor() -> Behavior {
     Behavior {
         mode: Mode::FollowAnchor,
-        rank: 1,
+        rank: 2,
         target: TargetKind::SquadAnchor,
         considerations: vec![Consideration {
             input: Input::Perc(Fact::SelfHealthFrac),
@@ -232,16 +232,44 @@ fn wander() -> Behavior {
 ///
 /// | rank | behaviour     | meaning                                          |
 /// |------|---------------|--------------------------------------------------|
-/// | 6    | `Flee`        | survival — nothing outranks staying alive         |
-/// | 5    | `Regroup`     | the cohesion leash — a strayed unit comes home    |
-/// | 4    | *role duty*   | Overwatch / Examine / PsiScan / TendWounded / SecureDoor |
-/// | 2–3  | *role support*| Ward, Engage, Commune                             |
-/// | 1    | `FollowAnchor`| in-formation drift (the unconditional floor)      |
+/// | 12   | `Flee`        | survival — nothing outranks staying alive         |
+/// | 10   | `Regroup`     | the cohesion leash — a strayed unit comes home    |
+/// | 8    | *role duty*   | Overwatch / Examine / PsiScan / TendWounded / SecureDoor |
+/// | 4–6  | *role support*| Ward, Engage, Commune                             |
+/// | 3    | `SitAt`       | downtime — sit at a table the hub already has     |
+/// | 2    | `FollowAnchor`| in-formation drift (the unconditional floor)      |
 /// | 0    | `Wander`      | unreachable while `FollowAnchor` scores 0.3       |
 ///
+/// **The numbers are doubled, and the gaps are the point.** They were 6/5/4/2–3/1/0, which is a
+/// ladder with no rung free between role support and `FollowAnchor` — so adding `SitAt` at all meant
+/// either tying with a role's own behaviour (which `decide` resolves by re-rolling every think, i.e.
+/// thrashing) or outranking the duty it is supposed to yield to. Only equality and `max` are ever
+/// asked of a rank, so doubling preserves every relative order and buys somewhere to stand.
+///
 /// Every rank must be unique within a role (`validate_rank_ladder`).
+/// **Sit down at a table when there is nothing else to do.**
+///
+/// Rank 2, so every role duty (4) and the cohesion leash (5) outrank it: a unit with a job does the
+/// job. It sits above `FollowAnchor` (1), which is the point — a squad standing around in the hub has
+/// somewhere to be, and drifting after the anchor forever is what it did before.
+///
+/// The gate is the hysteretic `SeatNearby` fact, the same shape `Regroup` uses and for the same
+/// reason: a unit at exactly the seat range would otherwise sit and stand every think.
+///
+/// This is the squad's end of the smart-object system. What it sits at is not written here — it is a
+/// location `site::smart` derived from the hub's own furniture, so moving a table moves where the
+/// squad sits with no code change at all.
+fn sit_at() -> Behavior {
+    Behavior {
+        mode: Mode::SitAt,
+        rank: 3,
+        target: TargetKind::NearestSeat,
+        considerations: vec![gate(Fact::SeatNearby)],
+    }
+}
+
 fn tail() -> Vec<Behavior> {
-    vec![flee(), regroup(), follow_anchor(), wander()]
+    vec![flee(), regroup(), sit_at(), follow_anchor(), wander()]
 }
 
 /// A `Step` gate that turns a boolean-ish fact into a hard on/off consideration.
@@ -265,13 +293,13 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
         RoleId::Gunman => vec![
             Behavior {
                 mode: Mode::Overwatch,
-                rank: 4,
+                rank: 8,
                 target: TargetKind::TrackedThreat,
                 considerations: vec![gate(Fact::ThreatBearingKnown)],
             },
             Behavior {
                 mode: Mode::Engage,
-                rank: 2,
+                rank: 4,
                 target: TargetKind::TrackedThreat,
                 considerations: vec![gate(Fact::ThreatBearingKnown)],
             },
@@ -286,13 +314,13 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
         RoleId::Researcher => vec![
             Behavior {
                 mode: Mode::Ward,
-                rank: 4,
+                rank: 8,
                 target: TargetKind::TrackedThreat,
                 considerations: vec![gate(Fact::PhotophobeBearingKnown)],
             },
             Behavior {
                 mode: Mode::Examine,
-                rank: 3,
+                rank: 6,
                 target: TargetKind::NearestExaminable,
                 considerations: vec![
                     gate(Fact::HasUnexaminedNearby),
@@ -308,19 +336,19 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
         RoleId::Psionic => vec![
             Behavior {
                 mode: Mode::PsiScan,
-                rank: 4,
+                rank: 8,
                 target: TargetKind::None,
                 considerations: vec![gate(Fact::AnomalyResidueNearby)],
             },
             Behavior {
                 mode: Mode::Ward,
-                rank: 3,
+                rank: 6,
                 target: TargetKind::None,
                 considerations: vec![gate(Fact::AllyDownNearby)],
             },
             Behavior {
                 mode: Mode::Commune,
-                rank: 2,
+                rank: 4,
                 target: TargetKind::TrackedThreat,
                 considerations: vec![gate(Fact::ThreatBearingKnown)],
             },
@@ -328,7 +356,7 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
         // Medic: move to and heal the nearest critically wounded ally.
         RoleId::Medic => vec![Behavior {
             mode: Mode::TendWounded,
-            rank: 4,
+            rank: 8,
             target: TargetKind::NearestWoundedAlly,
             considerations: vec![gate(Fact::AllyDownNearby)],
         }],
@@ -338,7 +366,7 @@ fn default_behaviors(role: RoleId) -> Vec<Behavior> {
         // the RL action space.
         RoleId::Engineer => vec![Behavior {
             mode: Mode::SecureDoor,
-            rank: 4,
+            rank: 8,
             target: TargetKind::NearestExaminable,
             considerations: vec![gate(Fact::HasUnexaminedNearby)],
         }],
@@ -383,6 +411,50 @@ mod tests {
         let brain = Brain { behaviors: default_behaviors(role) };
         let mut rng = 42u32;
         brain.behaviors[decide(&brain.behaviors, p, &mut rng)].mode
+    }
+
+    /// **The squad's end of the smart-object system.** A unit with nothing to do and a free table in
+    /// reach sits at it; the same unit with a job does the job.
+    #[test]
+    fn a_unit_with_nothing_to_do_sits_at_a_table() {
+        for role in RoleId::ALL {
+            let mut p = perc();
+            // Nothing near, nothing wrong: the old answer was to drift after the anchor forever.
+            assert_eq!(
+                chosen_mode(role, &p),
+                Mode::FollowAnchor,
+                "{role:?} with no seat offered"
+            );
+
+            p.squad.seat_nearby = 1.0;
+            p.squad.seat_dist = 3.0;
+            assert_eq!(
+                chosen_mode(role, &p),
+                Mode::SitAt,
+                "{role:?} should sit when a table is free and there is nothing else to do"
+            );
+        }
+    }
+
+    /// **Sitting yields to every duty.** Rank 3 is below the role band on purpose — an operative does
+    /// not sit down because a chair is nearer than the threat.
+    #[test]
+    fn a_seat_never_outranks_the_work() {
+        let mut p = perc();
+        p.squad.seat_nearby = 1.0;
+        p.squad.seat_dist = 1.0;
+
+        // A duty.
+        p.squad.threat_bearing_known = 1.0;
+        assert_eq!(chosen_mode(RoleId::Gunman, &p), Mode::Overwatch);
+
+        // The cohesion leash, which outranks duty and therefore also outranks sitting.
+        p.squad.past_leash = 1.0;
+        assert_eq!(chosen_mode(RoleId::Gunman, &p), Mode::Regroup);
+
+        // And survival above all of it.
+        p.drives[DriveId::FEAR.0] = 1.0;
+        assert_eq!(chosen_mode(RoleId::Gunman, &p), Mode::Flee);
     }
 
     #[test]
