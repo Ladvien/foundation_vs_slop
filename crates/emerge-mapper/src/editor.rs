@@ -25,7 +25,7 @@ use crate::chrome::{
     ACCENT, DANGER, DIM, HEADER_BG, LABEL, LIST_W, PANEL_BG, ROW_BG, ROW_SELECTED, SLOT_BG,
     TEXT,
 };
-use crate::keys::{self, Action, Context};
+use crate::keys::{self, Action};
 use crate::project::Project;
 use crate::view::{cursor_ground, MainCamera};
 
@@ -406,7 +406,7 @@ fn spawn_panel(mut commands: Commands) {
 
     commands.entity(root).with_children(|p| {
         crate::chrome::title(p, "EMERGE MAPPER");
-        crate::chrome::key_census(p, &[Context::Map, Context::Global]);
+        crate::chrome::shortcut_hint(p);
 
         // The readout, in the same two columns as the keys so the whole panel shares one left edge.
         p.spawn((

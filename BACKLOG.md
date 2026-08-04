@@ -775,15 +775,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
   WFC as a constraint solver with design-level constraints layered over local adjacency.
   · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`
 
-- **FVS-Q-11 — The Tiles panel pushes its own controls below the fold** · S
-  Measured 2026-08-04 on a 1280x802 logical window: the Tiles panel renders 18 census rows (10 Tiles +
-  8 Global) before the detail block, so the subgrid's cell grid and its `[solid][edge][anchor][clear]`
-  chips start below the visible area. The pane **is** a `ScrollArea` and they are reachable, and the
-  keyboard bindings added the same day reach them without scrolling — so this is ergonomics, not a
-  defect. The fix is a layout decision somebody has to make: collapse the census behind a toggle, or
-  move it below the controls. `docs/ui.md` §3.5 (Samp 2011) forbids reordering *within* the list, which
-  is not the same as choosing where the list sits. · *Deps:* — · *Touches:* `crates/emerge-mapper/src/{tiles,chrome}.rs`
-
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.

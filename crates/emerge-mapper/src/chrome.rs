@@ -251,3 +251,127 @@ pub fn scroll_list(parent: &mut ChildSpawnerCommands, marker: impl Bundle) {
 // A `LABEL  value` row builder belongs here too — the shape is repeated four times across the two
 // tabs, differing only in the label column's width. It is not written yet because nothing has been
 // moved onto it, and a builder with no caller is a stub.
+
+/// The held-key overlay's root. `Display::None` when it is not being asked for.
+#[derive(Component)]
+pub struct ShortcutsOverlay;
+
+/// Where the rows are rebuilt, so the frame around them is spawned once.
+#[derive(Component)]
+struct ShortcutsBody;
+
+/// Which tab's list the overlay is currently showing, so it is rebuilt on a tab change and not on
+/// every frame the key is held.
+#[derive(Resource, Default)]
+struct ShowingFor(Option<crate::tiles::Mode>);
+
+/// **The key list, on demand.**
+///
+/// It used to be printed down the side of every panel: eighteen rows in the Tiles tab, above the
+/// controls, which is what pushed the subgrid's own cell grid below the fold (`FVS-Q-11`). A key
+/// list is *reference*, consulted rarely and never while acting — and `docs/ui.md` §1.2's test is
+/// "does this force interpretation?", which a permanent eighteen-row table beside the thing you are
+/// trying to use does.
+///
+/// So it is held rather than printed, and the panels carry one line saying so. That line is not
+/// optional: Cockburn, Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`, already cited by
+/// `crate::keys`) document the intermodal-transition failure — a fast path offered *beside* a slow
+/// one does not get adopted on its own. A hidden list nobody is told about is that failure exactly.
+pub struct ChromePlugin;
+
+impl Plugin for ChromePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ShowingFor>()
+            .add_systems(Startup, spawn_shortcuts_overlay)
+            .add_systems(Update, drive_shortcuts_overlay.in_set(keys::Phase::Act));
+    }
+}
+
+fn spawn_shortcuts_overlay(mut commands: Commands) {
+    commands
+        .spawn((
+            ShortcutsOverlay,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                display: Display::None,
+                ..default()
+            },
+            // **Per `docs/ui.md` §5 trap 7.** A full-screen container without this eats every world
+            // click; its children keep their own hit targets, which this one does not need anyway.
+            bevy::picking::Pickable::IGNORE,
+            // Above the panels and the tab strip (101), which is the whole point of an overlay.
+            GlobalZIndex(400),
+            // A scrim, so the list reads against whatever is behind it without hiding the map.
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(PAD * 1.5)),
+                    row_gap: Val::Px(GAP_ROW),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+                ShortcutsBody,
+            ));
+        });
+}
+
+/// Show the list while the key is down, and rebuild it when the tab under it changes.
+fn drive_shortcuts_overlay(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
+    mode: Res<crate::tiles::Mode>,
+    mut showing: ResMut<ShowingFor>,
+    mut roots: Query<&mut Node, With<ShortcutsOverlay>>,
+    bodies: Query<Entity, With<ShortcutsBody>>,
+) {
+    let want = keys::pressed(&keyboard, live.0, keys::Action::Shortcuts);
+    for mut node in &mut roots {
+        let display = if want { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    // Rebuilt on the transition and on a tab change, never per frame: the rows are static text and
+    // respawning them sixty times a second would be sixty times the work for one picture.
+    let key = want.then_some(*mode);
+    if showing.0 == key {
+        return;
+    }
+    showing.0 = key;
+    let Some(tab) = key else { return };
+    for body in &bodies {
+        commands.entity(body).despawn_related::<Children>();
+        commands.entity(body).with_children(|p| {
+            title(p, &format!("{} KEYS", tab.label()));
+            // This tab first, then the frame around it — the same order the panels used, so anyone
+            // who learned the old list finds the rows where they were.
+            key_census(p, &[tab.context(), Context::Global]);
+        });
+    }
+}
+
+/// **One line where eighteen rows used to be.** See [`ChromePlugin`] for why it is not optional.
+pub fn shortcut_hint(parent: &mut ChildSpawnerCommands) {
+    parent.spawn((
+        Text::new(format!(
+            "Hold {} for shortcuts",
+            keys::chord(keys::Action::Shortcuts)
+        )),
+        TextColor(LABEL),
+        TextFont::from_font_size(10.0),
+        Node {
+            margin: UiRect::top(Val::Px(2.0)),
+            ..default()
+        },
+    ));
+}

@@ -148,6 +148,7 @@ fn main() {
             // First: it owns `keys::Live`, which the other three plugins' systems take as a
             // `Res<_>` — and in 0.19 a missing one panics the system rather than skipping it.
             keys::KeysPlugin,
+            chrome::ChromePlugin,
             view::ViewPlugin,
             editor::EditorPlugin,
             thumbs::ThumbsPlugin,

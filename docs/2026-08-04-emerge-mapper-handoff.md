@@ -195,12 +195,32 @@ is reported **once**, not once from each side.
 `if the lattice is empty, use the bounding box` branch — the fallback `CLAUDE.md` forbids. Filed as
 **FVS-Q-9** with the two honest routes.
 
+### The key list is an overlay now
+
+Held, not printed. `K` down shows this tab's rows over a scrim; releasing hides them. Each panel
+carries one line — *"Hold K for shortcuts"* — where eighteen census rows used to be, which is what
+closed **FVS-Q-11**: the whole subgrid section, chips included, now fits above the fold.
+
+It reads `keys::rows(tab.context())`, so it is per-tab by construction rather than by three call
+sites agreeing. That also makes the context model visible to the author for the first time: `W, A, S,
+D` reads *"pan"* on the Map tab and *"move the cell cursor"* on Tiles.
+
+Two knock-on rebindings, both recorded in the census beside the rows:
+
+- **`K` was the lattice cursor's "back"**, so the cursor moved from `H J K L` to `W A S D` — moving
+  one key of a cluster is worse than moving the cluster, and `W A S D` is what those keys mean.
+- **Pan went back to `Context::Map`**, which is what freed `W A S D` in the Tiles tab. This partly
+  reverses the earlier "the camera is Global" call: *turning* the view stays Global, because both
+  other tabs stage a 3D subject worth looking round, but panning does not — the Tiles camera is parked
+  on one tile by `stage_camera` and panning off it has no way back.
+
+`scripts/macinput.py` gained `keydown`/`keyup`: a held key cannot be driven by `key()`, which sends
+down-then-up, so the overlay would open and close inside one frame with nothing to capture.
+
 ### Still open
 
 - **FVS-Q-9** — `solid` and clearance.
 - **FVS-Q-10** — should `edge` feed the solver, or only check it.
-- **FVS-Q-11** — the Tiles panel pushes its own controls below the fold (measured; reachable by scroll
-  and by keyboard, so ergonomics rather than a defect).
 - `BACKLOG.md` had **nothing to archive** — no open item related to the mapper, subgrid, WFC, rigs or
   clips, because this work was tracked only in `docs/2026-08-0*`. So T5's third bullet inverted: the
   three items above were *added*.

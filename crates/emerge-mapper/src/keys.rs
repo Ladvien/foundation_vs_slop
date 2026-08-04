@@ -72,6 +72,8 @@ pub enum Action {
     AnimTab,
     Save,
     Undo,
+    /// Hold to see this tab's key list.
+    Shortcuts,
     // ── Map ──────────────────────────────────────────────────────────────────
     AimLeft,
     AimRight,
@@ -174,6 +176,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "map tab"),
     b(Action::TilesTab, KeyCode::Digit2, false, Context::Global, "2", "tiles tab"),
     b(Action::AnimTab, KeyCode::Digit3, false, Context::Global, "3", "animation tab"),
+    // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
+    // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
+    // modal that eats the next keystroke.
+    b(Action::Shortcuts, KeyCode::KeyK, false, Context::Global, "K", "hold for shortcuts"),
     b(Action::Save, KeyCode::KeyS, true, Context::Global, "S", "save"),
     b(Action::Undo, KeyCode::KeyZ, true, Context::Global, "Z", "undo"),
 
@@ -203,22 +209,21 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
 
-    // **The camera is Global, because it always was.** These read `Context::Map` when the census was
-    // written, but `view::drive` never consulted a context at all — so pan and turn worked on every
-    // tab, including while a name was being typed into a field. Now that `just_pressed` enforces the
-    // context, leaving these on `Map` would silently take the camera away from the Tiles and Anim
-    // tabs, both of which show a 3D preview that is worth turning. `Global` is documented as *"the
-    // frame around the editor"*, and a camera is exactly that.
+    // **Pan is the map's; turning the view is everyone's.** `view::drive` never consulted a context,
+    // so before the input gate both worked on every tab — including while a name was being typed,
+    // which is how `S` in the map-name field panned the view out from under the author mid-word.
     //
-    // Only the typing half of the old behaviour is gone, which is the half that was a bug: `S` in the
-    // map-name field used to pan the view out from under the author mid-word.
+    // Turning stays `Context::Global` because the Tiles and Anim tabs both stage a 3D subject that is
+    // worth looking round. Panning does not: the Tiles camera is parked on one tile by
+    // `stage_camera`, and panning off it has no way back. So `W, A, S, D` are free in that tab, which
+    // is what lets the lattice cursor have them.
     //
     // Declared W, A, S, D rather than W, S, A, D: the displayed row is these chords in order, and
     // "W, A, S, D" is how the shape is named everywhere. The census's order IS the reading order.
-    b(Action::PanForward, KeyCode::KeyW, false, Context::Global, "W", "pan"),
-    b(Action::PanLeft, KeyCode::KeyA, false, Context::Global, "A", "pan"),
-    b(Action::PanBack, KeyCode::KeyS, false, Context::Global, "S", "pan"),
-    b(Action::PanRight, KeyCode::KeyD, false, Context::Global, "D", "pan"),
+    b(Action::PanForward, KeyCode::KeyW, false, Context::Map, "W", "pan"),
+    b(Action::PanLeft, KeyCode::KeyA, false, Context::Map, "A", "pan"),
+    b(Action::PanBack, KeyCode::KeyS, false, Context::Map, "S", "pan"),
+    b(Action::PanRight, KeyCode::KeyD, false, Context::Map, "D", "pan"),
     b(Action::TurnViewLeft, KeyCode::KeyQ, false, Context::Global, "Q", "turn view"),
     b(Action::TurnViewRight, KeyCode::KeyE, false, Context::Global, "E", "turn view"),
 
@@ -243,15 +248,15 @@ pub const BINDINGS: &[Binding] = &[
     // seven above are counted — so each group shares one `does` and reads its chords in order, the
     // same shape as `W, A, S, D  pan`.
     //
-    // `H, J, K, L` because the arrows already walk the candidate list in this context, and the letters
-    // that would have been mnemonic (`S` solid, `E` edge, `A` anchor) are all taken by the Global
-    // camera row. `Z, X, C, V` is a run under the left hand, and those letters are free HERE precisely
-    // because they are Map bindings and the two tabs are never live together — the case `Context`
-    // exists to model.
-    b(Action::CellLeft, KeyCode::KeyH, false, Context::Tiles, "H", "move the cell cursor"),
-    b(Action::CellForward, KeyCode::KeyJ, false, Context::Tiles, "J", "move the cell cursor"),
-    b(Action::CellBack, KeyCode::KeyK, false, Context::Tiles, "K", "move the cell cursor"),
-    b(Action::CellRight, KeyCode::KeyL, false, Context::Tiles, "L", "move the cell cursor"),
+    // `W, A, S, D` moves the cursor, because that is what those keys mean everywhere and the lattice
+    // is a grid you walk. They are free here precisely because panning is the Map's — the two tabs are
+    // never live together, which is the case `Context` exists to model. (They were `H J K L`; `K` had
+    // to go when the shortcuts overlay took it, and moving one key of a cluster is worse than moving
+    // the cluster.) `Z, X, C, V` is the run under the left hand, free here for the same reason.
+    b(Action::CellForward, KeyCode::KeyW, false, Context::Tiles, "W", "move the cell cursor"),
+    b(Action::CellLeft, KeyCode::KeyA, false, Context::Tiles, "A", "move the cell cursor"),
+    b(Action::CellBack, KeyCode::KeyS, false, Context::Tiles, "S", "move the cell cursor"),
+    b(Action::CellRight, KeyCode::KeyD, false, Context::Tiles, "D", "move the cell cursor"),
     b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer down / up"),
     b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer down / up"),
     b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / anchor / clear"),
@@ -487,7 +492,7 @@ mod tests {
     fn every_action_has_exactly_one_binding() {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
-            Action::Save, Action::Undo,
+            Action::Save, Action::Undo, Action::Shortcuts,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
             Action::Fill, Action::Remove, Action::RenameMap,
             Action::OwnToggle, Action::Generate,
@@ -588,32 +593,55 @@ mod tests {
 
     /// Four keys, one idea. The displayed list collapses them rather than repeating the word.
     ///
-    /// Read from `Global`, not `Map`: the camera moved there when dispatch started enforcing context,
-    /// because `view::drive` had never consulted one and pan/turn worked on every tab. See the note
-    /// beside those rows in the census.
+    /// Pan is the map's and turning the view is everyone's, so the two collapsed rows live in
+    /// different contexts — and `W, A, S, D` means a second thing in the Tiles tab, which is legal
+    /// because those two are never live together.
     #[test]
     fn keys_that_do_one_thing_share_a_row() {
-        let global = rows(Context::Global);
-        let pan = global
+        let map = rows(Context::Map);
+        let pan = map
             .iter()
             .find(|r| r.does == "pan")
             .unwrap_or_else(|| panic!("no pan row"));
         assert_eq!(pan.chord, "W, A, S, D");
-        assert_eq!(global.iter().filter(|r| r.does == "pan").count(), 1);
+        assert_eq!(map.iter().filter(|r| r.does == "pan").count(), 1);
 
-        let turn = global
-            .iter()
+        let turn = rows(Context::Global)
+            .into_iter()
             .find(|r| r.does == "turn view")
             .unwrap_or_else(|| panic!("no turn row"));
         assert_eq!(turn.chord, "Q, E");
 
-        // And the aim pair, which is genuinely map-only, still collapses in `Map`.
-        let map = rows(Context::Map);
         let aim = map
             .iter()
             .find(|r| r.does == "aim left / right")
             .unwrap_or_else(|| panic!("no aim row"));
         assert_eq!(aim.chord, "Z, C");
+
+        // The same four chords, a different job, one row — the Tiles lattice cursor.
+        let cursor = rows(Context::Tiles)
+            .into_iter()
+            .find(|r| r.does == "move the cell cursor")
+            .unwrap_or_else(|| panic!("no cursor row"));
+        assert_eq!(cursor.chord, "W, A, S, D");
+    }
+
+    /// **The overlay key is held, not tapped.** `pressed` must answer for it while it is down —
+    /// `just_pressed` is true for one frame, which would make the list flicker rather than show.
+    #[test]
+    fn the_shortcuts_key_reads_as_held() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        input.press(binding(Action::Shortcuts).key);
+        for tab in [Context::Map, Context::Tiles, Context::Anim] {
+            assert!(
+                pressed(&input, tab, Action::Shortcuts),
+                "the shortcuts overlay must be reachable from {tab:?}"
+            );
+        }
+        assert!(
+            !pressed(&input, Context::Typing, Action::Shortcuts),
+            "and must not open while a field is taking keys"
+        );
     }
 
     /// Collapsing must not lose a binding — every one still appears in exactly one row.

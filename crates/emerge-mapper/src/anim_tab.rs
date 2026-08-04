@@ -23,7 +23,6 @@ use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::rigs::{Playback, Rigs};
 
 use crate::chrome::{ACCENT, DANGER, DIM, LABEL, ROW_BG, ROW_SELECTED, TEXT};
-use crate::keys::Context;
 use crate::tiles::{AnimRoot, Mode};
 
 /// What the bench is looking at.
@@ -111,7 +110,7 @@ fn spawn_panels(mut commands: Commands) {
     .insert(AnimRoot)
     .with_children(|p| {
         crate::chrome::title(p, "ANIMATION");
-        crate::chrome::key_census(p, &[Context::Anim, Context::Global]);
+        crate::chrome::shortcut_hint(p);
         p.spawn((
             Text::new(""),
             TextColor(DIM),

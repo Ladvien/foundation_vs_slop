@@ -25,7 +25,7 @@ use emerge_core::descriptor::{mount_label, mount_options, Descriptor};
 use emerge_core::import::{self, Candidate, Severity};
 
 use crate::chrome::{ACCENT, DANGER, DIM, HEADER_BG, LABEL, PANEL_BG, ROW_BG, ROW_SELECTED, TEXT};
-use crate::keys::{self, Action, Context};
+use crate::keys::{self, Action};
 use crate::project::Project;
 
 /// Which job the editor is doing.
@@ -1172,7 +1172,7 @@ fn spawn_tiles_panel(mut commands: Commands) {
     .insert(TilesRoot)
     .with_children(|p| {
         crate::chrome::title(p, "TILE CONFIGURATION");
-        crate::chrome::key_census(p, &[Context::Tiles, Context::Global]);
+        crate::chrome::shortcut_hint(p);
 
         p.spawn((
             Text::new(""),

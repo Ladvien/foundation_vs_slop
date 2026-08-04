@@ -129,6 +129,19 @@ def key(name, mod=None):
     time.sleep(0.2)
 
 
+# **Held keys, separately.** `key()` sends down-then-up, which cannot drive anything read with
+# `keys::pressed` rather than `just_pressed` — the shortcuts overlay is shown only while its key is
+# down, so a tap opens and closes it inside one frame and a screenshot catches nothing.
+def keydown(name):
+    _post(VK[name], True, 0)
+    time.sleep(0.15)
+
+
+def keyup(name):
+    _post(VK[name], False, 0)
+    time.sleep(0.15)
+
+
 def scroll(clicks):
     ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, int(clicks))
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
@@ -150,5 +163,7 @@ if __name__ == "__main__":
         scroll(float(sys.argv[2]))
     elif cmd == "key":
         key(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    elif cmd in ("keydown", "keyup"):
+        {"keydown": keydown, "keyup": keyup}[cmd](sys.argv[2])
     else:
         raise SystemExit(f"unknown command {cmd}")
