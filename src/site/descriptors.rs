@@ -46,9 +46,14 @@ use emerge_core::policy::{Match, Patch, Policy, POLICY_VERSION};
 use super::kit::{KitPiece, SiteKit};
 use super::pieces::{target_height, SitePiece};
 
-/// Where the converted pair lives, as a project directory `emerge_core::policy::layered_library`
-/// can open.
+/// Where the shipped kit's pair lives, as a project directory
+/// `emerge_core::policy::layered_library` can open.
 pub const SITE_PROJECT_DIR: &str = "assets/emerge/site";
+
+/// The greybox kit's pair. Two kits, two projects — the same argument the two files make today:
+/// re-skinning the Site is authoring, not code. A greybox wall is a 1 m module stretched to 2.4 m,
+/// which is exactly the policy content the Ozea kit mostly does not need.
+pub const GREYBOX_PROJECT_DIR: &str = "assets/emerge/site_greybox";
 
 /// The descriptor id for a piece — `site/wall`, `site/mess_table`.
 ///

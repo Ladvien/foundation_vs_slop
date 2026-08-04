@@ -19,14 +19,25 @@ use std::path::Path;
 use emerge_core::descriptor::Mount;
 use emerge_core::library::Library;
 use emerge_core::policy::Policy;
-use foundation_vs_slop::site::descriptors::{self, id_of, SITE_PROJECT_DIR};
-use foundation_vs_slop::site::kit::{SiteKit, SITE_KIT_PATH};
+use foundation_vs_slop::site::descriptors::{self, id_of, GREYBOX_PROJECT_DIR, SITE_PROJECT_DIR};
+use foundation_vs_slop::site::kit::{SiteKit, GREYBOX_KIT_PATH, SITE_KIT_PATH};
 use foundation_vs_slop::site::pieces::SitePiece;
 
 fn kit() -> SiteKit {
-    let text = std::fs::read_to_string(SITE_KIT_PATH)
-        .unwrap_or_else(|e| panic!("{SITE_KIT_PATH}: {e}"));
-    ron::from_str(&text).unwrap_or_else(|e| panic!("{SITE_KIT_PATH}: {e}"))
+    kit_at(SITE_KIT_PATH)
+}
+
+fn kit_at(path: &str) -> SiteKit {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    ron::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// Every shipped kit, and where its converted pair lives.
+fn kits() -> [(&'static str, &'static str); 2] {
+    [
+        (SITE_KIT_PATH, SITE_PROJECT_DIR),
+        (GREYBOX_KIT_PATH, GREYBOX_PROJECT_DIR),
+    ]
 }
 
 /// **Every measurement crosses unchanged.** This is the plan's Stage 1 gate — *"converted descriptors
@@ -180,8 +191,9 @@ fn the_converted_library_validates() {
 #[test]
 fn the_committed_site_project_matches_the_kit() {
     let write = std::env::var("EMERGE_WRITE_SITE").as_deref() == Ok("1");
-    let kit = kit();
-    let dir = Path::new(SITE_PROJECT_DIR);
+    for (kit_path, project_dir) in kits() {
+    let kit = kit_at(kit_path);
+    let dir = Path::new(project_dir);
 
     let files = [
         ("library.ron", descriptors::library(&kit).to_ron()),
@@ -220,4 +232,37 @@ fn the_committed_site_project_matches_the_kit() {
         let layered = emerge_core::policy::layered_library(dir).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(layered.descriptors.len(), SitePiece::ALL.len());
     }
+    }
+}
+
+/// **Two kits, two architectures, one set of ids.** The greybox kit is a 1 m module set, so its
+/// policy stretches a wall by 2.4 while the Ozea kit's leaves it alone — the same descriptor ids, the
+/// same field, wildly different numbers.
+///
+/// This is the argument for the split made concrete: if the stretch lived in the library, swapping
+/// kits would mean swapping measurements *and* architecture together, and there would be no file that
+/// said which was which.
+#[test]
+fn the_two_kits_state_the_same_architecture_with_different_numbers() {
+    let ozea = kit_at(SITE_KIT_PATH);
+    let greybox = kit_at(GREYBOX_KIT_PATH);
+
+    let wall = id_of(SitePiece::Wall);
+    let stretch = |kit: &SiteKit| -> f32 {
+        descriptors::policy(kit)
+            .apply(&descriptors::library(kit))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .get(&wall)
+            .and_then(|d| d.align.stretch_y)
+            .unwrap_or(1.0)
+    };
+
+    let (a, b) = (stretch(&ozea), stretch(&greybox));
+    assert_ne!(
+        a, b,
+        "both kits stretch a wall by {a} — one of them is not being read"
+    );
+    // Each reproduces its own kit exactly, which is the only claim that matters.
+    assert_eq!(a, ozea.y_scale(SitePiece::Wall));
+    assert_eq!(b, greybox.y_scale(SitePiece::Wall));
 }
