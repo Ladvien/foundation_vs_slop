@@ -16,6 +16,10 @@ emerge-core = { path = "../emerge-core" }
 # own copy, so a map cannot look one way here and another in the game — the failure `bake.rs` and
 # `site_editor::source_map` demonstrated by independently growing the same RON writer.
 emerge-bevy = { path = "../emerge-bevy" }
+# The game's own pose blender. The bench previews through THIS rather than a copy, on the same
+# argument `emerge-bevy` makes for `spawn_descriptor`: a rig cannot move one way here and another in
+# the game if there is only one blender.
+emerge-anim = { path = "../emerge-anim" }
 # The editor is a Bevy app in its own right, not a mode of the game. `sim_harness.rs` is the precedent
 # the plan cites for two binaries over one plugin graph — "not a second code path".
 # `bevy_dev_tools` is what carries `infinite_grid` — verified in the vendored source at

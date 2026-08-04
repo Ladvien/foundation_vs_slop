@@ -79,6 +79,21 @@ pub fn flood(
     yaw: f32,
     mut next_id: impl FnMut() -> String,
 ) -> Result<Filled, String> {
+    // **A fill covers open floor, so a piece that mounts on something cannot be filled with.**
+    // `stack::placement_at` already refuses such a piece cell by cell — that is the rule the click
+    // path obeys — but the fill never asked, so it wrote one placement per cell that could never rest
+    // anywhere and was never drawn. A measured run left **4,089 invisible lamps** in the map, all of
+    // them saveable, none of them on screen: the file and the screen disagreeing, which is the exact
+    // failure the one-path rule exists to prevent. Refused here, in the same shape as the other two
+    // refusals, so there is one answer to "may this piece go here" rather than two.
+    if let Some(class) = emerge_core::stack::needs_surface(brush) {
+        return Err(format!(
+            "`{}` goes on a `{class}` surface, so it cannot be flood filled — a fill covers open \
+             floor and none of these cells offers one. Place it on a surface instead.",
+            brush.id
+        ));
+    }
+
     let (cell_x, cell_z) = cell_extents(brush, yaw);
     // From the map, never re-derived here: `floor_rect` owns the centre-on-origin convention.
     let (min_x, min_z, max_x, max_z) = map.floor_rect();
@@ -183,6 +198,27 @@ mod tests {
             n += 1;
             format!("f{n}")
         }
+    }
+
+    /// **The 4,089 invisible lamps.** A surface-mounted piece has no floor answer, so filling with one
+    /// wrote a placement per cell that `stack` would refuse and `spawn_range` could never draw — the
+    /// map held thousands of rows that were saveable and invisible. The refusal is the whole fill, up
+    /// front, rather than a per-cell decision the caller then ignored.
+    #[test]
+    fn a_surface_piece_cannot_be_filled_with() {
+        use emerge_core::descriptor::Mount;
+        let lamp = Descriptor {
+            id: "lamp_tall".into(),
+            mount: Some(Mount::OnSurface {
+                class: "worktop".into(),
+            }),
+            ..brush(0.5)
+        };
+        let m = map((4.0, 3.0, 4.0));
+        let e = flood(&m, &lamp, (0.5, 0.5), 0.0, ids())
+            .err()
+            .unwrap_or_else(|| panic!("a fill with a surface piece must be refused, not written"));
+        assert!(e.contains("worktop"), "the refusal must name the surface it wants: {e}");
     }
 
     #[test]

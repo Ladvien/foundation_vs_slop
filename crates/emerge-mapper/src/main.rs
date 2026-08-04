@@ -30,9 +30,12 @@
 //! system** when a second 3D camera exists, and that **every run condition is evaluated** — no
 //! short-circuit — so a bare `Res<T>` in a `.run_if` panics whenever that resource is absent.
 
+mod anim_tab;
+mod chrome;
 mod devshot;
 mod editor;
 mod fill;
+mod filter;
 mod keys;
 mod tiles;
 mod project;
@@ -63,7 +66,26 @@ fn main() {
     };
 
     let project_name = project.map.name.clone();
-    App::new()
+
+    // **The real face, read before the window exists.** Bevy's embedded default is
+    // `FiraMono-subset.ttf`, **95 codepoints** of bare ASCII (`bevy_text-0.19.0/src/lib.rs:82`), so
+    // every `—` in the editor's copy — and in the refusals `emerge-core` hands back — drew as a tofu
+    // box. `docs/ui.md` §5 records the same trap costing the game 54 live sites across 10 glyphs.
+    //
+    // Read here rather than through the `AssetServer` because a font that arrives a frame late is a
+    // frame of tofu, and fatal rather than optional for the same reason the project is: an editor
+    // that cannot draw its own labels has nothing useful to show.
+    let font_path = root.join("assets/fonts/FiraMono-Regular.ttf");
+    let font_data = match std::fs::read(&font_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("emerge-mapper: cannot read {}: {e}", font_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let mut app = App::new();
+    app
         .add_plugins(
             DefaultPlugins
                 .set(AssetPlugin {
@@ -100,11 +122,37 @@ fn main() {
         // — the alternative is forty constants that drift apart the first time one is missed.
         .insert_resource(UiScale(1.2))
         .add_plugins((
+            // First: it owns `keys::Live`, which the other three plugins' systems take as a
+            // `Res<_>` — and in 0.19 a missing one panics the system rather than skipping it.
+            keys::KeysPlugin,
             view::ViewPlugin,
             editor::EditorPlugin,
             thumbs::ThumbsPlugin,
             tiles::TilesPlugin,
+            anim_tab::AnimTabPlugin,
             devshot::DevShotPlugin,
-        ))
-        .run();
+        ));
+
+    // **Replace the default face rather than hand a handle to 41 call sites.** `TextFont::default()`
+    // names `AssetId::default()`, which is exactly where `TextPlugin` puts the subset
+    // (`bevy_text-0.19.0/src/lib.rs:146`) — so overwriting that one asset re-points every existing
+    // `TextFont::from_font_size` at the full 1350-codepoint face at once.
+    //
+    // This is deliberately NOT the game's `FontAssets` pattern (`docs/ui.md` §5). That rule exists
+    // because a call site reaching for `Handle::default()` got the subset; here the default IS the
+    // shipped face, so there is no second thing to reach for and no site that can forget. One binary,
+    // one face, one place it is decided.
+    match app
+        .world_mut()
+        .resource_mut::<Assets<Font>>()
+        .insert(AssetId::default(), Font::from_bytes(font_data))
+    {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("emerge-mapper: cannot install {}: {e}", font_path.display());
+            std::process::exit(1);
+        }
+    }
+
+    app.run();
 }

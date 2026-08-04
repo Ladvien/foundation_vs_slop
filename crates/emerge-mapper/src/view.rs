@@ -72,7 +72,7 @@ impl Plugin for ViewPlugin {
         app.add_plugins(InfiniteGridPlugin)
             .init_resource::<Rig>()
             .add_systems(Startup, setup)
-            .add_systems(Update, drive);
+            .add_systems(Update, drive.in_set(keys::Phase::Act));
     }
 }
 
@@ -126,6 +126,10 @@ fn setup(mut commands: Commands, rig: Res<Rig>) {
 fn drive(
     time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
+    // **The whole system cannot be gated**, because its tail writes the camera transform every frame
+    // — a run condition here would freeze the view rather than ignore a key. So the context is a
+    // parameter and `keys::just_pressed` does the refusing, per key, in the one place that decides it.
+    live: Res<keys::Live>,
     scroll: Res<AccumulatedMouseScroll>,
     // The wheel belongs to whatever is under the cursor: a scrolling palette and a zooming camera
     // both want it, and reading the raw wheel means scrolling the list also zooms the world out from
@@ -143,10 +147,10 @@ fn drive(
     }
 
     let step = TAU / ROTATION_STEPS as f32;
-    if keys::just_pressed(&keys, Action::TurnViewLeft) {
+    if keys::just_pressed(&keys, live.0, Action::TurnViewLeft) {
         rig.goal_yaw += step;
     }
-    if keys::just_pressed(&keys, Action::TurnViewRight) {
+    if keys::just_pressed(&keys, live.0, Action::TurnViewRight) {
         rig.goal_yaw -= step;
     }
     // Ease toward the detent rather than snapping, so a rapid double-tap reads as one smooth turn.
@@ -166,7 +170,7 @@ fn drive(
         (Action::PanLeft, Vec2::new(-1.0, 0.0)),
         (Action::PanRight, Vec2::new(1.0, 0.0)),
     ] {
-        if keys::pressed(&keys, action) {
+        if keys::pressed(&keys, live.0, action) {
             wish += dir;
         }
     }

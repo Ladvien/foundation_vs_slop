@@ -18,9 +18,13 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::camera::visibility::ViewVisibility;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as UiButton, ScrollArea};
+use bevy::ui_widgets::{Activate, Button as UiButton};
 use emerge_core::map::Placed;
 
+use crate::chrome::{
+    ACCENT, DANGER, DIM, HEADER_BG, LABEL, LIST_W, PANEL_BG, ROW_BG, ROW_SELECTED, SLOT_BG,
+    TEXT,
+};
 use crate::keys::{self, Action, Context};
 use crate::project::Project;
 use crate::view::{cursor_ground, MainCamera};
@@ -30,28 +34,21 @@ const SNAP: f32 = 0.5;
 /// Yaw snap, degrees.
 const YAW_STEP: f32 = 15.0;
 
-const PANEL_BG: Color = Color::srgb(0.058, 0.054, 0.047);
-const ROW_BG: Color = Color::srgb(0.098, 0.092, 0.082);
-const ROW_ARMED: Color = Color::srgb(0.30, 0.28, 0.24);
-const TEXT: Color = Color::srgb(0.86, 0.84, 0.80);
-const TEXT_DIM: Color = Color::srgb(0.58, 0.56, 0.53);
-const ACCENT: Color = Color::srgb(0.90, 0.66, 0.24);
-/// The key column. Brighter than the description beside it, because the key is what you scan for.
-const KEY: Color = Color::srgb(0.74, 0.71, 0.66);
-/// The readout's label column — quieter than its value, which is the thing that changes.
-const LABEL: Color = Color::srgb(0.46, 0.44, 0.42);
-const DANGER: Color = Color::srgb(0.86, 0.36, 0.30);
-/// Empty preview tile, so an un-baked row reads as "not yet" rather than as a hole in the panel.
-const SLOT_BG: Color = Color::srgb(0.14, 0.135, 0.125);
-/// A category heading — quieter than a row, because it is a signpost rather than a thing to click on
-/// most of the time.
-const HEADER_BG: Color = Color::srgb(0.075, 0.070, 0.063);
-
 /// Where a descriptor with no `kind` goes. Named rather than hidden: an untagged piece is work to do,
 /// and a palette that quietly omitted it would be a palette missing pieces.
 const UNSORTED: &str = "unsorted";
 /// The map's edge. Dim enough not to compete with the grid, bright enough to find.
 const BOUNDS_LINE: Color = Color::srgb(0.42, 0.38, 0.30);
+
+/// The removal marker. Red because it is the one destructive tool here, and translucent because the
+/// thing it covers is the thing being asked about — an opaque marker would hide the answer.
+const REMOVE_TINT: Color = Color::srgba(0.86, 0.20, 0.16, 0.38);
+/// How far the marker floats above the floor, metres. Enough to beat z-fighting against a floor tile
+/// it is lying exactly on top of, small enough to still read as flat on the ground.
+const MARKER_LIFT: f32 = 0.02;
+/// A press-and-release inside this many metres is a click, not a drag — so "click one piece" and
+/// "drag a box" are the same gesture told apart by distance rather than by a second modifier.
+const CLICK_EPS: f32 = 0.2;
 
 /// Edge of a palette row's preview box, logical px.
 const THUMB_SLOT: f32 = 30.0;
@@ -94,7 +91,25 @@ pub struct EditorState {
     renaming: Option<String>,
     /// What can be undone, most recent last. See [`Undo`].
     undo: Vec<Undo>,
+    /// Is the removal tool armed?
+    ///
+    /// A **bool here and the drag in [`RemovalDrag`]**, not one struct: `rebuild_palette` runs on
+    /// `resource_changed::<EditorState>`, and a drag corner written every frame would tear the whole
+    /// palette down and rebuild it at frame rate. This flips twice per use; that one lives elsewhere.
+    pub removing: bool,
 }
+
+/// The rectangle being dragged out, in map space. Deliberately its own resource — see
+/// [`EditorState::removing`] for why it is not a field on the state everything else watches.
+#[derive(Resource, Default)]
+pub struct RemovalDrag {
+    /// Where the button went down, or `None` while only hovering.
+    from: Option<(f32, f32)>,
+}
+
+/// The translucent red marker: the hovered piece's footprint, or the dragged rectangle.
+#[derive(Component)]
+struct RemovalTile;
 
 /// One reversible edit.
 ///
@@ -106,6 +121,11 @@ enum Undo {
     Added { count: usize },
     /// Put a removed placement back where it was, at its old index.
     Removed { index: usize, placed: Box<Placed> },
+    /// Put back everything one drag took out. **Ascending by index**, which is what lets them go
+    /// back in that order and each land where it came from — an earlier row returning first shifts
+    /// the later ones into place. One entry for the whole rectangle, on the same argument the fill
+    /// makes: a box the author drew once is one act to undo once.
+    RemovedMany { items: Vec<(usize, Box<Placed>)> },
 }
 
 impl Default for EditorState {
@@ -121,15 +141,9 @@ impl Default for EditorState {
             pinning: None,
             renaming: None,
             undo: Vec::new(),
+            removing: false,
         }
     }
-}
-
-/// A map-size nudge button: which axis, and by how much.
-#[derive(Component, Clone, Copy)]
-struct SizeNudge {
-    axis: Axis,
-    delta: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -161,14 +175,26 @@ impl Axis {
             Axis::Z => b.2 = v,
         }
     }
-    /// One click of this axis. X and Z move in whole rooms; Y moves in half a storey, because a
-    /// ceiling is the one dimension an author tunes rather than lays out.
-    fn step(self) -> f32 {
-        match self {
-            Axis::X | Axis::Z => 4.0,
-            Axis::Y => 0.5,
-        }
-    }
+}
+
+/// A map may not be smaller than this on any axis, metres. One, not zero: a zero-width map has no
+/// floor to point at, and `fill` would refuse every cell in it for a reason that reads like a bug.
+const MIN_BOUND: u32 = 1;
+/// And no larger. 512 m at 0.5 m cells is past what one fill can cover and far past what an author
+/// can see; a typo of one extra digit should be refused rather than resolved into a map nobody meant.
+const MAX_BOUND: u32 = 512;
+
+/// One clickable size field.
+#[derive(Component, Clone, Copy)]
+struct SizeField(Axis);
+
+/// Which size field is being typed into, and the digits so far.
+///
+/// Its own resource for the reason [`RemovalDrag`] is: `rebuild_palette` watches `EditorState`, and a
+/// keystroke landing there would tear down and rebuild all forty-one palette rows per character.
+#[derive(Resource, Default)]
+pub struct SizeEdit {
+    active: Option<(Axis, String)>,
 }
 
 /// The value text of one axis row, refreshed as the size changes.
@@ -190,6 +216,13 @@ struct PaletteRow(usize);
 /// A spawned instance of a map placement, tagged with the id it came from.
 #[derive(Component)]
 pub struct Placement(pub String);
+
+/// **The grid step the map is read on**, metres.
+///
+/// Shared by `generate` and `check_edges` on purpose: the learned grammar and the edge check must
+/// agree about which two placements are neighbours, or the tool would report a fault between pieces
+/// the solver does not think touch.
+const CELL: f32 = 1.0;
 
 /// The see-through preview of the armed brush.
 #[derive(Component)]
@@ -228,11 +261,18 @@ enum Field {
     /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
     /// so two lines.
     Hint,
+    /// **Where the map disagrees with the tokens the tiles declare.**
+    ///
+    /// See `emerge_core::adjacency`. A standing readout rather than a message, because a fault is a
+    /// state the map is in — it does not happen once and stop being true, so putting it on
+    /// [`Self::Last`] would let the next action erase it.
+    Edges,
 }
 
 impl Field {
     fn label(self) -> &'static str {
         match self {
+            Field::Edges => "EDGES",
             Field::Name => "NAME",
             Field::Brush => "BRUSH",
             Field::Yaw => "YAW",
@@ -248,12 +288,28 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
+            .init_resource::<RemovalDrag>()
+            .init_resource::<SizeEdit>()
+            .init_resource::<EdgeFaults>()
+            // Shared by both tabs' lists, so it is registered once here rather than by whichever
+            // plugin happens to build first.
+            .init_resource::<crate::filter::Filters>()
+            .add_systems(
+                Update,
+                (
+                    crate::filter::keys.in_set(keys::Phase::Text),
+                    crate::filter::refresh,
+                ),
+            )
+            .add_observer(crate::filter::on_click)
             .add_systems(
                 Startup,
                 (
                     crate::thumbs::setup,
                     spawn_panel,
+                    spawn_palette_panel,
                     spawn_cost_readout,
+                    spawn_removal_tile,
                     spawn_existing,
                 )
                     .chain(),
@@ -261,10 +317,21 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
-                    rename_keys,
-                    pin_reason_keys,
-                    keys.run_if(not_renaming).run_if(in_map_mode),
-                    place_on_click.run_if(not_renaming).run_if(in_map_mode),
+                    // **The fields run last and the actions run first**, so no census action can
+                    // fire on a keystroke a field has already swallowed. See `keys::Phase`.
+                    rename_keys.in_set(keys::Phase::Text),
+                    pin_reason_keys.in_set(keys::Phase::Text),
+                    size_edit_keys.in_set(keys::Phase::Text),
+                    // No `not_typing`, no `in_map_mode`: `keys::just_pressed` now refuses on both
+                    // counts, and a run condition repeating it would be a second census. Dropping
+                    // `in_map_mode` also makes `Cmd+S` and `Cmd+Z` work from every tab, which is what
+                    // the census has always said they do (`Context::Global`) and what the guard
+                    // quietly contradicted.
+                    keys.in_set(keys::Phase::Act),
+                    // These two stay gated: they read the MOUSE, which the census does not model, so
+                    // context is not their guard. Mode is.
+                    place_on_click.run_if(not_typing).run_if(in_map_mode),
+                    drive_removal.run_if(not_typing).run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
                     fade_ghost,
                     style_rows,
@@ -276,16 +343,19 @@ impl Plugin for EditorPlugin {
                         // panic on launch.
                         resource_changed::<Project>
                             .or_else(resource_changed::<EditorState>)
+                            .or_else(resource_changed::<crate::filter::Filters>)
                             .or_else(run_once),
                     ),
                     refresh_size,
                     refresh_triangle_total,
                     draw_bounds,
+                    check_edges.run_if(resource_changed::<Project>.or_else(run_once)),
+                    draw_edge_faults.run_if(in_map_mode),
                 ),
             )
             .add_observer(on_row_click)
             .add_observer(on_category_click)
-            .add_observer(on_size_nudge);
+            .add_observer(on_size_field_click);
     }
 }
 
@@ -314,7 +384,7 @@ fn spawn_cost_readout(mut commands: Commands) {
         .with_children(|p| {
             p.spawn((
                 Text::new(""),
-                TextColor(TEXT_DIM),
+                TextColor(DIM),
                 TextFont::from_font_size(11.0),
                 TriangleTotal,
             ));
@@ -324,85 +394,19 @@ fn spawn_cost_readout(mut commands: Commands) {
 /// Build the panel's fixed furniture. The palette itself is `rebuild_palette`'s, which is why neither
 /// the project nor the thumbnails are read here — they were parameters that had stopped being used.
 fn spawn_panel(mut commands: Commands) {
-    let root = commands
-        .spawn((
-            crate::tiles::MapRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(12.0),
-                top: Val::Px(crate::tiles::TAB_STRIP_BOTTOM),
-                width: Val::Px(300.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
-                padding: UiRect::all(Val::Px(12.0)),
-                ..default()
-            },
-            // Opaque, not the game's translucent HUD panel. An editor panel is a work surface, and a
-            // researcher in a white coat behind a translucent one is unreadable — measured.
-            BackgroundColor(PANEL_BG),
-            GlobalZIndex(100),
-        ))
-        .id();
+    let root = crate::chrome::panel_root(
+        &mut commands,
+        crate::chrome::Side::Left,
+        crate::chrome::CONTROLS_W,
+        false,
+        false,
+    )
+    .insert(crate::tiles::MapRoot)
+    .id();
 
     commands.entity(root).with_children(|p| {
-        p.spawn((
-            Text::new("EMERGE MAPPER"),
-            TextColor(ACCENT),
-            TextFont::from_font_size(15.0),
-        ));
-        // **The keys, inline and in a column — read from the census, never retyped.**
-        //
-        // `docs/ui.md` §3.5 records what happens otherwise: key allocation lived in five prose
-        // censuses and all five drifted to the same wrong answer. A panel that types its own key list
-        // is a sixth. This renders `keys::in_context`, so a binding that changes changes here.
-        //
-        // Two aligned columns rather than a run-on line: a run-on wraps unpredictably at any width,
-        // and the eye finds a row in a table without reading the others.
-        p.spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(1.0),
-            margin: UiRect::top(Val::Px(2.0)),
-            ..default()
-        })
-        .with_children(|list| {
-            for row_def in keys::rows(Context::Map)
-                .into_iter()
-                .chain(keys::rows(Context::Global))
-            {
-                list.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    // A guaranteed gutter, so the widest chord still has air before its label.
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            // **`min_width`, not `width`.** A fixed width does not clip or shrink its
-                            // text — an over-long chord simply draws past the column and lands on top
-                            // of the label beside it, which is exactly what "W, A, S, D" did to
-                            // "pan". `min_width` keeps the column aligned for every row that fits and
-                            // lets the one that does not push its label right instead of through it.
-                            min_width: Val::Px(78.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(row_def.chord.clone()),
-                        TextColor(KEY),
-                        TextFont::from_font_size(11.0),
-                        // No wrap: a chord with a space in it is one token to a reader and two to a
-                        // line-breaker.
-                        TextLayout::new(Justify::Left, LineBreak::NoWrap),
-                    ));
-                    row.spawn((
-                        Text::new(row_def.does),
-                        TextColor(TEXT_DIM),
-                        TextFont::from_font_size(11.0),
-                    ));
-                });
-            }
-        });
+        crate::chrome::title(p, "EMERGE MAPPER");
+        crate::chrome::key_census(p, &[Context::Map, Context::Global]);
 
         // The readout, in the same two columns as the keys so the whole panel shares one left edge.
         p.spawn((
@@ -422,6 +426,7 @@ fn spawn_panel(mut commands: Commands) {
                 Field::Map,
                 Field::Last,
                 Field::Hint,
+                Field::Edges,
             ] {
                 s.spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -483,57 +488,72 @@ fn spawn_panel(mut commands: Commands) {
                         TextColor(LABEL),
                         TextFont::from_font_size(11.0),
                     ));
-                    for (glyph, delta) in [("-", -axis.step()), ("+", axis.step())] {
-                        row.spawn((
-                            UiButton,
-                            Hovered::default(),
-                            SizeNudge { axis, delta },
-                            Node {
-                                width: Val::Px(18.0),
-                                justify_content: JustifyContent::Center,
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            BackgroundColor(ROW_BG),
-                        ))
-                        .with_children(|b| {
-                            b.spawn((
-                                Text::new(glyph),
-                                TextColor(KEY),
-                                TextFont::from_font_size(11.0),
-                            ));
-                        });
-                    }
+                    // **A field, not a pair of nudges.** Stepping to 48 m from 32 was four clicks
+                    // and no way to say the number; the author knows the size they want, so the
+                    // control should let them state it. Click to focus, type digits, Enter to keep.
                     row.spawn((
-                        Text::new(""),
-                        TextColor(TEXT),
-                        TextFont::from_font_size(11.0),
-                        SizeReadout(axis),
-                    ));
+                        UiButton,
+                        Hovered::default(),
+                        SizeField(axis),
+                        Node {
+                            width: Val::Px(56.0),
+                            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        BackgroundColor(ROW_BG),
+                    ))
+                    .with_children(|f| {
+                        f.spawn((
+                            Text::new(""),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(11.0),
+                            SizeReadout(axis),
+                        ));
+                    });
                 });
             }
         });
 
+    });
+}
+
+/// **The palette, in its own panel against the right edge.**
+///
+/// It used to be the last child of the panel above, which meant it was handed whatever vertical space
+/// the keys, the status block and the map-size rows had not already taken. At `UiScale(1.2)` on a
+/// 1280×802 logical screen that is 668 UI px of budget against ~447 px of everything else — so the
+/// list rendered *two* rows and the rest ran off the bottom of the screen. The `max_height` it carried
+/// was never reached and never did anything.
+///
+/// A panel pinned to BOTH insets cannot have that failure: `top` and `bottom` together give the node a
+/// height taken from the viewport rather than from its content, so the list has a bottom to stop at
+/// and the scroll area is bounded by construction. Nothing above it can push it off-screen, because
+/// there is no longer anything above it.
+///
+/// Right edge rather than a second column beside the keys: the left panel keeps its width, and the map
+/// stays visible in the band between them, which is the thing being authored.
+fn spawn_palette_panel(mut commands: Commands) {
+    crate::chrome::panel_root(
+        &mut commands,
+        crate::chrome::Side::Right,
+        LIST_W,
+        // Pinned top AND bottom — the whole point of this panel.
+        true,
+        false,
+    )
+    // Tagged like the panel above so `tiles::apply_mode` hides it with the rest of the map tab — it
+    // iterates every `MapRoot`, so a second one needs no change there. Without this the palette would
+    // sit over the tiles tab offering pieces that tab cannot place.
+    .insert(crate::tiles::MapRoot)
+    .with_children(|p| {
         p.spawn((
             Text::new("PLACE"),
             TextColor(LABEL),
             TextFont::from_font_size(10.0),
-            Node {
-                margin: UiRect::top(Val::Px(8.0)),
-                ..default()
-            },
         ));
-        p.spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(2.0),
-                max_height: Val::Px(520.0),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            ScrollArea::default(),
-            PaletteList,
-        ));
+        crate::filter::spawn(p, crate::filter::Pane::Palette);
+        crate::chrome::scroll_list(p, PaletteList);
     });
 }
 
@@ -552,12 +572,27 @@ fn rebuild_palette(
     project: Res<Project>,
     state: Res<EditorState>,
     thumbs: Option<Res<crate::thumbs::Thumbnails>>,
+    filters: Res<crate::filter::Filters>,
     lists: Query<Entity, With<PaletteList>>,
 ) {
     for list in &lists {
         commands.entity(list).despawn_related::<Children>();
         commands.entity(list).with_children(|p| {
-            for (category, members) in categories(&project) {
+            for (category, mut members) in categories(&project) {
+                // **The filter narrows; it never reorders.** Rows that survive keep the positions
+                // they had, so what an author learned about where a piece sits is still true —
+                // Samp 2011, via `docs/ui.md` §3.5.
+                members.retain(|ix| {
+                    project
+                        .library
+                        .descriptors
+                        .get(*ix)
+                        .is_some_and(|d| filters.keeps(crate::filter::Pane::Palette, &d.id))
+                });
+                // A heading with nothing under it is a heading about nothing.
+                if members.is_empty() {
+                    continue;
+                }
                 let folded = state.collapsed.contains(&category);
                 p.spawn((
                     UiButton,
@@ -727,40 +762,138 @@ fn on_row_click(
 /// Grow or shrink one axis. Clamped at one cell rather than at zero: a map has to enclose something,
 /// and `Map::validate` refuses a non-positive extent — better to stop at the floor than to write a
 /// map the save will then reject.
-fn on_size_nudge(
+fn on_size_field_click(
     activate: On<Activate>,
-    nudges: Query<&SizeNudge>,
+    fields: Query<&SizeField>,
+    mut edit: ResMut<SizeEdit>,
+    mut state: ResMut<EditorState>,
+) {
+    let Ok(field) = fields.get(activate.entity) else {
+        return;
+    };
+    // **Starts empty, and says so.** Seeding it with the current number meant the first digit typed
+    // appended to it — 32 became 328 — and it looked like it had worked. `rename_keys` records the
+    // same trap and the same answer: a field with no selection model starts blank, and the value it
+    // is replacing is still on screen until Enter.
+    edit.active = Some((field.0, String::new()));
+    state.status = format!(
+        "{} size: type a whole number of metres, Enter to keep it, Esc to leave it alone",
+        field.0.label()
+    );
+}
+
+/// Digits, and nothing else.
+///
+/// Filtered at the keystroke rather than validated at commit: a field that accepts `4.5` and then
+/// refuses it has taught the author it was allowed. This one simply never shows a character that
+/// cannot be part of the answer.
+fn size_edit_keys(
+    mut events: MessageReader<KeyboardInput>,
+    mut edit: ResMut<SizeEdit>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
 ) {
-    let Ok(nudge) = nudges.get(activate.entity) else {
+    if edit.active.is_none() {
         return;
-    };
-    let mut bounds = project.map.bounds;
-    let want = (nudge.axis.get(bounds) + nudge.delta).max(nudge.axis.step());
-    nudge.axis.set(&mut bounds, want);
-    if bounds != project.map.bounds {
-        project.map.bounds = bounds;
-        project.dirty = true;
-        state.status = format!(
-            "map is {:.0} x {:.1} x {:.0} m",
-            bounds.0, bounds.1, bounds.2
-        );
+    }
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some((axis, raw)) = edit.active.take() else {
+                    return;
+                };
+                if raw.is_empty() {
+                    state.status = "nothing typed; the size is unchanged".to_owned();
+                    return;
+                }
+                let Ok(want) = raw.parse::<u32>() else {
+                    // Unreachable while the filter below holds, and stated rather than assumed: an
+                    // overlong run of digits overflows `u32` and that is a refusal, not a panic.
+                    state.status = format!("`{raw}` is not a whole number of metres");
+                    return;
+                };
+                if !(MIN_BOUND..=MAX_BOUND).contains(&want) {
+                    state.status =
+                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{want}` is outside it");
+                    return;
+                }
+                let mut bounds = project.map.bounds;
+                axis.set(&mut bounds, want as f32);
+                if bounds != project.map.bounds {
+                    project.map.bounds = bounds;
+                    project.dirty = true;
+                }
+                state.status = format!(
+                    "map is {:.0} x {:.0} x {:.0} m",
+                    bounds.0, bounds.1, bounds.2
+                );
+            }
+            Key::Escape => {
+                edit.active = None;
+                state.status = "size unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Character(s) => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    // Room for `MAX_BOUND`'s three digits and no more, so the buffer cannot grow
+                    // into something `u32` has to refuse later.
+                    if s.chars().all(|c| c.is_ascii_digit()) && raw.len() < 3 {
+                        raw.push_str(s);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-fn refresh_size(project: Res<Project>, mut readouts: Query<(&SizeReadout, &mut Text)>) {
-    for (readout, mut text) in &mut readouts {
-        let v = readout.0.get(project.map.bounds);
-        // One decimal only where it earns it — "32" reads faster than "32.0", and Y is the axis that
-        // actually lands on halves.
-        let want = if (v - v.round()).abs() < 1e-3 {
-            format!("{v:.0}")
-        } else {
-            format!("{v:.1}")
+fn refresh_size(
+    project: Res<Project>,
+    edit: Res<SizeEdit>,
+    mut readouts: Query<(&SizeReadout, &mut Text, &mut TextColor)>,
+    mut fields: Query<(&SizeField, &mut BackgroundColor)>,
+) {
+    for (readout, mut text, mut colour) in &mut readouts {
+        // While a field is being typed into it shows what has been typed, with a caret — so the
+        // number on screen is always the number Enter would commit, never the one being replaced.
+        let editing = match &edit.active {
+            Some((axis, raw)) if *axis == readout.0 => Some(raw),
+            _ => None,
+        };
+        let (want, want_colour) = match editing {
+            Some(raw) => (format!("{raw}_"), ACCENT),
+            None => {
+                let v = readout.0.get(project.map.bounds);
+                // Whole metres now that the field only accepts them. A map loaded with a fractional
+                // bound still reads truthfully rather than being silently rounded on screen.
+                let text = if (v - v.round()).abs() < 1e-3 {
+                    format!("{v:.0}")
+                } else {
+                    format!("{v:.1}")
+                };
+                (text, TEXT)
+            }
         };
         if text.0 != want {
             text.0 = want;
+        }
+        if colour.0 != want_colour {
+            colour.0 = want_colour;
+        }
+    }
+
+    for (field, mut bg) in &mut fields {
+        let focused = matches!(&edit.active, Some((axis, _)) if *axis == field.0);
+        let want = if focused { SLOT_BG } else { ROW_BG };
+        if bg.0 != want {
+            bg.0 = want;
         }
     }
 }
@@ -769,6 +902,62 @@ fn refresh_size(project: Res<Project>, mut readouts: Query<(&SizeReadout, &mut T
 ///
 /// Gizmos rather than a mesh: the bounds are a statement about the map, not a thing in it, and a real
 /// box would be pickable, shadow-casting, and something a click could land on.
+/// **Every place the map disagrees with the tiles' declared edge tokens.**
+///
+/// Recomputed only when the project changes — it is O(placements^2) in the worst case and the answer
+/// cannot move while nothing has been placed, turned or removed.
+#[derive(Resource, Default)]
+pub struct EdgeFaults(pub Vec<emerge_core::adjacency::Fault>);
+
+fn check_edges(project: Res<Project>, mut faults: ResMut<EdgeFaults>) {
+    faults.0 = emerge_core::adjacency::faults(&project.map, &project.library, CELL);
+}
+
+/// Outline both halves of every fault, so the sentence in the panel has something to point at.
+///
+/// A gizmo rather than a spawned marker: it is derived from a resource that is already recomputed on
+/// change, so there is nothing to keep in step and nothing to clean up.
+fn draw_edge_faults(
+    faults: Res<EdgeFaults>,
+    project: Res<Project>,
+    heights: Query<(&Placement, &Transform)>,
+    mut gizmos: Gizmos,
+) {
+    if faults.0.is_empty() {
+        return;
+    }
+    for fault in &faults.0 {
+        for id in [fault.a.as_str(), fault.b.as_str()] {
+            if id.is_empty() {
+                continue;
+            }
+            let Some((_, tf)) = heights.iter().find(|(p, _)| p.0 == id) else {
+                continue;
+            };
+            let footprint = project
+                .map
+                .placements
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| project.library.get(&p.descriptor))
+                .and_then(|d| d.extent.footprint)
+                .unwrap_or((CELL, CELL));
+            gizmos.rect(
+                Isometry3d::new(
+                    tf.translation + Vec3::Y * 0.02,
+                    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
+                Vec2::new(footprint.0, footprint.1),
+                FAULT_LINE,
+            );
+        }
+    }
+}
+
+/// The colour a disagreeing face is outlined in — the palette's refusal colour, because a fault is
+/// the map and the tokens contradicting each other and that is a thing to fix, not a warning.
+const FAULT_LINE: Color = DANGER;
+
 fn draw_bounds(project: Res<Project>, mut gizmos: Gizmos) {
     // `floor_rect` is the floor PLAN — map space, centred on zero. Drawing happens in the world, so
     // the origin goes back on here.
@@ -794,7 +983,7 @@ fn style_rows(
 ) {
     for (row, hovered, mut bg) in &mut rows {
         let want = if row.0 == state.brush {
-            ROW_ARMED
+            ROW_SELECTED
         } else if hovered.0 {
             Color::srgb(0.16, 0.15, 0.14)
         } else {
@@ -808,6 +997,7 @@ fn style_rows(
 
 fn refresh_status(
     project: Res<Project>,
+    faults: Res<EdgeFaults>,
     state: Res<EditorState>,
     mut fields: Query<(&Field, &mut Text, &mut TextColor)>,
 ) {
@@ -820,6 +1010,16 @@ fn refresh_status(
 
     for (field, mut text, mut colour) in &mut fields {
         let (want, tint) = match field {
+            // Silent when the map agrees with itself, which is the common case and the one a standing
+            // line must not shout about. `docs/ui.md` §1.2: more information helps, noise does not.
+            Field::Edges => match faults.0.len() {
+                0 => ("ok".to_owned(), DIM),
+                1 => (faults.0[0].message.clone(), DANGER),
+                n => (
+                    format!("{n} — {}", faults.0[0].message),
+                    DANGER,
+                ),
+            },
             // While renaming, the field shows what the name WILL be, not what was typed — that is
             // what "forced" means, and seeing `site_67` appear as you type "Site 67" teaches the rule
             // without anyone having to read it.
@@ -850,7 +1050,7 @@ fn refresh_status(
                 if state.status.starts_with("NOT SAVED") {
                     DANGER
                 } else {
-                    TEXT_DIM
+                    DIM
                 },
             ),
         };
@@ -869,8 +1069,69 @@ fn refresh_status(
 /// — but every run condition IS evaluated in Bevy 0.19, with no short-circuit, so a condition reading
 /// a resource some *other* plugin owns must take the option. Worth stating next to the one place that
 /// legitimately does not.
-fn not_renaming(state: Res<EditorState>) -> bool {
-    state.renaming.is_none() && state.pinning.is_none()
+/// **Nothing that reads a tab's keys may fire while a field is taking them.**
+///
+/// This is [`crate::keys::Context::Typing`] in the census's terms — the context that overlaps every
+/// other one and suppresses all of them.
+///
+/// **One condition, every field.** There were two (`not_typing` here and `not_renaming_candidate` in
+/// `tiles.rs`), each knowing about the fields of its own tab, and a filter box would have made three:
+/// a system gated on the wrong one fires while you type, which is how `2` in a text box lands you on
+/// another tab. Every field is listed here and nowhere else, so adding one is adding a line.
+///
+/// The buffers stay with their fields — a name, a pin's reason, an axis, a candidate id and a filter
+/// hold different things and commit differently. That is five kinds of state, not one fact written
+/// five times, so this reads them rather than owning them.
+pub fn not_typing(
+    state: Res<EditorState>,
+    edit: Res<SizeEdit>,
+    import: Res<crate::tiles::ImportState>,
+    filters: Res<crate::filter::Filters>,
+    div: Res<crate::tiles::DivEdit>,
+    cell: Res<crate::tiles::CellEdit>,
+) -> bool {
+    state.renaming.is_none()
+        && state.pinning.is_none()
+        && edit.active.is_none()
+        && import.renaming.is_none()
+        && !filters.typing()
+        && !div.typing()
+        && !cell.typing()
+}
+
+/// **Decide who owns the keyboard, once, before anything reads a key.**
+///
+/// Runs in [`keys::Phase::Sense`], which is ordered before both the action systems and the text
+/// fields. That ordering is not tidiness — see [`keys::Phase`] for the defect it fixes, in which a
+/// text field cleared its own flag mid-frame and the run condition guarding `Enter` re-evaluated to
+/// true behind it, importing six descriptors into `library.ron` by accident.
+///
+/// This reads exactly the fields [`not_typing`] reads, and for the same reason: the buffers stay with
+/// their fields, so adding a field is adding a line *here* — the one list — rather than a new guard
+/// somebody else has to remember to consult.
+pub fn sense_context(
+    mode: Res<crate::tiles::Mode>,
+    state: Res<EditorState>,
+    edit: Res<SizeEdit>,
+    import: Res<crate::tiles::ImportState>,
+    filters: Res<crate::filter::Filters>,
+    div: Res<crate::tiles::DivEdit>,
+    cell: Res<crate::tiles::CellEdit>,
+    mut live: ResMut<keys::Live>,
+) {
+    let typing = state.renaming.is_some()
+        || state.pinning.is_some()
+        || edit.active.is_some()
+        || import.renaming.is_some()
+        || filters.typing()
+        || div.typing()
+        || cell.typing();
+    let want = keys::Live(keys::live(mode.context(), typing));
+    // Written through the change detector only when it actually moves, so `Live` staying put does not
+    // wake every `resource_changed` reader in the editor every frame.
+    if *live != want {
+        *live = want;
+    }
 }
 
 /// Placing belongs to map mode. Without this, `F` in import mode would flood the map with whatever
@@ -884,13 +1145,14 @@ fn in_map_mode(mode: Res<crate::tiles::Mode>) -> bool {
 fn rename_keys(
     mut events: MessageReader<KeyboardInput>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
 ) {
     if state.renaming.is_none() {
         // `N` starts a rename. Read from the buffered events like everything else here, so a keypress
         // cannot both start the rename and be typed into it.
-        if keys::just_pressed(&keyboard, Action::RenameMap) {
+        if keys::just_pressed(&keyboard, live.0, Action::RenameMap) {
             // **Empty, not seeded with the current name.** Seeding it meant the first keystroke
             // appended, so renaming `site_67_hub` to `galley_deck` produced
             // `site_67_hubgalley_deck` — and it looked like it had worked, because the panel showed a
@@ -921,7 +1183,12 @@ fn rename_keys(
                     project.dirty = true;
                     // The file follows the name on the next save, and the old one stays where it is
                     // — deleting it here would destroy a file on a keystroke.
-                    state.status = format!("renamed `{was}` to `{name}` (Ctrl+S writes the new file)");
+                    // The modifier from the census, not typed: this sentence naming a key the build
+                    // does not read is the same failure as the panel doing it.
+                    state.status = format!(
+                        "renamed `{was}` to `{name}` ({}+S writes the new file)",
+                        keys::MOD_NAME
+                    );
                 }
             }
             Key::Escape => {
@@ -979,7 +1246,7 @@ fn refresh_triangle_total(
         } else if total > BUSY_SCENE {
             ACCENT
         } else {
-            TEXT_DIM
+            DIM
         };
         if colour.0 != tint {
             colour.0 = tint;
@@ -1111,6 +1378,181 @@ fn spawn_range(
     }
 }
 
+/// The removal marker, spawned once and then only moved.
+///
+/// Once, because a mesh and a material built per frame are a new asset per frame — the editor would
+/// grow a handle a tick until it ran out of memory, which is the shape of bug that looks like "it
+/// gets slow after a while" rather than like a leak.
+fn spawn_removal_tile(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        RemovalTile,
+        // A unit rectangle, scaled to whatever it has to cover. `Rectangle` is authored in the XY
+        // plane, so it is laid flat by a quarter turn about X in the system below.
+        Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: REMOVE_TINT,
+            // **Unlit and blended.** Lit, the marker's brightness would report where the key light
+            // happens to be rather than what it means; opaque, it would hide the piece it is
+            // pointing at, which is the one thing the author is trying to look at.
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+}
+
+/// **The removal tool**: show what would go, and take it when the button comes up.
+///
+/// Preview and commit in one system because they are one question asked twice — the rectangle the
+/// marker draws IS the rectangle the release removes, and computing it in two places is how a
+/// selection box comes to disagree with what it deletes.
+#[allow(clippy::too_many_arguments)]
+fn drive_removal(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    hovered_ui: Query<&Hovered>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    placed: Query<(Entity, &Placement)>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<RemovalTile>>,
+    mut drag: ResMut<RemovalDrag>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+) {
+    // Read, never write, unless something actually happened: `state` is watched by
+    // `rebuild_palette`, so an unconditional deref here rebuilds the palette every frame.
+    if !state.removing {
+        if drag.from.is_some() {
+            drag.from = None;
+        }
+        for (_, mut vis) in &mut marker {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    // A cursor over the panel is not a cursor over the map, and a marker under the palette is a
+    // promise about a click that will never reach the world — the same rule the ghost follows.
+    let hit = cursor_ground(&window, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
+    let Some(hit) = hit else {
+        for (_, mut vis) in &mut marker {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    };
+    let at = project.map.to_map_space((hit.x, hit.z));
+
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.from = Some(at);
+    }
+
+    // What the marker covers: the box being dragged, or — before a drag starts — the footprint of
+    // the piece that a click would take, which is what makes "this one" a claim rather than a guess.
+    let rect = match drag.from {
+        Some(from) => Some((
+            from.0.min(at.0),
+            from.1.min(at.1),
+            from.0.max(at.0),
+            from.1.max(at.1),
+        )),
+        None => pick_at(&project, at).and_then(|i| {
+            let p = project.map.placements.get(i)?;
+            let d = project.library.get(&p.descriptor)?;
+            let (w, depth) = crate::fill::cell_extents(d, p.yaw);
+            Some((
+                p.at.0 - w * 0.5,
+                p.at.1 - depth * 0.5,
+                p.at.0 + w * 0.5,
+                p.at.1 + depth * 0.5,
+            ))
+        }),
+    };
+
+    for (mut tf, mut vis) in &mut marker {
+        match rect {
+            Some((x0, z0, x1, z1)) => {
+                *vis = Visibility::Visible;
+                *tf = Transform::from_xyz(
+                    project.map.origin.0 + (x0 + x1) * 0.5,
+                    project.map.origin.1 + MARKER_LIFT,
+                    project.map.origin.2 + (z0 + z1) * 0.5,
+                )
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                // A floor of a few centimetres so a zero-area box is still visible as a box.
+                .with_scale(Vec3::new((x1 - x0).max(0.05), (z1 - z0).max(0.05), 1.0));
+            }
+            None => *vis = Visibility::Hidden,
+        }
+    }
+
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(from) = drag.from.take() else {
+        return;
+    };
+
+    if (from.0 - at.0).abs() <= CLICK_EPS && (from.1 - at.1).abs() <= CLICK_EPS {
+        match pick_at(&project, at) {
+            Some(i) => delete_index(&mut commands, i, &mut project, &mut state, &placed),
+            None => state.status = "nothing here to remove".to_owned(),
+        }
+        return;
+    }
+
+    let (x0, z0) = (from.0.min(at.0), from.1.min(at.1));
+    let (x1, z1) = (from.0.max(at.0), from.1.max(at.1));
+    let doomed: Vec<usize> = project
+        .map
+        .placements
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.at.0 >= x0 && p.at.0 <= x1 && p.at.1 >= z0 && p.at.1 <= z1)
+        .map(|(i, _)| i)
+        .collect();
+    if doomed.is_empty() {
+        state.status = "nothing inside that box".to_owned();
+        return;
+    }
+
+    // **Taken back to front.** Removing an earlier row shifts every later one down, so a forward
+    // pass would delete the wrong pieces the moment the box held more than one.
+    let mut items: Vec<(usize, Box<Placed>)> = Vec::with_capacity(doomed.len());
+    for i in doomed.iter().rev() {
+        let removed = project.map.placements.remove(*i);
+        for (entity, mark) in &placed {
+            if mark.0 == removed.id {
+                commands.entity(entity).despawn();
+            }
+        }
+        items.push((*i, Box::new(removed)));
+    }
+    // Ascending again, which is the order `Undo::RemovedMany` puts them back in.
+    items.reverse();
+
+    let n = items.len();
+    state.undo.push(Undo::RemovedMany { items });
+    project.dirty = true;
+    // The whole chord, rendered by the census — naming just the modifier told the author to press
+    // `Cmd`, which is not a thing anyone can do.
+    state.status = format!(
+        "removed {n} placement(s) — {} puts them back",
+        keys::chord_text(keys::binding(Action::Undo))
+    );
+}
+
 /// Bring up whatever the map already holds.
 fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res<Project>) {
     let ys = match heights(&project) {
@@ -1149,6 +1591,11 @@ fn place_on_click(
     mut state: ResMut<EditorState>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // While the removal tool is armed a click removes; it must not also place, or a box dragged over
+    // a crowded corner would delete what was there and leave a new piece behind it.
+    if state.removing {
         return;
     }
     // A click on a control is not a click on the world. Without this, arming a piece from the palette
@@ -1233,6 +1680,7 @@ fn short_id(descriptor_id: &str) -> &str {
 fn keys(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
+    live: Res<keys::Live>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
@@ -1242,24 +1690,34 @@ fn keys(
     mut state: ResMut<EditorState>,
 ) {
 
-    if keys::just_pressed(&keyboard, Action::Undo) {
+    if keys::just_pressed(&keyboard, live.0, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
     }
 
-    if keys::just_pressed(&keyboard, Action::Remove) && !hovered_ui.iter().any(|h| h.0) {
-        delete_under_cursor(
-            &mut commands,
-            window,
-            camera,
-            &mut project,
-            &mut state,
-            &placed,
-        );
+    // **The delete key arms a tool; it does not delete.** Removing on the keypress meant the only
+    // preview of what was about to go was the author's memory of where the cursor was. Now the key
+    // turns the mode on, the red marker answers "this one", and a click or a dragged box commits.
+    if keys::just_pressed(&keyboard, live.0, Action::Remove) {
+        state.removing = !state.removing;
+        state.status = if state.removing {
+            format!(
+                "removal mode: click a piece, or drag a box. {} or Esc to stop.",
+                keys::REMOVE_NAME
+            )
+        } else {
+            "removal mode off".to_owned()
+        };
         return;
     }
 
-    if keys::just_pressed(&keyboard, Action::Save) {
+    if keys::just_pressed(&keyboard, live.0, Action::Cancel) && state.removing {
+        state.removing = false;
+        state.status = "removal mode off".to_owned();
+        return;
+    }
+
+    if keys::just_pressed(&keyboard, live.0, Action::Save) {
         match project.save() {
             Ok(()) => {
                 let path = project.map_path.display().to_string();
@@ -1282,7 +1740,7 @@ fn keys(
         (Action::TurnPieceLeft, -YAW_STEP),
         (Action::TurnPieceRight, YAW_STEP),
     ] {
-        if keys::just_pressed(&keyboard, action) && !hovered_ui.iter().any(|h| h.0) {
+        if keys::just_pressed(&keyboard, live.0, action) && !hovered_ui.iter().any(|h| h.0) {
             turn_under_cursor(
                 &mut commands,
                 &assets,
@@ -1298,21 +1756,21 @@ fn keys(
     }
 
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
-    if keys::just_pressed(&keyboard, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
         toggle_pin(window, camera, &mut project, &mut state);
         return;
     }
 
     // **G continues the layout.** Learn the grammar from what is already placed, then fill the free
     // cells with more of it — see `emerge_core::grammar`.
-    if keys::just_pressed(&keyboard, Action::Generate) {
+    if keys::just_pressed(&keyboard, live.0, Action::Generate) {
         generate(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
     }
 
     // **F floods.** From the cell under the cursor outward, stopping at anything already placed and
     // at the map's edge — see `crate::fill`.
-    if keys::just_pressed(&keyboard, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
+    if keys::just_pressed(&keyboard, live.0, Action::Fill) && !hovered_ui.iter().any(|h| h.0) {
         flood_from_cursor(
             &mut commands,
             &assets,
@@ -1324,9 +1782,18 @@ fn keys(
         return;
     }
 
-    let step = if keys::just_pressed(&keyboard, Action::AimRight) {
+    // **X puts the brush back where it started.** Turning is relative, so a piece three quarters round
+    // is one press from straight in one direction and three in the other — and an author who has been
+    // tapping `Z` has no reason to be keeping count. This is the only absolute among the aim keys.
+    if keys::just_pressed(&keyboard, live.0, Action::AimReset) {
+        state.brush_yaw = 0.0;
+        state.status = "brush aimed straight again".to_owned();
+        return;
+    }
+
+    let step = if keys::just_pressed(&keyboard, live.0, Action::AimRight) {
         YAW_STEP
-    } else if keys::just_pressed(&keyboard, Action::AimLeft) {
+    } else if keys::just_pressed(&keyboard, live.0, Action::AimLeft) {
         -YAW_STEP
     } else {
         0.0
@@ -1342,21 +1809,17 @@ fn keys(
 /// a ray would need every one of them to be pickable — which would also make every one of them eat
 /// the click that places the next piece. The radius is the brush cell, so "delete what I am pointing
 /// at" means the same distance as "place one here".
-fn delete_under_cursor(
+fn delete_index(
     commands: &mut Commands,
-    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
-    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    index: usize,
     project: &mut Project,
     state: &mut EditorState,
     placed: &Query<(Entity, &Placement)>,
 ) {
-    // **One picker.** This grew its own copy of the search and the two drifted; `nearest_placement`
-    // is now the only answer to "the thing I am pointing at", shared with pin and turn.
-    let Some(index) = nearest_placement(window, camera, project) else {
+    if index >= project.map.placements.len() {
         state.status = "nothing here to remove".to_owned();
         return;
-    };
-
+    }
     let removed = project.map.placements.remove(index);
     for (entity, marker) in placed {
         if marker.0 == removed.id {
@@ -1393,6 +1856,43 @@ fn undo(
                 }
             }
             state.status = format!("undid {} placement(s)", gone.len());
+        }
+        Undo::RemovedMany { items } => {
+            let n = items.len();
+            // Rows back first, all of them, and only THEN drawn: how high a piece sits is a question
+            // about the finished map, so asking `heights` mid-restore would answer it against a map
+            // that is still missing some of its own contents.
+            let mut at_indices = Vec::with_capacity(n);
+            for (index, p) in items {
+                let at = index.min(project.map.placements.len());
+                project.map.placements.insert(at, *p);
+                at_indices.push(at);
+            }
+            match heights(project) {
+                Ok(ys) => {
+                    for at in at_indices {
+                        let Some(p) = project.map.placements.get(at) else {
+                            continue;
+                        };
+                        let (id, pat, pyaw) = (p.id.clone(), p.at, p.yaw);
+                        let (Some(d), Some(&y)) =
+                            (project.library.get(&p.descriptor).cloned(), ys.get(at))
+                        else {
+                            continue;
+                        };
+                        if let Some(e) =
+                            spawn_piece(commands, assets, &d, pat, pyaw, project.map.origin, y)
+                        {
+                            commands.entity(e).insert(Placement(id));
+                        }
+                    }
+                    state.status = format!("restored {n} placement(s)");
+                }
+                Err(e) => {
+                    state.status = format!("restored {n} but cannot draw them: {e}");
+                    error!("{e}");
+                }
+            }
         }
         Undo::Removed { index, placed: p } => {
             state.status = format!("restored {}", p.id);
@@ -1654,7 +2154,6 @@ fn generate(
 ) {
     // One metre: the tile the kits are authored on, and coarse enough that a 32 m map is a grid the
     // solver finishes rather than 4,096 cells of half-metre noise.
-    const CELL: f32 = 1.0;
 
     let grammar = match emerge_core::grammar::learn(&project.map, CELL) {
         Ok(g) => g,
@@ -1803,8 +2302,10 @@ fn drive_ghost(
         return;
     };
     // No ghost while the cursor is over the panel: the piece is not going there, and a preview
-    // hovering under the palette is a promise about a click that will never reach the world.
-    if hovered_ui.iter().any(|h| h.0) {
+    // hovering under the palette is a promise about a click that will never reach the world. Nor
+    // while removing — two previews for two different outcomes under one cursor is a question, not
+    // an answer.
+    if hovered_ui.iter().any(|h| h.0) || state.removing {
         clear(&mut commands);
         return;
     }
