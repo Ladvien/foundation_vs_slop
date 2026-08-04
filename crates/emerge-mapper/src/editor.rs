@@ -754,8 +754,17 @@ fn on_row_click(
         return;
     };
     state.brush = row.0;
+    // **Arming a piece leaves removal mode.** Picking something to place is an unambiguous statement
+    // that you are done deleting, and the mode is otherwise only escapable by a key — which a
+    // borderless-fullscreen window can have taken from it before Bevy ever sees it. A mode you can
+    // enter with a click and only leave with a keystroke is a trap.
+    let was_removing = std::mem::take(&mut state.removing);
     if let Some(d) = project.library.descriptors.get(row.0) {
-        state.status = format!("{} armed", d.id);
+        state.status = if was_removing {
+            format!("{} armed — removal mode off", d.id)
+        } else {
+            format!("{} armed", d.id)
+        };
     }
 }
 

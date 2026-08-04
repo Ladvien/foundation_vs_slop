@@ -374,9 +374,11 @@ pub enum CellField {
 }
 
 /// A verb that acts on the selected cell.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CellVerb {
-    /// Occupancy — the common one, so it is first and is a toggle rather than a field.
+    /// Occupancy — the common one, so it is first, is a toggle rather than a field, and is what a
+    /// header does before any chip has been touched.
+    #[default]
     Solid,
     /// Type an edge token.
     Edge,
@@ -401,13 +403,32 @@ impl CellVerb {
 #[derive(Component, Clone, Copy)]
 pub struct CellButton(pub u32, pub u32);
 
-/// A layer (y) selector.
-#[derive(Component, Clone, Copy)]
-pub struct LayerPick(pub u32);
+/// What a header covers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    /// Every cell in the layer.
+    Layer,
+    /// One x column, all z.
+    Column(u32),
+    /// One z row, all x.
+    Row(u32),
+}
 
-/// The number inside a [`LayerPick`], so its tint can be refreshed without rebuilding the button.
+/// A clickable header that applies the armed verb to a whole [`Span`] of one layer.
+///
+/// Marking a wall's outward face is nine identical clicks on a 3x3 lattice and rather more on a finer
+/// one; the shape being marked is almost always a row, a column or a whole slice, so those are the
+/// three shapes with a button.
 #[derive(Component, Clone, Copy)]
-pub struct LayerLabel(pub u32);
+pub struct FillHeader {
+    pub layer: u32,
+    pub span: Span,
+}
+
+/// Which layer a cell button or glyph belongs to. Every layer is drawn at once, so `(x, z)` alone no
+/// longer names a cell.
+#[derive(Component, Clone, Copy)]
+pub struct CellLayer(pub u32);
 
 /// The glyph inside a [`CellButton`], carrying the same `(x, z)`.
 #[derive(Component, Clone, Copy)]
@@ -441,6 +462,13 @@ pub struct CellEdit {
     pub layer: u32,
     /// The field taking keys, and what has been typed.
     active: Option<(CellField, String)>,
+    /// **The verb a header applies.** The chips still act on the selected cell as they always did;
+    /// this remembers which one was used last, so clicking a row, column or layer header repeats it
+    /// over that whole set. A header with no verb behind it would have to invent one.
+    pub verb: CellVerb,
+    /// The cells a pending token will land on, when a header opened the field rather than a cell.
+    /// `None` means the one selected cell.
+    pending: Option<Vec<(u32, u32, u32)>>,
 }
 
 impl CellEdit {
@@ -543,36 +571,59 @@ fn note_keys(
     }
 }
 
-fn on_layer_click(activate: On<Activate>, picks: Query<&LayerPick>, mut edit: ResMut<CellEdit>) {
-    let Ok(l) = picks.get(activate.entity) else {
-        return;
-    };
-    edit.layer = l.0;
-    // **The cursor rides the layer.** It used to be dropped here, on the argument that a cell
-    // highlighted on a slice nobody is looking at is a selection an author cannot see — true, but
-    // moving it to the new slice satisfies that too and keeps the column. `lattice_keys` does the
-    // same thing, so the mouse and the keyboard are one rule rather than two.
-    if let Some(at) = edit.at.as_mut() {
-        at.1 = l.0;
-    }
-    edit.active = None;
-}
-
 fn on_cell_click(
     activate: On<Activate>,
-    cells: Query<&CellButton>,
+    cells: Query<(&CellButton, &CellLayer)>,
     mut edit: ResMut<CellEdit>,
 ) {
-    let Ok(b) = cells.get(activate.entity) else {
+    let Ok((b, layer)) = cells.get(activate.entity) else {
         return;
     };
-    let at = (b.0, edit.layer, b.1);
+    // The button carries its own layer now that all of them are on screen at once.
+    let at = (b.0, layer.0, b.1);
+    edit.layer = layer.0;
     edit.at = Some(at);
     edit.active = None;
     // **No status line for a selection.** The line under the grid already says what the selected cell
     // holds, and `refresh_cells` repaints it in place — whereas writing `status` mutates
     // `ImportState`, which is what `rebuild_detail` watches, so saying it twice is what made picking a
     // cell respawn the whole detail block. One fact, one place, no bounce.
+}
+
+/// What a layer is called. Bottom, top, and the numbers in between — a three-layer lattice reads as
+/// words, and a nine-layer one has to read as numbers.
+fn layer_label(y: u32, dy: u32) -> String {
+    match (y, dy) {
+        (_, 1) => "only layer".to_owned(),
+        (0, _) => "bottom".to_owned(),
+        (y, dy) if y + 1 == dy => "top".to_owned(),
+        (1, 3) => "middle".to_owned(),
+        (y, _) => format!("y {y}"),
+    }
+}
+
+/// One header button. `*` fills the layer, `v` a column, `>` a row — ASCII only, per `docs/ui.md` §5.
+fn header_button(row: &mut ChildSpawnerCommands, header: FillHeader, glyph: &str) {
+    row.spawn((
+        UiButton,
+        Hovered::default(),
+        header,
+        Node {
+            min_width: Val::Px(20.0),
+            min_height: Val::Px(18.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(HEADER_BG),
+    ))
+    .with_children(|b| {
+        b.spawn((
+            Text::new(glyph.to_owned()),
+            TextColor(LABEL),
+            TextFont::from_font_size(9.0),
+        ));
+    });
 }
 
 /// One cell, in words. Used for the status line and the button glyph's tooltip role.
@@ -635,16 +686,42 @@ fn apply_verb(
         state.status = "pick a cell first".to_owned();
         return;
     };
+    apply_verb_to(verb, &[at], edit, project, state);
+}
+
+/// **Do one verb to a set of cells.** One cell from a chip, a row, a column or a whole layer from a
+/// header — the same code either way, so a header cannot drift from what the chip does.
+fn apply_verb_to(
+    verb: CellVerb,
+    cells: &[(u32, u32, u32)],
+    edit: &mut CellEdit,
+    project: &mut Project,
+    state: &mut ImportState,
+) {
+    edit.verb = verb;
+    let Some(&first) = cells.first() else { return };
+    let many = cells.len() > 1;
     match verb {
         CellVerb::Solid => {
             let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
                 return;
             };
-            let now = d.subgrid.toggle_solid(at);
-            let said = match now {
-                Some(true) => format!("cell {},{},{} is solid", at.0, at.1, at.2),
-                Some(false) => format!("cell {},{},{} is open", at.0, at.1, at.2),
-                None => "that cell is outside the lattice".to_owned(),
+            // **A span is set, not toggled.** Toggling many cells at once flips a mixed row into its
+            // photographic negative, which is never what a click on a header meant; one cell keeps
+            // the toggle, because there the before and after are both visible.
+            let said = if many {
+                for &at in cells {
+                    if d.subgrid.at(at).is_none_or(|c| !c.solid) {
+                        d.subgrid.toggle_solid(at);
+                    }
+                }
+                format!("{} cells solid", cells.len())
+            } else {
+                match d.subgrid.toggle_solid(first) {
+                    Some(true) => format!("cell {},{},{} is solid", first.0, first.1, first.2),
+                    Some(false) => format!("cell {},{},{} is open", first.0, first.1, first.2),
+                    None => "that cell is outside the lattice".to_owned(),
+                }
             };
             state.status = persist(project, where_to, said);
         }
@@ -652,8 +729,14 @@ fn apply_verb(
             let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
                 return;
             };
-            d.subgrid.clear(at);
-            let said = format!("cell {},{},{} cleared", at.0, at.1, at.2);
+            for &at in cells {
+                d.subgrid.clear(at);
+            }
+            let said = if many {
+                format!("{} cells cleared", cells.len())
+            } else {
+                format!("cell {},{},{} cleared", first.0, first.1, first.2)
+            };
             state.status = persist(project, where_to, said);
         }
         CellVerb::Edge | CellVerb::Anchor => {
@@ -665,10 +748,19 @@ fn apply_verb(
             // Starts empty, and Enter on an empty field CLEARS the token — one keystroke path for
             // setting and unsetting, rather than a second control for "remove".
             edit.active = Some((field, String::new()));
-            state.status = format!(
-                "type a {} token, Enter to keep it (empty clears), Esc to leave it",
-                verb.label()
-            );
+            edit.pending = many.then(|| cells.to_vec());
+            state.status = if many {
+                format!(
+                    "type a {} token for {} cells, Enter to keep it (empty clears), Esc to leave it",
+                    verb.label(),
+                    cells.len()
+                )
+            } else {
+                format!(
+                    "type a {} token, Enter to keep it (empty clears), Esc to leave it",
+                    verb.label()
+                )
+            };
         }
     }
 }
@@ -777,32 +869,50 @@ fn cell_keys(
                 // silence — an author watched a token they had entered simply not exist. The repo's
                 // rule is to fail loudly; the buffer is gone either way, so the least this can do is
                 // name what happened.
-                let Some(at) = edit.at else {
-                    state.status =
-                        format!("`{raw}` was not kept — the cell selection moved. Pick a cell, then type again.");
-                    return;
+                // A header opened this field for a whole span; a chip opened it for one cell.
+                let targets: Vec<(u32, u32, u32)> = match edit.pending.take() {
+                    Some(cells) => cells,
+                    None => match edit.at {
+                        Some(at) => vec![at],
+                        None => {
+                            state.status = format!(
+                                "`{raw}` was not kept — the cell selection moved. Pick a cell, then type again."
+                            );
+                            return;
+                        }
+                    },
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
                 let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
                     return;
                 };
-                let ok = match field {
-                    CellField::Edge => d.subgrid.set_edge(at, &token),
-                    CellField::Anchor => d.subgrid.set_anchor(at, &token),
+                let mut wrote = 0usize;
+                for &at in &targets {
+                    let ok = match field {
+                        CellField::Edge => d.subgrid.set_edge(at, &token),
+                        CellField::Anchor => d.subgrid.set_anchor(at, &token),
+                    };
+                    if ok.is_some() {
+                        wrote += 1;
+                    }
+                }
+                let said = match (wrote, token.is_empty(), targets.first()) {
+                    (0, _, _) => "that cell is outside the lattice".to_owned(),
+                    (1, true, Some(at)) => format!("cell {},{},{} token cleared", at.0, at.1, at.2),
+                    (1, false, Some(at)) => format!("cell {},{},{} = `{token}`", at.0, at.1, at.2),
+                    (n, true, _) => format!("{n} cells' tokens cleared"),
+                    (n, false, _) => format!("{n} cells = `{token}`"),
                 };
-                let said = match (ok, token.is_empty()) {
-                    (None, _) => "that cell is outside the lattice".to_owned(),
-                    (Some(()), true) => format!("cell {},{},{} token cleared", at.0, at.1, at.2),
-                    (Some(()), false) => format!("cell {},{},{} = `{token}`", at.0, at.1, at.2),
-                };
-                // A refused cell changed nothing, so there is nothing to write.
-                state.status = match ok {
-                    None => said,
-                    Some(()) => persist(&mut project, where_to, said),
+                // Nothing landed means nothing to write.
+                state.status = if wrote == 0 {
+                    said
+                } else {
+                    persist(&mut project, where_to, said)
                 };
             }
             Key::Escape => {
                 edit.active = None;
+                edit.pending = None;
                 state.status = "cell unchanged".to_owned();
             }
             Key::Backspace => {
@@ -825,6 +935,36 @@ fn cell_keys(
     }
 }
 
+/// Fill a row, a column or a whole layer with the verb the chips last used.
+fn on_fill_header(
+    activate: On<Activate>,
+    headers: Query<&FillHeader>,
+    mut edit: ResMut<CellEdit>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    let Ok(header) = headers.get(activate.entity) else {
+        return;
+    };
+    let Some((dx, _, dz)) = state.editing(&project.library).map(|d| d.subgrid.div) else {
+        return;
+    };
+    let y = header.layer;
+    let cells: Vec<(u32, u32, u32)> = match header.span {
+        Span::Layer => (0..dz).flat_map(|z| (0..dx).map(move |x| (x, y, z))).collect(),
+        Span::Column(x) => (0..dz).map(|z| (x, y, z)).collect(),
+        Span::Row(z) => (0..dx).map(|x| (x, y, z)).collect(),
+    };
+    // The selection follows the fill, so the readout under the grid describes something the author
+    // just acted on rather than wherever the cursor happened to be.
+    if let Some(&first) = cells.first() {
+        edit.at = Some(first);
+        edit.layer = y;
+    }
+    let verb = edit.verb;
+    apply_verb_to(verb, &cells, &mut edit, &mut project, &mut state);
+}
+
 /// **Repaint the lattice controls in place**, rather than rebuilding the pane around them.
 ///
 /// Picking a cell or a layer changes four things — which button is lit, which glyphs the slice shows,
@@ -840,29 +980,25 @@ fn refresh_cells(
     project: Res<Project>,
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
-    mut cells: Query<(&CellButton, &mut BackgroundColor), Without<LayerPick>>,
-    mut glyphs: Query<(&CellGlyph, &mut Text, &mut TextColor), (Without<LayerLabel>, Without<SelectedCellLine>, Without<NoteReadout>)>,
-    mut layers: Query<(&LayerPick, &mut BackgroundColor), Without<CellButton>>,
-    mut layer_labels: Query<(&LayerLabel, &mut TextColor), (Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>)>,
-    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<LayerLabel>, Without<NoteReadout>)>,
-    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<LayerLabel>, Without<SelectedCellLine>)>,
+    mut cells: Query<(&CellButton, &CellLayer, &mut BackgroundColor)>,
+    mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>)>,
+    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>)>,
+    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>)>,
 ) {
     let Some(d) = state.editing(&project.library) else {
         return;
     };
     let grid = &d.subgrid;
-    let (_, dy, _) = grid.div;
-    let layer = cell_edit.layer.min(dy.saturating_sub(1));
 
-    for (button, mut bg) in &mut cells {
-        let selected = cell_edit.at == Some((button.0, layer, button.1));
+    for (button, layer, mut bg) in &mut cells {
+        let selected = cell_edit.at == Some((button.0, layer.0, button.1));
         let want = if selected { ROW_SELECTED } else { ROW_BG };
         if bg.0 != want {
             bg.0 = want;
         }
     }
-    for (g, mut text, mut colour) in &mut glyphs {
-        let cell = grid.at((g.0, layer, g.1));
+    for (g, layer, mut text, mut colour) in &mut glyphs {
+        let cell = grid.at((g.0, layer.0, g.1));
         let want = cell_glyph(cell);
         if text.0 != want {
             text.0 = want.to_owned();
@@ -870,18 +1006,6 @@ fn refresh_cells(
         let tint = if cell.is_some() { ACCENT } else { LABEL };
         if colour.0 != tint {
             colour.0 = tint;
-        }
-    }
-    for (pick, mut bg) in &mut layers {
-        let want = if pick.0 == layer { ROW_SELECTED } else { ROW_BG };
-        if bg.0 != want {
-            bg.0 = want;
-        }
-    }
-    for (label, mut colour) in &mut layer_labels {
-        let want = if label.0 == layer { TEXT } else { LABEL };
-        if colour.0 != want {
-            colour.0 = want;
         }
     }
 
@@ -1211,9 +1335,9 @@ impl Plugin for TilesPlugin {
             )
             .add_observer(on_tab_click)
             .add_observer(on_div_click)
-            .add_observer(on_layer_click)
             .add_observer(on_cell_click)
             .add_observer(on_cell_verb)
+            .add_observer(on_fill_header)
             .add_observer(on_note_click)
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
@@ -2490,7 +2614,6 @@ fn rebuild_detail(
 
             let grid = &d.subgrid;
             let (dx, dy, dz) = grid.div;
-            let layer = cell_edit.layer.min(dy.saturating_sub(1));
             let marked = d.subgrid.cells.len();
 
             // **The subgrid.** Divisions first, because they frame every cell below them.
@@ -2545,42 +2668,6 @@ fn rebuild_detail(
                         ));
                     });
                 }
-                // ── the layer, on the same row ────────────────────────────────────────────────
-                //
-                // One y-slice at a time. All 27 buttons at once is a wall of glyphs; nine is a shape
-                // an author can read, and the picker says which slice they are on.
-                row.spawn((
-                    Node {
-                        margin: UiRect::right(Val::Px(crate::chrome::GAP_TIGHT)),
-                        ..default()
-                    },
-                    Text::new("layer y"),
-                    TextColor(LABEL),
-                    TextFont::from_font_size(9.0),
-                ));
-                for y in 0..dy {
-                    row.spawn((
-                        UiButton,
-                        Hovered::default(),
-                        LayerPick(y),
-                        Node {
-                            min_width: Val::Px(18.0),
-                            min_height: Val::Px(16.0),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(if y == layer { ROW_SELECTED } else { ROW_BG }),
-                    ))
-                    .with_children(|b| {
-                        b.spawn((
-                            Text::new(format!("{y}")),
-                            TextColor(if y == layer { TEXT } else { LABEL }),
-                            TextFont::from_font_size(10.0),
-                            LayerLabel(y),
-                        ));
-                    });
-                }
             });
 
             p.spawn((
@@ -2593,8 +2680,25 @@ fn rebuild_detail(
                 },
             ));
 
-            // The slice itself, z rows of x buttons — read like a plan view from above.
-            for z in 0..dz {
+            // **Every layer at once, bottom to top.** A picker showed one slice and hid the other
+            // two, so reading a shape meant clicking through it and holding the rest in your head —
+            // and a lattice is a 3D shape, which is the one thing a single slice cannot show.
+            //
+            // Bottom first because that is the order they stack in the world; the labels say so,
+            // rather than leaving `y = 0` to be inferred.
+            for y in 0..dy {
+                p.spawn((
+                    Text::new(layer_label(y, dy)),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(9.0),
+                    Node {
+                        margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
+                        ..default()
+                    },
+                ));
+
+                // The column headers, with the layer header in the corner above the row ones — the
+                // spreadsheet arrangement, because that is where a hand already looks for them.
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     column_gap: Val::Px(crate::chrome::GAP_TIGHT),
@@ -2602,35 +2706,53 @@ fn rebuild_detail(
                     ..default()
                 })
                 .with_children(|row| {
+                    header_button(row, FillHeader { layer: y, span: Span::Layer }, "*");
                     for x in 0..dx {
-                        let at = (x, layer, z);
-                        let cell = grid.at(at);
-                        let selected = cell_edit.at == Some(at);
-                        row.spawn((
-                            UiButton,
-                            Hovered::default(),
-                            CellButton(x, z),
-                            Node {
-                                min_width: Val::Px(20.0),
-                                min_height: Val::Px(18.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                ..default()
-                            },
-                            BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
-                        ))
-                        .with_children(|b| {
-                            b.spawn((
-                                Text::new(cell_glyph(cell).to_owned()),
-                                // A marked cell is brighter than an empty one — luminance, not hue,
-                                // per `docs/ui.md` §1.3.
-                                TextColor(if cell.is_some() { ACCENT } else { LABEL }),
-                                TextFont::from_font_size(11.0),
-                                CellGlyph(x, z),
-                            ));
-                        });
+                        header_button(row, FillHeader { layer: y, span: Span::Column(x) }, "v");
                     }
                 });
+
+                for z in 0..dz {
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        header_button(row, FillHeader { layer: y, span: Span::Row(z) }, ">");
+                        for x in 0..dx {
+                            let at = (x, y, z);
+                            let cell = grid.at(at);
+                            let selected = cell_edit.at == Some(at);
+                            row.spawn((
+                                UiButton,
+                                Hovered::default(),
+                                CellButton(x, z),
+                                CellLayer(y),
+                                Node {
+                                    min_width: Val::Px(20.0),
+                                    min_height: Val::Px(18.0),
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    ..default()
+                                },
+                                BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new(cell_glyph(cell).to_owned()),
+                                    // A marked cell is brighter than an empty one — luminance, not
+                                    // hue, per `docs/ui.md` §1.3.
+                                    TextColor(if cell.is_some() { ACCENT } else { LABEL }),
+                                    TextFont::from_font_size(11.0),
+                                    CellGlyph(x, z),
+                                    CellLayer(y),
+                                ));
+                            });
+                        }
+                    });
+                }
             }
 
             // What the selected cell is, and the verbs that change it. Each chip states its own
