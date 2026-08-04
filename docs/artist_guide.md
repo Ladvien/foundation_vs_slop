@@ -104,6 +104,12 @@ characters are under `SCP_Characters/`, for the procedural mushrooms under
 
 ## 4. Character assets (skinned rigs)
 
+> **Clip wiring is data now.** All sixteen rigs — valkyrie, crab, manca, SCP-610, the eight staff and
+> the four SCP-1048 variants — are declared in `assets/emerge/rigs.ron`. Every `GAIT_*`, `CLIP_*`,
+> `STAFF_CLIPS` and `ClipSpec` table that used to hold this in Rust is deleted, so the `Code ref`
+> columns below name the systems that *drive* the clips, not tables that still exist. Adding a rig is
+> a manifest entry.
+
 ### Squad — `characters/valkyrie.glb`
 
 The integration contract is documented in
@@ -135,18 +141,24 @@ continuously by weight, over a **single shared gait phase** — see `src/anim/` 
 `src/squad.rs` (the engineering guide is `docs/animation.md`). Consequences for
 anyone re-authoring these clips:
 
-| glTF index | Name | Slot | Duration | Phase offset | Cycle distance | Authored speed |
-|---|---|---|---|---|---|---|
-| 0 | `valkyrie_idle` | idle | 3.333 s | — (not a gait clip) | — | — |
-| 1 | `valkyrie_idle_alert` | idle, aiming | 2.917 s | — | — | — |
-| 5 | `valkyrie_walk` | forward, walk tier | 1.417 s | 0.000 (the reference) | 1.388 u | 0.98 u/s |
-| 11 | `valkyrie_run` | forward, run tier | 0.750 s | −0.016 | 2.135 u | 2.85 u/s |
-| 8 | `valkyrie_walk_back` | backward, walk tier | 1.458 s | −0.141 | 1.538 u | 1.05 u/s |
-| 12 | `valkyrie_run_back` | backward, run tier | 0.583 s | −0.062 | 1.185 u | 2.03 u/s |
-| 13 | `valkyrie_strafe_l` | **rightward** (see below) | 0.708 s | −0.031 | 1.937 u | 2.74 u/s |
-| 14 | `valkyrie_strafe_r` | **leftward** (see below) | 0.583 s | +0.047 | 1.259 u | 2.16 u/s |
-| 3 | `valkyrie_aim` | upper-body layer | 3.042 s | — | — | — |
-| 4 | `valkyrie_fire` | upper-body layer, one-shot | 1.167 s | — | — | — |
+> **The measured numbers live in `assets/emerge/rigs.ron`, not here.** `duration`, `phase_offset` and
+> `cycle_distance` are *measured off the GLB* by `emerge_core::clips` (the editor's ANIM tab), and
+> `crates/emerge-core/tests/rigs_match_assets.rs` re-measures them from the asset on every run. They
+> used to be written out in this table as well, and two copies of a measurement is one copy that goes
+> stale. What stays here is what an **artist** decides; what moved is what a **tool** reports.
+
+| glTF index | Name | Slot | Authored speed |
+|---|---|---|---|
+| 0 | `valkyrie_idle` | idle | — |
+| 1 | `valkyrie_idle_alert` | idle, aiming | — |
+| 5 | `valkyrie_walk` | forward, walk tier — **the phase reference** | 0.98 u/s |
+| 11 | `valkyrie_run` | forward, run tier | 2.85 u/s |
+| 8 | `valkyrie_walk_back` | backward, walk tier | 1.05 u/s |
+| 12 | `valkyrie_run_back` | backward, run tier | 2.03 u/s |
+| 13 | `valkyrie_strafe_l` | **rightward** (see below) | 2.74 u/s |
+| 14 | `valkyrie_strafe_r` | **leftward** (see below) | 2.16 u/s |
+| 3 | `valkyrie_aim` | upper-body layer | — |
+| 4 | `valkyrie_fire` | upper-body layer, one-shot | — |
 
 Every other clip (`reload`, `crouch_walk`, `aim_walk`, `walk_start`/`walk_stop`
 and their backward twins, `jump_fwd`/`jump_back`, `death`) is authored but **not

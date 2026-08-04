@@ -744,6 +744,46 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
+- **FVS-Q-9 — `solid` cannot refine clearance without a fallback branch (BLOCKED, reasoned 2026-08-04)** · M · *determinism: moves goldens*
+  `SubCell::solid` exists, is editable, and is read by nothing. The obvious consumer is
+  `emerge_core::stack::covers` — the single "is this point inside this piece" test that both stacking
+  and the editor's `pick_at` funnel through — so a lattice-aware version would let clearance respect a
+  piece's *shape* instead of its bounding box.
+  **It cannot be written as one path today.** The subgrid is sparse and absent means open, and all 42
+  shipped descriptors carry `cells: []`. So a `solid`-only rule makes every existing piece cover
+  nothing, and the only way to avoid that is `if the lattice is empty, use the bounding box` — which is
+  precisely the fallback branch `CLAUDE.md` forbids, and the reason this is filed rather than done.
+  Two honest routes, both needing a decision first: **(a)** author a lattice for all 42 descriptors, so
+  `solid` becomes the single unconditional rule; **(b)** add `Subgrid::occupancy: Footprint | Lattice`,
+  authored per descriptor and matched exhaustively with no `_` arm — the same shape as `Mount`, so the
+  variant is declared in data rather than inferred from emptiness. Either changes placement behaviour
+  and needs a replay-hash check. · *Deps:* — · *Touches:* `crates/emerge-core/src/{stack,descriptor}.rs`, `crates/emerge-mapper/src/fill.rs`
+
+- **FVS-Q-10 — Should authored `edge` tokens feed the solver, or only check it?** · L · *determinism: core*
+  `crates/emerge-core/src/adjacency.rs` reads `SubCell::edge` and reports where a map disagrees with
+  the tokens its tiles declare. It deliberately does **not** generate: `grammar.rs` already learns
+  adjacency from the map, and its module note argues that should be the only way, because *"inventing
+  an adjacency schema would mean asking an author to write down a grammar before they are allowed to
+  draw one."*
+  The open question is whether `grammar::learn`'s `support[dir][p]` table should be built from tokens
+  instead of from observed pairs. **What it would buy:** generation into an *empty* map — a learned
+  grammar knows only the map it was learned from, so `G` on a blank canvas has nothing to continue.
+  **What it costs:** it reverses that documented thesis, and an unauthored library would generate
+  unconstrained noise rather than refusing. Decide on real data — the validator now makes it possible
+  to author tokens and see whether they agree with what you actually draw, which is the evidence this
+  decision was missing. Sandhu, Chen & McCoy 2019 (`10.1145/3337722.3337752`) is the closest prior art:
+  WFC as a constraint solver with design-level constraints layered over local adjacency.
+  · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`
+
+- **FVS-Q-11 — The Tiles panel pushes its own controls below the fold** · S
+  Measured 2026-08-04 on a 1280x802 logical window: the Tiles panel renders 18 census rows (10 Tiles +
+  8 Global) before the detail block, so the subgrid's cell grid and its `[solid][edge][anchor][clear]`
+  chips start below the visible area. The pane **is** a `ScrollArea` and they are reachable, and the
+  keyboard bindings added the same day reach them without scrolling — so this is ergonomics, not a
+  defect. The fix is a layout decision somebody has to make: collapse the census behind a toggle, or
+  move it below the controls. `docs/ui.md` §3.5 (Samp 2011) forbids reordering *within* the list, which
+  is not the same as choosing where the list sits. · *Deps:* — · *Touches:* `crates/emerge-mapper/src/{tiles,chrome}.rs`
+
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.

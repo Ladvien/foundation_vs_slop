@@ -220,10 +220,11 @@ not, so the crab/manca use `Free` throughout.
   of unity will catch a mismatch.
 - **Re-authoring a gait clip (squad):** the `(duration, phase_offset, cycle_distance)` numbers are
   **measured off the GLB**, not guessed. If a clip is re-exported you must re-measure, or the feet drift.
-  `tests/valkyrie_asset.rs` pins the durations to the asset (±1 frame) and fails loudly if a re-export
-  drifts them — but it cannot check the phase offset or cycle distance, so those are on you.
+  The numbers live in `assets/emerge/rigs.ron`, and **all three are now checked against the asset**:
+  `crates/emerge-core/tests/rigs_match_assets.rs` re-measures every gait from the GLB the manifest
+  names. `tests/valkyrie_asset.rs` still pins the durations (±1 frame) and the in-place contract.
 
-See "The clip contract" for the measurement method.
+See "The clip contract" for the measurement method and the tool that performs it.
 
 ---
 
@@ -239,17 +240,24 @@ For the shared-phase design to hold, gait clips must be:
    to a blend by `gait_cycles_per_sec`), so the baked `cycle_distance` must be the real ground distance
    the clip covers per cycle.
 
-**Measurement method** (how the committed numbers were produced — currently a manual offline step, not a
-repo tool): sample the GLB's animation channels, run forward kinematics down the leg chains to get each
-foot's world position over the cycle, then:
+**Measurement method** — **`emerge_core::clips`** (`crates/emerge-core/src/clips.rs`), driven from the
+editor's ANIM tab. It samples the GLB's animation channels, runs forward kinematics down the leg chains
+to get each foot's world position over the cycle, and reports:
 
 - **cycle_distance** = the planted foot's speed relative to the static `Root`, ×`FIGURINE_SCALE`;
 - **phase_offset** = the negative of the lag that best cross-correlates the two clips' foot-height
   curves (φ is expressed in the reference clip's frame);
 - **duration** = the clip's longest keyframe time.
 
-If gait clips are re-authored often, committing that script as a `train`/dev subcommand would remove the
-"how do I re-measure" gap — flagged as a possible follow-up, not done here.
+It is engine-free — the FK is hand-rolled, quaternion to matrix to chain, because the `engine_free`
+allowlist has no math crate. Validated against the shipped Valkyrie: durations exact, root motion zero,
+walk 1.373 measured vs 1.388 declared (1.1%), run 2.106 vs 2.135 (1.4%), walk→walk_back phase −0.133 vs
+−0.141. The declared numbers stay authored rather than generated, and `rigs_match_assets.rs` is the drift
+guard between the two — a manifest that agrees only with itself proves nothing.
+
+**Tolerances are deliberately loose.** The guard is 20% and the reference gaits in `clips.rs` are pinned
+at 3%, because `docs/artist_guide.md` §4 says the back and strafe numbers are themselves rough. A tight
+bound there would be asserting their error rather than the asset's truth.
 
 Mask groups (which bones the upper-body layer excludes) are matched **by name** against the live
 skeleton, never a precomputed path, so a re-export that renames a bone surfaces as a missing name rather
@@ -260,10 +268,10 @@ than a silently wrong mask. The name list (`LOWER_BODY_BONES`) is asserted again
 
 ## Testing
 
-- **`src/anim/blend.rs`** (core, `cargo test`) — the blend space is a partition of unity everywhere,
+- **`crates/emerge-anim/src/blend.rs`** (core, `cargo test`) — the blend space is a partition of unity everywhere,
   continuous in speed and angle, `travel_angle` matches Bevy's −Z-forward convention, tiers are
   monotone, degenerate inputs don't NaN.
-- **`src/anim/mod.rs`** (core) — the apply pass through a real `App` on a bare `AnimationPlayer` (no
+- **`crates/emerge-anim/src/lib.rs`** (core) — the apply pass through a real `App` on a bare `AnimationPlayer` (no
   assets): weights ease without jumps and reach the player, gait clips share one phase and stay paused,
   the phase holds while idle, a one-shot restarts on trigger. Plus the cadence math.
 - **`src/squad.rs`** (core) — `valkyrie_weights`: aiming-while-walking layers instead of replacing, the
@@ -300,11 +308,14 @@ The design is drawn from work in the `home-still` corpus, cited inline where it'
 
 | Path | Role |
 |---|---|
-| `src/anim/mod.rs` | `PoseBlender`, `Slot`/`Playback`, `BlendSource`, `attach_pose_blenders`, `apply_pose_blenders`, `PoseBlendPlugin` |
-| `src/anim/blend.rs` | The humanoid locomotion blend space (pure math) |
+| `crates/emerge-anim/src/lib.rs` | `PoseBlender`, `Slot`/`Playback`, `BlendSource`, `attach_pose_blenders`, `apply_pose_blenders`, `PoseBlendPlugin`. Moved out of `src/anim/` so the editor can drive the real blender; the game re-exports it at `crate::anim`, so no call site moved |
+| `crates/emerge-anim/src/blend.rs` | The humanoid locomotion blend space (pure math) |
+| `assets/emerge/rigs.ron` | **The clip manifest — all sixteen rigs.** Every `GAIT_*`, `CLIP_*`, `STAFF_CLIPS` and `ClipSpec` table used to be a Rust const; they are all deleted and read from here |
+| `crates/emerge-core/src/clips.rs` | Engine-free GLB animation analysis: `clips`, `root_motion`, `cycle_distance`, `phase_offset`, `world_track` |
+| `crates/emerge-core/tests/rigs_match_assets.rs` | The drift guard — re-measures every gait from the GLB the manifest names |
 | `src/squad.rs` | Squad 2D blend space + masked action layer; `build_valkyrie_anim`, `drive_valkyrie_animation`, `valkyrie_weights` |
 | `src/crab/movement.rs`, `src/crab/setup.rs` | Crab: three `Free` clips, one-hot driver |
 | `src/parasite.rs` | Manca: five `Free` + one `OneShot` (BurrowOut) |
-| `src/scp1048/anim.rs` | SCP-1048 family: **four** graphs from one per-variant `ClipSpec` table. The bears share a rig but not a clip order, so instead of a shared `SLOT_*` const block each variant's table is the single source of truth for slot index, glTF index and one-shot-ness. Note B's `tantrum` is `Free` — the only *looping* attack in the game — and C's `fire_gun` is re-triggered per shot because it starts and ends in the aim pose |
+| `src/scp1048/anim.rs` | SCP-1048 family: **four** graphs, now built from `rigs.ron`'s four variant entries rather than a per-variant `ClipSpec` table. The bears share a rig but not a clip order, so each variant is its own manifest entry. Note B's `tantrum` is `Free` — the only *looping* attack in the game — and C's `fire_gun` is re-triggered per shot because it starts and ends in the aim pose |
 | `docs/artist_guide.md` §4 | Per-asset clip tables, authoring contract, "animations we still need" |
 | `tests/valkyrie_asset.rs` | The GLB asset contract |
