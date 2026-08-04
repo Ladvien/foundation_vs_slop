@@ -1,6 +1,6 @@
 (
     version: 1,
-    note: Some("The editor's working library. Seeded once from library_from_manifests.ron and OWNED BY emerge-mapper thereafter — its import mode appends here. The converter's output stays pinned separately, so a manifest that moves still fails a test without fighting an author's imports."),
+    note: Some("The editor\'s working library. Seeded once from library_from_manifests.ron and OWNED BY emerge-mapper thereafter — its import mode appends here. The converter\'s output stays pinned separately, so a manifest that moves still fails a test without fighting an author\'s imports."),
     descriptors: [
         (
             id: "lamp_tall",
@@ -36,6 +36,10 @@
                     "decor",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -74,6 +78,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -106,6 +114,10 @@
                     "decor",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -142,6 +154,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -177,6 +193,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -211,6 +231,10 @@
                     "decor",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -249,6 +273,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -282,6 +310,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -314,6 +346,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -352,6 +388,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -384,6 +424,10 @@
                     "dining",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -420,6 +464,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -453,6 +501,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -485,6 +537,10 @@
                     "kitchen",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -524,6 +580,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -561,6 +621,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -601,6 +665,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -640,6 +708,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -673,6 +745,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -705,6 +781,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -740,6 +820,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -772,6 +856,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -807,6 +895,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -845,6 +937,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -881,6 +977,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -916,6 +1016,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -950,6 +1054,10 @@
                     "bedroom",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -987,6 +1095,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1022,6 +1134,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1054,6 +1170,10 @@
                     "bathroom",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -1092,6 +1212,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1126,6 +1250,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1158,6 +1286,10 @@
                     "hall",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -1193,6 +1325,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1226,6 +1362,10 @@
                     "office",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -1261,6 +1401,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1295,6 +1439,10 @@
                     "hall",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -1332,6 +1480,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1364,6 +1516,10 @@
                     "bathroom",
                 ],
                 group: Some("bath"),
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),
@@ -1398,6 +1554,10 @@
                 ],
                 group: Some("bath"),
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -1430,6 +1590,43 @@
                     "bathroom",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
+            note: None,
+        ),
+        (
+            id: "is",
+            mesh: Some("characters/cipher_field.glb"),
+            align: (
+                scale: None,
+                stretch_y: None,
+                y_offset: Some(0.03944816),
+                pivot: Some((-0.0003646016, 0.052278467)),
+                front: None,
+            ),
+            extent: (
+                footprint: Some((1.5330375, 0.36034727)),
+                height: Some(1.677568),
+            ),
+            mount: None,
+            clearance: [],
+            offers: (
+                surfaces: [],
+                sockets: [],
+            ),
+            kind: [],
+            effects: [],
+            look: [],
+            placement: (
+                rooms: [],
+                group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),

@@ -38,6 +38,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -75,6 +79,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -108,6 +116,10 @@
                 ],
                 group: None,
             ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
+            ),
             note: None,
         ),
         (
@@ -140,6 +152,10 @@
                     "living",
                 ],
                 group: None,
+            ),
+            subgrid: (
+                div: (3, 3, 3),
+                cells: [],
             ),
             note: None,
         ),

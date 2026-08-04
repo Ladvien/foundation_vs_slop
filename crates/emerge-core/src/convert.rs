@@ -122,6 +122,9 @@ pub fn descriptor_from_manifest(item: &ManifestItem, policy: Policy) -> Result<D
     };
 
     Ok(Descriptor {
+        // The converter has no lattice to give: the old schema had no inside-the-tile detail, so a
+        // migrated piece starts with the default and an author fills it in.
+        subgrid: Default::default(),
         id: item.key.clone(),
         mesh: Some(item.glb.clone()),
         align: Align {

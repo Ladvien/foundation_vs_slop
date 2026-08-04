@@ -29,6 +29,8 @@
 //! `placement::mod` binds to the game's run lifecycle; `placement::anomalies` is SCP content. Those
 //! are the game's, and `ir.rs:7` already named `furnish.rs` as the boundary before the split.
 
+pub mod adjacency;
+pub mod clips;
 pub mod convert;
 pub mod descriptor;
 pub mod geom;
@@ -41,9 +43,17 @@ pub mod map;
 pub mod naming;
 pub mod placement;
 pub mod policy;
+pub mod rigs;
 pub mod rng;
 pub mod ron_surgery;
 pub mod smart;
 pub mod stack;
 pub mod vocab;
 pub mod wfc;
+
+/// Hermite ease between two edges. Pure math, so it lives here rather than in a crate that has a
+/// renderer — `emerge-anim`'s weight blending and the game's own `util` both take it from one place.
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}

@@ -59,6 +59,10 @@ impl Library {
             if d.id.trim().is_empty() {
                 return Err(format!("library: descriptor {i} has no id"));
             }
+            // The lattice is checked here rather than in `resolve`, because an out-of-range cell is
+            // wrong about the file it is written in — it is not a missing value some caller might
+            // supply.
+            d.subgrid.validate(&d.id)?;
             if let Some(j) = self.descriptors.iter().position(|o| o.id == d.id) {
                 if j != i {
                     return Err(format!(

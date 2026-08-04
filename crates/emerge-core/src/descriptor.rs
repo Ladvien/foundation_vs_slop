@@ -65,6 +65,9 @@ pub struct Descriptor {
     /// Hints for the generator — where this belongs and what it belongs *with*. See [`Placement`].
     pub placement: Placement,
 
+    /// The tile's internal lattice. See [`Subgrid`].
+    pub subgrid: Subgrid,
+
     /// What this asset is and why it is set up the way it is, as data.
     ///
     /// Same argument as [`crate::map::Map::note`]: prose a serializer can lose is prose that gets
@@ -72,6 +75,211 @@ pub struct Descriptor {
     /// scaled, how `front` was derived — and today that survives only because nothing re-serializes
     /// the file.
     pub note: Option<String>,
+}
+
+/// **A tile's internal lattice** — the thing that lets two pieces agree on where they meet.
+///
+/// A descriptor's [`Extent::footprint`] says how much floor a piece takes; `grid::cells` rounds that
+/// up to whole cells. That is enough to stop two pieces overlapping and not enough for anything else:
+/// it cannot say that an L-shaped desk leaves its inner corner free, that a table's four sides each
+/// seat someone, or that this wall segment may only abut another wall segment. Those are three
+/// questions about *where inside the tile*, and the tile had no inside.
+///
+/// One lattice answers all three, because they are facets of the same fact — what is at (x, y, z)
+/// within this piece:
+///
+/// * [`SubCell::solid`] — occupancy. Clearance and flood fill can respect the shape rather than the
+///   bounding box.
+/// * [`SubCell::edge`] — what the cell presents to the neighbour. WFC matches a tile's face against
+///   the facing cells of the tile beside it, which is what makes a corridor meet a corridor.
+/// * [`SubCell::anchor`] — a role an interacting item may occupy. The regular-grid sibling of
+///   [`Offers::sockets`]: a socket is a hand-placed point, an anchor is a lattice cell.
+///
+/// # Sparse, because most tiles have nothing to say
+///
+/// 3×3×3 is 27 cells and the shipped library is 43 mostly-rectangular props. Storing 27 entries each
+/// would be 1,161 rows of `solid: false` — so only cells that differ from open-and-unlabelled are
+/// written, and a piece with no lattice detail costs one defaulted field.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Subgrid {
+    /// Divisions per axis, `(x, y, z)`.
+    ///
+    /// **3×3×3.** Three is the smallest division with a *middle* — a centre distinct from its two
+    /// sides — which is what "left edge / interior / right edge" needs. Two would give a tile no
+    /// inside, and four would double the authoring for a symmetry nothing yet asks for.
+    pub div: (u32, u32, u32),
+    /// Only the cells that are not plain open space. See the note on sparseness.
+    pub cells: Vec<SubCell>,
+}
+
+impl Default for Subgrid {
+    fn default() -> Self {
+        Subgrid {
+            div: (3, 3, 3),
+            cells: Vec::new(),
+        }
+    }
+}
+
+impl Subgrid {
+    /// How many cells the lattice has, if it were written out in full.
+    pub fn volume(&self) -> u32 {
+        self.div.0 * self.div.1 * self.div.2
+    }
+
+    /// What is at `at`, or `None` for a cell nobody has said anything about.
+    pub fn at(&self, at: (u32, u32, u32)) -> Option<&SubCell> {
+        self.cells.iter().find(|c| c.at == at)
+    }
+
+    /// Is `at` inside the lattice?
+    pub fn holds(&self, at: (u32, u32, u32)) -> bool {
+        at.0 < self.div.0 && at.1 < self.div.1 && at.2 < self.div.2
+    }
+
+    /// The cell at `at`, created empty if nobody has written one yet.
+    ///
+    /// `None` when `at` is outside the lattice — a caller asking about a cell that cannot exist gets
+    /// an answer, not a row appended somewhere unreachable.
+    fn entry(&mut self, at: (u32, u32, u32)) -> Option<&mut SubCell> {
+        if !self.holds(at) {
+            return None;
+        }
+        if let Some(i) = self.cells.iter().position(|c| c.at == at) {
+            return self.cells.get_mut(i);
+        }
+        self.cells.push(SubCell {
+            at,
+            ..SubCell::default()
+        });
+        self.cells.last_mut()
+    }
+
+    /// **Drop any cell that has gone back to saying nothing.**
+    ///
+    /// The sparse invariant is not decoration: an author who marks a cell solid and then unmarks it
+    /// must leave the file as it was, or every tile ever poked at accretes rows of `solid: false`
+    /// that mean exactly what absence means.
+    fn prune(&mut self) {
+        self.cells
+            .retain(|c| c.solid || c.edge.is_some() || c.anchor.is_some());
+    }
+
+    /// Toggle a cell's occupancy. Returns what it became, or `None` if `at` is outside.
+    pub fn toggle_solid(&mut self, at: (u32, u32, u32)) -> Option<bool> {
+        let now = {
+            let cell = self.entry(at)?;
+            cell.solid = !cell.solid;
+            cell.solid
+        };
+        self.prune();
+        Some(now)
+    }
+
+    /// Set or clear a cell's edge label. An empty string clears it — the same keystroke that types a
+    /// token has to be able to take it back.
+    pub fn set_edge(&mut self, at: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at)?;
+        cell.edge = (!token.trim().is_empty()).then(|| token.trim().to_owned());
+        self.prune();
+        Some(())
+    }
+
+    /// Set or clear a cell's anchor role.
+    pub fn set_anchor(&mut self, at: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at)?;
+        cell.anchor = (!token.trim().is_empty()).then(|| token.trim().to_owned());
+        self.prune();
+        Some(())
+    }
+
+    /// Forget everything about a cell.
+    pub fn clear(&mut self, at: (u32, u32, u32)) {
+        self.cells.retain(|c| c.at != at);
+    }
+
+    /// **The lattice as it sits after `quarter` 90° turns about +Y.**
+    ///
+    /// A placement carries a yaw ([`crate::map::Placed::yaw`]) and the lattice does not know about
+    /// it, so anything comparing two placed tiles face to face has to turn one of them first.
+    /// Reading a face straight off the authored lattice would be silently wrong for every rotated
+    /// piece — which is exactly the piece a face-matching rule exists to check.
+    ///
+    /// The convention is the project's one forward rule: **a positive yaw turns +X toward −Z**
+    /// (`stack::covers`). So local +X becomes −Z, and a cell on the +X face lands on the −Z face:
+    ///
+    /// ```text
+    /// (x, y, z) -> (z, y, dx - 1 - x)      div (dx, dy, dz) -> (dz, dy, dx)
+    /// ```
+    ///
+    /// Four turns are the identity, which `rotating_four_times_is_the_identity` pins.
+    ///
+    /// Lives here rather than beside the matcher because the schema owns its own transforms for the
+    /// same reason it owns its own edits: the sparse invariant is this type's to keep.
+    pub fn rotated(&self, quarter: u8) -> Subgrid {
+        let mut out = self.clone();
+        for _ in 0..(quarter % 4) {
+            let (dx, dy, dz) = out.div;
+            out = Subgrid {
+                div: (dz, dy, dx),
+                cells: out
+                    .cells
+                    .iter()
+                    .map(|c| SubCell {
+                        at: (c.at.2, c.at.1, dx.saturating_sub(1) - c.at.0.min(dx.saturating_sub(1))),
+                        ..c.clone()
+                    })
+                    .collect(),
+            };
+        }
+        out
+    }
+
+    /// Refuse a lattice that cannot be true.
+    ///
+    /// Every rule here is one whose violation is silent: a zero division makes the lattice empty
+    /// while still claiming to have one, an out-of-range cell is a value nothing will ever read, and
+    /// a duplicate is two answers to one question with the first quietly winning.
+    pub fn validate(&self, owner: &str) -> Result<(), String> {
+        let (dx, dy, dz) = self.div;
+        if dx == 0 || dy == 0 || dz == 0 {
+            return Err(format!(
+                "`{owner}`'s subgrid divides {dx}x{dy}x{dz}; an axis with no divisions has no cells"
+            ));
+        }
+        let mut seen: Vec<(u32, u32, u32)> = Vec::with_capacity(self.cells.len());
+        for c in &self.cells {
+            if c.at.0 >= dx || c.at.1 >= dy || c.at.2 >= dz {
+                return Err(format!(
+                    "`{owner}`'s subgrid cell {:?} is outside its {dx}x{dy}x{dz} lattice",
+                    c.at
+                ));
+            }
+            if seen.contains(&c.at) {
+                return Err(format!(
+                    "`{owner}`'s subgrid names cell {:?} twice — one cell, one answer",
+                    c.at
+                ));
+            }
+            seen.push(c.at);
+        }
+        Ok(())
+    }
+}
+
+/// One cell of a [`Subgrid`]. See that type for what the three facets are for.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SubCell {
+    /// Which cell, `(x, y, z)`, zero-based.
+    pub at: (u32, u32, u32),
+    /// Solid space — what clearance and a flood fill must respect.
+    pub solid: bool,
+    /// What this cell presents to whatever is placed beside it. Matched face-to-face.
+    pub edge: Option<String>,
+    /// A role an interacting item may occupy here — `"diner"`, `"shelf-item"`.
+    pub anchor: Option<String>,
 }
 
 /// Where a piece belongs, for whatever is placing it. **Not a semantic axis.**
@@ -371,6 +579,13 @@ impl Descriptor {
             kind: pick(&self.kind, &patch.kind),
             effects: pick(&self.effects, &patch.effects),
             look: pick(&self.look, &patch.look),
+            // A patch that states a lattice replaces it, on the same rule the lists follow: an
+            // append could not remove a cell.
+            subgrid: if patch.subgrid == Subgrid::default() {
+                self.subgrid.clone()
+            } else {
+                patch.subgrid.clone()
+            },
             placement: Placement {
                 rooms: pick(&self.placement.rooms, &patch.placement.rooms),
                 group: patch.placement.group.clone().or_else(|| self.placement.group.clone()),
@@ -654,5 +869,164 @@ mod tests {
             .expect("serializes");
         let back: Descriptor = ron::from_str(&text).expect("parses");
         assert_eq!(d, back);
+    }
+}
+
+#[cfg(test)]
+mod subgrid_tests {
+    use super::*;
+
+    fn grid(div: (u32, u32, u32), cells: Vec<SubCell>) -> Subgrid {
+        Subgrid { div, cells }
+    }
+
+    fn cell(at: (u32, u32, u32)) -> SubCell {
+        SubCell {
+            at,
+            ..SubCell::default()
+        }
+    }
+
+    /// The default is the whole point of the feature being cheap: a piece that says nothing about its
+    /// inside costs one field and no rows.
+    #[test]
+    fn a_tile_says_nothing_about_its_inside_by_default() {
+        let g = Subgrid::default();
+        assert_eq!(g.div, (3, 3, 3));
+        assert_eq!(g.volume(), 27);
+        assert!(g.cells.is_empty());
+        assert!(g.validate("x").is_ok());
+    }
+
+    /// All three facets on one cell — the thing this schema exists to allow.
+    #[test]
+    fn one_cell_can_be_solid_and_an_edge_and_an_anchor() {
+        let c = SubCell {
+            at: (2, 0, 1),
+            solid: true,
+            edge: Some("wall".into()),
+            anchor: Some("diner".into()),
+        };
+        let g = grid((3, 3, 3), vec![c.clone()]);
+        assert!(g.validate("table").is_ok());
+        let got = g.at((2, 0, 1)).unwrap_or_else(|| panic!("no cell"));
+        assert_eq!(got, &c);
+        assert!(g.at((0, 0, 0)).is_none(), "unwritten cells are absent, not default rows");
+    }
+
+    #[test]
+    fn a_cell_outside_the_lattice_is_refused() {
+        let e = grid((3, 3, 3), vec![cell((3, 0, 0))])
+            .validate("desk")
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("outside"), "{e}");
+    }
+
+    #[test]
+    fn naming_one_cell_twice_is_refused() {
+        let e = grid((3, 3, 3), vec![cell((1, 1, 1)), cell((1, 1, 1))])
+            .validate("desk")
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("twice"), "{e}");
+    }
+
+    #[test]
+    fn an_axis_with_no_divisions_is_refused() {
+        let e = grid((3, 0, 3), vec![])
+            .validate("desk")
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("no cells"), "{e}");
+    }
+
+    /// A lattice survives the file, which is what makes it authorable at all.
+    #[test]
+    fn a_lattice_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "desk".into(),
+            subgrid: grid(
+                (3, 3, 3),
+                vec![SubCell {
+                    at: (0, 0, 2),
+                    solid: true,
+                    edge: Some("wall".into()),
+                    anchor: None,
+                }],
+            ),
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let after: Descriptor = ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, after);
+    }
+
+    /// An old library has no `subgrid` key at all and must still parse — the field defaults.
+    #[test]
+    fn a_descriptor_written_before_the_lattice_still_parses() {
+        let d: Descriptor = ron::from_str("(id: \"crate\")").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(d.subgrid, Subgrid::default());
+    }
+}
+
+#[cfg(test)]
+mod subgrid_edit_tests {
+    use super::*;
+
+    #[test]
+    fn toggling_a_cell_solid_and_back_leaves_no_trace() {
+        let mut g = Subgrid::default();
+        assert_eq!(g.toggle_solid((1, 0, 1)), Some(true));
+        assert_eq!(g.cells.len(), 1);
+        assert_eq!(g.toggle_solid((1, 0, 1)), Some(false));
+        // The sparse invariant: a cell that says nothing is absent, not a row of `solid: false`.
+        assert!(g.cells.is_empty(), "an unmarked cell must leave no row behind");
+    }
+
+    #[test]
+    fn a_cell_outside_the_lattice_cannot_be_written() {
+        let mut g = Subgrid::default();
+        assert_eq!(g.toggle_solid((3, 0, 0)), None);
+        assert_eq!(g.set_edge((0, 9, 0), "wall"), None);
+        assert!(g.cells.is_empty(), "an out-of-range write must not append anything");
+    }
+
+    #[test]
+    fn tokens_set_and_clear_on_the_same_cell() {
+        let mut g = Subgrid::default();
+        g.set_edge((0, 0, 2), "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), "diner").unwrap_or_else(|| panic!("in range"));
+        let c = g.at((0, 0, 2)).unwrap_or_else(|| panic!("written"));
+        assert_eq!(c.edge.as_deref(), Some("wall"));
+        assert_eq!(c.anchor.as_deref(), Some("diner"));
+
+        // Emptying both takes the row with it, since solid was never set.
+        g.set_edge((0, 0, 2), "").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), "  ").unwrap_or_else(|| panic!("in range"));
+        assert!(g.cells.is_empty());
+    }
+
+    /// A cell keeps whichever facets are still set — clearing one must not drop the others.
+    #[test]
+    fn clearing_one_facet_keeps_the_rest() {
+        let mut g = Subgrid::default();
+        g.toggle_solid((1, 1, 1));
+        g.set_edge((1, 1, 1), "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((1, 1, 1), "").unwrap_or_else(|| panic!("in range"));
+        let c = g.at((1, 1, 1)).unwrap_or_else(|| panic!("still solid"));
+        assert!(c.solid);
+        assert!(c.edge.is_none());
+    }
+
+    #[test]
+    fn clear_forgets_the_whole_cell() {
+        let mut g = Subgrid::default();
+        g.toggle_solid((2, 2, 2));
+        g.set_anchor((2, 2, 2), "seat").unwrap_or_else(|| panic!("in range"));
+        g.clear((2, 2, 2));
+        assert!(g.at((2, 2, 2)).is_none());
+        assert!(g.validate("x").is_ok());
     }
 }
