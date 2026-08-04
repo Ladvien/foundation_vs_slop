@@ -68,9 +68,10 @@ impl Project {
         let vocab = Vocabularies::parse(&read(&vocab_path)?)
             .map_err(|e| format!("{}: {e}", vocab_path.display()))?;
 
+        // Measurements, then this game's policy over them — `emerge_core::policy` owns the order so
+        // the editor and the game cannot end up with differently-layered libraries.
+        let library = emerge_core::policy::layered_library(&root.join(EMERGE_DIR))?;
         let library_path = root.join(LIBRARY);
-        let library = Library::parse(&read(&library_path)?)
-            .map_err(|e| format!("{}: {e}", library_path.display()))?;
 
         // The two-sided pass over the whole set, at open. A prop that rests on a class nothing offers
         // can never be placed, and the moment to say so is now — not when an author wonders why a

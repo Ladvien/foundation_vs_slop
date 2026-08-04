@@ -40,6 +40,7 @@ pub mod library;
 pub mod map;
 pub mod naming;
 pub mod placement;
+pub mod policy;
 pub mod rng;
 pub mod ron_surgery;
 pub mod stack;

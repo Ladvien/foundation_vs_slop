@@ -28,8 +28,7 @@
 //! scaled 1.2 presents its surface at 0.955 m. Reading `extent.height` alone would put the lamp inside
 //! the tabletop on every scaled piece, and nothing downstream would say so.
 
-use crate::descriptor::{Descriptor, Mount};
-use crate::placement::ir::Host;
+use crate::descriptor::{Descriptor, Mount, OverlayHost};
 use crate::library::Library;
 use crate::map::{Map, Placed};
 
@@ -258,19 +257,13 @@ pub fn datum(
         Some(Mount::OnSurface { class }) => host_top.ok_or_else(|| {
             format!("`{who}` needs a `{class}` surface and there is none under it")
         })?,
-        // A decal lies on the plane it names. `Wall` is the one with no answer in the data: a poster's
-        // height is not derivable from anything the schema records, and inventing one would put every
-        // wall decal at the same arbitrary height and call it authored.
+        // A decal lies on the plane it names. The floor and the ceiling are the map's to state; a
+        // wall's height is nobody's, so `OverlayHost::Wall` carries it — this used to be the one arm
+        // with no answer, and it returned an error rather than invent a number.
         Some(Mount::Overlay { on }) => match on {
-            Host::Floor => map.origin.1,
-            Host::Ceiling => map.origin.1 + map.bounds.1,
-            Host::Wall | Host::Opening => {
-                return Err(format!(
-                    "map: `{who}` is an overlay on a {on:?}, and the schema records no height for \
-                     one. `OnWall` carries a height and `Overlay` does not — until it does, this \
-                     layer cannot say where the piece goes."
-                ));
-            }
+            OverlayHost::Floor => map.origin.1,
+            OverlayHost::Ceiling => map.origin.1 + map.bounds.1,
+            OverlayHost::Wall { height } => map.origin.1 + height,
         },
     };
     // A geometric correction on the mesh, applied on top of whatever the layer decided rather than
@@ -491,6 +484,39 @@ mod tests {
         };
         let y = resolve_y(&m, &lib(vec![light])).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(y[0], 3.5);
+    }
+
+    /// **Every layer has an answer.** A wall overlay carries its own height — the one arm that used
+    /// to return an error, because `OnWall` had a height and `Overlay` had nowhere to put one. The
+    /// floor and ceiling decals take theirs from the map, since that is whose business they are.
+    #[test]
+    fn a_decal_lies_on_the_plane_it_names() {
+        let m = Map {
+            name: "test_map".into(),
+            origin: (0.0, 10.0, 0.0),
+            bounds: (8.0, 3.0, 8.0),
+            placements: vec![at("d", "decal", None)],
+            ..Map::default()
+        };
+        let decal = |on| {
+            let mut d = lamp();
+            d.id = "decal".into();
+            d.mount = Some(Mount::Overlay { on });
+            d
+        };
+
+        let floor = resolve_y(&m, &lib(vec![decal(OverlayHost::Floor)]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(floor[0], 10.0);
+
+        let ceiling = resolve_y(&m, &lib(vec![decal(OverlayHost::Ceiling)]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ceiling[0], 13.0);
+
+        // A poster at 1.6 m on the wall of a room whose floor is at 10.
+        let wall = resolve_y(&m, &lib(vec![decal(OverlayHost::Wall { height: 1.6 })]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(wall[0], 11.6);
     }
 
     /// A cycle is caught by the resolver as well as by `Map::validate`, so a caller that skipped
