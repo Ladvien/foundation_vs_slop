@@ -1297,6 +1297,34 @@
         ( piece: StorageBox,    pos: (25.2, 32.8), yaw:   0.0 ),
         ( piece: TrashBin,      pos: (33.4, 32.9), yaw:   0.0 ),
 
+        // **The lab bench.** Three counters end to end down the east wall, which is what turns the
+        // room from "a slab in an empty rectangle" into somewhere the work happens AROUND the subject.
+        // The slab stays centre stage; the bench is where the people are.
+        //
+        // Run along Z at a fixed X so the counters read as one continuous surface — 1.5 m apart on a
+        // 1.4 m piece, so they meet with a 10 cm reveal rather than fusing into an unreadable block.
+        ( piece: GalleyCounter, pos: (37.2, 27.6), yaw:   0.0 ),
+        ( piece: GalleyCounter, pos: (37.2, 29.1), yaw:   0.0 ),
+        ( piece: GalleyCounter, pos: (37.2, 30.6), yaw:   0.0 ),
+        // What is ON it. Every one of these `rests_on` a worktop, so it is seated at the bench's top
+        // by `visuals::place` rather than authored at a height — move the bench and the glassware
+        // goes with it.
+        ( piece: TubeRack,      pos: (37.2, 27.3), yaw:   0.0 ),
+        ( piece: TubeRack,      pos: (37.2, 27.9), yaw:   0.0 ),
+        ( piece: MedicalVial,   pos: (37.2, 29.1), yaw:   0.0 ),
+        ( piece: DataFolder,    pos: (37.2, 30.4), yaw:  90.0 ),
+        ( piece: Books,         pos: (37.2, 30.9), yaw:   0.0 ),
+        // A stool at the bench. Backless, so `front` is `None` and the facing rule exempts it — a
+        // stool genuinely has no front, and demanding one would be asserting a fact about the art.
+        ( piece: Stool,         pos: (36.0, 29.1), yaw:   0.0 ),
+        // A chair pulled up to the slab, on the side away from the door. It HAS a front, so the rule
+        // insists it face the slab: yaw 0 puts its back to the west wall and its seat toward the
+        // subject, which is where somebody sits to write up what is on the table.
+        ( piece: Chair,         pos: (26.7, 29.5), yaw:   0.0 ),
+        // Storage against the walls, out of the working floor.
+        ( piece: Locker,        pos: (24.3, 26.6), yaw:  90.0 ),
+        ( piece: StorageCrate,  pos: (35.4, 33.1), yaw:   0.0 ),
+
         // ── RECORDS  x[0,8) z[14,22) — 2900 K tungsten, "paper, dust, and a desk lamp" ──
         ( piece: TrashBin,      pos: ( 12.6, 31.4), yaw:   0.0 ),
         ( piece: StorageBox,    pos: ( 12.4, 27.2), yaw: 270.0 ),

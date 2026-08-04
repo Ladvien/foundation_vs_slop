@@ -599,43 +599,6 @@ pub(crate) fn cell_interior_dir(yaw_deg: f32) -> Vec3 {
     -(Quat::from_rotation_y(yaw_deg.to_radians()) * Vec3::X)
 }
 
-/// Build the booth behind a containment cell's glass: two side walls and a back.
-///
-/// **Derived from the cell's own placement, never authored** — the same discipline [`wall_panels`]
-/// and [`corner_vertices`] use, so adding a seventh cell to `site67.ron` gets an enclosure for free
-/// and no cell can be left as a bare pane by forgetting to type one.
-///
-/// Until 2026-08-01 a cell WAS a bare pane: `site67.ron`'s `cells:` authors one `WallWindow` and
-/// nothing around it, so a containment wing holding nothing read as six sheets of glass standing on
-/// an open deck. That undercuts the whole point of FVS-D-4 — the player is supposed to walk past a
-/// rack of the things they brought home, and a rack has to look like one when it is empty.
-///
-/// Sides run along the interior direction and are therefore a quarter-turn from the glass; the back
-/// is parallel to it. Everything is `Wall`, which is 1 m long, so a 2 m run is two pieces.
-fn enclose_containment_cell(
-    commands: &mut Commands,
-    assets: &AssetServer,
-    kit: &crate::site::kit::SiteKit,
-    at: Vec3,
-    yaw_deg: f32,
-) {
-    let rot = Quat::from_rotation_y(yaw_deg.to_radians());
-    let inward = cell_interior_dir(yaw_deg);
-    let span = rot * Vec3::Z;
-    // Sides: at both ends of the glass, stepping one metre at a time into the booth.
-    for side in [-1.0f32, 1.0] {
-        for step in [0.5f32, 1.5] {
-            let p = at + span * side * (CELL_DEPTH * 0.5) + inward * step;
-            place(commands, assets, kit, SitePiece::Wall, p, yaw_deg + 90.0);
-        }
-    }
-    // Back: parallel to the glass, at the far end of the booth.
-    for side in [-0.5f32, 0.5] {
-        let p = at + inward * CELL_DEPTH + span * side;
-        place(commands, assets, kit, SitePiece::Wall, p, yaw_deg);
-    }
-}
-
 fn spawn_site_geometry(
     mut commands: Commands,
     assets: Res<AssetServer>,
