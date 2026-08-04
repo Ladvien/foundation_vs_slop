@@ -818,26 +818,30 @@ fn size_edit_keys(
                     state.status = "nothing typed; the size is unchanged".to_owned();
                     return;
                 }
-                let Ok(want) = raw.parse::<u32>() else {
-                    // Unreachable while the filter below holds, and stated rather than assumed: an
-                    // overlong run of digits overflows `u32` and that is a refusal, not a panic.
-                    state.status = format!("`{raw}` is not a whole number of metres");
+                // **Metres, not whole metres.** The old +/- nudges stepped Y by 0.5 m; the field that
+                // replaced them took `u32`, so a ceiling saved at 3.5 m could be read on screen and
+                // never typed back — the author's only way to change it snapped it to 3 or 4. Bounds
+                // are `f32` in the schema and always were.
+                let Ok(want) = raw.parse::<f32>() else {
+                    state.status = format!("`{raw}` is not a number of metres");
                     return;
                 };
-                if !(MIN_BOUND..=MAX_BOUND).contains(&want) {
+                if !want.is_finite() || !(MIN_BOUND as f32..=MAX_BOUND as f32).contains(&want) {
                     state.status =
-                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{want}` is outside it");
+                        format!("a map axis runs {MIN_BOUND}..{MAX_BOUND} m; `{raw}` is outside it");
                     return;
                 }
                 let mut bounds = project.map.bounds;
-                axis.set(&mut bounds, want as f32);
+                axis.set(&mut bounds, want);
                 if bounds != project.map.bounds {
                     project.map.bounds = bounds;
                     project.dirty = true;
                 }
                 state.status = format!(
-                    "map is {:.0} x {:.0} x {:.0} m",
-                    bounds.0, bounds.1, bounds.2
+                    "map is {} x {} x {} m",
+                    trim_metres(bounds.0),
+                    trim_metres(bounds.1),
+                    trim_metres(bounds.2)
                 );
             }
             Key::Escape => {
@@ -851,9 +855,12 @@ fn size_edit_keys(
             }
             Key::Character(s) => {
                 if let Some((_, raw)) = edit.active.as_mut() {
-                    // Room for `MAX_BOUND`'s three digits and no more, so the buffer cannot grow
-                    // into something `u32` has to refuse later.
-                    if s.chars().all(|c| c.is_ascii_digit()) && raw.len() < 3 {
+                    // Digits and one decimal point — room for `MAX_BOUND`'s three digits plus
+                    // `.5`, and at most one point, so the buffer cannot grow into something the
+                    // parse has to refuse later.
+                    let point = s == "." && !raw.contains('.');
+                    let digit = s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty();
+                    if (digit || point) && raw.len() < 5 {
                         raw.push_str(s);
                     }
                 }
@@ -1155,6 +1162,15 @@ fn in_map_mode(mode: Res<crate::tiles::Mode>) -> bool {
 
 /// Type a name. Snake case is applied to what is shown and to what is committed, so the illegal state
 /// is never reachable rather than merely being rejected at the end.
+/// A metre count with no trailing `.0` — `32` rather than `32.0`, `3.5` as itself.
+fn trim_metres(m: f32) -> String {
+    if (m - m.round()).abs() < 1e-4 {
+        format!("{m:.0}")
+    } else {
+        format!("{m:.1}")
+    }
+}
+
 fn rename_keys(
     mut events: MessageReader<KeyboardInput>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -1163,8 +1179,10 @@ fn rename_keys(
     mut state: ResMut<EditorState>,
 ) {
     if state.renaming.is_none() {
-        // `N` starts a rename. Read from the buffered events like everything else here, so a keypress
-        // cannot both start the rename and be typed into it.
+        // `N` starts a rename. The comment here used to claim reading from the buffered events was
+        // enough to stop a keypress both starting the rename and being typed into it; it is not —
+        // the reader's cursor only advances when `read()` is called, and this branch returns without
+        // calling it. `events.clear()` below is what actually holds the invariant.
         if keys::just_pressed(&keyboard, live.0, Action::RenameMap) {
             // **Empty, not seeded with the current name.** Seeding it meant the first keystroke
             // appended, so renaming `site_67_hub` to `galley_deck` produced
@@ -1178,6 +1196,9 @@ fn rename_keys(
                 project.map.name
             );
         }
+        // Drain before leaving, so the `N` that opened the field is not read as its first character
+        // next frame. Same invariant as `tiles::cell_keys`.
+        events.clear();
         return;
     }
 
@@ -1460,6 +1481,14 @@ fn drive_removal(
     // promise about a click that will never reach the world — the same rule the ghost follows.
     let hit = cursor_ground(&window, cam, cam_tf).filter(|_| !hovered_ui.iter().any(|h| h.0));
     let Some(hit) = hit else {
+        // **A release ends the drag wherever it happens.** This used to return before the
+        // `just_released` branch, so letting go over a panel or off the map left `drag.from` set —
+        // and the red "these will be removed" rectangle then followed the cursor around with no
+        // button held, claiming a deletion nobody was making, until the next press reset it. A drag
+        // that ends outside the world removes nothing, but it does end.
+        if mouse.just_released(MouseButton::Left) {
+            drag.from = None;
+        }
         for (_, mut vis) in &mut marker {
             *vis = Visibility::Hidden;
         }
@@ -2107,6 +2136,11 @@ fn pin_reason_keys(
     mut state: ResMut<EditorState>,
 ) {
     if state.pinning.is_none() {
+        // **Drain before leaving.** The reader's cursor only advances when `read()` is called, so
+        // returning here leaves the keystroke that OPENED this field waiting to be read as its first
+        // character next frame. Same invariant as `tiles::cell_keys`; missing it is what made the
+        // first authored token come out as `xseam`.
+        events.clear();
         return;
     }
     for event in events.read() {

@@ -24,6 +24,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the shape below changes in a way an older file cannot satisfy.
+/// The highest mask group a slot may name — `AnimationMask` in Bevy 0.19 is a `u64`, so the bits are
+/// 0..63 and `1 << 64` is undefined behaviour the compiler turns into a panic.
+pub const MAX_MASK_GROUP: u32 = 64;
+
 pub const RIGS_VERSION: u32 = 1;
 
 /// How a clip advances. Mirrors `anim::Playback` — the game converts one to the other and nothing
@@ -117,6 +121,21 @@ impl Rigs {
             ));
         }
         for (name, rig) in &self.rigs {
+            // **A mask names a bit, and a bit has to exist.** `rigs::build` evaluates `1 << group`
+            // against Bevy's 64-bit `AnimationMask`; nothing checked the group, so `mask: Some(64)`
+            // in the manifest panicked the whole game at Startup with "attempt to shift left with
+            // overflow" in debug, or wrapped to bit 0 in release and masked the wrong bone group —
+            // which is worse, because it looks like the animation is merely wrong.
+            for slot in &rig.slots {
+                if let Some(group) = slot.mask {
+                    if group >= MAX_MASK_GROUP {
+                        return Err(format!(
+                            "`{name}`'s slot masks to group {group}; a mask group is a bit index into \
+                             a 64-bit animation mask, so it must be below {MAX_MASK_GROUP}"
+                        ));
+                    }
+                }
+            }
             if rig.mesh.is_empty() {
                 return Err(format!("rig `{name}` names no mesh"));
             }

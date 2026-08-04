@@ -324,7 +324,16 @@ pub fn world_track(glb: &Glb, clip: usize, node: usize) -> Option<(Vec<f32>, Vec
     // The chain from the node up to a root, then reversed so it composes parent-first.
     let mut chain = vec![node];
     let mut at = node;
+    // **Bounded by the node count.** `parents` just inverts `children` and nothing here runs a glTF
+    // validator, so an exporter that writes A as a child of B and B as a child of A makes this walk
+    // never terminate — the editor hangs with memory climbing while it pushes a chain forever. A
+    // chain cannot be longer than `parent` (one entry per node) without repeating a node, so
+    // exceeding that IS the
+    // cycle, and `None` is the honest answer: this rig has no measurable track.
     while let Some(Some(p)) = parent.get(at).copied() {
+        if chain.len() > parent.len() {
+            return None;
+        }
         chain.push(p);
         at = p;
     }

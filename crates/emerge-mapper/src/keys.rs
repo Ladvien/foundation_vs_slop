@@ -181,7 +181,12 @@ pub const BINDINGS: &[Binding] = &[
     // modal that eats the next keystroke.
     b(Action::Shortcuts, KeyCode::KeyK, false, Context::Global, "K", "hold for shortcuts"),
     b(Action::Save, KeyCode::KeyS, true, Context::Global, "S", "save"),
-    b(Action::Undo, KeyCode::KeyZ, true, Context::Global, "Z", "undo"),
+    // **Undo is the MAP's.** It was `Global`, and `keys` had lost its `in_map_mode` run condition, so
+    // `Cmd+Z` on the Tiles tab silently despawned a flood fill — up to ~1,400 placements — while every
+    // `MapRoot` panel was `Display::None` and nothing on screen changed. An undo you cannot see the
+    // effect of is not an undo. Lattice edits go straight to `library.ron` and have no undo of their
+    // own, which is exactly why the key is reached for there.
+    b(Action::Undo, KeyCode::KeyZ, true, Context::Map, "Z", "undo"),
 
     // **Z and C turn the brush; X puts it back.** They sit under the left hand already resting on
     // WASD, which the brackets never did — and `Z` is free as a bare key precisely because the
