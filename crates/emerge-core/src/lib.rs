@@ -43,6 +43,7 @@ pub mod placement;
 pub mod policy;
 pub mod rng;
 pub mod ron_surgery;
+pub mod smart;
 pub mod stack;
 pub mod vocab;
 pub mod wfc;

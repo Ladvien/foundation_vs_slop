@@ -108,4 +108,24 @@
             ( name: "worktop", note: "a desk or table worktop specifically" ),
         ],
     ),
+
+    // ── capabilities ─────────────────────────────────────────────────────────────────────────────
+    //
+    // The only axis about PEOPLE. A `RoleSlot` says which of these an occupant must have, and an
+    // actor carries the ones it has; the match is one `&`, per Game AI Pro 4 ch.4.
+    //
+    // Kept apart from `effects` deliberately. Both answer "what does it do", but `effects` is about a
+    // thing standing in a room and this is about somebody who could walk into it. One shared table
+    // would let a chair be authored as able to cook, and that error surfaces as a scene that silently
+    // never starts — the worst shape a content bug can take.
+    capabilities: (
+        tokens: [
+            ( name: "eat", note: "can take a meal — the diner role at a table" ),
+            ( name: "cook", note: "can prepare food, as the galley's server" ),
+            ( name: "rest", note: "can sleep or sit idle in a bunk or chair" ),
+            ( name: "guard", note: "can stand a post — a watch role at a checkpoint" ),
+            ( name: "repair", note: "can work on a broken fixture" ),
+            ( name: "converse", note: "can take part in a talking scene" ),
+        ],
+    ),
 )

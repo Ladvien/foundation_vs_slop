@@ -36,6 +36,7 @@ use bevy::prelude::*;
 use emerge_core::descriptor::Descriptor;
 use emerge_core::library::Library;
 use emerge_core::map::Map;
+use emerge_core::smart::{self, Actor, Booking, Cast, RoleMasks, Seat, Unfilled};
 use emerge_core::vocab::{Masks, Vocabularies};
 
 /// The library, map and vocabulary a world was built from.
@@ -50,6 +51,14 @@ pub struct EmergeWorld {
     /// [`emerge_core::stack::resolve_y`], because a piece's height can depend on a piece authored
     /// later in the file.
     pub y: Vec<f32>,
+    /// Every role's capability requirement, resolved once at load.
+    pub roles: RoleMasks,
+    /// Every seat every location offers, in world space, keyed by location id and in a total order.
+    ///
+    /// Computed at load rather than per query. A socket's world position moves only when the map does,
+    /// and the map does not move at runtime — so recomputing it inside the loop that runs whenever an
+    /// agent looks for something to do would be work done thousands of times to get the same answer.
+    pub seats: Vec<(String, Vec<Seat>)>,
 }
 
 impl EmergeWorld {
@@ -78,13 +87,31 @@ impl EmergeWorld {
         // discovered as a lamp inside a table — the same argument the missing-descriptor check above
         // makes, applied to the axis the schema could describe and nothing implemented.
         let y = emerge_core::stack::resolve_y(&map, &library)?;
+        // Roles and seats resolved with everything else, so a misspelled capability or a location
+        // governing a prop nobody placed is refused here rather than surfacing as a scene that
+        // silently never starts — the least debuggable shape a content bug takes.
+        let roles = smart::resolve_roles(&map, &vocab)?;
+        let mut seats = Vec::with_capacity(map.locations.len());
+        for loc in &map.locations {
+            seats.push((loc.id.clone(), smart::seats_of(&map, &library, &y, loc)?));
+        }
         Ok(EmergeWorld {
             library,
             map,
             vocab,
             masks,
             y,
+            roles,
+            seats,
         })
+    }
+
+    /// The seats a location offers.
+    pub fn seats(&self, location: &str) -> &[Seat] {
+        self.seats
+            .iter()
+            .find(|(id, _)| id == location)
+            .map_or(&[], |(_, s)| s.as_slice())
     }
 
     /// A descriptor and its masks by id.
@@ -135,7 +162,7 @@ pub struct EmergePlugin;
 
 impl Plugin for EmergePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<SmartObjects>().add_systems(
             Update,
             spawn_world.run_if(resource_added::<EmergeWorld>),
         );
@@ -266,6 +293,134 @@ fn spawn_world(mut commands: Commands, assets: Res<AssetServer>, world: Res<Emer
     );
 }
 
+// ── smart objects ────────────────────────────────────────────────────────────────────────────────
+
+/// What the world affords, and who is currently doing it.
+///
+/// The index and the bookings in one resource, because they answer one question between them: *what
+/// could this agent do that nobody else is already doing?* Splitting them would let a query return a
+/// table that a scene started on two systems ago.
+#[derive(Resource, Default)]
+pub struct SmartObjects {
+    booking: Booking,
+}
+
+/// An interaction an agent could start: where, what, and how far away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    pub location: String,
+    pub verb: String,
+    /// Metres from the asking agent to the location's nearest seat.
+    pub distance: f32,
+}
+
+impl SmartObjects {
+    /// **What is on offer near `from`.** Ordered nearest first, ties broken by `(location, verb)`.
+    ///
+    /// The query is the easy half — both chapters say so, and it is a filter and a sort. What it must
+    /// not do is offer something unusable: a location already running a scene owns its props, so it is
+    /// skipped rather than returned and refused later.
+    ///
+    /// The tie-break is a total order and not decoration. Two identical tables equidistant from an
+    /// agent would otherwise be ranked by whatever order the map file happens to list them in, which
+    /// is stable right up until somebody reorders the file.
+    pub fn offers(&self, world: &EmergeWorld, from: Vec3, within: f32) -> Vec<Offer> {
+        let mut out = Vec::new();
+        for loc in &world.map.locations {
+            if self.booking.is_busy(&loc.id) {
+                continue;
+            }
+            let seats = world.seats(&loc.id);
+            // A location with no seats is reachable from anywhere: its interactions want bystanders,
+            // not marked spots, so distance is measured to the props' own group rather than to a chair.
+            let distance = seats
+                .iter()
+                .map(|s| Vec3::new(s.at.0, s.at.1, s.at.2).distance(from))
+                .fold(f32::INFINITY, f32::min);
+            let distance = if distance.is_finite() { distance } else { 0.0 };
+            if distance > within {
+                continue;
+            }
+            for interaction in &loc.interactions {
+                out.push(Offer {
+                    location: loc.id.clone(),
+                    verb: interaction.verb.clone(),
+                    distance,
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (&a.location, &a.verb).cmp(&(&b.location, &b.verb)))
+        });
+        out
+    }
+
+    /// Try to start `verb` at `location` with the actors offered.
+    ///
+    /// Only the free ones are put forward — *"each NPC only participates in at most one script at a
+    /// time"* — so the exclusivity rule is enforced by what the allocator is allowed to see rather
+    /// than by checking afterwards.
+    pub fn start(
+        &mut self,
+        world: &EmergeWorld,
+        location: &str,
+        verb: &str,
+        actors: &[Actor],
+        rng: &mut impl emerge_core::rng::DetRng,
+    ) -> Result<Cast, Unfilled> {
+        let Some(loc) = world.map.locations.iter().find(|l| l.id == location) else {
+            return Err(Unfilled::Role {
+                role: format!("<no location `{location}`>"),
+                need: 0,
+                found: 0,
+            });
+        };
+        let Some(interaction) = loc.interactions.iter().find(|i| i.verb == verb) else {
+            return Err(Unfilled::Role {
+                role: format!("<no `{verb}` at `{location}`>"),
+                need: 0,
+                found: 0,
+            });
+        };
+        let requires = world.roles.get(location, verb).unwrap_or(&[]);
+        let free = self.booking.free(actors);
+        let cast = smart::allocate(
+            loc,
+            interaction,
+            requires,
+            &free,
+            world.seats(location),
+            rng,
+        )?;
+        // `allocate` saw only free actors and an idle location, so this cannot refuse — and if it ever
+        // does, the invariant broke and silence would be the worst possible response.
+        if let Err(e) = self.booking.start(cast.clone()) {
+            error!("emerge: booking refused a cast it should have accepted: {e}");
+        }
+        Ok(cast)
+    }
+
+    /// End whatever `location` was running, freeing its props and its cast.
+    pub fn finish(&mut self, location: &str) -> Option<Cast> {
+        self.booking.finish(location)
+    }
+
+    pub fn is_busy(&self, location: &str) -> bool {
+        self.booking.is_busy(location)
+    }
+
+    pub fn is_engaged(&self, actor: u64) -> bool {
+        self.booking.is_engaged(actor)
+    }
+
+    pub fn running(&self) -> &[Cast] {
+        self.booking.casts()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,7 +499,215 @@ mod tests {
         assert_eq!(draw_yaw(&plain, 30.0), 30.0);
     }
 
-    /// **A map is a thing you place.** `at` is map space and `origin` is where that space sits in the
+    // ── smart objects ────────────────────────────────────────────────────────────────────────
+
+    /// A galley: one table with `seats` chairs, and one `eat` interaction wanting diners.
+    fn galley(seats: usize) -> EmergeWorld {
+        use emerge_core::descriptor::{Offers, Socket};
+        use emerge_core::map::{Effect, Interaction, Location, RoleKind, RoleSlot};
+        use emerge_core::vocab::{Vocabulary, Vocabularies};
+
+        let mut table = descriptor("table");
+        table.offers = Offers {
+            surfaces: vec![],
+            sockets: (0..seats)
+                .map(|i| Socket {
+                    id: format!("seat_{i}"),
+                    role: Some("diner".into()),
+                    at: (i as f32, 0.45, 0.0),
+                    yaw: 0.0,
+                })
+                .collect(),
+        };
+
+        let mut diner = RoleSlot {
+            name: "diner".into(),
+            kind: RoleKind::Main,
+            min: 1,
+            max: 4,
+            socket_role: Some("diner".into()),
+            requires: vec!["eat".into()],
+        };
+        diner.max = seats.max(1) as u8;
+
+        EmergeWorld::new(
+            Library {
+                version: LIBRARY_VERSION,
+                note: None,
+                descriptors: vec![table],
+            },
+            Map {
+                name: "test_map".into(),
+                placements: vec![placed("t1", "table")],
+                locations: vec![Location {
+                    id: "galley_table_1".into(),
+                    props: vec!["t1".into()],
+                    interactions: vec![Interaction {
+                        verb: "eat".into(),
+                        roles: vec![diner],
+                        guard: None,
+                        effects: vec![Effect::Restore {
+                            drive: "stamina".into(),
+                            rate: 0.2,
+                        }],
+                        note: None,
+                    }],
+                    note: None,
+                }],
+                ..Map::default()
+            },
+            Vocabularies {
+                capabilities: Vocabulary::of(&[("eat", "can take a meal")]),
+                ..Vocabularies::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn diners(n: u64) -> Vec<Actor> {
+        use emerge_core::vocab::Can;
+        (1..=n).map(|id| Actor { id, can: Can(1) }).collect()
+    }
+
+    /// **Stage 6a\'s gate: one interaction drives an agent.** The query finds the table, the
+    /// allocation seats somebody, and the result says where they stand.
+    #[test]
+    fn an_agent_finds_a_table_and_sits_at_it() {
+        let world = galley(4);
+        let mut smart = SmartObjects::default();
+
+        let offers = smart.offers(&world, Vec3::ZERO, 50.0);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].verb, "eat");
+
+        let cast = smart
+            .start(
+                &world,
+                &offers[0].location,
+                "eat",
+                &diners(1),
+                &mut emerge_core::rng::seeded(4),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cast.filled.len(), 1);
+        let seat = cast.filled[0]
+            .seat
+            .as_ref()
+            .unwrap_or_else(|| panic!("a diner sits somewhere"));
+        assert_eq!(seat.prop, "t1");
+    }
+
+    /// **Stage 6b\'s gate, through the runtime: four agents fill a four-seat table.** No
+    /// double-booking, and the table is busy afterwards.
+    #[test]
+    fn four_agents_fill_the_table_and_it_is_then_busy() {
+        let world = galley(4);
+        let mut smart = SmartObjects::default();
+        let cast = smart
+            .start(
+                &world,
+                "galley_table_1",
+                "eat",
+                &diners(4),
+                &mut emerge_core::rng::seeded(4),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cast.filled.len(), 4);
+
+        // Everyone is engaged and the location owns its props, so it offers nothing more.
+        for id in 1..=4 {
+            assert!(smart.is_engaged(id));
+        }
+        assert!(smart.is_busy("galley_table_1"));
+        assert!(smart.offers(&world, Vec3::ZERO, 50.0).is_empty());
+
+        // And it all comes back.
+        assert!(smart.finish("galley_table_1").is_some());
+        assert!(!smart.is_engaged(1));
+        assert_eq!(smart.offers(&world, Vec3::ZERO, 50.0).len(), 1);
+    }
+
+    /// **A busy actor is not offered twice.** Two locations, four diners, and the second scene takes
+    /// only whoever the first left — the exclusivity rule enforced by what the allocator is allowed
+    /// to see rather than by a check afterwards.
+    #[test]
+    fn a_second_scene_takes_only_the_actors_the_first_left() {
+        let mut world = galley(2);
+        // A second table, so there is somewhere else to go.
+        world.map.placements.push(placed("t2", "table"));
+        let mut second = world.map.locations[0].clone();
+        second.id = "galley_table_2".into();
+        second.props = vec!["t2".into()];
+        world.map.locations.push(second);
+        let world = EmergeWorld::new(world.library, world.map, world.vocab)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let mut smart = SmartObjects::default();
+        let first = smart
+            .start(
+                &world,
+                "galley_table_1",
+                "eat",
+                &diners(4),
+                &mut emerge_core::rng::seeded(9),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let second = smart
+            .start(
+                &world,
+                "galley_table_2",
+                "eat",
+                &diners(4),
+                &mut emerge_core::rng::seeded(9),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let mut everyone: Vec<u64> = first.actors().chain(second.actors()).collect();
+        let total = everyone.len();
+        everyone.sort_unstable();
+        everyone.dedup();
+        assert_eq!(everyone.len(), total, "somebody is sitting at two tables");
+        assert_eq!(total, 4, "two 2-seat tables should seat four");
+    }
+
+    /// The nearest thing wins, and equidistant ones are broken by a total order rather than by the
+    /// order the map file happens to list them in.
+    #[test]
+    fn offers_come_back_nearest_first() {
+        let mut world = galley(1);
+        world.map.placements.push(Placed {
+            at: (20.0, 0.0),
+            ..placed("t2", "table")
+        });
+        let mut far = world.map.locations[0].clone();
+        far.id = "galley_table_2".into();
+        far.props = vec!["t2".into()];
+        world.map.locations.push(far);
+        let world = EmergeWorld::new(world.library, world.map, world.vocab)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let smart = SmartObjects::default();
+        let near = smart.offers(&world, Vec3::ZERO, 100.0);
+        assert_eq!(near[0].location, "galley_table_1");
+        // And the far one is out of range when the range is short.
+        let close = smart.offers(&world, Vec3::ZERO, 5.0);
+        assert_eq!(close.len(), 1);
+    }
+
+    /// A capability token the vocabulary does not hold is refused **at load**, naming the location and
+    /// the role — not discovered as a scene that silently never starts.
+    #[test]
+    fn a_misspelled_capability_is_refused_at_load() {
+        let mut world = galley(2);
+        world.map.locations[0].interactions[0].roles[0].requires = vec!["eeat".into()];
+        let err = EmergeWorld::new(world.library, world.map, world.vocab)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("galley_table_1/eat"), "{err}");
+        assert!(err.contains("Did you mean `eat`?"), "{err}");
+    }
+
+        /// **A map is a thing you place.** `at` is map space and `origin` is where that space sits in the
     /// world, so the same authored room dropped in two corners of a level lands in two corners.
     ///
     /// The first version added only the origin's Y and used `at` directly for X and Z — correct for

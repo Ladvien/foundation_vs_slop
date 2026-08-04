@@ -176,6 +176,15 @@ pub struct Vocabularies {
     /// Support-surface classes — what a piece offers a top for, and what a prop needs to rest on.
     /// The two-sided axis; see [`Vocabularies::validate_library`].
     pub surfaces: Vocabulary,
+    /// What an **actor** can do: `"eat"`, `"cook"`, `"guard"`. The only axis about people rather than
+    /// props, and the one a [`crate::map::RoleSlot`] matches on.
+    ///
+    /// Separate from `effects` on purpose, even though both are "what something does". `effects` is a
+    /// property of a thing standing in a room; this is a property of somebody who could walk into it.
+    /// Sharing one table would let a chair be authored as able to cook, and the error would surface as
+    /// a scene that silently never starts.
+    #[serde(default)]
+    pub capabilities: Vocabulary,
 }
 
 /// A descriptor's tokens, resolved to masks. Cheap to compare, which is the point.
@@ -188,6 +197,22 @@ pub struct Masks {
     pub provides: u64,
     /// The surface class this piece **needs** to rest on, if it rests on one at all.
     pub requires: u64,
+}
+
+/// What one actor can do, as a bitmask over the `capabilities` axis.
+///
+/// Game AI Pro 4 ch.4 on smart-object matching: *"a simple bit-mask can be used to represent the
+/// requirements for the link and the capabilities of the agent. Comparing these bitmasks is a very
+/// efficient way to filter out invalid links."*
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Can(pub u64);
+
+impl Can {
+    /// Whether this actor meets **every** requirement in `needs`. All of them, not any: a role that
+    /// wants a cook who can also carry wants both, and `!= 0` would take somebody who can only carry.
+    pub fn meets(self, needs: u64) -> bool {
+        (self.0 & needs) == needs
+    }
 }
 
 impl Masks {
@@ -264,6 +289,29 @@ impl Vocabularies {
             look: axis(&self.look, "look", &d.look)?,
             provides: axis(&self.surfaces, "surfaces", &d.offers.surfaces)?,
             requires,
+        })
+    }
+
+    /// The capability mask one role demands, or the reason its tokens are not in the axis.
+    ///
+    /// `where_` names the site — `"galley_table_1/eat"` — because a bare *"`chef` is not a
+    /// capability"* in a map with nine locations is a search rather than an answer.
+    pub fn role_mask(&self, role: &crate::map::RoleSlot, where_: &str) -> Result<u64, String> {
+        self.capabilities.mask(&role.requires).map_err(|_| {
+            let bad = role
+                .requires
+                .iter()
+                .find(|t| !self.capabilities.contains(t))
+                .map_or_else(String::new, |t| t.clone());
+            let hint = nearest(&self.capabilities, &bad)
+                .map(|n| format!(" Did you mean `{n}`?"))
+                .unwrap_or_default();
+            format!(
+                "{where_}: role `{}` requires `{bad}`, which is not a `capabilities` token.{hint} \
+                 The axis holds: {}.",
+                role.name,
+                self.capabilities.names().collect::<Vec<_>>().join(", ")
+            )
         })
     }
 
@@ -353,6 +401,10 @@ mod tests {
             surfaces: Vocabulary::of(&[
                 ("support", "any support top"),
                 ("worktop", "a desk or table top"),
+            ]),
+            capabilities: Vocabulary::of(&[
+                ("eat", "can take a meal"),
+                ("cook", "can prepare food"),
             ]),
         }
     }
