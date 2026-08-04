@@ -67,6 +67,8 @@ pub struct EditorState {
     pub brush: usize,
     pub brush_yaw: f32,
     pub status: String,
+    /// The ghost's running commentary. Written every frame; never mixed with [`Self::status`].
+    pub hint: String,
     /// Monotonic counter behind generated placement ids, so two crates never share a name.
     next_id: u32,
     /// Advanced on every solve, so pressing `G` twice offers a different arrangement rather than the
@@ -112,6 +114,7 @@ impl Default for EditorState {
             brush: 0,
             brush_yaw: 0.0,
             status: String::new(),
+            hint: String::new(),
             next_id: 0,
             seed: 1,
             collapsed: std::collections::HashSet::new(),
@@ -218,6 +221,13 @@ enum Field {
     Map,
     /// The last thing that happened — the only line that is prose.
     Last,
+    /// **What the cursor is telling you right now**, as opposed to what just happened.
+    ///
+    /// Its own line because the ghost writes it EVERY FRAME while a surface piece hovers over bare
+    /// floor, and sharing [`Self::Last`] meant every message an action produced was erased before it
+    /// could be read. Two different questions — "what did I just do" and "why can't I place this" —
+    /// so two lines.
+    Hint,
 }
 
 impl Field {
@@ -228,6 +238,7 @@ impl Field {
             Field::Yaw => "YAW",
             Field::Map => "MAP",
             Field::Last => "",
+            Field::Hint => "",
         }
     }
 }
@@ -404,7 +415,14 @@ fn spawn_panel(mut commands: Commands) {
             StatusBlock,
         ))
         .with_children(|s| {
-            for field in [Field::Name, Field::Brush, Field::Yaw, Field::Map, Field::Last] {
+            for field in [
+                Field::Name,
+                Field::Brush,
+                Field::Yaw,
+                Field::Map,
+                Field::Last,
+                Field::Hint,
+            ] {
                 s.spawn(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
@@ -826,6 +844,7 @@ fn refresh_status(
             ),
             // A refusal has to read differently from a success, or "NOT SAVED" scrolls past as if it
             // were a receipt.
+            Field::Hint => (state.hint.clone(), ACCENT),
             Field::Last => (
                 state.status.clone(),
                 if state.status.starts_with("NOT SAVED") {
@@ -1256,6 +1275,28 @@ fn keys(
         return;
     }
 
+    // **`,` and `.` turn the piece under the cursor.** The other half of aiming: `[`/`]` set the
+    // brush's facing before a piece exists, and these fix one that is already down — three chairs
+    // round a table were three chairs facing the same way until this existed.
+    for (action, step) in [
+        (Action::TurnPieceLeft, -YAW_STEP),
+        (Action::TurnPieceRight, YAW_STEP),
+    ] {
+        if keys::just_pressed(&keyboard, action) && !hovered_ui.iter().any(|h| h.0) {
+            turn_under_cursor(
+                &mut commands,
+                &assets,
+                window,
+                camera,
+                &mut project,
+                &mut state,
+                &placed,
+                step,
+            );
+            return;
+        }
+    }
+
     // **O pins or unpins the piece under the cursor.** A pin is what the solver routes around.
     if keys::just_pressed(&keyboard, Action::OwnToggle) && !hovered_ui.iter().any(|h| h.0) {
         toggle_pin(window, camera, &mut project, &mut state);
@@ -1309,34 +1350,9 @@ fn delete_under_cursor(
     state: &mut EditorState,
     placed: &Query<(Entity, &Placement)>,
 ) {
-    let (Some(window), Some(camera)) = (window, camera) else {
-        return;
-    };
-    let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
-        return;
-    };
-
-    let reach = project
-        .library
-        .descriptors
-        .get(state.brush)
-        .map(|d| crate::fill::cell_extents(d, state.brush_yaw))
-        .map(|(x, z)| x.max(z))
-        .unwrap_or(crate::fill::MIN_CELL);
-
-    // `sort`-free: one pass for the minimum, and ties broken by index so two pieces stacked exactly
-    // cannot make the choice depend on iteration order.
-    // Both sides in map space: `at` is authored there and the cursor answers in world metres.
-    let probe = project.map.to_map_space((hit.x, hit.z));
-    let mut best: Option<(usize, f32)> = None;
-    for (i, p) in project.map.placements.iter().enumerate() {
-        let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
-        if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
-            best = Some((i, d2));
-        }
-    }
-    let Some((index, _)) = best else {
+    // **One picker.** This grew its own copy of the search and the two drifted; `nearest_placement`
+    // is now the only answer to "the thing I am pointing at", shared with pin and turn.
+    let Some(index) = nearest_placement(window, camera, project) else {
         state.status = "nothing here to remove".to_owned();
         return;
     };
@@ -1422,7 +1438,7 @@ fn toggle_pin(
     project: &mut Project,
     state: &mut EditorState,
 ) {
-    let Some(index) = nearest_placement(window, camera, project, state) else {
+    let Some(index) = nearest_placement(window, camera, project) else {
         state.status = "nothing here to pin".to_owned();
         return;
     };
@@ -1441,35 +1457,134 @@ fn toggle_pin(
     }
 }
 
-/// The placement nearest the cursor, within a brush cell — shared by pin and delete so "the thing I
-/// am pointing at" means one distance rather than two.
+/// Turn the placement under the cursor by `step` degrees, and redraw it.
+///
+/// Rewrites the yaw in the map and respawns the entity rather than rotating the transform in place:
+/// the file is the truth and the entity is a picture of it, so turning the picture without turning the
+/// file is the class of bug where a save loses what you just did.
+#[allow(clippy::too_many_arguments)]
+fn turn_under_cursor(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    project: &mut Project,
+    state: &mut EditorState,
+    placed: &Query<(Entity, &Placement)>,
+    step: f32,
+) {
+    let Some(index) = nearest_placement(window, camera, project) else {
+        state.status = "nothing here to turn".to_owned();
+        return;
+    };
+    let Some(p) = project.map.placements.get_mut(index) else {
+        return;
+    };
+    p.yaw = (p.yaw + step).rem_euclid(360.0);
+    let (id, at, yaw, descriptor) = (p.id.clone(), p.at, p.yaw, p.descriptor.clone());
+    project.dirty = true;
+
+    for (entity, marker) in placed {
+        if marker.0 == id {
+            commands.entity(entity).despawn();
+        }
+    }
+    // Redrawn from the finished map, so a piece standing on this one keeps the height it had.
+    match heights(project) {
+        Ok(ys) => {
+            if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index)) {
+                if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y) {
+                    commands.entity(e).insert(Placement(id.clone()));
+                }
+            }
+        }
+        Err(e) => {
+            state.status = format!("turned {id} but cannot draw it: {e}");
+            error!("{e}");
+            return;
+        }
+    }
+    state.status = format!("{id} now at {yaw:.0} deg");
+}
+
+/// **The thing you are pointing at**, given a probe in map space.
+///
+/// Pure, and separated from the cursor for exactly that reason: the rule below is the whole content
+/// of "which piece did I mean", and proving it through a window means aiming a synthetic mouse at a
+/// 0.45 m chair — which is how the last two sessions lost an hour each to the harness rather than to
+/// the code.
+///
+/// Two passes, and the first is the fix. It used to be distance-to-`at` alone, which reads as "the
+/// nearest centre" and is wrong the moment anything stands on anything: a lamp on a table has almost
+/// exactly the table's `at`, so pointing at the lamp could delete the table. That is not
+/// hypothetical — it happened while authoring `break_room.map.ron`.
+///
+/// 1. **Anything whose footprint contains the probe**, smallest first. The piece you can see least of
+///    is the one you must have been aiming at.
+/// 2. Failing that, the nearest centre within **its own** reach — its own, not the brush's. The reach
+///    used to come from whatever piece was armed, so how far you could grab a chair depended on what
+///    you happened to be holding. What you are pointing at is not a property of what you are carrying.
+///
+/// Ties break on the placement id, a total order that does not depend on authoring order.
+pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
+    let mut covering: Option<(usize, f32, &str)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let Some(d) = project.library.get(&p.descriptor) else {
+            continue;
+        };
+        if !emerge_core::stack::covers(d, p.at, p.yaw, probe) {
+            continue;
+        }
+        let area = d
+            .extent
+            .footprint
+            .map_or(f32::INFINITY, |(w, depth)| w * depth);
+        let better = match covering {
+            None => true,
+            Some((_, best_area, best_id)) => (area, p.id.as_str()) < (best_area, best_id),
+        };
+        if better {
+            covering = Some((i, area, p.id.as_str()));
+        }
+    }
+    if let Some((i, _, _)) = covering {
+        return Some(i);
+    }
+
+    let mut nearest: Option<(usize, f32, &str)> = None;
+    for (i, p) in project.map.placements.iter().enumerate() {
+        let reach = project
+            .library
+            .get(&p.descriptor)
+            .map(|d| crate::fill::cell_extents(d, p.yaw))
+            .map_or(crate::fill::MIN_CELL, |(x, z)| x.max(z));
+        let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
+        if d2 > reach * reach {
+            continue;
+        }
+        let better = match nearest {
+            None => true,
+            Some((_, best_d2, best_id)) => (d2, p.id.as_str()) < (best_d2, best_id),
+        };
+        if better {
+            nearest = Some((i, d2, p.id.as_str()));
+        }
+    }
+    nearest.map(|(i, _, _)| i)
+}
+
+/// [`pick_at`], with the probe taken from the cursor — shared by pin, delete and turn, so "the thing
+/// I am pointing at" means one thing.
 fn nearest_placement(
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     project: &Project,
-    state: &EditorState,
 ) -> Option<usize> {
     let (window, camera) = (window?, camera?);
     let (cam, cam_tf) = *camera;
     let hit = cursor_ground(&window, cam, cam_tf)?;
-    let reach = project
-        .library
-        .descriptors
-        .get(state.brush)
-        .map(|d| crate::fill::cell_extents(d, state.brush_yaw))
-        .map(|(x, z)| x.max(z))
-        .unwrap_or(crate::fill::MIN_CELL);
-
     // Both sides in map space: `at` is authored there and the cursor answers in world metres.
-    let probe = project.map.to_map_space((hit.x, hit.z));
-    let mut best: Option<(usize, f32)> = None;
-    for (i, p) in project.map.placements.iter().enumerate() {
-        let d2 = (p.at.0 - probe.0).powi(2) + (p.at.1 - probe.1).powi(2);
-        if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
-            best = Some((i, d2));
-        }
-    }
-    best.map(|(i, _)| i)
+    pick_at(project, project.map.to_map_space((hit.x, hit.z)))
 }
 
 /// Type the reason a cell is pinned.
@@ -1728,12 +1843,16 @@ fn drive_ghost(
             // surface piece armed, and `ResMut` marks the resource changed on every mutable deref —
             // `rebuild_palette` watches `resource_changed::<EditorState>`, so an unconditional write
             // here would tear down and rebuild the whole palette at frame rate.
-            if state.status != e {
-                state.status = e;
+            if state.hint != e {
+                state.hint = e;
             }
             return;
         }
     };
+    // The piece can go here, so there is nothing to warn about.
+    if !state.hint.is_empty() {
+        state.hint.clear();
+    }
 
     let existing = ghosts.iter().find(|(_, g)| g.0 == state.brush).map(|(e, _)| e);
     for (e, g) in &ghosts {
@@ -1798,5 +1917,115 @@ fn fade_ghost(
                 queue.extend(kids.iter());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emerge_core::descriptor::{Descriptor, Extent};
+    use emerge_core::library::{Library, LIBRARY_VERSION};
+    use emerge_core::map::{Map, Placed};
+
+    fn piece(id: &str, w: f32, d: f32) -> Descriptor {
+        Descriptor {
+            id: id.to_owned(),
+            mesh: Some(format!("{id}.glb")),
+            extent: Extent {
+                footprint: Some((w, d)),
+                height: Some(1.0),
+            },
+            ..Descriptor::default()
+        }
+    }
+
+    fn at(id: &str, descriptor: &str, at: (f32, f32)) -> Placed {
+        Placed {
+            id: id.to_owned(),
+            descriptor: descriptor.to_owned(),
+            at,
+            ..Placed::default()
+        }
+    }
+
+    fn project(descriptors: Vec<Descriptor>, placements: Vec<Placed>) -> Project {
+        Project {
+            root: std::path::PathBuf::from("."),
+            vocab: emerge_core::vocab::Vocabularies::default(),
+            library: Library {
+                version: LIBRARY_VERSION,
+                note: None,
+                descriptors,
+            },
+            masks: Vec::new(),
+            map: Map {
+                name: "test_map".into(),
+                placements,
+                ..Map::default()
+            },
+            map_path: std::path::PathBuf::from("test_map.map.ron"),
+            dirty: false,
+            triangles: Vec::new(),
+        }
+    }
+
+    /// **The bug this rule was rewritten for.** A lamp on a table shares the table's `at`, so
+    /// "nearest centre" could hand back the table when the cursor was squarely on the lamp — and did,
+    /// while authoring `break_room.map.ron`.
+    #[test]
+    fn pointing_at_a_lamp_on_a_table_picks_the_lamp() {
+        let p = project(
+            vec![piece("table", 1.6, 0.8), piece("lamp", 0.3, 0.3)],
+            vec![at("t1", "table", (0.0, 0.0)), at("l1", "lamp", (0.0, 0.0))],
+        );
+        assert_eq!(pick_at(&p, (0.0, 0.0)), Some(1), "the smaller thing wins");
+        // Off the lamp but still on the table, the table is what you are pointing at.
+        assert_eq!(pick_at(&p, (0.6, 0.0)), Some(0));
+    }
+
+    /// **Reach belongs to the target, not the brush.** Pointing at bare floor beside a piece still
+    /// grabs it; how far that reaches must not depend on what happens to be armed.
+    #[test]
+    fn a_near_miss_still_grabs_the_piece_beside_it() {
+        let p = project(
+            vec![piece("crate", 1.0, 1.0)],
+            vec![at("c1", "crate", (0.0, 0.0))],
+        );
+        assert_eq!(pick_at(&p, (0.0, 0.0)), Some(0), "dead centre");
+        assert_eq!(pick_at(&p, (0.6, 0.0)), Some(0), "just outside, still its cell");
+        assert_eq!(pick_at(&p, (9.0, 9.0)), None, "across the room is nothing");
+    }
+
+    /// Two identical pieces at the same distance resolve the same way every time — by id, which is a
+    /// total order that does not depend on which was authored first.
+    #[test]
+    fn a_tie_resolves_by_id_rather_than_by_authoring_order() {
+        let forwards = project(
+            vec![piece("crate", 1.0, 1.0)],
+            vec![at("b", "crate", (2.0, 0.0)), at("a", "crate", (-2.0, 0.0))],
+        );
+        let backwards = project(
+            vec![piece("crate", 1.0, 1.0)],
+            vec![at("a", "crate", (-2.0, 0.0)), at("b", "crate", (2.0, 0.0))],
+        );
+        let id = |p: &Project, i: Option<usize>| {
+            i.and_then(|i| p.map.placements.get(i)).map(|q| q.id.clone())
+        };
+        // Equidistant from the origin, so only the id can break it — and it breaks the same way
+        // whichever order the file lists them in.
+        assert_eq!(
+            id(&forwards, pick_at(&forwards, (0.0, 0.0))),
+            id(&backwards, pick_at(&backwards, (0.0, 0.0)))
+        );
+    }
+
+    /// A piece with no measured footprint covers nothing, so it cannot swallow every click.
+    #[test]
+    fn an_unmeasured_piece_does_not_cover_the_map() {
+        let mut vague = piece("mystery", 1.0, 1.0);
+        vague.extent.footprint = None;
+        let p = project(vec![vague], vec![at("m1", "mystery", (0.0, 0.0))]);
+        // Not covering, and its fallback reach is the minimum cell rather than infinity.
+        assert_eq!(pick_at(&p, (9.0, 9.0)), None);
     }
 }
