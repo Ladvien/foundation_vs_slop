@@ -6,7 +6,7 @@
 //! engine in it. `crates/emerge-core/tests/engine_free.rs` fails the build if that stops being true.
 //!
 //! ```text
-//! emerge-mapper [project-dir] [map-name]
+//! emerge-mapper [project-dir] [map-name] [--kit <name>]
 //! ```
 //!
 //! The second argument is a **name**, not a filename: `emerge-mapper . site_67` opens (or starts)
@@ -49,15 +49,38 @@ use bevy::prelude::*;
 use project::Project;
 
 fn main() {
+    // **`--kit` is pulled out first**, so the two positional arguments keep meaning exactly what they
+    // meant before it existed. A kit is a directory under `assets/emerge/` holding a library and its
+    // policy layer: the default one is furniture, `--kit site` is the 45-piece architectural set whose
+    // walls, corners, doorways and pipes are what edge tokens are for.
+    let mut positional: Vec<String> = Vec::new();
+    let mut kit: Option<String> = None;
     let mut args = std::env::args().skip(1);
-    let root = PathBuf::from(args.next().unwrap_or_else(|| ".".to_owned()));
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--kit" => match args.next() {
+                Some(name) => kit = Some(name),
+                None => {
+                    eprintln!("emerge-mapper: --kit needs a name, e.g. `--kit site`");
+                    std::process::exit(1);
+                }
+            },
+            other => positional.push(other.to_owned()),
+        }
+    }
+    let root = PathBuf::from(
+        positional.first().cloned().unwrap_or_else(|| ".".to_owned()),
+    );
     // A NAME, not a filename — `emerge-mapper . site_67` opens assets/emerge/site_67.map.ron.
-    let map_name = args.next().unwrap_or_else(|| "untitled_map".to_owned());
+    let map_name = positional
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "untitled_map".to_owned());
 
     // **Open the project before standing up the window.** A failure here is fatal and prints what is
     // wrong with which file; the alternative is an editor that comes up with an empty palette, which
     // looks exactly like an editor whose project has no assets. Same call `SourceMap::parse` makes.
-    let project = match Project::open(&root, &map_name) {
+    let project = match Project::open(&root, &map_name, kit.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("emerge-mapper: cannot open {}: {e}", root.display());

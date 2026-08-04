@@ -2452,6 +2452,8 @@ mod tests {
     fn project(descriptors: Vec<Descriptor>, placements: Vec<Placed>) -> Project {
         Project {
             root: std::path::PathBuf::from("."),
+            emerge_dir: std::path::PathBuf::from("assets/emerge"),
+            library_path: std::path::PathBuf::from("assets/emerge/library.ron"),
             vocab: emerge_core::vocab::Vocabularies::default(),
             library: Library {
                 version: LIBRARY_VERSION,

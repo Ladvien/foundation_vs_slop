@@ -25,12 +25,27 @@ use emerge_core::vocab::{Masks, Vocabularies};
 /// descriptor's `mesh` path means the same thing to this editor and to the game that loads the map.
 const EMERGE_DIR: &str = "assets/emerge";
 const VOCAB: &str = "assets/emerge/vocab.ron";
-const LIBRARY: &str = "assets/emerge/library.ron";
+const LIBRARY_FILE: &str = "library.ron";
 
 /// The opened project.
 #[derive(Resource)]
 pub struct Project {
     pub root: PathBuf,
+    /// **The kit's directory** — `assets/emerge`, or a named subdirectory of it.
+    ///
+    /// A *kit* is a library and its policy layer: `assets/emerge/site/` holds the 45 architectural
+    /// pieces (wall, corner, doorway, header, column, pipe) with their own patches sizing walls to a
+    /// 2.40 m facility, and the default directory holds furniture. `policy::layered_library` already
+    /// reads exactly one directory, so a kit is a path and nothing else.
+    ///
+    /// **The vocabulary is not per-kit** and stays at the root: tokens are what this *project* means,
+    /// and a kit that could redefine them would be a second vocabulary to keep in step.
+    ///
+    /// Resolved once, here, so nothing downstream carries an `Option` or rebuilds this path. Maps are
+    /// written beside their kit, because a map means nothing without the library that draws it.
+    pub emerge_dir: PathBuf,
+    /// Where [`Self::library`] came from and where it is written back.
+    pub library_path: PathBuf,
     pub vocab: Vocabularies,
     pub library: Library,
     /// Per-descriptor token masks, in library order — resolved once at load so the palette and the
@@ -52,7 +67,7 @@ pub struct Project {
 
 impl Project {
     /// Read a project, or say exactly what is wrong with it.
-    pub fn open(root: &Path, map_name: &str) -> Result<Project, String> {
+    pub fn open(root: &Path, map_name: &str, kit: Option<&str>) -> Result<Project, String> {
         // Forced, not checked: whatever was typed on the command line becomes the one spelling before
         // anything else sees it, so there is no path through this program on which a map has a name
         // the filesystem and the schema disagree about.
@@ -64,14 +79,39 @@ impl Project {
             ));
         }
 
+        // The kit name is forced into a plain directory name the same way the map name is, so
+        // `--kit ../../etc` cannot walk out of the project.
+        let emerge_dir = match kit {
+            Some(k) => {
+                let k = naming::to_snake_case(k);
+                if k.is_empty() {
+                    return Err(format!(
+                        "`{}` leaves nothing usable as a kit name. A kit is a directory under \
+                         `{EMERGE_DIR}` — snake_case, like `site`.",
+                        kit.unwrap_or_default()
+                    ));
+                }
+                let dir = root.join(EMERGE_DIR).join(&k);
+                if !dir.join(LIBRARY_FILE).is_file() {
+                    return Err(format!(
+                        "no kit `{k}`: {} has no {LIBRARY_FILE}. Kits are directories under \
+                         `{EMERGE_DIR}`.",
+                        dir.display()
+                    ));
+                }
+                dir
+            }
+            None => root.join(EMERGE_DIR),
+        };
+
         let vocab_path = root.join(VOCAB);
         let vocab = Vocabularies::parse(&read(&vocab_path)?)
             .map_err(|e| format!("{}: {e}", vocab_path.display()))?;
 
         // Measurements, then this game's policy over them — `emerge_core::policy` owns the order so
         // the editor and the game cannot end up with differently-layered libraries.
-        let library = emerge_core::policy::layered_library(&root.join(EMERGE_DIR))?;
-        let library_path = root.join(LIBRARY);
+        let library = emerge_core::policy::layered_library(&emerge_dir)?;
+        let library_path = emerge_dir.join(LIBRARY_FILE);
 
         // The two-sided pass over the whole set, at open. A prop that rests on a class nothing offers
         // can never be placed, and the moment to say so is now — not when an author wonders why a
@@ -80,7 +120,7 @@ impl Project {
             .resolve(&vocab)
             .map_err(|e| format!("{}: {e}", library_path.display()))?;
 
-        let map_path = root.join(EMERGE_DIR).join(naming::map_file_name(&name));
+        let map_path = emerge_dir.join(naming::map_file_name(&name));
         // A map that does not exist yet is a new map, not an error: this is how an author starts one.
         // A map that exists and does not parse IS an error — silently replacing it with an empty one
         // would destroy their work on the first save.
@@ -103,7 +143,7 @@ impl Project {
             Map {
                 version: MAP_VERSION,
                 name: name.clone(),
-                note: Some(format!("Authored in emerge-mapper. Library: {LIBRARY}.")),
+                note: Some(format!("Authored in emerge-mapper. Library: {}.", library_path.display())),
                 ..Map::default()
             }
         };
@@ -130,6 +170,8 @@ impl Project {
 
         Ok(Project {
             root: root.to_path_buf(),
+            emerge_dir,
+            library_path,
             vocab,
             library,
             masks,
@@ -149,9 +191,10 @@ impl Project {
         self.map.validate()?;
         // Follow a rename. The path is derived rather than remembered, so the file a map is in is
         // always the file its name says it is.
+        // Beside the kit it was authored with, not at the project root's default — a map written
+        // where its library is not is a map that opens against the wrong tiles.
         self.map_path = self
-            .root
-            .join(EMERGE_DIR)
+            .emerge_dir
             .join(naming::map_file_name(&self.map.name));
         let text = ron::ser::to_string_pretty(&self.map, ron::ser::PrettyConfig::default())
             .map_err(|e| format!("map: serialize: {e}"))?;

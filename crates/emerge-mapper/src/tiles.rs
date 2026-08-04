@@ -792,7 +792,7 @@ impl ImportState {
 fn write_library(project: &mut Project) -> Result<std::path::PathBuf, String> {
     project.masks = project.library.resolve(&project.vocab)?;
     project.remeasure_triangles();
-    let path = project.root.join("assets/emerge/library.ron");
+    let path = project.library_path.clone();
     let text = project.library.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text)?;
     Ok(path)
