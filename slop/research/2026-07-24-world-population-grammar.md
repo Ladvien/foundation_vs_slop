@@ -232,10 +232,15 @@ next to it"), extended from props to gameplay.
 Staged so each step is independently shippable and each retires a hand-rolled mechanism (full detail in the
 implementation plan):
 
-- **Stage A** — split `surfaces` from `affordances`; add `Predicate::SupportedBy`; route furnish Pass 4
-  through the orchestrator. *Fixes the TV-on-bed bug; closes the IR bypass.*
-- **Stage B** — compile the four greedy spawn scans into `MinDistance`+`Count` constraints (behind the
-  determinism/liveness gates).
+- **Stage A** — ✅ **shipped.** Split `surfaces` from `affordances`; added `Predicate::SupportedBy`;
+  routed furnish Pass 4 through the orchestrator. *Fixed the TV-on-bed bug; closed the IR bypass.*
+- **Stage B** — ✅ **shipped 2026-08-01** as `src/placement/anomalies.rs`. The five per-species greedy
+  raster scans (`enemy`, `scp999`, `scp1048`, `crab`, `scp610`) are one level-wide pass whose
+  vocabulary is this IR: a `Predicate::Count` over the level plus a `Predicate::MinDistance` against
+  every other anomaly, so separation is **cross-species by construction** rather than per-species by
+  accident. Site selection is Mitchell's best-candidate, which spreads by construction and leaves no
+  scan order for a corner to win — the bug that put 610, 1048, 1048-A and Smiley in the same corner.
+  It draws from its own RNG sub-stream, so the furniture goldens are untouched by construction.
 - **Stage C** — `src/placement/grammar.rs`: the weighted graph-rewrite grammar (Layer A).
 - **Stage D** — promote `ir::Guard` into the storylet precondition→effect vocabulary (Layer C).
 - **Stage E** — `GrammarGenes` in `level_genome.rs`; encounter-graph descriptor in `qd.rs` (Layer D hookup).

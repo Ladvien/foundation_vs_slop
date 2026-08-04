@@ -66,3 +66,8 @@ scripts/__pycache__/
 
 # emerge-mapper writes maps next to the library it opens; test maps are not content.
 assets/emerge/*.map.ron
+# ...with one deliberate exception. `break_room` is a REGRESSION FIXTURE rather than a scratch map:
+# it is the first map the editor produced, and `tests/site_descriptors.rs` loads it through the same
+# path the game does. Without a committed map, a schema change could break every authored map with
+# nothing failing. Scratch maps stay ignored; this one is checked in on purpose.
+!assets/emerge/break_room.map.ron

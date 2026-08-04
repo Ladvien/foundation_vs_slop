@@ -334,7 +334,7 @@ pub fn post_positions(
     // Found by looking, not by testing: Ito was posted to (16.5, 4.5) and cell 0 stands at (15.5, 4.0),
     // so she spawned *inside the booth* and was invisible behind its walls — a body that exists, is
     // animating, and cannot be seen. `site67.ron` keeps `cells:` as its own list because a cell is
-    // derived geometry rather than a kit prop (`enclose_containment_cell` builds the walls from the
+    // derived geometry rather than a kit prop (the cell rooms are walled by the perimeter pass from the
     // glass's placement), so a rule that only reads `props` silently does not apply to a sixth of the
     // containment wing.
     //
