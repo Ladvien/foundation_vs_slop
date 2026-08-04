@@ -1,0 +1,34 @@
+=== OVERNIGHT CHAIN starting 2026-07-31 21:57:44 ===
+    wall 06:50  ·  24 islands  ·  HEAD f7e085b
+    binary 2026-07-31 21:54:52
+    no --apply on any stage: winners land as .candidate.ron for review
+
+=== STAGE rl  start 2026-07-31 21:57:44  cap 292 min ===
+>> launching 24 'rl' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_rl_19.ron  (best fitness 0.2261; 24 of 24 islands produced elites)
+   winner copied to assets/config/elites_policy.candidate.ron  (--no-apply: assets/config/elites_policy.ron left untouched)
+   ship it:  FVS_POLICY_ELITE=assets/config/elites_policy.candidate.ron
+=== rl finished 2026-08-01 02:28:07 exit=0 ===
+
+=== STAGE levels  start 2026-08-01 02:28:07  cap 15 min ===
+>> launching 24 'levels' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_levels_23.ron  (best fitness 1.0000; 24 of 24 islands produced elites)
+   winner copied to assets/config/elites_levels.candidate.ron  (--no-apply: assets/config/elites_levels.ron left untouched)
+   ship it:  FVS_LEVELS_ELITE=assets/config/elites_levels.candidate.ron (overlay — handles any elite), or `train apply levels assets/config/elites_levels.candidate.ron` for a value-only elite that keeps every room type
+=== levels finished 2026-08-01 02:29:30 exit=0 ===
+
+=== STAGE audio  start 2026-08-01 02:29:30  cap 260 min ===
+>> launching 24 'audio' islands → islands_out/ (each a separate process)
+
+>> WINNER: islands_out/elites_audio_24.ron  (best fitness 0.0989; 24 of 24 islands produced elites)
+   winner copied to assets/config/elites_audio.candidate.ron  (--no-apply: assets/config/elites_audio.ron left untouched)
+   ship it:  train apply audio assets/config/elites_audio.candidate.ron   (or re-run with --apply)
+=== audio finished 2026-08-01 05:23:39 exit=0 ===
+
+=== CHAIN DONE 2026-08-01 05:23:39 ===
+Candidates written (none applied):
+-rw-r--r-- 1 ladvien ladvien    3634 Aug  1 05:23 assets/config/elites_audio.candidate.ron
+-rw-r--r-- 1 ladvien ladvien 1987423 Aug  1 02:29 assets/config/elites_levels.candidate.ron
+-rw-r--r-- 1 ladvien ladvien 2146684 Aug  1 02:28 assets/config/elites_policy.candidate.ron

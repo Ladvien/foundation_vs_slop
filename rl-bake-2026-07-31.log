@@ -1,0 +1,6 @@
+=== FVS-H-1 policy bake SCHEDULED at 2026-07-31 18:33:38 ===
+    fires 2026-07-31 23:30:00  (in 296 min)
+    26 generations x batch 8 across 24 islands (~208 genomes/island, projected ~4.9 h)
+    hard ceiling 6 h; no --apply, so config.ron and the goldens are untouched
+    binary: 2026-07-31 18:29:09  ·  HEAD eaddd13
+
