@@ -1,0 +1,11 @@
+# The dispatcher behind `cargo fvs`.
+#
+# **Its own crate, with no dependencies at all**, and that is the point: as a `src/bin/` target of the
+# game package it would have rebuilt the whole game library before it could print its own `--help`.
+# A launcher that takes two minutes to tell you the flags is worse than remembering the flags.
+[package]
+name = "fvs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]

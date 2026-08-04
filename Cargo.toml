@@ -1,7 +1,7 @@
 # The game is the workspace root package; the engine-free half lives in `crates/`. See
 # `docs/2026-08-03-emerge-mapper-plan.md` for why the split exists and what may cross the boundary.
 [workspace]
-members = ["crates/emerge-core", "crates/emerge-bevy", "crates/emerge-mapper"]
+members = ["crates/emerge-core", "crates/emerge-bevy", "crates/emerge-mapper", "crates/fvs"]
 
 [package]
 name = "foundation_vs_slop"
