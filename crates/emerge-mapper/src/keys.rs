@@ -69,6 +69,9 @@ pub enum Action {
     // ── Map ──────────────────────────────────────────────────────────────────
     AimLeft,
     AimRight,
+    /// Turn the placement under the cursor, as opposed to the brush.
+    TurnPieceLeft,
+    TurnPieceRight,
     Fill,
     Remove,
     RenameMap,
@@ -114,6 +117,15 @@ pub const BINDINGS: &[Binding] = &[
 
     b(Action::AimLeft, KeyCode::BracketLeft, false, Context::Map, "[", "aim left"),
     b(Action::AimRight, KeyCode::BracketRight, false, Context::Map, "]", "aim right"),
+    // **A separate pair, on purpose.** `[`/`]` turn the BRUSH and must keep doing only that: binding
+    // them to the selection is what made rotation feel broken before, because placing selects, so the
+    // next `]` turned the piece just put down while the ghost — the only thing on screen showing a
+    // facing — sat still. These turn what is under the cursor, which is the other half nobody had.
+    // Distinct `does` strings so the pair does NOT collapse into one row: the collapsed chord is
+    // comma-joined, and a chord that IS a comma cannot survive that — which is why this is R/T rather
+    // than the `<`/`>` a rotate usually wants.
+    b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn this left"),
+    b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn this right"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     b(Action::Remove, KeyCode::Delete, false, Context::Map, "Del", "remove"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
@@ -255,6 +267,7 @@ mod tests {
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleLayer,
             Action::Accept, Action::Rescan, Action::RemoveTile,
+            Action::TurnPieceLeft, Action::TurnPieceRight,
         ];
         assert_eq!(
             actions.len(),
