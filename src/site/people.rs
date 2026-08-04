@@ -134,6 +134,23 @@ impl StaffRig {
         }
     }
 
+    /// This rig's name in `assets/emerge/rigs.ron`, where its clip table lives.
+    ///
+    /// Deliberately the same spelling as the GLB stem: the manifest entry and the asset it describes
+    /// are the same thing seen twice, and a rig whose two names drift is one nobody can grep for.
+    pub fn rig_name(self) -> &'static str {
+        match self {
+            Self::Researcher => "researcher",
+            Self::Scientist => "scientist",
+            Self::FieldOp => "fieldop",
+            Self::Makarov => "makarov",
+            Self::CipherStandard => "cipher_standard",
+            Self::CipherSenior => "cipher_senior",
+            Self::CipherField => "cipher_field",
+            Self::CipherHazmat => "cipher_hazmat",
+        }
+    }
+
     /// Every rig, in declaration order. Indexes `StaffAnim`'s per-rig graphs, exactly the way
     /// `Scp1048Variant::index()` indexes that module's `TABLES`.
     pub const ALL: [StaffRig; 8] = [

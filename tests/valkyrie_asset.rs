@@ -18,7 +18,6 @@
 //!
 //! So the contract is asserted here, against the bytes, rather than left to a comment.
 
-use std::collections::HashMap;
 
 mod common;
 use common::Glb;
@@ -41,16 +40,27 @@ const WIRED_CLIPS: [(usize, &str); 10] = [
     (14, "valkyrie_strafe_r"),
 ];
 
-/// Clip name → the duration baked into `squad`'s gait table, seconds. Tolerance is one 24 fps frame:
-/// the table only has to be right to within a frame for the phase mapping to hold up.
-const GAIT_DURATIONS: [(&str, f32); 6] = [
-    ("valkyrie_walk", 1.417),
-    ("valkyrie_run", 0.750),
-    ("valkyrie_walk_back", 1.458),
-    ("valkyrie_run_back", 0.583),
-    ("valkyrie_strafe_l", 0.708),
-    ("valkyrie_strafe_r", 0.583),
-];
+/// The gait table, **read from `assets/emerge/rigs.ron`** rather than copied here.
+///
+/// It used to be a literal in this file mirroring `squad.rs`'s `GAIT_*` consts — a third copy of
+/// numbers that already existed twice, and one that could agree with neither. The manifest is the
+/// source now; this returns `(clip index, duration)` for every gait it declares.
+fn gait_durations() -> Vec<(usize, f32)> {
+    let text = std::fs::read_to_string("assets/emerge/rigs.ron")
+        .unwrap_or_else(|e| panic!("assets/emerge/rigs.ron: {e}"));
+    let rigs = emerge_core::rigs::Rigs::parse(&text)
+        .unwrap_or_else(|e| panic!("assets/emerge/rigs.ron: {e}"));
+    let rig = rigs
+        .get("valkyrie")
+        .unwrap_or_else(|| panic!("rigs.ron has no `valkyrie`"));
+    rig.slots
+        .iter()
+        .filter_map(|s| match s.playback {
+            emerge_core::rigs::Playback::Gait { duration, .. } => Some((s.clip, duration)),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Every bone `squad::LOWER_BODY_BONES` puts in the upper-body mask group.
 const LOWER_BODY_BONES: [&str; 14] = [
@@ -114,22 +124,21 @@ fn wired_clip_indices_still_name_the_clips_squad_expects() {
 #[test]
 fn the_gait_table_durations_match_the_asset() {
     let glb = Glb::load(GLB);
-    let by_name: HashMap<&str, f32> = glb
-        .animations()
-        .iter()
-        .filter_map(|a| a["name"].as_str().map(|n| (n, glb.duration(a))))
-        .collect();
+    let anims = glb.animations();
 
-    for (name, baked) in GAIT_DURATIONS {
-        let actual = by_name
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| panic!("clip `{name}` is gone from the rig"));
+    let gaits = gait_durations();
+    assert_eq!(gaits.len(), 6, "the valkyrie declares six gaits in rigs.ron");
+    for (clip, declared) in gaits {
+        let a = anims
+            .get(clip)
+            .unwrap_or_else(|| panic!("rigs.ron names clip {clip}, which the rig no longer has"));
+        let actual = glb.duration(a);
         assert!(
-            (actual - baked).abs() <= FRAME,
-            "clip `{name}` is {actual:.3} s but src/squad.rs bakes {baked:.3} s — the shared gait phase \
-             maps φ onto the wrong part of the clip, so the feet will drift out of sync. Re-measure the \
-             gait table."
+            (actual - declared).abs() <= FRAME,
+            "clip {clip} (`{}`) is {actual:.3} s but assets/emerge/rigs.ron declares {declared:.3} s \
+             — the shared gait phase maps φ onto the wrong part of the clip, so the feet will drift \
+             out of sync. Re-measure with `emerge_core::clips::cycle_distance` and update rigs.ron.",
+            a["name"].as_str().unwrap_or("unnamed")
         );
     }
 }

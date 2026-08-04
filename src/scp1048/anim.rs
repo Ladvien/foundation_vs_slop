@@ -21,71 +21,41 @@ use bevy::prelude::*;
 
 use super::{AnimState, Scp1048, Scp1048State, Scp1048Variant};
 
-/// One animation slot: which clip it loads, and how it plays.
-struct ClipSpec {
-    /// The [`AnimState`] that selects this slot.
-    state: AnimState,
-    /// Index into the variant's glb animation list (pinned by `tests/creature_clip_contract.rs`).
-    gltf: usize,
-    /// `true` ⇒ a `OneShot` slot: triggered on the edge and allowed to run to its end, holding its
-    /// final frame. `false` ⇒ a `Free` slot that loops and is never rewound.
-    one_shot: bool,
+/// This variant's name in `assets/emerge/rigs.ron`, where its clip table lives.
+///
+/// Four entries rather than one, because the four ship **different clip sets** — only the original can
+/// draw, SCP-1048-A cannot dance — and the manifest has to be able to say so per body.
+pub(crate) fn rig_name(variant: Scp1048Variant) -> &'static str {
+    match variant {
+        Scp1048Variant::Original => "scp1048_original",
+        Scp1048Variant::EarCopy => "scp1048_ear",
+        Scp1048Variant::InfantArm => "scp1048_infant",
+        Scp1048Variant::Scrap => "scp1048_scrap",
+    }
 }
 
-const fn clip(state: AnimState, gltf: usize, one_shot: bool) -> ClipSpec {
-    ClipSpec { state, gltf, one_shot }
+/// The manifest's `state` string → this module's enum.
+///
+/// **Refused loudly on an unknown name.** This is the one place a slot label is a lookup key rather
+/// than a note (see `emerge_core::rigs::SlotDef::state`), and the cost of that is exactly this
+/// function: a typo in the manifest has to fail at startup naming the bad string, not resolve to some
+/// other state and animate the wrong thing.
+fn state_from(s: &str) -> Result<AnimState, String> {
+    Ok(match s {
+        "rest_idle" => AnimState::RestIdle,
+        "dance" => AnimState::Dance,
+        "jump" => AnimState::Jump,
+        "sit_down" => AnimState::SitDown,
+        "draw" => AnimState::Draw,
+        "rage" => AnimState::Rage,
+        "attack" => AnimState::Attack,
+        "aim" => AnimState::Aim,
+        "fire" => AnimState::Fire,
+        "whip" => AnimState::Whip,
+        other => return Err(format!("`{other}` is not an SCP-1048 animation state")),
+    })
 }
 
-/// SCP-1048, the benign original — all five clips wired.
-const ORIGINAL_CLIPS: &[ClipSpec] = &[
-    clip(AnimState::RestIdle, 0, false),
-    clip(AnimState::Dance, 1, false),
-    clip(AnimState::Jump, 2, true),
-    clip(AnimState::Draw, 3, false),
-    clip(AnimState::SitDown, 4, true),
-];
-
-/// SCP-1048-A, the ear bear — all five wired. `scream` is a one-shot attack that returns to neutral.
-const EAR_CLIPS: &[ClipSpec] = &[
-    clip(AnimState::RestIdle, 0, false),
-    clip(AnimState::Jump, 1, true),
-    clip(AnimState::SitDown, 2, true),
-    clip(AnimState::Attack, 3, true), // scream
-    clip(AnimState::Rage, 4, false),
-];
-
-/// SCP-1048-B, the infant-arm bear — all six wired.
-///
-/// Note `Attack` (`tantrum`) is **`Free`, not `OneShot`**: it is authored as a looping fit with two
-/// flail cycles per pass, so it is driven as a *state* held for as long as the bear is attacking,
-/// never triggered as an event. This is the one attack in the codebase that loops.
-const INFANT_CLIPS: &[ClipSpec] = &[
-    clip(AnimState::RestIdle, 0, false),
-    clip(AnimState::Dance, 1, false),
-    clip(AnimState::Jump, 2, true),
-    clip(AnimState::SitDown, 3, true),
-    clip(AnimState::Attack, 4, false), // tantrum — LOOPS
-    clip(AnimState::Rage, 5, false),
-];
-
-/// SCP-1048-C, the rusted scrap bear — seven of its eight clips.
-///
-/// **`scp1048c_dance` (glTF index 1) is deliberately not wired.** It ships as legacy motion inherited
-/// from the benign original and reads wrong on a violent copy; the asset's own hand-off note says to
-/// leave it alone. The contract test still pins its index, so a re-export that drops it — which would
-/// shift every hostile clip below it — fails loudly instead of silently playing the wrong animation.
-const SCRAP_CLIPS: &[ClipSpec] = &[
-    clip(AnimState::RestIdle, 0, false),
-    clip(AnimState::Jump, 2, true),
-    clip(AnimState::SitDown, 3, true),
-    clip(AnimState::Aim, 4, true),
-    clip(AnimState::Fire, 5, true),
-    clip(AnimState::Whip, 6, true),
-    clip(AnimState::Rage, 7, false),
-];
-
-/// The clip table for a variant, indexed by [`Scp1048Variant::index`].
-const TABLES: [&[ClipSpec]; 4] = [ORIGINAL_CLIPS, EAR_CLIPS, INFANT_CLIPS, SCRAP_CLIPS];
 
 /// Which slot plays `state` on `variant`, and whether that slot is a one-shot.
 ///
@@ -94,11 +64,25 @@ const TABLES: [&[ClipSpec]; 4] = [ORIGINAL_CLIPS, EAR_CLIPS, INFANT_CLIPS, SCRAP
 /// benign and hostile mode sets disjoint), and `every_state_the_executor_can_request_has_a_clip`
 /// below is what holds that line; the driver simply leaves the pose alone if it ever happens, rather
 /// than substituting some other animation.
-pub(crate) fn slot_for(variant: Scp1048Variant, state: AnimState) -> Option<(usize, bool)> {
-    TABLES[variant.index()]
-        .iter()
-        .position(|c| c.state == state)
-        .map(|slot| (slot, TABLES[variant.index()][slot].one_shot))
+pub(crate) fn slot_for(
+    manifest: &crate::rigs::RigManifest,
+    variant: Scp1048Variant,
+    state: AnimState,
+) -> Option<(usize, bool)> {
+    let rig = manifest.rig(rig_name(variant)).ok()?;
+    rig.slots.iter().position(|s| {
+        s.state
+            .as_deref()
+            .and_then(|n| state_from(n).ok())
+            .is_some_and(|st| st == state)
+    })
+    .map(|i| {
+        let one_shot = matches!(
+            rig.slots[i].playback,
+            emerge_core::rigs::Playback::OneShot { .. }
+        );
+        (i, one_shot)
+    })
 }
 
 /// One variant's built graph plus its slot table.
@@ -125,29 +109,30 @@ impl Scp1048Anim {
 /// Build one variant's `AnimationGraph` + slot table from its [`ClipSpec`] table.
 fn build_one(
     variant: Scp1048Variant,
+    manifest: &crate::rigs::RigManifest,
     assets: &AssetServer,
     graphs: &mut Assets<AnimationGraph>,
-) -> BearAnim {
-    let specs = TABLES[variant.index()];
-    let (graph, nodes) = AnimationGraph::from_clips(
-        specs
-            .iter()
-            .map(|c| assets.load(GltfAssetLabel::Animation(c.gltf).from_asset(variant.glb()))),
-    );
+) -> Option<BearAnim> {
     // Playback speed is 1.0 throughout: unlike the crab's sped-up scuttle, these clips are authored at
-    // gameplay tempo (24 fps, in-place) and the hand-off doc's timings assume they play at 1×.
-    let slots: Arc<[crate::anim::Slot]> = specs
-        .iter()
-        .zip(nodes.iter())
-        .map(|(c, &node)| {
-            if c.one_shot {
-                crate::anim::Slot::one_shot(node, 1.0)
-            } else {
-                crate::anim::Slot::free(node, 1.0)
+    // gameplay tempo (24 fps, in-place) and the hand-off doc's timings assume they play at 1x.
+    let rig = match manifest.rig(rig_name(variant)) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return None;
+        }
+    };
+    // Every state the manifest names must resolve, or the bear would silently lack a pose.
+    for slot in &rig.slots {
+        if let Some(name) = slot.state.as_deref() {
+            if let Err(e) = state_from(name) {
+                error!("{}: {e}", rig_name(variant));
+                return None;
             }
-        })
-        .collect();
-    BearAnim { graph: graphs.add(graph), slots }
+        }
+    }
+    let (graph, slots) = crate::rigs::build(rig, assets, graphs);
+    Some(BearAnim { graph, slots })
 }
 
 /// `Startup`: build all four graphs. Every bear that spawns later clones handles out of this.
@@ -155,8 +140,22 @@ pub(crate) fn build_scp1048_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
-    let per_variant = Scp1048Variant::ALL.map(|v| build_one(v, &assets, &mut graphs));
+    // **All four or none**, on the same argument the staff bodies make: a manifest missing one
+    // variant is a manifest edited wrongly, and three bears that animate beside one that does not is
+    // the harder failure to notice.
+    let mut built = Vec::with_capacity(Scp1048Variant::ALL.len());
+    for v in Scp1048Variant::ALL {
+        match build_one(v, &manifest, &assets, &mut graphs) {
+            Some(a) => built.push(a),
+            None => return,
+        }
+    }
+    let Ok(per_variant) = <[BearAnim; 4]>::try_from(built) else {
+        error!("scp1048: expected {} variants", Scp1048Variant::ALL.len());
+        return;
+    };
     commands.insert_resource(Scp1048Anim { per_variant });
 }
 
@@ -171,13 +170,14 @@ pub(crate) fn build_scp1048_anim(
 /// `fire_gun` begins and ends in the same aim pose (a measured 0.000 mm seam), so shots replay
 /// cleanly, and staying on that slot afterwards leaves the bear holding its aim with no fade back.
 pub(crate) fn drive_scp1048_animation(
+    manifest: Res<crate::rigs::RigManifest>,
     mut bears: Query<(&Scp1048, &Scp1048State, &mut crate::anim::PoseBlender)>,
 ) {
     for (bear, state, mut blender) in &mut bears {
         // A variant with no clip for this state keeps whatever it is already showing. This is
         // unreachable for the shipped brains (see the test below) and is deliberately NOT a
         // substitute-another-clip path.
-        let Some((slot, one_shot)) = slot_for(bear.variant, state.anim) else {
+        let Some((slot, one_shot)) = slot_for(&manifest, bear.variant, state.anim) else {
             continue;
         };
         let entering = one_shot && blender.target_weight(slot) <= 0.0;
@@ -219,30 +219,54 @@ mod tests {
         }
     }
 
+    /// The shipped manifest, so these contracts are asserted against the file the game reads.
+    fn manifest() -> crate::rigs::RigManifest {
+        crate::rigs::RigManifest(crate::rigs::load().unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    /// One variant's slots, in manifest order.
+    fn slots(m: &crate::rigs::RigManifest, v: Scp1048Variant) -> &[emerge_core::rigs::SlotDef] {
+        &m.rig(rig_name(v)).unwrap_or_else(|e| panic!("{e}")).slots
+    }
+
     #[test]
     fn every_state_the_executor_can_request_has_a_clip() {
+        let m = manifest();
         for variant in Scp1048Variant::ALL {
             for state in reachable_states(variant) {
                 assert!(
-                    slot_for(variant, state).is_some(),
+                    slot_for(&m, variant, state).is_some(),
                     "{variant:?} has no clip for {state:?} — the driver would silently hold its pose"
                 );
             }
         }
     }
 
+    /// Every state a variant declares resolves to its own position, exactly once.
+    ///
+    /// This is what makes `state` safe to use as a lookup key: a manifest that named a state twice
+    /// would silently resolve to the first, and the second slot would be unreachable.
     #[test]
     fn slots_are_dense_unique_and_in_range_per_variant() {
+        let m = manifest();
         for variant in Scp1048Variant::ALL {
-            let specs = TABLES[variant.index()];
+            let specs = slots(&m, variant);
             let mut seen: Vec<AnimState> = Vec::new();
             for (i, spec) in specs.iter().enumerate() {
-                assert!(!seen.contains(&spec.state), "{variant:?} maps {:?} twice", spec.state);
-                seen.push(spec.state);
+                let name = spec
+                    .state
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{variant:?} slot {i} declares no state"));
+                let st = state_from(name).unwrap_or_else(|e| panic!("{variant:?} slot {i}: {e}"));
+                assert!(!seen.contains(&st), "{variant:?} maps {st:?} twice");
+                seen.push(st);
                 let (slot, one_shot) =
-                    slot_for(variant, spec.state).expect("a tabled state must resolve");
-                assert_eq!(slot, i, "{variant:?} {:?} resolved to the wrong slot", spec.state);
-                assert_eq!(one_shot, spec.one_shot);
+                    slot_for(&m, variant, st).expect("a declared state must resolve");
+                assert_eq!(slot, i, "{variant:?} {st:?} resolved to the wrong slot");
+                assert_eq!(
+                    one_shot,
+                    matches!(spec.playback, emerge_core::rigs::Playback::OneShot { .. })
+                );
                 assert!(slot < specs.len());
             }
         }
@@ -253,7 +277,8 @@ mod tests {
         // Two slots loading the same glTF clip would mean one of them is a copy-paste slip: the
         // blender would cross-fade a clip with itself and the second state would look like a no-op.
         for variant in Scp1048Variant::ALL {
-            let mut idx: Vec<usize> = TABLES[variant.index()].iter().map(|c| c.gltf).collect();
+            let m = manifest();
+            let mut idx: Vec<usize> = slots(&m, variant).iter().map(|c| c.clip).collect();
             let before = idx.len();
             idx.sort_unstable();
             idx.dedup();
@@ -265,9 +290,11 @@ mod tests {
     fn the_infant_arm_tantrum_loops_but_every_other_attack_is_a_one_shot() {
         // The asset contract that most easily gets "tidied" into uniformity. B's tantrum is authored
         // as a looping fit and must be driven as a state; A's scream is a discrete event.
-        let (_, b_one_shot) = slot_for(Scp1048Variant::InfantArm, AnimState::Attack).expect("B");
+        let m = manifest();
+        let (_, b_one_shot) =
+            slot_for(&m, Scp1048Variant::InfantArm, AnimState::Attack).expect("B");
         assert!(!b_one_shot, "SCP-1048-B's tantrum must loop, not fire once");
-        let (_, a_one_shot) = slot_for(Scp1048Variant::EarCopy, AnimState::Attack).expect("A");
+        let (_, a_one_shot) = slot_for(&m, Scp1048Variant::EarCopy, AnimState::Attack).expect("A");
         assert!(a_one_shot, "SCP-1048-A's scream must be a one-shot");
     }
 
@@ -275,25 +302,27 @@ mod tests {
     fn the_scrap_bear_never_wires_its_inherited_dance() {
         // Tonal contract from the asset hand-off: C ships `dance` (glTF 1) as legacy motion and must
         // never play it. Its index stays pinned in the clip-contract test, but no slot may load it.
-        assert!(slot_for(Scp1048Variant::Scrap, AnimState::Dance).is_none());
+        let m = manifest();
+        assert!(slot_for(&m, Scp1048Variant::Scrap, AnimState::Dance).is_none());
         assert!(
-            !SCRAP_CLIPS.iter().any(|c| c.gltf == 1),
+            !slots(&m, Scp1048Variant::Scrap).iter().any(|c| c.clip == 1),
             "SCP-1048-C must not wire glTF clip 1 (its inherited dance)"
         );
     }
 
     #[test]
     fn only_the_original_can_draw_and_only_c_can_use_the_gun() {
-        assert!(slot_for(Scp1048Variant::Original, AnimState::Draw).is_some());
+        let m = manifest();
+        assert!(slot_for(&m, Scp1048Variant::Original, AnimState::Draw).is_some());
         for v in [Scp1048Variant::EarCopy, Scp1048Variant::InfantArm, Scp1048Variant::Scrap] {
-            assert!(slot_for(v, AnimState::Draw).is_none(), "{v:?} must not draw pictures");
+            assert!(slot_for(&m, v, AnimState::Draw).is_none(), "{v:?} must not draw pictures");
         }
         for state in [AnimState::Aim, AnimState::Fire, AnimState::Whip] {
-            assert!(slot_for(Scp1048Variant::Scrap, state).is_some());
+            assert!(slot_for(&m, Scp1048Variant::Scrap, state).is_some());
             for v in
                 [Scp1048Variant::Original, Scp1048Variant::EarCopy, Scp1048Variant::InfantArm]
             {
-                assert!(slot_for(v, state).is_none(), "{v:?} has no arm gun");
+                assert!(slot_for(&m, v, state).is_none(), "{v:?} has no arm gun");
             }
         }
     }

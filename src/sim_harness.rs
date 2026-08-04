@@ -415,7 +415,7 @@ pub fn build_headless_app_unfinished(cfg: &SimConfig) -> App {
         // `PoseBlendPlugin` is the one apply pass for every skinned model's clip weights. Cosmetic
         // (`Update` only, writes nothing hashed), but registered here so the harness's plugin graph
         // stays identical to production and the liveness oracle can read the blend state.
-        (crate::anim::PoseBlendPlugin, crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
+        (crate::rigs::RigsPlugin, crate::anim::PoseBlendPlugin, crate::squad::SquadPlugin, crate::squad_ai::SquadAiPlugin),
         crate::selection::SelectionPlugin,
         crate::fog::FogPlugin,
         // `SessionPlugin` is harness-visible ON PURPOSE — it is the reason the module exists. The

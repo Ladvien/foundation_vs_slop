@@ -23,7 +23,7 @@
 //!   them, which is §36.2.5's "minimize the amount of time that the character remains within an
 //!   overlapping range".
 
-use crate::util::smoothstep;
+use emerge_core::smoothstep;
 
 /// Directional lobes of the blend space, in the character's own frame.
 pub const DIR_FWD: usize = 0;

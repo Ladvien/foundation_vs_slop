@@ -14,26 +14,28 @@ pub(crate) fn build_surface_graph(mut commands: Commands, dungeon: Res<Dungeon>)
     commands.insert_resource(graph);
 }
 
+/// This creature's name in `assets/emerge/rigs.ron`.
+const RIG: &str = "crab";
+
 pub(crate) fn build_crab_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
-    // glb clips: 0 = attack, 1 = idle, 2 = walk.
-    let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(0).from_asset(CRAB_GLB)),
-        assets.load(GltfAssetLabel::Animation(1).from_asset(CRAB_GLB)),
-        assets.load(GltfAssetLabel::Animation(2).from_asset(CRAB_GLB)),
-    ]);
-    // Slot order is `SLOT_IDLE`/`SLOT_WALK`/`SLOT_ATTACK`, not the glb's clip order. All three are
-    // `Free`: a scuttle and a chomp share no gait, so there is nothing to phase-lock — the crab takes
-    // from `crate::anim` only the part it needs, a cross-fade that never rewinds a clip.
-    let slots: Arc<[crate::anim::Slot]> = Arc::from([
-        crate::anim::Slot::free(nodes[1], 1.0),
-        crate::anim::Slot::free(nodes[2], WALK_ANIM_SPEED),
-        crate::anim::Slot::free(nodes[0], ATTACK_ANIM_SPEED),
-    ]);
-    commands.insert_resource(CrabAnim { graph: graphs.add(graph), slots });
+    // Slot order is `SLOT_IDLE`/`SLOT_WALK`/`SLOT_ATTACK`, not the glb's clip order — which is why the
+    // manifest's indices read 1, 2, 0. All three are `Free`: a scuttle and a chomp share no gait, so
+    // there is nothing to phase-lock; the crab takes from `crate::anim` only the part it needs, a
+    // cross-fade that never rewinds a clip.
+    let rig = match manifest.rig(RIG) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return;
+        }
+    };
+    let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
+    commands.insert_resource(CrabAnim { graph, slots });
 }
 
 /// Build the shared crab collider + scene handles. One builder so `spawn_crabs` (normal play) and the

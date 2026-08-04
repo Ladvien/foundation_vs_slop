@@ -86,12 +86,6 @@ const WALL_NORMAL_Y: f32 = 0.7;
 const HOST_BODY_RADIUS: f32 = 0.35;
 // `beh.parasite_swarm.embed_range` → `behavior.parasite_swarm.embed_range` (the embed reach beyond HOST_BODY_RADIUS).
 
-/// Clip playback-rate multipliers (the authored clips are long; play them faster for a lively scuttle).
-const WALK_ANIM_SPEED: f32 = 2.0;
-const CLIMB_ANIM_SPEED: f32 = 2.0;
-const ATTACK_ANIM_SPEED: f32 = 1.6;
-/// The eruption climb-out (BurrowOut) plays slow for a dragged-out, dramatic emergence (one-shot).
-const BURROW_ANIM_SPEED: f32 = 0.8;
 
 /// Blend-set slot indices, matching the order [`build_manca_anim`] wires them in.
 const SLOT_SNUG: usize = 0;
@@ -575,36 +569,32 @@ pub fn rouse_all_mancae(app: &mut App) -> usize {
     n
 }
 
+/// This creature's name in `assets/emerge/rigs.ron`.
+const RIG: &str = "manca";
+
 /// Build the shared animation graph over the manca clips we drive in Phase 1.
 fn build_manca_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
     // The glb stores its 12 clips ALPHABETICALLY (Attack1, Attack2, BurrowOut, Climb, Forage1,
     // Forage2, Idle_Alert, Idle_Snug, Leap, Run, Walk1, Walk2) — not in the authoring-tool order the
     // artist guide originally listed. `tests/creature_clip_contract.rs` pins index → name against the
     // asset bytes so a re-export that reorders them fails loudly instead of playing the wrong clips.
-    let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(7).from_asset(SCP150_GLB)), // Idle_Snug (dormant huddle)
-        assets.load(GltfAssetLabel::Animation(6).from_asset(SCP150_GLB)), // Idle_Alert
-        assets.load(GltfAssetLabel::Animation(10).from_asset(SCP150_GLB)), // Walk1
-        assets.load(GltfAssetLabel::Animation(3).from_asset(SCP150_GLB)), // Climb
-        assets.load(GltfAssetLabel::Animation(1).from_asset(SCP150_GLB)), // Attack2 (pounce-bite)
-        assets.load(GltfAssetLabel::Animation(2).from_asset(SCP150_GLB)), // BurrowOut (one-shot eruption)
-    ]);
+    let rig = match manifest.rig(RIG) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return;
+        }
+    };
     // Slot order matches the `SLOT_*` constants. Every clip but the eruption is `Free` — a scuttle, a
     // climb and a chomp share no gait, so there is nothing to phase-lock; the manca takes from
     // `crate::anim` only the cross-fade that never rewinds a clip. The eruption is the one `OneShot`.
-    let slots: std::sync::Arc<[crate::anim::Slot]> = std::sync::Arc::from([
-        crate::anim::Slot::free(nodes[0], 1.0),
-        crate::anim::Slot::free(nodes[1], 1.0),
-        crate::anim::Slot::free(nodes[2], WALK_ANIM_SPEED),
-        crate::anim::Slot::free(nodes[3], CLIMB_ANIM_SPEED),
-        crate::anim::Slot::free(nodes[4], ATTACK_ANIM_SPEED),
-        crate::anim::Slot::one_shot(nodes[5], BURROW_ANIM_SPEED),
-    ]);
-    commands.insert_resource(MancaAnim { graph: graphs.add(graph), slots });
+    let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
+    commands.insert_resource(MancaAnim { graph, slots });
 }
 
 /// Build the shared wound-disc mesh + dark bloody material once (the chestburster hole stamped onto hosts).
