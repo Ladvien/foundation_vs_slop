@@ -1863,26 +1863,35 @@ fn remove_tile(
 fn on_tag_chip(
     activate: On<Activate>,
     chips: Query<&TagChip>,
-    project: Res<Project>,
+    mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(chip) = chips.get(activate.entity) else {
         return;
     };
-    let Some(token) = chip
-        .axis
-        .tokens(&project.vocab)
-        .names()
-        .nth(chip.token)
-        .map(str::to_owned)
-    else {
+    // **Both the token and the vocabulary order come out first, owned.** What follows needs a mutable
+    // borrow of the same `Project`, and the sort key cannot be read from it while that is held.
+    let (token, order) = {
+        let names: Vec<String> = chip
+            .axis
+            .tokens(&project.vocab)
+            .names()
+            .map(str::to_owned)
+            .collect();
+        match names.get(chip.token) {
+            Some(t) => (t.clone(), names),
+            None => return,
+        }
+    };
+    // **Through the focus, like every other mutator.** This wrote to `candidates[selected]` while the
+    // pane had already been switched to read whatever the focus points at, so clicking a tag on a
+    // library tile edited an invisible candidate: the chip did not light, the descriptor did not
+    // change, and nothing reached disk. The one accessor exists so this cannot happen; missing it
+    // here is what it looks like when it does.
+    let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
         return;
     };
-    let at = state.selected;
-    let Some(c) = state.candidates.get_mut(at) else {
-        return;
-    };
-    let list = chip.axis.list(&mut c.proposed);
+    let list = chip.axis.list(d);
     match list.iter().position(|t| *t == token) {
         Some(i) => {
             list.remove(i);
@@ -1891,16 +1900,11 @@ fn on_tag_chip(
         // serialize identically and a diff of the library shows real changes only.
         None => {
             list.push(token.clone());
-            let order: Vec<String> = chip
-                .axis
-                .tokens(&project.vocab)
-                .names()
-                .map(str::to_owned)
-                .collect();
             list.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
         }
     }
-    state.status = format!("{} tags updated", chip.axis.label().to_lowercase());
+    let said = format!("{} tags updated", chip.axis.label().to_lowercase());
+    state.status = persist(&mut project, where_to, said);
 }
 
 fn move_selection(
@@ -2680,80 +2684,110 @@ fn rebuild_detail(
                 },
             ));
 
-            // **Every layer at once, bottom to top.** A picker showed one slice and hid the other
-            // two, so reading a shape meant clicking through it and holding the rest in your head —
-            // and a lattice is a 3D shape, which is the one thing a single slice cannot show.
+            // **Every layer at once, side by side, bottom on the left.** A picker showed one slice
+            // and hid the other two, so reading a shape meant clicking through it and holding the
+            // rest in your head — and a lattice is a 3D shape, which is the one thing a single slice
+            // cannot show.
             //
-            // Bottom first because that is the order they stack in the world; the labels say so,
-            // rather than leaving `y = 0` to be inferred.
-            for y in 0..dy {
-                p.spawn((
-                    Text::new(layer_label(y, dy)),
-                    TextColor(LABEL),
-                    TextFont::from_font_size(9.0),
-                    Node {
-                        margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
-                        ..default()
-                    },
-                ));
+            // Side by side rather than stacked because three 3x3 grids in a column is a tall thin
+            // strip the eye has to scan, while three in a row is one picture. Bottom on the left, and
+            // the labels say so rather than leaving `y = 0` to be inferred.
+            p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexStart,
+                column_gap: Val::Px(crate::chrome::GAP_GROUP),
+                // Wraps rather than overflowing: a finer lattice, or a narrower panel, puts the last
+                // layer on a second line instead of off the edge.
+                flex_wrap: FlexWrap::Wrap,
+                row_gap: Val::Px(crate::chrome::GAP_ROW),
+                margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
+                ..default()
+            })
+            .with_children(|layers| {
+                for y in 0..dy {
+                    layers
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(2.0),
+                            ..default()
+                        })
+                        .with_children(|col| {
+                            col.spawn((
+                                Text::new(layer_label(y, dy)),
+                                TextColor(LABEL),
+                                TextFont::from_font_size(9.0),
+                            ));
 
-                // The column headers, with the layer header in the corner above the row ones — the
-                // spreadsheet arrangement, because that is where a hand already looks for them.
-                p.spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                    margin: UiRect::top(Val::Px(2.0)),
-                    ..default()
-                })
-                .with_children(|row| {
-                    header_button(row, FillHeader { layer: y, span: Span::Layer }, "*");
-                    for x in 0..dx {
-                        header_button(row, FillHeader { layer: y, span: Span::Column(x) }, "v");
-                    }
-                });
-
-                for z in 0..dz {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                        margin: UiRect::top(Val::Px(2.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        header_button(row, FillHeader { layer: y, span: Span::Row(z) }, ">");
-                        for x in 0..dx {
-                            let at = (x, y, z);
-                            let cell = grid.at(at);
-                            let selected = cell_edit.at == Some(at);
-                            row.spawn((
-                                UiButton,
-                                Hovered::default(),
-                                CellButton(x, z),
-                                CellLayer(y),
-                                Node {
-                                    min_width: Val::Px(20.0),
-                                    min_height: Val::Px(18.0),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    ..default()
-                                },
-                                BackgroundColor(if selected { ROW_SELECTED } else { ROW_BG }),
-                            ))
-                            .with_children(|b| {
-                                b.spawn((
-                                    Text::new(cell_glyph(cell).to_owned()),
-                                    // A marked cell is brighter than an empty one — luminance, not
-                                    // hue, per `docs/ui.md` §1.3.
-                                    TextColor(if cell.is_some() { ACCENT } else { LABEL }),
-                                    TextFont::from_font_size(11.0),
-                                    CellGlyph(x, z),
-                                    CellLayer(y),
-                                ));
+                            // The column headers, with the layer header in the corner above the row
+                            // ones — the spreadsheet arrangement, because that is where a hand
+                            // already looks for them.
+                            col.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                header_button(row, FillHeader { layer: y, span: Span::Layer }, "*");
+                                for x in 0..dx {
+                                    header_button(
+                                        row,
+                                        FillHeader { layer: y, span: Span::Column(x) },
+                                        "v",
+                                    );
+                                }
                             });
-                        }
-                    });
+
+                            for z in 0..dz {
+                                col.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                                    ..default()
+                                })
+                                .with_children(|row| {
+                                    header_button(
+                                        row,
+                                        FillHeader { layer: y, span: Span::Row(z) },
+                                        ">",
+                                    );
+                                    for x in 0..dx {
+                                        let at = (x, y, z);
+                                        let cell = grid.at(at);
+                                        let selected = cell_edit.at == Some(at);
+                                        row.spawn((
+                                            UiButton,
+                                            Hovered::default(),
+                                            CellButton(x, z),
+                                            CellLayer(y),
+                                            Node {
+                                                min_width: Val::Px(20.0),
+                                                min_height: Val::Px(18.0),
+                                                justify_content: JustifyContent::Center,
+                                                align_items: AlignItems::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(if selected {
+                                                ROW_SELECTED
+                                            } else {
+                                                ROW_BG
+                                            }),
+                                        ))
+                                        .with_children(|b| {
+                                            b.spawn((
+                                                Text::new(cell_glyph(cell).to_owned()),
+                                                // A marked cell is brighter than an empty one —
+                                                // luminance, not hue, per `docs/ui.md` §1.3.
+                                                TextColor(if cell.is_some() { ACCENT } else { LABEL }),
+                                                TextFont::from_font_size(11.0),
+                                                CellGlyph(x, z),
+                                                CellLayer(y),
+                                            ));
+                                        });
+                                    }
+                                });
+                            }
+                        });
                 }
-            }
+            });
 
             // What the selected cell is, and the verbs that change it. Each chip states its own
             // job — `docs/ui.md` §4.2's rule that a verb is clickable and named.
