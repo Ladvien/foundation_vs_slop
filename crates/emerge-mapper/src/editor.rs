@@ -1089,6 +1089,7 @@ pub fn not_typing(
     filters: Res<crate::filter::Filters>,
     div: Res<crate::tiles::DivEdit>,
     cell: Res<crate::tiles::CellEdit>,
+    note: Res<crate::tiles::NoteEdit>,
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
@@ -1097,6 +1098,7 @@ pub fn not_typing(
         && !filters.typing()
         && !div.typing()
         && !cell.typing()
+        && !note.typing()
 }
 
 /// **Decide who owns the keyboard, once, before anything reads a key.**
@@ -1117,6 +1119,7 @@ pub fn sense_context(
     filters: Res<crate::filter::Filters>,
     div: Res<crate::tiles::DivEdit>,
     cell: Res<crate::tiles::CellEdit>,
+    note: Res<crate::tiles::NoteEdit>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
@@ -1125,7 +1128,8 @@ pub fn sense_context(
         || import.renaming.is_some()
         || filters.typing()
         || div.typing()
-        || cell.typing();
+        || cell.typing()
+        || note.typing();
     let want = keys::Live(keys::live(mode.context(), typing));
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor every frame.

@@ -59,6 +59,17 @@ impl Library {
             if d.id.trim().is_empty() {
                 return Err(format!("library: descriptor {i} has no id"));
             }
+            // **An id is a name, and names have a shape.** Nothing checked this, so whatever a tool or
+            // a hand-edit last wrote is what a map ends up referencing. Segments rather than the whole
+            // string, because `/` is the kit namespace — see `naming::is_id`.
+            if !crate::naming::is_id(&d.id) {
+                return Err(format!(
+                    "library: `{}` is not a usable id. An id is snake_case — lowercase letters, \
+                     digits and single underscores, starting with a letter — and `/` separates a kit \
+                     from a piece, as in `site/wall_corner`.",
+                    d.id
+                ));
+            }
             // The lattice is checked here rather than in `resolve`, because an out-of-range cell is
             // wrong about the file it is written in — it is not a missing value some caller might
             // supply.

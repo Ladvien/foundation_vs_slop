@@ -121,12 +121,12 @@ pub fn on_click(
     let Ok(b) = boxes.get(activate.entity) else {
         return;
     };
-    if filters.focus == Some(b.0) {
-        filters.text_mut(b.0).clear();
-        filters.focus = None;
-    } else {
-        filters.focus = Some(b.0);
-    }
+    // **A click always starts a fresh search, with the cursor in the box.** Clicking a focused box
+    // used to clear it *and* blur it, so narrowing a list twice meant click, type, click, click, type
+    // — the second click looked like it had done nothing. Enter and Escape still both leave, so there
+    // is no way to get stuck in a box you did not mean to open.
+    filters.text_mut(b.0).clear();
+    filters.focus = Some(b.0);
 }
 
 /// Keystrokes into the focused box.

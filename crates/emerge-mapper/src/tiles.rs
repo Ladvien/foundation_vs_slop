@@ -405,6 +405,22 @@ pub struct CellButton(pub u32, pub u32);
 #[derive(Component, Clone, Copy)]
 pub struct LayerPick(pub u32);
 
+/// The number inside a [`LayerPick`], so its tint can be refreshed without rebuilding the button.
+#[derive(Component, Clone, Copy)]
+pub struct LayerLabel(pub u32);
+
+/// The glyph inside a [`CellButton`], carrying the same `(x, z)`.
+#[derive(Component, Clone, Copy)]
+pub struct CellGlyph(pub u32, pub u32);
+
+/// The line under the grid saying what the selected cell holds.
+#[derive(Component)]
+pub struct SelectedCellLine;
+
+/// The description's text, refreshed in place while it is typed into.
+#[derive(Component)]
+pub struct NoteReadout;
+
 /// **Which cell is being edited, and what is being typed into it.**
 ///
 /// Its own resource, like `DivEdit`, but **not** for the same reason — and the comment that claimed
@@ -433,6 +449,100 @@ impl CellEdit {
     }
 }
 
+/// The clickable description field.
+#[derive(Component, Clone, Copy)]
+pub struct NoteField;
+
+/// **What is being typed into the description**, or `None`.
+///
+/// `Descriptor::note` already existed and nothing could write it, so every description in the shipped
+/// libraries is whatever a generator put there. It is free text on purpose — the id says what a piece
+/// *is* and the tags say what it *offers*, and neither can carry "the one with the cracked screen".
+#[derive(Resource, Default)]
+pub struct NoteEdit {
+    active: Option<String>,
+}
+
+impl NoteEdit {
+    pub fn typing(&self) -> bool {
+        self.active.is_some()
+    }
+}
+
+fn on_note_click(
+    activate: On<Activate>,
+    fields: Query<&NoteField>,
+    project: Res<Project>,
+    mut edit: ResMut<NoteEdit>,
+    mut state: ResMut<ImportState>,
+) {
+    if fields.get(activate.entity).is_err() {
+        return;
+    }
+    // Seeded with what is there, unlike the id and the tokens: a description is *edited*, not
+    // replaced, and retyping a sentence to change one word is not an interaction.
+    let now = state
+        .editing(&project.library)
+        .and_then(|d| d.note.clone())
+        .unwrap_or_default();
+    edit.active = Some(now);
+    state.status = "describe it — Enter to keep it, Esc to leave it".to_owned();
+}
+
+/// Typing a description. Free text, so unlike an id nothing is forced as you type.
+fn note_keys(
+    mut events: MessageReader<KeyboardInput>,
+    mut edit: ResMut<NoteEdit>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    for event in events.read() {
+        // Drained even while shut, so the key that opens this field cannot be typed into it — see
+        // `cell_keys`.
+        if edit.active.is_none() || !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some(raw) = edit.active.take() else { return };
+                let text = raw.trim().to_owned();
+                let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+                    return;
+                };
+                // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
+                // for setting and unsetting rather than a second control for "remove".
+                d.note = (!text.is_empty()).then(|| text.clone());
+                let said = if text.is_empty() {
+                    "description cleared".to_owned()
+                } else {
+                    format!("described: {text}")
+                };
+                state.status = persist(&mut project, where_to, said);
+            }
+            Key::Escape => {
+                edit.active = None;
+                state.status = "description unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some(raw) = edit.active.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Space => {
+                if let Some(raw) = edit.active.as_mut() {
+                    raw.push(' ');
+                }
+            }
+            Key::Character(ch) => {
+                if let Some(raw) = edit.active.as_mut() {
+                    raw.push_str(ch);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn on_layer_click(activate: On<Activate>, picks: Query<&LayerPick>, mut edit: ResMut<CellEdit>) {
     let Ok(l) = picks.get(activate.entity) else {
         return;
@@ -452,8 +562,6 @@ fn on_cell_click(
     activate: On<Activate>,
     cells: Query<&CellButton>,
     mut edit: ResMut<CellEdit>,
-    project: Res<Project>,
-    mut state: ResMut<ImportState>,
 ) {
     let Ok(b) = cells.get(activate.entity) else {
         return;
@@ -461,11 +569,10 @@ fn on_cell_click(
     let at = (b.0, edit.layer, b.1);
     edit.at = Some(at);
     edit.active = None;
-    let said = state
-        .editing(&project.library)
-        .and_then(|d| d.subgrid.at(at).map(describe_cell))
-        .unwrap_or_else(|| "open".to_owned());
-    state.status = format!("cell {},{},{} — {said}", at.0, at.1, at.2);
+    // **No status line for a selection.** The line under the grid already says what the selected cell
+    // holds, and `refresh_cells` repaints it in place — whereas writing `status` mutates
+    // `ImportState`, which is what `rebuild_detail` watches, so saying it twice is what made picking a
+    // cell respawn the whole detail block. One fact, one place, no bounce.
 }
 
 /// One cell, in words. Used for the status line and the button glyph's tooltip role.
@@ -641,11 +748,10 @@ fn lattice_keys(
     // Opening a token field and then moving the cursor would leave the buffer pointed at a cell it
     // was not typed for, so moving closes it — the same reason `on_cell_click` clears it.
     edit.active = None;
-    let said = state
-        .editing(&project.library)
-        .and_then(|d| d.subgrid.at(at).map(describe_cell))
-        .unwrap_or_else(|| "open".to_owned());
-    state.status = format!("cell {},{},{} — {said}", at.0, at.1, at.2);
+    // **No status line for a selection.** The line under the grid already says what the selected cell
+    // holds, and `refresh_cells` repaints it in place — whereas writing `status` mutates
+    // `ImportState`, which is what `rebuild_detail` watches, so saying it twice is what made picking a
+    // cell respawn the whole detail block. One fact, one place, no bounce.
 }
 
 /// Typing an edge or anchor token.
@@ -715,6 +821,112 @@ fn cell_keys(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// **Repaint the lattice controls in place**, rather than rebuilding the pane around them.
+///
+/// Picking a cell or a layer changes four things — which button is lit, which glyphs the slice shows,
+/// the line under the grid, and the caret in a token — and none of them changes the *shape* of the
+/// pane. `rebuild_detail` used to run on every `CellEdit` change, so a click despawned every node in
+/// the detail block and respawned it a frame later: the visible bounce.
+///
+/// The structural rebuild stays for things that really do change the shape — a different tile, or a
+/// different number of divisions — and both of those write `ImportState`, which is what it watches.
+#[allow(clippy::type_complexity)]
+fn refresh_cells(
+    state: Res<ImportState>,
+    project: Res<Project>,
+    cell_edit: Res<CellEdit>,
+    note_edit: Res<NoteEdit>,
+    mut cells: Query<(&CellButton, &mut BackgroundColor), Without<LayerPick>>,
+    mut glyphs: Query<(&CellGlyph, &mut Text, &mut TextColor), (Without<LayerLabel>, Without<SelectedCellLine>, Without<NoteReadout>)>,
+    mut layers: Query<(&LayerPick, &mut BackgroundColor), Without<CellButton>>,
+    mut layer_labels: Query<(&LayerLabel, &mut TextColor), (Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>)>,
+    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<LayerLabel>, Without<NoteReadout>)>,
+    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<LayerLabel>, Without<SelectedCellLine>)>,
+) {
+    let Some(d) = state.editing(&project.library) else {
+        return;
+    };
+    let grid = &d.subgrid;
+    let (_, dy, _) = grid.div;
+    let layer = cell_edit.layer.min(dy.saturating_sub(1));
+
+    for (button, mut bg) in &mut cells {
+        let selected = cell_edit.at == Some((button.0, layer, button.1));
+        let want = if selected { ROW_SELECTED } else { ROW_BG };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+    for (g, mut text, mut colour) in &mut glyphs {
+        let cell = grid.at((g.0, layer, g.1));
+        let want = cell_glyph(cell);
+        if text.0 != want {
+            text.0 = want.to_owned();
+        }
+        let tint = if cell.is_some() { ACCENT } else { LABEL };
+        if colour.0 != tint {
+            colour.0 = tint;
+        }
+    }
+    for (pick, mut bg) in &mut layers {
+        let want = if pick.0 == layer { ROW_SELECTED } else { ROW_BG };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+    }
+    for (label, mut colour) in &mut layer_labels {
+        let want = if label.0 == layer { TEXT } else { LABEL };
+        if colour.0 != want {
+            colour.0 = want;
+        }
+    }
+
+    let detail = match cell_edit.at {
+        Some(at) => match &cell_edit.active {
+            Some((field, raw)) => format!(
+                "{},{},{}  {} `{raw}_`",
+                at.0,
+                at.1,
+                at.2,
+                if *field == CellField::Edge { "edge" } else { "anchor" }
+            ),
+            None => format!(
+                "{},{},{}  {}",
+                at.0,
+                at.1,
+                at.2,
+                grid.at(at).map(describe_cell).unwrap_or_else(|| "open".to_owned())
+            ),
+        },
+        None => "no cell picked".to_owned(),
+    };
+    for (mut text, mut colour) in &mut lines {
+        if text.0 != detail {
+            text.0 = detail.clone();
+        }
+        let tint = if cell_edit.active.is_some() { ACCENT } else { DIM };
+        if colour.0 != tint {
+            colour.0 = tint;
+        }
+    }
+
+    let (note_text, note_tint) = match &note_edit.active {
+        Some(raw) => (format!("{raw}_"), ACCENT),
+        None => match d.note.as_deref() {
+            Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
+            _ => ("describe it\u{2026}".to_owned(), LABEL),
+        },
+    };
+    for (mut text, mut colour) in &mut notes {
+        if text.0 != note_text {
+            text.0 = note_text.clone();
+        }
+        if colour.0 != note_tint {
+            colour.0 = note_tint;
         }
     }
 }
@@ -953,6 +1165,7 @@ impl Plugin for TilesPlugin {
             .init_resource::<MapView>()
             .init_resource::<DivEdit>()
             .init_resource::<CellEdit>()
+            .init_resource::<NoteEdit>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -981,20 +1194,27 @@ impl Plugin for TilesPlugin {
                     refresh_div,
                     style_tabs,
                     rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
-                    rebuild_detail.run_if(
-                        resource_changed::<ImportState>.or_else(resource_changed::<CellEdit>),
-                    ),
+                    // **Structure only.** The selection and the carets are repainted in place by
+                    // `refresh_cells`; rebuilding the pane for them is the bounce.
+                    rebuild_detail.run_if(resource_changed::<ImportState>),
                     refresh_lines,
                     drive_preview,
                     draw_preview_footprint.run_if(in_tiles_mode),
                     draw_subgrid.run_if(in_tiles_mode),
                 ),
             )
+            // A second `add_systems` rather than a nested tuple — `add_systems` caps a tuple at 20
+            // in 0.19, and nesting would imply these belong together for a reason.
+            .add_systems(
+                Update,
+                (note_keys.in_set(crate::keys::Phase::Text), refresh_cells),
+            )
             .add_observer(on_tab_click)
             .add_observer(on_div_click)
             .add_observer(on_layer_click)
             .add_observer(on_cell_click)
             .add_observer(on_cell_verb)
+            .add_observer(on_note_click)
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
@@ -2113,6 +2333,7 @@ fn rebuild_detail(
     mut commands: Commands,
     state: Res<ImportState>,
     cell_edit: Res<CellEdit>,
+    note_edit: Res<NoteEdit>,
     project: Res<Project>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
@@ -2153,6 +2374,41 @@ fn rebuild_detail(
                     ..default()
                 },
             ));
+
+            // **The description.** `Descriptor::note` is free text and nothing could write it before,
+            // so every description in the shipped libraries is whatever a generator left there. The id
+            // says what a piece *is* and the tags say what it *offers*; neither can carry "the one
+            // with the cracked screen", which is the sort of thing a later reader — human or model —
+            // needs to tell two crates apart.
+            let (note_text, note_tint) = match &note_edit.active {
+                Some(raw) => (format!("{raw}_"), ACCENT),
+                None => match d.note.as_deref() {
+                    Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
+                    _ => ("describe it\u{2026}".to_owned(), LABEL),
+                },
+            };
+            p.spawn((
+                UiButton,
+                Hovered::default(),
+                NoteField,
+                Node {
+                    // Stated, because the text is empty until somebody types — an unstated height
+                    // lays this out at 7 logical px (`docs/ui.md` §5).
+                    min_height: Val::Px(18.0),
+                    padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
+                    margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                    ..default()
+                },
+                BackgroundColor(ROW_BG),
+            ))
+            .with_children(|f| {
+                f.spawn((
+                    Text::new(note_text),
+                    TextColor(note_tint),
+                    TextFont::from_font_size(10.0),
+                    NoteReadout,
+                ));
+            });
 
             if let Some((c, m)) = cand.and_then(|c| c.measured.map(|m| (c, m))) {
                 // Measured facts, not controls. Given their own heading so the eye can skip them
@@ -2203,7 +2459,7 @@ fn rebuild_detail(
                 }
             }
 
-            // **The layer.** `mount` is what replaced `Role`, `rests_on` and the height heuristic that
+            // **The mount.** It is what replaced `Role`, `rests_on` and the height heuristic that
             // once decided a 10.9 cm mug was a floor decal — so it is the one field worth putting on
             // its own line rather than in a list of tags.
             p.spawn(Node {
@@ -2218,7 +2474,10 @@ fn rebuild_detail(
                         flex_shrink: 0.0,
                         ..default()
                     },
-                    Text::new("layer"),
+                    // **"mount", not "layer".** The subgrid below has its own `layer y` picker, and
+                    // one panel saying "layer" twice about two different things is the confusion the
+                    // key census already fixed on its side (`Action::CycleMount`).
+                    Text::new("mount"),
                     TextColor(LABEL),
                     TextFont::from_font_size(10.0),
                 ));
@@ -2229,12 +2488,21 @@ fn rebuild_detail(
                 ));
             });
 
+            let grid = &d.subgrid;
+            let (dx, dy, dz) = grid.div;
+            let layer = cell_edit.layer.min(dy.saturating_sub(1));
+            let marked = d.subgrid.cells.len();
+
             // **The subgrid.** Divisions first, because they frame every cell below them.
             crate::chrome::section(p, "SUBGRID");
+            // **Divisions and the layer picker share a row.** They are one question — which lattice,
+            // and which slice of it — and stacking them put the grid itself a line further down for
+            // no gain.
             p.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 column_gap: Val::Px(crate::chrome::GAP_TIGHT),
+                flex_wrap: FlexWrap::Wrap,
                 ..default()
             })
             .with_children(|row| {
@@ -2277,36 +2545,10 @@ fn rebuild_detail(
                         ));
                     });
                 }
-            });
-            let marked = d.subgrid.cells.len();
-            p.spawn((
-                Text::new(format!(
-                    "{marked} of {} cells marked",
-                    d.subgrid.volume()
-                )),
-                TextColor(DIM),
-                TextFont::from_font_size(9.0),
-                Node {
-                    margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
-                    ..default()
-                },
-            ));
-
-            // ── the layer, then that layer's cells ────────────────────────────────────────────
-            //
-            // One y-slice at a time. All 27 buttons at once is a wall of glyphs; nine is a shape an
-            // author can read, and the picker says which slice they are on.
-            let grid = &d.subgrid;
-            let (dx, dy, dz) = grid.div;
-            let layer = cell_edit.layer.min(dy.saturating_sub(1));
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
-                ..default()
-            })
-            .with_children(|row| {
+                // ── the layer, on the same row ────────────────────────────────────────────────
+                //
+                // One y-slice at a time. All 27 buttons at once is a wall of glyphs; nine is a shape
+                // an author can read, and the picker says which slice they are on.
                 row.spawn((
                     Node {
                         margin: UiRect::right(Val::Px(crate::chrome::GAP_TIGHT)),
@@ -2335,10 +2577,21 @@ fn rebuild_detail(
                             Text::new(format!("{y}")),
                             TextColor(if y == layer { TEXT } else { LABEL }),
                             TextFont::from_font_size(10.0),
+                            LayerLabel(y),
                         ));
                     });
                 }
             });
+
+            p.spawn((
+                Text::new(format!("{marked} of {} cells marked", d.subgrid.volume())),
+                TextColor(DIM),
+                TextFont::from_font_size(9.0),
+                Node {
+                    margin: UiRect::top(Val::Px(crate::chrome::GAP_TIGHT)),
+                    ..default()
+                },
+            ));
 
             // The slice itself, z rows of x buttons — read like a plan view from above.
             for z in 0..dz {
@@ -2373,6 +2626,7 @@ fn rebuild_detail(
                                 // per `docs/ui.md` §1.3.
                                 TextColor(if cell.is_some() { ACCENT } else { LABEL }),
                                 TextFont::from_font_size(11.0),
+                                CellGlyph(x, z),
                             ));
                         });
                     }
@@ -2404,6 +2658,7 @@ fn rebuild_detail(
                 Text::new(detail),
                 TextColor(if cell_edit.active.is_some() { ACCENT } else { DIM }),
                 TextFont::from_font_size(9.0),
+                SelectedCellLine,
                 Node {
                     margin: UiRect::top(Val::Px(crate::chrome::GAP_ROW)),
                     ..default()

@@ -41,7 +41,8 @@ const ROTATION_STEPS: u32 = 4;
 const MIN_ZOOM: f32 = 4.0;
 const MAX_ZOOM: f32 = 80.0;
 const ZOOM_STEP: f32 = 2.0;
-const PAN_SPEED: f32 = 14.0;
+/// Metres a second, matching the game's `src/camera.rs` so the two feel the same.
+const PAN_SPEED: f32 = 16.0;
 
 /// Where the camera is looking and how far out.
 #[derive(Resource)]
@@ -177,10 +178,13 @@ fn drive(
     if wish != Vec2::ZERO {
         let yaw_rot = Quat::from_rotation_y(rig.yaw);
         let screen = yaw_rot * Vec3::new(wish.x, 0.0, wish.y).normalize_or_zero();
-        // Scaled by zoom: at a wide view a keypress should cross a similar fraction of the screen as
-        // it does close in, which is what makes panning feel the same at every zoom.
-        let zoom_scale = rig.height / 18.0;
-        rig.focus += screen * PAN_SPEED * dt * zoom_scale;
+        // **Constant speed, like the game.** This used to scale by `rig.height / 18.0`, on the
+        // argument that a keypress should cross the same *fraction of the screen* at every zoom. In
+        // the hand it reads as the camera sticking: zoomed in — which is where an author does detail
+        // work — panning crawled at a third of the speed the game moves at, and the same keys
+        // behaving differently in the two applications is the surprise worth removing.
+        // `src/camera.rs:370` is the reference: `rig.focus += dir * PAN_SPEED * dt`, unscaled.
+        rig.focus += screen * PAN_SPEED * dt;
     }
 
     let (mut tf, mut proj) = camera.into_inner();

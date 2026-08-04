@@ -209,21 +209,18 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
 
-    // **Pan is the map's; turning the view is everyone's.** `view::drive` never consulted a context,
-    // so before the input gate both worked on every tab — including while a name was being typed,
-    // which is how `S` in the map-name field panned the view out from under the author mid-word.
-    //
-    // Turning stays `Context::Global` because the Tiles and Anim tabs both stage a 3D subject that is
-    // worth looking round. Panning does not: the Tiles camera is parked on one tile by
-    // `stage_camera`, and panning off it has no way back. So `W, A, S, D` are free in that tab, which
-    // is what lets the lattice cursor have them.
+    // **The camera is Global — pan included.** This briefly moved to `Context::Map` to free
+    // `W, A, S, D` for the Tiles lattice cursor, on the argument that panning off a staged tile has
+    // no way back. That argument was wrong in practice: an author on any tab reaches for these keys
+    // to move the view, and a tab where they silently do something else is a tab where the camera
+    // feels broken. The lattice cursor moved instead — see its row.
     //
     // Declared W, A, S, D rather than W, S, A, D: the displayed row is these chords in order, and
     // "W, A, S, D" is how the shape is named everywhere. The census's order IS the reading order.
-    b(Action::PanForward, KeyCode::KeyW, false, Context::Map, "W", "pan"),
-    b(Action::PanLeft, KeyCode::KeyA, false, Context::Map, "A", "pan"),
-    b(Action::PanBack, KeyCode::KeyS, false, Context::Map, "S", "pan"),
-    b(Action::PanRight, KeyCode::KeyD, false, Context::Map, "D", "pan"),
+    b(Action::PanForward, KeyCode::KeyW, false, Context::Global, "W", "pan"),
+    b(Action::PanLeft, KeyCode::KeyA, false, Context::Global, "A", "pan"),
+    b(Action::PanBack, KeyCode::KeyS, false, Context::Global, "S", "pan"),
+    b(Action::PanRight, KeyCode::KeyD, false, Context::Global, "D", "pan"),
     b(Action::TurnViewLeft, KeyCode::KeyQ, false, Context::Global, "Q", "turn view"),
     b(Action::TurnViewRight, KeyCode::KeyE, false, Context::Global, "E", "turn view"),
 
@@ -248,15 +245,16 @@ pub const BINDINGS: &[Binding] = &[
     // seven above are counted — so each group shares one `does` and reads its chords in order, the
     // same shape as `W, A, S, D  pan`.
     //
-    // `W, A, S, D` moves the cursor, because that is what those keys mean everywhere and the lattice
-    // is a grid you walk. They are free here precisely because panning is the Map's — the two tabs are
-    // never live together, which is the case `Context` exists to model. (They were `H J K L`; `K` had
-    // to go when the shortcuts overlay took it, and moving one key of a cluster is worse than moving
-    // the cluster.) `Z, X, C, V` is the run under the left hand, free here for the same reason.
-    b(Action::CellForward, KeyCode::KeyW, false, Context::Tiles, "W", "move the cell cursor"),
-    b(Action::CellLeft, KeyCode::KeyA, false, Context::Tiles, "A", "move the cell cursor"),
-    b(Action::CellBack, KeyCode::KeyS, false, Context::Tiles, "S", "move the cell cursor"),
-    b(Action::CellRight, KeyCode::KeyD, false, Context::Tiles, "D", "move the cell cursor"),
+    // **`T F G H` is an inverted T, one column left of the usual one.** The cursor cannot have
+    // `W A S D` (the camera's, on every tab), nor the arrows (they walk the two lists), nor `H J K L`
+    // (`K` is the shortcuts overlay). This is the nearest remaining cluster with the right *shape* —
+    // T above, F left, G below, H right — and shape is what the hand remembers.
+    // `Z, X, C, V` is the run under the left hand, free here because they are Map bindings and the
+    // two tabs are never live together, which is the case `Context` exists to model.
+    b(Action::CellForward, KeyCode::KeyT, false, Context::Tiles, "T", "move the cell cursor"),
+    b(Action::CellLeft, KeyCode::KeyF, false, Context::Tiles, "F", "move the cell cursor"),
+    b(Action::CellBack, KeyCode::KeyG, false, Context::Tiles, "G", "move the cell cursor"),
+    b(Action::CellRight, KeyCode::KeyH, false, Context::Tiles, "H", "move the cell cursor"),
     b(Action::LayerDown, KeyCode::BracketLeft, false, Context::Tiles, "[", "layer down / up"),
     b(Action::LayerUp, KeyCode::BracketRight, false, Context::Tiles, "]", "layer down / up"),
     b(Action::CellSolid, KeyCode::KeyZ, false, Context::Tiles, "Z", "solid / edge / anchor / clear"),
@@ -593,18 +591,17 @@ mod tests {
 
     /// Four keys, one idea. The displayed list collapses them rather than repeating the word.
     ///
-    /// Pan is the map's and turning the view is everyone's, so the two collapsed rows live in
-    /// different contexts — and `W, A, S, D` means a second thing in the Tiles tab, which is legal
-    /// because those two are never live together.
+    /// The camera's two collapsed rows are Global, so they read the same on every tab.
     #[test]
     fn keys_that_do_one_thing_share_a_row() {
         let map = rows(Context::Map);
-        let pan = map
+        let global = rows(Context::Global);
+        let pan = global
             .iter()
             .find(|r| r.does == "pan")
             .unwrap_or_else(|| panic!("no pan row"));
         assert_eq!(pan.chord, "W, A, S, D");
-        assert_eq!(map.iter().filter(|r| r.does == "pan").count(), 1);
+        assert_eq!(global.iter().filter(|r| r.does == "pan").count(), 1);
 
         let turn = rows(Context::Global)
             .into_iter()
@@ -618,12 +615,13 @@ mod tests {
             .unwrap_or_else(|| panic!("no aim row"));
         assert_eq!(aim.chord, "Z, C");
 
-        // The same four chords, a different job, one row — the Tiles lattice cursor.
+        // The lattice cursor is its own cluster, and must not be the camera's — an author reaches
+        // for `W A S D` to move the view on every tab.
         let cursor = rows(Context::Tiles)
             .into_iter()
             .find(|r| r.does == "move the cell cursor")
             .unwrap_or_else(|| panic!("no cursor row"));
-        assert_eq!(cursor.chord, "W, A, S, D");
+        assert_eq!(cursor.chord, "T, F, G, H");
     }
 
     /// **The overlay key is held, not tapped.** `pressed` must answer for it while it is down —
