@@ -7,6 +7,11 @@ left.
 
 Nothing is committed. The whole change is in the working tree.
 
+> **Then read `docs/2026-08-04-emerge-mapper-next.md`.** This document is the no-prior-context
+> orientation and its §4 traps are still current; that one is the ranked recommendation list —
+> what to build next and in what order, the eight unfixed review findings, and what was and was
+> not verified in the running app.
+
 **Updated 2026-08-04 (second session):** §3 is rewritten — T1–T5 are done. §1's baselines have moved: `emerge-core` 216 (was 206), `emerge-mapper` 30 (was 28).
 
 ---
