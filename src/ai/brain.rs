@@ -305,6 +305,9 @@ pub fn think(
         active.mode = chosen.mode;
         active.target = match chosen.target {
             TargetKind::None => None,
+            // The seat a unit has been offered. Resolved in perception from `site::smart::SmartHub`,
+            // so a level with no Site simply never offers one and this stays `None`.
+            TargetKind::NearestSeat => perc.squad.nearest_seat,
             TargetKind::NearestUnit => nearest_unit,
             TargetKind::ScentHotspot => Some(hotspots.scent.0),
             TargetKind::MeatHotspot => Some(hotspots.meat.0),

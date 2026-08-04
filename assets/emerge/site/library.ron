@@ -879,7 +879,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "bed",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -937,7 +939,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -969,7 +973,9 @@
                 ],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1001,7 +1007,9 @@
                 ],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1030,7 +1038,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "seating",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1117,7 +1127,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "seating",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1175,7 +1187,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "seating",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1207,7 +1221,9 @@
                 ],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1239,7 +1255,9 @@
                 ],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1271,7 +1289,9 @@
                 ],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "table",
+            ],
             effects: [],
             look: [],
             placement: (
@@ -1329,7 +1349,9 @@
                 surfaces: [],
                 sockets: [],
             ),
-            kind: [],
+            kind: [
+                    "seating",
+            ],
             effects: [],
             look: [],
             placement: (

@@ -96,6 +96,15 @@ pub enum Mode {
     /// Bear (the benign original only): the endearing display — dance, or sit down and draw a
     /// picture. Canon behaviour, and the tell that the player is being watched back.
     Emote,
+    /// **Sit down at a table the hub already has.** The one mode that comes from a *smart location*
+    /// rather than from an entity the unit can see: `site::smart` derives which props belong together
+    /// and `emerge_core::smart` decides who gets a place, so this is the squad's end of a system the
+    /// map authors rather than the code.
+    ///
+    /// Appended to the end of the enum on purpose. `Mode::index` is the discriminant, `MODE_COUNT`
+    /// sizes every mode distribution in `squad_ai::surprise`, and an RL policy's action head is that
+    /// wide — inserting anywhere else would silently re-point every learned action.
+    SitAt,
 }
 
 impl Mode {
@@ -103,7 +112,7 @@ impl Mode {
     /// (`squad_ai::surprise` indexes mode distributions by `Mode::index`). Pinned by
     /// `mode_all_is_dense_and_in_discriminant_order`, so adding a variant without listing it here is a
     /// loud test failure rather than a silently truncated distribution.
-    pub const ALL: [Mode; 29] = [
+    pub const ALL: [Mode; 30] = [
         Mode::Forage,
         Mode::Latch,
         Mode::Flee,
@@ -133,6 +142,7 @@ impl Mode {
         Mode::Strike,
         Mode::Build,
         Mode::Emote,
+        Mode::SitAt,
     ];
 
     /// Dense index into [`Mode::ALL`]. Every variant is fieldless, so the discriminant *is* the index.
@@ -202,6 +212,13 @@ pub enum Fact {
     PhotophobeBearingKnown,
 
     // --- SCP-1048 Builder Bear facts. Neutral (0) for every other agent. ---
+    /// **1.0 while a place to sit is free and in reach**, hysteretic like the other sight gates. Gates
+    /// `Mode::SitAt`. Zero for every agent that is not a squad unit, and zero in a level whose layout
+    /// derives no locations — a hub with no chairs pulled up to a table affords nothing.
+    SeatNearby,
+    /// Distance to that place (large when none), so a behaviour can prefer a near table to a far one.
+    NearestSeatDist,
+
     /// 1.0 while this bear has banked enough material AND is off build cooldown — i.e. a copy could be
     /// assembled right now. Gates `Mode::Build`, alongside the *inverse* of [`Fact::SeenBySquad`]: the
     /// bear builds only what nobody is watching it build.
@@ -278,6 +295,8 @@ pub enum TargetKind {
     NearestWoundedAlly,
     /// The nearest known hostile (Gunman's Engage destination / Psionic's Commune subject).
     TrackedThreat,
+    /// The free place to sit this unit has been allocated (the `SitAt` destination).
+    NearestSeat,
 }
 
 /// A complete behaviour: a small data literal.
@@ -399,6 +418,10 @@ pub struct SquadFields {
     /// `None` / 0.0 when none is in range; hysteretic via `squad_ai::PerceptionLatch`.
     pub nearest_photophobe: Option<Vec3>,
     pub photophobe_bearing_known: f32,
+    /// Where the free seat is, its distance, and the hysteretic gate — see [`Fact::SeatNearby`].
+    pub nearest_seat: Option<Vec3>,
+    pub seat_dist: f32,
+    pub seat_nearby: f32,
 }
 
 impl SquadFields {
@@ -419,6 +442,9 @@ impl SquadFields {
             past_leash: 0.0,
             nearest_photophobe: None,
             photophobe_bearing_known: 0.0,
+            nearest_seat: None,
+            seat_dist: NO_TARGET_DIST,
+            seat_nearby: 0.0,
         }
     }
 }
@@ -434,6 +460,8 @@ impl Perception {
             Input::Perc(Fact::CarryingMeat) => self.carrying,
             Input::Perc(Fact::PreySpotted) => self.prey_spotted,
             Input::Perc(Fact::RallyHere) => self.rally_val,
+            Input::Perc(Fact::SeatNearby) => self.squad.seat_nearby,
+            Input::Perc(Fact::NearestSeatDist) => self.squad.seat_dist,
             Input::Perc(Fact::AlarmHere) => self.alarm_val,
             Input::Perc(Fact::SeenBySquad) => self.seen_by_squad,
             Input::Perc(Fact::NoiseDraw) => self.noise_draw,

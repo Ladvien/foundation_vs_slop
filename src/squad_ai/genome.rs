@@ -547,7 +547,7 @@ mod tests {
             "a flat Logistic is a constant 0.5, so this brain loads — the behavioural MC must reject it"
         );
         let decoded = decode(&template, &zeroed).expect("decode");
-        let flee = decoded.iter().find(|b| b.rank == 6).expect("the rank-6 Flee tail");
+        let flee = decoded.iter().find(|b| b.rank == 12).expect("the rank-12 Flee tail");
         assert_eq!(flee.mode, crate::ai::utility::Mode::Flee);
     }
 }

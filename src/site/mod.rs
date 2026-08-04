@@ -61,6 +61,7 @@ pub mod people;
 pub mod presence;
 pub mod review;
 pub mod signage;
+pub mod smart;
 pub mod pieces;
 pub mod staff_anim;
 pub mod visuals;

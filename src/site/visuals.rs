@@ -205,11 +205,29 @@ impl Plugin for SiteVisualsPlugin {
             }
         };
         let nav = SiteNav::bake(&layout);
+        // **The hub's smart locations, derived once.** Built here rather than in a system because the
+        // furniture does not move: re-deriving every tick would walk every prop pair to reach the same
+        // four answers. The kit is `SiteKitRes`, already validated by `SitePlugin` — this plugin is
+        // added after it, so it is the one the rest of the Site draws with.
+        let smart_hub = match app.world().get_resource::<crate::site::SiteKitRes>() {
+            Some(kit) => crate::site::smart::SmartHub::from_layout(&layout, kit),
+            // Loud, and then empty rather than absent: a hub with no derived spots simply affords
+            // nothing to sit at, which is the honest state when the kit is missing. `SitePlugin`
+            // panics on a bad kit long before this, so reaching it means the plugin order changed.
+            None => {
+                error!(
+                    "site: SiteKitRes is missing at SiteVisualsPlugin::build, so no smart locations \
+                     were derived — the squad will find nowhere to sit"
+                );
+                crate::site::smart::SmartHub::default()
+            }
+        };
         // `leave_for_the_site` reads the binding table non-optionally, and the plugin that registers a
         // reader is what guarantees the resource exists — the same contract `camera` states.
         crate::input::claim_bindings(app);
         app.add_plugins(MaterialPlugin::<AsyncApertureMaterial>::default())
             .insert_resource(nav)
+            .insert_resource(smart_hub)
             .insert_resource(SiteLayoutRes(layout))
             .insert_resource(SiteStaffRes(staff))
             // AFTER both graphs exist: `spawn_site_geometry` pins `ValkyrieAnim`'s graph and slots on

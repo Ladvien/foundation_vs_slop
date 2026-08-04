@@ -62,11 +62,17 @@ pub struct PerceptionLatch {
     pub past_leash: bool,
     /// A light-averse creature is within the Researcher's warding range (latches `Mode::Ward`).
     pub photophobe: bool,
+    /// A free place to sit is in reach (latches `Mode::SitAt`).
+    pub seat: bool,
 }
 
 /// The planar distance of a [`nearest_planar`] hit, or [`NO_TARGET_DIST`] when there is no candidate at
 /// all. "No candidate" and "candidate far away" must read the same to the latches, so an emptied query
 /// (the last crab died) releases a gate exactly as a retreating one does.
+/// How close counts as "at the table". Roughly a chair's reach past the surface's own half-width, so a
+/// unit stops where somebody sitting down would be rather than inside the furniture.
+const SIT_DEADZONE: f32 = 1.2;
+
 fn dist_of<T>(hit: Option<(T, Vec3, f32)>) -> f32 {
     hit.map_or(NO_TARGET_DIST, |(_, _, d)| d)
 }
@@ -150,7 +156,13 @@ pub fn squad_think(
         ),
         With<Unit>,
     >,
-    beh: Res<crate::behavior_tuning::BehaviorTuning>,
+    // Tupled to stay inside Bevy's 16-parameter cap, the same way `light`/`sim` are below. `hub` is
+    // `Option`, because a dungeon level has no Site and therefore no furniture to sit at — and a bare
+    // `Res` would panic this system there rather than skip it.
+    tuning: (
+        Res<crate::behavior_tuning::BehaviorTuning>,
+        Option<Res<crate::site::smart::SmartHub>>,
+    ),
     // Almond Water at the unit's cell → the learned policy's water observation (belief/inversion mechanic).
     // `squad_think` is ordered `.after(AlmondWaterWritten)` so this reads the current tick's field + belief.
     // Tupled into one system param (Bevy's 16-param limit; see the `light`/`sim` note above).
@@ -176,6 +188,7 @@ pub fn squad_think(
         .map(|(e, t, _, _, _, _, _, _, h, _, _, _, _, _, _)| (e, t.translation, health_frac(h)))
         .collect();
 
+    let (beh, hub) = tuning;
     let dt = time.delta_secs();
 
     for (
@@ -260,6 +273,16 @@ pub fn squad_think(
         // The band is already applied via `wounded_cut` above, so the latch just records the outcome for
         // the next tick's threshold.
         latch.ally_down = nearest_wounded.is_some();
+        // **The hub's furniture, if this level has any.** `Option<Res<_>>`, because the resource only
+        // exists where a Site was built — a dungeon level derives no locations, and a bare `Res` in a
+        // system that also runs there would panic rather than skip (CLAUDE.md's first Bevy trap).
+        let seat = hub.as_ref().and_then(|h| h.nearest_free(pos));
+        latch.seat = latch_when_below(
+            latch.seat,
+            seat.map_or(NO_TARGET_DIST, |(_, d)| d),
+            beh.perception.seat_sight,
+            beh.perception.seat_sight_release,
+        );
         latch.past_leash =
             latch_when_above(latch.past_leash, anchor_dist, beh.perception.leash, beh.perception.leash_in);
 
@@ -300,6 +323,9 @@ pub fn squad_think(
             past_leash: if latch.past_leash { 1.0 } else { 0.0 },
             nearest_photophobe: photophobe.map(|(_, p, _)| p),
             photophobe_bearing_known: if latch.photophobe { 1.0 } else { 0.0 },
+            nearest_seat: seat.map(|(p, _)| p),
+            seat_dist: seat.map_or(NO_TARGET_DIST, |(_, d)| d),
+            seat_nearby: if latch.seat { 1.0 } else { 0.0 },
         };
 
         // Almond Water observation for the learned policy (belief/inversion mechanic). Belief is SMELLED: an
@@ -462,6 +488,13 @@ fn resolve_goal(mode: Mode, perc: &Perception, anchor: &SquadAnchor) -> Option<V
         // `THINK_INTERVAL`), so a unit that has just run home is still in `Regroup` for a fraction of a
         // second after arriving — without the deadband it would spend that time steering into the exact
         // centroid, and `avoids: true` would keep it from reading as settled to ORCA.
+        // **Walk to the table, then stop.** The deadband is the same idea `FollowAnchor` uses and it
+        // matters more here: a unit that has arrived is *sitting*, and steering into the prop's exact
+        // centre would push it through the table it is sitting at.
+        Mode::SitAt => match perc.squad.nearest_seat {
+            Some(at) if perc.squad.seat_dist > SIT_DEADZONE => Some(at),
+            _ => None,
+        },
         Mode::Regroup | Mode::FollowAnchor => {
             if perc.squad.anchor_dist > FOLLOW_DEADZONE {
                 anchor_goal
