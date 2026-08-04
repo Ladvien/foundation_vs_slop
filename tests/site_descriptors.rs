@@ -133,3 +133,36 @@ fn both_kits_name_the_same_pieces_and_every_id_resolves() {
         assert!(!b.glb(*piece).is_empty(), "{piece:?} has geometry");
     }
 }
+
+/// **An authored map loads.** `assets/emerge/break_room.map.ron` was made in `emerge-mapper` on
+/// 2026-08-03 — a fridge, a table, three chairs and a wall light — and it is committed as the first
+/// map the editor produced that the game can read.
+///
+/// It exists as a **fixture**, not as content: the loop it proves (author → save → the game validates
+/// the same file with the same rules) had no regression test at all, so a schema change could have
+/// broken every authored map with nothing failing.
+#[test]
+fn the_authored_break_room_still_loads() {
+    use emerge_core::map::Map;
+
+    let text = std::fs::read_to_string("assets/emerge/break_room.map.ron")
+        .unwrap_or_else(|e| panic!("assets/emerge/break_room.map.ron: {e}"));
+    let map = Map::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(map.name, "break_room");
+    assert_eq!(map.placements.len(), 6, "a fridge, a table, three chairs, a light");
+
+    // Through the real load path — the library layered with this project's policy, the same call the
+    // game and the editor both make — so a descriptor the library stopped defining fails here.
+    let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    for p in &map.placements {
+        assert!(
+            library.get(&p.descriptor).is_some(),
+            "{} names `{}`, which the library no longer defines",
+            p.id,
+            p.descriptor
+        );
+    }
+    // And every height resolves — the check that would catch a stacked piece whose host went away.
+    emerge_core::stack::resolve_y(&map, &library).unwrap_or_else(|e| panic!("{e}"));
+}
