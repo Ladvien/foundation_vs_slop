@@ -221,6 +221,18 @@ pub struct RoleSlot {
     /// Which [`crate::descriptor::Socket::role`] an occupant stands at.
     #[serde(default)]
     pub socket_role: Option<String>,
+    /// What an occupant must be able to do — tokens from the `capabilities` axis, **all** of which
+    /// are required.
+    ///
+    /// Empty means anybody, which is the honest reading of a role that states no requirement, and is
+    /// right for an `Extra` standing around. A `Main` role usually wants something: a diner can eat, a
+    /// server can cook.
+    ///
+    /// All rather than any: a role wanting somebody who can cook *and* carry wants both, and an
+    /// "intersects" test would hand it somebody who can only carry. Game AI Pro 4 ch.4's mask compare,
+    /// with the requirement side as the subset test it has to be.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// Smart Zones' three strata, kept because they encode *when a scene may start*.
@@ -515,6 +527,7 @@ mod tests {
                         min: 1,
                         max: 4,
                         socket_role: Some("diner".into()),
+                        requires: vec!["eat".into()],
                     }],
                     guard: None,
                     effects: vec![Effect::Restore {

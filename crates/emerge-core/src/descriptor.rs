@@ -31,7 +31,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::placement::ir::Host;
 
 /// What an asset is. A patch — see the module docs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -116,10 +115,13 @@ pub fn mount_options(surfaces: &[String]) -> Vec<Mount> {
         Mount::OnWall { height: 1.8 },
         Mount::OnCeiling,
         Mount::Tiled,
-        Mount::Overlay { on: Host::Floor },
-        Mount::Overlay { on: Host::Wall },
+        Mount::Overlay { on: OverlayHost::Floor },
+        // The same default `OnWall` offers, because it is the same question: eye level for a sign.
         Mount::Overlay {
-            on: Host::Ceiling,
+            on: OverlayHost::Wall { height: 1.8 },
+        },
+        Mount::Overlay {
+            on: OverlayHost::Ceiling,
         },
         Mount::InOpening { clear: None },
     ];
@@ -146,7 +148,11 @@ pub fn mount_label(mount: Option<&Mount>) -> String {
         Some(Mount::OnWall { height }) => format!("on wall at {height:.1} m"),
         Some(Mount::OnCeiling) => "on ceiling".to_owned(),
         Some(Mount::Tiled) => "tiled".to_owned(),
-        Some(Mount::Overlay { on }) => format!("overlay on {on:?}").to_lowercase(),
+        Some(Mount::Overlay { on }) => match on {
+            OverlayHost::Floor => "overlay on floor".to_owned(),
+            OverlayHost::Ceiling => "overlay on ceiling".to_owned(),
+            OverlayHost::Wall { height } => format!("overlay on wall at {height:.1} m"),
+        },
         Some(Mount::InOpening { clear }) => match clear {
             Some((w, h)) => format!("in opening {w:.2} x {h:.2} m"),
             None => "in opening".to_owned(),
@@ -221,9 +227,34 @@ pub enum Mount {
     ///
     /// The case the old schemas could not express. `Overlay` claims no volume and never participates
     /// in the overlap rule: two decals may share a wall, which is the whole point of them.
-    Overlay { on: Host },
+    ///
+    /// The host carries the height where a height is a thing that exists — see [`OverlayHost`].
+    Overlay { on: OverlayHost },
     /// Laid on a grid by a tiling solver.
     Tiled,
+}
+
+/// The plane a decal lies on.
+///
+/// Its own enum rather than [`crate::placement::ir::Host`] for two reasons, and both are about not
+/// being able to say something meaningless. `Opening` is not a plane you can stick a poster to. And a
+/// **wall** needs a height while a floor and a ceiling do not: the map states where those are, and
+/// nothing anywhere states how high a poster hangs.
+///
+/// That last one shipped as a hole. `Mount::OnWall` has carried a height since it was written, and
+/// `Overlay` — the variant that exists *for* wall decals — had nowhere to put one, so a wall overlay
+/// could be authored and then had no answer for where it went. Encoding it in the variant means the
+/// unanswerable state is not constructible rather than merely rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum OverlayHost {
+    /// A floor marking — a hazard stripe, a painted lane, a stain. Lies on the map's floor.
+    Floor,
+    /// A ceiling stain or a painted marking. Lies on the map's ceiling.
+    Ceiling,
+    /// A poster, a sign, a scorch mark, at this height in metres — the same field `OnWall` carries,
+    /// for the same reason.
+    Wall { height: f32 },
 }
 
 /// Which way a clearance requirement points, relative to the piece's own front.
@@ -519,7 +550,9 @@ mod tests {
         d.extent.height = None;
         assert!(d.resolve().is_err(), "a solid piece must state its height");
 
-        d.mount = Some(Mount::Overlay { on: Host::Wall });
+        d.mount = Some(Mount::Overlay {
+            on: OverlayHost::Wall { height: 1.8 },
+        });
         let r = d.resolve().expect("a decal may omit height");
         assert_eq!(r.height, 0.0);
         assert!(!r.occupies_floor(), "an overlay claims no floor");
@@ -536,11 +569,18 @@ mod tests {
                 footprint: Some((0.4, 0.4)),
                 height: None,
             },
-            mount: Some(Mount::Overlay { on: Host::Wall }),
+            mount: Some(Mount::Overlay {
+                on: OverlayHost::Wall { height: 1.8 },
+            }),
             ..Default::default()
         };
         let r = d.resolve().expect("resolves");
-        assert_eq!(r.mount, Mount::Overlay { on: Host::Wall });
+        assert_eq!(
+            r.mount,
+            Mount::Overlay {
+                on: OverlayHost::Wall { height: 1.8 }
+            }
+        );
         assert!(!r.occupies_floor());
     }
 
