@@ -1,7 +1,7 @@
 //! **emerge-mapper** — the binary. Argument parsing and the app; everything else is the
 //! library beside this, so `tests/` can drive the editor without a window. See `lib.rs`.
 
-use emerge_mapper::{anim_tab, chrome, devshot, editor, keys, project, thumbs, tiles, view};
+use emerge_mapper::{harness, project};
 
 use std::path::PathBuf;
 
@@ -51,23 +51,6 @@ fn main() {
 
     let project_name = project.map.name.clone();
 
-    // **The real face, read before the window exists.** Bevy's embedded default is
-    // `FiraMono-subset.ttf`, **95 codepoints** of bare ASCII (`bevy_text-0.19.0/src/lib.rs:82`), so
-    // every `—` in the editor's copy — and in the refusals `emerge-core` hands back — drew as a tofu
-    // box. `docs/ui.md` §5 records the same trap costing the game 54 live sites across 10 glyphs.
-    //
-    // Read here rather than through the `AssetServer` because a font that arrives a frame late is a
-    // frame of tofu, and fatal rather than optional for the same reason the project is: an editor
-    // that cannot draw its own labels has nothing useful to show.
-    let font_path = root.join("assets/fonts/FiraMono-Regular.ttf");
-    let font_data = match std::fs::read(&font_path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("emerge-mapper: cannot read {}: {e}", font_path.display());
-            std::process::exit(1);
-        }
-    };
-
     let mut app = App::new();
     app
         .add_plugins(
@@ -104,19 +87,12 @@ fn main() {
         // **One knob for the whole interface.** `UiScale` multiplies every `Val::Px` and every font
         // size, so the panels grow together and nothing has to be re-tuned relative to anything else
         // — the alternative is forty constants that drift apart the first time one is missed.
-        .insert_resource(UiScale(1.2))
-        .add_plugins((
-            // First: it owns `keys::Live`, which the other three plugins' systems take as a
-            // `Res<_>` — and in 0.19 a missing one panics the system rather than skipping it.
-            keys::KeysPlugin,
-            chrome::ChromePlugin,
-            view::ViewPlugin,
-            editor::EditorPlugin,
-            thumbs::ThumbsPlugin,
-            tiles::TilesPlugin,
-            anim_tab::AnimTabPlugin,
-            devshot::DevShotPlugin,
-        ));
+        .insert_resource(UiScale(1.2));
+
+    // **The one list of the editor's plugins**, shared with `harness::build_headless`. A binary and a
+    // test that each assembled their own graph would be two editors, and the tests would be checking
+    // the one nobody ships.
+    harness::add_editor_plugins(&mut app);
 
     // **Replace the default face rather than hand a handle to 41 call sites.** `TextFont::default()`
     // names `AssetId::default()`, which is exactly where `TextPlugin` puts the subset
@@ -127,16 +103,9 @@ fn main() {
     // because a call site reaching for `Handle::default()` got the subset; here the default IS the
     // shipped face, so there is no second thing to reach for and no site that can forget. One binary,
     // one face, one place it is decided.
-    match app
-        .world_mut()
-        .resource_mut::<Assets<Font>>()
-        .insert(AssetId::default(), Font::from_bytes(font_data))
-    {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("emerge-mapper: cannot install {}: {e}", font_path.display());
-            std::process::exit(1);
-        }
+    if let Err(e) = harness::install_font(&mut app, &root) {
+        eprintln!("emerge-mapper: {e}");
+        std::process::exit(1);
     }
 
     app.run();

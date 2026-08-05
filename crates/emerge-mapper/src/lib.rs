@@ -42,6 +42,7 @@
 //! argument parsing and the app; everything else lives here, where `tests/` can reach it.
 
 pub mod anim_tab;
+pub mod harness;
 pub mod chrome;
 pub mod devshot;
 pub mod editor;

@@ -21,6 +21,7 @@
 //! right" is not a question this file can ask. It asks the one that actually broke things.
 
 use bevy::prelude::*;
+use emerge_mapper::harness;
 
 /// An app with nothing that needs a screen.
 fn headless() -> App {
@@ -160,4 +161,108 @@ fn pointing_at_a_wall_picks_the_face_you_are_looking_at() {
     let (_, none) = pick_cell([1.5, 9.0, 0.25], [0.0, -1.0, 0.0], origin, size, div)
         .unwrap_or_else(|| panic!("a ray from above must hit it"));
     assert_eq!(none, None);
+}
+
+/// **The whole editor, stepped.**
+///
+/// These are the tests the GUI driving was standing in for. `harness::build_headless` boots the real
+/// plugin graph — the same list `main.rs` uses — with no window, no wgpu device and no audio, and
+/// steps it by hand.
+///
+/// What they catch is the class that has actually broken this editor: in Bevy 0.19 a missing `Res<T>`
+/// **panics its system** rather than skipping it, and every run condition is evaluated with no
+/// short-circuit. Both are invisible until a frame runs.
+mod stepped {
+    use super::*;
+
+    /// The workspace root, which is also the editor's project root and asset root.
+    fn root() -> std::path::PathBuf {
+        // `CARGO_MANIFEST_DIR` is `crates/emerge-mapper`.
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| panic!("the crate must live two levels under the workspace"))
+            .to_path_buf()
+    }
+
+    /// **The editor boots and survives frames.** If any system takes a resource nobody registered,
+    /// or a run condition reads an absent one, this panics — which is the whole point.
+    ///
+    /// Ten frames rather than one: `Startup` runs on the first, and several systems only do work on a
+    /// later frame (`rebuild_detail` on a changed resource, `thumbs` after its booth is torn down).
+    #[test]
+    fn the_editor_boots_and_steps_without_panicking() {
+        let mut app = harness::build_headless(&root(), "untitled_map", None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..10 {
+            app.update();
+        }
+    }
+
+    /// And on a kit, which is a different library, a different policy and 45 more pieces.
+    #[test]
+    fn the_editor_boots_on_the_site_kit() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for _ in 0..10 {
+            app.update();
+        }
+        // The kit really did load, so this is not passing on an empty project.
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("the project resource is gone"));
+        assert!(
+            project.library.descriptors.len() >= 40,
+            "the site kit has 45 pieces; got {}",
+            project.library.descriptors.len()
+        );
+        assert_eq!(project.policy.divisions, 1);
+    }
+
+    /// **The authored tokens survive the real load path**, and the layered library the editor reads
+    /// carries them. This is the end of the chain the whole branch built: measurements on disk →
+    /// policy layered → lattice validated → in front of an author.
+    #[test]
+    fn the_authored_edge_tokens_reach_the_editor() {
+        let mut app = harness::build_headless(&root(), "untitled_map", Some("site"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        app.update();
+        let project = app
+            .world()
+            .get_resource::<emerge_mapper::project::Project>()
+            .unwrap_or_else(|| panic!("no project"));
+
+        let wall = project
+            .library
+            .get("site/wall")
+            .unwrap_or_else(|| panic!("site/wall is in the kit"));
+        let grid = wall
+            .subgrid
+            .as_ref()
+            .unwrap_or_else(|| panic!("site/wall's authored lattice did not survive the load"));
+        assert_eq!(
+            grid.cells.iter().filter(|c| c.edge.as_deref() == Some("wall")).count(),
+            10,
+            "the wall's run-faces are five cells each"
+        );
+
+        // And the measurements underneath are still unstretched — the kit-corruption fix, checked
+        // through the editor's own loader rather than through `write_library`'s tests.
+        let measured = project
+            .measured
+            .get("site/wall")
+            .unwrap_or_else(|| panic!("no measured wall"));
+        assert_eq!(measured.align.stretch_y, None, "the policy layer must not be in the file");
+    }
+
+    /// **A missing project is refused, not opened empty.** `Project::open`'s own rule, checked
+    /// through the harness because that is the path the binary takes.
+    #[test]
+    fn a_project_that_is_not_there_is_refused() {
+        let err = harness::build_headless(std::path::Path::new("/nonexistent"), "m", None)
+            .err()
+            .unwrap_or_default();
+        assert!(!err.is_empty(), "opening nothing must say so");
+    }
 }
