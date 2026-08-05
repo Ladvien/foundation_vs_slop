@@ -102,12 +102,20 @@ fn the_library_derives_the_two_fronts_the_kit_records_by_hand() {
             .derive_front()
             .unwrap_or_else(|e| panic!("{}: {e}", kit.glb(entry_piece)))
             .unwrap_or_else(|| panic!("{}: derived no front at all", kit.glb(entry_piece)));
-        // A quarter turn is the unit the kit authors in; anything inside an eighth of one resolves to
-        // the same quarter.
-        assert!(
-            (derived - want).abs() <= 45.0,
-            "{}: kit records front {want}°, the mesh derives {derived:.1}°",
-            kit.glb(entry_piece)
+        // **Exact, not within a tolerance.** The old assertion allowed 45° because `derive_front`
+        // returned a continuous angle and the kit recorded a quarter turn; the snapping now happens
+        // inside `derive_front`, so the two agree on a face or they disagree.
+        assert_eq!(
+            derived,
+            want,
+            "{}: kit records the {} face, the mesh derives {} ({:.1}° raw)",
+            kit.glb(entry_piece),
+            want.label(),
+            derived.label(),
+            open(kit.glb(entry_piece))
+                .front_detail()
+                .map(|(_, deg)| deg)
+                .unwrap_or(f32::NAN)
         );
     }
 }

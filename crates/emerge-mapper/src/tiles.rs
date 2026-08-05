@@ -2504,7 +2504,7 @@ fn rebuild_detail(
                     (
                         "front",
                         match c.proposed.align.front {
-                            Some(yaw) => format!("{yaw:.0} deg"),
+                            Some(face) => format!("{} face", face.label()),
                             None => "none".to_owned(),
                         },
                     ),

@@ -265,8 +265,11 @@ impl SiteKit {
         self.piece(piece).extent.footprint.unwrap_or((0.0, 0.0))
     }
 
-    /// Which way this mesh fronts, if it has a front at all.
-    pub fn front(&self, piece: SitePiece) -> Option<f32> {
+    /// Which of its own faces this mesh fronts, if it has a front at all.
+    ///
+    /// A face rather than an angle — see `emerge_core::descriptor::Face`. Callers composing a world
+    /// facing want `placement_yaw + front.yaw_degrees()`.
+    pub fn front(&self, piece: SitePiece) -> Option<emerge_core::descriptor::Face> {
         self.piece(piece).align.front
     }
 

@@ -434,6 +434,97 @@ pub fn mount_label(mount: Option<&Mount>) -> String {
     }
 }
 
+/// **One of a tile's four horizontal faces**, in the vocabulary the lattice already uses.
+///
+/// `crate::adjacency::face` reads a face; [`Align::front`] names one; and cell picking will report
+/// the one a ray entered. Three things about the same four directions, so they are one type rather
+/// than three spellings of a quarter turn.
+///
+/// The world meaning is `crate::wfc`'s, which is `grammar::learn`'s step table: **North is −Z, East
+/// is +X, South is +Z, West is −X.**
+///
+/// # Why a face and not degrees
+///
+/// `front` was a yaw in degrees, and degrees can express things a tile cannot have. A front at 37°
+/// points at a corner: there is no column of cells there, so nothing can read it, and
+/// `adjacency::quarter_turns` already refuses off-square yaws for exactly that reason. Naming a face
+/// makes the quantisation part of the type instead of a rule some later caller forgets.
+///
+/// It is also lossless for the shipped data — every `front` in the repo is `90.0`, which is [`Self::East`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Face {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Face {
+    /// The yaw, in degrees, whose forward vector points out of this face.
+    ///
+    /// The engine convention is `forward = (sin yaw, cos yaw)`, so yaw 0 is +Z — [`Self::South`] —
+    /// and the quarter turns follow from there. This is what every reader that composes a facing
+    /// with a placement's yaw wants.
+    pub fn yaw_degrees(self) -> f32 {
+        match self {
+            Face::South => 0.0,
+            Face::East => 90.0,
+            Face::North => 180.0,
+            Face::West => 270.0,
+        }
+    }
+
+    /// The face a yaw points out of, to the nearest quarter turn.
+    ///
+    /// **Snapping is the point, not a loss.** `glb::front_detail` measures a continuous angle out of
+    /// centroid asymmetry, and that angle is evidence about which face is the front rather than a
+    /// facing in its own right — a chair modelled 3° off square still fronts +X. The importer shows
+    /// the raw measurement beside this so an author can overrule a borderline call.
+    pub fn from_yaw(deg: f32) -> Face {
+        if !deg.is_finite() {
+            return Face::South;
+        }
+        match (deg / 90.0).round().rem_euclid(4.0) as u8 {
+            1 => Face::East,
+            2 => Face::North,
+            3 => Face::West,
+            _ => Face::South,
+        }
+    }
+
+    /// This face as [`crate::wfc`]'s edge index, so a front and a lattice face are the same four
+    /// numbers to everything downstream.
+    pub fn dir(self) -> crate::placement::ir::Dir {
+        match self {
+            Face::North => crate::wfc::N,
+            Face::East => crate::wfc::E,
+            Face::South => crate::wfc::S,
+            Face::West => crate::wfc::W,
+        }
+    }
+
+    /// The face opposite this one.
+    pub fn opposite(self) -> Face {
+        match self {
+            Face::North => Face::South,
+            Face::East => Face::West,
+            Face::South => Face::North,
+            Face::West => Face::East,
+        }
+    }
+
+    /// How an author reads it, matching `adjacency`'s fault messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Face::North => "N",
+            Face::East => "E",
+            Face::South => "S",
+            Face::West => "W",
+        }
+    }
+}
+
 /// Corrections for what the artist got wrong. Every one is measured, never dialled by eye — the kit's
 /// own doc says so of `scale`, and the importer exists to make that true of the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -455,13 +546,17 @@ pub struct Align {
     /// Local XZ offset of the mesh's bbox centre from its origin. Placement reasons about a footprint
     /// symmetric about the origin, so an off-centre mesh seated against a wall pokes through it.
     pub pivot: Option<(f32, f32)>,
-    /// Degrees to add to an authored yaw to reach the engine convention (`forward = (sin, cos)`).
+    /// **Which of the mesh's own faces is its front**, in its local space.
+    ///
+    /// Composed with a placement's yaw by whoever needs a world facing:
+    /// `placement.yaw + front.yaw_degrees()`. See [`Face`] for why this is a face rather than the
+    /// arbitrary angle it used to be.
     ///
     /// `None` means *the mesh is symmetric and has no front*, which is a different claim from
-    /// `Some(0.0)`. The kit records that distinction deliberately: a stool measures symmetric to
-    /// within a centimetre, and "asserting a facing on a stool would be asserting a fact about the art
-    /// that is not true."
-    pub front: Option<f32>,
+    /// `Some(Face::South)`. The kit records that distinction deliberately: a stool measures symmetric
+    /// to within a centimetre, and "asserting a facing on a stool would be asserting a fact about the
+    /// art that is not true."
+    pub front: Option<Face>,
 }
 
 /// How much room it takes. Metres.
@@ -600,7 +695,7 @@ pub struct Resolved {
     pub stretch_y: Option<f32>,
     pub y_offset: f32,
     pub pivot: (f32, f32),
-    pub front: Option<f32>,
+    pub front: Option<Face>,
     pub footprint: (f32, f32),
     pub height: f32,
     pub mount: Mount,
@@ -891,7 +986,7 @@ mod tests {
         let patch = Descriptor {
             id: String::new(),
             align: Align {
-                front: Some(90.0),
+                front: Some(Face::East),
                 ..Default::default()
             },
             ..Default::default()
@@ -900,7 +995,7 @@ mod tests {
         assert_eq!(merged.id, "crate", "an empty id inherits");
         assert_eq!(merged.mesh.as_deref(), Some("ozea/crate.glb"));
         assert_eq!(merged.extent.footprint, Some((0.6, 0.6)));
-        assert_eq!(merged.align.front, Some(90.0), "the patch wins where it speaks");
+        assert_eq!(merged.align.front, Some(Face::East), "the patch wins where it speaks");
     }
 
     /// Replace, not append — so a patch can take a tag away. An append-only list needs a second
@@ -955,6 +1050,93 @@ mod tests {
             .expect("serializes");
         let back: Descriptor = ron::from_str(&text).expect("parses");
         assert_eq!(d, back);
+    }
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::*;
+
+    /// The engine convention is `forward = (sin yaw, cos yaw)`, so yaw 0 points at +Z — which is
+    /// South in `wfc`'s naming. Everything else follows, and getting this backwards would turn every
+    /// seat in the game a quarter turn.
+    #[test]
+    fn a_faces_yaw_points_out_of_it() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            let yaw = face.yaw_degrees().to_radians();
+            let (x, z) = (yaw.sin(), yaw.cos());
+            let want = match face {
+                Face::North => (0.0, -1.0),
+                Face::East => (1.0, 0.0),
+                Face::South => (0.0, 1.0),
+                Face::West => (-1.0, 0.0),
+            };
+            assert!(
+                (x - want.0).abs() < 1e-5 && (z - want.1).abs() < 1e-5,
+                "{}: forward is ({x:.3}, {z:.3}), wanted {want:?}",
+                face.label()
+            );
+        }
+    }
+
+    /// Round trip, and the snap: an angle within an eighth turn of a face resolves to it.
+    #[test]
+    fn an_angle_snaps_to_the_face_it_is_nearest() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            assert_eq!(Face::from_yaw(face.yaw_degrees()), face);
+            // Off square by up to 44 degrees either way, and wrapped a full turn, still the same face.
+            for drift in [-44.0, -1.0, 1.0, 44.0] {
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift), face, "{drift}");
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift + 360.0), face);
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift - 360.0), face);
+            }
+        }
+        // The shipped value, which is what the four hand-measured fronts were written as.
+        assert_eq!(Face::from_yaw(90.0), Face::East);
+    }
+
+    /// A yaw that is not a number cannot pick a face, and picking one at random would be a facing
+    /// nobody authored. South is the identity — the zero-degree face — so it is the honest answer.
+    #[test]
+    fn a_yaw_that_is_not_an_angle_falls_to_the_identity_face() {
+        assert_eq!(Face::from_yaw(f32::NAN), Face::South);
+        assert_eq!(Face::South.yaw_degrees(), 0.0);
+    }
+
+    #[test]
+    fn opposite_is_its_own_inverse_and_never_itself() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            assert_eq!(face.opposite().opposite(), face);
+            assert_ne!(face.opposite(), face);
+        }
+    }
+
+    /// A front and a lattice face are the same four numbers, so a piece's front can be used to read
+    /// the cells it presents without a second mapping in between.
+    #[test]
+    fn a_face_is_the_same_direction_the_lattice_uses() {
+        assert_eq!(Face::North.dir(), crate::wfc::N);
+        assert_eq!(Face::East.dir(), crate::wfc::E);
+        assert_eq!(Face::South.dir(), crate::wfc::S);
+        assert_eq!(Face::West.dir(), crate::wfc::W);
+    }
+
+    /// A face survives the file it is written in.
+    #[test]
+    fn a_front_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "chair".into(),
+            align: Align {
+                front: Some(Face::East),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(text.contains("front: Some(East)"), "{text}");
+        let after: Descriptor = ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, after);
     }
 }
 

@@ -1175,7 +1175,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
-                front: Some(90.0),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.43, 1.0)),
@@ -1337,7 +1337,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
-                front: Some(90.0),
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((1.0, 1.0)),

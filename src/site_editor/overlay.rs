@@ -67,7 +67,7 @@ pub fn facing(
     };
     let (fw, fd) = kit.footprint(piece);
     let reach = 0.5 * fw.max(fd) + 0.35;
-    let yaw = (yaw_deg + front).to_radians();
+    let yaw = (yaw_deg + front.yaw_degrees()).to_radians();
     let from = layout.point(pos) + Vec3::Y * OUTLINE_LIFT;
     let to = from + Vec3::new(yaw.sin() * reach, 0.0, yaw.cos() * reach);
     gizmos.line(from, to, color);

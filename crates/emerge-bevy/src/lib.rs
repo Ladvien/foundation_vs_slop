@@ -199,7 +199,7 @@ pub fn origin_of(at: (f32, f32), map_origin: (f32, f32, f32), y: f32) -> Vec3 {
 /// existed every chair in `site67.ron` was authored sideways to its table — the yaws were written
 /// against the engine convention while the mesh fronted somewhere else.
 pub fn draw_yaw(d: &Descriptor, authored: f32) -> f32 {
-    authored + d.align.front.unwrap_or(0.0)
+    authored + d.align.front.map_or(0.0, |f| f.yaw_degrees())
 }
 
 /// Put one descriptor in the world.
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn the_draw_yaw_adds_the_meshs_front_correction() {
         let mut d = descriptor("chair");
-        d.align.front = Some(90.0);
+        d.align.front = Some(emerge_core::descriptor::Face::East);
         assert_eq!(draw_yaw(&d, 0.0), 90.0);
         assert_eq!(draw_yaw(&d, 45.0), 135.0);
 

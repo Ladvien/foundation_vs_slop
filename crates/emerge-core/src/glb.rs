@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use crate::descriptor::Face;
+
 /// A parsed binary glTF container: the JSON chunk and the BIN chunk.
 pub struct Glb {
     pub json: Value,
@@ -72,8 +74,8 @@ pub const ORIGIN_TOL: f32 = 0.005;
 ///
 /// | mesh | asymmetry | kit records |
 /// |---|---|---|
-/// | `chair` | 166 mm | `Some(90.0)` |
-/// | `command_chair` | 83 mm | `Some(90.0)` |
+/// | `chair` | 166 mm | `Some(Face::East)` |
+/// | `command_chair` | 83 mm | `Some(Face::East)` |
 /// | `stool` | **12 mm** | `None` |
 /// | `bench` | 1.9 mm | `None` |
 /// | `mess_table` | 2.0 mm | `None` |
@@ -476,11 +478,16 @@ impl Glb {
     /// seat is its back, so that offset points backwards; the front is the opposite way.
     ///
     /// `Ok(None)` means **the mesh is symmetric and has no front**, which is a different claim from
-    /// `Some(0.0)` and the one the kit deliberately records for a stool: "asserting a facing on a
-    /// stool would be asserting a fact about the art that is not true."
-    pub fn derive_front(&self) -> Result<Option<f32>, String> {
+    /// `Some(Face::South)` and the one the kit deliberately records for a stool: "asserting a facing
+    /// on a stool would be asserting a fact about the art that is not true."
+    ///
+    /// The continuous angle is **snapped to the nearest face**. It is evidence about which way the
+    /// piece faces, not a facing in its own right — a chair modelled 3° off square still fronts +X,
+    /// and a tile has no column of cells at 37° for anything to read. [`Self::front_detail`] returns
+    /// the raw measurement for an importer to show beside the verdict.
+    pub fn derive_front(&self) -> Result<Option<Face>, String> {
         let (offset, yaw) = self.front_detail()?;
-        Ok((offset >= FRONT_MIN_OFFSET).then_some(yaw))
+        Ok((offset >= FRONT_MIN_OFFSET).then(|| Face::from_yaw(yaw)))
     }
 
     /// The raw measurement behind [`derive_front`]: how far the upper slice's XZ centroid sits from
@@ -648,10 +655,15 @@ mod tests {
         }
         let g = Glb::parse(&synth(json, &bin)).expect("parses");
         let front = g.derive_front().expect("derives").expect("has a front");
-        assert!(
-            (front - 90.0).abs() < 1.0,
-            "a back at −X means a front at +X, which is yaw 90 — got {front}"
+        assert_eq!(
+            front,
+            Face::East,
+            "a back at −X means a front at +X, which is the East face"
         );
+        // The raw angle is still available for an importer to show — snapping is the verdict, not
+        // the measurement.
+        let (_, deg) = g.front_detail().expect("measures");
+        assert!((deg - 90.0).abs() < 1.0, "and it measured {deg} deg");
     }
 
     /// A stool has no front, and `None` says exactly that. `Some(0.0)` would be a claim about the art
