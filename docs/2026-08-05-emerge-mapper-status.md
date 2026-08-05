@@ -42,11 +42,28 @@ That is how extracting the animation layer into `crates/emerge-anim` dropped its
 rigs-manifest drift guard out of the CI gate with nothing going red: the tests were not failing, they
 were not running. Every plain `cargo test` in `ci.yml`, `TESTING.md` and `CLAUDE.md` now carries it.
 
-The non-harness suite is **fully green**. Two of `tests/replay.rs` still fail under `--features
-test-harness` (`authored_world_config_override_is_a_noop`,
-`deterministic_core_is_bit_identical_across_many_builds`) — both predate this branch. The gates that
-matter, `deterministic_core_is_bit_identical` and the `a0_fvs_j6_mutant3_on_world_0x5c09191` golden, are
-green, so `snapshot_hash` has not moved.
+The non-harness suite is **fully green**, and `snapshot_hash` has not moved: both
+`deterministic_core_is_bit_identical` and the `a0_fvs_j6_mutant3_on_world_0x5c09191` golden pass.
+
+### The harness lane on this machine — measured against the baseline, not assumed
+
+`tests/replay.rs` (minus the two nightly-only `search_rollouts` tests) gives **17 passed, 4 failed**.
+Run again from a worktree at `aea728b`, the commit before this session's work: **the identical 17 and
+4**. So none of them is this branch's, which is worth stating with the evidence rather than by
+inspection of the diff. Two earlier claims in this doc were wrong and are corrected here:
+
+| test | what it actually is |
+|---|---|
+| `deterministic_core_is_bit_identical_across_many_builds` | **Not a failure.** It aborts with `thread 'IO Task Pool (0)' has overflowed its stack` unless `RUST_MIN_STACK=33554432` is set — which `ci.yml` sets in `env:` and a local shell does not. With it, it passes. `BACKLOG.md`'s FVS-J entry already describes this; I had been calling it a determinism failure. |
+| `field_passes_are_bit_identical` | **Would pass in CI.** *"no field golden is pinned for this architecture yet (goldens are PER-PLATFORM). This run measured `0xe090401cb48e2ae3`."* This is an M-series Mac; the goldens are pinned for `x86_64`. |
+| `migrated_defaults_reproduce_the_shipped_golden_hash` | Same — no `aarch64` golden. Measured `0xac8196c4a1bfb0d0`. Its own message says to pin it in the `cfg(not(target_arch = "x86_64"))` arm once the `determinism-arm` lane reproduces it across builds. |
+| `photophobia_pulls_crabs_into_shadow` | **A real pre-existing failure**, and it fails in isolation: *"photophobic crabs (gain>0) should occupy darker cells than gain=0 crabs: on=0.195 off=0.114"* — the photophobic group is in **brighter** cells than the control, which is the oracle inverted, not merely unmet. |
+| `authored_world_config_override_is_a_noop` | **A real pre-existing failure**, in isolation too: *"installing the authored world config changed the sim — the override seam or encode/decode is lossy"*. |
+
+`BACKLOG.md`'s claim that *"`deterministic_core_is_bit_identical` and `field_passes_are_bit_identical`
+both pass at HEAD in isolation"* is stale for the second one: it fails in isolation, for the
+per-platform reason above. The harness lane is `continue-on-error` in CI, so neither real failure is
+gating — which is exactly how both stayed unnoticed.
 
 **35 authored `SubCell`s** in `assets/emerge/site/library.ron` — the first in this repo. `wall`,
 `wall_corner`, `wall_window` and `column` carry `wall` on their run-faces, and a run of them reports no
