@@ -381,10 +381,27 @@ fn inspect(
 
     // A re-export under a new name is two entries that are one asset, and the duplicate is found by
     // whoever wonders why the palette has two crates.
+    //
+    // **Compared as a sorted triple, not axis by axis.** A stored `extent` is already rotated by its
+    // descriptor's `align.rotate` while this measurement is raw, so the two can be in different
+    // frames — but a quarter turn only *permutes* the three spans, so the multiset is the same in
+    // every frame. It also makes the check stronger than it was: a re-export that arrived on its
+    // side is now caught rather than missed.
+    let spans = |w: f32, h: f32, d: f32| {
+        let mut v = [w, h, d];
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    };
+    let mine = spans(m.footprint.0, m.height, m.footprint.1);
     if let Some(twin) = library.descriptors.iter().find(|other| {
         other.mesh.as_deref() != Some(rel)
-            && other.extent.footprint.is_some_and(|f| close(f, m.footprint))
-            && other.extent.height.is_some_and(|h| (h - m.height).abs() < 1e-3)
+            && match (other.extent.footprint, other.extent.height) {
+                (Some((w, d)), Some(h)) => spans(w, h, d)
+                    .iter()
+                    .zip(mine.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-3),
+                _ => false,
+            }
     }) {
         out.push(Finding::note(format!(
             "`{}` already has these exact measurements — this may be the same asset re-exported",
@@ -408,8 +425,56 @@ fn origin_verdict(m: &Measured) -> OriginAlignment {
     }
 }
 
-fn close(a: (f32, f32), b: (f32, f32)) -> bool {
-    (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+/// **Re-measure a descriptor for the rotation it now carries.** The one place a rotation is baked.
+///
+/// `align.rotate` is a render instruction and the `extent` beside it is already rotated — see
+/// [`crate::descriptor::Align::rotate`] for why that trade was taken. The invariant only holds if
+/// changing the rotation re-derives the measurements, so this is what an editor calls when it does.
+///
+/// Rewrites `extent.footprint`, `extent.height`, `align.pivot` and `align.y_offset`, because a
+/// quarter turn moves all four. Leaves `front`, `scale` and `stretch_y` alone: a facing is a fact
+/// about which way the art points and is expressed in the mesh's own frame, and the two scales are
+/// corrections that a rotation does not touch.
+///
+/// # An authored lift or sink survives the turn
+///
+/// `was` is the rotation the descriptor's *current* measurements were taken under — what
+/// `align.rotate` held before the caller changed it. It is needed because `y_offset` is not purely a
+/// measurement: it is `-base_y` **plus** whatever the author added, and this used to overwrite the sum
+/// with the term. Measured across the shipped kits, every non-zero `y_offset` is entirely the authored
+/// term — all six meshes sit at `base_y = 0`, so `site/floor`'s `-0.06` sink and the three decals'
+/// `+0.002` lifts were the whole value, and one press of a rotate chip zeroed them. The decals then
+/// land coplanar with the floor plate they were lifted off, which `Align::y_offset`'s own doc calls
+/// out as leaving "the depth winner undefined".
+///
+/// So the authored term is measured out before the turn and put back after it. A vertical nudge is
+/// still vertical after a turn about Y; after one about X or Z the author's `0.002` is applied to the
+/// piece as it now stands, which is the same claim they made about it standing the other way.
+pub fn remeasure_rotated(
+    d: &mut Descriptor,
+    glb: &Glb,
+    was: Option<(i32, i32, i32)>,
+) -> Result<(), String> {
+    let quarters = match d.align.rotate {
+        Some(rotate) => crate::descriptor::quarter_turns_xyz(rotate, &d.id)?,
+        None => (0, 0, 0),
+    };
+    let before_quarters = match was {
+        Some(rotate) => crate::descriptor::quarter_turns_xyz(rotate, &d.id)?,
+        None => (0, 0, 0),
+    };
+    // One read of the file, turned twice: `Measured::rotated` works off the recorded bounds.
+    let raw = glb.measure()?;
+    let m = raw.rotated(quarters);
+    let before = raw.rotated(before_quarters);
+    // What the author added on top of the measurement. Absent means they never said, which is the
+    // same as adding nothing.
+    let authored_lift = d.align.y_offset.unwrap_or(-before.base_y) + before.base_y;
+    d.extent.footprint = Some(m.footprint);
+    d.extent.height = Some(m.height);
+    d.align.pivot = Some(m.pivot);
+    d.align.y_offset = Some(-m.base_y + authored_lift);
+    Ok(())
 }
 
 /// Triangles across every primitive, from the accessor counts — no vertex data is read.
@@ -440,6 +505,197 @@ pub fn triangles(glb: &Glb) -> usize {
             n / 3
         })
         .sum()
+}
+
+/// **Does this triangle touch this axis-aligned box?** Exact, by the separating-axis theorem.
+///
+/// Akenine-Möller 2001, *Fast 3D Triangle-Box Overlap Testing* — thirteen axes: the box's three face
+/// normals, the triangle's normal, and the nine cross products of a box axis with a triangle edge.
+/// Finding a single axis on which the two projections do not overlap proves they are disjoint;
+/// surviving all thirteen proves they intersect.
+///
+/// Coordinates are already relative to the box centre, and `half` is the box's half-extent.
+fn triangle_hits_box(tri: [[f32; 3]; 3], half: f32) -> bool {
+    let [a, b, c] = tri;
+    // The box's own three axes.
+    for i in 0..3 {
+        let (mn, mx) = (a[i].min(b[i]).min(c[i]), a[i].max(b[i]).max(c[i]));
+        if mn > half || mx < -half {
+            return false;
+        }
+    }
+
+    let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let cross = |p: [f32; 3], q: [f32; 3]| {
+        [
+            p[1] * q[2] - p[2] * q[1],
+            p[2] * q[0] - p[0] * q[2],
+            p[0] * q[1] - p[1] * q[0],
+        ]
+    };
+    let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+
+    // The triangle's plane against the box.
+    let n = cross(sub(b, a), sub(c, a));
+    let d = dot(n, a);
+    let r = half * (n[0].abs() + n[1].abs() + n[2].abs());
+    if d.abs() > r {
+        return false;
+    }
+
+    // The nine edge-vs-box-axis cross products.
+    let edges = [sub(b, a), sub(c, b), sub(a, c)];
+    let verts = [a, b, c];
+    for e in edges {
+        for axis in 0..3 {
+            let mut unit = [0.0f32; 3];
+            unit[axis] = 1.0;
+            let ax = cross(unit, e);
+            // A degenerate axis separates nothing, and normalising it would divide by zero.
+            if ax[0].abs() + ax[1].abs() + ax[2].abs() < 1e-12 {
+                continue;
+            }
+            let p: Vec<f32> = verts.iter().map(|v| dot(ax, *v)).collect();
+            let (mn, mx) = p.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+            let r = half * (ax[0].abs() + ax[1].abs() + ax[2].abs());
+            if mn > r || mx < -r {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// **Which lattice cells the mesh actually occupies.**
+///
+/// Nobody hand-marks a lattice — a 3 m wall at the shipped setting is 30 cells and it only goes up
+/// from there — so occupancy has to come off the geometry. This is the read that does it.
+///
+/// # Every cell a triangle passes through, not every cell holding a vertex
+///
+/// This began as vertex occupancy, which was cheap and honest and **wrong for exactly the meshes
+/// that matter**. A wall slab has vertices only at its eight corners, so a 2.40 m wall came back
+/// with its top and bottom layers marked and the six between them open — measured, on the shipped
+/// kit, at 4 cells of 10. Architecture is the low-poly half of any kit and the half the lattice
+/// exists for.
+///
+/// Rasterising is the correct method rather than a better heuristic: a triangle either passes
+/// through a cell or it does not, and `triangle_hits_box` answers that exactly. A bounding box
+/// cannot answer it at all — one box per mesh *is* the whole extent, so every cell comes out solid.
+///
+/// # It reads the assembled model
+///
+/// Triangles come from [`Glb::triangle_vertices`], which walks the scene graph and applies node
+/// transforms. Reading raw accessors would see a kitbashed mesh's parts piled at the origin — the
+/// same defect `Glb::bounds` was fixed for, and one this would otherwise have repeated.
+///
+/// # Normalised, so units and the policy layer cannot reach it
+///
+/// Cells are assigned in the mesh's own bounding box rather than in metres. Two consequences, both
+/// tested: a centimetre-authored mesh (the FBX exporter's `scale: 0.01` over 100x vertex data, which
+/// [`crate::glb::Measured::suspect_centimetres`] flags) marks exactly what its metre twin does; and
+/// `align.stretch_y` scales an axis uniformly, so a project's architecture cannot change which cells
+/// a mesh is said to fill.
+///
+/// # In the frame the divisions were derived in
+///
+/// `rotate` is the piece's [`crate::descriptor::Align::rotate`], as quarter turns. Every vertex goes
+/// through it before anything is measured, because `div` comes from the **rotated** extent: leaving it
+/// out mapped the Y and Z divisions onto the wrong mesh axes for any piece exported the wrong way up,
+/// and returned a transposed lattice for every non-symmetric one — an L-desk, a pipe corner, a window
+/// cutout. Pass `(0, 0, 0)` for a piece that carries no rotation.
+///
+/// Returns cells in ascending order with no duplicates, so the result is the same on every machine.
+pub fn occupancy(
+    glb: &Glb,
+    div: (u32, u32, u32),
+    rotate: (u8, u8, u8),
+) -> Result<Vec<(u32, u32, u32)>, String> {
+    let (dx, dy, dz) = div;
+    if dx == 0 || dy == 0 || dz == 0 {
+        return Err(format!(
+            "a {dx}x{dy}x{dz} lattice has no cells for a mesh to occupy"
+        ));
+    }
+    let tris: Vec<[[f32; 3]; 3]> = glb
+        .triangle_vertices()?
+        .into_iter()
+        .map(|t| t.map(|v| crate::glb::spin(v, rotate)))
+        .collect();
+
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for t in &tris {
+        for v in t {
+            for a in 0..3 {
+                if !v[a].is_finite() {
+                    return Err("glb: a vertex position is not a finite number".to_owned());
+                }
+                lo[a] = lo[a].min(v[a]);
+                hi[a] = hi[a].max(v[a]);
+            }
+        }
+    }
+
+    let n = [dx, dy, dz];
+    // Into lattice coordinates, where a cell is the unit box from `i` to `i + 1`. A flat axis — a
+    // decal, or a plane — has one row and everything lands in it; scaling by zero would be a NaN.
+    let to_cell = |v: [f32; 3]| {
+        let mut out = [0.0f32; 3];
+        for a in 0..3 {
+            let span = hi[a] - lo[a];
+            out[a] = if span <= 0.0 {
+                0.5
+            } else {
+                (v[a] - lo[a]) / span * n[a] as f32
+            };
+        }
+        out
+    };
+
+    let mut marked = vec![false; (dx as usize) * (dy as usize) * (dz as usize)];
+    for t in &tris {
+        let p = [to_cell(t[0]), to_cell(t[1]), to_cell(t[2])];
+        // Only the cells this triangle's own bounds reach are worth testing.
+        let mut min = [0u32; 3];
+        let mut max = [0u32; 3];
+        for a in 0..3 {
+            let l = p[0][a].min(p[1][a]).min(p[2][a]).floor().max(0.0);
+            let h = p[0][a].max(p[1][a]).max(p[2][a]).ceil();
+            min[a] = (l as u32).min(n[a] - 1);
+            max[a] = (h.max(0.0) as u32).min(n[a] - 1);
+        }
+        for x in min[0]..=max[0] {
+            for y in min[1]..=max[1] {
+                for z in min[2]..=max[2] {
+                    let at = ((x as usize) * dy as usize + y as usize) * dz as usize + z as usize;
+                    if marked[at] {
+                        continue;
+                    }
+                    let centre = [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5];
+                    let rel = p.map(|v| {
+                        [v[0] - centre[0], v[1] - centre[1], v[2] - centre[2]]
+                    });
+                    if triangle_hits_box(rel, 0.5) {
+                        marked[at] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for x in 0..dx {
+        for y in 0..dy {
+            for z in 0..dz {
+                let at = ((x as usize) * dy as usize + y as usize) * dz as usize + z as usize;
+                if marked[at] {
+                    out.push((x, y, z));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -588,5 +844,309 @@ mod tests {
     fn severity_orders_so_the_worst_finding_can_be_found() {
         assert!(Severity::Blocking > Severity::Warn);
         assert!(Severity::Warn > Severity::Note);
+    }
+}
+
+/// Occupancy, over synthetic containers so no fixture asset is needed.
+#[cfg(test)]
+mod occupancy_tests {
+    use super::*;
+
+    /// A minimal GLB carrying exactly the triangles given, in metres.
+    fn mesh(tris: &[[[f32; 3]; 3]]) -> Glb {
+        let count = tris.len() * 3;
+        // **The accessor declares its bounds**, as a real exporter's does — glTF requires `min`/`max`
+        // on a POSITION accessor, and `Glb::measure` reads them rather than the vertex data. Without
+        // them this fixture could only be used for occupancy, which reads the buffer.
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for t in tris {
+            for v in t {
+                for a in 0..3 {
+                    lo[a] = lo[a].min(v[a]);
+                    hi[a] = hi[a].max(v[a]);
+                }
+            }
+        }
+        let list = |v: [f32; 3]| format!("[{},{},{}]", v[0], v[1], v[2]);
+        let json = format!(
+            r#"{{
+              "accessors":[{{"type":"VEC3","componentType":5126,"count":{count},"bufferView":0,"min":{},"max":{}}}],
+              "bufferViews":[{{"byteOffset":0,"byteLength":{}}}],
+              "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}]
+            }}"#,
+            list(lo),
+            list(hi),
+            count * 12
+        );
+        let mut bin = Vec::new();
+        for t in tris {
+            for v in t {
+                for c in v {
+                    bin.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        let j = json.as_bytes();
+        let mut jj = j.to_vec();
+        jj.extend(std::iter::repeat_n(b' ', (4 - j.len() % 4) % 4));
+        let total = 12 + 8 + jj.len() + 8 + bin.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(jj.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&jj);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        Glb::parse(&out).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// An axis-aligned quad in the XZ plane at height `y`, as two triangles.
+    fn slab(x: (f32, f32), y: f32, z: (f32, f32)) -> Vec<[[f32; 3]; 3]> {
+        let (x0, x1) = x;
+        let (z0, z1) = z;
+        vec![
+            [[x0, y, z0], [x1, y, z0], [x1, y, z1]],
+            [[x0, y, z0], [x1, y, z1], [x0, y, z1]],
+        ]
+    }
+
+    /// **A turn re-measures the piece; it does not un-author the correction on it.**
+    ///
+    /// `y_offset` is `-base_y` **plus** whatever the author added, and `remeasure_rotated` used to
+    /// overwrite the sum with the term. Measured across the shipped kits every non-zero `y_offset` is
+    /// entirely the authored part — all six meshes sit at `base_y = 0` — so one press of a rotate chip
+    /// zeroed `site/floor`'s `-0.06` sink and all three decals' `+0.002` lifts, putting the decals
+    /// coplanar with the plate they were lifted off.
+    #[test]
+    fn a_turn_keeps_the_lift_the_author_added() {
+        // Geometry that starts above its own origin, so `-base_y` is not zero and the arithmetic has
+        // something to get wrong.
+        let glb = mesh(&box_mesh([0.0, 0.5, 0.0], [1.0, 1.0, 1.0]));
+        let raw = glb.measure().unwrap_or_else(|e| panic!("{e}"));
+        assert!((raw.base_y - 0.5).abs() < 1e-6, "base_y {}", raw.base_y);
+
+        for (authored, lift) in [(-0.5f32, 0.0f32), (-0.4, 0.1), (-0.56, -0.06)] {
+            for turn in [(0, 90, 0), (90, 0, 0), (0, 0, 90)] {
+                let mut d = Descriptor {
+                    id: "plate".to_owned(),
+                    align: Align {
+                        y_offset: Some(authored),
+                        rotate: Some(turn),
+                        ..Align::default()
+                    },
+                    ..Descriptor::default()
+                };
+                // `was: None` — the authored value was taken with the piece unturned.
+                remeasure_rotated(&mut d, &glb, None).unwrap_or_else(|e| panic!("{e}"));
+                let base_now = glb
+                    .measure()
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .rotated(crate::descriptor::quarter_turns_xyz(turn, "plate").unwrap_or_else(|e| panic!("{e}")))
+                    .base_y;
+                let got = d.align.y_offset.unwrap_or(f32::NAN);
+                assert!(
+                    (got - (-base_now + lift)).abs() < 1e-5,
+                    "turn {turn:?}, authored {authored}: y_offset {got}, wanted {} \
+                     (measurement {} plus the author's {lift})",
+                    -base_now + lift,
+                    -base_now
+                );
+            }
+        }
+    }
+
+    /// And a turn that changes nothing must change nothing — the identity is the case a delta
+    /// calculation gets wrong first.
+    #[test]
+    fn an_identity_turn_leaves_the_offset_exactly_where_it_was() {
+        let glb = mesh(&box_mesh([0.0, 0.5, 0.0], [1.0, 1.0, 1.0]));
+        let mut d = Descriptor {
+            id: "plate".to_owned(),
+            align: Align {
+                y_offset: Some(-0.56),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        remeasure_rotated(&mut d, &glb, None).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            (d.align.y_offset.unwrap_or(f32::NAN) + 0.56).abs() < 1e-6,
+            "{:?}",
+            d.align.y_offset
+        );
+    }
+
+    /// **Rasterising a rotated mesh is rasterising the rotated mesh.**
+    ///
+    /// `occupancy` normalised vertices into the raw file's bounding box while its `div` came from the
+    /// already-rotated `extent`, so a piece carrying `align.rotate` had the Y and Z divisions applied
+    /// to the wrong mesh axes. Stated as an invariant rather than as a table of expected cells: the
+    /// answer for a mesh turned at read time must equal the answer for a mesh whose vertices were
+    /// turned first, which is the only thing "in the same frame" can mean.
+    ///
+    /// The shape is deliberately asymmetric on all three axes — a symmetric one cannot tell a
+    /// transposition from the truth, which is why this went unnoticed.
+    #[test]
+    fn a_rotation_reads_the_mesh_in_the_frame_its_divisions_came_from() {
+        let wedge = {
+            let mut out = box_mesh([0.0, 0.0, 0.0], [1.0, 0.25, 0.5]);
+            out.extend(box_mesh([0.0, 0.0, 0.0], [0.25, 0.75, 0.5]));
+            out
+        };
+        // Every quarter turn about each axis, and one composed turn — quarter turns do not commute,
+        // so a fix that happened to work for a single axis is not a fix.
+        for rotate in [(1, 0, 0), (3, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (2, 1, 3)] {
+            let turned: Vec<[[f32; 3]; 3]> = wedge
+                .iter()
+                .map(|t| t.map(|v| crate::glb::spin(v, rotate)))
+                .collect();
+            let div = (3, 2, 4);
+            assert_eq!(
+                occupancy(&mesh(&wedge), div, rotate).unwrap_or_else(|e| panic!("{e}")),
+                occupancy(&mesh(&turned), div, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}")),
+                "rotate {rotate:?}: reading the mesh turned must equal reading the turned mesh"
+            );
+        }
+    }
+
+    /// A closed box as 12 triangles — what a low-poly wall, crate or column actually is.
+    fn box_mesh(lo: [f32; 3], hi: [f32; 3]) -> Vec<[[f32; 3]; 3]> {
+        let c = |x: usize, y: usize, z: usize| {
+            [
+                if x == 0 { lo[0] } else { hi[0] },
+                if y == 0 { lo[1] } else { hi[1] },
+                if z == 0 { lo[2] } else { hi[2] },
+            ]
+        };
+        let quad = |a, b, cc, d| vec![[a, b, cc], [a, cc, d]];
+        let mut out = Vec::new();
+        for (a, b, cc, d) in [
+            (c(0,0,0), c(1,0,0), c(1,1,0), c(0,1,0)),
+            (c(0,0,1), c(1,0,1), c(1,1,1), c(0,1,1)),
+            (c(0,0,0), c(0,0,1), c(0,1,1), c(0,1,0)),
+            (c(1,0,0), c(1,0,1), c(1,1,1), c(1,1,0)),
+            (c(0,0,0), c(1,0,0), c(1,0,1), c(0,0,1)),
+            (c(0,1,0), c(1,1,0), c(1,1,1), c(0,1,1)),
+        ] {
+            out.extend(quad(a, b, cc, d));
+        }
+        out
+    }
+
+    /// **The reason this stopped being vertex occupancy.**
+    ///
+    /// A wall is a slab with vertices only at its eight corners. Marking the cell each vertex falls
+    /// in left the middle of it open — measured at 4 of 10 cells on the shipped `site/wall`, which is
+    /// most of the piece reported as thin air. A solid box is solid all the way through.
+    #[test]
+    fn a_wall_slab_is_solid_all_the_way_up() {
+        // 3 m wide, 2.4 m tall, 0.5 m deep — the shipped wall, at the shipped divisions.
+        let wall = box_mesh([0.0, 0.0, 0.0], [3.0, 2.4, 0.5]);
+        let div = (6, 5, 1);
+        let got = occupancy(&mesh(&wall), div, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            got.len() as u32,
+            emerge_core_volume(div),
+            "every cell of a solid slab is solid; got {} of {}",
+            got.len(),
+            emerge_core_volume(div)
+        );
+    }
+
+    fn emerge_core_volume(div: (u32, u32, u32)) -> u32 {
+        crate::descriptor::Subgrid::volume(div)
+    }
+
+    /// The eight corners of a box fill all eight cells of a 2x2x2 lattice.
+    #[test]
+    fn a_box_fills_the_lattice_it_spans() {
+        let got = occupancy(&mesh(&box_mesh([0.0; 3], [1.0; 3])), (2, 2, 2), (0, 0, 0))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.len(), 8, "{got:?}");
+    }
+
+    /// **The far corner belongs to the last cell**, not to one past the end and not wrapped to the
+    /// first. Off by one here would mark the wrong face of every mesh.
+    #[test]
+    fn the_far_corner_lands_in_the_last_cell() {
+        let tri = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 1.0]]];
+        let got = occupancy(&mesh(&tri), (4, 4, 4), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(got.contains(&(0, 0, 0)), "{got:?}");
+        assert!(got.contains(&(3, 3, 3)), "the vertex at the maximum bound: {got:?}");
+    }
+
+    /// **The shape, not the bounding box.** An L leaves its inner corner clear — which a bounding box
+    /// could never report, and which is the whole reason this reads geometry.
+    #[test]
+    fn an_l_shape_leaves_its_inner_corner_clear() {
+        // Two arms of a flat L over a 2x1x2 lattice, each stopping short of the far cell.
+        let mut l = slab((0.0, 2.0), 0.0, (0.0, 0.9));
+        l.extend(slab((0.0, 0.9), 0.0, (0.0, 2.0)));
+        let got = occupancy(&mesh(&l), (2, 1, 2), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got, vec![(0, 0, 0), (0, 0, 1), (1, 0, 0)]);
+        assert!(!got.contains(&(1, 0, 1)), "the inner corner must stay open");
+    }
+
+    /// **Unit-free.** The FBX importer writes centimetre authoring as 100x vertex data under a node
+    /// `scale: 0.01`. Normalised bucketing means such a mesh marks exactly what its metre twin does.
+    #[test]
+    fn a_centimetre_mesh_marks_the_same_cells_as_its_metre_twin() {
+        let m = box_mesh([0.0, 0.0, 0.0], [2.0, 1.0, 2.0]);
+        let cm: Vec<[[f32; 3]; 3]> = m
+            .iter()
+            .map(|t| t.map(|v| [v[0] * 100.0, v[1] * 100.0, v[2] * 100.0]))
+            .collect();
+        assert_eq!(
+            occupancy(&mesh(&m), (4, 2, 4), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}")),
+            occupancy(&mesh(&cm), (4, 2, 4), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"))
+        );
+    }
+
+    /// **Invariant to the policy layer.** `stretch_y` scales an axis uniformly, so one game's ceiling
+    /// height cannot change which cells a mesh is said to fill.
+    #[test]
+    fn stretching_an_axis_does_not_move_a_single_cell() {
+        let base = box_mesh([0.0, 0.0, 0.0], [2.0, 1.0, 2.0]);
+        let tall: Vec<[[f32; 3]; 3]> = base
+            .iter()
+            .map(|t| t.map(|v| [v[0], v[1] * 2.4, v[2]]))
+            .collect();
+        assert_eq!(
+            occupancy(&mesh(&base), (3, 3, 3), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}")),
+            occupancy(&mesh(&tall), (3, 3, 3), (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"))
+        );
+    }
+
+    /// A decal has no thickness. One layer, everything in it — no divide by zero.
+    #[test]
+    fn a_flat_mesh_occupies_one_layer_rather_than_dividing_by_zero() {
+        let got = occupancy(&mesh(&slab((0.0, 1.0), 0.0, (0.0, 1.0))), (2, 1, 2), (0, 0, 0))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.len(), 4);
+        assert!(got.iter().all(|c| c.1 == 0));
+    }
+
+    /// Sorted, and each cell once, so two machines reading one mesh get one answer.
+    #[test]
+    fn the_answer_is_sorted_and_each_cell_appears_once() {
+        let got = occupancy(&mesh(&box_mesh([0.0; 3], [1.0; 3])), (3, 3, 3), (0, 0, 0))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(got, sorted);
+    }
+
+    /// A degenerate lattice is refused rather than silently marking nothing.
+    #[test]
+    fn a_lattice_with_no_cells_is_refused() {
+        let err = occupancy(&mesh(&slab((0.0, 1.0), 0.0, (0.0, 1.0))), (2, 0, 2), (0, 0, 0))
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("no cells"), "{err}");
     }
 }

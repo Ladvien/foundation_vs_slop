@@ -465,13 +465,26 @@ one-path-per-feature rule.
    `assets/fonts/FiraMono-Regular.ttf` (1350 codepoints). **Verify any new glyph against that face**
    — `✓` (U+2713), `▶`/`▸` (U+25B6/25B8), `⚠` (U+26A0) and `★` (U+2605) are *not* in it.
    `ui::theme::glyph` holds the checked set.
+
+   **`emerge-mapper` deviates deliberately, and this is the record of it.** It is a separate binary, so
+   instead of threading a `FontAssets` resource it overwrites `AssetId::default()` with the full face
+   at startup (`crates/emerge-mapper/src/main.rs`) — the same font, the opposite mechanism. The rule
+   above exists because a call site reaching for `Handle::default()` got the subset; there, the default
+   **is** the shipped face, so there is no second thing to reach for and no site that can forget. One
+   binary, one face, one place it is decided. Do not copy this into the game, which has more than one
+   font and a real asset lifecycle.
 5. **UI draws after post-processing**, so the VHS pass cannot reach it and HUD text stays crisp.
    Keep it that way. UI-side CRT would need a `UiMaterial` on a fullscreen node, and §1.2/§1.3 argue
    against it.
 6. **`ImageNode::default()` is an invisible 1×1 transparent texture.** Always `ImageNode::new(h)`.
 7. **`Pickable::IGNORE` is per-entity.** A full-screen container needs it or it eats every world
    click; its children stay pickable, which is what lets panels inside the frame have hit targets.
-8. **Layer order lives in `theme.rs`.** `Z_HUD` < `Z_PANEL` < `Z_BLOOD_LENS` < `Z_MENU_DIM` <
+8. **A UI node sized only by its text is 7 logical px tall when that text starts empty.** State a
+   `min_height` on anything clickable — a laid-out field measured 7 px is not a target anyone can hit
+   on purpose. Found in `emerge-mapper`'s subgrid division fields.
+9. **`bevy_ui_widgets::Button` fires `Activate` on click**, and the observer pattern is
+   `On<Activate>` + `Query<&Marker>` + `marker.get(activate.entity)`.
+10. **Layer order lives in `theme.rs`.** `Z_HUD` < `Z_PANEL` < `Z_BLOOD_LENS` < `Z_MENU_DIM` <
    `Z_MENU`, asserted by a test. Do not spell a layer as arithmetic on another one — seven panels
    used `Z_MENU - 1` and ended up *above* the pause scrim.
 

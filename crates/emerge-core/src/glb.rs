@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use crate::descriptor::Face;
+
 /// A parsed binary glTF container: the JSON chunk and the BIN chunk.
 pub struct Glb {
     pub json: Value,
@@ -49,6 +51,86 @@ pub struct Measured {
     pub suspect_centimetres: bool,
 }
 
+/// One quarter turn about +X, right-handed: `y -> z`, `z -> -y`.
+fn turn_x(p: [f32; 3]) -> [f32; 3] {
+    [p[0], -p[2], p[1]]
+}
+/// One quarter turn about +Y: `z -> x`, `x -> -z`.
+fn turn_y(p: [f32; 3]) -> [f32; 3] {
+    [p[2], p[1], -p[0]]
+}
+/// One quarter turn about +Z: `x -> y`, `y -> -x`.
+fn turn_z(p: [f32; 3]) -> [f32; 3] {
+    [-p[1], p[0], p[2]]
+}
+
+/// **A point through `rotate` quarter turns about X, then Y, then Z.**
+///
+/// The order is the one [`crate::descriptor::Align::rotate`] documents, and it matters: quarter turns
+/// do not commute, so a rotation composed in another order is a different rotation.
+///
+/// Public because [`crate::import::occupancy`] has to rasterise a mesh in the **same frame** the
+/// extent beside it was measured in. It did not: it normalised vertices into the raw file's bounding
+/// box while its divisions came from the already-rotated extent, so any piece carrying `align.rotate`
+/// got the Y and Z divisions applied to the wrong mesh axes and its `solid` cells came back
+/// transposed — visibly not covering the geometry they claim to measure, on anything that is not
+/// symmetric.
+pub fn spin(p: [f32; 3], rotate: (u8, u8, u8)) -> [f32; 3] {
+    let mut p = p;
+    for _ in 0..(rotate.0 % 4) {
+        p = turn_x(p);
+    }
+    for _ in 0..(rotate.1 % 4) {
+        p = turn_y(p);
+    }
+    for _ in 0..(rotate.2 % 4) {
+        p = turn_z(p);
+    }
+    p
+}
+
+impl Measured {
+    /// **The same mesh, measured as it will stand after `rotate`.**
+    ///
+    /// `rotate` is quarter turns per axis, applied X then Y then Z — the order
+    /// [`crate::descriptor::Align::rotate`] documents.
+    ///
+    /// Exact rather than approximate: a quarter turn maps the bounding box's eight corners onto
+    /// eight corners, so rotating them and re-taking the min and max gives the true rotated box.
+    /// Every derived field is then re-derived from it, because **all of them move**. A chair tipped
+    /// onto its back has a new footprint *and* a new height *and* a new pivot *and* a new base —
+    /// rotating the footprint alone would seat it in the floor.
+    pub fn rotated(&self, rotate: (u8, u8, u8)) -> Measured {
+        let spin = |p: [f32; 3]| spin(p, rotate);
+
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for cx in [self.lo[0], self.hi[0]] {
+            for cy in [self.lo[1], self.hi[1]] {
+                for cz in [self.lo[2], self.hi[2]] {
+                    let p = spin([cx, cy, cz]);
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(p[a]);
+                        hi[a] = hi[a].max(p[a]);
+                    }
+                }
+            }
+        }
+        let (w, h, d) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        Measured {
+            lo,
+            hi,
+            footprint: (w, d),
+            height: h,
+            pivot: ((lo[0] + hi[0]) * 0.5, (lo[2] + hi[2]) * 0.5),
+            base_y: lo[1],
+            // A rotation cannot change the largest span, but deriving it rather than copying keeps
+            // every field of a `Measured` produced the one way.
+            suspect_centimetres: w.max(h).max(d) > 12.0,
+        }
+    }
+}
+
 /// Where the file's origin sits relative to its geometry, in the vocabulary the asset library's own
 /// per-pack READMEs already use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +154,8 @@ pub const ORIGIN_TOL: f32 = 0.005;
 ///
 /// | mesh | asymmetry | kit records |
 /// |---|---|---|
-/// | `chair` | 166 mm | `Some(90.0)` |
-/// | `command_chair` | 83 mm | `Some(90.0)` |
+/// | `chair` | 166 mm | `Some(Face::East)` |
+/// | `command_chair` | 83 mm | `Some(Face::East)` |
 /// | `stool` | **12 mm** | `None` |
 /// | `bench` | 1.9 mm | `None` |
 /// | `mess_table` | 2.0 mm | `None` |
@@ -278,7 +360,33 @@ impl Glb {
         let mut hi = [f32::MIN; 3];
         let mut seen = false;
 
-        // Roots: the default scene's nodes, or every node when a file declares none.
+        self.for_each_mesh_node(&mut |mesh_ix, world| {
+            if self.accumulate_mesh(mesh_ix, world, &mut lo, &mut hi) {
+                seen = true;
+            }
+        })?;
+
+        if !seen {
+            return Err("glb: no POSITION accessor declared min/max bounds".to_owned());
+        }
+        Ok((lo, hi))
+    }
+
+    /// Union one mesh's primitives, transformed by `world`, into `lo`/`hi`.
+    /// **Every mesh in the file, with the world matrix the scene graph puts it at.**
+    ///
+    /// Factored out because two readers need the same answer and must not drift: [`Self::bounds`]
+    /// measures the assembled model, and [`Self::triangle_vertices`] rasterises it. Reading raw
+    /// accessors instead — which is what `positions` does — sees every part of a kitbashed mesh piled
+    /// at the origin, and the whole reason `bounds` walks the graph is that this file format really
+    /// does assemble models that way.
+    ///
+    /// Falls back to every mesh at the identity when no node references one, so a file with geometry
+    /// and no scene graph is measured where it sits rather than reported empty.
+    fn for_each_mesh_node(
+        &self,
+        f: &mut impl FnMut(usize, &[f32; 16]),
+    ) -> Result<(), String> {
         let roots: Vec<usize> = self
             .json
             .get("scenes")
@@ -293,6 +401,7 @@ impl Glb {
                 (0..self.json["nodes"].as_array().map_or(0, |n| n.len())).collect()
             });
 
+        let mut any = false;
         let mut stack: Vec<(usize, [f32; 16])> = roots.into_iter().map(|n| (n, IDENTITY)).collect();
         // Bounded, because a malformed file can describe a cycle and this must not hang on one.
         let mut budget = 100_000usize;
@@ -305,11 +414,9 @@ impl Glb {
                 continue;
             };
             let world = mul(&parent, &node_matrix(node));
-
             if let Some(mesh_ix) = node["mesh"].as_u64() {
-                if self.accumulate_mesh(mesh_ix as usize, &world, &mut lo, &mut hi) {
-                    seen = true;
-                }
+                any = true;
+                f(mesh_ix as usize, &world);
             }
             if let Some(kids) = node["children"].as_array() {
                 for k in kids.iter().filter_map(|v| v.as_u64()) {
@@ -318,23 +425,121 @@ impl Glb {
             }
         }
 
-        // A file with meshes but no scene graph referencing them: measure them where they are.
-        if !seen {
+        if !any {
             let count = self.json["meshes"].as_array().map_or(0, |m| m.len());
             for m in 0..count {
-                if self.accumulate_mesh(m, &IDENTITY, &mut lo, &mut hi) {
-                    seen = true;
-                }
+                f(m, &IDENTITY);
             }
         }
-
-        if !seen {
-            return Err("glb: no POSITION accessor declared min/max bounds".to_owned());
-        }
-        Ok((lo, hi))
+        Ok(())
     }
 
-    /// Union one mesh's primitives, transformed by `world`, into `lo`/`hi`.
+    /// Decode an index accessor to `u32`, whatever width it was written at.
+    ///
+    /// glTF allows unsigned byte, short and int for indices, and a reader that assumed one of them
+    /// would silently misread two thirds of the files in this project's asset packs.
+    fn read_indices(&self, index: usize) -> Result<Vec<u32>, String> {
+        let acc = &self.json["accessors"][index];
+        if acc["type"].as_str() != Some("SCALAR") {
+            return Err(format!("glb: accessor {index} is not SCALAR"));
+        }
+        let width = match acc["componentType"].as_u64() {
+            Some(5121) => 1usize,
+            Some(5123) => 2,
+            Some(5125) => 4,
+            other => {
+                return Err(format!(
+                    "glb: accessor {index} has index component type {other:?}, which is not an                      unsigned byte, short or int"
+                ))
+            }
+        };
+        let count = acc["count"].as_u64().unwrap_or(0) as usize;
+        let view_ix = acc["bufferView"]
+            .as_u64()
+            .ok_or_else(|| format!("glb: accessor {index} has no bufferView"))?
+            as usize;
+        let view = &self.json["bufferViews"][view_ix];
+        let base = view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + acc["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let stride = view["byteStride"].as_u64().unwrap_or(width as u64) as usize;
+
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = base + i * stride;
+            let raw = self
+                .bin
+                .get(at..at + width)
+                .ok_or_else(|| format!("glb: accessor {index} reads past the BIN chunk"))?;
+            out.push(match width {
+                1 => raw[0] as u32,
+                2 => u16::from_le_bytes([raw[0], raw[1]]) as u32,
+                _ => u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+            });
+        }
+        Ok(out)
+    }
+
+    /// **Every triangle in the assembled model**, in the same space [`Self::bounds`] measures.
+    ///
+    /// Indexed and unindexed primitives both, and node transforms applied — so a kitbashed mesh
+    /// gives the triangles where its parts actually sit rather than piled on the origin.
+    ///
+    /// A primitive whose `mode` is not triangles is skipped rather than misread: a line list read
+    /// three vertices at a time is nonsense that looks like geometry.
+    pub fn triangle_vertices(&self) -> Result<Vec<[[f32; 3]; 3]>, String> {
+        let mut out: Vec<[[f32; 3]; 3]> = Vec::new();
+        let mut failed: Option<String> = None;
+        self.for_each_mesh_node(&mut |mesh_ix, world| {
+            if failed.is_some() {
+                return;
+            }
+            let Some(prims) = self.json["meshes"][mesh_ix]["primitives"].as_array() else {
+                return;
+            };
+            for prim in prims {
+                // glTF default mode is 4 (TRIANGLES).
+                if prim["mode"].as_u64().unwrap_or(4) != 4 {
+                    continue;
+                }
+                let Some(pos_ix) = prim["attributes"]["POSITION"].as_u64() else {
+                    continue;
+                };
+                let verts = match self.read_vec3(pos_ix as usize) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                };
+                let placed: Vec<[f32; 3]> = verts.iter().map(|v| apply(world, *v)).collect();
+
+                let idx: Vec<u32> = match prim.get("indices").and_then(|i| i.as_u64()) {
+                    Some(i) => match self.read_indices(i as usize) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            failed = Some(e);
+                            return;
+                        }
+                    },
+                    None => (0..placed.len() as u32).collect(),
+                };
+                for tri in idx.chunks_exact(3) {
+                    let get = |n: u32| placed.get(n as usize).copied();
+                    if let (Some(a), Some(b), Some(c)) = (get(tri[0]), get(tri[1]), get(tri[2])) {
+                        out.push([a, b, c]);
+                    }
+                }
+            }
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if out.is_empty() {
+            return Err("glb: no triangles".to_owned());
+        }
+        Ok(out)
+    }
+
     fn accumulate_mesh(
         &self,
         mesh_ix: usize,
@@ -476,11 +681,16 @@ impl Glb {
     /// seat is its back, so that offset points backwards; the front is the opposite way.
     ///
     /// `Ok(None)` means **the mesh is symmetric and has no front**, which is a different claim from
-    /// `Some(0.0)` and the one the kit deliberately records for a stool: "asserting a facing on a
-    /// stool would be asserting a fact about the art that is not true."
-    pub fn derive_front(&self) -> Result<Option<f32>, String> {
+    /// `Some(Face::South)` and the one the kit deliberately records for a stool: "asserting a facing
+    /// on a stool would be asserting a fact about the art that is not true."
+    ///
+    /// The continuous angle is **snapped to the nearest face**. It is evidence about which way the
+    /// piece faces, not a facing in its own right — a chair modelled 3° off square still fronts +X,
+    /// and a tile has no column of cells at 37° for anything to read. [`Self::front_detail`] returns
+    /// the raw measurement for an importer to show beside the verdict.
+    pub fn derive_front(&self) -> Result<Option<Face>, String> {
         let (offset, yaw) = self.front_detail()?;
-        Ok((offset >= FRONT_MIN_OFFSET).then_some(yaw))
+        Ok((offset >= FRONT_MIN_OFFSET).then(|| Face::from_yaw(yaw)))
     }
 
     /// The raw measurement behind [`derive_front`]: how far the upper slice's XZ centroid sits from
@@ -648,10 +858,126 @@ mod tests {
         }
         let g = Glb::parse(&synth(json, &bin)).expect("parses");
         let front = g.derive_front().expect("derives").expect("has a front");
-        assert!(
-            (front - 90.0).abs() < 1.0,
-            "a back at −X means a front at +X, which is yaw 90 — got {front}"
+        assert_eq!(
+            front,
+            Face::East,
+            "a back at −X means a front at +X, which is the East face"
         );
+        // The raw angle is still available for an importer to show — snapping is the verdict, not
+        // the measurement.
+        let (_, deg) = g.front_detail().expect("measures");
+        assert!((deg - 90.0).abs() < 1.0, "and it measured {deg} deg");
+    }
+
+    /// **A quarter turn about X stands a lying-down piece up**, and every derived field moves with
+    /// it. The failure this guards is the one the handoff named: rotating the footprint alone and
+    /// leaving the height, which seats the piece in the floor.
+    #[test]
+    fn a_turn_about_x_swaps_height_and_depth_and_re_derives_the_base() {
+        // A "door" exported lying on its face: 1 m wide, 0.1 m tall, 2 m deep, base at y = 0.
+        let m = Measured {
+            lo: [-0.5, 0.0, -1.0],
+            hi: [0.5, 0.1, 1.0],
+            footprint: (1.0, 2.0),
+            height: 0.1,
+            pivot: (0.0, 0.0),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let up = m.rotated((1, 0, 0));
+        assert!((up.footprint.0 - 1.0).abs() < 1e-5, "width is untouched by a turn about X");
+        assert!((up.footprint.1 - 0.1).abs() < 1e-5, "depth becomes the old height");
+        assert!((up.height - 2.0).abs() < 1e-5, "height becomes the old depth");
+
+        // The base moved: the box now spans y in [-1, 1], so seating it takes a +1 m offset. This is
+        // the field a footprint-only rotation would have left behind.
+        assert!((up.base_y + 1.0).abs() < 1e-5, "base_y is {}", up.base_y);
+
+        // **And the pivot moved too.** The mesh was base-at-origin, so its old Y ran [0, 0.1]; that
+        // range is now the depth, running [0, 0.1] on Z, whose centre is 0.05 rather than 0. A
+        // rotation that re-derived the footprint and left the pivot alone would place this piece
+        // 50 mm out — which is the whole reason `rotated` re-derives every field instead of the
+        // obvious two.
+        assert!(up.pivot.0.abs() < 1e-5, "X was centred and stays centred: {:?}", up.pivot);
+        assert!(
+            (up.pivot.1 - 0.05).abs() < 1e-5,
+            "Z inherits the old base-at-origin Y range, so its centre is 50 mm: {:?}",
+            up.pivot
+        );
+    }
+
+    /// Four quarter turns about any axis are the identity, which is the cheapest proof the corner
+    /// transform is a rotation and not a shear.
+    #[test]
+    fn four_quarter_turns_about_any_axis_change_nothing() {
+        let m = Measured {
+            lo: [-0.3, 0.0, -0.7],
+            hi: [0.4, 1.1, 0.2],
+            footprint: (0.7, 0.9),
+            height: 1.1,
+            pivot: (0.05, -0.25),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        // Compared with an epsilon, not exactly: the derived fields are recomputed as `hi - lo` in
+        // f32, so a span written as 0.7 comes back as 0.70000005. That is arithmetic, not drift.
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        for axis in [(4, 0, 0), (0, 4, 0), (0, 0, 4), (0, 0, 0)] {
+            let back = m.rotated(axis);
+            assert_eq!(back.lo, m.lo, "{axis:?}");
+            assert_eq!(back.hi, m.hi, "{axis:?}");
+            assert!(near(back.footprint.0, m.footprint.0), "{axis:?} {:?}", back.footprint);
+            assert!(near(back.footprint.1, m.footprint.1), "{axis:?} {:?}", back.footprint);
+            assert!(near(back.height, m.height), "{axis:?}");
+            assert!(near(back.pivot.0, m.pivot.0) && near(back.pivot.1, m.pivot.1), "{axis:?}");
+        }
+    }
+
+    /// A turn about Y keeps the piece upright and swaps its floor axes — the common case, and the
+    /// one that must NOT touch the height.
+    #[test]
+    fn a_turn_about_y_swaps_the_footprint_and_leaves_the_height() {
+        let m = Measured {
+            lo: [-1.5, 0.0, -0.25],
+            hi: [1.5, 2.4, 0.25],
+            footprint: (3.0, 0.5),
+            height: 2.4,
+            pivot: (0.0, 0.0),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let turned = m.rotated((0, 1, 0));
+        assert!((turned.footprint.0 - 0.5).abs() < 1e-5);
+        assert!((turned.footprint.1 - 3.0).abs() < 1e-5);
+        assert!((turned.height - 2.4).abs() < 1e-5, "a wall turned on the floor is still 2.4 m");
+        assert!((turned.base_y - 0.0).abs() < 1e-5, "and still stands on the ground");
+    }
+
+    /// The three spans are a multiset invariant under any quarter turn — which is what the
+    /// importer's duplicate check leans on to compare across frames.
+    #[test]
+    fn a_rotation_only_permutes_the_three_spans() {
+        let m = Measured {
+            lo: [0.0, 0.0, 0.0],
+            hi: [0.3, 0.7, 1.9],
+            footprint: (0.3, 1.9),
+            height: 0.7,
+            pivot: (0.15, 0.95),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let sorted = |x: &Measured| {
+            let mut v = [x.footprint.0, x.height, x.footprint.1];
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        };
+        let want = sorted(&m);
+        for r in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1), (3, 2, 1), (2, 3, 3)] {
+            let got = sorted(&m.rotated(r));
+            for (a, b) in got.iter().zip(want.iter()) {
+                assert!((a - b).abs() < 1e-5, "{r:?}: {got:?} vs {want:?}");
+            }
+        }
     }
 
     /// A stool has no front, and `None` says exactly that. `Some(0.0)` would be a claim about the art

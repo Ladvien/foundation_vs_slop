@@ -73,6 +73,9 @@ use crate::health::Health;
 /// The asset. Recompressed 28.7 MB → 5.2 MB (see `assets/scp610/README.md`); contract unchanged.
 const SCP610_GLB: &str = "scp610/scp-610.glb";
 
+/// This creature's name in `assets/emerge/rigs.ron`.
+pub(crate) const RIG: &str = "scp610";
+
 /// Authored at real human scale — 1.80 × 0.86 × 1.90 m fully grown — so unlike the blob and the crab
 /// this spawns unscaled. `assets/scp610/README.md` §2.
 const RENDER_SCALE: f32 = 1.0;
@@ -108,23 +111,6 @@ pub struct Scp610Anim {
     slots: Arc<[crate::anim::Slot]>,
 }
 
-/// glTF animation index for `scp610_idle`. Pinned by `tests/creature_clip_contract.rs`.
-const CLIP_IDLE: usize = 0;
-/// glTF animation index for `scp610_death` — the controlled collapse. Pinned by the same test.
-///
-/// The other three clips (`chase_run`, `writhe_rage`, `lunge_attack`) stay unloaded on purpose: they
-/// are locomotion and attack animations for a creature that does neither. Loading a clip nothing can
-/// trigger would put a dead node in the graph and a dead slot in every bloom's blend weights.
-///
-/// **Wiring them would not fix the T-pose either — measured, 2026-08-01.** Decoding the GLB's rotation
-/// channels, every clip in the file holds all eight arm/leg bones at exactly 2 keyframes with **zero**
-/// spread — i.e. pinned to the node's rest rotation, which `assets/scp610/README.md` §2 says *is* the
-/// T-pose — except `chase_run` and `lunge_attack` (`upper_arm_*`, 15-17 keys, spread 0.37-0.65). Those
-/// two are precisely the behaviours a stationary, non-attacking bloom does not have. `writhe_rage` moves
-/// only `head` and the three `mutant_limb_*` (spread 0.34-0.42) and leaves the arms spread wide, so
-/// loading it would buy limb thrash on top of an unchanged T-pose. The arms are an **asset** defect and
-/// have to be re-authored in `scp_characters`; do not go looking for a wiring fix here again.
-const CLIP_DEATH: usize = 4;
 
 /// Blend slots, in the order [`build_scp610_anim`] adds them. The array `set_targets` takes is
 /// positional, so these name the positions rather than leaving two bare literals in
@@ -261,12 +247,17 @@ fn build_scp610_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
-    // Order MUST match SLOT_IDLE / SLOT_DEATH — `set_targets` is positional.
-    let (graph, nodes) = AnimationGraph::from_clips([
-        assets.load(GltfAssetLabel::Animation(CLIP_IDLE).from_asset(SCP610_GLB)),
-        assets.load(GltfAssetLabel::Animation(CLIP_DEATH).from_asset(SCP610_GLB)),
-    ]);
+    // Order MUST match SLOT_IDLE / SLOT_DEATH — `set_targets` is positional, so the manifest's slot
+    // order is the contract.
+    let rig = match manifest.rig(RIG) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return;
+        }
+    };
     // Idle is `free`, not `gait`: the bloom never travels, so there is no ground distance to sync a
     // stride against. Speed 1.0 — the clips are authored at 24 fps gameplay tempo (README 5).
     //
@@ -278,15 +269,9 @@ fn build_scp610_anim(
     // it looped, and a bloom re-collapsed every 1.29 s forever — the player's 2026-08-01 report,
     // "SCP-610 just keeps falling over and over again". Still no `AnimationTransitions` anywhere near
     // the blender, which `docs/animation.md` forbids because its `PostUpdate` pass stomps the weights.
-    let slots: Arc<[crate::anim::Slot]> = Arc::from(
-        [
-            crate::anim::Slot::free(nodes[SLOT_IDLE], 1.0),
-            crate::anim::Slot::one_shot(nodes[SLOT_DEATH], 1.0),
-        ]
-        .as_slice(),
-    );
+    let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
     debug_assert_eq!(slots.len(), SLOT_COUNT, "slot table drifted from the SLOT_* constants");
-    commands.insert_resource(Scp610Anim { graph: graphs.add(graph), slots });
+    commands.insert_resource(Scp610Anim { graph, slots });
 }
 
 /// The one shared builder — used by the seeded spawner and (later) the Research Room F6 palette, so a

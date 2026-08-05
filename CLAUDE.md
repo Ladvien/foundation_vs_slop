@@ -57,7 +57,10 @@ Each of these cost real time. They are 0.19 facts, verified in the source above.
 **Read `TESTING.md` before writing or running tests** — it documents the whole system (what exists, how to
 run it, how to add to it). The one-liners:
 
-- `cargo test` — deterministic-core layer (RNG/WFC/utility/ORCA/laser). Fast, GPU-free, the CI hard gate.
+- `cargo test --workspace` — deterministic-core layer (RNG/WFC/utility/ORCA/laser). Fast, GPU-free, the
+  CI hard gate. **`--workspace` is load-bearing:** this workspace has a root package, so bare `cargo test`
+  compiles no test target under `crates/` — that is how `crates/emerge-anim`'s 21 tests left the gate
+  without anything going red.
 - `cargo test --features test-harness -- --test-threads=1` — headless replay / liveness / SSIM. Boots the
   real game with no window; **needs a GPU**.
 

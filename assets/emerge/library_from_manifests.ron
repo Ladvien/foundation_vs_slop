@@ -10,6 +10,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -37,6 +38,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -47,6 +49,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -74,6 +77,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -84,6 +88,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -107,6 +112,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -117,6 +123,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -142,6 +149,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -152,6 +160,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -177,6 +186,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -187,6 +197,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -212,6 +223,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -222,6 +234,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -249,6 +262,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -259,6 +273,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.278)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -282,6 +297,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -292,6 +308,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.058)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -315,6 +332,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -325,6 +343,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -352,6 +371,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -362,6 +382,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.057)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -385,6 +406,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -395,6 +417,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, -0.141)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -420,6 +443,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -430,6 +454,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -453,6 +478,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -463,6 +489,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((-0.157, -0.136)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -486,6 +513,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -496,6 +524,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -524,6 +553,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -534,6 +564,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -562,6 +593,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -572,6 +604,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -601,6 +634,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -611,6 +645,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -640,6 +675,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -650,6 +686,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -673,6 +710,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -683,6 +721,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -706,6 +745,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -716,6 +756,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -740,6 +781,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -750,6 +792,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -773,6 +816,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -783,6 +827,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -808,6 +853,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -818,6 +864,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -845,6 +892,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -855,6 +903,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -881,6 +930,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -891,6 +941,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -916,6 +967,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -926,6 +978,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -951,6 +1004,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -961,6 +1015,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -987,6 +1042,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -997,6 +1053,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1022,6 +1079,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1032,6 +1090,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1055,6 +1114,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1065,6 +1125,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1092,6 +1153,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1102,6 +1164,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1126,6 +1189,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1136,6 +1200,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1159,6 +1224,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1169,6 +1235,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1193,6 +1260,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1203,6 +1271,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1227,6 +1296,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1237,6 +1307,7 @@
                 stretch_y: None,
                 y_offset: Some(-0.03),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1261,6 +1332,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1271,6 +1343,7 @@
                 stretch_y: None,
                 y_offset: Some(-0.03),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1296,6 +1369,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1306,6 +1380,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((-0.347, -0.126)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1332,6 +1407,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1342,6 +1418,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((-0.029, 0.124)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1365,6 +1442,7 @@
                 ],
                 group: Some("bath"),
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1375,6 +1453,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((-0.006, 0.09)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1398,6 +1477,7 @@
                 ],
                 group: Some("bath"),
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1408,6 +1488,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.545, 0.004)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1431,6 +1512,7 @@
                 ],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
     ],

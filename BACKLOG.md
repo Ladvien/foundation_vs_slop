@@ -744,6 +744,22 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
+- **FVS-Q-10 — Should authored `edge` tokens feed the solver, or only check it?** · L · *determinism: core*
+  `crates/emerge-core/src/adjacency.rs` reads `SubCell::edge` and reports where a map disagrees with
+  the tokens its tiles declare. It deliberately does **not** generate: `grammar.rs` already learns
+  adjacency from the map, and its module note argues that should be the only way, because *"inventing
+  an adjacency schema would mean asking an author to write down a grammar before they are allowed to
+  draw one."*
+  The open question is whether `grammar::learn`'s `support[dir][p]` table should be built from tokens
+  instead of from observed pairs. **What it would buy:** generation into an *empty* map — a learned
+  grammar knows only the map it was learned from, so `G` on a blank canvas has nothing to continue.
+  **What it costs:** it reverses that documented thesis, and an unauthored library would generate
+  unconstrained noise rather than refusing. Decide on real data — the validator now makes it possible
+  to author tokens and see whether they agree with what you actually draw, which is the evidence this
+  decision was missing. Sandhu, Chen & McCoy 2019 (`10.1145/3337722.3337752`) is the closest prior art:
+  WFC as a constraint solver with design-level constraints layered over local adjacency.
+  · *Deps:* — · *Touches:* `crates/emerge-core/src/{grammar,adjacency}.rs`
+
 - **FVS-Q-7 — The flesh spread: SCP-610 as a growing field, not a standing figure** · L · *determinism: core*
   The Upside Down read — flesh growing down halls. **The engine already exists:** `src/mycelia/` is a GPU Physarum + Gray-Scott field with world-XZ floor *and* wall materials that already forages toward blood pools and nests and "blooms in the unseen dark". Missing only a flesh skin and 610 wired as a source.
   Grounded, because spread on a lattice of rooms is a solved modelling problem: **Mollison 1977** (`10.1111/j.2517-6161.1977.tb01627.x`) decomposes it into *growth* plus a *contact distribution* — exactly the split here — and warns realistic models must be nonlinear and stochastic, against a fixed-radius flood fill. **Ludlam, Gibson, Otten & Gilligan 2011** (`10.1098/rsif.2011.0506`) fit fungal spread across discrete lattice sites and show **synergy is necessary** — nearest-neighbour transmission alone cannot explain real dynamics. **Neri et al. 2011** (`10.1371/journal.pcbi.1002174`) show experimentally that **host heterogeneity lowers invasion probability**, so `dungeon.room_types` becomes a designed brake rather than decoration. Turk 1991 (`10.1145/122718.122749`) is the graphics-side classic behind the Gray-Scott layer already running.
@@ -840,7 +856,100 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 - **Blind pattern-replaces break this codebase specifically.** One warning was "fixed" by a repo-wide rename that also hit a test genuinely using the binding it renamed: one warning became four compile errors. The tests here deliberately reuse production names to pin contracts, so a name is rarely as unique as it looks. Read the site, then edit it.
 - **⚠️ The replay suite cannot currently finish: `deterministic_core_is_bit_identical_across_many_builds` aborts on a stack overflow (found 2026-08-01).** `thread 'IO Task Pool (0)' has overflowed its stack` → `SIGABRT`. Bevy's async **asset-loading** pool takes a smaller default stack than the main thread, and this test builds many `App`s in one process, so each one re-enters the loader. Confirmed **pre-existing**: reproduced at `82e4f5a` in a clean worktree, i.e. before the Site/Ozea work landed, so it is not fallout from the kit swap. Not OOM — 18 GB free, nothing in `dmesg`.
 
-  Why it matters more than one red test: `cargo test` fail-fasts across test binaries, so this abort **stops the whole harness run at `tests/replay.rs`** and every suite after it silently never executes. Any claim of "the harness is green" made without reading the per-suite list is unfounded. The individual goldens are fine — `deterministic_core_is_bit_identical` and `field_passes_are_bit_identical` both pass at HEAD in isolation — so this is a test-harness defect, not a determinism regression. Likely fixes: raise the pool's stack (`TaskPoolThreadAssignmentPolicy` / `stack_size`), or drop the app between builds so the loader unwinds. Until then, run the harness with `--no-fail-fast` or nothing downstream of `replay` is being checked.
+  Why it matters more than one red test: `cargo test` fail-fasts across test binaries, so this abort **stops the whole harness run at `tests/replay.rs`** and every suite after it silently never executes. Any claim of "the harness is green" made without reading the per-suite list is unfounded. Likely fixes: raise the pool's stack (`TaskPoolThreadAssignmentPolicy` / `stack_size`), or drop the app between builds so the loader unwinds. Until then, run the harness with `--no-fail-fast` or nothing downstream of `replay` is being checked.
+
+  **Correction, measured 2026-08-05.** `RUST_MIN_STACK=33554432` — which `ci.yml` sets in `env:` and a local shell does not — makes this test **pass**, so the workaround is one variable, not `--no-fail-fast`. And the claim above that *"`field_passes_are_bit_identical` passes at HEAD in isolation"* is **wrong**: it fails in isolation on Apple Silicon, because *"no field golden is pinned for this architecture yet (goldens are PER-PLATFORM)"*. Same for `migrated_defaults_reproduce_the_shipped_golden_hash`. Both would pass in CI's x86_64 lane. Measured hashes for whoever pins the `aarch64` arm: field `0xe090401cb48e2ae3`, migrated-defaults `0xac8196c4a1bfb0d0` — but see each test's own message, which asks for the `determinism-arm` lane to reproduce them across builds first.
+- **⚠️ Two harness oracles are red, pre-existing, and nothing gates on them (measured 2026-08-05).** Confirmed by running `tests/replay.rs` from a worktree at `aea728b` and getting the identical result, so neither belongs to the `feat/emerge-lattice` work. The harness lane is `continue-on-error`, which is how both stayed unnoticed.
+
+  **`photophobia_pulls_crabs_into_shadow` is fixed** (2026-08-05) — and the mechanism was never wrong. Diagnosed by measuring the A/B across five seeds and five horizons rather than reading the sign chain: the effect is real and large (`5/5` seeds at 30 ticks, pooled `0.772 → 0.568`; `−37%` pooled at 120 ticks) and by 360 ticks it is gone (`1/5`, pooled inverted). The oracle measured one seed at 360 ticks, so it was comparing two decorrelated worlds. It now pools crabs across five seeds at 120 ticks, with the shipped seed deliberately still in the set. The gradient convention was verified directly (step one tile along `LightField::gradient` and resample: brighter).
+
+- **DESIGN CALL: should the photophobic push cross surface patches?** Surfaced by the diagnosis above and **not** decided. `crab_locomotion` runs `light_push` through `clamp_to_patch` on purpose — *"gate crossings stay with the mode's flow-field"* — so photophobia is a **within-patch** effect: a crab settles at the darkest point of its own patch, generally mid-gradient. Measured at tick 360: with the gain on, 13–19 of 40 crabs are still standing on a light gradient; with it off, 26–38 of 40 have random-walked into flat *deep dark*. So over a long horizon **diffusion into other rooms beats steering within one**, which is why the old oracle inverted. Two readings, both defensible: (a) correct as-is — light is a local force and room-scale routing is the mode's job, so "dark = cover" holds at the scale a player reads; (b) a photophobic crab should be able to leave a lit room, which needs the push to influence patch selection rather than only position within a patch. (b) changes crab distribution and therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin. Do not "fix" this without picking one.
+
+  **`authored_world_config_override_is_a_noop` was never a real failure** — corrected 2026-08-05. `GOLDEN` is `0` under `cfg(not(target_arch = "x86_64"))`, so on Apple Silicon it compared against zero; the message about a lossy seam is the assert's text, not a diagnosis. The authored config reproduces the shipped hash **exactly** (`0xac8196c4a1bfb0d0` both ways), so that seam is lossless and the QD archives riding it were never at risk. Both `aarch64` goldens are now pinned and the whole replay suite is green.
+
+- **⚠️ Three x86_64 replay goldens are STALE, and that is what blocks promoting the harness lane (found 2026-08-05).** `migrated_defaults_reproduce_the_shipped_golden_hash`, `field_passes_are_bit_identical`, and `authored_world_config_override_is_a_noop` (which reads the same `GOLDEN`) all fail on CI's x86_64 runner. **They pass on aarch64**, whose goldens were measured and pinned the same day.
+
+  **Why nobody knew.** On `main` this lane fail-fasted at the **lib** target on the SIGMA canary — `cargo test` stops at the first failing *binary*, so `tests/replay.rs` and every suite after it never executed. Run `30909881477` (main, 2026-08-04): `1023 passed; 1 failed`, job over. The lane was also `continue-on-error`, so the red never blocked anything. Two independent concealments stacked on the same file.
+
+  **What has to happen, in order:** (1) measure the three hashes on x86_64 — this **cannot** be done from an Apple Silicon machine, the goldens are per-platform by design (see `tests/replay.rs`'s `GOLDEN` doc); (2) establish whether the drift is a real gameplay change or an unrecorded re-pin — `a0_fvs_j6_mutant3_on_world_0x5c09191_reproduces` and `deterministic_core_is_bit_identical` both **pass** on x86_64, so whatever moved did not move everything, which is a strong clue; (3) fix or re-pin; (4) then drop `continue-on-error`.
+
+  **Do not promote the lane by skipping these three.** They are the determinism pins. A gate that is green because it stopped checking them is worse than an advisory lane that is honestly red.
+
+- **⚠️ The harness lane's four known-red skips — the debt list that made promoting it possible (2026-08-05).** The lane is now a **hard gate** with `--no-fail-fast`, which took enumerating every failure at once; `cargo test` stops at the first failing *binary*, so each red hid the ones after it and reproducing the full list took one run per defect. All four are **pre-existing** — confirmed against a worktree at `main`, and the branch touches nothing under `src/squad_ai`/`src/ai`. **Each skip in `ci.yml` must be deleted the moment its test is green.**
+
+  1. `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops` — the ATTENTION gate; fully measured, needs a placement decision. See the entry below.
+  2. `playtest_level::shipped_level_playtests_and_is_deterministic` — **bisected 2026-08-05.** The static pre-filter passes (axes `(0.849, 0.313)`) and `decode` passes; the third gate is the one that rejects: `surprise::minimal_criterion` returns *"no crab died — the world was static"*. The rollout outcome on the shipped level at seed `0x5C09191`, 1800 ticks:
+
+     `squad=5  survivors=5  crabs_alive=41  crabs_killed=0  duty_decisions=138  unit_damage=0.000  reachable=3577  liveness_violations=0`
+
+  3. `search_calibration::a_candidate_genome_actually_changes_the_simulation`
+  4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
+
+  **LOCATED (2026-08-05). One cause, three of the four skips, and it is the evaluation harness — not the game.** The decisive experiment: take the **identical** `SimConfig` the failing test rolls out (`deterministic_core_seeded(0x5C09191)` + `BrainSource::Authored` + `.with_level(pheno)`) and step it **by hand** instead of through `run_episode`. Result: crabs 40 → 44, lowest crab health **0.303**, 4 nests present at tick 1. **Combat works.** The same config through `run_episode` gives `crabs_killed = 0, unit_damage = 0.00`. The only difference is `run_episode`'s **synthetic player**.
+
+  `search_calibration`'s own failure dump names the mechanism:
+
+  ```
+  ordered_ticks: 4500  of EPISODE_TICKS 7200   (62.5% under standing player order)
+  weapons_tight_ticks: 900                     (12.5% holding fire)
+  captures_attempted: 3, completed: 1, broken: 2
+  crabs_killed: 0   unit_damage_taken: 0.0
+  cells_covered: 332  of reachable_cells: 3577  (9% of the map)
+  squad_duty_decisions: 440
+  ```
+
+  And `search_calibration.rs:60` states the consequence of the first number: *"a standing `MoveOrder` overrides locomotion and excludes the unit from `unit_actions` and `medic_heal`, so a permanently-ordered squad evaluates nothing."* The squad is ordered for nearly two thirds of the episode and weapons-tight for an eighth of it — and `WeaponsTight` gates the bolt. It is also *correct* that it does: holding fire is a containment verb, and 3 captures were attempted. **The containment mechanic and `minimal_criterion`'s "a crab must have died" are in direct conflict**, and the harness satisfies the former.
+
+  This is why all three fail:
+  * `playtest_level` and `the_authored_brains_produce_a_real_encounter_on_every_world` — `minimal_criterion` rejects on "no crab died", so **every** episode is rejected. The test's own message spells out the stakes: *"`train evolve` will silently produce an empty archive and exit 0."*
+  * `a_candidate_genome_actually_changes_the_simulation` — two genomes produce a byte-identical hash, which follows: if the squad is ordered or weapons-tight for 75% of the episode, the brain barely runs and cannot differentiate.
+
+  **The fix is a judgement call, not a bug fix, and the test already frames it:** *"Either gameplay changed, or a threshold in `surprise::minimal_criterion` needs recalibrating against `train probe`."* Gameplay did change — containment landed and holding fire became a core verb. Candidates: recalibrate `minimal_criterion` so a *capture* counts as a real encounter alongside a kill (`captures_completed: 1` is right there in the outcome); shorten `ADVANCE_TICKS` (300) so less of the episode is spent ordered; or have the synthetic player not hold weapons tight. Each moves `snapshot_hash` and re-scores every archive.
+
+  **Do not trust my earlier eliminations for this.** Nine hypotheses were tested and eight were wrong, and the first seven measured the **shipped dungeon stepped by hand** — a world where combat works fine — rather than the harness path that actually fails. Recorded so nobody re-runs them: squad never reaches the swarm (closes to 0.47 m), crab overhead (all crabs at `y = 0.12`), horizon too short (5400 ticks, still zero), LOS blocked (`true` at the closest pair), the brain never picks a fight (no attack mode on *either* seed), the fog gate (163 visible targets on the failing seed vs 80 on the working one), the front arc (65 fully-valid acquisitions vs 4), nests missing when the tour is planned (4 exist at tick 1). The lesson: **reproduce the failure through the entry point the failing test uses, before forming any hypothesis.** `rollout_level` was visible in the source from the start.
+
+- **⚠️ DECISION NEEDED: `broadcast.watch_threshold` (0.006) sits inside the ambient ATTENTION floor, so "look away to contain it" cannot hold.** Found 2026-08-05 while trying to promote the harness lane; `watching_the_feed_makes_it_generate_and_ignoring_it_stops` is red because the mechanic really is broken, not because the oracle is.
+
+  **Measured.** Two screens, nobody deliberately looking at either, ambient ATTENTION sampled at each screen's own cell every 100 ticks:
+
+  | tick | screen A | screen B | crabs |
+  |---|---|---|---|
+  | 100 | 0.00444 | 0.00130 | 40 |
+  | 400 | 0.00741 ***** | 0.00611 ***** | 40 |
+  | 600 | 0.00633 ***** | 0.00659 ***** | 41 |
+  | 900 | 0.00618 ***** | 0.00666 ***** | 42 |
+
+  (**\*** = at or above the threshold, i.e. counts as *watched*.) The field **rises to a resting plateau of ~0.0062–0.0067 and stays there**, so a threshold of `0.006` is under the noise floor: every screen counts as watched forever, and the feed generates regardless of where the player looks. Crab growth follows exactly.
+
+  **Why the obvious history is misleading.** The *genome range* for this knob was already corrected once (2026-08-01, `(0.05, 0.80)` → `(0.0, 0.05)`) because the old band sat **above** anything the field reaches at a screen, making the anomaly permanently inert. That correction was right, but the shipped default landed at the opposite failure: `0.006` is at the bottom of the new band, below the ambient floor. The band `(0.0, 0.05)` therefore spans *both* pathologies, and only its upper part discriminates.
+
+  **The watched side, now measured too.** Units pinned at each whole-metre stand-off from the screen, on a floor cell with real line of sight (`fog::update_los` reads unit `Transform`s, so pinning them drives the true mechanism), 240 ticks to settle:
+
+  | stand-off | 0 m | 1 m | 2 m | 3 m | 4 m | 5 m | 6 m | 7 m | 8 m |
+  |---|---|---|---|---|---|---|---|---|---|
+  | screen's ATTENTION | 1.324 | 1.393 | 1.390 | 1.376 | 1.347 | 1.295 | 1.201 | 1.038 | 0.771 |
+
+  8 m is the edge of `fog::VISION_RADIUS` (8 cells at `TILE_SIZE = 1.0`). The deposit is **binary per cell** over the line-of-sight set at `ATTENTION_RATE = 1.0/s`, settling at `RATE / evaporate`, so this is not a smooth distance falloff — it is a **step at the LOS boundary**, and the gentle decline across the row is the diffusion of a fixed deposit, not attenuation of the gaze.
+
+  **So the discriminating band is `0.007 → 0.771`, a factor of ~110.** Any threshold in it separates "watched" from "ignored" cleanly. The shipped `0.006` is the one place it cannot: just below the diffusion floor. The evolvable band `(0.0, 0.05)` is therefore *mostly* correct — only its bottom sliver `(0, ~0.007)` is pathological, and the authored default landed in exactly that sliver.
+
+  **`0.05` was tried, and it is not the fix — the threshold is not the root cause.** Applied together with its paired containment ceiling (`0.003` → `0.025`; the two are documented as moving together, and *both* shipped numbers sat inside the `0.0025–0.0067` diffusion floor, so the feed always generated **and** containment was a coin flip on where the squad stood). With that pair, `watching_the_feed_makes_it_generate_and_ignoring_it_stops` **passes** — and `the_watch_feed_fires_in_passive_play_on_the_held_in_seeds` starts failing, with the number that explains everything:
+
+  | seed | nearest squad approach to a screen | peak ATTENTION at the screen |
+  |---|---|---|
+  | `0x5c09191` | 13.8 m | 0.009 |
+  | `0x1ce5` | 15.1 m | 0.012 |
+  | `0xfeed` | 13.1 m | 0.028 |
+
+  **`broadcast.spawn_min_dist` is 16.0 tiles and `fog::VISION_RADIUS` is 8.** The anomaly is seeded at twice the distance its own mechanic can reach, and on every held-in seed the squad's closest pass is 13–15 m, so a screen is **never** in the line-of-sight set. The only thing that ever reaches it is diffusion. That makes the two oracles jointly unsatisfiable: a threshold above the noise floor makes the feed a prop (`emissions 0`), and a threshold inside the noise floor makes "look away to contain it" meaningless. `0.006` bought the second; `0.05` buys the first. Neither is the mechanic working.
+
+  Reverted, so the shipped game is unchanged and no half-finished retune sits in the branch.
+
+  **The decision is placement, not tuning.** Options, none costed: (a) bring `spawn_min_dist` under `VISION_RADIUS` — tried at `6.0` and screens then sit permanently in sight, so "ignoring" fails; the usable window is narrow and knife-edged, and `16.0`'s comment ("found, not handed over") is the intent it would give up; (b) make the squad's patrol actually visit the rooms screens are seeded in, which is where "the squad has to pull attention off the room" becomes real; (c) widen what the gate samples from the screen's own cell to a neighbourhood — but at 13 m the neighbours are equally out of sight, so this does nothing on its own; (d) raise `VISION_RADIUS`, which moves fog everywhere. **(b) is the only one that makes the mechanic mean what its doc says.**
+
+  Note also that the genome band `(0.0, 0.05)` was corrected on 2026-08-01 on the strength of "~0.01 at 14 m" — which is the *out-of-sight diffusion* value, not a distance falloff. In line of sight the field reaches 0.77–1.39, so the pre-correction band `(0.05, 0.80)` was the one that spanned the real discriminating range. Whatever is decided, that band needs revisiting with these numbers.
+
+  **This is a gameplay retune, not a bug fix:** it changes crab counts, therefore positions, therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin on both architectures — and it shifts the meaning of the evolvable band, so baked elites measured under the old default were scored against an anomaly that always fired. Do not change it without picking a value deliberately.
 - **Scope realism.** The XL items (H-3, I-1, K-4, C-6) are correctly sequenced last and behind prerequisites. Do not let the appeal of the "full vision" pull them earlier than M4, or the M0–M3 foundation slips.
 
 ---

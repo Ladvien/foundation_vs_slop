@@ -2307,6 +2307,62 @@ Split out 2026-07-30.
 
 ### Push 11 — Render & Art Direction  ·  cross-cutting  ·  continuous
 
+
+- **FVS-Q-9 — `solid` refining clearance: answered NO** · M · ✅ **CLOSED 2026-08-05, not built**
+  `SubCell::solid` was to refine `emerge_core::stack::covers` — the single "is this point inside this
+  piece" test that stacking and the editor's `pick_at` both funnel through — so clearance would respect
+  a piece's *shape* rather than its bounding box.
+  **Filed as blocked, closed as not worth it, and the difference matters.** The original blocker was
+  that all 42 descriptors carried `cells: []`, so a `solid`-only rule made every piece cover nothing
+  and the only escape was `if the lattice is empty, use the bounding box` — the fallback `CLAUDE.md`
+  forbids. That blocker is *gone*: divisions are derived from a piece's own size and
+  `import::occupancy` rasterises triangles, so authoring all 86 pieces is one batch call. Route (a) was
+  implemented, measured, and discarded on the numbers:
+
+  | `divisions` | subunit | solid cells / volume | RON lines |
+  |---|---|---|---|
+  | **1** (shipped) | 500 mm | 451 / 469 — **96%** | 2,700 |
+  | 2 | 250 mm | 3,176 / 3,752 — 85% | 19,000 |
+  | 3 | 167 mm | 8,865 / 12,663 — 70% | 53,000 |
+  | 4 | 125 mm | 18,358 / 30,016 — 61% | 110,000 |
+
+  At the shipped resolution a lattice-aware `covers` agrees with the bounding box **96% of the time**:
+  the props are mostly smaller than a few cells, so there is no shape left to express. Resolution fine
+  enough to hold a shape starts near `divisions: 3` — 53,000 lines of RON, and a wall becomes 18x15x3:
+  810 cells, fifteen layers in the editor's panel, unauthorable by hand.
+  **The reason it cannot be rescued is structural.** `divisions` is deliberately one project-wide
+  number, because that is exactly what makes two faces comparable (`descriptor::Subgrid`). So the
+  lattice's resolution is fixed by what edge matching needs — coarse — while shape-aware clearance
+  needs fine, and one number cannot serve both. Route **(b)**'s `occupancy: Footprint | Lattice` does
+  not help: a `Lattice` piece still divides by the global number, so at `divisions: 1` it is still 96%
+  solid.
+  *Ruling:* the subgrid's job is **face matching**, which works and is now authored (35 `SubCell`s on
+  the Site kit's full-height family). Clearance shape is a different job with a conflicting resolution
+  requirement, and `Descriptor::clearance` already exists as its own field for it.
+  *What closing this leaves:* `SubCell::solid` now has **no gameplay consumer**. It is still authored
+  (`import::occupancy` + the editor's `rescan mesh`) and drawn, where it earns its place as the
+  author's confirmation that the lattice lines up with the mesh — but nothing reads it to decide
+  anything, and that is deliberate rather than forgotten. Reopen only if `divisions` is raised for some
+  other reason. · *Deps:* — · *Touches:* `crates/emerge-core/src/{stack,descriptor}.rs`, `crates/emerge-mapper/src/fill.rs`
+
+- **FVS-Q-11 — The Tiles panel pushes its own controls below the fold** · S · ✅ **LANDED 2026-08-04**
+  Measured on a 1280x802 logical window: the Tiles panel rendered 18 census rows (10 Tiles + 8 Global)
+  above the detail block, so the subgrid's cell grid and its `[solid][edge][anchor][clear]` chips
+  started below the visible area. Reachable by scroll and by keyboard, so ergonomics rather than a
+  defect — but the controls of the tab's newest feature were the part you could not see.
+  *Shipped:* the key list is now a **held-key overlay** (`chrome::ChromePlugin`) rather than a
+  permanent table down the side of every panel. `K` held shows this tab's rows over a scrim and
+  releasing hides them; each panel carries one line, "Hold K for shortcuts", in place of eighteen. The
+  overlay reads `keys::rows(tab.context())` so it is per-tab by construction — `W, A, S, D` reads
+  "pan" on the Map tab and "move the cell cursor" on Tiles, which is the context model finally being
+  visible to the author rather than only to the collision test.
+  The line is **not** optional: Cockburn, Gutwin, Scarr & Malacria 2014 (`10.1145/2659796`) document
+  the intermodal-transition failure — a fast path offered beside a slow one is not adopted on its own,
+  and a hidden list nobody is told about is that failure exactly.
+  *Verified:* the whole subgrid section — divisions, layer picker, the full 3x3 grid and all four
+  chips — now fits above the fold, and a pixel sample confirms the scrim dims the panels and the tab
+  strip as well as the world. · *Deps:* — · *Touches:* `crates/emerge-mapper/src/{chrome,keys,editor,tiles,anim_tab}.rs`
+
 - **FVS-Q-1 — The relight: HDR + bloom, irradiance environment map, the game's first shadows** · L · ✅ **LANDED 2026-07-30**
   `GlobalAmbientLight` is a *uniform* term — added identically to every surface whatever its normal — so nothing could acquire form from it and the scene read as clay; `mycelia_floor.wgsl` had already hand-authored a cavity-AO term to claw some back. Replaced by a runtime-generated 64² gradient cubemap through `GeneratedEnvironmentMapLight`; ambient drops 200 → 12, a black-crush floor only. There is **no HDRI anywhere in the asset library** and Bevy's `hdr` loader feature is off, which does not matter: Ramamoorthi & Hanrahan 2001 (`10.1145/383259.383317`) show diffuse irradiance is captured almost entirely by a low-order SH expansion, so 64² carries the HDRI signal at 192 KB with no asset dependency.
   The camera was **LDR**, which silently capped the whole emissive layer — TonyMcMapface clips above mid-grey, so `fixture_emissive`, the mycelia glow and the laser bolts had each been tuned *down* to survive it.

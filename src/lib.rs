@@ -17,7 +17,10 @@
 
 /// Cosmetic pose blending — the shared clip-weight/gait-phase driver every skinned model goes
 /// through (squad figurine, crab, manca). Never touches hashed sim state; see its module docs.
-pub mod anim;
+/// The pose blender, moved to `crates/emerge-anim` so the editor can drive the same one the game
+/// does. Re-exported here because every call site says `crate::anim::…` and none of them needed to
+/// know. See that crate's manifest for why it moved.
+pub use emerge_anim as anim;
 pub mod antagonist;
 /// Config-bake machinery (RON splicing + golden re-pinning) shared with the `train` binary.
 pub mod bake;
@@ -51,6 +54,7 @@ pub mod region_capture;
 /// only describe as "Wtf? No ideae what this is." Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
 pub mod rig_watch;
+pub mod rigs;
 /// Dev-only performance overlay (FPS / frame-ms / entity-count / CPU / mem, toggled with F4) plus the
 /// frame-time/entity/system-info diagnostics it reads. Debug-only, stripped from release like `devshot`.
 #[cfg(debug_assertions)]
@@ -394,7 +398,7 @@ pub fn run() {
             // `PoseBlendPlugin` runs the one apply pass every skinned model's clip weights go through
             // (squad, crab, manca), so it is registered once here rather than by each creature plugin.
             // Cosmetic, but grouped with the squad because that is where the drivers order against it.
-            (anim::PoseBlendPlugin, squad::SquadPlugin, squad_ai::SquadAiPlugin),
+            (rigs::RigsPlugin, anim::PoseBlendPlugin, squad::SquadPlugin, squad_ai::SquadAiPlugin),
             selection::SelectionPlugin,
             fog::FogPlugin,
             // `SessionPlugin` (run outcome: win/lose/still-going) is nested with `HealthPlugin` rather

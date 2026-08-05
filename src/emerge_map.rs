@@ -118,7 +118,7 @@ fn load(name: &str) -> Result<EmergeWorld, String> {
 
     let vocab = Vocabularies::parse(&read("vocab.ron")?)?;
     // The same call the editor makes: measurements, then this project's policy over them.
-    let library = emerge_core::policy::layered_library(std::path::Path::new(EMERGE_DIR))?;
+    let library = emerge_core::policy::layered_library(std::path::Path::new(EMERGE_DIR))?.library;
     let map = Map::parse(&read(&naming::map_file_name(name))?)?;
     EmergeWorld::new(library, map, vocab)
 }
@@ -140,7 +140,8 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         // Through the real load path, so the shipped `project.ron` is exercised rather than skipped.
         let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
-            .unwrap_or_else(|e| panic!("{e}"));
+            .unwrap_or_else(|e| panic!("{e}"))
+            .library;
 
         // An empty map is a valid one — it is what an author starts with.
         let world = EmergeWorld::new(
@@ -170,7 +171,8 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
-            .unwrap_or_else(|e| panic!("{e}"));
+            .unwrap_or_else(|e| panic!("{e}"))
+            .library;
 
         let mut map = Map {
             name: "broken".into(),

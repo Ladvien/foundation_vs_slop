@@ -1,6 +1,6 @@
 (
     version: 1,
-    note: Some("GENERATED from the Site kit by tests/site_descriptors.rs. Measurements only — this facility\'s architecture is in project.ron beside it. Do not hand-edit; regenerate with EMERGE_WRITE_SITE=1 cargo test --test site_descriptors."),
+    note: Some("Measurements only — this facility\'s architecture is in project.ron beside it. Originally generated from the Site kit by tests/site_descriptors.rs, but that generator no longer exists anywhere in the tree: this file is hand-maintained now, and emerge-mapper writes it. tests/site_descriptors.rs still CHECKS the numbers here, which is what keeps it honest."),
     descriptors: [
         (
             id: "site/floor",
@@ -10,6 +10,7 @@
                 stretch_y: None,
                 y_offset: Some(-0.06),
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -29,6 +30,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -39,6 +41,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -58,6 +61,70 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -68,6 +135,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -87,6 +155,40 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -97,6 +199,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -118,6 +221,58 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -128,6 +283,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -149,6 +305,58 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -159,6 +367,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -178,6 +387,22 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -188,6 +413,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -207,6 +433,70 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -217,6 +507,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -236,6 +527,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -246,6 +538,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -265,6 +558,34 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -275,6 +596,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -294,6 +616,70 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 4, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -304,6 +690,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -325,6 +712,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -335,6 +723,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -354,6 +743,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -364,6 +754,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -383,6 +774,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -393,6 +785,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -412,6 +805,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -422,6 +816,7 @@
                 stretch_y: None,
                 y_offset: Some(0.002),
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -441,6 +836,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -451,6 +847,7 @@
                 stretch_y: None,
                 y_offset: Some(0.002),
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -470,6 +867,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -480,6 +878,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -499,6 +898,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -509,6 +909,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -528,6 +929,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -538,6 +940,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -557,6 +960,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -567,6 +971,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -586,6 +991,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -596,6 +1002,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -615,6 +1022,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -625,6 +1033,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -644,6 +1053,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -654,6 +1064,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -675,6 +1086,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -685,6 +1097,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -706,6 +1119,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -716,6 +1130,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -737,6 +1152,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -747,6 +1163,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -768,6 +1185,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -778,6 +1196,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -799,6 +1218,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -809,6 +1229,7 @@
                 stretch_y: None,
                 y_offset: Some(0.002),
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -828,6 +1249,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -838,6 +1260,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -857,6 +1280,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -867,6 +1291,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -880,7 +1305,7 @@
                 sockets: [],
             ),
             kind: [
-                    "bed",
+                "bed",
             ],
             effects: [],
             look: [],
@@ -888,6 +1313,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -898,6 +1324,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -917,6 +1344,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -927,6 +1355,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -940,7 +1369,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -948,6 +1377,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -958,6 +1388,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -974,7 +1405,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -982,6 +1413,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -992,6 +1424,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1008,7 +1441,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -1016,6 +1449,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1026,6 +1460,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1039,7 +1474,7 @@
                 sockets: [],
             ),
             kind: [
-                    "seating",
+                "seating",
             ],
             effects: [],
             look: [],
@@ -1047,6 +1482,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1057,6 +1493,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1076,6 +1513,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1086,6 +1524,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1105,6 +1544,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1115,6 +1555,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1128,7 +1569,7 @@
                 sockets: [],
             ),
             kind: [
-                    "seating",
+                "seating",
             ],
             effects: [],
             look: [],
@@ -1136,6 +1577,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1146,6 +1588,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1165,6 +1608,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1175,7 +1619,8 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
-                front: Some(90.0),
+                rotate: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.57, 0.45)),
@@ -1188,7 +1633,7 @@
                 sockets: [],
             ),
             kind: [
-                    "seating",
+                "seating",
             ],
             effects: [],
             look: [],
@@ -1196,6 +1641,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1206,6 +1652,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1222,7 +1669,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -1230,6 +1677,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1240,6 +1688,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1256,7 +1705,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -1264,6 +1713,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1274,6 +1724,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1290,7 +1741,7 @@
                 sockets: [],
             ),
             kind: [
-                    "table",
+                "table",
             ],
             effects: [],
             look: [],
@@ -1298,6 +1749,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1308,6 +1760,7 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -1327,6 +1780,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
         (
@@ -1337,7 +1791,8 @@
                 stretch_y: None,
                 y_offset: None,
                 pivot: None,
-                front: Some(90.0),
+                rotate: None,
+                front: Some(East),
             ),
             extent: (
                 footprint: Some((0.59, 0.55)),
@@ -1350,7 +1805,7 @@
                 sockets: [],
             ),
             kind: [
-                    "seating",
+                "seating",
             ],
             effects: [],
             look: [],
@@ -1358,6 +1813,7 @@
                 rooms: [],
                 group: None,
             ),
+            subgrid: None,
             note: None,
         ),
     ],

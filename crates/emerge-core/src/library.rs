@@ -23,6 +23,15 @@ use crate::vocab::{Masks, Vocabularies};
 /// Bumped when the shape below changes. A mismatch is refused, never migrated — `persist.rs`'s rule.
 pub const LIBRARY_VERSION: u32 = 1;
 
+/// The most cells one piece's derived lattice may have.
+///
+/// The old per-descriptor `div` was capped at 9 per axis, which bounded a lattice at 729. Divisions
+/// are now **derived** — a piece's span times the project's number — so nothing bounds them from the
+/// descriptor's side, and a 10 m corridor at `divisions: 4` would build 80 x 40 x 8. This is the
+/// replacement guard: generous enough that a 6 m wall at the shipped setting is nowhere near it, low
+/// enough that the editor is never asked to draw a lattice nobody could author.
+pub const MAX_LATTICE_CELLS: u32 = 4096;
+
 /// Everything a project can place.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +68,21 @@ impl Library {
             if d.id.trim().is_empty() {
                 return Err(format!("library: descriptor {i} has no id"));
             }
+            // **An id is a name, and names have a shape.** Nothing checked this, so whatever a tool or
+            // a hand-edit last wrote is what a map ends up referencing. Segments rather than the whole
+            // string, because `/` is the kit namespace — see `naming::is_id`.
+            if !crate::naming::is_id(&d.id) {
+                return Err(format!(
+                    "library: `{}` is not a usable id. An id is snake_case — lowercase letters, \
+                     digits and single underscores, starting with a letter — and `/` separates a kit \
+                     from a piece, as in `site/wall_corner`.",
+                    d.id
+                ));
+            }
+            // The lattice is **not** checked here: a cell is in range or not depending on the
+            // project's divisions-per-tile, which lives in `project.ron` and is not knowable from
+            // this file alone. `policy::layered_library` runs `validate_lattices` once both layers
+            // are parsed — it is the one loader, so there is no path on which the check is skipped.
             if let Some(j) = self.descriptors.iter().position(|o| o.id == d.id) {
                 if j != i {
                     return Err(format!(
@@ -67,6 +91,64 @@ impl Library {
                         d.id
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// **Every lattice against the project's divisions.**
+    ///
+    /// Separate from [`Self::validate`] because it needs a number `library.ron` does not carry: a
+    /// cell at `(5, 0, 0)` is in range on a 3 m wall and outside a 0.5 m crate, and which it is
+    /// depends on `project.ron`'s `divisions`. Called from `policy::layered_library`, the one place
+    /// both layers exist at once.
+    ///
+    /// Refuses on the same grounds the per-lattice check always did — an out-of-range cell is a
+    /// value nothing will ever read, a duplicate is two answers to one question — plus a ceiling on
+    /// the derived volume, since divisions are multiplied by a piece's span and a 10 m corridor at a
+    /// fine setting would otherwise build a lattice nobody can author or draw.
+    /// # The ceiling applies to every piece, authored or not
+    ///
+    /// This used to `continue` on `subgrid: None` — "says nothing about its inside, so there is
+    /// nothing to be wrong about" — which is true of the *cells* and false of the volume. A piece
+    /// gets divisions the moment anything asks for them, and the editor asks as soon as the row is
+    /// selected: it derives them to draw the grid, and `rebuild_detail` materialises a button and a
+    /// text node **per cell**. So the guard covered only the pieces that already had cells, which are
+    /// the pieces whose author had already survived drawing them.
+    ///
+    /// At the legal maximum `divisions: 8`, `site/wall` derives 48x40x8 — 15,360 cells, some 33,000 UI
+    /// entities on every `ImportState` change, and a `vec![false; 15_360]` SAT-tested against every
+    /// triangle in the mesh on every rescan. That is a project that should be refused at load, and it
+    /// was loading.
+    pub fn validate_lattices(&self, divisions: u32) -> Result<(), String> {
+        let ceiling = |d: &Descriptor, div: (u32, u32, u32)| -> Result<(), String> {
+            let volume = crate::descriptor::Subgrid::volume(div);
+            if volume > MAX_LATTICE_CELLS {
+                return Err(format!(
+                    "library: `{}` derives a {}x{}x{} lattice of {volume} cells, past the {MAX_LATTICE_CELLS} \
+                     a piece may have. Divisions are multiplied by a piece's span, so this is either \
+                     an oversized `extent` or a `divisions` set too fine for this kit.",
+                    d.id, div.0, div.1, div.2
+                ));
+            }
+            Ok(())
+        };
+        for d in &self.descriptors {
+            match (&d.subgrid, crate::descriptor::divisions(d, divisions)) {
+                // Authored cells. The divisions **must** derive — a cell index means nothing without
+                // them — so this is the one arm that propagates that failure.
+                (Some(grid), div) => {
+                    let div = div?;
+                    ceiling(d, div)?;
+                    grid.validate(&d.id, div)?;
+                }
+                // No cells yet, but the lattice above is what the editor will build the moment this
+                // row is selected.
+                (None, Ok(div)) => ceiling(d, div)?,
+                // No cells and no derivable lattice — a missing `extent.footprint` — so there is
+                // genuinely nothing here to bound. `Descriptor::resolve` is where that is reported;
+                // saying it again under a name that hides its cause helps nobody.
+                (None, Err(_)) => {}
             }
         }
         Ok(())
@@ -122,6 +204,29 @@ mod tests {
         let err = lib(vec![d("crate"), d("crate")]).validate().err().unwrap_or_default();
         assert!(err.contains("declared twice"), "{err}");
         assert!(err.contains("crate"), "must name the id: {err}");
+    }
+
+    /// **A piece with no cells yet is still bounded.** `validate_lattices` skipped `subgrid: None`,
+    /// so the ceiling covered only pieces that already had cells — and the editor derives and
+    /// materialises the lattice of whichever row is selected, authored or not.
+    #[test]
+    fn the_cell_ceiling_applies_to_a_piece_with_no_cells_yet() {
+        let mut wall = d("wall");
+        wall.extent = crate::descriptor::Extent {
+            footprint: Some((3.0, 0.5)),
+            height: Some(2.4),
+        };
+        assert_eq!(wall.subgrid, None, "the case is a piece nobody has authored");
+        // At the legal maximum this derives 48x40x8 = 15,360 cells.
+        let err = lib(vec![wall.clone()])
+            .validate_lattices(8)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("15360"), "must name the volume: {err}");
+        assert!(err.contains("wall"), "must name the piece: {err}");
+        // And the shipped setting is nowhere near it, which is the other half of the guard being
+        // useful rather than merely present.
+        assert!(lib(vec![wall]).validate_lattices(1).is_ok());
     }
 
     #[test]

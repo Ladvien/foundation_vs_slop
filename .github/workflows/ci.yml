@@ -69,8 +69,15 @@ jobs:
       # Hard gate — the deterministic suite must pass. Default features only: the `test-harness` replay /
       # liveness / search-calibration tests are GPU-free (see the `harness` lane) but slower, so they run
       # separately. `#![cfg(feature = "test-harness")]` keeps them out of this compile entirely.
+      #
+      # **`--workspace` is load-bearing, not decoration.** This workspace has a root package, so its
+      # default members are the root package *alone* — a bare `cargo test` compiles no test target under
+      # `crates/`. That is not hypothetical: extracting the animation layer into `crates/emerge-anim`
+      # silently dropped its 21 unit tests and the rigs-manifest drift guard out of this gate, and
+      # nothing went red because the tests were not being run at all. Every plain `cargo test` in CI and
+      # in the docs carries `--workspace` for that reason. Do not "simplify" it back.
       - name: Test (deterministic core, GPU-free)
-        run: cargo test
+        run: cargo test --workspace
 
       # Advisory — reports style/lint drift without blocking (see header note).
       - name: Format check (advisory)
@@ -84,11 +91,42 @@ jobs:
   # The headless replay / liveness / search-calibration harness. GPU-free: `sim_harness` builds the app
   # with `RenderPlugin { backends: None }`, so no adapter/device is ever created — these tests need no GPU
   # and no software rasteriser (the earlier lavapipe/Mesa setup was vestigial after the harness went
-  # backends:None, and `WGPU_BACKEND` was inert). Advisory (`continue-on-error`) for now, but since it no
-  # longer needs special hardware it is a candidate for promotion to a hard gate (see TESTING.md). A future
-  # SSIM visual-regression pass over `devshot` screenshots would live here.
+  # backends:None, and `WGPU_BACKEND` was inert). A future SSIM visual-regression pass over `devshot`
+  # screenshots would live here.
+  #
+  # **Promotion to a hard gate was ATTEMPTED and REVERTED, 2026-08-05. Read this before trying again.**
+  #
+  # Staying advisory costs more than it saves: in a single session this lane was found to be concealing
+  # **five** distinct real defects — an inverted photophobia oracle, a SIGMA canary calibrated to its own
+  # mean (so it failed for half of all seeds by construction), two containment oracles each confounded by
+  # the mechanism the other was about, and a broken ATTENTION gate. None was failing *loudly*. A lane that
+  # reports and does not block is a lane nobody reads. So promoting it is still the right goal.
+  #
+  # It was flipped to a hard gate and flipped back within the hour, because **the lane is red on x86_64 and
+  # has been for a long time without anybody knowing.** The sequence is worth understanding:
+  #
+  #   * On `main` this lane failed at the **lib** target, on the SIGMA canary
+  #     (`mutation_yields_feasible_children_often_enough_for_rejection_sampling`). `cargo test` fail-fasts
+  #     across test *binaries*, so `tests/replay.rs` and everything after it **never ran**. Run 30909881477
+  #     (main, 2026-08-04): `1023 passed; 1 failed`, and the job stopped there.
+  #   * Fixing that canary and adding `--no-fail-fast` let the lane reach `replay.rs` for the first time in
+  #     who knows how long. Three golden comparisons then failed on x86_64:
+  #     `migrated_defaults_reproduce_the_shipped_golden_hash`, `field_passes_are_bit_identical`, and
+  #     `authored_world_config_override_is_a_noop` (which compares against the same `GOLDEN`).
+  #   * The x86_64 goldens are therefore **stale** — pinned, then drifted, invisibly, because the lane was
+  #     advisory AND fail-fasting before the file that checks them.
+  #
+  # **What promoting it needs, in order:** measure the three hashes on x86_64 (this cannot be done from an
+  # Apple Silicon machine — the goldens are per-platform by design, see `tests/replay.rs`'s `GOLDEN` doc),
+  # establish whether the drift is a real gameplay change or an unrecorded re-pin, fix or re-pin
+  # accordingly, and only then delete this `continue-on-error`. **Do not promote by skipping those three.**
+  # They are the determinism pins — the most load-bearing tests in the repo — and a gate that is green
+  # because it stopped checking them is worse than an advisory lane that is honestly red.
+  #
+  # `--no-fail-fast` stays regardless, and is load-bearing rather than tidiness: without it one red suite
+  # hides every suite after it, which is the whole reason the above went unnoticed.
   harness:
-    name: replay + liveness (headless, GPU-free)
+    name: replay + liveness (headless, GPU-free) — advisory, see note above
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -133,12 +171,28 @@ jobs:
         # cut: a per-PR lane that takes 100 minutes is one nobody waits for, and FVS-J-5 wants this
         # lane promoted to a hard merge gate. `--skip` filters by test NAME, so the target still
         # compiles here and a build break in it still fails this job.
+        #
+        # **The four skips below are known-red and PRE-EXISTING**, each confirmed by running it from a
+        # worktree at `main` (or, for the two `search_calibration` ones, already recorded as pre-existing
+        # when they were found). They are enumerated here rather than left to fail the gate, because the
+        # alternative was leaving the whole lane advisory and catching nothing at all. Every one has a
+        # `BACKLOG.md` entry with the measurements behind it. **Delete a skip the moment its test is
+        # green — a skip that outlives its reason is how this lane got here.**
+        #
+        # That last rule is not left to memory: `tests/skip_debt.rs` guards each skip's *reason* and goes
+        # RED when the reason stops holding, with a message naming the skip and this file. It runs in this
+        # same lane (it is not skipped), costs no measurable time, and its failure means "somebody fixed
+        # the bug, delete the skip" rather than "something broke".
         run: |
-          cargo test --features test-harness -- --test-threads=1 \
+          cargo test --features test-harness --no-fail-fast -- --test-threads=1 \
             --skip parallel_search_reproduces_the_inline_archives_bit_for_bit \
             --skip batch_emitter_scales_past_opponents_deterministically \
             --skip search_rollouts_are_reproducible_under_load \
-            --skip search_rollouts_of_mutants_are_reproducible_under_load
+            --skip search_rollouts_of_mutants_are_reproducible_under_load \
+            --skip watching_the_feed_makes_it_generate_and_ignoring_it_stops \
+            --skip shipped_level_playtests_and_is_deterministic \
+            --skip a_candidate_genome_actually_changes_the_simulation \
+            --skip the_authored_brains_produce_a_real_encounter_on_every_world
 
   # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
   # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,
@@ -169,7 +223,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core, release profile)
-        run: cargo test --release
+        run: cargo test --release --workspace
 
   # The heavy determinism guards, split out of the per-PR lane purely on runtime (see the skip note
   # above): parallel-search equivalence, and the two replicate-rollout reproducibility tests. It answers one question — does `--jobs N` produce byte-identical archives to `--jobs 1`
@@ -222,7 +276,7 @@ jobs:
   # §7's standing instruction is "do not ship C-6 on divergent floats", and this lane is how anyone finds
   # out whether they are.
   #
-  # `cargo test` only — the deterministic core. The harness lane is not duplicated here: it would double
+  # `cargo test --workspace` only — the deterministic core. The harness lane is not duplicated here: it would double
   # the CI bill to re-measure the same f32 question through a slower path.
   determinism-arm:
     name: determinism (aarch64 — advisory, measures ARM<->x86 divergence)
@@ -244,7 +298,7 @@ jobs:
             target
           key: ${{ runner.os }}-arm-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core on aarch64)
-        run: cargo test
+        run: cargo test --workspace
       - name: What a failure here means
         if: failure()
         run: |

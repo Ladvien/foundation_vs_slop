@@ -279,6 +279,9 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 /// See `/mnt/codex_fs/game_assets/SCP_Characters/gltf/valkyrie_bevy_integration.md`.
 const FIGURINE_GLB: &str = "characters/valkyrie.glb";
 
+/// This creature's name in `assets/emerge/rigs.ron`, which is where its clip table lives.
+pub(crate) const RIG: &str = "valkyrie";
+
 /// Laser bolts spawn from this fixed offset in the unit's **rotated, unscaled** local frame:
 /// `laser::fire_laser` computes `unit.translation + unit.rotation * MUZZLE_OFFSET`. Deliberately
 /// **decoupled from the cosmetic `FIGURINE_SCALE`** — the muzzle's world position feeds the hashed sim
@@ -347,22 +350,12 @@ const SPAWN_SPIRAL: [(i32, i32); 13] = [
 
 /// glb animation indices in the 20-clip retargeted rig. **Load-bearing** — the Mixamo rifle retarget
 /// already reordered them once, so `tests/valkyrie_asset.rs` pins index → name against the asset.
-const CLIP_IDLE: usize = 0;
-const CLIP_IDLE_ALERT: usize = 1;
-const CLIP_AIM: usize = 3;
-const CLIP_FIRE: usize = 4;
-const CLIP_WALK: usize = 5;
-const CLIP_WALK_BACK: usize = 8;
-const CLIP_RUN: usize = 11;
-const CLIP_RUN_BACK: usize = 12;
 /// `valkyrie_strafe_l` (13) and `valkyrie_strafe_r` (14) are wired **by measured direction, not by
 /// name**: the rig faces glTF `+Z`, so the character's own right is local `−X` (`hand_r`, `foot_r` and
 /// `thigh_r` all sit at negative X in the bind pose), and clip 13's planted foot drives the body toward
 /// `−X` — i.e. clip 13 sidesteps to the character's RIGHT and clip 14 to its LEFT. The names are
 /// inverted in the source asset; wiring them by name would send units skating the wrong way on both
 /// sides. See the artist notes in `docs/artist_guide.md`.
-const CLIP_STRAFE_LEFTWARD: usize = 14;
-const CLIP_STRAFE_RIGHTWARD: usize = 13;
 
 /// `(duration s, phase offset, cycle distance world u)` for each gait clip, measured off
 /// `assets/characters/valkyrie.glb` and scaled by [`FIGURINE_SCALE`]:
@@ -380,14 +373,8 @@ const CLIP_STRAFE_RIGHTWARD: usize = 13;
 ///
 /// Speed correction from these numbers is §36.2.5, generalised from one clip to a blend by
 /// `anim::gait_cycles_per_sec`.
-const GAIT_WALK: (f32, f32, f32) = (1.417, 0.000, 1.388);
-const GAIT_RUN: (f32, f32, f32) = (0.750, -0.016, 2.135);
-const GAIT_WALK_BACK: (f32, f32, f32) = (1.458, -0.141, 1.538);
-const GAIT_RUN_BACK: (f32, f32, f32) = (0.583, -0.062, 1.185);
 /// Clip 14 (`valkyrie_strafe_r`), which travels to the character's left.
-const GAIT_STRAFE_LEFTWARD: (f32, f32, f32) = (0.583, 0.047, 1.259);
 /// Clip 13 (`valkyrie_strafe_l`), which travels to the character's right.
-const GAIT_STRAFE_RIGHTWARD: (f32, f32, f32) = (0.708, -0.031, 1.937);
 
 /// Mask group holding every bone below the waist. The aim/fire clips mask it out, so on those bones
 /// they contribute nothing and the locomotion mixture poses the legs alone.
@@ -479,52 +466,22 @@ pub(crate) fn build_valkyrie_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
-    let mut graph = AnimationGraph::new();
-    let root = graph.root;
-    let clip = |i: usize| {
-        assets.load::<AnimationClip>(GltfAssetLabel::Animation(i).from_asset(FIGURINE_GLB))
+    // The clip indices, the gait triples and the upper-body mask all come from
+    // `assets/emerge/rigs.ron` now. They used to be `CLIP_*`/`GAIT_*` constants here — measured off
+    // the GLB by hand, and unable to be re-checked without a code edit. See `crate::rigs`.
+    let rig = match manifest.rig(RIG) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return;
+        }
     };
-
-    // Order matters: these must line up with `anim::blend`'s `SLOT_*` constants.
-    let idle = graph.add_clip(clip(CLIP_IDLE), 1.0, root);
-    let idle_alert = graph.add_clip(clip(CLIP_IDLE_ALERT), 1.0, root);
-    let walk = graph.add_clip(clip(CLIP_WALK), 1.0, root);
-    let run = graph.add_clip(clip(CLIP_RUN), 1.0, root);
-    let walk_back = graph.add_clip(clip(CLIP_WALK_BACK), 1.0, root);
-    let run_back = graph.add_clip(clip(CLIP_RUN_BACK), 1.0, root);
-    let strafe_l = graph.add_clip(clip(CLIP_STRAFE_LEFTWARD), 1.0, root);
-    let strafe_r = graph.add_clip(clip(CLIP_STRAFE_RIGHTWARD), 1.0, root);
-    // The upper-body layer. The mask is populated from the live skeleton on the first attach.
-    let mask = 1 << MASK_LOWER_BODY;
-    let aim = graph.add_clip_with_mask(clip(CLIP_AIM), mask, 1.0, root);
-    let fire = graph.add_clip_with_mask(clip(CLIP_FIRE), mask, 1.0, root);
-
-    let slots: Arc<[anim::Slot]> = Arc::from([
-        anim::Slot::free(idle, 1.0),
-        anim::Slot::free(idle_alert, 1.0),
-        anim::Slot::gait(walk, GAIT_WALK.0, GAIT_WALK.1, GAIT_WALK.2),
-        anim::Slot::gait(run, GAIT_RUN.0, GAIT_RUN.1, GAIT_RUN.2),
-        anim::Slot::gait(walk_back, GAIT_WALK_BACK.0, GAIT_WALK_BACK.1, GAIT_WALK_BACK.2),
-        anim::Slot::gait(run_back, GAIT_RUN_BACK.0, GAIT_RUN_BACK.1, GAIT_RUN_BACK.2),
-        anim::Slot::gait(
-            strafe_l,
-            GAIT_STRAFE_LEFTWARD.0,
-            GAIT_STRAFE_LEFTWARD.1,
-            GAIT_STRAFE_LEFTWARD.2,
-        ),
-        anim::Slot::gait(
-            strafe_r,
-            GAIT_STRAFE_RIGHTWARD.0,
-            GAIT_STRAFE_RIGHTWARD.1,
-            GAIT_STRAFE_RIGHTWARD.2,
-        ),
-        anim::Slot::free(aim, 1.0),
-        anim::Slot::one_shot(fire, 1.0),
-    ]);
+    let (graph, slots) = crate::rigs::build(rig, &assets, &mut graphs);
     debug_assert_eq!(slots.len(), N_SLOTS);
 
-    commands.insert_resource(ValkyrieAnim { graph: graphs.add(graph), slots });
+    commands.insert_resource(ValkyrieAnim { graph, slots });
 }
 
 /// Populate [`MASK_LOWER_BODY`] from the first VALKYRIE skeleton to finish streaming in. Every figurine

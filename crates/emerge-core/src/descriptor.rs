@@ -65,6 +65,15 @@ pub struct Descriptor {
     /// Hints for the generator — where this belongs and what it belongs *with*. See [`Placement`].
     pub placement: Placement,
 
+    /// The tile's internal lattice, or `None` for a piece that says nothing about its inside.
+    ///
+    /// **An `Option` because a patch has to be able to say nothing.** [`Self::patched_with`] used a
+    /// bare `Subgrid` and treated `Subgrid::default()` as "unset" — but that is also the commonest
+    /// legal value, so a patch deliberately clearing a lattice was indistinguishable from a patch
+    /// with no opinion about it, and the second reading silently won. `None` is "no opinion";
+    /// `Some(Subgrid::default())` is "this piece has no marked cells".
+    pub subgrid: Option<Subgrid>,
+
     /// What this asset is and why it is set up the way it is, as data.
     ///
     /// Same argument as [`crate::map::Map::note`]: prose a serializer can lose is prose that gets
@@ -72,6 +81,300 @@ pub struct Descriptor {
     /// scaled, how `front` was derived — and today that survives only because nothing re-serializes
     /// the file.
     pub note: Option<String>,
+}
+
+/// **A tile's internal lattice** — the thing that lets two pieces agree on where they meet.
+///
+/// A descriptor's [`Extent::footprint`] says how much floor a piece takes; `grid::cells` rounds that
+/// up to whole cells. That is enough to stop two pieces overlapping and not enough for anything else:
+/// it cannot say that an L-shaped desk leaves its inner corner free, that a table's four sides each
+/// seat someone, or that this wall segment may only abut another wall segment. Those are three
+/// questions about *where inside the tile*, and the tile had no inside.
+///
+/// One lattice answers all three, because they are facets of the same fact — what is at (x, y, z)
+/// within this piece:
+///
+/// * [`SubCell::solid`] — occupancy. Clearance and flood fill can respect the shape rather than the
+///   bounding box.
+/// * [`SubCell::edge`] — what the cell presents to the neighbour. WFC matches a tile's face against
+///   the facing cells of the tile beside it, which is what makes a corridor meet a corridor.
+/// * [`SubCell::anchor`] — a role an interacting item may occupy. The regular-grid sibling of
+///   [`Offers::sockets`]: a socket is a hand-placed point, an anchor is a lattice cell.
+///
+/// # The divisions are not stored here
+///
+/// **A lattice knows its cells; the project knows how finely a tile divides.** `div` used to be a
+/// per-descriptor field defaulting to 3×3×3, which meant a 3 m wall had 1 m cells and a 0.5 m chair
+/// had 0.167 m ones — two faces that [`crate::adjacency::seam`] compares cell against cell and
+/// that could never mean the same thing. Merrell & Manocha's model synthesis is explicit about why
+/// that cannot work: the grid is three sets of parallel planes and *"all planes within each set are
+/// parallel and evenly spaced"*, so a spacing that varies per object is not a grid at all
+/// (Merrell & Manocha 2009, *Constraint-Based Model Synthesis*, §4.4).
+///
+/// So the spacing is one project-level number — [`crate::policy::Policy::divisions`] — and a piece's
+/// divisions are **derived** from its own size by [`divisions`]. The same paper names this exact
+/// remedy for objects that do not land on round multiples: *"the planes could be spaced more closely.
+/// If they are spaced twice as close, an object that was 1.5-plane spaces wide would become three
+/// planes wide"* (§4.5).
+///
+/// # Sparse, because most tiles have nothing to say
+///
+/// The shipped library is 43 mostly-rectangular props. Writing every cell would be thousands of rows
+/// of `solid: false` — so only cells that differ from open-and-unlabelled are written, and a piece
+/// with no lattice detail costs nothing at all.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Subgrid {
+    /// Only the cells that are not plain open space. See the note on sparseness.
+    pub cells: Vec<SubCell>,
+}
+
+/// **How finely a piece divides**, given the project's divisions-per-tile.
+///
+/// A subunit is a `grid::SNAP / per_tile` **cube**: each axis is the whole number of authoring cells
+/// the piece spans, times `per_tile`. So every piece in a project is measured against the same
+/// spacing on every axis, which is what makes an edge token on a 3 m wall mean the same thing as one
+/// on a 0.5 m chair.
+///
+/// # The piece as placed, not the mesh as measured
+///
+/// The height is `extent.height * align.stretch_y`, because that is how tall the piece **stands**.
+/// Reading `extent.height` alone made the same piece id derive a different lattice in two kits: the
+/// Site kit's wall is authored at 2.40 m and stretched 1.0, so five layers; `site_greybox`'s is a 1 m
+/// module stretched 2.4x, so it derived **two** — a lattice describing a piece a third of the height
+/// of the one actually in the world. Found by authoring the first real tokens, which is the only way
+/// it could have been found.
+///
+/// **`align.scale` is deliberately not applied**, and that is not an oversight. `stack::covers` — the
+/// floor reservation this lattice sits inside — uses the raw `extent.footprint`, so scaling the
+/// lattice alone would describe a piece of one size inside a reservation of another. `site/books`
+/// carries `scale: Some(0.6)` and is the one place that is observable today. The two should agree;
+/// making them agree is a change to what a footprint *means* and belongs on its own.
+///
+/// `grid::cells` never returns zero, so a decal with no height gets one layer rather than a
+/// degenerate lattice — no special case needed.
+///
+/// A missing `footprint` is refused by id rather than resolved to `(0, 0)`, the same call
+/// [`Descriptor::resolve`] makes and for the same reason: a zero lattice has no cells and every rule
+/// reading it would silently report success.
+pub fn divisions(d: &Descriptor, per_tile: u32) -> Result<(u32, u32, u32), String> {
+    let owner = &d.id;
+    if per_tile == 0 {
+        return Err(format!(
+            "`{owner}`: the project divides each tile 0 ways; an axis with no divisions has no cells"
+        ));
+    }
+    let (w, dep) = d.extent.footprint.ok_or_else(|| {
+        format!("`{owner}`: no `extent.footprint`, so its lattice cannot be derived")
+    })?;
+    // A decal may legitimately omit its height — `Descriptor::resolve` says so — and `grid::cells(0)`
+    // is one cell, so the lattice is one layer deep rather than empty.
+    let h = d.extent.height.unwrap_or(0.0) * d.align.stretch_y.unwrap_or(1.0);
+    let axis = |span: f32| crate::grid::cells(span).0 * per_tile;
+    Ok((axis(w), axis(h), axis(dep)))
+}
+
+/// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
+///
+/// Separate from [`Subgrid::rotated`] because the lattice no longer carries its own divisions: a
+/// caller that turns a tile needs both halves, and having to ask for both is what keeps them in step.
+pub fn rotate_div(div: (u32, u32, u32), quarter: u8) -> (u32, u32, u32) {
+    if quarter % 2 == 0 {
+        div
+    } else {
+        (div.2, div.1, div.0)
+    }
+}
+
+impl Subgrid {
+    /// How many cells the lattice has, if it were written out in full.
+    pub fn volume(div: (u32, u32, u32)) -> u32 {
+        div.0.saturating_mul(div.1).saturating_mul(div.2)
+    }
+
+    /// What is at `at`, or `None` for a cell nobody has said anything about.
+    ///
+    /// The one accessor that does **not** need the divisions: it searches what was written rather
+    /// than asking what could exist.
+    pub fn at(&self, at: (u32, u32, u32)) -> Option<&SubCell> {
+        self.cells.iter().find(|c| c.at == at)
+    }
+
+    /// Is `at` inside a lattice of `div`?
+    pub fn holds(at: (u32, u32, u32), div: (u32, u32, u32)) -> bool {
+        at.0 < div.0 && at.1 < div.1 && at.2 < div.2
+    }
+
+    /// The cell at `at`, created empty if nobody has written one yet.
+    ///
+    /// `None` when `at` is outside the lattice — a caller asking about a cell that cannot exist gets
+    /// an answer, not a row appended somewhere unreachable.
+    fn entry(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<&mut SubCell> {
+        if !Subgrid::holds(at, div) {
+            return None;
+        }
+        if let Some(i) = self.cells.iter().position(|c| c.at == at) {
+            return self.cells.get_mut(i);
+        }
+        self.cells.push(SubCell {
+            at,
+            ..SubCell::default()
+        });
+        self.cells.last_mut()
+    }
+
+    /// **Drop any cell that has gone back to saying nothing.**
+    ///
+    /// The sparse invariant is not decoration: an author who marks a cell solid and then unmarks it
+    /// must leave the file as it was, or every tile ever poked at accretes rows of `solid: false`
+    /// that mean exactly what absence means.
+    fn prune(&mut self) {
+        self.cells
+            .retain(|c| c.solid || c.edge.is_some() || c.anchor.is_some());
+    }
+
+    /// Toggle a cell's occupancy. Returns what it became, or `None` if `at` is outside.
+    pub fn toggle_solid(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<bool> {
+        let now = {
+            let cell = self.entry(at, div)?;
+            cell.solid = !cell.solid;
+            cell.solid
+        };
+        self.prune();
+        Some(now)
+    }
+
+    /// Mark a cell solid, whatever it was. Returns `None` if `at` is outside.
+    ///
+    /// Distinct from [`Self::toggle_solid`] because a mesh scan states a fact rather than flipping
+    /// one: running it twice must leave the same lattice, which a toggle would not.
+    pub fn set_solid(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<()> {
+        self.entry(at, div)?.solid = true;
+        self.prune();
+        Some(())
+    }
+
+    /// Set or clear a cell's edge label. An empty string clears it — the same keystroke that types a
+    /// token has to be able to take it back.
+    pub fn set_edge(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at, div)?;
+        cell.edge = (!token.trim().is_empty()).then(|| token.trim().to_owned());
+        self.prune();
+        Some(())
+    }
+
+    /// Set or clear a cell's anchor role.
+    pub fn set_anchor(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at, div)?;
+        cell.anchor = (!token.trim().is_empty()).then(|| token.trim().to_owned());
+        self.prune();
+        Some(())
+    }
+
+    /// Forget everything about a cell.
+    pub fn clear(&mut self, at: (u32, u32, u32)) {
+        self.cells.retain(|c| c.at != at);
+    }
+
+    /// **The lattice as it sits after `quarter` 90° turns about +Y.**
+    ///
+    /// A placement carries a yaw ([`crate::map::Placed::yaw`]) and the lattice does not know about
+    /// it, so anything comparing two placed tiles face to face has to turn one of them first.
+    /// Reading a face straight off the authored lattice would be silently wrong for every rotated
+    /// piece — which is exactly the piece a face-matching rule exists to check.
+    ///
+    /// The convention is the project's one forward rule: **a positive yaw turns +X toward −Z**
+    /// (`stack::covers`). So local +X becomes −Z, and a cell on the +X face lands on the −Z face:
+    ///
+    /// ```text
+    /// (x, y, z) -> (z, y, dx - 1 - x)      div (dx, dy, dz) -> (dz, dy, dx)
+    /// ```
+    ///
+    /// Four turns are the identity, which `rotating_four_times_is_the_identity` pins.
+    ///
+    /// `div` is the lattice's divisions **before** the turn; the turned divisions are
+    /// [`rotate_div`]'s job. Two calls rather than one because the lattice no longer carries its
+    /// divisions, and a caller forced to name both cannot let them drift apart.
+    ///
+    /// Lives here rather than beside the matcher because the schema owns its own transforms for the
+    /// same reason it owns its own edits: the sparse invariant is this type's to keep.
+    pub fn rotated(&self, quarter: u8, div: (u32, u32, u32)) -> Subgrid {
+        let mut out = self.clone();
+        let mut at_div = div;
+        for _ in 0..(quarter % 4) {
+            let (dx, dy, dz) = at_div;
+            out = Subgrid {
+                cells: out
+                    .cells
+                    .iter()
+                    .map(|c| SubCell {
+                        at: (c.at.2, c.at.1, dx.saturating_sub(1) - c.at.0.min(dx.saturating_sub(1))),
+                        ..c.clone()
+                    })
+                    .collect(),
+            };
+            at_div = (dz, dy, dx);
+        }
+        out
+    }
+
+    /// Refuse a lattice that cannot be true.
+    ///
+    /// Every rule here is one whose violation is silent: a zero division makes the lattice empty
+    /// while still claiming to have one, an out-of-range cell is a value nothing will ever read, and
+    /// a duplicate is two answers to one question with the first quietly winning.
+    pub fn validate(&self, owner: &str, div: (u32, u32, u32)) -> Result<(), String> {
+        let (dx, dy, dz) = div;
+        if dx == 0 || dy == 0 || dz == 0 {
+            return Err(format!(
+                "`{owner}`'s subgrid divides {dx}x{dy}x{dz}; an axis with no divisions has no cells"
+            ));
+        }
+        let mut seen: Vec<(u32, u32, u32)> = Vec::with_capacity(self.cells.len());
+        for c in &self.cells {
+            if c.at.0 >= dx || c.at.1 >= dy || c.at.2 >= dz {
+                return Err(format!(
+                    "`{owner}`'s subgrid cell {:?} is outside its {dx}x{dy}x{dz} lattice",
+                    c.at
+                ));
+            }
+            if seen.contains(&c.at) {
+                return Err(format!(
+                    "`{owner}`'s subgrid names cell {:?} twice — one cell, one answer",
+                    c.at
+                ));
+            }
+            seen.push(c.at);
+        }
+        Ok(())
+    }
+}
+
+/// One cell of a [`Subgrid`]. See that type for what the three facets are for.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SubCell {
+    /// Which cell, `(x, y, z)`, zero-based.
+    pub at: (u32, u32, u32),
+    /// Solid space, as rasterised from the mesh by [`crate::import::occupancy`].
+    ///
+    /// **Nothing reads this to decide anything, and that is a ruling rather than an omission.** It was
+    /// meant to refine `stack::covers` so clearance would respect a piece's shape instead of its
+    /// bounding box — `FVS-Q-9`, closed *no* on 2026-08-05 after being built and measured. At the
+    /// shipped `divisions: 1` a lattice-aware `covers` agrees with the bounding box 96% of the time,
+    /// because the props are mostly smaller than a few cells; resolution fine enough to hold a shape
+    /// needs `divisions: 3`, which makes a wall 810 cells. And `divisions` cannot be raised for this
+    /// alone, because it is one project-wide number precisely so that two faces are comparable — see
+    /// [`Subgrid`]. Coarse-for-matching and fine-for-clearance cannot be the same number.
+    ///
+    /// What it *is* for: the author's confirmation that the lattice lines up with the mesh. The editor
+    /// marks it with `rescan mesh` and draws it, which is how you see that a wall's lattice really does
+    /// fill the wall. `Descriptor::clearance` is the field that decides anything about space.
+    pub solid: bool,
+    /// What this cell presents to whatever is placed beside it. Matched face-to-face.
+    pub edge: Option<String>,
+    /// A role an interacting item may occupy here — `"diner"`, `"shelf-item"`.
+    pub anchor: Option<String>,
 }
 
 /// Where a piece belongs, for whatever is placing it. **Not a semantic axis.**
@@ -160,6 +463,120 @@ pub fn mount_label(mount: Option<&Mount>) -> String {
     }
 }
 
+/// **One of a tile's four horizontal faces**, in the vocabulary the lattice already uses.
+///
+/// `crate::adjacency::face` reads a face; [`Align::front`] names one; and cell picking will report
+/// the one a ray entered. Three things about the same four directions, so they are one type rather
+/// than three spellings of a quarter turn.
+///
+/// The world meaning is `crate::wfc`'s, which is `grammar::learn`'s step table: **North is −Z, East
+/// is +X, South is +Z, West is −X.**
+///
+/// # Why a face and not degrees
+///
+/// `front` was a yaw in degrees, and degrees can express things a tile cannot have. A front at 37°
+/// points at a corner: there is no column of cells there, so nothing can read it, and
+/// `adjacency::quarter_turns` already refuses off-square yaws for exactly that reason. Naming a face
+/// makes the quantisation part of the type instead of a rule some later caller forgets.
+///
+/// It is also lossless for the shipped data — every `front` in the repo is `90.0`, which is [`Self::East`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Face {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Face {
+    /// The yaw, in degrees, whose forward vector points out of this face.
+    ///
+    /// The engine convention is `forward = (sin yaw, cos yaw)`, so yaw 0 is +Z — [`Self::South`] —
+    /// and the quarter turns follow from there. This is what every reader that composes a facing
+    /// with a placement's yaw wants.
+    pub fn yaw_degrees(self) -> f32 {
+        match self {
+            Face::South => 0.0,
+            Face::East => 90.0,
+            Face::North => 180.0,
+            Face::West => 270.0,
+        }
+    }
+
+    /// The face a yaw points out of, to the nearest quarter turn.
+    ///
+    /// **Snapping is the point, not a loss.** `glb::front_detail` measures a continuous angle out of
+    /// centroid asymmetry, and that angle is evidence about which face is the front rather than a
+    /// facing in its own right — a chair modelled 3° off square still fronts +X. The importer shows
+    /// the raw measurement beside this so an author can overrule a borderline call.
+    pub fn from_yaw(deg: f32) -> Face {
+        if !deg.is_finite() {
+            return Face::South;
+        }
+        match (deg / 90.0).round().rem_euclid(4.0) as u8 {
+            1 => Face::East,
+            2 => Face::North,
+            3 => Face::West,
+            _ => Face::South,
+        }
+    }
+
+    /// This face as [`crate::wfc`]'s edge index, so a front and a lattice face are the same four
+    /// numbers to everything downstream.
+    pub fn dir(self) -> crate::placement::ir::Dir {
+        match self {
+            Face::North => crate::wfc::N,
+            Face::East => crate::wfc::E,
+            Face::South => crate::wfc::S,
+            Face::West => crate::wfc::W,
+        }
+    }
+
+    /// The face opposite this one.
+    pub fn opposite(self) -> Face {
+        match self {
+            Face::North => Face::South,
+            Face::East => Face::West,
+            Face::South => Face::North,
+            Face::West => Face::East,
+        }
+    }
+
+    /// How an author reads it, matching `adjacency`'s fault messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Face::North => "N",
+            Face::East => "E",
+            Face::South => "S",
+            Face::West => "W",
+        }
+    }
+}
+
+/// **[`Align::rotate`] as quarter turns**, or a refusal naming the piece and the angle.
+///
+/// The same rule `adjacency::quarter_turns` holds for a placement's yaw, for the same reason: a tile
+/// is square to the world, so a rotation that is not a quarter turn leaves it with no face any rule
+/// can read. Refused rather than rounded — rounding would silently store an orientation the author
+/// did not ask for, and the mesh would render at one angle while every measurement described another.
+pub fn quarter_turns_xyz(rotate: (i32, i32, i32), owner: &str) -> Result<(u8, u8, u8), String> {
+    let axis = |deg: i32, name: &str| -> Result<u8, String> {
+        if deg % 90 != 0 {
+            return Err(format!(
+                "`{owner}`'s rotation is {deg} degrees about {name}; a tile only sits square to the \
+                 world, so a rotation must be a multiple of 90"
+            ));
+        }
+        Ok((deg.rem_euclid(360) / 90) as u8)
+    };
+    Ok((
+        axis(rotate.0, "X")?,
+        axis(rotate.1, "Y")?,
+        axis(rotate.2, "Z")?,
+    ))
+}
+
 /// Corrections for what the artist got wrong. Every one is measured, never dialled by eye — the kit's
 /// own doc says so of `scale`, and the importer exists to make that true of the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -181,13 +598,36 @@ pub struct Align {
     /// Local XZ offset of the mesh's bbox centre from its origin. Placement reasons about a footprint
     /// symmetric about the origin, so an off-centre mesh seated against a wall pokes through it.
     pub pivot: Option<(f32, f32)>,
-    /// Degrees to add to an authored yaw to reach the engine convention (`forward = (sin, cos)`).
+    /// **A default rotation for a mesh authored the wrong way up**, in degrees per axis, applied X
+    /// then Y then Z.
+    ///
+    /// Every value is a multiple of 90 — [`quarter_turns_xyz`] refuses anything else. A tile's
+    /// lattice, its faces and its footprint are all square to the world; a mesh dropped in at 37°
+    /// has no honest extent, so the schema cannot express one.
+    ///
+    /// # The extent stored beside this is already rotated
+    ///
+    /// **This is a render instruction, not a measurement correction.** The importer measures the
+    /// mesh, applies this rotation to the bounds ([`crate::glb::Measured::rotated`]), and writes the
+    /// *rotated* `extent`, `pivot` and `y_offset`. So every reader of `extent` — `stack`, `fill`,
+    /// `thumbs`, [`divisions`] — sees the piece as it will stand in the world, and none of them
+    /// needs to know this field exists.
+    ///
+    /// The cost of that choice is an invariant a file can break: editing `rotate` by hand leaves
+    /// `extent` describing the old orientation, and nothing downstream can tell. Change it through
+    /// the editor, which re-measures.
+    pub rotate: Option<(i32, i32, i32)>,
+    /// **Which of the mesh's own faces is its front**, in its local space.
+    ///
+    /// Composed with a placement's yaw by whoever needs a world facing:
+    /// `placement.yaw + front.yaw_degrees()`. See [`Face`] for why this is a face rather than the
+    /// arbitrary angle it used to be.
     ///
     /// `None` means *the mesh is symmetric and has no front*, which is a different claim from
-    /// `Some(0.0)`. The kit records that distinction deliberately: a stool measures symmetric to
-    /// within a centimetre, and "asserting a facing on a stool would be asserting a fact about the art
-    /// that is not true."
-    pub front: Option<f32>,
+    /// `Some(Face::South)`. The kit records that distinction deliberately: a stool measures symmetric
+    /// to within a centimetre, and "asserting a facing on a stool would be asserting a fact about the
+    /// art that is not true."
+    pub front: Option<Face>,
 }
 
 /// How much room it takes. Metres.
@@ -326,7 +766,7 @@ pub struct Resolved {
     pub stretch_y: Option<f32>,
     pub y_offset: f32,
     pub pivot: (f32, f32),
-    pub front: Option<f32>,
+    pub front: Option<Face>,
     pub footprint: (f32, f32),
     pub height: f32,
     pub mount: Mount,
@@ -356,6 +796,7 @@ impl Descriptor {
                 stretch_y: patch.align.stretch_y.or(self.align.stretch_y),
                 y_offset: patch.align.y_offset.or(self.align.y_offset),
                 pivot: patch.align.pivot.or(self.align.pivot),
+                rotate: patch.align.rotate.or(self.align.rotate),
                 front: patch.align.front.or(self.align.front),
             },
             extent: Extent {
@@ -371,6 +812,10 @@ impl Descriptor {
             kind: pick(&self.kind, &patch.kind),
             effects: pick(&self.effects, &patch.effects),
             look: pick(&self.look, &patch.look),
+            // A patch that states a lattice replaces it, on the same rule the lists follow: an
+            // append could not remove a cell. `None` is the patch saying nothing — which is a
+            // different claim from `Some(Subgrid::default())`, the patch clearing every cell.
+            subgrid: patch.subgrid.clone().or_else(|| self.subgrid.clone()),
             placement: Placement {
                 rooms: pick(&self.placement.rooms, &patch.placement.rooms),
                 group: patch.placement.group.clone().or_else(|| self.placement.group.clone()),
@@ -379,6 +824,29 @@ impl Descriptor {
             // needs `note: Some("")` — deliberate, because a note is somebody's reasoning and losing
             // it should take an act.
             note: patch.note.clone().or_else(|| self.note.clone()),
+        }
+    }
+
+    /// **The lattice to write into**, created empty if this is the first thing said about it.
+    ///
+    /// Pair every batch of edits with [`Self::settle_lattice`], or a piece whose last cell was
+    /// cleared keeps an empty lattice where it used to have nothing.
+    pub fn lattice_mut(&mut self) -> &mut Subgrid {
+        self.subgrid.get_or_insert_with(Subgrid::default)
+    }
+
+    /// **Drop a lattice that has gone back to saying nothing.**
+    ///
+    /// `Subgrid::prune` keeps the *cells* sparse; this keeps the *field* sparse, and it is the same
+    /// argument one level up: a piece an author poked at and undid must leave the file as it was.
+    ///
+    /// `None` and `Some(Subgrid::default())` are only interchangeable **here**, in a base
+    /// descriptor, where both can mean nothing but "no cells". In a patch they are two different
+    /// claims — silence versus "clear them" — which is why [`Self::patched_with`] distinguishes
+    /// them and this does not.
+    pub fn settle_lattice(&mut self) {
+        if self.subgrid.as_ref().is_some_and(|g| g.cells.is_empty()) {
+            self.subgrid = None;
         }
     }
 
@@ -590,7 +1058,7 @@ mod tests {
         let patch = Descriptor {
             id: String::new(),
             align: Align {
-                front: Some(90.0),
+                front: Some(Face::East),
                 ..Default::default()
             },
             ..Default::default()
@@ -599,7 +1067,7 @@ mod tests {
         assert_eq!(merged.id, "crate", "an empty id inherits");
         assert_eq!(merged.mesh.as_deref(), Some("ozea/crate.glb"));
         assert_eq!(merged.extent.footprint, Some((0.6, 0.6)));
-        assert_eq!(merged.align.front, Some(90.0), "the patch wins where it speaks");
+        assert_eq!(merged.align.front, Some(Face::East), "the patch wins where it speaks");
     }
 
     /// Replace, not append — so a patch can take a tag away. An append-only list needs a second
@@ -654,5 +1122,640 @@ mod tests {
             .expect("serializes");
         let back: Descriptor = ron::from_str(&text).expect("parses");
         assert_eq!(d, back);
+    }
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::*;
+
+    /// The engine convention is `forward = (sin yaw, cos yaw)`, so yaw 0 points at +Z — which is
+    /// South in `wfc`'s naming. Everything else follows, and getting this backwards would turn every
+    /// seat in the game a quarter turn.
+    #[test]
+    fn a_faces_yaw_points_out_of_it() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            let yaw = face.yaw_degrees().to_radians();
+            let (x, z) = (yaw.sin(), yaw.cos());
+            let want = match face {
+                Face::North => (0.0, -1.0),
+                Face::East => (1.0, 0.0),
+                Face::South => (0.0, 1.0),
+                Face::West => (-1.0, 0.0),
+            };
+            assert!(
+                (x - want.0).abs() < 1e-5 && (z - want.1).abs() < 1e-5,
+                "{}: forward is ({x:.3}, {z:.3}), wanted {want:?}",
+                face.label()
+            );
+        }
+    }
+
+    /// Round trip, and the snap: an angle within an eighth turn of a face resolves to it.
+    #[test]
+    fn an_angle_snaps_to_the_face_it_is_nearest() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            assert_eq!(Face::from_yaw(face.yaw_degrees()), face);
+            // Off square by up to 44 degrees either way, and wrapped a full turn, still the same face.
+            for drift in [-44.0, -1.0, 1.0, 44.0] {
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift), face, "{drift}");
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift + 360.0), face);
+                assert_eq!(Face::from_yaw(face.yaw_degrees() + drift - 360.0), face);
+            }
+        }
+        // The shipped value, which is what the four hand-measured fronts were written as.
+        assert_eq!(Face::from_yaw(90.0), Face::East);
+    }
+
+    /// A yaw that is not a number cannot pick a face, and picking one at random would be a facing
+    /// nobody authored. South is the identity — the zero-degree face — so it is the honest answer.
+    #[test]
+    fn a_yaw_that_is_not_an_angle_falls_to_the_identity_face() {
+        assert_eq!(Face::from_yaw(f32::NAN), Face::South);
+        assert_eq!(Face::South.yaw_degrees(), 0.0);
+    }
+
+    #[test]
+    fn opposite_is_its_own_inverse_and_never_itself() {
+        for face in [Face::North, Face::East, Face::South, Face::West] {
+            assert_eq!(face.opposite().opposite(), face);
+            assert_ne!(face.opposite(), face);
+        }
+    }
+
+    /// A front and a lattice face are the same four numbers, so a piece's front can be used to read
+    /// the cells it presents without a second mapping in between.
+    #[test]
+    fn a_face_is_the_same_direction_the_lattice_uses() {
+        assert_eq!(Face::North.dir(), crate::wfc::N);
+        assert_eq!(Face::East.dir(), crate::wfc::E);
+        assert_eq!(Face::South.dir(), crate::wfc::S);
+        assert_eq!(Face::West.dir(), crate::wfc::W);
+    }
+
+    /// A face survives the file it is written in.
+    #[test]
+    fn a_front_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "chair".into(),
+            align: Align {
+                front: Some(Face::East),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(text.contains("front: Some(East)"), "{text}");
+        let after: Descriptor = ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, after);
+    }
+}
+
+#[cfg(test)]
+mod subgrid_tests {
+    use super::*;
+
+    fn grid(cells: Vec<SubCell>) -> Subgrid {
+        Subgrid { cells }
+    }
+
+    fn cell(at: (u32, u32, u32)) -> SubCell {
+        SubCell {
+            at,
+            ..SubCell::default()
+        }
+    }
+
+    const D3: (u32, u32, u32) = (3, 3, 3);
+
+    /// A descriptor of exactly this size, unstretched — the shape most of these tests want.
+    fn sized(w: f32, h: f32, d: f32) -> Descriptor {
+        Descriptor {
+            id: "x".into(),
+            extent: Extent {
+                footprint: Some((w, d)),
+                height: Some(h),
+            },
+            ..Descriptor::default()
+        }
+    }
+
+    /// The default is the whole point of the feature being cheap: a piece that says nothing about its
+    /// inside costs no rows at all.
+    #[test]
+    fn a_tile_says_nothing_about_its_inside_by_default() {
+        let g = Subgrid::default();
+        assert_eq!(Subgrid::volume(D3), 27);
+        assert!(g.cells.is_empty());
+        assert!(g.validate("x", D3).is_ok());
+    }
+
+    /// All three facets on one cell — the thing this schema exists to allow.
+    #[test]
+    fn one_cell_can_be_solid_and_an_edge_and_an_anchor() {
+        let c = SubCell {
+            at: (2, 0, 1),
+            solid: true,
+            edge: Some("wall".into()),
+            anchor: Some("diner".into()),
+        };
+        let g = grid(vec![c.clone()]);
+        assert!(g.validate("table", D3).is_ok());
+        let got = g.at((2, 0, 1)).unwrap_or_else(|| panic!("no cell"));
+        assert_eq!(got, &c);
+        assert!(g.at((0, 0, 0)).is_none(), "unwritten cells are absent, not default rows");
+    }
+
+    #[test]
+    fn a_cell_outside_the_lattice_is_refused() {
+        let e = grid(vec![cell((3, 0, 0))])
+            .validate("desk", D3)
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("outside"), "{e}");
+    }
+
+    #[test]
+    fn naming_one_cell_twice_is_refused() {
+        let e = grid(vec![cell((1, 1, 1)), cell((1, 1, 1))])
+            .validate("desk", D3)
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("twice"), "{e}");
+    }
+
+    #[test]
+    fn an_axis_with_no_divisions_is_refused() {
+        let e = grid(vec![])
+            .validate("desk", (3, 0, 3))
+            .err()
+            .unwrap_or_else(|| panic!("accepted"));
+        assert!(e.contains("no cells"), "{e}");
+    }
+
+    /// A lattice survives the file, which is what makes it authorable at all.
+    #[test]
+    fn a_lattice_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "desk".into(),
+            subgrid: Some(grid(vec![SubCell {
+                at: (0, 0, 2),
+                solid: true,
+                edge: Some("wall".into()),
+                anchor: None,
+            }])),
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let after: Descriptor = ron::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, after);
+    }
+
+    /// An old library has no `subgrid` key at all and must still parse — the field defaults.
+    #[test]
+    fn a_descriptor_written_before_the_lattice_still_parses() {
+        let d: Descriptor = ron::from_str("(id: \"crate\")").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(d.subgrid, None);
+    }
+
+    /// **The point of deriving divisions.** Two pieces of the same height present faces of the same
+    /// length, so their edge tokens can be compared; two of different heights do not, and refusing is
+    /// the honest answer rather than matching on a prefix.
+    ///
+    /// The numbers are the ones the plan was approved on, at the shipped `divisions: 1`.
+    #[test]
+    fn a_pieces_divisions_come_from_its_own_size() {
+        let at = |d: Descriptor| divisions(&d, 1).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(at(sized(0.5, 0.5, 0.5)), (1, 1, 1), "crate");
+        assert_eq!(at(sized(0.5, 0.9, 0.5)), (1, 2, 1), "chair");
+        assert_eq!(at(sized(1.0, 0.75, 1.0)), (2, 2, 2), "table");
+        assert_eq!(at(sized(3.0, 2.4, 0.5)), (6, 5, 1), "wall");
+        assert_eq!(at(sized(1.0, 2.4, 0.5)), (2, 5, 1), "doorway");
+
+        // A wall and a doorway are both 2.4 m, so both present five rows and can agree.
+        let wall = at(sized(3.0, 2.4, 0.5));
+        let doorway = at(sized(1.0, 2.4, 0.5));
+        assert_eq!(wall.1, doorway.1);
+        // A crate is not, and must not silently match the bottom of a wall.
+        assert_ne!(at(sized(0.5, 0.5, 0.5)).1, wall.1);
+    }
+
+    /// Raising the project's number refines every axis of every piece by the same factor — the
+    /// remedy Merrell & Manocha §4.5 names for objects that do not land on round multiples.
+    #[test]
+    fn dividing_a_tile_more_finely_refines_every_piece_equally() {
+        let wall = sized(3.0, 2.4, 0.5);
+        let one = divisions(&wall, 1).unwrap_or_else(|e| panic!("{e}"));
+        let three = divisions(&wall, 3).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(three, (one.0 * 3, one.1 * 3, one.2 * 3));
+    }
+
+    /// A decal may omit its height (`Descriptor::resolve` says so) and still gets one layer rather
+    /// than a degenerate lattice — `grid::cells` never returns zero.
+    #[test]
+    fn a_piece_with_no_height_still_has_one_layer() {
+        let mut d = sized(1.0, 0.0, 1.0);
+        d.extent.height = None;
+        assert_eq!(divisions(&d, 1).unwrap_or_else(|err| panic!("{err}")), (2, 1, 2));
+    }
+
+    /// No footprint is refused by id, not resolved to a zero lattice that every rule reads as fine.
+    #[test]
+    fn a_piece_with_no_footprint_is_refused_by_name() {
+        let d = Descriptor {
+            id: "mystery".into(),
+            ..Descriptor::default()
+        };
+        let err = divisions(&d, 1).err().unwrap_or_default();
+        assert!(err.contains("mystery") && err.contains("footprint"), "{err}");
+    }
+
+    /// Zero divisions-per-tile is refused here too, so no caller can build a lattice with no cells.
+    #[test]
+    fn a_project_that_divides_a_tile_zero_ways_is_refused() {
+        let err = divisions(&sized(1.0, 1.0, 1.0), 0).err().unwrap_or_default();
+        assert!(err.contains("no cells"), "{err}");
+    }
+
+    /// A quarter turn swaps x and z; two turns are back to square; four are the identity.
+    #[test]
+    fn turning_swaps_the_x_and_z_divisions() {
+        let div = (6, 5, 1);
+        assert_eq!(rotate_div(div, 0), div);
+        assert_eq!(rotate_div(div, 1), (1, 5, 6));
+        assert_eq!(rotate_div(div, 2), div);
+        assert_eq!(rotate_div(div, 3), (1, 5, 6));
+        assert_eq!(rotate_div(div, 4), div);
+    }
+}
+
+#[cfg(test)]
+mod subgrid_edit_tests {
+    use super::*;
+
+    const D3: (u32, u32, u32) = (3, 3, 3);
+
+    #[test]
+    fn toggling_a_cell_solid_and_back_leaves_no_trace() {
+        let mut g = Subgrid::default();
+        assert_eq!(g.toggle_solid((1, 0, 1), D3), Some(true));
+        assert_eq!(g.cells.len(), 1);
+        assert_eq!(g.toggle_solid((1, 0, 1), D3), Some(false));
+        // The sparse invariant: a cell that says nothing is absent, not a row of `solid: false`.
+        assert!(g.cells.is_empty(), "an unmarked cell must leave no row behind");
+    }
+
+    /// A mesh scan states a fact rather than flipping one, so running it twice is running it once.
+    #[test]
+    fn marking_solid_is_idempotent_where_toggling_is_not() {
+        let mut g = Subgrid::default();
+        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
+        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
+        assert_eq!(g.cells.len(), 1);
+        assert!(g.at((1, 0, 1)).is_some_and(|c| c.solid), "a second scan must not unmark it");
+    }
+
+    #[test]
+    fn a_cell_outside_the_lattice_cannot_be_written() {
+        let mut g = Subgrid::default();
+        assert_eq!(g.toggle_solid((3, 0, 0), D3), None);
+        assert_eq!(g.set_edge((0, 9, 0), D3, "wall"), None);
+        assert!(g.cells.is_empty(), "an out-of-range write must not append anything");
+    }
+
+    #[test]
+    fn tokens_set_and_clear_on_the_same_cell() {
+        let mut g = Subgrid::default();
+        g.set_edge((0, 0, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), D3, "diner").unwrap_or_else(|| panic!("in range"));
+        let c = g.at((0, 0, 2)).unwrap_or_else(|| panic!("written"));
+        assert_eq!(c.edge.as_deref(), Some("wall"));
+        assert_eq!(c.anchor.as_deref(), Some("diner"));
+
+        // Emptying both takes the row with it, since solid was never set.
+        g.set_edge((0, 0, 2), D3, "").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), D3, "  ").unwrap_or_else(|| panic!("in range"));
+        assert!(g.cells.is_empty());
+    }
+
+    /// A cell keeps whichever facets are still set — clearing one must not drop the others.
+    #[test]
+    fn clearing_one_facet_keeps_the_rest() {
+        let mut g = Subgrid::default();
+        g.toggle_solid((1, 1, 1), D3);
+        g.set_edge((1, 1, 1), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((1, 1, 1), D3, "").unwrap_or_else(|| panic!("in range"));
+        let c = g.at((1, 1, 1)).unwrap_or_else(|| panic!("still solid"));
+        assert!(c.solid);
+        assert!(c.edge.is_none());
+    }
+
+    #[test]
+    fn clear_forgets_the_whole_cell() {
+        let mut g = Subgrid::default();
+        g.toggle_solid((2, 2, 2), D3);
+        g.set_anchor((2, 2, 2), D3, "seat").unwrap_or_else(|| panic!("in range"));
+        g.clear((2, 2, 2));
+        assert!(g.at((2, 2, 2)).is_none());
+        assert!(g.validate("x", D3).is_ok());
+    }
+
+    /// A patch saying nothing about the lattice inherits it; a patch stating one replaces it, and an
+    /// **empty** stated lattice clears every cell. Those last two were indistinguishable before
+    /// `subgrid` became an `Option`, and the inherit reading silently won.
+    #[test]
+    fn a_patch_can_state_an_empty_lattice_without_it_meaning_silence() {
+        let base = Descriptor {
+            id: "wall".into(),
+            subgrid: Some(Subgrid {
+                cells: vec![SubCell {
+                    at: (0, 0, 0),
+                    solid: true,
+                    ..SubCell::default()
+                }],
+            }),
+            ..Descriptor::default()
+        };
+
+        let silent = base.patched_with(&Descriptor::default());
+        assert_eq!(silent.subgrid, base.subgrid, "no opinion inherits");
+
+        let cleared = base.patched_with(&Descriptor {
+            subgrid: Some(Subgrid::default()),
+            ..Descriptor::default()
+        });
+        assert_eq!(
+            cleared.subgrid,
+            Some(Subgrid::default()),
+            "an explicitly empty lattice clears the cells rather than inheriting them"
+        );
+    }
+}
+
+/// The rotation field: what it accepts, what it refuses, and how it layers.
+#[cfg(test)]
+mod rotate_tests {
+    use super::*;
+
+    #[test]
+    fn a_rotation_is_read_as_quarter_turns() {
+        assert_eq!(quarter_turns_xyz((0, 0, 0), "x"), Ok((0, 0, 0)));
+        assert_eq!(quarter_turns_xyz((90, 180, 270), "x"), Ok((1, 2, 3)));
+        // Wrapped either way — an author writing -90 means three quarters, not an error.
+        assert_eq!(quarter_turns_xyz((-90, 360, 720), "x"), Ok((3, 0, 0)));
+    }
+
+    /// Refused rather than rounded. Rounding would draw the mesh at one angle while every
+    /// measurement beside it described another.
+    #[test]
+    fn a_rotation_that_is_not_a_quarter_turn_is_refused_by_name() {
+        let err = quarter_turns_xyz((0, 45, 0), "lamp").err().unwrap_or_default();
+        assert!(err.contains("lamp") && err.contains("45") && err.contains("about Y"), "{err}");
+    }
+
+    /// A patch may state a rotation, and silence inherits — the rule every other `Align` field holds.
+    #[test]
+    fn a_rotation_layers_like_every_other_correction() {
+        let base = Descriptor {
+            id: "door".into(),
+            align: Align {
+                rotate: Some((90, 0, 0)),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        assert_eq!(
+            base.patched_with(&Descriptor::default()).align.rotate,
+            Some((90, 0, 0)),
+            "silence inherits"
+        );
+        assert_eq!(
+            base.patched_with(&Descriptor {
+                align: Align {
+                    rotate: Some((0, 90, 0)),
+                    ..Align::default()
+                },
+                ..Descriptor::default()
+            })
+            .align
+            .rotate,
+            Some((0, 90, 0)),
+            "a stated rotation wins"
+        );
+    }
+
+    /// A rotation survives the file, and reads as degrees rather than as a count nobody can picture.
+    #[test]
+    fn a_rotation_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "door".into(),
+            align: Align {
+                rotate: Some((90, 0, 180)),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(text.contains("rotate: Some((90, 0, 180))"), "{text}");
+        assert_eq!(
+            ron::from_str::<Descriptor>(&text).unwrap_or_else(|e| panic!("{e}")),
+            before
+        );
+    }
+}
+
+/// **Which lattice cell a ray enters, and through which face.**
+///
+/// The lattice is an axis-aligned box from `origin` spanning `size`, divided `div` ways per axis.
+/// `dir` need not be normalised. Returns `None` when the ray misses, or when it starts inside the box
+/// — a camera inside the piece it is authoring has no "entry" to report, and guessing one would put
+/// the cursor on a face the author cannot see.
+///
+/// # What the face means, and what it does not
+///
+/// The face is **where you are looking from**, which is what makes a token's audience legible: an
+/// author putting `seam` on a cell wants to know which neighbour will read it. It is not a new place
+/// to store anything — [`SubCell::edge`] is one token per *cell*, and
+/// [`crate::adjacency::face`] collects the tokens of whichever cells lie on the face being compared.
+/// A corner cell is on two faces and presents the same token to both, by design.
+///
+/// `None` for the face means the ray came in through the top or the bottom. Those are real surfaces
+/// to click on — you pick cells from above constantly — but they are not faces any rule reads, since
+/// adjacency is horizontal. Saying `None` is more honest than naming a direction that matches nothing.
+///
+/// Slab method: clip the ray against each pair of parallel planes and keep the latest entry. The axis
+/// that produced that entry is the face it came through.
+pub fn pick_cell(
+    ray_origin: [f32; 3],
+    dir: [f32; 3],
+    origin: [f32; 3],
+    size: [f32; 3],
+    div: (u32, u32, u32),
+) -> Option<((u32, u32, u32), Option<Face>)> {
+    let n = [div.0, div.1, div.2];
+    if n.iter().any(|d| *d == 0) || size.iter().any(|s| *s <= 0.0) {
+        return None;
+    }
+    if ray_origin.iter().chain(dir.iter()).any(|v| !v.is_finite()) {
+        return None;
+    }
+
+    let mut t_enter = f32::NEG_INFINITY;
+    let mut t_exit = f32::INFINITY;
+    // Which axis let the ray in last, and from which side. `None` until a slab actually bounds it —
+    // a ray parallel to every axis but one still has a face.
+    let mut entry: Option<(usize, bool)> = None;
+
+    for a in 0..3 {
+        let (lo, hi) = (origin[a], origin[a] + size[a]);
+        if dir[a].abs() < 1e-9 {
+            // Parallel to this slab: inside it forever, or outside it forever.
+            if ray_origin[a] < lo || ray_origin[a] > hi {
+                return None;
+            }
+            continue;
+        }
+        let (mut t1, mut t2) = ((lo - ray_origin[a]) / dir[a], (hi - ray_origin[a]) / dir[a]);
+        // `from_low` tracks which plane t1 is, before the swap loses that.
+        let from_low = t1 <= t2;
+        if !from_low {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        if t1 > t_enter {
+            t_enter = t1;
+            entry = Some((a, from_low));
+        }
+        t_exit = t_exit.min(t2);
+        if t_enter > t_exit {
+            return None;
+        }
+    }
+
+    // Behind the camera, or starting inside. Both are "no entry face to report".
+    if t_enter <= 0.0 {
+        return None;
+    }
+
+    let hit = [
+        ray_origin[0] + dir[0] * t_enter,
+        ray_origin[1] + dir[1] * t_enter,
+        ray_origin[2] + dir[2] * t_enter,
+    ];
+    let mut cell = [0u32; 3];
+    for a in 0..3 {
+        let frac = (hit[a] - origin[a]) / size[a];
+        // Clamped rather than refused: the entry point sits exactly on a boundary by construction, and
+        // floating point puts it a hair outside about half the time.
+        cell[a] = ((frac * n[a] as f32) as i64).clamp(0, n[a] as i64 - 1) as u32;
+    }
+
+    let face = entry.and_then(|(axis, from_low)| match (axis, from_low) {
+        // Entering through the low-X plane means looking at the piece's WEST face.
+        (0, true) => Some(Face::West),
+        (0, false) => Some(Face::East),
+        // North is −Z, so the low-Z plane is the north face.
+        (2, true) => Some(Face::North),
+        (2, false) => Some(Face::South),
+        // Top or bottom: a surface, but not a face adjacency reads.
+        _ => None,
+    });
+    Some(((cell[0], cell[1], cell[2]), face))
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    const ORIGIN: [f32; 3] = [0.0, 0.0, 0.0];
+    const SIZE: [f32; 3] = [3.0, 2.4, 0.5];
+    /// The shipped wall's lattice.
+    const DIV: (u32, u32, u32) = (6, 5, 1);
+
+    /// Looking at the wall from +X hits its EAST face and the last x cell.
+    #[test]
+    fn a_ray_from_the_east_reports_the_east_face() {
+        let got = pick_cell([10.0, 1.2, 0.25], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((x, _, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(x, DIV.0 - 1, "the near column, not the far one");
+        assert_eq!(face, Some(Face::East));
+    }
+
+    /// And from −X, the west face and cell zero. The pair together is the check that the sign of the
+    /// slab is not inverted — one of them alone would pass either way.
+    #[test]
+    fn a_ray_from_the_west_reports_the_west_face() {
+        let got = pick_cell([-10.0, 1.2, 0.25], [1.0, 0.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((x, _, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(x, 0);
+        assert_eq!(face, Some(Face::West));
+    }
+
+    /// North is −Z and South is +Z, matching `crate::wfc`. Getting this backwards would put every
+    /// token on the wrong side of every wall.
+    #[test]
+    fn the_z_faces_follow_the_projects_own_compass() {
+        let from_north = pick_cell([1.5, 1.2, -10.0], [0.0, 0.0, 1.0], ORIGIN, SIZE, DIV);
+        assert_eq!(from_north.and_then(|(_, f)| f), Some(Face::North));
+        let from_south = pick_cell([1.5, 1.2, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+        assert_eq!(from_south.and_then(|(_, f)| f), Some(Face::South));
+    }
+
+    /// **Looking down picks a cell but names no face.** Adjacency is horizontal, so there is no face
+    /// here that any rule reads — and inventing one would put a token where nothing looks for it.
+    #[test]
+    fn looking_down_gives_a_cell_and_no_face() {
+        let got = pick_cell([1.5, 10.0, 0.25], [0.0, -1.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((_, y, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(y, DIV.1 - 1, "the top layer");
+        assert_eq!(face, None, "top and bottom are surfaces, not faces");
+    }
+
+    /// The cell tracks where along the face the ray landed, which is the whole point of picking.
+    #[test]
+    fn the_cell_follows_the_hit_along_the_face() {
+        // Each x cell is 0.5 m wide; aim at the middle of the third.
+        let got = pick_cell([1.25, 0.25, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+        let ((x, y, z), _) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!((x, y, z), (2, 0, 0), "third column, bottom layer");
+    }
+
+    /// A miss is a miss, in every direction it can be one.
+    #[test]
+    fn a_ray_that_misses_reports_nothing() {
+        // Past the end of the wall.
+        assert!(pick_cell([10.0, 1.2, 9.0], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Above it.
+        assert!(pick_cell([10.0, 9.0, 0.25], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Pointing away from it.
+        assert!(pick_cell([10.0, 1.2, 0.25], [1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Starting inside: there is no entry face to name.
+        assert!(pick_cell([1.5, 1.2, 0.25], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV).is_none());
+    }
+
+    /// Degenerate input is refused rather than answered with cell zero.
+    #[test]
+    fn a_lattice_or_ray_that_cannot_be_picked_is_refused() {
+        assert!(pick_cell([0.0, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, (0, 1, 1)).is_none());
+        assert!(pick_cell([0.0, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, [0.0; 3], DIV).is_none());
+        assert!(pick_cell([f32::NAN, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV).is_none());
+    }
+
+    /// **Every cell is reachable**, and the cell a ray picks is the cell whose box contains the hit.
+    /// Swept rather than sampled at one point, because an off-by-one in the clamp would show up only
+    /// at the edges.
+    #[test]
+    fn sweeping_the_face_walks_every_column_in_order() {
+        let mut seen = Vec::new();
+        for i in 0..DIV.0 {
+            // The middle of each column.
+            let x = (i as f32 + 0.5) * SIZE[0] / DIV.0 as f32;
+            let got = pick_cell([x, 0.25, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+            let ((cx, _, _), _) = got.unwrap_or_else(|| panic!("column {i} must hit"));
+            seen.push(cx);
+        }
+        assert_eq!(seen, (0..DIV.0).collect::<Vec<_>>());
     }
 }

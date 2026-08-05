@@ -186,3 +186,105 @@ fn raw_accessor_height(path: &Path) -> f32 {
     }
     hi - lo
 }
+
+/// **Occupancy, on meshes that exist** — the read behind the editor's "rescan mesh" button.
+///
+/// `emerge_core::import::occupancy`'s unit tests use hand-built triangles, which prove the
+/// rasteriser and prove nothing about the assets. This runs it over the shipped architecture.
+///
+/// # What it reports, and why the numbers are not all "full"
+///
+/// Solid pieces come back completely marked, which is the point — a wall is solid all the way up:
+///
+/// ```text
+/// site/wall             1 x 5 x 2    10 of 10
+/// site/wall_corner      1 x 5 x 1     5 of  5
+/// site/wall_window      1 x 5 x 4    20 of 20
+/// site/column           1 x 5 x 2    10 of 10
+/// site/wall_doorway_wide 1 x 4 x 4   12 of 16   <- the opening
+/// site/slab             4 x 3 x 2    22 of 24   <- the notch
+/// ```
+///
+/// The two that are *not* full are the check that this is measuring shape rather than answering
+/// "yes" to everything: a wide doorway has cells that are entirely hole, and the slab has a notch.
+///
+/// **This replaced vertex occupancy**, which marked the cell each vertex fell in and therefore left
+/// the middle of every low-poly slab open — `site/wall` came back 4 of 10, with only its top and
+/// bottom layers marked, because a box has vertices only at its corners. That was the common case
+/// for architecture, which is the half of a kit the lattice exists for.
+#[test]
+fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
+    let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let mut checked = 0usize;
+    for d in &layered.library.descriptors {
+        let Some(mesh) = d.mesh.as_deref() else { continue };
+        let path = Path::new("assets").join(mesh);
+        let Ok(glb) = emerge_core::glb::Glb::open(&path) else { continue };
+
+        let div = emerge_core::descriptor::divisions(d, layered.policy.divisions)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let total = emerge_core::descriptor::Subgrid::volume(div);
+        let cells = emerge_core::import::occupancy(&glb, div, (0, 0, 0))
+            .unwrap_or_else(|e| panic!("{}: {e}", d.id));
+
+        assert!(!cells.is_empty(), "{} scanned to nothing", d.id);
+        assert!(
+            cells.len() as u32 <= total,
+            "{} marked {} of {total} — a cell outside the lattice",
+            d.id,
+            cells.len()
+        );
+        for &(x, y, z) in &cells {
+            assert!(
+                x < div.0 && y < div.1 && z < div.2,
+                "{} marked ({x},{y},{z}) outside its {div:?} lattice",
+                d.id
+            );
+        }
+        println!(
+            "{:26} {:>2} x {:>2} x {:>2}   {:>4} of {:>4} cells",
+            d.id, div.0, div.1, div.2, cells.len(), total
+        );
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} meshes were reachable to scan");
+
+    // **The slab case, pinned by name** — the one the method was changed for. A wall is solid, so
+    // every cell of it is solid; under vertex occupancy this was 4 of 10, top and bottom layers only.
+    let wall = layered
+        .library
+        .get("site/wall")
+        .unwrap_or_else(|| panic!("site/wall is in the kit"));
+    let div = emerge_core::descriptor::divisions(wall, layered.policy.divisions)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let glb = emerge_core::glb::Glb::open(Path::new("assets/ozea/wall.glb"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let cells = emerge_core::import::occupancy(&glb, div, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        cells.len() as u32,
+        emerge_core::descriptor::Subgrid::volume(div),
+        "a solid wall is solid in every cell; got {cells:?}"
+    );
+
+    // And the discriminating case: a wide doorway is mostly hole, so it must NOT come back full.
+    // Without this, "mark everything" would pass the assertion above.
+    let wide = layered
+        .library
+        .get("site/wall_doorway_wide")
+        .unwrap_or_else(|| panic!("the wide doorway is in the kit"));
+    let wdiv = emerge_core::descriptor::divisions(wide, layered.policy.divisions)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let wglb = emerge_core::glb::Glb::open(
+        Path::new("assets").join(wide.mesh.as_deref().unwrap_or_default()).as_path(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let wcells = emerge_core::import::occupancy(&wglb, wdiv, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        (wcells.len() as u32) < emerge_core::descriptor::Subgrid::volume(wdiv),
+        "a doorway's opening must leave cells open, or this is marking everything: {} of {}",
+        wcells.len(),
+        emerge_core::descriptor::Subgrid::volume(wdiv)
+    );
+}

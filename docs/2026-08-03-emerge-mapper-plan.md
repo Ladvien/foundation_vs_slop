@@ -10,6 +10,15 @@
 (the runtime plugin the game consumes), and `emerge-mapper` (the standalone binary). The earlier
 `forge-` prefix was a placeholder and is gone.
 
+
+> **Status, 2026-08-04.** Stages 0a and 0b shipped. **Stages 1–6b are still open**, and the two
+> sessions recorded in `docs/2026-08-04-emerge-mapper-handoff.md` were *off-plan* work — editor input
+> and focus fixes, an animation clip manifest, and the tile lattice with its `edge` checker. A reader
+> of that handoff alone would not know this table exists, which is why the pointer is here as well.
+> Stage 5's mesh-importer `front` derivation in particular is easy to confuse with the GLB *animation*
+> measurement that did ship (`emerge_core::clips`); they are different things and only the second
+> exists.
+
 ## Context
 
 The F7 Site editor shipped, but it is a dressing tool welded to one game's hub. What is wanted is a

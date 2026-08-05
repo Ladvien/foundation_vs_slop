@@ -836,6 +836,17 @@ fn capping_every_nest_stops_the_swarm_replenishing() {
         assert!(app.world().get::<Capped>(n).is_some());
     }
 
+    // **Isolate the subject.** Capping seals a *nest*; it says nothing about the watch feed, which is a
+    // second source of crabs counted by the same total. The squad is in the world and a screen can be
+    // watched, so this asserted "no new crabs" while a mechanism capping does not govern was free to
+    // make one — measured `40 -> 41`, read as the cap leaking. Put the watch threshold out of reach so
+    // the only crab source left is the one under test. Same "mutate tuning at the seam" isolation
+    // `photophobia_pulls_crabs_into_shadow` uses, and for the same reason.
+    app.world_mut()
+        .resource_mut::<foundation_vs_slop::sim::SimTuning>()
+        .broadcast
+        .watch_threshold = 1.0e9;
+
     let before = crabs(&mut app);
     step(&mut app, &cfg, 600);
     let after = crabs(&mut app);
@@ -1154,6 +1165,16 @@ fn watching_the_feed_makes_it_generate_and_ignoring_it_stops() {
             app.world().resource::<foundation_vs_slop::sim::SimTuning>().broadcast.count
         );
     };
+
+    // **Isolate the subject.** The feed is one source of crabs; **nests** are another, and nothing here
+    // caps them. Over 900 ticks a fed nest breeds, so this counted a nest's newborn as a leak in the
+    // ATTENTION gate — measured `40 -> 42`, and the message blamed "look away to contain it" for a
+    // mechanism it has no bearing on. Price a birth out of reach, so the only crab this total can gain
+    // is one the feed made. Same seam-isolation as the capping test above.
+    app.world_mut()
+        .resource_mut::<foundation_vs_slop::sim::SimTuning>()
+        .breeding
+        .meat_per_crab = 1.0e9;
 
     // IGNORED: nobody is looking at it (it sits `spawn_min_dist` from the squad), so the swarm must
     // not grow on its account. Measured first, because it is the half that can fail silently.

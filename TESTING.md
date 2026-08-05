@@ -9,11 +9,11 @@ oracle choice is the difference between a golden regression net and a test that 
 ## TL;DR
 
 ```bash
-cargo test                                                # deterministic core — fast, GPU-free, the CI hard gate
+cargo test --workspace                                    # deterministic core — fast, GPU-free, the CI hard gate
 cargo test --features test-harness -- --test-threads=1    # + headless replay / liveness / SSIM (GPU-free)
 ```
 
-- **`cargo test`** runs the pure-logic + golden layer (RNG, WFC, utility-AI, ORCA, laser, geometry,
+- **`cargo test --workspace`** runs the pure-logic + golden layer (RNG, WFC, utility-AI, ORCA, laser, geometry,
   placement). No GPU, no window, ~instant. **This is what CI blocks on.**
 - **`--features test-harness`** additionally boots the *real game* headless and runs replay + liveness +
   visual tests. They open no window and need **no GPU**: the harness sets `RenderPlugin` with
@@ -195,7 +195,7 @@ These are the hard-won constraints. Violating any one either flakes the suite or
 
 ## What's in the box
 
-### 1. Deterministic-core layer (`cargo test`, GPU-free)
+### 1. Deterministic-core layer (`cargo test --workspace`, GPU-free)
 
 Pure functions called directly — **no Bevy `App`**. Fast, deterministic, no GPU. This is the CI hard gate.
 See the **Test inventory** below for the full per-module breakdown.
@@ -228,7 +228,7 @@ unit-tested; the *capture* half needs the windowed game + `devshot` (the harness
 
 The canonical map of what pins what. Update this table when you add or retire a test module.
 
-### In-file `#[cfg(test)] mod tests` — pure logic, `cargo test`
+### In-file `#[cfg(test)] mod tests` — pure logic, `cargo test --workspace`
 
 | Module | What it pins |
 |---|---|
@@ -400,13 +400,27 @@ the two is evidence about `target/`, not about the source. Reach for `cargo clea
 
 ## CI (`.github/workflows/ci.yml`)
 
-- **Hard gate** (`test` job, ubuntu, GPU-free): `cargo test` — the deterministic core must pass on every
+- **Hard gate** (`test` job, ubuntu, GPU-free): `cargo test --workspace` — the deterministic core must pass on every
   push. Installs Bevy's Linux build deps (alsa/udev/wayland/xkb).
 - **Advisory**: `cargo fmt --check` + `cargo clippy` run but **don't block** — the repo predates style
   enforcement (no `rustfmt.toml`, standing clippy lints), so blocking would fail on untouched code.
-- **Harness lane** (`harness` job, `continue-on-error`): runs the replay/liveness/SSIM tests. Since the
-  harness took `backends: None` it needs no GPU and no lavapipe, so this lane is a candidate for promotion
-  to a hard gate.
+- **Harness lane** (`harness` job) — **still advisory; promotion attempted and reverted 2026-08-05**:
+  `cargo test --features test-harness --no-fail-fast -- --test-threads=1`, plus a skip list. 1203 tests over
+  37 suites, green on aarch64. Needs no GPU since the harness took `backends: None`.
+  - **It is red on x86_64 and has been for a long time.** On `main` it fail-fasted at the *lib* target on
+    the SIGMA canary, so `replay.rs` never ran; fixing that and adding `--no-fail-fast` revealed three
+    **stale x86_64 goldens** (`migrated_defaults_reproduce_the_shipped_golden_hash`,
+    `field_passes_are_bit_identical`, `authored_world_config_override_is_a_noop`). Promoting needs those
+    measured and resolved on x86_64 first — **not** skipped; see the long note in `ci.yml`.
+  - **`--no-fail-fast` is load-bearing.** `cargo test` stops at the first failing *binary*, so one red suite
+    hides every suite after it. That is how three separate defects stayed unknown while this lane was
+    running them.
+  - **Two kinds of skip, and they are not the same thing.** Four are *slow* (the parallel-search and
+    replicate-rollout tests, moved to the nightly job on runtime alone — FVS-J-5). Four are *known-red and
+    pre-existing*, each with a `BACKLOG.md` entry carrying its measurements. The second kind is a debt
+    list: delete the skip the moment its test is green.
+  - It went advisory→gating because staying advisory was measured to cost more than it saved — in one
+    session it was concealing five real defects, none of them failing loudly.
 
 Pin determinism on a **single** CI target: the RNG is bit-stable, but `f32` gameplay math may diverge across
 CPUs/compilers. Treat other platforms with tolerance unless gameplay math moves to fixed-point.

@@ -37,7 +37,7 @@ pub(crate) use crate::squad::{Prey, Unit};
 pub(crate) use crate::surface_nav::{clamp_to_patch, project_tangent, surface_orientation, SurfaceField, SurfaceGraph};
 pub(crate) use crate::util::{hash01_u32, rand01, unit_is_facing};
 
-mod setup;
+pub(crate) mod setup;
 mod movement;
 mod combat;
 mod foraging;
@@ -99,11 +99,6 @@ pub(crate) const TRANSFER_RADIUS: f32 = 0.22;
 pub(crate) const NORMAL_EASE: f32 = 12.0;
 /// Frame-dt clamp so a hitch can't fling a crab off its surface (mirrors `enemy::MAX_FRAME_DT`).
 pub(crate) const MAX_FRAME_DT: f32 = 1.0 / 30.0;
-/// Clip playback-rate multipliers. The authored clips are extremely long (walk ≈ 10.5 s/loop, attack
-/// ≈ 2.5 s), so at 1× the legs crawl through one cycle over many seconds — playing them several times
-/// faster turns it into a frantic scuttle / rapid chomp. Tuned by eye.
-pub(crate) const WALK_ANIM_SPEED: f32 = 7.0;
-pub(crate) const ATTACK_ANIM_SPEED: f32 = 4.0;
 
 /// Blend-set slot indices, matching the order [`build_crab_anim`] wires them in.
 pub(crate) const SLOT_IDLE: usize = 0;

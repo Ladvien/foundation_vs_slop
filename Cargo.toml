@@ -1,7 +1,7 @@
 # The game is the workspace root package; the engine-free half lives in `crates/`. See
 # `docs/2026-08-03-emerge-mapper-plan.md` for why the split exists and what may cross the boundary.
 [workspace]
-members = ["crates/emerge-core", "crates/emerge-bevy", "crates/emerge-mapper", "crates/fvs"]
+members = ["crates/emerge-core", "crates/emerge-anim", "crates/emerge-bevy", "crates/emerge-mapper", "crates/fvs"]
 
 [package]
 name = "foundation_vs_slop"
@@ -37,6 +37,8 @@ emerge-core = { path = "crates/emerge-core" }
 # The runtime half of emerge: turns a library and a map into entities. `src/emerge_map.rs` uses it to
 # load what `emerge-mapper` writes, which is the step that makes the editor's output real.
 emerge-bevy = { path = "crates/emerge-bevy" }
+# The pose blender. Its own crate so `emerge-mapper` can drive the real one — see that manifest.
+emerge-anim = { path = "crates/emerge-anim" }
 avian3d = "0.7.0"
 # `jpeg`: the SCP_Characters glTFs (e.g. VALKYRIE, the squad body) embed their PBR textures as JPEG to
 # keep the .glb small; Bevy's default image features cover PNG but NOT JPEG, so without this the whole

@@ -38,23 +38,19 @@ use bevy::prelude::*;
 use super::people::StaffRig;
 use crate::anim;
 
-/// Slot → glTF clip index, in slot order.
-///
-/// The indices are the shared vocabulary measured across every rig; `tests/staff_asset.rs` holds the
-/// full 20-clip table and fails if any rig's order drifts. Only the clips a driver actually weights are
-/// wired here — the other thirteen exist in the asset and are loaded by nothing, which is deliberate:
-/// a slot nobody drives is a weight that is always zero, and the repo's named process risk is shipping
-/// exactly that kind of unreachable correctness.
-///
-/// ⚠️ **Stage C adds `sit` (17), `wave` (13) and `point` (15)** when the routine layer has a reason to
-/// play them. `sit` is the whole reason the staff rigs were chosen — the Valkyrie has no such clip, and
-/// the design leans on that (*operatives stand and lean; staff are the ones who sit*).
-const STAFF_CLIPS: [usize; SLOTS] = [
-    0,  // SLOT_IDLE       — <rig>_idle
-    2,  // SLOT_IDLE_LOOK  — <rig>_idle_look
-    4,  // SLOT_WALK       — <rig>_walk
-    6,  // SLOT_JOG        — <rig>_jog
-];
+// Slot → glTF clip index now lives in `assets/emerge/rigs.ron`, one entry per body, and
+// `crates/emerge-core/tests/rigs_match_assets.rs` checks each against the GLB it names. It was a
+// `STAFF_CLIPS` array here; `tests/staff_asset.rs` still holds the full 20-clip vocabulary and fails
+// if any rig's order drifts.
+//
+// Only the clips a driver actually weights are wired — the other sixteen exist in the asset and are
+// loaded by nothing, which is deliberate: a slot nobody drives is a weight that is always zero, and
+// the repo's named process risk is shipping exactly that kind of unreachable correctness.
+//
+// ⚠️ **Stage C adds `sit` (17), `wave` (13) and `point` (15)** when the routine layer has a reason to
+// play them. `sit` is the whole reason the staff rigs were chosen — the Valkyrie has no such clip, and
+// the design leans on that (*operatives stand and lean; staff are the ones who sit*). Adding them is
+// now an edit to each body's slot list in the manifest, not to a table here.
 
 pub const SLOT_IDLE: usize = 0;
 pub const SLOT_IDLE_LOOK: usize = 1;
@@ -95,20 +91,24 @@ impl StaffAnim {
     }
 }
 
-fn build_one(rig: StaffRig, assets: &AssetServer, graphs: &mut Assets<AnimationGraph>) -> RigAnim {
-    let (graph, nodes) = AnimationGraph::from_clips(
-        STAFF_CLIPS
-            .iter()
-            .map(|i| assets.load(GltfAssetLabel::Animation(*i).from_asset(rig.glb()))),
-    );
-    // Every clip loops and is never rewound; only its weight moves. See the header for why none of
-    // these is a `Gait`.
-    let slots: Arc<[anim::Slot]> = nodes.iter().map(|n| anim::Slot::free(*n, 1.0)).collect();
+fn build_one(
+    rig: StaffRig,
+    manifest: &crate::rigs::RigManifest,
+    assets: &AssetServer,
+    graphs: &mut Assets<AnimationGraph>,
+) -> Option<RigAnim> {
+    // Every clip loops and is never rewound; only its weight moves - the manifest says `Free` for all
+    // four. See the header for why none of these is a `Gait`.
+    let spec = match manifest.rig(rig.rig_name()) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("{e}");
+            return None;
+        }
+    };
+    let (graph, slots) = crate::rigs::build(spec, assets, graphs);
     debug_assert_eq!(slots.len(), SLOTS);
-    RigAnim {
-        graph: graphs.add(graph),
-        slots,
-    }
+    Some(RigAnim { graph, slots })
 }
 
 /// `Startup`. Must run before any staff body spawns, since the spawn clones the graph handle onto the
@@ -117,8 +117,22 @@ pub fn build_staff_anim(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    manifest: Res<crate::rigs::RigManifest>,
 ) {
-    let per_rig = StaffRig::ALL.map(|r| build_one(r, &assets, &mut graphs));
+    // **All eight or none.** The eight share one table, so a manifest missing one of them is a
+    // manifest edited wrongly rather than a body that happens to be absent - and eight bodies where
+    // one silently never animates is much the harder failure to find.
+    let mut built = Vec::with_capacity(StaffRig::ALL.len());
+    for r in StaffRig::ALL {
+        match build_one(r, &manifest, &assets, &mut graphs) {
+            Some(a) => built.push(a),
+            None => return,
+        }
+    }
+    let Ok(per_rig) = <[RigAnim; 8]>::try_from(built) else {
+        error!("staff: expected {} rigs", StaffRig::ALL.len());
+        return;
+    };
     commands.insert_resource(StaffAnim { per_rig });
 }
 
@@ -153,19 +167,43 @@ pub fn staff_weights(speed: f32, look: bool) -> [f32; SLOTS] {
 mod tests {
     use super::*;
 
+    /// The constants are how a driver addresses a slot; the manifest is what each slot loads. They
+    /// are still two lists of the same thing — that is exactly how the Valkyrie's clip indices
+    /// drifted once already — so this checks them against each other, now reading the manifest rather
+    /// than a second array in this file.
+    ///
+    /// **Every body, not just one.** The eight share a clip vocabulary, and a manifest edit that
+    /// touched seven of them is the failure this catches.
     #[test]
-    fn the_slot_table_and_its_constants_agree() {
-        // The constants are how a driver addresses a slot; the table is what each slot loads. They are
-        // two hand-maintained lists of the same thing, which is exactly how the Valkyrie's clip
-        // indices drifted once already.
-        assert_eq!(STAFF_CLIPS.len(), SLOTS);
-        assert_eq!(STAFF_CLIPS[SLOT_IDLE], 0, "slot 0 must load <rig>_idle");
-        assert_eq!(STAFF_CLIPS[SLOT_IDLE_LOOK], 2, "slot 1 must load <rig>_idle_look");
-        assert_eq!(STAFF_CLIPS[SLOT_WALK], 4, "slot 2 must load <rig>_walk");
-        assert_eq!(STAFF_CLIPS[SLOT_JOG], 6, "slot 3 must load <rig>_jog");
-        // Every wired index must be inside the 20-clip vocabulary `tests/staff_asset.rs` pins.
-        for i in STAFF_CLIPS {
-            assert!(i < 20, "clip index {i} is past the end of the shared 20-clip vocabulary");
+    fn the_manifest_and_the_slot_constants_agree() {
+        let rigs = crate::rigs::load().unwrap_or_else(|e| panic!("{e}"));
+        for body in StaffRig::ALL {
+            let rig = rigs
+                .get(body.rig_name())
+                .unwrap_or_else(|| panic!("rigs.ron has no `{}`", body.rig_name()));
+            assert_eq!(rig.slots.len(), SLOTS, "{}", body.rig_name());
+            for (slot, want, what) in [
+                (SLOT_IDLE, 0, "<rig>_idle"),
+                (SLOT_IDLE_LOOK, 2, "<rig>_idle_look"),
+                (SLOT_WALK, 4, "<rig>_walk"),
+                (SLOT_JOG, 6, "<rig>_jog"),
+            ] {
+                assert_eq!(
+                    rig.slots[slot].clip,
+                    want,
+                    "{} slot {slot} must load {what}",
+                    body.rig_name()
+                );
+            }
+            // Every wired index must be inside the 20-clip vocabulary `tests/staff_asset.rs` pins.
+            for s in &rig.slots {
+                assert!(
+                    s.clip < 20,
+                    "{}: clip index {} is past the end of the shared 20-clip vocabulary",
+                    body.rig_name(),
+                    s.clip
+                );
+            }
         }
     }
 

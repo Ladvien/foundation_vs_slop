@@ -153,3 +153,45 @@ mod tests {
         assert_eq!(map_file_name("site_67"), "site_67.map.ron");
     }
 }
+
+/// **Is this a usable descriptor id?** One or more snake_case segments joined by `/`.
+///
+/// The separator is a *namespace*, not decoration: the site kit ships `site/wall_corner`, and the two
+/// halves mean "which kit" and "which piece". Strict snake_case would reject all 45 of them, so the
+/// rule is applied per segment.
+///
+/// Refused rather than repaired. [`to_snake_case`] exists for the moment an id is *authored* — the
+/// importer runs it on the file stem and the editor's field forces it as you type — and by the time a
+/// library is being read, an id that is not a name is a fact about the file, not an input to fix.
+pub fn is_id(s: &str) -> bool {
+    !s.is_empty() && s.split('/').all(is_id_segment)
+}
+
+fn is_id_segment(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_lowercase())
+        && !s.ends_with('_')
+        && !s.contains("__")
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    /// Every id the shipped libraries carry has to keep loading, and the kit namespace is the reason
+    /// this is per-segment rather than a single regex over the whole string.
+    #[test]
+    fn a_kit_namespaced_id_is_a_valid_id() {
+        for ok in ["lamp_tall", "site/wall_corner", "crt_a", "barrel_acid_b", "tv", "is"] {
+            assert!(is_id(ok), "`{ok}` should be a valid id");
+        }
+    }
+
+    /// The shapes that mean somebody hand-edited a file or a tool wrote a display name into an id.
+    #[test]
+    fn a_name_that_is_not_snake_case_is_refused() {
+        for bad in ["", "Wall Corner", "siteWall", "_leading", "trailing_", "double__bar", "9lives", "site//wall", "/wall"] {
+            assert!(!is_id(bad), "`{bad}` should not be a valid id");
+        }
+    }
+}

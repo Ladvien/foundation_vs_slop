@@ -1016,7 +1016,7 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
         let Some((d, target)) = nearest else { continue };
         // `front` is the mesh's own quarter-turn offset from the engine convention — see
         // `kit::KitPiece::front`. Without it this test is exactly 90° wrong for every chair.
-        let yaw = (p.yaw + front).to_radians();
+        let yaw = (p.yaw + front.yaw_degrees()).to_radians();
         let cos = facing_cosine(p.pos, yaw, target.pos);
         if cos < SEAT_FACING_MIN_COS {
             let want = (target.pos.1 - p.pos.1)
@@ -1032,7 +1032,7 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
                     p.yaw,
                     cos.clamp(-1.0, 1.0).acos().to_degrees(),
                     target.piece,
-                    (90.0 - want - front).rem_euclid(360.0),
+                    (90.0 - want - front.yaw_degrees()).rem_euclid(360.0),
                 ),
             ));
         }
@@ -1133,7 +1133,7 @@ pub fn prop_placement_report(layout: &SiteLayout, kit: &super::kit::SiteKit) -> 
             continue;
         }
         let Some(front) = kit.front(p.piece) else { continue };
-        let yaw = (p.yaw + front).to_radians();
+        let yaw = (p.yaw + front.yaw_degrees()).to_radians();
         // Far enough ahead to clear the prop's own footprint at any rotation, plus room for a person.
         let (fw, fd) = kit.footprint(p.piece);
         let reach = 0.5 * fw.max(fd) + FRONT_CLEAR;
@@ -1880,7 +1880,7 @@ mod tests {
         for seat in [SitePiece::Chair, SitePiece::CommandChair] {
             assert_eq!(
                 kit.front(seat),
-                Some(90.0),
+                Some(emerge_core::descriptor::Face::East),
                 "{seat:?} fronts local +X (backrest mass at -X), a quarter turn off the engine's +Z"
             );
         }
