@@ -404,9 +404,14 @@ the two is evidence about `target/`, not about the source. Reach for `cargo clea
   push. Installs Bevy's Linux build deps (alsa/udev/wayland/xkb).
 - **Advisory**: `cargo fmt --check` + `cargo clippy` run but **don't block** — the repo predates style
   enforcement (no `rustfmt.toml`, standing clippy lints), so blocking would fail on untouched code.
-- **Harness lane** (`harness` job) — **a HARD GATE since 2026-08-05**: `cargo test --features test-harness
-  --no-fail-fast -- --test-threads=1`, plus a skip list. 1203 tests over 37 suites. Needs no GPU since the
-  harness took `backends: None`.
+- **Harness lane** (`harness` job) — **still advisory; promotion attempted and reverted 2026-08-05**:
+  `cargo test --features test-harness --no-fail-fast -- --test-threads=1`, plus a skip list. 1203 tests over
+  37 suites, green on aarch64. Needs no GPU since the harness took `backends: None`.
+  - **It is red on x86_64 and has been for a long time.** On `main` it fail-fasted at the *lib* target on
+    the SIGMA canary, so `replay.rs` never ran; fixing that and adding `--no-fail-fast` revealed three
+    **stale x86_64 goldens** (`migrated_defaults_reproduce_the_shipped_golden_hash`,
+    `field_passes_are_bit_identical`, `authored_world_config_override_is_a_noop`). Promoting needs those
+    measured and resolved on x86_64 first — **not** skipped; see the long note in `ci.yml`.
   - **`--no-fail-fast` is load-bearing.** `cargo test` stops at the first failing *binary*, so one red suite
     hides every suite after it. That is how three separate defects stayed unknown while this lane was
     running them.

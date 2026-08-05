@@ -94,20 +94,41 @@ jobs:
   # backends:None, and `WGPU_BACKEND` was inert). A future SSIM visual-regression pass over `devshot`
   # screenshots would live here.
   #
-  # **PROMOTED TO A HARD GATE 2026-08-05.** It was `continue-on-error` for hardware reasons that stopped
-  # being true when the harness went `backends: None`, and staying advisory cost more than it saved: in a
-  # single session this lane was found to be concealing **five** distinct real defects — an inverted
-  # photophobia oracle, a SIGMA canary calibrated to its own mean (so it failed for half of all seeds by
-  # construction), two containment oracles each confounded by the mechanism the other was about, and a
-  # broken ATTENTION gate. None of them was failing *loudly*; all of them were failing where nothing
-  # looked. A lane that reports and does not block is a lane nobody reads.
+  # **Promotion to a hard gate was ATTEMPTED and REVERTED, 2026-08-05. Read this before trying again.**
   #
-  # `--no-fail-fast` is load-bearing, not tidiness. `cargo test` stops at the first failing **binary**, so
-  # a single red suite hid every suite after it — that is how three of the five above stayed unknown even
-  # while the lane ran them. Reproducing the full list took one run per defect until this flag went on.
+  # Staying advisory costs more than it saves: in a single session this lane was found to be concealing
+  # **five** distinct real defects — an inverted photophobia oracle, a SIGMA canary calibrated to its own
+  # mean (so it failed for half of all seeds by construction), two containment oracles each confounded by
+  # the mechanism the other was about, and a broken ATTENTION gate. None was failing *loudly*. A lane that
+  # reports and does not block is a lane nobody reads. So promoting it is still the right goal.
+  #
+  # It was flipped to a hard gate and flipped back within the hour, because **the lane is red on x86_64 and
+  # has been for a long time without anybody knowing.** The sequence is worth understanding:
+  #
+  #   * On `main` this lane failed at the **lib** target, on the SIGMA canary
+  #     (`mutation_yields_feasible_children_often_enough_for_rejection_sampling`). `cargo test` fail-fasts
+  #     across test *binaries*, so `tests/replay.rs` and everything after it **never ran**. Run 30909881477
+  #     (main, 2026-08-04): `1023 passed; 1 failed`, and the job stopped there.
+  #   * Fixing that canary and adding `--no-fail-fast` let the lane reach `replay.rs` for the first time in
+  #     who knows how long. Three golden comparisons then failed on x86_64:
+  #     `migrated_defaults_reproduce_the_shipped_golden_hash`, `field_passes_are_bit_identical`, and
+  #     `authored_world_config_override_is_a_noop` (which compares against the same `GOLDEN`).
+  #   * The x86_64 goldens are therefore **stale** — pinned, then drifted, invisibly, because the lane was
+  #     advisory AND fail-fasting before the file that checks them.
+  #
+  # **What promoting it needs, in order:** measure the three hashes on x86_64 (this cannot be done from an
+  # Apple Silicon machine — the goldens are per-platform by design, see `tests/replay.rs`'s `GOLDEN` doc),
+  # establish whether the drift is a real gameplay change or an unrecorded re-pin, fix or re-pin
+  # accordingly, and only then delete this `continue-on-error`. **Do not promote by skipping those three.**
+  # They are the determinism pins — the most load-bearing tests in the repo — and a gate that is green
+  # because it stopped checking them is worse than an advisory lane that is honestly red.
+  #
+  # `--no-fail-fast` stays regardless, and is load-bearing rather than tidiness: without it one red suite
+  # hides every suite after it, which is the whole reason the above went unnoticed.
   harness:
-    name: replay + liveness (headless, GPU-free) — HARD GATE
+    name: replay + liveness (headless, GPU-free) — advisory, see note above
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Bevy Linux build dependencies

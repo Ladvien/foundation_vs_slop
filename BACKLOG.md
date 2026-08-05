@@ -867,6 +867,14 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
   **`authored_world_config_override_is_a_noop` was never a real failure** — corrected 2026-08-05. `GOLDEN` is `0` under `cfg(not(target_arch = "x86_64"))`, so on Apple Silicon it compared against zero; the message about a lossy seam is the assert's text, not a diagnosis. The authored config reproduces the shipped hash **exactly** (`0xac8196c4a1bfb0d0` both ways), so that seam is lossless and the QD archives riding it were never at risk. Both `aarch64` goldens are now pinned and the whole replay suite is green.
 
+- **⚠️ Three x86_64 replay goldens are STALE, and that is what blocks promoting the harness lane (found 2026-08-05).** `migrated_defaults_reproduce_the_shipped_golden_hash`, `field_passes_are_bit_identical`, and `authored_world_config_override_is_a_noop` (which reads the same `GOLDEN`) all fail on CI's x86_64 runner. **They pass on aarch64**, whose goldens were measured and pinned the same day.
+
+  **Why nobody knew.** On `main` this lane fail-fasted at the **lib** target on the SIGMA canary — `cargo test` stops at the first failing *binary*, so `tests/replay.rs` and every suite after it never executed. Run `30909881477` (main, 2026-08-04): `1023 passed; 1 failed`, job over. The lane was also `continue-on-error`, so the red never blocked anything. Two independent concealments stacked on the same file.
+
+  **What has to happen, in order:** (1) measure the three hashes on x86_64 — this **cannot** be done from an Apple Silicon machine, the goldens are per-platform by design (see `tests/replay.rs`'s `GOLDEN` doc); (2) establish whether the drift is a real gameplay change or an unrecorded re-pin — `a0_fvs_j6_mutant3_on_world_0x5c09191_reproduces` and `deterministic_core_is_bit_identical` both **pass** on x86_64, so whatever moved did not move everything, which is a strong clue; (3) fix or re-pin; (4) then drop `continue-on-error`.
+
+  **Do not promote the lane by skipping these three.** They are the determinism pins. A gate that is green because it stopped checking them is worse than an advisory lane that is honestly red.
+
 - **⚠️ The harness lane's four known-red skips — the debt list that made promoting it possible (2026-08-05).** The lane is now a **hard gate** with `--no-fail-fast`, which took enumerating every failure at once; `cargo test` stops at the first failing *binary*, so each red hid the ones after it and reproducing the full list took one run per defect. All four are **pre-existing** — confirmed against a worktree at `main`, and the branch touches nothing under `src/squad_ai`/`src/ai`. **Each skip in `ci.yml` must be deleted the moment its test is green.**
 
   1. `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops` — the ATTENTION gate; fully measured, needs a placement decision. See the entry below.
