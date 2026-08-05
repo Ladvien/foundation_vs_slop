@@ -3715,6 +3715,126 @@ mod write_library_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **An import reaches the file, or the author is told it did not.**
+    ///
+    /// `commit_candidate` pushed the new descriptor onto `project.library` — the *derived* layer — and
+    /// then called `write_library`, which serializes `measured` and rebuilds `library` from it. So the
+    /// file was rewritten byte-identical, the palette never gained the piece, and the status line said
+    /// *"added `crate_b` — it is in the palette now"*. Nothing here exercised that path, which is why
+    /// it shipped.
+    ///
+    /// Driven through `commit_measured` rather than through the observer, because the defect was the
+    /// *destination* of the write and that is what this pins. Which key reaches it is
+    /// `crates/emerge-mapper/tests/headless.rs`' concern.
+    #[test]
+    fn an_accepted_import_lands_in_the_measurements_file() {
+        let dir = temp_dir("import_lands");
+        let mut project = project_in(&dir, stretching_policy());
+
+        let mut trial = project.measured.clone();
+        trial.descriptors.push(Descriptor {
+            id: "crate_b".into(),
+            mesh: Some("crate_b.glb".into()),
+            extent: Extent {
+                footprint: Some((0.5, 0.5)),
+                height: Some(0.5),
+            },
+            mount: Some(emerge_core::descriptor::Mount::OnFloor),
+            ..Descriptor::default()
+        });
+        commit_measured(&mut project, trial).unwrap_or_else(|e| panic!("{e}"));
+
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            back.get("crate_b").is_some(),
+            "the import has to be IN the file that was written:\n{written}"
+        );
+        // And in both live layers, so the palette shows it without a reload.
+        assert!(project.measured.get("crate_b").is_some(), "measured");
+        assert!(project.library.get("crate_b").is_some(), "the derived palette");
+        // The piece it was added beside is untouched, and the policy still did not leak downward.
+        assert_eq!(
+            back.get("wall").and_then(|d| d.extent.height),
+            Some(AUTHORED_HEIGHT)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The derived layer is not a place to keep anything**, and this is what that costs.
+    ///
+    /// The characterisation half of the fix above. `commit_candidate` and `remove_tile` both edited
+    /// `project.library`, which reads exactly like editing the library — and it is a no-op, because
+    /// every write rebuilds that layer from `measured`. Asserting the loss here means the next person
+    /// who reaches for `project.library` finds a test that names the trap, and it also pins the
+    /// direction of the layering: a "fix" that made the writer serialize `library` instead would put
+    /// the facility's stretched wall heights back into the measurements file the kit exists to share.
+    #[test]
+    fn an_edit_to_the_derived_layer_alone_is_lost() {
+        let dir = temp_dir("derived_lost");
+        let mut project = project_in(&dir, stretching_policy());
+
+        project.library.descriptors.push(Descriptor {
+            id: "ghost".into(),
+            extent: Extent {
+                footprint: Some((0.5, 0.5)),
+                height: Some(0.5),
+            },
+            ..Descriptor::default()
+        });
+        write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
+
+        let written =
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !written.contains("ghost"),
+            "a write serializes `measured`; anything only in `library` cannot reach the file"
+        );
+        assert!(
+            project.library.get("ghost").is_none(),
+            "and the write rebuilds `library` from `measured`, so it is gone from memory too — which \
+             is why the old code's status line could report success"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A refused write leaves the editor holding what the disk holds.**
+    ///
+    /// The other half of proposing rather than mutating. `Policy::apply` fails when a patch matches
+    /// nothing, so removing the last piece a rule names is a reachable refusal — and the old code had
+    /// already assigned `project.library` and `project.masks` before it found out.
+    #[test]
+    fn a_refused_commit_changes_nothing() {
+        let dir = temp_dir("refused");
+        let mut project = project_in(&dir, stretching_policy());
+        write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
+        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+
+        // Removing `wall` strands the policy patch that names it.
+        let mut trial = project.measured.clone();
+        trial.descriptors.retain(|d| d.id != "wall");
+        let err = commit_measured(&mut project, trial)
+            .err()
+            .unwrap_or_else(|| panic!("removing the last piece a patch names must be refused"));
+        assert!(err.contains("matches no descriptor"), "{err}");
+
+        assert!(
+            project.measured.get("wall").is_some(),
+            "the refusal must not have taken the piece out of the live measurements"
+        );
+        assert!(project.library.get("wall").is_some(), "nor out of the derived layer");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}")),
+            before,
+            "and the file must be byte-identical"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **Re-opening must not stack the patch.** The other half of the same defect: a baked-in
     /// stretch gets multiplied again by the next load.
     #[test]
