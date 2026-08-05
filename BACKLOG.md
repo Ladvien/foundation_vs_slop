@@ -877,13 +877,18 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
   3. `search_calibration::a_candidate_genome_actually_changes_the_simulation`
   4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
 
-  **⚠️ These four are very likely ONE root cause, and it is a bigger deal than the list looks: on the shipped levels the squad never reaches the content.** The evidence lines up across three independent measurements:
+  **I proposed a unifying cause — "the squad never reaches the content" — and then measured it, and it is WRONG as stated.** Recorded because the correction is the useful part. Nearest squad↔crab distance over 1800 ticks:
 
-  * 1800 ticks (30 s) of shipped play: **0 crabs killed and 0 unit damage**, while the squad makes 138 duty decisions. It is doing role work somewhere the swarm is not.
-  * the watch-feed diagnosis below, independently: the squad's **nearest approach to a screen is 13.1–15.1 m** across all three held-in seeds, against a `VISION_RADIUS` of 8.
-  * `a_candidate_genome_actually_changes_the_simulation` follows for free — if the brain never engages, swapping the genome *cannot* move the sim, so that test fails by construction rather than by a wiring fault.
+  | seed | t=600 | t=1100 | t=1800 | closest ever | crab count |
+  |---|---|---|---|---|---|
+  | `0x5C09191` (the one the playtest uses) | 51.1 m | 7.5 m | 5.5 m | **2.09 m** | 40 → 44 |
+  | `0x1ce5` | 31.8 m | 14.8 m | 4.5 m | 4.50 m | 42 → **34** |
 
-  If that is right, the consequence reaches past the test list: **the behaviour search and the level search have been assigning fitness to episodes in which nothing happens**, which would make large parts of the archive meaningless rather than merely noisy. Worth confirming before any more search budget is spent. The cheap confirmation is to log the nearest squad↔crab distance over a shipped rollout, the same way the watch-feed test already logs nearest-approach-to-a-screen.
+  The squad closes to **2 m**, and on `0x1ce5` **eight crabs died**. So the swarm and the squad do meet, engagement does happen, and the archive-wide alarm ("the search has been scoring episodes where nothing happens") is **not supported** — do not act on it.
+
+  What survives is narrower and still worth fixing: on **`0x5C09191` specifically**, the squad gets within 2.09 m and *still* records `crabs_killed = 0` and `unit_damage = 0.000` over 30 s. Neither side engages at two metres. Two candidate explanations, neither tested: the 2.09 m is a 3-D distance and crabs climb, so the nearest crab may be directly *overhead* on a wall or ceiling with no valid engagement geometry; or the engagement gate (range / `Dungeon::line_of_sight`, which `laser::fire_laser` applies separately from the fog grid) rejects it. **Measure which before changing anything** — the distance to the nearest crab *on the same surface patch* is the number that would separate them.
+
+  The watch-feed finding below stands on its own measurements and is unaffected by this correction. `a_candidate_genome_actually_changes_the_simulation` may still share a cause with the playtest failure — a seed where nothing is contested cannot distinguish two brains — but that is now a hypothesis about one seed, not about the search.
 
 - **⚠️ DECISION NEEDED: `broadcast.watch_threshold` (0.006) sits inside the ambient ATTENTION floor, so "look away to contain it" cannot hold.** Found 2026-08-05 while trying to promote the harness lane; `watching_the_feed_makes_it_generate_and_ignoring_it_stops` is red because the mechanic really is broken, not because the oracle is.
 
