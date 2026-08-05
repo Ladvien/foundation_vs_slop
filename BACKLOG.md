@@ -882,7 +882,17 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
   **Why the obvious history is misleading.** The *genome range* for this knob was already corrected once (2026-08-01, `(0.05, 0.80)` → `(0.0, 0.05)`) because the old band sat **above** anything the field reaches at a screen, making the anomaly permanently inert. That correction was right, but the shipped default landed at the opposite failure: `0.006` is at the bottom of the new band, below the ambient floor. The band `(0.0, 0.05)` therefore spans *both* pathologies, and only its upper part discriminates.
 
-  **What is NOT yet measured, and what the decision needs:** what a screen reads when the squad is *genuinely* looking at it from playable range. The test's WATCHED half floods the field artificially, so it proves the gate can fire but says nothing about the natural value. Until that is measured the safe interval is only bounded below (must exceed ~0.007 with margin) and above by the containment rule's `0.30` "standing on it".
+  **The watched side, now measured too.** Units pinned at each whole-metre stand-off from the screen, on a floor cell with real line of sight (`fog::update_los` reads unit `Transform`s, so pinning them drives the true mechanism), 240 ticks to settle:
+
+  | stand-off | 0 m | 1 m | 2 m | 3 m | 4 m | 5 m | 6 m | 7 m | 8 m |
+  |---|---|---|---|---|---|---|---|---|---|
+  | screen's ATTENTION | 1.324 | 1.393 | 1.390 | 1.376 | 1.347 | 1.295 | 1.201 | 1.038 | 0.771 |
+
+  8 m is the edge of `fog::VISION_RADIUS` (8 cells at `TILE_SIZE = 1.0`). The deposit is **binary per cell** over the line-of-sight set at `ATTENTION_RATE = 1.0/s`, settling at `RATE / evaporate`, so this is not a smooth distance falloff — it is a **step at the LOS boundary**, and the gentle decline across the row is the diffusion of a fixed deposit, not attenuation of the gaze.
+
+  **So the discriminating band is `0.007 → 0.771`, a factor of ~110.** Any threshold in it separates "watched" from "ignored" cleanly. The shipped `0.006` is the one place it cannot: just below the diffusion floor. The evolvable band `(0.0, 0.05)` is therefore *mostly* correct — only its bottom sliver `(0, ~0.007)` is pathological, and the authored default landed in exactly that sliver.
+
+  **Recommended value: `0.05`** — the top of the evolvable band. ~7.5x clear of the diffusion floor and still ~15x below the weakest watched reading (0.771 at maximum range), so it cannot be tripped by residue and cannot miss a genuine look. It also stays an order of magnitude under the containment rule's `0.4`, preserving the documented "generating but not yet being contained" band. Anything in `0.02`–`0.05` is defensible on the same numbers.
 
   **This is a gameplay retune, not a bug fix:** it changes crab counts, therefore positions, therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin on both architectures — and it shifts the meaning of the evolvable band, so baked elites measured under the old default were scored against an anomaly that always fired. Do not change it without picking a value deliberately.
 - **Scope realism.** The XL items (H-3, I-1, K-4, C-6) are correctly sequenced last and behind prerequisites. Do not let the appeal of the "full vision" pull them earlier than M4, or the M0–M3 foundation slips.
