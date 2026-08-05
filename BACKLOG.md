@@ -903,7 +903,21 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
   So five armed units stand half a metre from a crab, in clear sight, for thousands of ticks, and **neither side ever fires**. That is the engage path being dead on this seed, not a geometry or timing artifact. It is also seed-specific: on `0x1ce5` the same shipped level kills eight crabs, so nothing here is globally broken.
 
-  **Where to look, none of it asserted:** target acquisition (does the brain ever select an attack mode, or are all 138 `duty_decisions` non-combat?), `laser::fire_laser`'s own `Dungeon::line_of_sight` gate and its range, crab aggro/threat wiring, and faction tagging. The single most informative next measurement is a histogram of the squad's chosen `Mode` over the rollout — if no unit ever picks an engaging mode, the bug is upstream of the weapon entirely.
+  **The `Mode` histogram was taken, and it rules the brain out.** Squad modes over 2400 ticks, both seeds:
+
+  | mode | `0x5C09191` (no kills) | `0x1ce5` (8 kills) |
+  |---|---|---|
+  | FollowAnchor | 45.8% | 69.2% |
+  | Ward | 14.2% | 10.0% |
+  | Commune | 13.3% | 10.8% |
+  | Overwatch | 12.5% | 10.0% |
+  | Flee | 8.3% | — |
+  | SecureDoor | 3.3% | — |
+  | Examine | 2.5% | — |
+
+  **Neither seed ever shows an attacking mode** — and one of them kills eight crabs. So the rifles fire independently of the brain's mode, exactly as `surprise::minimal_criterion`'s own comment says (*"the rifles auto-fire"*), and mode selection is **not** the discriminator. That eliminates "the brain never chose to fight", which was the leading candidate.
+
+  **So the remaining suspect is the auto-fire gate itself** — `laser::fire_laser`. Note it carries its **own** `Dungeon::line_of_sight` test, deliberately separate from the `FogGrid` (see `fog::update_los`'s note: the fog reveal rule is lenient on purpose and `fire_laser` needs the strict corner rule). My LOS measurement used `Dungeon::line_of_sight` and returned `true` at 0.47 m, so the strict test passes at the closest pair — which makes the range check, the target-selection step that picks *which* crab, or a cooldown/ammo gate the next things to read. Nothing here is asserted; the four eliminated hypotheses are in the table above so nobody re-runs them.
 
   The watch-feed finding below stands on its own measurements and is unaffected by this correction. `a_candidate_genome_actually_changes_the_simulation` may still share a cause with the playtest failure — a seed where nothing is contested cannot distinguish two brains — but that is now a hypothesis about one seed, not about the search.
 
