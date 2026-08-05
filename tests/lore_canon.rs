@@ -57,6 +57,27 @@ fn offending_lines(text: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// **Lines that develop the deprecated theming, as opposed to disclaiming it.**
+///
+/// A line naming the material *and* calling it deprecated is doing the thing this lint wants: it is
+/// pointing at the ruling. `docs/lore/2026-08-01-scp-gear.md` says the Coherence Anchor was
+/// "re-themed off the deprecated Gat-Hayes stabilizer" — one sentence, whose whole content is that
+/// the theming is gone. Treating that as development demanded a banner announcing a deprecation the
+/// line had just announced.
+///
+/// Narrow on purpose, and applied **only** to the docs/lore banner check — never to
+/// [`scan`], which asks a different question of shipped copy: whether the words appear at all, for
+/// which "we call it deprecated" is not an excuse.
+///
+/// A document that genuinely develops the theming still has its other lines, so this cannot excuse
+/// one: it only lets a doc that mentions it once, to disown it, avoid a banner about itself.
+fn developing_lines(text: &str) -> Vec<(usize, String)> {
+    offending_lines(text)
+        .into_iter()
+        .filter(|(_, l)| !l.to_lowercase().contains("deprecated"))
+        .collect()
+}
+
 fn scan(path: &Path, hits: &mut Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
         // A file that will not read as UTF-8 is a binary asset, not copy. Skipping is correct here and
@@ -115,7 +136,7 @@ fn the_lore_research_is_kept_but_marked_deprecated() {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        if offending_lines(&text).is_empty() {
+        if developing_lines(&text).is_empty() {
             continue; // this document does not develop the deprecated theming
         }
         // The banner must be near the top, where it is read first.

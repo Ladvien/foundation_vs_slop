@@ -1,6 +1,6 @@
 (
     version: 1,
-    note: Some("GENERATED from the Site kit by tests/site_descriptors.rs. Measurements only — this facility\'s architecture is in project.ron beside it. Do not hand-edit; regenerate with EMERGE_WRITE_SITE=1 cargo test --test site_descriptors."),
+    note: Some("Measurements only — this facility\'s architecture is in project.ron beside it. Originally generated from the Site kit by tests/site_descriptors.rs, but that generator no longer exists anywhere in the tree: this file is hand-maintained now, and emerge-mapper writes it. tests/site_descriptors.rs still CHECKS the numbers here, which is what keeps it honest."),
     descriptors: [
         (
             id: "site/floor",

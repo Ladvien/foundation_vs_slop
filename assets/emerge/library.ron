@@ -1515,36 +1515,5 @@
             subgrid: None,
             note: None,
         ),
-        (
-            id: "is",
-            mesh: Some("characters/cipher_field.glb"),
-            align: (
-                scale: None,
-                stretch_y: None,
-                y_offset: Some(0.03944816),
-                pivot: Some((-0.0003646016, 0.052278467)),
-                rotate: None,
-                front: None,
-            ),
-            extent: (
-                footprint: Some((1.5330375, 0.36034727)),
-                height: Some(1.677568),
-            ),
-            mount: None,
-            clearance: [],
-            offers: (
-                surfaces: [],
-                sockets: [],
-            ),
-            kind: [],
-            effects: [],
-            look: [],
-            placement: (
-                rooms: [],
-                group: None,
-            ),
-            subgrid: None,
-            note: None,
-        ),
     ],
 )
