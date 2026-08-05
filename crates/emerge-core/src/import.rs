@@ -551,7 +551,7 @@ fn triangle_hits_box(tri: [[f32; 3]; 3], half: f32) -> bool {
 /// exists for.
 ///
 /// Rasterising is the correct method rather than a better heuristic: a triangle either passes
-/// through a cell or it does not, and [`triangle_hits_box`] answers that exactly. A bounding box
+/// through a cell or it does not, and `triangle_hits_box` answers that exactly. A bounding box
 /// cannot answer it at all — one box per mesh *is* the whole extent, so every cell comes out solid.
 ///
 /// # It reads the assembled model

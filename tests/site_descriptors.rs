@@ -303,60 +303,77 @@ fn the_authored_run_faces_let_the_full_height_family_meet() {
     );
 }
 
-/// **The open question, pinned as behaviour.**
+/// **Every authored architectural piece agrees with a wall, in both kits.**
 ///
-/// A doorway is 2.01 m against the wall's 2.40, so it derives four layers to the wall's five. Give it
-/// the same token and the seam is refused — not because the tokens disagree, but because the faces
-/// are different lengths. The kit reaches 2.40 m by stacking a 0.40 m header above the doorway, so
-/// the wall's fifth row is the header's only row.
+/// This replaced two tests that pinned the *opposite*, deliberately, while the rule was undecided: a
+/// doorway was one row short of a wall and refused it, and greybox's corner was a cell too wide and
+/// was left unauthored to avoid the same fault. Both were `may_abut` comparing whole faces, which only
+/// means anything when two pieces are the same size — and in a kit that reaches 2.40 m by stacking a
+/// 2.00 m doorway under a 0.40 m header, they are not.
 ///
-/// `may_abut` compares whole faces, so it cannot see that. Whether it should instead compare the part
-/// that overlaps — which would fix this and the horizontal version of it, a 3 m wall meeting a 1 m
-/// doorway — is the decision this test exists to keep visible. **It asserts the current behaviour,
-/// not the desired one**, so whoever changes the rule has to come here and say so.
+/// `adjacency::seam` compares the rectangle two pieces actually share, so a doorway agrees with a wall
+/// over the four rows they have in common and the header covers the fifth. Every architectural piece
+/// is authored now, in both kits, including the two that could not be before.
 #[test]
-fn a_doorway_is_one_row_short_of_a_wall_and_the_fault_says_so() {
-    let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
-        .unwrap_or_else(|e| panic!("{e}"));
-    let div = layered.policy.divisions;
-    let mut lib = layered.library.clone();
+fn every_authored_architectural_piece_agrees_with_a_wall() {
+    for kit in ["site", "site_greybox"] {
+        let l = emerge_core::policy::layered_library(&Path::new("assets/emerge").join(kit))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let div = l.policy.divisions;
+        let wall = l.library.get("site/wall").unwrap_or_else(|| panic!("no wall"));
+        let (_, wall_d) = wall.extent.footprint.unwrap_or_else(|| panic!("no footprint"));
 
-    // Author the doorway the obvious way: the same token, on its own four-layer run-face.
-    let door = lib
-        .descriptors
-        .iter_mut()
-        .find(|d| d.id == "site/wall_doorway")
-        .unwrap_or_else(|| panic!("the doorway is in the kit"));
-    door.subgrid = Some(emerge_core::descriptor::Subgrid {
-        cells: (0..4)
-            .flat_map(|y| [(0, y, 0), (0, y, 3)])
-            .map(|at| emerge_core::descriptor::SubCell {
-                at,
-                edge: Some("wall".into()),
-                ..emerge_core::descriptor::SubCell::default()
-            })
-            .collect(),
-    });
+        let mut checked = 0usize;
+        for id in [
+            "site/wall",
+            "site/wall_corner",
+            "site/wall_window",
+            "site/column",
+            "site/wall_doorway",
+            "site/wall_doorway_wide",
+            "site/wall_header",
+            "site/wall_low",
+        ] {
+            let d = l.library.get(id).unwrap_or_else(|| panic!("{kit}: {id}"));
+            assert!(
+                d.subgrid.as_ref().is_some_and(|g| {
+                    g.cells.iter().any(|c| c.edge.as_deref() == Some("wall"))
+                }),
+                "{kit}: {id} carries no `wall` token — every architectural piece is authored now"
+            );
+            let (_, dep) = d.extent.footprint.unwrap_or_else(|| panic!("{id} has no footprint"));
 
-    let at = |id: &str, d: &str, z: f32| emerge_core::map::Placed {
-        id: id.into(),
-        descriptor: d.into(),
-        at: (0.25, z),
-        yaw: 0.0,
-        ..emerge_core::map::Placed::default()
-    };
-    let map = emerge_core::map::Map {
-        name: "door".into(),
-        placements: vec![at("w1", "site/wall", 0.5), at("d1", "site/wall_doorway", 2.03)],
-        ..emerge_core::map::Map::default()
-    };
-    let faults = emerge_core::adjacency::faults(&map, &lib, emerge_core::grid::SNAP, div);
-    assert_eq!(faults.len(), 1, "{faults:#?}");
-    let m = &faults[0].message;
-    // Four against five, with the same token in every cell — which is what makes it a question about
-    // the rule rather than about the tokens.
-    assert!(m.contains("[wall wall wall wall]"), "{m}");
-    assert!(m.contains("[wall wall wall wall wall]"), "{m}");
+            // A wall, then this piece immediately after it along the run. Both centred on the same X so
+            // they overlap there, which is what makes the N/S face a seam at all.
+            let map = emerge_core::map::Map {
+                name: "run".into(),
+                placements: vec![
+                    emerge_core::map::Placed {
+                        id: "w1".into(),
+                        descriptor: "site/wall".into(),
+                        at: (0.25, wall_d * 0.5),
+                        ..emerge_core::map::Placed::default()
+                    },
+                    emerge_core::map::Placed {
+                        id: "p1".into(),
+                        descriptor: id.into(),
+                        at: (0.25, wall_d + dep * 0.5),
+                        ..emerge_core::map::Placed::default()
+                    },
+                ],
+                ..emerge_core::map::Map::default()
+            };
+            let faults =
+                emerge_core::adjacency::faults(&map, &l.library, emerge_core::grid::SNAP, div);
+            assert!(
+                faults.is_empty(),
+                "{kit}: a wall meeting {id} must agree:\n{}",
+                faults.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join("\n")
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 8, "{kit}: every architectural piece must be covered");
+    }
 }
 
 /// **Two kits that build the same facility derive the same vertical lattice.**
@@ -408,71 +425,4 @@ fn both_kits_derive_the_same_layers_for_every_piece_with_a_stated_height() {
     // And the number is the one the facility asked for: 2.40 m of wall on a 0.5 m subunit is five.
     assert_eq!(layers(&site, "site/wall"), 5);
     assert_eq!(layers(&grey, "site/wall"), 5);
-}
-
-/// **The greybox kit's authored run-faces, and the one piece left out of them.**
-///
-/// The greybox fixture is 1 m modules stretched to the facility's heights, so its lattices agree with
-/// the Site kit's on the vertical axis (that is `both_kits_derive_the_same_layers_...`) but *not*
-/// horizontally: footprints are not stretched, and a greybox module is a different shape.
-///
-/// `wall`, `wall_window` and `column` all come out one cell wide, so all three present a five-cell
-/// run-face and agree. **`wall_corner` does not**: its footprint makes it two cells wide, so it
-/// presents ten where the others present five, and whole-face equality refuses it against its own wall
-/// family. It is deliberately unauthored, for the same reason `wall_doorway` is unauthored in the Site
-/// kit — and it is a second, independent instance of the seam question, this time inside a kit's
-/// primary wall set rather than at a doorway.
-#[test]
-fn the_greybox_run_faces_agree_and_the_corner_is_left_out() {
-    let l = emerge_core::policy::layered_library(Path::new("assets/emerge/site_greybox"))
-        .unwrap_or_else(|e| panic!("{e}"));
-    let div = l.policy.divisions;
-    let face = |id: &str| {
-        let d = l.library.get(id).unwrap_or_else(|| panic!("{id}"));
-        let (dx, dy, _) = emerge_core::descriptor::divisions(d, div).unwrap_or_else(|e| panic!("{e}"));
-        dx * dy
-    };
-
-    for id in ["site/wall", "site/wall_window", "site/column"] {
-        assert_eq!(face(id), 5, "{id} must present five cells to agree with the others");
-        let g = l
-            .library
-            .get(id)
-            .and_then(|d| d.subgrid.as_ref())
-            .unwrap_or_else(|| panic!("{id} carries no lattice — the tokens were lost"));
-        assert!(g.cells.iter().any(|c| c.edge.as_deref() == Some("wall")), "{id} has no token");
-    }
-
-    // The exclusion, asserted rather than described: if the corner ever narrows to one cell it can be
-    // authored, and this test is where someone will find out.
-    assert_eq!(face("site/wall_corner"), 10, "the greybox corner is two cells wide");
-    assert!(
-        l.library.get("site/wall_corner").and_then(|d| d.subgrid.as_ref()).is_none(),
-        "the greybox corner must stay unauthored while its face is a different size from the wall's"
-    );
-
-    // And a run of the three that do agree reports nothing.
-    let at = |id: &str, d: &str, z: f32| emerge_core::map::Placed {
-        id: id.into(),
-        descriptor: d.into(),
-        at: (0.25, z),
-        yaw: 0.0,
-        ..emerge_core::map::Placed::default()
-    };
-    // Greybox modules are 1 m deep, so centres sit half a metre apart.
-    let run = emerge_core::map::Map {
-        name: "grey".into(),
-        placements: vec![
-            at("w1", "site/wall", 0.5),
-            at("w2", "site/wall", 1.5),
-            at("win", "site/wall_window", 2.5),
-        ],
-        ..emerge_core::map::Map::default()
-    };
-    let faults = emerge_core::adjacency::faults(&run, &l.library, emerge_core::grid::SNAP, div);
-    assert!(
-        faults.is_empty(),
-        "a greybox run must agree:\n{}",
-        faults.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join("\n")
-    );
 }

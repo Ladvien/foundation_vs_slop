@@ -105,7 +105,7 @@ pub struct Descriptor {
 ///
 /// **A lattice knows its cells; the project knows how finely a tile divides.** `div` used to be a
 /// per-descriptor field defaulting to 3×3×3, which meant a 3 m wall had 1 m cells and a 0.5 m chair
-/// had 0.167 m ones — two faces that [`crate::adjacency::may_abut`] compares element for element and
+/// had 0.167 m ones — two faces that [`crate::adjacency::seam`] compares cell against cell and
 /// that could never mean the same thing. Merrell & Manocha's model synthesis is explicit about why
 /// that cannot work: the grid is three sets of parallel planes and *"all planes within each set are
 /// parallel and evenly spaced"*, so a spacing that varies per object is not a grid at all

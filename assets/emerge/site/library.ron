@@ -221,7 +221,58 @@
                 rooms: [],
                 group: None,
             ),
-            subgrid: None,
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -254,7 +305,58 @@
                 rooms: [],
                 group: None,
             ),
-            subgrid: None,
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 2, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 3, 3),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -285,7 +387,22 @@
                 rooms: [],
                 group: None,
             ),
-            subgrid: None,
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (
@@ -441,7 +558,34 @@
                 rooms: [],
                 group: None,
             ),
-            subgrid: None,
+            subgrid: Some((
+                cells: [
+                    (
+                        at: (0, 0, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 0, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 0),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                    (
+                        at: (0, 1, 1),
+                        solid: false,
+                        edge: Some("wall"),
+                        anchor: None,
+                    ),
+                ],
+            )),
             note: None,
         ),
         (

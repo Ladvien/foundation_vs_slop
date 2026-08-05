@@ -1,7 +1,7 @@
 //! **Do the tiles the author placed agree with the tokens the author declared?**
 //!
 //! [`Subgrid::edge`](crate::descriptor::SubCell::edge) is what a tile presents to whatever sits
-//! beside it. This module is the one thing that reads it: a predicate, [`may_abut`], and one caller,
+//! beside it. This module is the one thing that reads it: a comparison, [`seam`], and one caller,
 //! [`faults`], which walks a finished map and reports every abutting pair whose facing tokens
 //! disagree.
 //!
@@ -91,9 +91,13 @@ pub fn quarter_turns(who: &str, yaw_deg: f32) -> Result<u8, String> {
 /// `dir` is [`crate::wfc`]'s edge index, and its world meaning is `grammar::learn`'s step table:
 /// `N` is −Z, `E` is +X, `S` is +Z, `W` is −X.
 ///
-/// The order is `y` outer, then the axis that is not `dir`'s — so two facing columns are read in the
-/// same spatial order and can be compared element by element. A cell with no `edge` contributes
+/// The order is `y` outer, then the axis that is not `dir`'s. A cell with no `edge` contributes
 /// `None`, which is a token in its own right; see the module note.
+///
+/// **This reads a face; it does not compare two.** [`seam`] is the comparison, and it does not go
+/// through this — two pieces of different sizes share only part of a face, so reading each in full and
+/// checking them element for element is the thing that was wrong. Kept because "what does this face
+/// present" is a question worth being able to ask on its own.
 pub fn face(g: &Subgrid, dir: Dir, div: (u32, u32, u32)) -> Vec<Option<&str>> {
     let (dx, dy, dz) = div;
     let mut out = Vec::new();
@@ -117,29 +121,120 @@ pub fn face(g: &Subgrid, dir: Dir, div: (u32, u32, u32)) -> Vec<Option<&str>> {
     out
 }
 
-/// The direction facing back the other way.
-fn opposite(dir: Dir) -> Dir {
-    match dir {
-        N => S,
-        E => W,
-        S => N,
-        W => E,
-        other => other,
-    }
+/// **A piece's world extent**, and the lattice divisions that span it.
+///
+/// The two are quoted together because neither means anything alone: a cell index is only a position
+/// once you know which span it divides.
+#[derive(Clone, Copy, Debug)]
+pub struct Placed3 {
+    /// World `(min, max)` per axis, after yaw.
+    pub x: (f32, f32),
+    pub y: (f32, f32),
+    pub z: (f32, f32),
+    /// Divisions per axis, matching those world spans — so already turned, if the piece is.
+    pub div: (u32, u32, u32),
 }
 
-/// **May `b` sit `dir` of `a`?** True when the facing columns agree, element for element.
+/// Which cell of `n` divisions over `[lo, hi]` contains `v`.
 ///
-/// Equality, per Merrell & Manocha 2009 §4.3 — see the module note. Faces of different lengths never
-/// agree, which is how two tiles divided differently refuse each other rather than matching on a
-/// prefix.
+/// Clamped rather than refused: callers sample the centre of a step inside the overlap, so a value
+/// lands outside only through floating point, and the honest answer there is the edge cell.
+fn index(v: f32, (lo, hi): (f32, f32), n: u32) -> u32 {
+    if n == 0 || hi <= lo {
+        return 0;
+    }
+    (((v - lo) / (hi - lo) * n as f32) as i64).clamp(0, n as i64 - 1) as u32
+}
+
+/// **The tokens either side of a seam presents to the other, over the part they actually share.**
 ///
-/// **That refusal still matters now that divisions are derived.** Two pieces of the same size get
-/// the same divisions and reach the element-wise comparison, which is the whole point of deriving
-/// them — but a 0.5 m crate beside a 2.4 m wall genuinely presents a shorter face, and reporting
-/// those as compatible would be inventing an agreement that the geometry does not support.
-pub fn may_abut(a: &Subgrid, b: &Subgrid, dir: Dir, a_div: (u32, u32, u32), b_div: (u32, u32, u32)) -> bool {
-    face(a, dir, a_div) == face(b, opposite(dir), b_div)
+/// # Why not whole faces
+///
+/// Comparing whole faces element for element — which this did until 2026-08-05 — is only meaningful
+/// when the two pieces are
+/// the same size. The shipped kits say otherwise in two independent places:
+///
+/// * A 2.40 m wall meets a **2.00 m doorway** with a 0.40 m header above it. Whole faces are five rows
+///   against four, so the seam was refused even when every token on it read `wall` — and the header,
+///   which supplies the fifth row, was never compared to the doorway at all because it shares its
+///   `(x, z)` cells rather than abutting them.
+/// * `site_greybox`'s **`wall_corner` is twice as wide** as its own wall. Not an architectural stack,
+///   just two pieces of one family being different widths.
+///
+/// Both are the same defect: equality of whole faces asks "are these pieces the same shape" when the
+/// question is "do they agree where they touch". This answers the second.
+///
+/// # How
+///
+/// The seam is a rectangle: the **lateral** overlap along the axis the seam runs on, and the
+/// **vertical** overlap of the two pieces' world heights. It is sampled at the centre of each subunit
+/// step and each sample is mapped into both pieces' own lattices, so pieces divided differently — or
+/// offset from each other — are still read at the same physical places, in the same order.
+///
+/// `None` when they share no rectangle: no lateral overlap, or one piece entirely above the other.
+/// That is not a seam and there is nothing to compare.
+pub fn seam<'a>(
+    a: &'a Subgrid,
+    a_at: Placed3,
+    b: &'a Subgrid,
+    b_at: Placed3,
+    dir: Dir,
+    subunit: f32,
+) -> Option<(Vec<Option<&'a str>>, Vec<Option<&'a str>>)> {
+    if !(subunit.is_finite() && subunit > 0.0) {
+        return None;
+    }
+    // The vertical overlap is shared by every seam direction.
+    let y = (a_at.y.0.max(b_at.y.0), a_at.y.1.min(b_at.y.1));
+    if y.1 <= y.0 {
+        return None;
+    }
+    // The lateral axis is whichever one the seam runs along, and the face index on the other is
+    // fixed by the direction: entering from the East reads `a`'s last x column and `b`'s first.
+    let lateral_is_z = dir == E || dir == W;
+    let (a_lat, b_lat) = if lateral_is_z {
+        (a_at.z, b_at.z)
+    } else {
+        (a_at.x, b_at.x)
+    };
+    let lat = (a_lat.0.max(b_lat.0), a_lat.1.min(b_lat.1));
+    if lat.1 <= lat.0 {
+        return None;
+    }
+
+    let last = |n: u32| n.saturating_sub(1);
+    let (a_face, b_face) = match dir {
+        E => (last(a_at.div.0), 0),
+        W => (0, last(b_at.div.0)),
+        N => (0, last(b_at.div.2)),
+        S => (last(a_at.div.2), 0),
+        _ => return None,
+    };
+
+    // Steps, not divisions: the two pieces may divide this stretch differently, so the sampling rate
+    // is the project's own subunit and both are read at the same physical places.
+    let steps = |span: (f32, f32)| (((span.1 - span.0) / subunit).round() as u32).max(1);
+    let (n_lat, n_y) = (steps(lat), steps(y));
+
+    let mut left = Vec::with_capacity((n_lat * n_y) as usize);
+    let mut right = Vec::with_capacity((n_lat * n_y) as usize);
+    for iy in 0..n_y {
+        let wy = y.0 + (iy as f32 + 0.5) * (y.1 - y.0) / n_y as f32;
+        for il in 0..n_lat {
+            let wl = lat.0 + (il as f32 + 0.5) * (lat.1 - lat.0) / n_lat as f32;
+            let cell = |at: Placed3, face: u32| -> (u32, u32, u32) {
+                let ay = index(wy, at.y, at.div.1);
+                if lateral_is_z {
+                    (face, ay, index(wl, at.z, at.div.2))
+                } else {
+                    (index(wl, at.x, at.div.0), ay, face)
+                }
+            };
+            left.push(a.at(cell(a_at, a_face)).and_then(|c| c.edge.as_deref()));
+            right.push(b.at(cell(b_at, b_face)).and_then(|c| c.edge.as_deref()));
+        }
+    }
+    Some((left, right))
 }
 
 /// One disagreement between two placed tiles.
@@ -253,6 +348,11 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         /// wrong, and the first is the one that matters — a wall seam is the thing edge tokens exist
         /// to check.
         span: (i64, i64, i64, i64),
+        /// The same piece in world metres, which is what the seam comparison reads. The cell rect
+        /// above answers "do these touch"; this answers "where, exactly".
+        x: (f32, f32),
+        y: (f32, f32),
+        z: (f32, f32),
         yaw: f32,
         grid: Subgrid,
         /// The lattice's divisions, derived from this placement's own patched extent — so a
@@ -261,8 +361,20 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         /// Whether this tile says anything about its edges at all.
         declares: bool,
     }
+    // **Every placement's base Y.** The seam comparison needs a vertical overlap, and a piece's Y is
+    // not in its `Placed`: it comes from its `mount` through `stack::datum`, which for anything
+    // resting on a surface needs that surface resolved first. `resolve_y` is the one function that
+    // does it, so it is the one used here.
+    //
+    // A map whose heights cannot be resolved is `Map::validate`'s problem and `placement_at`'s to
+    // report — the same call this function already makes about a descriptor missing from the library.
+    // Reporting it twice under a name that hides its cause helps nobody.
+    let Ok(ys) = crate::stack::resolve_y(map, library) else {
+        return out;
+    };
+
     let mut placed: Vec<Tile> = Vec::new();
-    for p in &map.placements {
+    for (i, p) in map.placements.iter().enumerate() {
         let Some(base) = library.get(&p.descriptor) else {
             continue;
         };
@@ -289,9 +401,16 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
             Ok(q) if q % 2 == 1 => (fd, fw),
             _ => (fw, fd),
         };
+        let base = ys.get(i).copied().unwrap_or(map.origin.1);
+        // The height as it stands, which is the same rule `divisions` uses — see
+        // `descriptor::divisions` on why the stretch belongs in it.
+        let h = authored.extent.height.unwrap_or(0.0) * authored.align.stretch_y.unwrap_or(1.0);
         placed.push(Tile {
             id: p.id.as_str(),
             span: to_span(p.at, (fw, fd)),
+            x: (p.at.0 - fw * 0.5, p.at.0 + fw * 0.5),
+            y: (base, base + h),
+            z: (p.at.1 - fd * 0.5, p.at.1 + fd * 0.5),
             yaw: p.yaw,
             div,
             declares: grid.cells.iter().any(|c| c.edge.is_some()),
@@ -376,11 +495,20 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
                 let [(a_grid, a_div), (b_grid, b_div)] = turned.as_slice() else {
                     continue;
                 };
-                if may_abut(a_grid, b_grid, dir, *a_div, *b_div) {
+                // **The part they share, not the whole face.** See [`seam`] for why, and for the two
+                // places in the shipped kits that forced the change.
+                let a_at = Placed3 { x: a.x, y: a.y, z: a.z, div: *a_div };
+                let b_at = Placed3 { x: b.x, y: b.y, z: b.z, div: *b_div };
+                let Some((a_face, b_face)) =
+                    seam(a_grid, a_at, b_grid, b_at, dir, cell / divisions.max(1) as f32)
+                else {
+                    // No rectangle in common: the cell rects touch but the pieces do not overlap in Y,
+                    // so there is no seam here to be right or wrong about.
+                    continue;
+                };
+                if a_face == b_face {
                     continue;
                 }
-                let a_face = face(a_grid, dir, *a_div);
-                let b_face = face(b_grid, opposite(dir), *b_div);
                 out.push(Fault {
                     a: a.id.to_owned(),
                     b: b.id.to_owned(),
@@ -433,47 +561,14 @@ mod tests {
         }
     }
 
-    const ONE: (u32, u32, u32) = (1, 1, 1);
-
     /// **The inert property, and it must hold without a branch.** Every shipped descriptor has an
     /// empty lattice, so every face is all-`None`, so everything matches everything. If this ever
-    /// fails, someone has made `None` mean "wildcard" or "no answer" instead of "a token".
-    #[test]
-    fn an_unauthored_lattice_agrees_with_everything() {
-        let empty = Subgrid::default();
-        for dir in [N, E, S, W] {
-            assert!(
-                may_abut(&empty, &empty, dir, ONE, ONE),
-                "two unauthored lattices must abut in {}",
-                dir_name(dir)
-            );
-        }
-    }
 
-    /// The whole point: two faces that say different things do not match.
-    #[test]
-    fn facing_tokens_must_agree() {
-        // A 1x1x1 lattice: one cell, so each face is one token.
-        let wall = grid(&[((0, 0, 0), "wall")]);
-        let door = grid(&[((0, 0, 0), "door")]);
-        assert!(may_abut(&wall, &wall, E, ONE, ONE));
-        assert!(!may_abut(&wall, &door, E, ONE, ONE), "`wall` must not meet `door`");
-        assert!(
-            !may_abut(&wall, &Subgrid::default(), E, ONE, ONE),
-            "an authored token must not meet an unlabelled cell — that would be a wildcard"
-        );
-    }
 
     /// Faces of different lengths cannot agree, rather than agreeing on a prefix.
     ///
     /// Divisions are derived from size now, so this is the differently-**sized** case: a piece one
     /// cell deep beside one three cells deep. Their faces are genuinely different shapes and saying
-    /// otherwise would invent an agreement the geometry does not support.
-    #[test]
-    fn lattices_divided_differently_refuse_each_other() {
-        let empty = Subgrid::default();
-        assert!(!may_abut(&empty, &empty, E, (1, 1, 3), (1, 1, 2)));
-    }
 
     /// Four quarter turns put every cell back where it started.
     #[test]
@@ -677,14 +772,27 @@ mod tests {
             ("wall", (3.0, 0.5), grid(&[((0, 0, 0), "stone")])),
             ("gap", (0.5, 0.5), Subgrid::default()),
         ]);
-        // Turned a quarter, the wall is 0.5 wide and 3 deep, running from z = 0 to z = 3.
+        // Turned a quarter, the wall is 0.5 wide and 3 deep, running from z = 0 to z = 3. The token was
+        // authored at x = 0 and `rotated` carries `(x, y, z)` to `(z, y, dx - 1 - x)`, so it lands at
+        // z = 5 of 6 — the LAST half-metre of the run. That is where a neighbour has to be to meet it.
         let map = map_with(vec![
             placed("w1", "wall", (0.25, 1.5), 90.0),
-            // Beside its long side, two metres along — only reachable if the turn was accounted for.
-            placed("g1", "gap", (0.75, 2.0), 0.0),
+            // Beside its long side. Reachable at all only if the turn was accounted for in the
+            // pairing, and a fault only if the token moved with it.
+            placed("g1", "gap", (0.75, 2.75), 0.0),
         ]);
         let found = faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE);
         assert_eq!(found.len(), 1, "the turned wall's long face: {found:#?}");
+
+        // **The same neighbour at the other end of the run is not a fault**, because the token is not
+        // there. Under whole-face equality it was one — six cells against one, refused on length
+        // alone — and that is exactly the difference `seam` makes: it asks what is *at* the seam, not
+        // how big the two faces are.
+        let elsewhere = map_with(vec![
+            placed("w1", "wall", (0.25, 1.5), 90.0),
+            placed("g1", "gap", (0.75, 0.25), 0.0),
+        ]);
+        assert_eq!(faults(&elsewhere, &lib, crate::grid::SNAP, ONE_PER_TILE), Vec::new());
     }
 
     /// A map of unauthored tiles reports nothing — the inert property, end to end.
@@ -795,5 +903,162 @@ mod tests {
             found.iter().any(|f| f.a == "chair" && f.message.contains("240")),
             "{found:#?}"
         );
+    }
+}
+
+/// **The seam rule, and the two cases in the shipped kits that decided it.**
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+    use crate::descriptor::{Descriptor, Extent, SubCell};
+    use crate::map::Placed;
+
+    /// `wall` on every cell of a lattice, which is how the kits are authored.
+    fn all_wall(div: (u32, u32, u32)) -> Subgrid {
+        let (dx, dy, dz) = div;
+        Subgrid {
+            cells: (0..dx)
+                .flat_map(|x| (0..dy).flat_map(move |y| (0..dz).map(move |z| (x, y, z))))
+                .map(|at| SubCell {
+                    at,
+                    edge: Some("wall".into()),
+                    ..SubCell::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn piece(id: &str, w: f32, h: f32, d: f32, div: (u32, u32, u32)) -> Descriptor {
+        Descriptor {
+            id: id.into(),
+            extent: Extent {
+                footprint: Some((w, d)),
+                height: Some(h),
+            },
+            mount: Some(crate::descriptor::Mount::OnFloor),
+            subgrid: Some(all_wall(div)),
+            ..Descriptor::default()
+        }
+    }
+
+    fn map_of(ps: Vec<Placed>) -> Map {
+        Map {
+            name: "t".into(),
+            placements: ps,
+            ..Map::default()
+        }
+    }
+
+    fn at(id: &str, d: &str, x: f32, z: f32) -> Placed {
+        Placed {
+            id: id.into(),
+            descriptor: d.into(),
+            at: (x, z),
+            yaw: 0.0,
+            ..Placed::default()
+        }
+    }
+
+    /// A wall's run-face against a doorway's, the shipped shapes: 2.40 m against 2.01 m, so five rows
+    /// against four. **Whole-face equality refused this**; the overlap agrees, because every cell on
+    /// the part they share says `wall` on both sides.
+    #[test]
+    fn a_wall_and_a_shorter_doorway_agree_over_the_rows_they_share() {
+        let lib = Library {
+            descriptors: vec![
+                piece("wall", 0.1, 2.40, 1.0, (1, 5, 2)),
+                piece("door", 0.1, 2.01, 1.0, (1, 4, 2)),
+            ],
+            ..Library::default()
+        };
+        let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("d1", "door", 0.25, 1.5)]);
+        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// And a header, which only exists between 2.00 m and 2.40 m, agrees with the wall over exactly
+    /// that band. **This pair was never compared at all** under the old pairing: a header sitting above
+    /// a doorway shares its `(x, z)` cells, so `side` saw overlap rather than abutment. Here it is
+    /// beside the wall, which is the seam it really has.
+    #[test]
+    fn a_header_agrees_with_the_wall_over_the_band_it_occupies() {
+        let mut header = piece("header", 0.1, 0.40, 1.0, (1, 1, 2));
+        // A header hangs at wall height rather than standing on the floor.
+        header.mount = Some(crate::descriptor::Mount::OnWall { height: 2.0 });
+        let lib = Library {
+            descriptors: vec![piece("wall", 0.1, 2.40, 1.0, (1, 5, 2)), header],
+            ..Library::default()
+        };
+        let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("h1", "header", 0.25, 1.5)]);
+        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// **A disagreement inside the overlap is still a fault.** The whole point is to compare *less*,
+    /// not to compare nothing — a permissive rule that reported nothing would be worse than the strict
+    /// one it replaced.
+    #[test]
+    fn a_different_token_on_the_shared_rows_is_still_reported() {
+        let mut door = piece("door", 0.1, 2.01, 1.0, (1, 4, 2));
+        door.subgrid = Some(Subgrid {
+            cells: (0..4)
+                .flat_map(|y| [(0, y, 0), (0, y, 1)])
+                .map(|at| SubCell {
+                    at,
+                    edge: Some("glass".into()),
+                    ..SubCell::default()
+                })
+                .collect(),
+        });
+        let lib = Library {
+            descriptors: vec![piece("wall", 0.1, 2.40, 1.0, (1, 5, 2)), door],
+            ..Library::default()
+        };
+        let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("d1", "door", 0.25, 1.5)]);
+        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].message.contains("glass"), "{}", found[0].message);
+    }
+
+    /// The greybox case: two pieces of one family at different **widths**, meeting along a run. Not an
+    /// architectural stack — just a corner that is two cells wide against a wall that is one — and the
+    /// overlap is the metre they actually share.
+    #[test]
+    fn a_wider_corner_agrees_with_its_wall_over_the_width_they_share() {
+        let lib = Library {
+            descriptors: vec![
+                piece("wall", 0.5, 2.40, 1.0, (1, 5, 2)),
+                piece("corner", 1.0, 2.40, 1.0, (2, 5, 2)),
+            ],
+            ..Library::default()
+        };
+        // Wall spans x [0, 0.5]; corner spans x [0, 1.0]. They meet on z, overlapping on the wall's
+        // half-metre of width.
+        let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("c1", "corner", 0.5, 1.5)]);
+        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// **No vertical overlap is not a seam.** A piece floating entirely above another shares a cell
+    /// footprint and no surface, so there is nothing to be right or wrong about — and reporting one
+    /// would be inventing a relationship the geometry does not have.
+    #[test]
+    fn pieces_that_do_not_overlap_in_height_are_not_a_seam() {
+        let mut high = piece("high", 0.1, 0.40, 1.0, (1, 1, 2));
+        high.mount = Some(crate::descriptor::Mount::OnWall { height: 3.0 });
+        high.subgrid = Some(Subgrid {
+            cells: vec![SubCell {
+                at: (0, 0, 0),
+                edge: Some("glass".into()),
+                ..SubCell::default()
+            }],
+        });
+        let lib = Library {
+            descriptors: vec![piece("wall", 0.1, 2.40, 1.0, (1, 5, 2)), high],
+            ..Library::default()
+        };
+        // Beside the wall on the floor plan, but 3.0 m up where the wall stops at 2.40.
+        let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("h1", "high", 0.25, 1.5)]);
+        assert_eq!(faults(&map, &lib, crate::grid::SNAP, 1), Vec::new());
     }
 }
