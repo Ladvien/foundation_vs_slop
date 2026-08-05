@@ -13,6 +13,8 @@
 //! The numbers below are the ones the old computation produced, written as literals on purpose. A
 //! literal is the only kind of assertion that survives the code it was checking being deleted.
 
+use std::path::Path;
+
 use foundation_vs_slop::site::kit::{
     id_of, load_site_kit, SiteKit, GREYBOX_KIT_PATH, GREYBOX_PROJECT_DIR, SITE_KIT_PATH,
     SITE_PROJECT_DIR,
@@ -239,4 +241,120 @@ fn the_furniture_library_derives_workable_lattices() {
             d.id
         );
     }
+}
+
+/// **The first authored edge tokens in this repo, and what they prove.**
+///
+/// `site/wall`, `wall_corner`, `wall_window` and `column` carry `wall` on their run-faces — the N and
+/// S faces, since these pieces are thin on X and run along Z. All four are 2.40 m, so all four derive
+/// five layers, so all four present a five-cell face. That agreement is the whole point of deriving
+/// divisions from a piece's own size: under the old per-descriptor `div: (3,3,3)` a 2.40 m wall and a
+/// 0.22 m corner both had three layers, and comparing them compared bands of different heights.
+#[test]
+fn the_authored_run_faces_let_the_full_height_family_meet() {
+    let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let div = layered.policy.divisions;
+
+    // Every piece that carries tokens presents the same face size, or they cannot agree at all.
+    let face_len = |id: &str| {
+        let d = layered.library.get(id).unwrap_or_else(|| panic!("{id}"));
+        let (dx, dy, _) = emerge_core::descriptor::divisions(&d.extent, div, id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        dx * dy
+    };
+    for id in ["site/wall", "site/wall_corner", "site/wall_window", "site/column"] {
+        assert_eq!(face_len(id), 5, "{id} must present five cells on its run-face");
+        let g = layered
+            .library
+            .get(id)
+            .and_then(|d| d.subgrid.as_ref())
+            .unwrap_or_else(|| panic!("{id} carries no lattice — the tokens were lost"));
+        assert!(
+            g.cells.iter().any(|c| c.edge.as_deref() == Some("wall")),
+            "{id} carries a lattice with no `wall` token in it"
+        );
+    }
+
+    // A run of them, end to end along Z, reports nothing. `wall` is 1.00 m long, so its centres sit
+    // half a metre apart; the window is 2.00 and the column 0.80.
+    let at = |id: &str, d: &str, z: f32| emerge_core::map::Placed {
+        id: id.into(),
+        descriptor: d.into(),
+        at: (0.25, z),
+        yaw: 0.0,
+        ..emerge_core::map::Placed::default()
+    };
+    let run = emerge_core::map::Map {
+        name: "run".into(),
+        placements: vec![
+            at("w1", "site/wall", 0.5),
+            at("w2", "site/wall", 1.5),
+            at("win", "site/wall_window", 3.0),
+        ],
+        ..emerge_core::map::Map::default()
+    };
+    let faults =
+        emerge_core::adjacency::faults(&run, &layered.library, emerge_core::grid::SNAP, div);
+    assert!(
+        faults.is_empty(),
+        "a run of full-height pieces must agree:\n{}",
+        faults.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// **The open question, pinned as behaviour.**
+///
+/// A doorway is 2.01 m against the wall's 2.40, so it derives four layers to the wall's five. Give it
+/// the same token and the seam is refused — not because the tokens disagree, but because the faces
+/// are different lengths. The kit reaches 2.40 m by stacking a 0.40 m header above the doorway, so
+/// the wall's fifth row is the header's only row.
+///
+/// `may_abut` compares whole faces, so it cannot see that. Whether it should instead compare the part
+/// that overlaps — which would fix this and the horizontal version of it, a 3 m wall meeting a 1 m
+/// doorway — is the decision this test exists to keep visible. **It asserts the current behaviour,
+/// not the desired one**, so whoever changes the rule has to come here and say so.
+#[test]
+fn a_doorway_is_one_row_short_of_a_wall_and_the_fault_says_so() {
+    let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let div = layered.policy.divisions;
+    let mut lib = layered.library.clone();
+
+    // Author the doorway the obvious way: the same token, on its own four-layer run-face.
+    let door = lib
+        .descriptors
+        .iter_mut()
+        .find(|d| d.id == "site/wall_doorway")
+        .unwrap_or_else(|| panic!("the doorway is in the kit"));
+    door.subgrid = Some(emerge_core::descriptor::Subgrid {
+        cells: (0..4)
+            .flat_map(|y| [(0, y, 0), (0, y, 3)])
+            .map(|at| emerge_core::descriptor::SubCell {
+                at,
+                edge: Some("wall".into()),
+                ..emerge_core::descriptor::SubCell::default()
+            })
+            .collect(),
+    });
+
+    let at = |id: &str, d: &str, z: f32| emerge_core::map::Placed {
+        id: id.into(),
+        descriptor: d.into(),
+        at: (0.25, z),
+        yaw: 0.0,
+        ..emerge_core::map::Placed::default()
+    };
+    let map = emerge_core::map::Map {
+        name: "door".into(),
+        placements: vec![at("w1", "site/wall", 0.5), at("d1", "site/wall_doorway", 2.03)],
+        ..emerge_core::map::Map::default()
+    };
+    let faults = emerge_core::adjacency::faults(&map, &lib, emerge_core::grid::SNAP, div);
+    assert_eq!(faults.len(), 1, "{faults:#?}");
+    let m = &faults[0].message;
+    // Four against five, with the same token in every cell — which is what makes it a question about
+    // the rule rather than about the tokens.
+    assert!(m.contains("[wall wall wall wall]"), "{m}");
+    assert!(m.contains("[wall wall wall wall wall]"), "{m}");
 }
