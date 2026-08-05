@@ -877,49 +877,28 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
   3. `search_calibration::a_candidate_genome_actually_changes_the_simulation`
   4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
 
-  **I proposed a unifying cause — "the squad never reaches the content" — and then measured it, and it is WRONG as stated.** Recorded because the correction is the useful part. Nearest squad↔crab distance over 1800 ticks:
+  **LOCATED (2026-08-05). One cause, three of the four skips, and it is the evaluation harness — not the game.** The decisive experiment: take the **identical** `SimConfig` the failing test rolls out (`deterministic_core_seeded(0x5C09191)` + `BrainSource::Authored` + `.with_level(pheno)`) and step it **by hand** instead of through `run_episode`. Result: crabs 40 → 44, lowest crab health **0.303**, 4 nests present at tick 1. **Combat works.** The same config through `run_episode` gives `crabs_killed = 0, unit_damage = 0.00`. The only difference is `run_episode`'s **synthetic player**.
 
-  | seed | t=600 | t=1100 | t=1800 | closest ever | crab count |
-  |---|---|---|---|---|---|
-  | `0x5C09191` (the one the playtest uses) | 51.1 m | 7.5 m | 5.5 m | **2.09 m** | 40 → 44 |
-  | `0x1ce5` | 31.8 m | 14.8 m | 4.5 m | 4.50 m | 42 → **34** |
+  `search_calibration`'s own failure dump names the mechanism:
 
-  The squad closes to **2 m**, and on `0x1ce5` **eight crabs died**. So the swarm and the squad do meet, engagement does happen, and the archive-wide alarm ("the search has been scoring episodes where nothing happens") is **not supported** — do not act on it.
+  ```
+  ordered_ticks: 4500  of EPISODE_TICKS 7200   (62.5% under standing player order)
+  weapons_tight_ticks: 900                     (12.5% holding fire)
+  captures_attempted: 3, completed: 1, broken: 2
+  crabs_killed: 0   unit_damage_taken: 0.0
+  cells_covered: 332  of reachable_cells: 3577  (9% of the map)
+  squad_duty_decisions: 440
+  ```
 
-  **What survives, and it is a real bug: on `0x5C09191` the squad and the swarm interpenetrate and nothing happens.** Four hypotheses were tested and *three were wrong* — worth stating, because each looked obvious:
+  And `search_calibration.rs:60` states the consequence of the first number: *"a standing `MoveOrder` overrides locomotion and excludes the unit from `unit_actions` and `medic_heal`, so a permanently-ordered squad evaluates nothing."* The squad is ordered for nearly two thirds of the episode and weapons-tight for an eighth of it — and `WeaponsTight` gates the bolt. It is also *correct* that it does: holding fire is a containment verb, and 3 captures were attempted. **The containment mechanic and `minimal_criterion`'s "a crab must have died" are in direct conflict**, and the harness satisfies the former.
 
-  | hypothesis | verdict |
-  |---|---|
-  | the squad never reaches the swarm | **wrong** — closes to 0.47 m |
-  | the nearest crab is overhead (crabs climb) | **wrong** — all 44 crabs at `y = 0.12`, units at `y = 0.00`; nothing is on a wall |
-  | 1800 ticks is shorter than the time-to-contact | **wrong** — at 2700 / 3600 / 5400 ticks, still `crabs_killed = 0` |
-  | line of sight is blocked | **wrong** — `line_of_sight = true` at the closest pair |
+  This is why all three fail:
+  * `playtest_level` and `the_authored_brains_produce_a_real_encounter_on_every_world` — `minimal_criterion` rejects on "no crab died", so **every** episode is rejected. The test's own message spells out the stakes: *"`train evolve` will silently produce an empty archive and exit 0."*
+  * `a_candidate_genome_actually_changes_the_simulation` — two genomes produce a byte-identical hash, which follows: if the squad is ordered or weapons-tight for 75% of the episode, the brain barely runs and cannot differentiate.
 
-  The measurements, `deterministic_core_seeded(0x5C09191)`:
+  **The fix is a judgement call, not a bug fix, and the test already frames it:** *"Either gameplay changed, or a threshold in `surprise::minimal_criterion` needs recalibrating against `train probe`."* Gameplay did change — containment landed and holding fire became a core verb. Candidates: recalibrate `minimal_criterion` so a *capture* counts as a real encounter alongside a kill (`captures_completed: 1` is right there in the outcome); shorten `ADVANCE_TICKS` (300) so less of the episode is spent ordered; or have the synthetic player not hold weapons tight. Each moves `snapshot_hash` and re-scores every archive.
 
-  * from t=800 onward there are **5–20 squad↔crab pairs within 12 m at every sample, and most are in line of sight** (t=2100: 20 pairs under 12 m, 16 of them in LOS);
-  * closest approach **0.47 m** at t=2300, in **adjacent cells** — unit `(80,112)`, crab `(80,113)` — with `line_of_sight = true`;
-  * and across 1800 / 2700 / 3600 / 5400 ticks: `crabs_killed = 0`, `unit_damage_taken = 0.00`, `survivors = 5`, crab count *rising* 40 → 44.
-
-  So five armed units stand half a metre from a crab, in clear sight, for thousands of ticks, and **neither side ever fires**. That is the engage path being dead on this seed, not a geometry or timing artifact. It is also seed-specific: on `0x1ce5` the same shipped level kills eight crabs, so nothing here is globally broken.
-
-  **The `Mode` histogram was taken, and it rules the brain out.** Squad modes over 2400 ticks, both seeds:
-
-  | mode | `0x5C09191` (no kills) | `0x1ce5` (8 kills) |
-  |---|---|---|
-  | FollowAnchor | 45.8% | 69.2% |
-  | Ward | 14.2% | 10.0% |
-  | Commune | 13.3% | 10.8% |
-  | Overwatch | 12.5% | 10.0% |
-  | Flee | 8.3% | — |
-  | SecureDoor | 3.3% | — |
-  | Examine | 2.5% | — |
-
-  **Neither seed ever shows an attacking mode** — and one of them kills eight crabs. So the rifles fire independently of the brain's mode, exactly as `surprise::minimal_criterion`'s own comment says (*"the rifles auto-fire"*), and mode selection is **not** the discriminator. That eliminates "the brain never chose to fight", which was the leading candidate.
-
-  **So the remaining suspect is the auto-fire gate itself** — `laser::fire_laser`. Note it carries its **own** `Dungeon::line_of_sight` test, deliberately separate from the `FogGrid` (see `fog::update_los`'s note: the fog reveal rule is lenient on purpose and `fire_laser` needs the strict corner rule). My LOS measurement used `Dungeon::line_of_sight` and returned `true` at 0.47 m, so the strict test passes at the closest pair — which makes the range check, the target-selection step that picks *which* crab, or a cooldown/ammo gate the next things to read. Nothing here is asserted; the four eliminated hypotheses are in the table above so nobody re-runs them.
-
-  The watch-feed finding below stands on its own measurements and is unaffected by this correction. `a_candidate_genome_actually_changes_the_simulation` may still share a cause with the playtest failure — a seed where nothing is contested cannot distinguish two brains — but that is now a hypothesis about one seed, not about the search.
+  **Do not trust my earlier eliminations for this.** Nine hypotheses were tested and eight were wrong, and the first seven measured the **shipped dungeon stepped by hand** — a world where combat works fine — rather than the harness path that actually fails. Recorded so nobody re-runs them: squad never reaches the swarm (closes to 0.47 m), crab overhead (all crabs at `y = 0.12`), horizon too short (5400 ticks, still zero), LOS blocked (`true` at the closest pair), the brain never picks a fight (no attack mode on *either* seed), the fog gate (163 visible targets on the failing seed vs 80 on the working one), the front arc (65 fully-valid acquisitions vs 4), nests missing when the tour is planned (4 exist at tick 1). The lesson: **reproduce the failure through the entry point the failing test uses, before forming any hypothesis.** `rollout_level` was visible in the source from the start.
 
 - **⚠️ DECISION NEEDED: `broadcast.watch_threshold` (0.006) sits inside the ambient ATTENTION floor, so "look away to contain it" cannot hold.** Found 2026-08-05 while trying to promote the harness lane; `watching_the_feed_makes_it_generate_and_ignoring_it_stops` is red because the mechanic really is broken, not because the oracle is.
 
