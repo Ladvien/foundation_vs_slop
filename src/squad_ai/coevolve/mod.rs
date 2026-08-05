@@ -201,8 +201,15 @@ pub fn feasible(t: &Templates, squad: &SquadGenome, swarm: &SwarmGenome) -> Resu
 ///
 /// A child is infeasible when it loses its unconditional default — e.g. `wander()`'s intercept
 /// (`Linear { m: 0.0, b: 0.12 }`) drifts below `MIN_SCORE = 0.1`, only 0.02 away. That is the guard doing
-/// its job, and roughly half of all children trip it at `SIGMA = 0.25`. Screening costs *no simulation*,
-/// so bounded rejection sampling is the right constraint-handling move: redraw until feasible.
+/// its job. Screening costs *no simulation*, so bounded rejection sampling is the right
+/// constraint-handling move: redraw until feasible.
+///
+/// **How often it trips, measured over 2000 draws (2026-08-05):** `squad` children are feasible
+/// **0.902** of the time and `swarm` children **0.281** — so the swarm side is essentially the whole
+/// rejection rate, and the previous claim here of "roughly half of all children" was wrong for both.
+/// The two are drawn independently, so over 500 pairs none exhausted this budget and the worst side
+/// needed 19 of 64 redraws (`P(exhaust) ≈ 0.72^64 ≈ 4e-10`).
+/// `coevolve::tests::mutation_yields_feasible_children_often_enough_for_rejection_sampling` pins it.
 ///
 /// Exhausting the budget is a loud error, never a silent skip. It means `SIGMA` is wrong for this parent,
 /// and quietly evaluating the parent again (or an authored brain) would corrupt the archive with a

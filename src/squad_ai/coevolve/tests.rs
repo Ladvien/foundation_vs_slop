@@ -143,29 +143,95 @@ fn mean_is_order_independent() {
     assert_eq!(mean(&xs), mean(&ys));
 }
 
+/// **A canary on `SIGMA`** — and a regression test for a bug this test found: with the slope sign left
+/// free, `Linear{m}` went negative half the time, `guaranteed_floor` lost both unconditional tails
+/// (`wander`, `follow_anchor`, both authored `m = 0.0`), and **0 of 32** children were feasible — the
+/// search would have spun forever. `ParamKind::SignLocked` fixed it.
+///
+/// # Why this was recalibrated (2026-08-05)
+///
+/// It asserted `>= 16` joint-feasible children out of **64 draws**, and it was red at `13/64`. That was
+/// not a regression. Measured over 2000 draws, the joint single-draw rate is **0.255** — so the old bar
+/// sat exactly *at* the true mean, where the count's standard deviation is
+/// `sqrt(64 · 0.255 · 0.745) ≈ 3.5`. A threshold at the mean fails for about half of all seeds by
+/// construction, and `13` is 0.9σ low: an ordinary draw, not a signal. It went red when something
+/// perturbed the RNG stream (the `coevolve.rs` file split, `72e3423`), which is the only reason a
+/// *seeded* coin flip changes its answer.
+///
+/// Two things replace it, both measured rather than assumed:
+///
+/// * **The per-side rates, with enough samples to mean something.** They are wildly asymmetric, which
+///   the old joint number hid and the old comment got wrong: `squad` is **0.902** and `swarm` is
+///   **0.281**, so the swarm side is the entire constraint. At `n = 2000` each rate has σ ≈ 0.01, so
+///   the floors below are ~10σ away and cannot flap.
+/// * **What production actually needs.** `propose_squad` and `propose_swarm` redraw *independently*,
+///   `MAX_MUTATION_ATTEMPTS` each — they never require a jointly-feasible single draw, which is the
+///   statistic the old test measured. Over 500 pairs: **0** exhausted the budget and the worst side
+///   needed 19 of 64 redraws. `P(exhaust) ≈ 0.72^64 ≈ 4e-10` per side, so the search is safe by a
+///   factor of about a billion. This asserts that directly, which is the doc's own stated bar —
+///   *"bounded rejection sampling terminates comfortably"*.
 #[test]
 fn mutation_yields_feasible_children_often_enough_for_rejection_sampling() {
-    // A canary on SIGMA, and a regression test for a bug this test found: with the slope sign left
-    // free, `Linear{m}` went negative half the time, `guaranteed_floor` lost both unconditional tails
-    // (`wander`, `follow_anchor`, both authored `m = 0.0`), and **0 of 32** children were feasible —
-    // the search would have spun forever. `ParamKind::SignLocked` fixed it.
-    //
-    // The residual rejection rate is the guard working as designed (`wander`'s intercept sits 0.02
-    // above MIN_SCORE), and `propose_*` absorbs it by redrawing. The bar here only has to be high
-    // enough that bounded rejection sampling terminates comfortably.
     let t = Templates::authored();
     let squad0 = SquadGenome::authored(&t);
     let swarm0 = SwarmGenome::authored(&t);
     let mut rng = seeded(99);
-    let mut ok = 0;
-    for _ in 0..64 {
+
+    // Enough draws that the rate is a measurement and not a coin flip.
+    const N: u32 = 2000;
+    let (mut squad_ok, mut swarm_ok) = (0u32, 0u32);
+    for _ in 0..N {
         let squad = mutate_squad(&t, &squad0, &mut rng).expect("mutate");
         let swarm = mutate_swarm(&t, &swarm0, &mut rng).expect("mutate");
-        if feasible(&t, &squad, &swarm).is_ok() {
-            ok += 1;
+        if squad_feasible(&t, &squad).is_ok() {
+            squad_ok += 1;
+        }
+        if swarm_feasible(&t, &swarm).is_ok() {
+            swarm_ok += 1;
         }
     }
-    assert!(ok >= 16, "only {ok}/64 joint children feasible — SIGMA {SIGMA} is too large");
+    let (squad_rate, swarm_rate) = (squad_ok as f32 / N as f32, swarm_ok as f32 / N as f32);
+    // Floors at roughly half the measured rate: far enough below to never flap, close enough that a
+    // SIGMA large enough to matter trips them.
+    assert!(
+        squad_rate > 0.45,
+        "squad children are feasible only {squad_rate:.3} of the time (measured 0.902) — SIGMA {SIGMA}          may be too large"
+    );
+    assert!(
+        swarm_rate > 0.15,
+        "swarm children are feasible only {swarm_rate:.3} of the time (measured 0.281, and this is          the binding side) — SIGMA {SIGMA} may be too large"
+    );
+
+    // And the invariant the search actually rests on: bounded rejection sampling terminates, with room
+    // to spare. This is what would break if SIGMA drifted, and it is what breaks the search when it
+    // does — an exhausted budget is a hard error in `propose_*`, never a silent skip.
+    const PAIRS: u32 = 500;
+    let (mut exhausted, mut redraws, mut worst) = (0u32, 0u32, 0u32);
+    for _ in 0..PAIRS {
+        for side in 0..2 {
+            let mut rejected = 0u32;
+            let got = if side == 0 {
+                propose_squad(&t, &squad0, &mut rng, &mut rejected).map(|_| ())
+            } else {
+                propose_swarm(&t, &swarm0, &mut rng, &mut rejected).map(|_| ())
+            };
+            if got.is_err() {
+                exhausted += 1;
+            }
+            redraws += rejected;
+            worst = worst.max(rejected);
+        }
+    }
+    assert_eq!(
+        exhausted, 0,
+        "{exhausted} of {} proposals exhausted the {MAX_MUTATION_ATTEMPTS}-draw budget — that is a          hard error in the search, not a slow path",
+        PAIRS * 2
+    );
+    let mean_redraws = redraws as f32 / (PAIRS * 2) as f32;
+    assert!(
+        mean_redraws < 10.0,
+        "a proposal needs {mean_redraws:.1} redraws on average (worst {worst}, budget          {MAX_MUTATION_ATTEMPTS}) — rejection sampling no longer terminates comfortably"
+    );
 }
 
 #[test]
