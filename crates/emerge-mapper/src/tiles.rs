@@ -1399,6 +1399,7 @@ impl Plugin for TilesPlugin {
                     move_selection.in_set(crate::keys::Phase::Act),
                     lattice_keys.in_set(crate::keys::Phase::Act),
                     autoscan_candidate.run_if(in_tiles_mode),
+                    keep_library_selection_visible.run_if(in_tiles_mode),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
@@ -2007,6 +2008,8 @@ fn move_selection(
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
     project: Res<Project>,
+    // The arrows walk what is on screen, which is what the filter decides.
+    filters: Res<crate::filter::Filters>,
     mut state: ResMut<ImportState>,
 ) {
     // **Read the keys before touching the focus.** Clearing `selected_library_id` unconditionally
@@ -2024,7 +2027,7 @@ fn move_selection(
         state.status = "candidates".to_owned();
     }
     if to_library {
-        match library_ids(project.as_ref()).first() {
+        match library_ids(project.as_ref(), &filters).first() {
             Some(first) => {
                 if state.selected_library_id.is_none() {
                     state.selected_library_id = Some(first.clone());
@@ -2042,7 +2045,7 @@ fn move_selection(
     // pair nobody would remember, on a tab already carrying ten rows of its twelve.
     match state.selected_library_id.clone() {
         Some(id) => {
-            let ids = library_ids(project.as_ref());
+            let ids = library_ids(project.as_ref(), &filters);
             let Some(at) = ids.iter().position(|d| *d == id) else {
                 return;
             };
@@ -2069,13 +2072,48 @@ fn move_selection(
 
 /// The library's ids in the order the panel lists them — declaration order, which is the order the
 /// rows are drawn in, so the arrows walk what the eye reads.
-fn library_ids(project: &Project) -> Vec<String> {
+/// **The library ids the author can actually see**, in list order.
+///
+/// Filtered with the same predicate `rebuild_candidates` renders with. Walking the unfiltered
+/// library meant the arrows stepped through rows that were not on screen — and `Delete` acts on the
+/// selection, so the key removed a tile the author never saw. The list and the keys have to agree
+/// about what "next" means or one of them is lying.
+fn library_ids(project: &Project, filters: &crate::filter::Filters) -> Vec<String> {
+    let pane = crate::filter::Pane::Candidates;
     project
         .library
         .descriptors
         .iter()
+        .filter(|d| filters.keeps(pane, &d.id))
         .map(|d| d.id.clone())
         .collect()
+}
+
+/// **Keep the library selection on a row that is showing.**
+///
+/// The other half of the same defect: filtering after selecting could hide the selected tile while
+/// it stayed selected, and `Delete` would still remove it. Copied from
+/// `anim_tab::keep_selection_visible`, including its last rule — if nothing survives the filter,
+/// leave the selection alone rather than jumping it somewhere arbitrary the moment a half-typed
+/// filter matches nothing.
+fn keep_library_selection_visible(
+    filters: Res<crate::filter::Filters>,
+    project: Res<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if !filters.is_changed() {
+        return;
+    }
+    let Some(id) = state.selected_library_id.clone() else {
+        return;
+    };
+    let visible = library_ids(&project, &filters);
+    if visible.iter().any(|v| *v == id) {
+        return;
+    }
+    if let Some(first) = visible.first() {
+        state.selected_library_id = Some(first.clone());
+    }
 }
 
 fn on_pack_click(
