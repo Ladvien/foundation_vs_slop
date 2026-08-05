@@ -91,9 +91,16 @@ pub struct ImportState {
     pub summary: String,
     /// The last thing that happened. Transient, and lives at the bottom where a changing line belongs.
     pub status: String,
-    /// The raw text being typed into the candidate's id, or `None` when not renaming. Snake case is
-    /// applied for display and on commit, exactly as the map's name is — one rule, one behaviour.
-    pub renaming: Option<String>,
+    /// The candidate being renamed and the raw text typed so far, or `None` when not renaming.
+    /// Snake case is applied for display and on commit, exactly as the map's name is — one rule, one
+    /// behaviour.
+    ///
+    /// **Carries its target.** The commit used to write to `candidates[self.selected]`, read at
+    /// `Enter` — so clicking another row mid-word renamed the piece the author had just moved to
+    /// rather than the one they had been typing about. Identified by **mesh path** rather than by
+    /// index, because `R` rescans and rebuilds the list: an index would point somewhere else, and
+    /// silently.
+    pub renaming: Option<Rename>,
     /// The library entry selected for removal, if one is. Separate from [`Self::selected`], which
     /// indexes candidates — the two lists are different things and one index into both would be a
     /// bug waiting for the first time their lengths differ.
@@ -171,6 +178,32 @@ const TILE_VIEW_HEIGHT: f32 = 4.0;
 /// is worth: the derived `x x y x z` and the subunit's size in millimetres.
 #[derive(Component)]
 pub struct DivReadout;
+
+/// **Which piece an edit was opened against.**
+///
+/// Every text field here has the same shape: it opens on the focused piece, the author types, and it
+/// commits on `Enter`. Reading the focus *at commit* meant a click in between redirected the edit —
+/// the review's finding #5. So a field captures this when it opens and writes through
+/// [`ImportState::at_target`], and where the focus has moved to by then does not matter.
+///
+/// A library entry is named by its id, which is what `Library` looks up by. A candidate is named by
+/// its **mesh path**: unique across the scan, and stable across the rebuild `R` does, where an index
+/// would quietly point at a different piece.
+#[derive(Clone, PartialEq, Debug)]
+pub enum EditTarget {
+    Library(String),
+    Candidate(String),
+}
+
+/// A candidate id being typed, and which candidate it belongs to.
+///
+/// See [`ImportState::renaming`] for why the target is captured at open and why it is a mesh path.
+#[derive(Clone)]
+pub struct Rename {
+    /// The candidate's mesh path — unique, and stable across a rescan.
+    pub mesh: String,
+    pub raw: String,
+}
 
 /// Which facet of a cell a token is being typed into.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -262,6 +295,9 @@ pub struct NoteReadout;
 pub struct CellEdit {
     /// The selected cell, if any.
     pub at: Option<(u32, u32, u32)>,
+    /// The piece a token field was opened against, so a click elsewhere cannot redirect the edit.
+    /// See [`EditTarget`].
+    pub target: Option<EditTarget>,
     /// The layer the grid is showing. A 3x3x3 lattice is 27 buttons at once, which is a wall — one
     /// y-slice at a time is nine, which is a shape you can read.
     pub layer: u32,
@@ -293,7 +329,9 @@ pub struct NoteField;
 /// *is* and the tags say what it *offers*, and neither can carry "the one with the cracked screen".
 #[derive(Resource, Default)]
 pub struct NoteEdit {
-    active: Option<String>,
+    /// The piece this description was opened against, and the text so far. The target is captured at
+    /// open for the reason [`EditTarget`] gives.
+    active: Option<(EditTarget, String)>,
 }
 
 impl NoteEdit {
@@ -314,11 +352,16 @@ fn on_note_click(
     }
     // Seeded with what is there, unlike the id and the tokens: a description is *edited*, not
     // replaced, and retyping a sentence to change one word is not an interaction.
+    // From `measured`, which is what a description is written back to — reading the layered library
+    // here would seed the field with a note a policy patch supplied and then write it down a level.
     let now = state
-        .editing(&project.library)
+        .editing(&project.measured)
         .and_then(|d| d.note.clone())
         .unwrap_or_default();
-    edit.active = Some(now);
+    let Some(target) = state.target() else {
+        return;
+    };
+    edit.active = Some((target, now));
     state.status = "describe it — Enter to keep it, Esc to leave it".to_owned();
 }
 
@@ -337,9 +380,11 @@ fn note_keys(
         }
         match &event.logical_key {
             Key::Enter => {
-                let Some(raw) = edit.active.take() else { return };
+                let Some((target, raw)) = edit.active.take() else { return };
                 let text = raw.trim().to_owned();
-                let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+                // The piece this field was opened on, not whatever has the focus now.
+                let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
+                    state.status = "the description was not kept — that tile is gone".to_owned();
                     return;
                 };
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
@@ -357,17 +402,17 @@ fn note_keys(
                 state.status = "description unchanged".to_owned();
             }
             Key::Backspace => {
-                if let Some(raw) = edit.active.as_mut() {
+                if let Some((_, raw)) = edit.active.as_mut() {
                     raw.pop();
                 }
             }
             Key::Space => {
-                if let Some(raw) = edit.active.as_mut() {
+                if let Some((_, raw)) = edit.active.as_mut() {
                     raw.push(' ');
                 }
             }
             Key::Character(ch) => {
-                if let Some(raw) = edit.active.as_mut() {
+                if let Some((_, raw)) = edit.active.as_mut() {
                     raw.push_str(ch);
                 }
             }
@@ -781,7 +826,13 @@ fn apply_verb_to(
             // Starts empty, and Enter on an empty field CLEARS the token — one keystroke path for
             // setting and unsetting, rather than a second control for "remove".
             edit.active = Some((field, String::new()));
-            edit.pending = many.then(|| cells.to_vec());
+            edit.target = state.target();
+            // **The target is captured here, not read at commit.** One cell or a whole span, the
+            // same way: the cells this field was opened against are the cells it writes to. Reading
+            // the live selection at `Enter` meant a click that moved the cursor mid-word redirected
+            // the edit — or, once that was noticed, refused it and threw away what had been typed.
+            // Neither is what the author asked for; the cell they opened the field on is.
+            edit.pending = Some(cells.to_vec());
             state.status = if many {
                 format!(
                     "type a {} token for {} cells, Enter to keep it (empty clears), Esc to leave it",
@@ -913,23 +964,18 @@ fn cell_keys(
                 let Some((field, raw)) = edit.active.take() else {
                     return;
                 };
-                // **Say so rather than swallowing it.** Clicking a different layer clears `at` but
-                // leaves the buffer, so this used to consume what had been typed and return in
-                // silence — an author watched a token they had entered simply not exist. The repo's
-                // rule is to fail loudly; the buffer is gone either way, so the least this can do is
-                // name what happened.
-                // A header opened this field for a whole span; a chip opened it for one cell.
-                let targets: Vec<(u32, u32, u32)> = match edit.pending.take() {
-                    Some(cells) => cells,
-                    None => match edit.at {
-                        Some(at) => vec![at],
-                        None => {
-                            state.status = format!(
-                                "`{raw}` was not kept — the cell selection moved. Pick a cell, then type again."
-                            );
-                            return;
-                        }
-                    },
+                // The cells this field was opened against — see `apply_verb_to`. A field with no
+                // target was never opened by a verb, so there is nothing it could mean; that is a
+                // bug rather than an author error, and it says so instead of guessing at a cell.
+                let Some(targets) = edit.pending.take() else {
+                    state.status =
+                        format!("`{raw}` was not kept — this field was opened without a cell.");
+                    return;
+                };
+                let Some(target) = edit.target.take() else {
+                    state.status =
+                        format!("`{raw}` was not kept — this field was opened without a tile.");
+                    return;
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
                 // Before the mutable borrow: the write is range-checked against these.
@@ -940,7 +986,8 @@ fn cell_keys(
                         return;
                     }
                 };
-                let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+                let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
+                    state.status = format!("`{raw}` was not kept — that tile is gone.");
                     return;
                 };
                 let mut wrote = 0usize;
@@ -1100,7 +1147,7 @@ fn refresh_cells(
     }
 
     let (note_text, note_tint) = match &note_edit.active {
-        Some(raw) => (format!("{raw}_"), ACCENT),
+        Some((_, raw)) => (format!("{raw}_"), ACCENT),
         None => match d.note.as_deref() {
             Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
             _ => ("describe it\u{2026}".to_owned(), LABEL),
@@ -1181,6 +1228,40 @@ impl ImportState {
             None => self
                 .candidates
                 .get_mut(self.selected)
+                .map(|c| (&mut c.proposed, Persist::InMemory)),
+        }
+    }
+}
+
+impl ImportState {
+    /// The piece the pane is focused on, as something an edit can hold on to. See [`EditTarget`].
+    pub fn target(&self) -> Option<EditTarget> {
+        match &self.selected_library_id {
+            Some(id) => Some(EditTarget::Library(id.clone())),
+            None => self.current().map(|c| EditTarget::Candidate(c.mesh.clone())),
+        }
+    }
+
+    /// The descriptor a captured target names, wherever the focus has since moved to.
+    ///
+    /// `None` when the target is gone — a library entry removed, or a candidate dropped by a rescan.
+    /// That is a real thing to happen mid-edit, and the callers say so rather than writing to
+    /// whatever is selected instead.
+    pub fn at_target<'a>(
+        &'a mut self,
+        target: &EditTarget,
+        library: &'a mut emerge_core::library::Library,
+    ) -> Option<(&'a mut Descriptor, Persist)> {
+        match target {
+            EditTarget::Library(id) => library
+                .descriptors
+                .iter_mut()
+                .find(|d| &d.id == id)
+                .map(|d| (d, Persist::Library)),
+            EditTarget::Candidate(mesh) => self
+                .candidates
+                .iter_mut()
+                .find(|c| &c.mesh == mesh)
                 .map(|c| (&mut c.proposed, Persist::InMemory)),
         }
     }
@@ -1738,8 +1819,12 @@ fn rename_candidate(
                 state.status = format!(
                     "`{id}` is in the library — renaming it would strand every placement that names it"
                 );
-            } else if state.current().is_some() {
-                state.renaming = Some(String::new());
+            } else if let Some(mesh) = state.current().map(|c| c.mesh.clone()) {
+                // The target, captured now. See `ImportState::renaming`.
+                state.renaming = Some(Rename {
+                    mesh,
+                    raw: String::new(),
+                });
                 state.status = "type an id — Enter to keep it, Esc to leave it alone".to_owned();
             }
         }
@@ -1755,16 +1840,33 @@ fn rename_candidate(
         }
         match &event.logical_key {
             Key::Enter => {
-                let raw = state.renaming.take().unwrap_or_default();
-                let id = emerge_core::naming::to_snake_case(&raw);
+                let Some(rename) = state.renaming.take() else {
+                    return;
+                };
+                let id = emerge_core::naming::to_snake_case(&rename.raw);
                 if id.is_empty() {
                     state.status = "an id cannot be empty; nothing was changed".to_owned();
                 } else {
-                    let at = state.selected;
-                    if let Some(c) = state.candidates.get_mut(at) {
-                        c.proposed.id = id.clone();
+                    // The candidate this field was opened on, found by the mesh it names rather than
+                    // by wherever the selection has since moved to.
+                    match state
+                        .candidates
+                        .iter_mut()
+                        .find(|c| c.mesh == rename.mesh)
+                    {
+                        Some(c) => {
+                            c.proposed.id = id.clone();
+                            state.status = format!("id is `{id}`");
+                        }
+                        // Only reachable if a rescan dropped the mesh mid-rename, which is a real
+                        // thing `R` can do. Saying so beats renaming whatever is selected now.
+                        None => {
+                            state.status = format!(
+                                "`{id}` was not kept — `{}` is no longer in the scan.",
+                                rename.mesh
+                            )
+                        }
                     }
-                    state.status = format!("id is `{id}`");
                 }
             }
             Key::Escape => {
@@ -1772,18 +1874,18 @@ fn rename_candidate(
                 state.status = "id unchanged".to_owned();
             }
             Key::Backspace => {
-                if let Some(raw) = state.renaming.as_mut() {
-                    raw.pop();
+                if let Some(r) = state.renaming.as_mut() {
+                    r.raw.pop();
                 }
             }
             Key::Space => {
-                if let Some(raw) = state.renaming.as_mut() {
-                    raw.push(' ');
+                if let Some(r) = state.renaming.as_mut() {
+                    r.raw.push(' ');
                 }
             }
             Key::Character(s) => {
-                if let Some(raw) = state.renaming.as_mut() {
-                    raw.push_str(s);
+                if let Some(r) = state.renaming.as_mut() {
+                    r.raw.push_str(s);
                 }
             }
             _ => {}
@@ -2626,7 +2728,7 @@ fn rebuild_detail(
             // empty field reads as "waiting for you" rather than as the id having been wiped.
             let (id_text, id_tint) = match &state.renaming {
                 Some(raw) => (
-                    format!("id  {}_", emerge_core::naming::to_snake_case(raw)),
+                    format!("id  {}_", emerge_core::naming::to_snake_case(&raw.raw)),
                     ACCENT,
                 ),
                 None => (format!("id  {}", d.id), TEXT),
@@ -2649,7 +2751,7 @@ fn rebuild_detail(
             // with the cracked screen", which is the sort of thing a later reader — human or model —
             // needs to tell two crates apart.
             let (note_text, note_tint) = match &note_edit.active {
-                Some(raw) => (format!("{raw}_"), ACCENT),
+                Some((_, raw)) => (format!("{raw}_"), ACCENT),
                 None => match d.note.as_deref() {
                     Some(n) if !n.is_empty() => (n.to_owned(), TEXT),
                     _ => ("describe it\u{2026}".to_owned(), LABEL),
