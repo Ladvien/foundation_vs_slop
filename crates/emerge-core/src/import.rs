@@ -478,32 +478,97 @@ pub fn triangles(glb: &Glb) -> usize {
         .sum()
 }
 
-/// **Which lattice cells the mesh actually occupies**, one per vertex.
+/// **Does this triangle touch this axis-aligned box?** Exact, by the separating-axis theorem.
+///
+/// Akenine-Möller 2001, *Fast 3D Triangle-Box Overlap Testing* — thirteen axes: the box's three face
+/// normals, the triangle's normal, and the nine cross products of a box axis with a triangle edge.
+/// Finding a single axis on which the two projections do not overlap proves they are disjoint;
+/// surviving all thirteen proves they intersect.
+///
+/// Coordinates are already relative to the box centre, and `half` is the box's half-extent.
+fn triangle_hits_box(tri: [[f32; 3]; 3], half: f32) -> bool {
+    let [a, b, c] = tri;
+    // The box's own three axes.
+    for i in 0..3 {
+        let (mn, mx) = (a[i].min(b[i]).min(c[i]), a[i].max(b[i]).max(c[i]));
+        if mn > half || mx < -half {
+            return false;
+        }
+    }
+
+    let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let cross = |p: [f32; 3], q: [f32; 3]| {
+        [
+            p[1] * q[2] - p[2] * q[1],
+            p[2] * q[0] - p[0] * q[2],
+            p[0] * q[1] - p[1] * q[0],
+        ]
+    };
+    let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+
+    // The triangle's plane against the box.
+    let n = cross(sub(b, a), sub(c, a));
+    let d = dot(n, a);
+    let r = half * (n[0].abs() + n[1].abs() + n[2].abs());
+    if d.abs() > r {
+        return false;
+    }
+
+    // The nine edge-vs-box-axis cross products.
+    let edges = [sub(b, a), sub(c, b), sub(a, c)];
+    let verts = [a, b, c];
+    for e in edges {
+        for axis in 0..3 {
+            let mut unit = [0.0f32; 3];
+            unit[axis] = 1.0;
+            let ax = cross(unit, e);
+            // A degenerate axis separates nothing, and normalising it would divide by zero.
+            if ax[0].abs() + ax[1].abs() + ax[2].abs() < 1e-12 {
+                continue;
+            }
+            let p: Vec<f32> = verts.iter().map(|v| dot(ax, *v)).collect();
+            let (mn, mx) = p.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+            let r = half * (ax[0].abs() + ax[1].abs() + ax[2].abs());
+            if mn > r || mx < -r {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// **Which lattice cells the mesh actually occupies.**
 ///
 /// Nobody hand-marks a lattice — a 3 m wall at the shipped setting is 30 cells and it only goes up
 /// from there — so occupancy has to come off the geometry. This is the read that does it.
 ///
-/// # Why vertices and not the bounding box
+/// # Every cell a triangle passes through, not every cell holding a vertex
 ///
-/// A bounding box cannot answer this: one box per mesh *is* the whole extent, so every cell comes
-/// out solid and the answer carries no information. Per-primitive boxes help a kitbashed multi-part
-/// mesh and say nothing about a single-primitive chair.
+/// This began as vertex occupancy, which was cheap and honest and **wrong for exactly the meshes
+/// that matter**. A wall slab has vertices only at its eight corners, so a 2.40 m wall came back
+/// with its top and bottom layers marked and the six between them open — measured, on the shipped
+/// kit, at 4 cells of 10. Architecture is the low-poly half of any kit and the half the lattice
+/// exists for.
 ///
-/// Vertex occupancy is honest about what it knows, and — the reason to prefer it over triangle
-/// rasterisation for now — **its failure mode is visible**. A large flat face spanning a cell with no
-/// vertex inside it, the middle of a tabletop, comes back unmarked, and an author looking at the grid
-/// sees the hole. A wrong answer that looks right is the one worth avoiding; this one looks wrong.
+/// Rasterising is the correct method rather than a better heuristic: a triangle either passes
+/// through a cell or it does not, and [`triangle_hits_box`] answers that exactly. A bounding box
+/// cannot answer it at all — one box per mesh *is* the whole extent, so every cell comes out solid.
+///
+/// # It reads the assembled model
+///
+/// Triangles come from [`Glb::triangle_vertices`], which walks the scene graph and applies node
+/// transforms. Reading raw accessors would see a kitbashed mesh's parts piled at the origin — the
+/// same defect `Glb::bounds` was fixed for, and one this would otherwise have repeated.
 ///
 /// # Normalised, so units and the policy layer cannot reach it
 ///
-/// Cells are assigned on `(v - lo) / (hi - lo)` rather than on metres. Two consequences, both tested:
-/// a centimetre-authored mesh (the FBX exporter's `scale: 0.01` over 100x vertex data, which
-/// [`crate::glb::Measured::suspect_centimetres`] flags) buckets identically to its metre twin; and
+/// Cells are assigned in the mesh's own bounding box rather than in metres. Two consequences, both
+/// tested: a centimetre-authored mesh (the FBX exporter's `scale: 0.01` over 100x vertex data, which
+/// [`crate::glb::Measured::suspect_centimetres`] flags) marks exactly what its metre twin does; and
 /// `align.stretch_y` scales an axis uniformly, so a project's architecture cannot change which cells
 /// a mesh is said to fill.
 ///
-/// Returns cells in ascending order with no duplicates, so the result is the same on every machine
-/// and can be compared directly.
+/// Returns cells in ascending order with no duplicates, so the result is the same on every machine.
 pub fn occupancy(glb: &Glb, div: (u32, u32, u32)) -> Result<Vec<(u32, u32, u32)>, String> {
     let (dx, dy, dz) = div;
     if dx == 0 || dy == 0 || dz == 0 {
@@ -511,41 +576,80 @@ pub fn occupancy(glb: &Glb, div: (u32, u32, u32)) -> Result<Vec<(u32, u32, u32)>
             "a {dx}x{dy}x{dz} lattice has no cells for a mesh to occupy"
         ));
     }
-    let positions = glb.positions()?;
+    let tris = glb.triangle_vertices()?;
+
     let mut lo = [f32::INFINITY; 3];
     let mut hi = [f32::NEG_INFINITY; 3];
-    for v in &positions {
-        for a in 0..3 {
-            // A NaN coordinate would poison the bounds and put every later vertex in cell 0.
-            if !v[a].is_finite() {
-                return Err("glb: a vertex position is not a finite number".to_owned());
+    for t in &tris {
+        for v in t {
+            for a in 0..3 {
+                if !v[a].is_finite() {
+                    return Err("glb: a vertex position is not a finite number".to_owned());
+                }
+                lo[a] = lo[a].min(v[a]);
+                hi[a] = hi[a].max(v[a]);
             }
-            lo[a] = lo[a].min(v[a]);
-            hi[a] = hi[a].max(v[a]);
         }
     }
 
     let n = [dx, dy, dz];
-    let mut out: Vec<(u32, u32, u32)> = Vec::new();
-    for v in &positions {
-        let mut cell = [0u32; 3];
+    // Into lattice coordinates, where a cell is the unit box from `i` to `i + 1`. A flat axis — a
+    // decal, or a plane — has one row and everything lands in it; scaling by zero would be a NaN.
+    let to_cell = |v: [f32; 3]| {
+        let mut out = [0.0f32; 3];
         for a in 0..3 {
             let span = hi[a] - lo[a];
-            // A flat axis — a decal, or a plane — has one row, and every vertex is in it. Dividing
-            // by a zero span would be a NaN that `as u32` saturates to 0 anyway; saying so is
-            // clearer than relying on that.
-            cell[a] = if span <= 0.0 {
-                0
+            out[a] = if span <= 0.0 {
+                0.5
             } else {
-                // `min` rather than a modulus: the vertex at the maximum bound lands exactly on
-                // `n`, and it belongs to the last cell rather than wrapping to the first.
-                (((v[a] - lo[a]) / span * n[a] as f32) as u32).min(n[a] - 1)
+                (v[a] - lo[a]) / span * n[a] as f32
             };
         }
-        out.push((cell[0], cell[1], cell[2]));
+        out
+    };
+
+    let mut marked = vec![false; (dx as usize) * (dy as usize) * (dz as usize)];
+    for t in &tris {
+        let p = [to_cell(t[0]), to_cell(t[1]), to_cell(t[2])];
+        // Only the cells this triangle's own bounds reach are worth testing.
+        let mut min = [0u32; 3];
+        let mut max = [0u32; 3];
+        for a in 0..3 {
+            let l = p[0][a].min(p[1][a]).min(p[2][a]).floor().max(0.0);
+            let h = p[0][a].max(p[1][a]).max(p[2][a]).ceil();
+            min[a] = (l as u32).min(n[a] - 1);
+            max[a] = (h.max(0.0) as u32).min(n[a] - 1);
+        }
+        for x in min[0]..=max[0] {
+            for y in min[1]..=max[1] {
+                for z in min[2]..=max[2] {
+                    let at = ((x as usize) * dy as usize + y as usize) * dz as usize + z as usize;
+                    if marked[at] {
+                        continue;
+                    }
+                    let centre = [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5];
+                    let rel = p.map(|v| {
+                        [v[0] - centre[0], v[1] - centre[1], v[2] - centre[2]]
+                    });
+                    if triangle_hits_box(rel, 0.5) {
+                        marked[at] = true;
+                    }
+                }
+            }
+        }
     }
-    out.sort_unstable();
-    out.dedup();
+
+    let mut out = Vec::new();
+    for x in 0..dx {
+        for y in 0..dy {
+            for z in 0..dz {
+                let at = ((x as usize) * dy as usize + y as usize) * dz as usize + z as usize;
+                if marked[at] {
+                    out.push((x, y, z));
+                }
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -703,27 +807,28 @@ mod tests {
 mod occupancy_tests {
     use super::*;
 
-    /// A minimal GLB carrying exactly the vertices given, in metres.
-    fn mesh(points: &[[f32; 3]]) -> Glb {
+    /// A minimal GLB carrying exactly the triangles given, in metres.
+    fn mesh(tris: &[[[f32; 3]; 3]]) -> Glb {
+        let count = tris.len() * 3;
         let json = format!(
             r#"{{
-              "accessors":[{{"type":"VEC3","componentType":5126,"count":{},"bufferView":0}}],
+              "accessors":[{{"type":"VEC3","componentType":5126,"count":{count},"bufferView":0}}],
               "bufferViews":[{{"byteOffset":0,"byteLength":{}}}],
               "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}]
             }}"#,
-            points.len(),
-            points.len() * 12
+            count * 12
         );
         let mut bin = Vec::new();
-        for p in points {
-            for c in p {
-                bin.extend_from_slice(&c.to_le_bytes());
+        for t in tris {
+            for v in t {
+                for c in v {
+                    bin.extend_from_slice(&c.to_le_bytes());
+                }
             }
         }
         let j = json.as_bytes();
-        let pad_j = (4 - j.len() % 4) % 4;
         let mut jj = j.to_vec();
-        jj.extend(std::iter::repeat_n(b' ', pad_j));
+        jj.extend(std::iter::repeat_n(b' ', (4 - j.len() % 4) % 4));
         let total = 12 + 8 + jj.len() + 8 + bin.len();
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(b"glTF");
@@ -738,93 +843,150 @@ mod occupancy_tests {
         Glb::parse(&out).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// The eight corners of a box fill all eight cells of a 2x2x2 lattice — the sanity case.
+    /// An axis-aligned quad in the XZ plane at height `y`, as two triangles.
+    fn slab(x: (f32, f32), y: f32, z: (f32, f32)) -> Vec<[[f32; 3]; 3]> {
+        let (x0, x1) = x;
+        let (z0, z1) = z;
+        vec![
+            [[x0, y, z0], [x1, y, z0], [x1, y, z1]],
+            [[x0, y, z0], [x1, y, z1], [x0, y, z1]],
+        ]
+    }
+
+    /// A closed box as 12 triangles — what a low-poly wall, crate or column actually is.
+    fn box_mesh(lo: [f32; 3], hi: [f32; 3]) -> Vec<[[f32; 3]; 3]> {
+        let c = |x: usize, y: usize, z: usize| {
+            [
+                if x == 0 { lo[0] } else { hi[0] },
+                if y == 0 { lo[1] } else { hi[1] },
+                if z == 0 { lo[2] } else { hi[2] },
+            ]
+        };
+        let quad = |a, b, cc, d| vec![[a, b, cc], [a, cc, d]];
+        let mut out = Vec::new();
+        for (a, b, cc, d) in [
+            (c(0,0,0), c(1,0,0), c(1,1,0), c(0,1,0)),
+            (c(0,0,1), c(1,0,1), c(1,1,1), c(0,1,1)),
+            (c(0,0,0), c(0,0,1), c(0,1,1), c(0,1,0)),
+            (c(1,0,0), c(1,0,1), c(1,1,1), c(1,1,0)),
+            (c(0,0,0), c(1,0,0), c(1,0,1), c(0,0,1)),
+            (c(0,1,0), c(1,1,0), c(1,1,1), c(0,1,1)),
+        ] {
+            out.extend(quad(a, b, cc, d));
+        }
+        out
+    }
+
+    /// **The reason this stopped being vertex occupancy.**
+    ///
+    /// A wall is a slab with vertices only at its eight corners. Marking the cell each vertex falls
+    /// in left the middle of it open — measured at 4 of 10 cells on the shipped `site/wall`, which is
+    /// most of the piece reported as thin air. A solid box is solid all the way through.
+    #[test]
+    fn a_wall_slab_is_solid_all_the_way_up() {
+        // 3 m wide, 2.4 m tall, 0.5 m deep — the shipped wall, at the shipped divisions.
+        let wall = box_mesh([0.0, 0.0, 0.0], [3.0, 2.4, 0.5]);
+        let div = (6, 5, 1);
+        let got = occupancy(&mesh(&wall), div).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            got.len() as u32,
+            emerge_core_volume(div),
+            "every cell of a solid slab is solid; got {} of {}",
+            got.len(),
+            emerge_core_volume(div)
+        );
+    }
+
+    fn emerge_core_volume(div: (u32, u32, u32)) -> u32 {
+        crate::descriptor::Subgrid::volume(div)
+    }
+
+    /// The eight corners of a box fill all eight cells of a 2x2x2 lattice.
     #[test]
     fn a_box_fills_the_lattice_it_spans() {
-        let mut points = Vec::new();
-        for x in [0.0f32, 1.0] {
-            for y in [0.0f32, 1.0] {
-                for z in [0.0f32, 1.0] {
-                    points.push([x, y, z]);
-                }
-            }
-        }
-        let got = occupancy(&mesh(&points), (2, 2, 2)).unwrap_or_else(|e| panic!("{e}"));
+        let got = occupancy(&mesh(&box_mesh([0.0; 3], [1.0; 3])), (2, 2, 2))
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(got.len(), 8, "{got:?}");
     }
 
-    /// **The vertex at the maximum bound belongs to the last cell**, not to a cell past the end and
-    /// not wrapped around to the first. Off by one here would mark the wrong face of every mesh.
+    /// **The far corner belongs to the last cell**, not to one past the end and not wrapped to the
+    /// first. Off by one here would mark the wrong face of every mesh.
     #[test]
     fn the_far_corner_lands_in_the_last_cell() {
-        let got = occupancy(&mesh(&[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]), (4, 4, 4))
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(got, vec![(0, 0, 0), (3, 3, 3)]);
+        let tri = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 1.0]]];
+        let got = occupancy(&mesh(&tri), (4, 4, 4)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(got.contains(&(0, 0, 0)), "{got:?}");
+        assert!(got.contains(&(3, 3, 3)), "the vertex at the maximum bound: {got:?}");
     }
 
     /// **The shape, not the bounding box.** An L leaves its inner corner clear — which a bounding box
-    /// could never report, and which is the whole reason this reads vertices.
+    /// could never report, and which is the whole reason this reads geometry.
     #[test]
     fn an_l_shape_leaves_its_inner_corner_clear() {
-        let got = occupancy(
-            &mesh(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0]]),
-            (2, 1, 2),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        // Two arms of a flat L over a 2x1x2 lattice, each stopping short of the far cell.
+        let mut l = slab((0.0, 2.0), 0.0, (0.0, 0.9));
+        l.extend(slab((0.0, 0.9), 0.0, (0.0, 2.0)));
+        let got = occupancy(&mesh(&l), (2, 1, 2)).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(got, vec![(0, 0, 0), (0, 0, 1), (1, 0, 0)]);
         assert!(!got.contains(&(1, 0, 1)), "the inner corner must stay open");
     }
 
     /// **Unit-free.** The FBX importer writes centimetre authoring as 100x vertex data under a node
-    /// `scale: 0.01` — `Measured::suspect_centimetres` exists for it. Normalised bucketing means such
-    /// a mesh marks exactly the cells its metre twin does.
+    /// `scale: 0.01`. Normalised bucketing means such a mesh marks exactly what its metre twin does.
     #[test]
     fn a_centimetre_mesh_marks_the_same_cells_as_its_metre_twin() {
-        let metres = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0], [1.0, 0.5, 1.0]];
-        let centimetres: Vec<[f32; 3]> = metres.iter().map(|p| [p[0] * 100.0, p[1] * 100.0, p[2] * 100.0]).collect();
-        let a = occupancy(&mesh(&metres), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}"));
-        let b = occupancy(&mesh(&centimetres), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(a, b);
+        let m = box_mesh([0.0, 0.0, 0.0], [2.0, 1.0, 2.0]);
+        let cm: Vec<[[f32; 3]; 3]> = m
+            .iter()
+            .map(|t| t.map(|v| [v[0] * 100.0, v[1] * 100.0, v[2] * 100.0]))
+            .collect();
+        assert_eq!(
+            occupancy(&mesh(&m), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}")),
+            occupancy(&mesh(&cm), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}"))
+        );
     }
 
     /// **Invariant to the policy layer.** `stretch_y` scales an axis uniformly, so one game's ceiling
     /// height cannot change which cells a mesh is said to fill.
     #[test]
     fn stretching_an_axis_does_not_move_a_single_cell() {
-        let base = [[0.0, 0.0, 0.0], [2.0, 1.0, 2.0], [0.5, 0.25, 1.5]];
-        let stretched: Vec<[f32; 3]> = base.iter().map(|p| [p[0], p[1] * 2.4, p[2]]).collect();
-        let a = occupancy(&mesh(&base), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}"));
-        let b = occupancy(&mesh(&stretched), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(a, b);
+        let base = box_mesh([0.0, 0.0, 0.0], [2.0, 1.0, 2.0]);
+        let tall: Vec<[[f32; 3]; 3]> = base
+            .iter()
+            .map(|t| t.map(|v| [v[0], v[1] * 2.4, v[2]]))
+            .collect();
+        assert_eq!(
+            occupancy(&mesh(&base), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}")),
+            occupancy(&mesh(&tall), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}"))
+        );
     }
 
-    /// A decal has no thickness. One layer, every vertex in it — no divide by zero.
+    /// A decal has no thickness. One layer, everything in it — no divide by zero.
     #[test]
     fn a_flat_mesh_occupies_one_layer_rather_than_dividing_by_zero() {
-        let got = occupancy(
-            &mesh(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
-            (2, 1, 2),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        let got = occupancy(&mesh(&slab((0.0, 1.0), 0.0, (0.0, 1.0))), (2, 1, 2))
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(got.len(), 4);
         assert!(got.iter().all(|c| c.1 == 0));
     }
 
-    /// The result is sorted and deduplicated, so two machines reading one mesh get one answer.
+    /// Sorted, and each cell once, so two machines reading one mesh get one answer.
     #[test]
-    fn repeated_vertices_collapse_and_the_order_is_stable() {
-        let got = occupancy(
-            &mesh(&[[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]),
-            (2, 2, 2),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(got, vec![(0, 0, 0), (1, 1, 1)]);
+    fn the_answer_is_sorted_and_each_cell_appears_once() {
+        let got = occupancy(&mesh(&box_mesh([0.0; 3], [1.0; 3])), (3, 3, 3))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(got, sorted);
     }
 
     /// A degenerate lattice is refused rather than silently marking nothing.
     #[test]
     fn a_lattice_with_no_cells_is_refused() {
-        let err = occupancy(&mesh(&[[0.0, 0.0, 0.0]]), (2, 0, 2)).err().unwrap_or_default();
+        let err = occupancy(&mesh(&slab((0.0, 1.0), 0.0, (0.0, 1.0))), (2, 0, 2))
+            .err()
+            .unwrap_or_default();
         assert!(err.contains("no cells"), "{err}");
     }
 }

@@ -346,7 +346,33 @@ impl Glb {
         let mut hi = [f32::MIN; 3];
         let mut seen = false;
 
-        // Roots: the default scene's nodes, or every node when a file declares none.
+        self.for_each_mesh_node(&mut |mesh_ix, world| {
+            if self.accumulate_mesh(mesh_ix, world, &mut lo, &mut hi) {
+                seen = true;
+            }
+        })?;
+
+        if !seen {
+            return Err("glb: no POSITION accessor declared min/max bounds".to_owned());
+        }
+        Ok((lo, hi))
+    }
+
+    /// Union one mesh's primitives, transformed by `world`, into `lo`/`hi`.
+    /// **Every mesh in the file, with the world matrix the scene graph puts it at.**
+    ///
+    /// Factored out because two readers need the same answer and must not drift: [`Self::bounds`]
+    /// measures the assembled model, and [`Self::triangle_vertices`] rasterises it. Reading raw
+    /// accessors instead — which is what `positions` does — sees every part of a kitbashed mesh piled
+    /// at the origin, and the whole reason `bounds` walks the graph is that this file format really
+    /// does assemble models that way.
+    ///
+    /// Falls back to every mesh at the identity when no node references one, so a file with geometry
+    /// and no scene graph is measured where it sits rather than reported empty.
+    fn for_each_mesh_node(
+        &self,
+        f: &mut impl FnMut(usize, &[f32; 16]),
+    ) -> Result<(), String> {
         let roots: Vec<usize> = self
             .json
             .get("scenes")
@@ -361,6 +387,7 @@ impl Glb {
                 (0..self.json["nodes"].as_array().map_or(0, |n| n.len())).collect()
             });
 
+        let mut any = false;
         let mut stack: Vec<(usize, [f32; 16])> = roots.into_iter().map(|n| (n, IDENTITY)).collect();
         // Bounded, because a malformed file can describe a cycle and this must not hang on one.
         let mut budget = 100_000usize;
@@ -373,11 +400,9 @@ impl Glb {
                 continue;
             };
             let world = mul(&parent, &node_matrix(node));
-
             if let Some(mesh_ix) = node["mesh"].as_u64() {
-                if self.accumulate_mesh(mesh_ix as usize, &world, &mut lo, &mut hi) {
-                    seen = true;
-                }
+                any = true;
+                f(mesh_ix as usize, &world);
             }
             if let Some(kids) = node["children"].as_array() {
                 for k in kids.iter().filter_map(|v| v.as_u64()) {
@@ -386,23 +411,121 @@ impl Glb {
             }
         }
 
-        // A file with meshes but no scene graph referencing them: measure them where they are.
-        if !seen {
+        if !any {
             let count = self.json["meshes"].as_array().map_or(0, |m| m.len());
             for m in 0..count {
-                if self.accumulate_mesh(m, &IDENTITY, &mut lo, &mut hi) {
-                    seen = true;
-                }
+                f(m, &IDENTITY);
             }
         }
-
-        if !seen {
-            return Err("glb: no POSITION accessor declared min/max bounds".to_owned());
-        }
-        Ok((lo, hi))
+        Ok(())
     }
 
-    /// Union one mesh's primitives, transformed by `world`, into `lo`/`hi`.
+    /// Decode an index accessor to `u32`, whatever width it was written at.
+    ///
+    /// glTF allows unsigned byte, short and int for indices, and a reader that assumed one of them
+    /// would silently misread two thirds of the files in this project's asset packs.
+    fn read_indices(&self, index: usize) -> Result<Vec<u32>, String> {
+        let acc = &self.json["accessors"][index];
+        if acc["type"].as_str() != Some("SCALAR") {
+            return Err(format!("glb: accessor {index} is not SCALAR"));
+        }
+        let width = match acc["componentType"].as_u64() {
+            Some(5121) => 1usize,
+            Some(5123) => 2,
+            Some(5125) => 4,
+            other => {
+                return Err(format!(
+                    "glb: accessor {index} has index component type {other:?}, which is not an                      unsigned byte, short or int"
+                ))
+            }
+        };
+        let count = acc["count"].as_u64().unwrap_or(0) as usize;
+        let view_ix = acc["bufferView"]
+            .as_u64()
+            .ok_or_else(|| format!("glb: accessor {index} has no bufferView"))?
+            as usize;
+        let view = &self.json["bufferViews"][view_ix];
+        let base = view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + acc["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let stride = view["byteStride"].as_u64().unwrap_or(width as u64) as usize;
+
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = base + i * stride;
+            let raw = self
+                .bin
+                .get(at..at + width)
+                .ok_or_else(|| format!("glb: accessor {index} reads past the BIN chunk"))?;
+            out.push(match width {
+                1 => raw[0] as u32,
+                2 => u16::from_le_bytes([raw[0], raw[1]]) as u32,
+                _ => u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+            });
+        }
+        Ok(out)
+    }
+
+    /// **Every triangle in the assembled model**, in the same space [`Self::bounds`] measures.
+    ///
+    /// Indexed and unindexed primitives both, and node transforms applied — so a kitbashed mesh
+    /// gives the triangles where its parts actually sit rather than piled on the origin.
+    ///
+    /// A primitive whose `mode` is not triangles is skipped rather than misread: a line list read
+    /// three vertices at a time is nonsense that looks like geometry.
+    pub fn triangle_vertices(&self) -> Result<Vec<[[f32; 3]; 3]>, String> {
+        let mut out: Vec<[[f32; 3]; 3]> = Vec::new();
+        let mut failed: Option<String> = None;
+        self.for_each_mesh_node(&mut |mesh_ix, world| {
+            if failed.is_some() {
+                return;
+            }
+            let Some(prims) = self.json["meshes"][mesh_ix]["primitives"].as_array() else {
+                return;
+            };
+            for prim in prims {
+                // glTF default mode is 4 (TRIANGLES).
+                if prim["mode"].as_u64().unwrap_or(4) != 4 {
+                    continue;
+                }
+                let Some(pos_ix) = prim["attributes"]["POSITION"].as_u64() else {
+                    continue;
+                };
+                let verts = match self.read_vec3(pos_ix as usize) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                };
+                let placed: Vec<[f32; 3]> = verts.iter().map(|v| apply(world, *v)).collect();
+
+                let idx: Vec<u32> = match prim.get("indices").and_then(|i| i.as_u64()) {
+                    Some(i) => match self.read_indices(i as usize) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            failed = Some(e);
+                            return;
+                        }
+                    },
+                    None => (0..placed.len() as u32).collect(),
+                };
+                for tri in idx.chunks_exact(3) {
+                    let get = |n: u32| placed.get(n as usize).copied();
+                    if let (Some(a), Some(b), Some(c)) = (get(tri[0]), get(tri[1]), get(tri[2])) {
+                        out.push([a, b, c]);
+                    }
+                }
+            }
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if out.is_empty() {
+            return Err("glb: no triangles".to_owned());
+        }
+        Ok(out)
+    }
+
     fn accumulate_mesh(
         &self,
         mesh_ix: usize,

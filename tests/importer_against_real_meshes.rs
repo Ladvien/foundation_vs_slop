@@ -187,36 +187,31 @@ fn raw_accessor_height(path: &Path) -> f32 {
     hi - lo
 }
 
-/// **Occupancy, on meshes that exist** — the read behind the editor's "scan mesh" button.
+/// **Occupancy, on meshes that exist** — the read behind the editor's "rescan mesh" button.
 ///
-/// `emerge_core::import::occupancy`'s unit tests use hand-built vertex sets, which prove the
-/// bucketing and prove nothing about the assets. This runs it over the shipped architecture.
+/// `emerge_core::import::occupancy`'s unit tests use hand-built triangles, which prove the
+/// rasteriser and prove nothing about the assets. This runs it over the shipped architecture.
 ///
-/// # What it found, and the limitation it makes concrete
+/// # What it reports, and why the numbers are not all "full"
 ///
-/// Vertex occupancy marks the cell each vertex falls in, so it under-marks a large flat face that
-/// spans a cell with no vertex inside it. That is documented on `occupancy` as an acceptable failure
-/// mode *because it is visible in the grid* — and against the real kit it turns out to be the common
-/// case for architecture, not a corner case:
+/// Solid pieces come back completely marked, which is the point — a wall is solid all the way up:
 ///
 /// ```text
-/// site/wall             1 x 5 x 2     4 of 10    a slab: vertices only at the 8 corners
-/// site/column           1 x 5 x 2     4 of 10    same
-/// site/wall_corner      1 x 5 x 1     2 of  5    same
-/// site/wall_window      1 x 5 x 4     8 of 20    same
-/// site/wall_doorway     1 x 4 x 4    14 of 16    denser mesh, good coverage
-/// site/wall_low         1 x 4 x 2     8 of  8    fully marked
-/// site/floor            2 x 1 x 2     4 of  4    fully marked
+/// site/wall             1 x 5 x 2    10 of 10
+/// site/wall_corner      1 x 5 x 1     5 of  5
+/// site/wall_window      1 x 5 x 4    20 of 20
+/// site/column           1 x 5 x 2    10 of 10
+/// site/wall_doorway_wide 1 x 4 x 4   12 of 16   <- the opening
+/// site/slab             4 x 3 x 2    22 of 24   <- the notch
 /// ```
 ///
-/// A 2.40 m wall is solid all the way up; a scan marks only its top and bottom layers, because a
-/// low-poly slab has no vertices in between. So the button is a real head start on dense meshes and
-/// leaves the middle of a boxy one to the author, who sees "4 of 10" in the status line and the gap
-/// in the grid. Closing it properly means triangle rasterisation — marking every cell a triangle
-/// passes through — which is the correct method and the one more piece of work.
+/// The two that are *not* full are the check that this is measuring shape rather than answering
+/// "yes" to everything: a wide doorway has cells that are entirely hole, and the slab has a notch.
 ///
-/// This pins the honest properties (every marked cell is in range, nothing scans to nothing) and
-/// **records the coverage** so that improvement is measurable rather than asserted.
+/// **This replaced vertex occupancy**, which marked the cell each vertex fell in and therefore left
+/// the middle of every low-poly slab open — `site/wall` came back 4 of 10, with only its top and
+/// bottom layers marked, because a box has vertices only at its corners. That was the common case
+/// for architecture, which is the half of a kit the lattice exists for.
 #[test]
 fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
     let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
@@ -256,9 +251,8 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
     }
     assert!(checked > 10, "only {checked} meshes were reachable to scan");
 
-    // The slab case, pinned by name. If this ever rises, the method improved and the doc table above
-    // is stale; if it falls, something regressed. Either way it should be noticed rather than
-    // silently absorbed.
+    // **The slab case, pinned by name** — the one the method was changed for. A wall is solid, so
+    // every cell of it is solid; under vertex occupancy this was 4 of 10, top and bottom layers only.
     let wall = layered
         .library
         .get("site/wall")
@@ -269,12 +263,28 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         .unwrap_or_else(|e| panic!("{e}"));
     let cells = emerge_core::import::occupancy(&glb, div).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
-        cells.len(),
-        4,
-        "a low-poly wall slab marks its corner layers only — see this test's note"
+        cells.len() as u32,
+        emerge_core::descriptor::Subgrid::volume(div),
+        "a solid wall is solid in every cell; got {cells:?}"
     );
+
+    // And the discriminating case: a wide doorway is mostly hole, so it must NOT come back full.
+    // Without this, "mark everything" would pass the assertion above.
+    let wide = layered
+        .library
+        .get("site/wall_doorway_wide")
+        .unwrap_or_else(|| panic!("the wide doorway is in the kit"));
+    let wdiv = emerge_core::descriptor::divisions(&wide.extent, layered.policy.divisions, "wide")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let wglb = emerge_core::glb::Glb::open(
+        Path::new("assets").join(wide.mesh.as_deref().unwrap_or_default()).as_path(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let wcells = emerge_core::import::occupancy(&wglb, wdiv).unwrap_or_else(|e| panic!("{e}"));
     assert!(
-        cells.iter().all(|c| c.1 == 0 || c.1 == div.1 - 1),
-        "and those are the bottom and top layers, which is exactly the gap: {cells:?}"
+        (wcells.len() as u32) < emerge_core::descriptor::Subgrid::volume(wdiv),
+        "a doorway's opening must leave cells open, or this is marking everything: {} of {}",
+        wcells.len(),
+        emerge_core::descriptor::Subgrid::volume(wdiv)
     );
 }
