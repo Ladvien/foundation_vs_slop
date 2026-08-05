@@ -267,9 +267,32 @@ fn dir_name(dir: Dir) -> &'static str {
 
 /// **Every abutting pair whose edge tokens disagree.**
 ///
-/// `cell` is the grid step the map is read on — the same one `grammar::learn` is given, so the
-/// validator and the generator agree about which placements are neighbours. Two placements are
-/// neighbours when their cells are orthogonally adjacent.
+/// # Neighbours are decided in world metres, on no grid at all
+///
+/// This took a grid step (`cell`) until 2026-08-05 and quantised every placement into an integer
+/// cell rectangle before asking which pieces touched. That one parameter was doing three
+/// incompatible jobs and was wrong at all three:
+///
+/// * **It was not aligned to anything.** The rectangle was anchored at `map.floor_rect()`'s
+///   `min_x`/`min_z` — that is `-bounds/2`, which is a multiple of the step only when the map's
+///   size happens to be an even multiple of it. Set a map 33 m wide and every span shifts half a
+///   cell, `ax1 == bx0` is never true, and **no seam in the map pairs at all** — reported as `ok`.
+/// * **It erased every piece smaller than the step.** The editor passed 1.0 m while placement snaps
+///   on [`crate::grid::SNAP`] = 0.5 m, so two touching half-metre pieces landed in one cell, shared
+///   one span, and were never compared — silently exempting most of the furniture from the only
+///   check that reads their edge tokens.
+/// * **It set the sampling rate.** [`seam`] was sampled at `cell / divisions`, but a lattice cell is
+///   `SNAP / divisions` — so the editor read every *other* row of a face and called it a match.
+///
+/// So the grid is gone. Two pieces are neighbours when a face of one **is** a face of the other in
+/// world coordinates (within [`EDGE_EPSILON`]) and they overlap on the perpendicular axis, which is
+/// the same exact-world-extent question [`seam`] already answers for the tokens themselves. One
+/// path, one set of coordinates.
+///
+/// Pieces that *overlap* rather than meet are not a seam and are not compared. That is deliberate:
+/// [`crate::grid::snap_span`] rounds a 0.55 m bench down to a 0.5 m cell precisely so set dressing
+/// tiles without gaps, and accepts a 5 cm overlap to do it. Architecture — the thing edge tokens are
+/// authored on — is sized in exact multiples and meets exactly.
 ///
 /// # What it reads
 ///
@@ -289,11 +312,8 @@ fn dir_name(dir: Dir) -> &'static str {
 /// A yaw that is not a quarter turn produces a fault carrying that sentence rather than an `Err` for
 /// the whole map. One unturnable piece must not blind the author to the other twelve, and the message
 /// says exactly which piece and which angle.
-pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fault> {
+pub fn faults(map: &Map, library: &Library, divisions: u32) -> Vec<Fault> {
     let mut out: Vec<Fault> = Vec::new();
-    if !(cell.is_finite() && cell > 0.0) {
-        return out;
-    }
 
     // **Nothing declared, nothing to check.** The module note calls this feature inert until it is
     // authored; this is where that stops being a property of the answer and becomes a property of
@@ -314,50 +334,34 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
     if !any_declared {
         return out;
     }
-    let (min_x, min_z, _, _) = map.floor_rect();
-    // A placement's `at` is its centre, so its extent runs half a footprint either way. Rounded
-    // rather than floored/ceiled: a piece authored on the grid should occupy exactly the cells it
-    // covers, and floating point leaves a 3 m span a hair under or over six cells depending on where
-    // it sits. `EDGE_EPSILON` absorbs that; anything larger would merge genuinely separate pieces.
-    let to_span = |at: (f32, f32), (w, d): (f32, f32)| {
-        // The near edge rounds up into its cell and the far edge rounds down out of the next one, so
-        // a piece whose edge lands exactly on a boundary occupies the cells it covers and not the
-        // one it merely touches. Nudged in opposite directions on purpose: a single shared epsilon
-        // cancels itself out and makes every piece a cell too wide, which reads as everything
-        // abutting everything.
-        let near = |v: f32| ((v / cell) + EDGE_EPSILON).floor() as i64;
-        let far = |v: f32| ((v / cell) - EDGE_EPSILON).ceil() as i64;
-        (
-            near(at.0 - w * 0.5 - min_x),
-            far(at.0 + w * 0.5 - min_x),
-            near(at.1 - d * 0.5 - min_z),
-            far(at.1 + d * 0.5 - min_z),
-        )
-    };
+    // **One lattice cell, in metres.** `descriptor::divisions` is `grid::cells(span) * divisions`,
+    // and `grid::cells` counts [`crate::grid::SNAP`]-sized units — so a cell is `SNAP / divisions`
+    // across, and that, not the caller's idea of a grid step, is the rate at which a face has to be
+    // sampled to read every row of it exactly once.
+    let subunit = crate::grid::SNAP / divisions.max(1) as f32;
 
     // A piece whose descriptor is missing from the library is the map's problem, not this check's;
     // `Map::validate` is where that is caught.
+    /// **A placement resolved to world coordinates, with its yaw already answered for.**
+    ///
+    /// The yaw is squared **once**, here. It used to be squared twice — the footprint swapped in this
+    /// loop and the cells rotated in the pair loop below, from two separate `quarter_turns` calls on
+    /// the same angle. The second call handled its `Err`. The first folded it into a `_` arm shared
+    /// with the even-quarter case, so the two calls could disagree about whether a piece was
+    /// turnable at all. Storing the one answer is what makes that impossible rather than unlikely.
     struct Tile<'a> {
         id: &'a str,
-        /// The half-open cell rectangle this piece occupies, `[x0, x1) x [z0, z1)`.
-        ///
-        /// **Its footprint, not its centre.** Pairing by the cell a placement's `at` falls in
-        /// assumed every piece was one cell across: two 3 m walls side by side have centres six
-        /// cells apart, so they were never compared, while two small props whose centres landed in
-        /// neighbouring cells were compared whether or not they touched. Both halves of that were
-        /// wrong, and the first is the one that matters — a wall seam is the thing edge tokens exist
-        /// to check.
-        span: (i64, i64, i64, i64),
-        /// The same piece in world metres, which is what the seam comparison reads. The cell rect
-        /// above answers "do these touch"; this answers "where, exactly".
+        /// World `(min, max)` per axis — what decides both who touches whom and where.
         x: (f32, f32),
         y: (f32, f32),
         z: (f32, f32),
-        yaw: f32,
-        grid: Subgrid,
-        /// The lattice's divisions, derived from this placement's own patched extent — so a
-        /// placement that overrides its size is compared on the lattice it actually stands on.
-        div: (u32, u32, u32),
+        /// **The lattice as it stands, or why this piece has no readable face.**
+        ///
+        /// `Ok` carries the cells rotated *and* the divisions swapped: a face read off one without
+        /// the other is a face of the wrong length. Both are derived from this placement's own
+        /// patched extent, so a placement that overrides its size is compared on the lattice it
+        /// actually stands on.
+        turned: Result<(Subgrid, (u32, u32, u32)), String>,
         /// Whether this tile says anything about its edges at all.
         declares: bool,
     }
@@ -395,11 +399,31 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
             continue;
         };
         let grid = authored.subgrid.clone().unwrap_or_default();
-        // The footprint as it stands, which a quarter turn swaps.
-        let (fw, fd) = authored.extent.footprint.unwrap_or((cell, cell));
-        let (fw, fd) = match quarter_turns(&p.id, p.yaw) {
+        let declares = grid.cells.iter().any(|c| c.edge.is_some());
+        // `divisions` above already refused a piece with no footprint, naming it; there is no second
+        // opinion to form here and no default that would be honest.
+        let Some((fw, fd)) = authored.extent.footprint else {
+            continue;
+        };
+        // **The turn, squared once.** Both halves together: `rotated` takes the divisions the cells
+        // were authored on, so it reads `div` before `rotate_div` replaces it.
+        let turn = quarter_turns(&p.id, p.yaw);
+        let turned = match &turn {
+            Ok(q) => Ok((grid.rotated(*q, div), crate::descriptor::rotate_div(div, *q))),
+            Err(message) => Err(message.clone()),
+        };
+        // The footprint as it stands. The arms are spelled out because collapsing two of them is
+        // precisely what went wrong here: an off-square yaw has **no** swap that means anything, and
+        // sharing an arm with "an even quarter turn changes nothing" made those two cases
+        // indistinguishable to the reader and to the next person to edit it.
+        let (fw, fd) = match &turn {
             Ok(q) if q % 2 == 1 => (fd, fw),
-            _ => (fw, fd),
+            Ok(_) => (fw, fd),
+            // Its unturned footprint, used for one purpose: letting `side` find whoever stands next
+            // to it, so the refusal below reaches an author who has declared something nearby.
+            // Nothing reads this piece's lattice — `turned` is an `Err`, so the seam is skipped and
+            // the refusal is the only thing the pair can produce.
+            Err(_) => (fw, fd),
         };
         let base = ys.get(i).copied().unwrap_or(map.origin.1);
         // The height as it stands, which is the same rule `divisions` uses — see
@@ -407,14 +431,11 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         let h = authored.extent.height.unwrap_or(0.0) * authored.align.stretch_y.unwrap_or(1.0);
         placed.push(Tile {
             id: p.id.as_str(),
-            span: to_span(p.at, (fw, fd)),
             x: (p.at.0 - fw * 0.5, p.at.0 + fw * 0.5),
             y: (base, base + h),
             z: (p.at.1 - fd * 0.5, p.at.1 + fd * 0.5),
-            yaw: p.yaw,
-            div,
-            declares: grid.cells.iter().any(|c| c.edge.is_some()),
-            grid,
+            declares,
+            turned,
         });
     }
 
@@ -430,17 +451,20 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
     // the other axis — touching at a corner is not a seam, because no column of cells faces another.
     // The world meaning of the directions is `crate::wfc`'s: N is -Z, E is +X, S is +Z, W is -X.
     let side = |a: &Tile, b: &Tile| -> Option<Dir> {
-        let (ax0, ax1, az0, az1) = a.span;
-        let (bx0, bx1, bz0, bz1) = b.span;
-        let over_x = ax0 < bx1 && bx0 < ax1;
-        let over_z = az0 < bz1 && bz0 < az1;
-        if ax1 == bx0 && over_z {
+        // One piece's far edge IS the other's near edge, to within the float slop of having got
+        // there by adding half a footprint to a centre.
+        let meets = |p: f32, q: f32| (p - q).abs() <= EDGE_EPSILON;
+        // A strict overlap on the perpendicular axis. Touching at a corner is not a seam, because no
+        // column of cells faces another — so a zero-width overlap has to fail, which is what the
+        // epsilon on the near side is for.
+        let over = |a: (f32, f32), b: (f32, f32)| a.0.max(b.0) + EDGE_EPSILON < a.1.min(b.1);
+        if meets(a.x.1, b.x.0) && over(a.z, b.z) {
             Some(E)
-        } else if bx1 == ax0 && over_z {
+        } else if meets(b.x.1, a.x.0) && over(a.z, b.z) {
             Some(W)
-        } else if az1 == bz0 && over_x {
+        } else if meets(a.z.1, b.z.0) && over(a.x, b.x) {
             Some(S)
-        } else if bz1 == az0 && over_x {
+        } else if meets(b.z.1, a.z.0) && over(a.x, b.x) {
             Some(N)
         } else {
             None
@@ -467,41 +491,33 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
                 }
                 // Both yaws have to square before there is a face to read. Reported once per piece,
                 // because the same tilted piece has up to four neighbours and four copies of one
-                // sentence is not four pieces of information.
-                let mut turned = Vec::new();
+                // sentence is not four pieces of information — and reported *here*, on reaching a
+                // pair, rather than when the placement was read: an armchair at 240° with nothing
+                // declared anywhere near it is nobody's problem, and saying so would bury the faults
+                // that are.
                 for t in [a, b] {
-                    match quarter_turns(t.id, t.yaw) {
-                        // Both halves of the turn, together: the cells move and the divisions swap,
-                        // and a face read off one without the other is a face of the wrong length.
-                        Ok(q) => turned.push((
-                            t.grid.rotated(q, t.div),
-                            crate::descriptor::rotate_div(t.div, q),
-                        )),
-                        Err(message) => {
-                            if !yaw_reported.contains(&t.id) {
-                                yaw_reported.push(t.id);
-                                out.push(Fault {
-                                    a: t.id.to_owned(),
-                                    b: String::new(),
-                                    dir: N,
-                                    a_face: Vec::new(),
-                                    b_face: Vec::new(),
-                                    message,
-                                });
-                            }
+                    if let Err(message) = &t.turned {
+                        if !yaw_reported.contains(&t.id) {
+                            yaw_reported.push(t.id);
+                            out.push(Fault {
+                                a: t.id.to_owned(),
+                                b: String::new(),
+                                dir: N,
+                                a_face: Vec::new(),
+                                b_face: Vec::new(),
+                                message: message.clone(),
+                            });
                         }
                     }
                 }
-                let [(a_grid, a_div), (b_grid, b_div)] = turned.as_slice() else {
-                    continue;
-                };
                 // **The part they share, not the whole face.** See [`seam`] for why, and for the two
                 // places in the shipped kits that forced the change.
+                let (Ok((a_grid, a_div)), Ok((b_grid, b_div))) = (&a.turned, &b.turned) else {
+                    continue;
+                };
                 let a_at = Placed3 { x: a.x, y: a.y, z: a.z, div: *a_div };
                 let b_at = Placed3 { x: b.x, y: b.y, z: b.z, div: *b_div };
-                let Some((a_face, b_face)) =
-                    seam(a_grid, a_at, b_grid, b_at, dir, cell / divisions.max(1) as f32)
-                else {
+                let Some((a_face, b_face)) = seam(a_grid, a_at, b_grid, b_at, dir, subunit) else {
                     // No rectangle in common: the cell rects touch but the pieces do not overlap in Y,
                     // so there is no seam here to be right or wrong about.
                     continue;
@@ -694,7 +710,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            faults(&map_with(many), &lib, crate::grid::SNAP, ONE_PER_TILE),
+            faults(&map_with(many), &lib, ONE_PER_TILE),
             Vec::new()
         );
     }
@@ -710,7 +726,7 @@ mod tests {
             placed("g1", "gap", (0.25, 0.25), 0.0),
             placed("w1", "wall", (0.75, 0.25), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE).len(), 1);
+        assert_eq!(faults(&map, &lib, ONE_PER_TILE).len(), 1);
     }
 
     /// **The defect this pairing was rewritten for.** Two 3 m walls side by side share a seam, but
@@ -728,7 +744,7 @@ mod tests {
             placed("w1", "wall", (1.5, 0.25), 0.0),
             placed("g1", "gap", (4.5, 0.25), 0.0),
         ]);
-        let found = faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE);
+        let found = faults(&map, &lib, ONE_PER_TILE);
         assert_eq!(found.len(), 1, "the seam between two touching walls: {found:#?}");
         assert_eq!((found[0].a.as_str(), found[0].b.as_str()), ("g1", "w1"));
     }
@@ -746,7 +762,87 @@ mod tests {
             // One empty cell between them.
             placed("g1", "gap", (1.25, 0.25), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE), Vec::new());
+        assert_eq!(faults(&map, &lib, ONE_PER_TILE), Vec::new());
+    }
+
+    /// **The answer cannot depend on how big the map is.**
+    ///
+    /// Neighbours were decided on an integer cell grid anchored at `floor_rect`'s `min_x` — that is
+    /// `-bounds/2`, a multiple of the cell size only when the map's width happens to be an even
+    /// multiple of it. At 33 m every span shifted half a cell, `ax1 == bx0` was never true, and **no
+    /// seam in the map paired at all** — reported to the author as `ok`. Two identical maps that
+    /// differ only in `bounds` must give the identical answer, which is what makes it a property of
+    /// the pieces rather than of the paperwork around them.
+    #[test]
+    fn an_odd_map_bound_does_not_unpair_every_seam() {
+        let lib = library_with(&[
+            ("wall", grid(&[((0, 0, 0), "stone")])),
+            ("gap", Subgrid::default()),
+        ]);
+        let touching = vec![
+            placed("w1", "wall", (0.5, 0.5), 0.0),
+            placed("g1", "gap", (1.0, 0.5), 0.0),
+        ];
+        // Every odd metre, and a fractional one: none of these is a whole number of 0.5 m cells away
+        // from its own half-width, which is the shape of the bug.
+        for width in [33.0, 7.0, 1.0, 12.5] {
+            let map = Map {
+                bounds: (width, 4.0, width),
+                placements: touching.clone(),
+                ..Map::default()
+            };
+            let found = faults(&map, &lib, ONE_PER_TILE);
+            assert_eq!(
+                found.len(),
+                1,
+                "a {width} m map must find the same one seam: {found:#?}"
+            );
+        }
+    }
+
+    /// **A face is sampled at the lattice's own rate, not the caller's.**
+    ///
+    /// `descriptor::divisions` is `grid::cells(span) * divisions` and `grid::cells` counts
+    /// [`crate::grid::SNAP`] units, so one cell is `SNAP / divisions` metres. [`seam`] used to be
+    /// handed `cell / divisions` from the same parameter that set the neighbour grid — 1.0 m from the
+    /// editor — so a 2.40 m wall's five rows were read at **two** places and the three rows between
+    /// them were never compared. This puts the disagreement on one of the rows that sampling missed.
+    #[test]
+    fn every_row_of_a_face_is_read_exactly_once() {
+        let rows = |odd: &str| {
+            let mut cells: Vec<_> = (0..5)
+                .map(|y| SubCell {
+                    at: (0, y, 0),
+                    edge: Some("wall".to_owned()),
+                    ..SubCell::default()
+                })
+                .collect();
+            // Row 2. At the old 1.0 m sampling rate a 2.40 m face was read at y = 0.6 and y = 1.8,
+            // which land in rows 1 and 3 — so this row, and rows 0 and 4, went unread.
+            cells[2].edge = Some(odd.to_owned());
+            Subgrid { cells }
+        };
+        let wall = |id: &str, g: Subgrid| Descriptor {
+            id: id.to_owned(),
+            extent: crate::descriptor::Extent {
+                footprint: Some((crate::grid::SNAP, crate::grid::SNAP)),
+                height: Some(2.4),
+            },
+            subgrid: Some(g),
+            ..Descriptor::default()
+        };
+        let lib = Library {
+            descriptors: vec![wall("plain", rows("wall")), wall("odd", rows("glass"))],
+            ..Library::default()
+        };
+        let map = map_with(vec![
+            placed("a", "plain", (0.5, 0.5), 0.0),
+            placed("b", "odd", (1.0, 0.5), 0.0),
+        ]);
+        let found = faults(&map, &lib, ONE_PER_TILE);
+        assert_eq!(found.len(), 1, "row 2 disagrees: {found:#?}");
+        assert_eq!(found[0].a_face.len(), 5, "five rows, five samples: {found:#?}");
+        assert!(found[0].message.contains("glass"), "{}", found[0].message);
     }
 
     /// **A corner is not a seam.** Two pieces meeting only at a point present no column of cells to
@@ -761,7 +857,7 @@ mod tests {
             placed("w1", "wall", (0.25, 0.25), 0.0),
             placed("g1", "gap", (0.75, 0.75), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE), Vec::new());
+        assert_eq!(faults(&map, &lib, ONE_PER_TILE), Vec::new());
     }
 
     /// A turned piece abuts on its turned footprint — a 3 m wall at 90 degrees runs along Z, and the
@@ -781,7 +877,7 @@ mod tests {
             // pairing, and a fault only if the token moved with it.
             placed("g1", "gap", (0.75, 2.75), 0.0),
         ]);
-        let found = faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE);
+        let found = faults(&map, &lib, ONE_PER_TILE);
         assert_eq!(found.len(), 1, "the turned wall's long face: {found:#?}");
 
         // **The same neighbour at the other end of the run is not a fault**, because the token is not
@@ -792,7 +888,7 @@ mod tests {
             placed("w1", "wall", (0.25, 1.5), 90.0),
             placed("g1", "gap", (0.75, 0.25), 0.0),
         ]);
-        assert_eq!(faults(&elsewhere, &lib, crate::grid::SNAP, ONE_PER_TILE), Vec::new());
+        assert_eq!(faults(&elsewhere, &lib, ONE_PER_TILE), Vec::new());
     }
 
     /// A map of unauthored tiles reports nothing — the inert property, end to end.
@@ -801,9 +897,9 @@ mod tests {
         let lib = library_with(&[("crate_a", Subgrid::default())]);
         let map = map_with(vec![
             placed("one", "crate_a", (0.5, 0.5), 0.0),
-            placed("two", "crate_a", (1.5, 0.5), 0.0),
+            placed("two", "crate_a", (1.0, 0.5), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, 1.0, ONE_PER_TILE), Vec::new());
+        assert_eq!(faults(&map, &lib, ONE_PER_TILE), Vec::new());
     }
 
     /// One mismatched pair is reported once per direction it is wrong in — here `one`'s E face and
@@ -816,9 +912,9 @@ mod tests {
         ]);
         let map = map_with(vec![
             placed("w1", "wall", (0.5, 0.5), 0.0),
-            placed("g1", "gap", (1.5, 0.5), 0.0),
+            placed("g1", "gap", (1.0, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
+        let found = faults(&map, &lib, ONE_PER_TILE);
         assert_eq!(found.len(), 1, "one seam is one fault, not two: {found:#?}");
         assert!(found[0].message.contains("stone"), "{}", found[0].message);
         // `g1` sorts before `w1`, so that is the ordering reported — and the sentence still names
@@ -837,19 +933,17 @@ mod tests {
         let forward = faults(
             &map_with(vec![
                 placed("aaa", "wall", (0.5, 0.5), 0.0),
-                placed("bbb", "gap", (1.5, 0.5), 0.0),
+                placed("bbb", "gap", (1.0, 0.5), 0.0),
             ]),
             &lib,
-            1.0,
             ONE_PER_TILE,
         );
         let backward = faults(
             &map_with(vec![
-                placed("bbb", "gap", (1.5, 0.5), 0.0),
+                placed("bbb", "gap", (1.0, 0.5), 0.0),
                 placed("aaa", "wall", (0.5, 0.5), 0.0),
             ]),
             &lib,
-            1.0,
             ONE_PER_TILE,
         );
         assert_eq!(forward, backward);
@@ -862,9 +956,9 @@ mod tests {
         let lib = library_with(&[("wall", grid(&[((0, 0, 0), "stone")]))]);
         let map = map_with(vec![
             placed("tilted", "wall", (0.5, 0.5), 15.0),
-            placed("square", "wall", (1.5, 0.5), 0.0),
+            placed("square", "wall", (1.0, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
+        let found = faults(&map, &lib, ONE_PER_TILE);
         assert_eq!(
             found.iter().filter(|f| f.a == "tilted" && f.b.is_empty()).count(),
             1,
@@ -881,9 +975,9 @@ mod tests {
         let lib = library_with(&[("armchair", Subgrid::default()), ("table", Subgrid::default())]);
         let map = map_with(vec![
             placed("chair", "armchair", (0.5, 0.5), 240.0),
-            placed("table", "table", (1.5, 0.5), 0.0),
+            placed("table", "table", (1.0, 0.5), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, 1.0, ONE_PER_TILE), Vec::new());
+        assert_eq!(faults(&map, &lib, ONE_PER_TILE), Vec::new());
     }
 
     /// But once its neighbour declares one, the odd yaw is exactly what stops the check, and it says
@@ -896,9 +990,9 @@ mod tests {
         ]);
         let map = map_with(vec![
             placed("chair", "armchair", (0.5, 0.5), 240.0),
-            placed("w1", "wall", (1.5, 0.5), 0.0),
+            placed("w1", "wall", (1.0, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
+        let found = faults(&map, &lib, ONE_PER_TILE);
         assert!(
             found.iter().any(|f| f.a == "chair" && f.message.contains("240")),
             "{found:#?}"
@@ -972,7 +1066,7 @@ mod seam_tests {
             ..Library::default()
         };
         let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("d1", "door", 0.25, 1.5)]);
-        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        let found = faults(&map, &lib, 1);
         assert!(found.is_empty(), "{found:#?}");
     }
 
@@ -990,7 +1084,7 @@ mod seam_tests {
             ..Library::default()
         };
         let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("h1", "header", 0.25, 1.5)]);
-        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        let found = faults(&map, &lib, 1);
         assert!(found.is_empty(), "{found:#?}");
     }
 
@@ -1015,7 +1109,7 @@ mod seam_tests {
             ..Library::default()
         };
         let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("d1", "door", 0.25, 1.5)]);
-        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        let found = faults(&map, &lib, 1);
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].message.contains("glass"), "{}", found[0].message);
     }
@@ -1035,7 +1129,7 @@ mod seam_tests {
         // Wall spans x [0, 0.5]; corner spans x [0, 1.0]. They meet on z, overlapping on the wall's
         // half-metre of width.
         let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("c1", "corner", 0.5, 1.5)]);
-        let found = faults(&map, &lib, crate::grid::SNAP, 1);
+        let found = faults(&map, &lib, 1);
         assert!(found.is_empty(), "{found:#?}");
     }
 
@@ -1059,6 +1153,6 @@ mod seam_tests {
         };
         // Beside the wall on the floor plan, but 3.0 m up where the wall stops at 2.40.
         let map = map_of(vec![at("w1", "wall", 0.25, 0.5), at("h1", "high", 0.25, 1.5)]);
-        assert_eq!(faults(&map, &lib, crate::grid::SNAP, 1), Vec::new());
+        assert_eq!(faults(&map, &lib, 1), Vec::new());
     }
 }

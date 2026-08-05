@@ -64,6 +64,31 @@ fn turn_z(p: [f32; 3]) -> [f32; 3] {
     [-p[1], p[0], p[2]]
 }
 
+/// **A point through `rotate` quarter turns about X, then Y, then Z.**
+///
+/// The order is the one [`crate::descriptor::Align::rotate`] documents, and it matters: quarter turns
+/// do not commute, so a rotation composed in another order is a different rotation.
+///
+/// Public because [`crate::import::occupancy`] has to rasterise a mesh in the **same frame** the
+/// extent beside it was measured in. It did not: it normalised vertices into the raw file's bounding
+/// box while its divisions came from the already-rotated extent, so any piece carrying `align.rotate`
+/// got the Y and Z divisions applied to the wrong mesh axes and its `solid` cells came back
+/// transposed — visibly not covering the geometry they claim to measure, on anything that is not
+/// symmetric.
+pub fn spin(p: [f32; 3], rotate: (u8, u8, u8)) -> [f32; 3] {
+    let mut p = p;
+    for _ in 0..(rotate.0 % 4) {
+        p = turn_x(p);
+    }
+    for _ in 0..(rotate.1 % 4) {
+        p = turn_y(p);
+    }
+    for _ in 0..(rotate.2 % 4) {
+        p = turn_z(p);
+    }
+    p
+}
+
 impl Measured {
     /// **The same mesh, measured as it will stand after `rotate`.**
     ///
@@ -76,18 +101,7 @@ impl Measured {
     /// onto its back has a new footprint *and* a new height *and* a new pivot *and* a new base —
     /// rotating the footprint alone would seat it in the floor.
     pub fn rotated(&self, rotate: (u8, u8, u8)) -> Measured {
-        let spin = |mut p: [f32; 3]| {
-            for _ in 0..(rotate.0 % 4) {
-                p = turn_x(p);
-            }
-            for _ in 0..(rotate.1 % 4) {
-                p = turn_y(p);
-            }
-            for _ in 0..(rotate.2 % 4) {
-                p = turn_z(p);
-            }
-            p
-        };
+        let spin = |p: [f32; 3]| spin(p, rotate);
 
         let mut lo = [f32::INFINITY; 3];
         let mut hi = [f32::NEG_INFINITY; 3];

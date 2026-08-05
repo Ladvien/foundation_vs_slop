@@ -77,13 +77,19 @@ fn the_tiles_plugin_registers_the_resources_its_systems_take() {
     }
 }
 
-/// **The census answers for every action.** `binding` panics if an action has no row, and the
-/// editor calls it per key per frame — so a new `Action` without a binding is a crash on the first
-/// frame that reads keys, not a compile error.
+/// **The census answers for the action it was asked about.**
+///
+/// `binding` does not panic on a missing row — it falls back to `BINDINGS[0]`, which is
+/// Tab / "next tab". So this asserted the wrong thing twice over: its doc claimed a panic, and its
+/// assertions were that the returned row's `chord` and `does` are non-empty, which `BINDINGS[0]`
+/// satisfies. **A new `Action` with no row silently bound itself to Tab and this test stayed green.**
+///
+/// Checking the row's own `action` field is what makes it fail, because that is the one field the
+/// fallback cannot fake.
 #[test]
-fn every_action_resolves_to_a_binding_at_runtime() {
+fn every_action_resolves_to_its_own_binding_at_runtime() {
     use emerge_mapper::keys::{binding, Action};
-    // The two added most recently, and the two most likely to be forgotten next.
+    // The ones added most recently, and the ones most likely to be forgotten next.
     for action in [
         Action::ScanMesh,
         Action::RotateMeshX,
@@ -91,8 +97,18 @@ fn every_action_resolves_to_a_binding_at_runtime() {
         Action::RotateMeshZ,
         Action::Remove,
         Action::AimReset,
+        Action::TurnPieceLeft,
+        Action::TurnPieceRight,
+        Action::FocusCandidates,
+        Action::FocusLibrary,
     ] {
         let b = binding(action);
+        assert_eq!(
+            b.action, action,
+            "{action:?} has no row in the census — it resolved to `{}` ({}), which is what the \
+             fallback returns for anything missing",
+            b.chord, b.does
+        );
         assert!(!b.chord.is_empty(), "{action:?} has no chord to show");
         assert!(!b.does.is_empty(), "{action:?} has no description");
     }

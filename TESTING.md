@@ -9,11 +9,11 @@ oracle choice is the difference between a golden regression net and a test that 
 ## TL;DR
 
 ```bash
-cargo test                                                # deterministic core — fast, GPU-free, the CI hard gate
+cargo test --workspace                                    # deterministic core — fast, GPU-free, the CI hard gate
 cargo test --features test-harness -- --test-threads=1    # + headless replay / liveness / SSIM (GPU-free)
 ```
 
-- **`cargo test`** runs the pure-logic + golden layer (RNG, WFC, utility-AI, ORCA, laser, geometry,
+- **`cargo test --workspace`** runs the pure-logic + golden layer (RNG, WFC, utility-AI, ORCA, laser, geometry,
   placement). No GPU, no window, ~instant. **This is what CI blocks on.**
 - **`--features test-harness`** additionally boots the *real game* headless and runs replay + liveness +
   visual tests. They open no window and need **no GPU**: the harness sets `RenderPlugin` with
@@ -195,7 +195,7 @@ These are the hard-won constraints. Violating any one either flakes the suite or
 
 ## What's in the box
 
-### 1. Deterministic-core layer (`cargo test`, GPU-free)
+### 1. Deterministic-core layer (`cargo test --workspace`, GPU-free)
 
 Pure functions called directly — **no Bevy `App`**. Fast, deterministic, no GPU. This is the CI hard gate.
 See the **Test inventory** below for the full per-module breakdown.
@@ -228,7 +228,7 @@ unit-tested; the *capture* half needs the windowed game + `devshot` (the harness
 
 The canonical map of what pins what. Update this table when you add or retire a test module.
 
-### In-file `#[cfg(test)] mod tests` — pure logic, `cargo test`
+### In-file `#[cfg(test)] mod tests` — pure logic, `cargo test --workspace`
 
 | Module | What it pins |
 |---|---|
@@ -400,7 +400,7 @@ the two is evidence about `target/`, not about the source. Reach for `cargo clea
 
 ## CI (`.github/workflows/ci.yml`)
 
-- **Hard gate** (`test` job, ubuntu, GPU-free): `cargo test` — the deterministic core must pass on every
+- **Hard gate** (`test` job, ubuntu, GPU-free): `cargo test --workspace` — the deterministic core must pass on every
   push. Installs Bevy's Linux build deps (alsa/udev/wayland/xkb).
 - **Advisory**: `cargo fmt --check` + `cargo clippy` run but **don't block** — the repo predates style
   enforcement (no `rustfmt.toml`, standing clippy lints), so blocking would fail on untouched code.

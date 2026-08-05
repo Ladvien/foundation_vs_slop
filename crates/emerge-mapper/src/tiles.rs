@@ -580,7 +580,23 @@ impl RotateAxis {
 ///
 /// A turn about **X or Z swaps the piece's height with a floor axis**, so this is also the one place
 /// a tile's lattice changes shape without the project's `divisions` moving.
-fn rotate_mesh(axis: RotateAxis, project: &mut Project, state: &mut ImportState) {
+///
+/// # The authored lattice comes with it, or the turn is refused
+///
+/// This re-measured the extent and left the cells where they were, which is not a smaller version of
+/// the right answer — it is a corrupt file. `site/wall`'s ten cells are authored at `1x5x2`; a turn
+/// about Y derives `2x5x1`, the five cells at `z = 1` fall outside it, and `write_library` then refuses
+/// **every** subsequent edit in the session with `cell (0,0,1) is outside its 2x5x1 lattice`.
+///
+/// A turn about **Y** has an exact mapping and takes it: `Subgrid::rotated` and
+/// `descriptor::rotate_div` are the pair that does this everywhere else in the program, and
+/// `adjacency::faults` already uses them together for a placement's yaw.
+///
+/// A turn about **X or Z** has none — the lattice's Y axis becomes a floor axis, and cells authored
+/// against a height do not describe a width. So a piece with authored cells refuses, names the count,
+/// and says what `force` would do. `force` then clears them and reports how many, which is the
+/// author's call to make explicitly rather than something to do to them quietly.
+fn rotate_mesh(axis: RotateAxis, force: bool, project: &mut Project, state: &mut ImportState) {
     let Some(d) = state.editing(&project.measured) else {
         state.status = "no tile is selected".to_owned();
         return;
@@ -589,6 +605,19 @@ fn rotate_mesh(axis: RotateAxis, project: &mut Project, state: &mut ImportState)
         state.status = format!("`{}` has no mesh to turn", d.id);
         return;
     };
+    let authored_cells = d.subgrid.as_ref().map_or(0, |g| g.cells.len());
+    if axis != RotateAxis::Y && authored_cells > 0 && !force {
+        state.status = format!(
+            "`{}` has {authored_cells} authored cell(s). A {} turn swaps its height with a floor \
+             axis and there is no mapping for that — hold Shift to turn it anyway and clear them.",
+            d.id,
+            axis.label()
+        );
+        return;
+    }
+    // **Before the extent moves.** A Y turn maps the cells onto the turned piece, and the mapping
+    // reads the divisions they were authored against.
+    let div_before = focused_div(state, project).ok();
     let path = project.root.join("assets").join(&mesh);
     let glb = match emerge_core::glb::Glb::open(&path) {
         Ok(glb) => glb,
@@ -606,15 +635,33 @@ fn rotate_mesh(axis: RotateAxis, project: &mut Project, state: &mut ImportState)
     // A rotation of nothing is not a rotation — keep the field absent rather than storing an
     // identity nobody authored, so a descriptor that was never turned still says so.
     d.align.rotate = (want != (0, 0, 0)).then_some(want);
-    if let Err(why) = emerge_core::import::remeasure_rotated(d, &glb) {
+    if let Err(why) = emerge_core::import::remeasure_rotated(d, &glb, before) {
         d.align.rotate = before;
         state.status = why;
         return;
     }
+    // The lattice, moved or dropped. Both halves of a Y turn together — the cells and the divisions —
+    // because a lattice read off one without the other is the wrong shape; `rotate_div` is not called
+    // here only because divisions are derived from the extent that just changed.
+    let lattice = match (axis, div_before) {
+        (RotateAxis::Y, Some(div)) => {
+            d.subgrid = d.subgrid.take().map(|g| g.rotated(1, div));
+            String::new()
+        }
+        // A Y turn on a piece whose divisions would not derive has no cells worth moving either:
+        // `divisions` refuses only for a missing footprint, and `Subgrid::validate` would refuse such
+        // a lattice at the door.
+        (RotateAxis::Y, None) => String::new(),
+        _ if authored_cells > 0 => {
+            d.subgrid = None;
+            format!(" — {authored_cells} authored cell(s) cleared")
+        }
+        _ => String::new(),
+    };
     let (w, dep) = d.extent.footprint.unwrap_or((0.0, 0.0));
     let h = d.extent.height.unwrap_or(0.0);
     let said = format!(
-        "{} {},{},{} deg — now {w:.2} x {h:.2} x {dep:.2} m",
+        "{} {},{},{} deg — now {w:.2} x {h:.2} x {dep:.2} m{lattice}",
         d.id, want.0, want.1, want.2
     );
     state.status = persist(project, where_to, said);
@@ -624,13 +671,23 @@ fn rotate_mesh(axis: RotateAxis, project: &mut Project, state: &mut ImportState)
 fn on_rotate_click(
     activate: On<Activate>,
     axes: Query<&RotateAxis>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
     let Ok(axis) = axes.get(activate.entity) else {
         return;
     };
-    rotate_mesh(*axis, &mut project, &mut state);
+    rotate_mesh(*axis, held_shift(&keyboard), &mut project, &mut state);
+}
+
+/// **Shift, held, meaning "I know — do it anyway".**
+///
+/// Read at the moment the turn is asked for rather than kept as a mode, so there is no state that can
+/// be left on. Both entry points go through this, so the chip and the key cannot disagree about what
+/// forcing means. `keys::fires_in` is not involved: this is a modifier on an action, not an action.
+fn held_shift(keyboard: &ButtonInput<KeyCode>) -> bool {
+    keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight)
 }
 
 /// **Mark every cell the mesh's geometry reaches, and say how many.**
@@ -660,10 +717,25 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
         state.status = format!("`{}` has no mesh to scan", d.id);
         return;
     };
+    // **The rotation the divisions were derived with.** `div` comes from the piece's `extent`, which
+    // `import::remeasure_rotated` already baked `align.rotate` into — so the rasteriser has to read
+    // the mesh in that same frame or it maps these divisions onto the mesh's raw axes and returns a
+    // transposed lattice. An off-square `rotate` cannot be baked at all, and that refusal is the
+    // author's to see rather than something to round away.
+    let rotate = match d.align.rotate {
+        Some(r) => match emerge_core::descriptor::quarter_turns_xyz(r, &d.id) {
+            Ok(q) => q,
+            Err(why) => {
+                state.status = why;
+                return;
+            }
+        },
+        None => (0, 0, 0),
+    };
 
     let path = project.root.join("assets").join(&mesh);
     let cells = match emerge_core::glb::Glb::open(&path)
-        .and_then(|glb| emerge_core::import::occupancy(&glb, div))
+        .and_then(|glb| emerge_core::import::occupancy(&glb, div, rotate))
     {
         Ok(cells) => cells,
         Err(why) => {
@@ -750,7 +822,10 @@ fn on_scan_mesh(
 /// reference so a caller can derive the divisions *before* borrowing the descriptor mutably — which
 /// is the order every editing path needs.
 fn focused_div(state: &ImportState, project: &Project) -> Result<(u32, u32, u32), String> {
-    let Some(d) = state.editing(&project.measured) else {
+    // The piece as PLACED — see [`ImportState::placed`]. A lattice is a division of the thing that
+    // ends up in the world, and the range check a write goes through has to be the same one
+    // `Library::validate_lattices` will apply to it afterwards.
+    let Some(d) = state.placed(project) else {
         return Err("no tile is selected".to_owned());
     };
     project.divisions_of(d)
@@ -866,7 +941,9 @@ pub struct LatticePick(pub Option<((u32, u32, u32), Option<emerge_core::descript
 /// must agree about where the lattice is to within nothing at all — a highlight half a cell off the
 /// box it highlights is worse than no highlight.
 fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32, u32, u32))> {
-    let d = state.editing(&project.measured)?;
+    // As placed: the box is the piece a click has to land on, and a stretched wall stands 2.40 m
+    // whatever its measurement says.
+    let d = state.placed(project)?;
     let div = project.divisions_of(d).ok()?;
     let (w, dep) = d.extent.footprint?;
     // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
@@ -1017,7 +1094,7 @@ fn lattice_keys(
         (Action::RotateMeshZ, RotateAxis::Z),
     ] {
         if pressed(action) {
-            rotate_mesh(axis, &mut project, &mut state);
+            rotate_mesh(axis, held_shift(&keyboard), &mut project, &mut state);
             return;
         }
     }
@@ -1112,8 +1189,14 @@ fn cell_keys(
                     return;
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
-                // Before the mutable borrow: the write is range-checked against these.
-                let div = match focused_div(&state, &project) {
+                // Before the mutable borrow: the write is range-checked against these. Derived from
+                // **`target`**, the tile this field was opened on, and not from the live selection —
+                // see `ImportState::placed_at_target` for what that cost.
+                let div = match state
+                    .placed_at_target(&target, &project)
+                    .ok_or_else(|| format!("`{raw}` was not kept — that tile is gone."))
+                    .and_then(|d| project.divisions_of(d))
+                {
                     Ok(div) => div,
                     Err(why) => {
                         state.status = why;
@@ -1224,7 +1307,8 @@ fn refresh_cells(
     mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>)>,
     mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>)>,
 ) {
-    let Some(d) = state.editing(&project.measured) else {
+    // As placed, so the cells shown are the cells that exist. See [`ImportState::placed`].
+    let Some(d) = state.placed(&project) else {
         return;
     };
     // A piece with no marked cells reads as an empty lattice rather than as a missing one — the
@@ -1346,6 +1430,29 @@ impl ImportState {
         }
     }
 
+    /// **The focused piece as it will stand in the world** — for anything that reads its *shape*.
+    ///
+    /// [`Self::editing`] takes whichever library it is handed, and which one that is turns out to be
+    /// a real decision rather than a detail. `Project::measured` is what an edit is written *to*.
+    /// The layered library is what the piece *is*: under `--kit site_greybox`, `site/wall` is measured
+    /// at 1.0 m and the kit's `project.ron` stretches it to 2.40 — so the measurement derives a
+    /// 2-row lattice and the piece that gets placed has 5.
+    ///
+    /// Every reader of the lattice's *shape* was asking `measured`, so an author authored on a grid
+    /// nothing else in the program used: `validate_lattices`, `adjacency::faults` and the game all
+    /// read the layered one. A token put on what the editor drew as the top row landed on row 1 of 5,
+    /// and the three rows above it could not be reached at all — not refused, just absent. In the
+    /// other direction (`wall_header`, patched shorter) every edit failed the range check instead.
+    ///
+    /// A **candidate** has no layered entry — it is not in the project yet — so this returns its
+    /// proposal, which is the whole truth about it. That comes out of `selected_library_id` rather
+    /// than from looking its id up, deliberately: an author who types a name that is already taken
+    /// gets told so by `commit_candidate`, and until then their candidate must not quietly start
+    /// reporting the shape of the piece that already owns the name.
+    pub fn placed<'a>(&'a self, project: &'a crate::project::Project) -> Option<&'a Descriptor> {
+        self.editing(&project.library)
+    }
+
     /// The mutable half of [`Self::editing`]. `Ok(true)` from a caller's point of view means "this
     /// edit landed on a library entry", which is the caller's cue to write the file — a candidate's
     /// edits live in memory until Accept, a library entry's are the file.
@@ -1381,6 +1488,32 @@ impl ImportState {
     /// `None` when the target is gone — a library entry removed, or a candidate dropped by a rescan.
     /// That is a real thing to happen mid-edit, and the callers say so rather than writing to
     /// whatever is selected instead.
+    /// **The piece an edit is held on, as it will stand** — the read-only, placed-layer sibling of
+    /// [`Self::at_target`].
+    ///
+    /// `at_target` exists because the list can move under a field that is still open, and a write has
+    /// to land on the tile the field was opened against. The **range check** that write goes through
+    /// has to come from the same tile, and it did not: it came from `focused_div`, which reads the
+    /// live selection. Clicking another library row mid-word — an unconditional observer, and
+    /// `keys::fires_in` only suppresses *keyboard* actions while typing — then checked one tile's
+    /// cells against another tile's divisions. Selecting something smaller made every cell fail the
+    /// check and the token was silently discarded; selecting something larger wrote a cell outside
+    /// the small piece's lattice.
+    pub fn placed_at_target<'a>(
+        &'a self,
+        target: &EditTarget,
+        project: &'a crate::project::Project,
+    ) -> Option<&'a Descriptor> {
+        match target {
+            EditTarget::Library(id) => project.library.get(id),
+            EditTarget::Candidate(mesh) => self
+                .candidates
+                .iter()
+                .find(|c| &c.mesh == mesh)
+                .map(|c| &c.proposed),
+        }
+    }
+
     pub fn at_target<'a>(
         &'a mut self,
         target: &EditTarget,
@@ -1422,16 +1555,37 @@ impl ImportState {
 /// would be on disk while `library` still described the world before the edit. Re-layering first
 /// means a refusal costs nothing but the message.
 fn write_library(project: &mut Project) -> Result<std::path::PathBuf, String> {
+    let edited = project.measured.clone();
+    commit_measured(project, edited)
+}
+
+/// **Write these measurements, and adopt them only if that worked.**
+///
+/// The structural edits — adding an imported piece, removing one — need to *propose* a library rather
+/// than mutate the live one, because both can be refused: by the two-sided surface check, by a policy
+/// patch that now matches nothing, or by the file system. So the candidate comes in as a value and
+/// nothing in `project` moves until it is on disk.
+///
+/// Both of those edits used to push and pop `project.library` — the **derived** view — and then call
+/// [`write_library`], which serializes `measured` and rebuilds `library` from it. The write was
+/// therefore byte-identical to what was already there, the change vanished, and the status line
+/// reported success: *"added `crate_b` — it is in the palette now"* about a palette that never gained
+/// it. A derived layer is not a place to keep anything; this is the only door to the one that is.
+fn commit_measured(
+    project: &mut Project,
+    measured: emerge_core::library::Library,
+) -> Result<std::path::PathBuf, String> {
     // Rebuild the layered view from the edited measurements, and prove it still holds together,
     // before anything touches the disk.
-    let library = project.policy.apply(&project.measured)?;
+    let library = project.policy.apply(&measured)?;
     library.validate_lattices(project.policy.divisions)?;
     let masks = library.resolve(&project.vocab)?;
 
     let path = project.library_path.clone();
-    let text = project.measured.to_ron()?;
+    let text = measured.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text)?;
 
+    project.measured = measured;
     project.library = library;
     project.masks = masks;
     project.remeasure_triangles();
@@ -1626,7 +1780,13 @@ impl Plugin for TilesPlugin {
                         draw_preview_footprint.run_if(in_tiles_mode),
                         draw_subgrid.run_if(in_tiles_mode),
                     ),
-                    keep_library_selection_visible.run_if(in_tiles_mode),
+                    // Nested as a pair, because a system tuple caps out at twenty and these two are
+                    // one rule: a selection the filter has hidden must not stay selected, in either
+                    // list. Accept and Remove both act on a selection.
+                    (
+                        keep_library_selection_visible.run_if(in_tiles_mode),
+                        keep_candidate_selection_visible.run_if(in_tiles_mode),
+                    ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
@@ -2105,18 +2265,16 @@ fn commit_candidate(
         return;
     }
 
-    // Validate against a library that ALREADY CONTAINS it, because the two-sided surface check is
-    // about the finished set: a piece that offers `worktop` makes another piece's `on worktop` legal,
-    // and checking it in isolation would reject the pair that fixes each other.
-    let mut trial = project.library.clone();
+    // **Into `measured`** — the layer that is written and the layer an import belongs in: what a mesh
+    // scan produces is a measurement, and the project's architecture is layered over it afterwards.
+    //
+    // A proposal, not a mutation. `commit_measured` layers the policy over it and runs the two-sided
+    // surface check on the result, which is the right shape for that check: it is about the finished
+    // set, so a piece that offers `worktop` makes another piece's `on worktop` legal, and checking it
+    // in isolation would reject the pair that fixes each other.
+    let mut trial = project.measured.clone();
     trial.descriptors.push(descriptor.clone());
-    if let Err(e) = trial.resolve(&project.vocab) {
-        state.status = format!("not added: {e}");
-        return;
-    }
-
-    project.library = trial;
-    match write_library(&mut project) {
+    match commit_measured(&mut project, trial) {
         Ok(path) => {
             // Drop it from the candidate list: it is in the library now, and an importer that keeps
             // offering what you have already taken is one you cannot tell your progress from.
@@ -2131,7 +2289,9 @@ fn commit_candidate(
             info!("added `{}` to {}", descriptor.id, path.display());
         }
         Err(e) => {
-            state.status = format!("NOT WRITTEN: {e}");
+            // Nothing was added and nothing was written — `commit_measured` refuses before it
+            // touches the disk — so this says the one thing that is true of both.
+            state.status = format!("not added: {e}");
             error!("{e}");
         }
     }
@@ -2174,31 +2334,25 @@ fn remove_tile(
         return;
     }
 
-    let Some(at) = project.library.descriptors.iter().position(|d| d.id == id) else {
+    // **Out of `measured`**, for the reason `commit_candidate` writes into it: the derived layer is
+    // rebuilt from the measurements on every write, so removing a piece from it removed nothing.
+    // Ids survive layering — `Policy::apply` patches entries, it does not rename them — so the piece
+    // named by the palette is the piece named here.
+    let Some(at) = project.measured.descriptors.iter().position(|d| d.id == id) else {
         return;
     };
-    let mut trial = project.library.clone();
+    let mut trial = project.measured.clone();
     trial.descriptors.remove(at);
-    // Re-validate: removing a piece can strand another that rested on the surface it offered, and
-    // that is exactly the two-sided check's job.
-    match trial.resolve(&project.vocab) {
-        Ok(masks) => {
-            project.library = trial;
-            project.masks = masks;
-        }
-        Err(e) => {
-            state.status = format!("not removed: {e}");
-            return;
-        }
-    }
-
-    match write_library(&mut project) {
+    // `commit_measured` re-validates, which is what catches the interesting failure: removing a piece
+    // can strand another that rested on a surface only it offered, and it can leave a policy patch
+    // matching nothing.
+    match commit_measured(&mut project, trial) {
         Ok(path) => {
             state.selected_library_id = None;
             state.status = format!("removed `{id}` from the library");
             info!("removed `{id}` from {}", path.display());
         }
-        Err(e) => state.status = format!("NOT WRITTEN: {e}"),
+        Err(e) => state.status = format!("not removed: {e}"),
     }
 }
 
@@ -2302,17 +2456,67 @@ fn move_selection(
             }
         }
         None => {
-            if state.candidates.is_empty() {
-                return;
-            }
-            let last = state.candidates.len() - 1;
-            if down && state.selected < last {
-                state.selected += 1;
-            }
-            if up && state.selected > 0 {
-                state.selected -= 1;
+            // The visible rows, for the reason the library branch above walks `library_ids`. This
+            // branch was left stepping `state.selected` through the unfiltered list, which is the
+            // worse half of the same defect: the candidate list is where **Accept** acts, so with the
+            // list filtered to three rows, one Down moved the focus to an unrelated mesh that was not
+            // on screen — `autoscan_candidate` then scanned it, and Enter imported it.
+            let rows = candidate_rows(&state, &filters);
+            let at = match rows.iter().position(|&i| i == state.selected) {
+                Some(at) => at,
+                // Not on screen at all. An arrow then means "start from the top of what I can see",
+                // which is where the eye already is.
+                None => {
+                    if let Some(&first) = rows.first() {
+                        state.selected = first;
+                    }
+                    return;
+                }
+            };
+            let want = if down { at + 1 } else { at.saturating_sub(1) };
+            if let Some(&next) = rows.get(want.min(rows.len().saturating_sub(1))) {
+                state.selected = next;
             }
         }
+    }
+}
+
+/// **The candidate rows the author can actually see**, as indices into [`ImportState::candidates`].
+///
+/// The sibling of [`library_ids`], filtered with the same predicate `rebuild_candidates` renders
+/// with. Indices rather than mesh paths because `ImportState::selected` is an index and every other
+/// reader of the focus already goes through it.
+fn candidate_rows(state: &ImportState, filters: &crate::filter::Filters) -> Vec<usize> {
+    let pane = crate::filter::Pane::Candidates;
+    state
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| filters.keeps(pane, &c.mesh))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// **Keep the candidate selection on a row that is showing.**
+///
+/// [`keep_library_selection_visible`] for the other list, and it matters more here: filtering could
+/// hide the selected candidate while it stayed selected, and Accept acts on the selection — so the
+/// most natural way to find a mesh was also the way to import a different one. Same last rule as its
+/// sibling: if nothing survives the filter, leave the selection alone rather than jumping it
+/// somewhere arbitrary the moment a half-typed query matches nothing.
+fn keep_candidate_selection_visible(
+    filters: Res<crate::filter::Filters>,
+    mut state: ResMut<ImportState>,
+) {
+    if !filters.is_changed() {
+        return;
+    }
+    let visible = candidate_rows(&state, &filters);
+    if visible.iter().any(|&i| i == state.selected) {
+        return;
+    }
+    if let Some(&first) = visible.first() {
+        state.selected = first;
     }
 }
 
@@ -2501,7 +2705,18 @@ fn drive_preview(
             .with_scale(Vec3::splat(a.scale.unwrap_or(1.0))),
             Visibility::Inherited,
         ))
-        .with_child((WorldAssetRoot(scene), Transform::default()));
+        // **The mesh child carries `align.rotate`**, the same way `emerge_bevy::spawn_world` does —
+        // see its note on why the export correction belongs here and not on the parent.
+        //
+        // This was `Transform::default()`, so the one tab that *has* the rotate chips and the
+        // `RotateMesh*` keys was the one place a rotation had no visible effect: `rotate_mesh`
+        // rewrote the footprint, height, pivot and y_offset, `draw_preview_footprint` and
+        // `draw_subgrid` redrew for the standing piece, and the mesh stayed lying down — offset by
+        // the *rotated* pivot, so it also floated off its own footprint rectangle.
+        .with_child((
+            WorldAssetRoot(scene),
+            Transform::from_rotation(emerge_bevy::mesh_rotation(d)),
+        ));
 }
 
 /// Draw the footprint the placement rules will reserve, and the grid cells it occupies.
@@ -2524,7 +2739,9 @@ const LATTICE_SET: Color = Color::srgb(0.62, 0.52, 0.82);
 /// crowding failure `docs/ui.md` §1.2 names, on a tile instead of a panel — the lattice would hide the
 /// mesh it describes.
 fn draw_subgrid(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizmos) {
-    let Some(desc) = state.editing(&project.measured) else {
+    // As placed — the same layer `focused_div` range-checks against, so the grid an author clicks is
+    // the grid their click is written into. See [`ImportState::placed`].
+    let Some(desc) = state.placed(&project) else {
         return;
     };
     let Some((w, d)) = desc.extent.footprint else {
@@ -2857,7 +3074,16 @@ fn rebuild_detail(
             // **The pane follows the focus, not the candidate list.** It used to return here unless a
             // candidate was selected, which is why an accepted tile's lattice could only be reached
             // by hand-editing `library.ron`.
-            let Some(d) = state.editing(&project.measured) else {
+            // **Both layers, because this pane shows both things.** `d` is the measurement — the
+            // MEASURED block below is about exactly that, and the id and note it displays are the
+            // ones an edit would be written back to. `placed` is the same piece as it will stand,
+            // which is the only honest source for the lattice's shape: see [`ImportState::placed`].
+            //
+            // One guard for the pair. They are `Some` together or `None` together — the layered
+            // library is derived from the measurements and `Policy::apply` patches entries without
+            // renaming them — so a second `else` arm here would be a branch nothing can reach.
+            let (Some(d), Some(placed)) = (state.editing(&project.measured), state.placed(&project))
+            else {
                 return;
             };
             // The candidate behind the focus, when the focus IS a candidate. `measured` and the
@@ -3021,7 +3247,7 @@ fn rebuild_detail(
 
             // A piece whose size is not measured yet has no derivable lattice, and the honest thing
             // is to say which piece and why rather than draw an empty grid that looks authored.
-            let div = match project.divisions_of(d) {
+            let div = match project.divisions_of(placed) {
                 Ok(div) => div,
                 Err(why) => {
                     crate::chrome::section(p, "SUBGRID");

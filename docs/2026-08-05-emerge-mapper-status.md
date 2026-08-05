@@ -5,7 +5,8 @@ and its findings table, all eight of which are closed. That document's **§4 "Tr
 is still accurate and still worth your time; so is `docs/2026-08-04-emerge-mapper-handoff.md`, which
 remains the no-prior-context orientation.
 
-Branch **`feat/emerge-lattice`**, 33 commits off `bc7a92a` (which is where `main` sits), **pushed**.
+Branch **`feat/emerge-lattice`**, 37 commits off `bc7a92a` (which is where `main` sits), **pushed** as
+PR #90. A `/code-review max 90` pass over it produced **15 confirmed findings, all fixed** — §7 below.
 
 ---
 
@@ -32,11 +33,14 @@ for `descriptor::pick_cell`, answered in arithmetic.
 
 | suite | result |
 |---|---|
-| `cargo test --lib` | 977 passed, 1 ignored |
-| `cargo test -p emerge-core` | 267 + 2 + 4 |
-| `cargo test -p emerge-mapper` | 40 + 10 headless |
-| `cargo test --tests` | **35 targets, none failing** |
+| `cargo test --workspace` | **1443 passed, 0 failed** |
 | `cargo check -p emerge-core -p emerge-mapper -p fvs --all-targets` | **zero warnings** |
+
+**`--workspace` is load-bearing and was missing.** This workspace has a root package, so its default
+members are the root package *alone* — a bare `cargo test` compiles no test target under `crates/`.
+That is how extracting the animation layer into `crates/emerge-anim` dropped its 21 unit tests and the
+rigs-manifest drift guard out of the CI gate with nothing going red: the tests were not failing, they
+were not running. Every plain `cargo test` in `ci.yml`, `TESTING.md` and `CLAUDE.md` now carries it.
 
 The non-harness suite is **fully green**. Two of `tests/replay.rs` still fail under `--features
 test-harness` (`authored_world_config_override_is_a_noop`,
@@ -113,9 +117,8 @@ decides anything about space. `SubCell::solid`'s own doc says so.
 - **`FVS-Q-10`** — should authored `edge` tokens feed `grammar`'s support table, or only check it? Still
   deferred, and still correctly: `grammar` learns adjacency from the map and `edge` is the declared
   half. Settle the seam rule first.
-- **A review before this lands.** 33 commits touching schema (`Subgrid`, `front`, `rotate`), assets and
-  gameplay-adjacent code. `/code-review ultra` is user-triggered and billed; the last one on a *smaller*
-  version of this branch produced 66 verified findings.
+- ~~**A review before this lands.**~~ Done — `/code-review max 90`, 15 confirmed findings, all fixed.
+  See §7.
 
 ---
 
@@ -136,3 +139,43 @@ decides anything about space. `SubCell::solid`'s own doc says so.
   `cargo install --path crates/fvs` — it only shells out to `cargo run`, so the editor is still rebuilt
   from live source. The `cargo fvs` alias is opt-in per machine (`.cargo/config.toml` is deliberately
   uncommitted: a machine-specific `target-dir` in it once broke CI).
+
+---
+
+## 7. What the review found (15 confirmed, all fixed)
+
+`/code-review max 90` — 46 agents, 41 verified candidates, 0 refuted. Ranked as reported. The pattern
+worth noticing: **eleven of the fifteen were a program lying about success**, not a crash.
+
+| # | Where | What |
+|---|---|---|
+| 1 | `tiles.rs` `commit_candidate` | Accept pushed the import onto `project.library` — the **derived** layer — then `write_library` serialized `measured` and rebuilt `library` from it. The file was rewritten byte-identical, the palette never gained the piece, and the status line said *"it is in the palette now"*. `remove_tile` had it too. Both now go through `commit_measured`, which proposes a library and adopts it only once it is on disk. |
+| 2 | `tiles.rs` five readers | The editor derived a piece's lattice from `measured` while `validate_lattices`, `adjacency::faults` and the game all read the layered library. Under `site_greybox` an author saw 2 rows and authored into row 1 of 5, with the other three unreachable — not refused, absent. `ImportState::placed` is now the one accessor for shape. |
+| 3, 9, 10 | `adjacency.rs` | One parameter (`cell`) was doing three incompatible jobs and was wrong at all three: its grid was anchored at `-bounds/2` so an odd map width unpaired **every** seam; it erased every piece smaller than the step, exempting most furniture; and it set [`seam`]'s sampling rate to 1.0 m when a lattice cell is 0.5 m, so a 2.40 m wall's five rows were read at two places. The grid is gone — neighbours are decided in world metres, which is what `seam` already did for the tokens. |
+| 4 | `src/rigs.rs` | The previous review's fix replaced `insert_resource` with `error!`-and-return, but the seven spawners take a bare `Res<CrabAnim>` — and in Bevy 0.19 a missing `Res<T>` **panics its system**. The fix moved the panic and the doc claimed a bind-pose creature that never existed. `required()` is now production code checked at plugin build, so the precondition holds. |
+| 5 | `Cargo.toml` / CI | See §1. |
+| 6, 7, 8, 11 | `align.rotate` | `occupancy` rasterised into the raw bbox with rotated divisions (transposed lattice); `rotate_mesh` re-measured the extent and left the cells where they were, so `write_library` then refused **every** later edit in the session; `remeasure_rotated` zeroed authored `y_offset`s — measured, all six shipped ones are *entirely* authored, so `site/floor`'s sink and three decals' anti-z-fight lifts died on one keypress; and the preview ignored `mesh_rotation`, in the one tab that has the rotate chips. |
+| 12, 13 | `tiles.rs` | The candidate arrows walked the *unfiltered* list — the library branch had been fixed and candidates left — so one Down and one Enter could import a mesh the author never saw. And a cell write was range-checked against the live selection while landing on the captured target. |
+| 14, 15 | `library.rs`, `headless.rs` | Two guards that could not fire: `MAX_LATTICE_CELLS` skipped `subgrid: None`, which is most pieces; and `every_action_resolves_to_a_binding` asserted the returned row had a non-empty chord and description, which `BINDINGS[0]` satisfies — so a new `Action` bound itself to Tab and the test stayed green. |
+
+### The rotate rule, as decided
+
+Refuse by default, with an override where one makes sense — the author's call, 2026-08-05:
+
+* An authored **lift or sink is preserved exactly** across a turn. It is measured out before and put
+  back after, so no refusal is needed and nothing is lost.
+* A turn about **Y maps the cells** with `Subgrid::rotated` + `rotate_div`, the pair used everywhere
+  else. No refusal needed there either.
+* A turn about **X or Z** has no lattice mapping — the lattice's Y axis becomes a floor axis. With
+  authored cells it refuses and names the count; **Shift** turns it anyway and reports how many cells
+  were cleared.
+
+### Two traps this pass paid for
+
+* **A test can pass for the wrong reason.** `a_mismatched_pair_is_reported` placed two 0.5 m pieces
+  1.0 m apart — a genuine 0.5 m gap — and only ever paired them *because* of the quantisation finding
+  #3 describes. Fixing the code broke the test, and the test was what was wrong.
+* **Measure before choosing.** Whether `remeasure_rotated` destroyed anything real turned on whether
+  any shipped `y_offset` differs from `-base_y`. Six meshes, one throwaway probe: every one sits at
+  `base_y = 0`, so every authored offset was the whole value. That turned a judgement call into an
+  arithmetic one.

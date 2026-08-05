@@ -936,7 +936,6 @@ fn check_edges(project: Res<Project>, mut faults: ResMut<EdgeFaults>) {
     faults.0 = emerge_core::adjacency::faults(
         &project.map,
         &project.library,
-        CELL,
         project.policy.divisions,
     );
 }

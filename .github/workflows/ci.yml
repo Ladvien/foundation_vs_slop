@@ -69,8 +69,15 @@ jobs:
       # Hard gate — the deterministic suite must pass. Default features only: the `test-harness` replay /
       # liveness / search-calibration tests are GPU-free (see the `harness` lane) but slower, so they run
       # separately. `#![cfg(feature = "test-harness")]` keeps them out of this compile entirely.
+      #
+      # **`--workspace` is load-bearing, not decoration.** This workspace has a root package, so its
+      # default members are the root package *alone* — a bare `cargo test` compiles no test target under
+      # `crates/`. That is not hypothetical: extracting the animation layer into `crates/emerge-anim`
+      # silently dropped its 21 unit tests and the rigs-manifest drift guard out of this gate, and
+      # nothing went red because the tests were not being run at all. Every plain `cargo test` in CI and
+      # in the docs carries `--workspace` for that reason. Do not "simplify" it back.
       - name: Test (deterministic core, GPU-free)
-        run: cargo test
+        run: cargo test --workspace
 
       # Advisory — reports style/lint drift without blocking (see header note).
       - name: Format check (advisory)
@@ -169,7 +176,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core, release profile)
-        run: cargo test --release
+        run: cargo test --release --workspace
 
   # The heavy determinism guards, split out of the per-PR lane purely on runtime (see the skip note
   # above): parallel-search equivalence, and the two replicate-rollout reproducibility tests. It answers one question — does `--jobs N` produce byte-identical archives to `--jobs 1`
@@ -222,7 +229,7 @@ jobs:
   # §7's standing instruction is "do not ship C-6 on divergent floats", and this lane is how anyone finds
   # out whether they are.
   #
-  # `cargo test` only — the deterministic core. The harness lane is not duplicated here: it would double
+  # `cargo test --workspace` only — the deterministic core. The harness lane is not duplicated here: it would double
   # the CI bill to re-measure the same f32 question through a slower path.
   determinism-arm:
     name: determinism (aarch64 — advisory, measures ARM<->x86 divergence)
@@ -244,7 +251,7 @@ jobs:
             target
           key: ${{ runner.os }}-arm-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (deterministic core on aarch64)
-        run: cargo test
+        run: cargo test --workspace
       - name: What a failure here means
         if: failure()
         run: |

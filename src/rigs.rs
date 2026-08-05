@@ -103,65 +103,92 @@ impl Plugin for RigsPlugin {
     fn build(&self, app: &mut App) {
         match load() {
             Ok(rigs) => {
-                app.insert_resource(RigManifest(rigs));
+                let manifest = RigManifest(rigs);
+                // **And every rig the game will ask for, checked here.** A parseable manifest that is
+                // simply missing an entry used to get all the way to a spawner, and the outcome was
+                // neither of the two this module documents: `build_crab_anim` logged the miss and
+                // returned without inserting `CrabAnim`, and then `spawn_crabs` — which takes a bare
+                // `Res<CrabAnim>`, and in Bevy 0.19 a missing `Res<T>` **panics its system** rather
+                // than skipping it — died on entering the run, pointing at a resource instead of at
+                // the file. Six other spawners had the same shape.
+                //
+                // Checking it at build time is what makes the seven `Err` arms below unreachable and
+                // `Res<CrabAnim>` sound. It is also the same call the parse failure makes, for the
+                // same reason: threading `Option<&CrabAnim>` down into each spawner would put a
+                // creature in the world holding its bind pose, and a degraded substitute written
+                // quietly is precisely what the one-path rule exists to prevent.
+                let missing: Vec<&str> = required()
+                    .into_iter()
+                    .filter(|name| manifest.rig(name).is_err())
+                    .collect();
+                if !missing.is_empty() {
+                    panic!(
+                        "{RIGS_PATH} defines no rig for: {missing:?}\n\nEvery rig the game names has \
+                         to exist before anything spawns. Add the rig, or stop asking for it."
+                    );
+                }
+                app.insert_resource(manifest);
             }
             Err(e) => panic!("{e}"),
         }
     }
 }
 
+/// **The rig names production code asks for**, taken from the code that asks.
+///
+/// Not a second list of strings: each entry is the same constant the spawner reads, so this cannot
+/// drift from what the game actually looks up — which is the census failure `emerge-mapper`'s
+/// `keys.rs` module note describes at length.
+fn required() -> Vec<&'static str> {
+    let mut out = vec![
+        crate::crab::setup::RIG,
+        crate::scp610::RIG,
+        crate::squad::RIG,
+        crate::parasite::RIG,
+    ];
+    out.extend(
+        crate::scp1048::Scp1048Variant::ALL
+            .iter()
+            .map(|v| crate::scp1048::anim::rig_name(*v)),
+    );
+    out.extend(crate::site::people::StaffRig::ALL.iter().map(|r| r.rig_name()));
+    out
+}
+
 /// **Every rig the game names must exist in the manifest.**
 ///
-/// The review's finding #2 was that a missing rig panicked an unrelated system at Startup. The panic
-/// is gone — all seven lookups take the `Err` and `error!` it — but that traded a crash for something
-/// quieter and not obviously better: a creature spawns with no animation, holding its bind pose, and
-/// the only evidence is a line in a log nobody reads while playing.
-///
-/// The finding asked where "the rigs the game requires" should be written down. **Here**, as a test,
-/// and referencing the same constants the spawners do rather than a second list of strings that
-/// could drift from them — which is the census failure `emerge-mapper`'s `keys.rs` module note
-/// describes at length.
-///
-/// A rig deleted from `rigs.ron` now fails CI instead of failing quietly in play.
+/// [`required`] is production code and [`RigsPlugin::build`] enforces it, so a rig deleted from
+/// `rigs.ron` refuses to launch. These tests are what keep that enforcement honest: the check is only
+/// as good as the list it walks, and a `required()` that returned nothing would make a green run mean
+/// nothing.
 #[cfg(test)]
 mod required_rigs {
-    /// The rig names production code asks for, taken from the code that asks.
-    fn required() -> Vec<&'static str> {
-        let mut out = vec![
-            crate::crab::setup::RIG,
-            crate::scp610::RIG,
-            crate::squad::RIG,
-            crate::parasite::RIG,
-        ];
-        out.extend(
-            crate::scp1048::Scp1048Variant::ALL
-                .iter()
-                .map(|v| crate::scp1048::anim::rig_name(*v)),
-        );
-        out.extend(crate::site::people::StaffRig::ALL.iter().map(|r| r.rig_name()));
-        out
-    }
-
+    /// The same pass `RigsPlugin::build` makes, without booting an `App` — so a missing rig is a
+    /// named CI failure rather than a panic somebody has to run the game to see.
     #[test]
     fn the_shipped_manifest_defines_every_rig_the_game_asks_for() {
         let rigs = super::load().unwrap_or_else(|e| panic!("{e}"));
         let manifest = super::RigManifest(rigs);
-        let missing: Vec<&str> = required()
+        let missing: Vec<&str> = super::required()
             .into_iter()
             .filter(|name| manifest.rig(name).is_err())
             .collect();
         assert!(
             missing.is_empty(),
-            "assets/emerge/rigs.ron defines no rig for: {missing:?}\n\nA spawner that cannot find \
-             its rig logs an error and carries on, so the creature stands in its bind pose and \
-             nothing fails where you would look. Add the rig, or stop asking for it."
+            "assets/emerge/rigs.ron defines no rig for: {missing:?}\n\nEvery rig the game names has \
+             to exist before anything spawns, and `RigsPlugin` refuses to build without them — so \
+             this is a launch failure, not a cosmetic one. Add the rig, or stop asking for it."
         );
     }
 
     /// And the list is not empty — a `required()` that silently returned nothing would make the test
-    /// above pass forever.
+    /// above, and the check in the plugin, pass forever.
     #[test]
     fn the_required_list_is_not_vacuous() {
-        assert!(required().len() >= 16, "only {} rigs required", required().len());
+        assert!(
+            super::required().len() >= 16,
+            "only {} rigs required",
+            super::required().len()
+        );
     }
 }

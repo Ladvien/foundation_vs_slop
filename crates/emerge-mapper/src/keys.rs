@@ -307,9 +307,19 @@ const fn b(
 }
 
 /// The binding for an action.
+///
+/// # The last resort is a real row, so only a test can tell you it was reached
+///
+/// There is no infallible way to write this: `Action` has no derive that enumerates it, so the lookup
+/// can miss, and returning `Option` would push a "what do I show instead" decision onto every label
+/// in the editor. It therefore returns `BINDINGS[0]` — Tab — and **that is indistinguishable from a
+/// correct answer by looking at the chord or the description**, which is exactly how a missing row
+/// went unnoticed: `every_action_resolves_to_its_own_binding_at_runtime` asserted that the returned
+/// row had a non-empty chord and description, and `BINDINGS[0]` has both.
+///
+/// The only field that gives it away is `action`, so both guards now compare that: the test above
+/// per action, and `every_action_has_exactly_one_binding` below over the whole table.
 pub fn binding(action: Action) -> &'static Binding {
-    // Every `Action` has a row; the test below is what keeps that true, so this cannot be reached
-    // with a missing one in a build that passes.
     BINDINGS
         .iter()
         .find(|b| b.action == action)
@@ -585,6 +595,15 @@ mod tests {
             BINDINGS.len(),
             "the action list and the binding table disagree — one of them gained a row alone"
         );
+        // **Every row is reachable through `binding`.** A duplicate row is shadowed by `find`, which
+        // returns the first match — so the count check above can pass while half the table is dead.
+        for b in BINDINGS {
+            assert_eq!(
+                binding(b.action).action, b.action,
+                "`{}` ({}) is in the table but `binding` does not return it",
+                b.chord, b.does
+            );
+        }
         for a in actions {
             assert_eq!(
                 BINDINGS.iter().filter(|b| b.action == a).count(),

@@ -295,7 +295,7 @@ fn the_authored_run_faces_let_the_full_height_family_meet() {
         ..emerge_core::map::Map::default()
     };
     let faults =
-        emerge_core::adjacency::faults(&run, &layered.library, emerge_core::grid::SNAP, div);
+        emerge_core::adjacency::faults(&run, &layered.library, div);
     assert!(
         faults.is_empty(),
         "a run of full-height pieces must agree:\n{}",
@@ -364,7 +364,7 @@ fn every_authored_architectural_piece_agrees_with_a_wall() {
                 ..emerge_core::map::Map::default()
             };
             let faults =
-                emerge_core::adjacency::faults(&map, &l.library, emerge_core::grid::SNAP, div);
+                emerge_core::adjacency::faults(&map, &l.library, div);
             assert!(
                 faults.is_empty(),
                 "{kit}: a wall meeting {id} must agree:\n{}",

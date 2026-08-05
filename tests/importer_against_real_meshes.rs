@@ -226,7 +226,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         let div = emerge_core::descriptor::divisions(d, layered.policy.divisions)
             .unwrap_or_else(|e| panic!("{e}"));
         let total = emerge_core::descriptor::Subgrid::volume(div);
-        let cells = emerge_core::import::occupancy(&glb, div)
+        let cells = emerge_core::import::occupancy(&glb, div, (0, 0, 0))
             .unwrap_or_else(|e| panic!("{}: {e}", d.id));
 
         assert!(!cells.is_empty(), "{} scanned to nothing", d.id);
@@ -261,7 +261,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         .unwrap_or_else(|e| panic!("{e}"));
     let glb = emerge_core::glb::Glb::open(Path::new("assets/ozea/wall.glb"))
         .unwrap_or_else(|e| panic!("{e}"));
-    let cells = emerge_core::import::occupancy(&glb, div).unwrap_or_else(|e| panic!("{e}"));
+    let cells = emerge_core::import::occupancy(&glb, div, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         cells.len() as u32,
         emerge_core::descriptor::Subgrid::volume(div),
@@ -280,7 +280,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         Path::new("assets").join(wide.mesh.as_deref().unwrap_or_default()).as_path(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let wcells = emerge_core::import::occupancy(&wglb, wdiv).unwrap_or_else(|e| panic!("{e}"));
+    let wcells = emerge_core::import::occupancy(&wglb, wdiv, (0, 0, 0)).unwrap_or_else(|e| panic!("{e}"));
     assert!(
         (wcells.len() as u32) < emerge_core::descriptor::Subgrid::volume(wdiv),
         "a doorway's opening must leave cells open, or this is marking everything: {} of {}",
