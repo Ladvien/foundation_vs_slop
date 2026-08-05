@@ -186,3 +186,95 @@ fn raw_accessor_height(path: &Path) -> f32 {
     }
     hi - lo
 }
+
+/// **Occupancy, on meshes that exist** — the read behind the editor's "scan mesh" button.
+///
+/// `emerge_core::import::occupancy`'s unit tests use hand-built vertex sets, which prove the
+/// bucketing and prove nothing about the assets. This runs it over the shipped architecture.
+///
+/// # What it found, and the limitation it makes concrete
+///
+/// Vertex occupancy marks the cell each vertex falls in, so it under-marks a large flat face that
+/// spans a cell with no vertex inside it. That is documented on `occupancy` as an acceptable failure
+/// mode *because it is visible in the grid* — and against the real kit it turns out to be the common
+/// case for architecture, not a corner case:
+///
+/// ```text
+/// site/wall             1 x 5 x 2     4 of 10    a slab: vertices only at the 8 corners
+/// site/column           1 x 5 x 2     4 of 10    same
+/// site/wall_corner      1 x 5 x 1     2 of  5    same
+/// site/wall_window      1 x 5 x 4     8 of 20    same
+/// site/wall_doorway     1 x 4 x 4    14 of 16    denser mesh, good coverage
+/// site/wall_low         1 x 4 x 2     8 of  8    fully marked
+/// site/floor            2 x 1 x 2     4 of  4    fully marked
+/// ```
+///
+/// A 2.40 m wall is solid all the way up; a scan marks only its top and bottom layers, because a
+/// low-poly slab has no vertices in between. So the button is a real head start on dense meshes and
+/// leaves the middle of a boxy one to the author, who sees "4 of 10" in the status line and the gap
+/// in the grid. Closing it properly means triangle rasterisation — marking every cell a triangle
+/// passes through — which is the correct method and the one more piece of work.
+///
+/// This pins the honest properties (every marked cell is in range, nothing scans to nothing) and
+/// **records the coverage** so that improvement is measurable rather than asserted.
+#[test]
+fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
+    let layered = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let mut checked = 0usize;
+    for d in &layered.library.descriptors {
+        let Some(mesh) = d.mesh.as_deref() else { continue };
+        let path = Path::new("assets").join(mesh);
+        let Ok(glb) = emerge_core::glb::Glb::open(&path) else { continue };
+
+        let div = emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, &d.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let total = emerge_core::descriptor::Subgrid::volume(div);
+        let cells = emerge_core::import::occupancy(&glb, div)
+            .unwrap_or_else(|e| panic!("{}: {e}", d.id));
+
+        assert!(!cells.is_empty(), "{} scanned to nothing", d.id);
+        assert!(
+            cells.len() as u32 <= total,
+            "{} marked {} of {total} — a cell outside the lattice",
+            d.id,
+            cells.len()
+        );
+        for &(x, y, z) in &cells {
+            assert!(
+                x < div.0 && y < div.1 && z < div.2,
+                "{} marked ({x},{y},{z}) outside its {div:?} lattice",
+                d.id
+            );
+        }
+        println!(
+            "{:26} {:>2} x {:>2} x {:>2}   {:>4} of {:>4} cells",
+            d.id, div.0, div.1, div.2, cells.len(), total
+        );
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} meshes were reachable to scan");
+
+    // The slab case, pinned by name. If this ever rises, the method improved and the doc table above
+    // is stale; if it falls, something regressed. Either way it should be noticed rather than
+    // silently absorbed.
+    let wall = layered
+        .library
+        .get("site/wall")
+        .unwrap_or_else(|| panic!("site/wall is in the kit"));
+    let div = emerge_core::descriptor::divisions(&wall.extent, layered.policy.divisions, "site/wall")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let glb = emerge_core::glb::Glb::open(Path::new("assets/ozea/wall.glb"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let cells = emerge_core::import::occupancy(&glb, div).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        cells.len(),
+        4,
+        "a low-poly wall slab marks its corner layers only — see this test's note"
+    );
+    assert!(
+        cells.iter().all(|c| c.1 == 0 || c.1 == div.1 - 1),
+        "and those are the bottom and top layers, which is exactly the gap: {cells:?}"
+    );
+}

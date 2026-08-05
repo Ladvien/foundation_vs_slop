@@ -442,6 +442,77 @@ pub fn triangles(glb: &Glb) -> usize {
         .sum()
 }
 
+/// **Which lattice cells the mesh actually occupies**, one per vertex.
+///
+/// Nobody hand-marks a lattice — a 3 m wall at the shipped setting is 30 cells and it only goes up
+/// from there — so occupancy has to come off the geometry. This is the read that does it.
+///
+/// # Why vertices and not the bounding box
+///
+/// A bounding box cannot answer this: one box per mesh *is* the whole extent, so every cell comes
+/// out solid and the answer carries no information. Per-primitive boxes help a kitbashed multi-part
+/// mesh and say nothing about a single-primitive chair.
+///
+/// Vertex occupancy is honest about what it knows, and — the reason to prefer it over triangle
+/// rasterisation for now — **its failure mode is visible**. A large flat face spanning a cell with no
+/// vertex inside it, the middle of a tabletop, comes back unmarked, and an author looking at the grid
+/// sees the hole. A wrong answer that looks right is the one worth avoiding; this one looks wrong.
+///
+/// # Normalised, so units and the policy layer cannot reach it
+///
+/// Cells are assigned on `(v - lo) / (hi - lo)` rather than on metres. Two consequences, both tested:
+/// a centimetre-authored mesh (the FBX exporter's `scale: 0.01` over 100x vertex data, which
+/// [`crate::glb::Measured::suspect_centimetres`] flags) buckets identically to its metre twin; and
+/// `align.stretch_y` scales an axis uniformly, so a project's architecture cannot change which cells
+/// a mesh is said to fill.
+///
+/// Returns cells in ascending order with no duplicates, so the result is the same on every machine
+/// and can be compared directly.
+pub fn occupancy(glb: &Glb, div: (u32, u32, u32)) -> Result<Vec<(u32, u32, u32)>, String> {
+    let (dx, dy, dz) = div;
+    if dx == 0 || dy == 0 || dz == 0 {
+        return Err(format!(
+            "a {dx}x{dy}x{dz} lattice has no cells for a mesh to occupy"
+        ));
+    }
+    let positions = glb.positions()?;
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for v in &positions {
+        for a in 0..3 {
+            // A NaN coordinate would poison the bounds and put every later vertex in cell 0.
+            if !v[a].is_finite() {
+                return Err("glb: a vertex position is not a finite number".to_owned());
+            }
+            lo[a] = lo[a].min(v[a]);
+            hi[a] = hi[a].max(v[a]);
+        }
+    }
+
+    let n = [dx, dy, dz];
+    let mut out: Vec<(u32, u32, u32)> = Vec::new();
+    for v in &positions {
+        let mut cell = [0u32; 3];
+        for a in 0..3 {
+            let span = hi[a] - lo[a];
+            // A flat axis — a decal, or a plane — has one row, and every vertex is in it. Dividing
+            // by a zero span would be a NaN that `as u32` saturates to 0 anyway; saying so is
+            // clearer than relying on that.
+            cell[a] = if span <= 0.0 {
+                0
+            } else {
+                // `min` rather than a modulus: the vertex at the maximum bound lands exactly on
+                // `n`, and it belongs to the last cell rather than wrapping to the first.
+                (((v[a] - lo[a]) / span * n[a] as f32) as u32).min(n[a] - 1)
+            };
+        }
+        out.push((cell[0], cell[1], cell[2]));
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +659,136 @@ mod tests {
     fn severity_orders_so_the_worst_finding_can_be_found() {
         assert!(Severity::Blocking > Severity::Warn);
         assert!(Severity::Warn > Severity::Note);
+    }
+}
+
+/// Occupancy, over synthetic containers so no fixture asset is needed.
+#[cfg(test)]
+mod occupancy_tests {
+    use super::*;
+
+    /// A minimal GLB carrying exactly the vertices given, in metres.
+    fn mesh(points: &[[f32; 3]]) -> Glb {
+        let json = format!(
+            r#"{{
+              "accessors":[{{"type":"VEC3","componentType":5126,"count":{},"bufferView":0}}],
+              "bufferViews":[{{"byteOffset":0,"byteLength":{}}}],
+              "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}]
+            }}"#,
+            points.len(),
+            points.len() * 12
+        );
+        let mut bin = Vec::new();
+        for p in points {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let j = json.as_bytes();
+        let pad_j = (4 - j.len() % 4) % 4;
+        let mut jj = j.to_vec();
+        jj.extend(std::iter::repeat_n(b' ', pad_j));
+        let total = 12 + 8 + jj.len() + 8 + bin.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(jj.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&jj);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        Glb::parse(&out).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The eight corners of a box fill all eight cells of a 2x2x2 lattice — the sanity case.
+    #[test]
+    fn a_box_fills_the_lattice_it_spans() {
+        let mut points = Vec::new();
+        for x in [0.0f32, 1.0] {
+            for y in [0.0f32, 1.0] {
+                for z in [0.0f32, 1.0] {
+                    points.push([x, y, z]);
+                }
+            }
+        }
+        let got = occupancy(&mesh(&points), (2, 2, 2)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.len(), 8, "{got:?}");
+    }
+
+    /// **The vertex at the maximum bound belongs to the last cell**, not to a cell past the end and
+    /// not wrapped around to the first. Off by one here would mark the wrong face of every mesh.
+    #[test]
+    fn the_far_corner_lands_in_the_last_cell() {
+        let got = occupancy(&mesh(&[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]), (4, 4, 4))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got, vec![(0, 0, 0), (3, 3, 3)]);
+    }
+
+    /// **The shape, not the bounding box.** An L leaves its inner corner clear — which a bounding box
+    /// could never report, and which is the whole reason this reads vertices.
+    #[test]
+    fn an_l_shape_leaves_its_inner_corner_clear() {
+        let got = occupancy(
+            &mesh(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0]]),
+            (2, 1, 2),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got, vec![(0, 0, 0), (0, 0, 1), (1, 0, 0)]);
+        assert!(!got.contains(&(1, 0, 1)), "the inner corner must stay open");
+    }
+
+    /// **Unit-free.** The FBX importer writes centimetre authoring as 100x vertex data under a node
+    /// `scale: 0.01` — `Measured::suspect_centimetres` exists for it. Normalised bucketing means such
+    /// a mesh marks exactly the cells its metre twin does.
+    #[test]
+    fn a_centimetre_mesh_marks_the_same_cells_as_its_metre_twin() {
+        let metres = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0], [1.0, 0.5, 1.0]];
+        let centimetres: Vec<[f32; 3]> = metres.iter().map(|p| [p[0] * 100.0, p[1] * 100.0, p[2] * 100.0]).collect();
+        let a = occupancy(&mesh(&metres), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}"));
+        let b = occupancy(&mesh(&centimetres), (4, 2, 4)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(a, b);
+    }
+
+    /// **Invariant to the policy layer.** `stretch_y` scales an axis uniformly, so one game's ceiling
+    /// height cannot change which cells a mesh is said to fill.
+    #[test]
+    fn stretching_an_axis_does_not_move_a_single_cell() {
+        let base = [[0.0, 0.0, 0.0], [2.0, 1.0, 2.0], [0.5, 0.25, 1.5]];
+        let stretched: Vec<[f32; 3]> = base.iter().map(|p| [p[0], p[1] * 2.4, p[2]]).collect();
+        let a = occupancy(&mesh(&base), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}"));
+        let b = occupancy(&mesh(&stretched), (3, 3, 3)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(a, b);
+    }
+
+    /// A decal has no thickness. One layer, every vertex in it — no divide by zero.
+    #[test]
+    fn a_flat_mesh_occupies_one_layer_rather_than_dividing_by_zero() {
+        let got = occupancy(
+            &mesh(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
+            (2, 1, 2),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.len(), 4);
+        assert!(got.iter().all(|c| c.1 == 0));
+    }
+
+    /// The result is sorted and deduplicated, so two machines reading one mesh get one answer.
+    #[test]
+    fn repeated_vertices_collapse_and_the_order_is_stable() {
+        let got = occupancy(
+            &mesh(&[[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]),
+            (2, 2, 2),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got, vec![(0, 0, 0), (1, 1, 1)]);
+    }
+
+    /// A degenerate lattice is refused rather than silently marking nothing.
+    #[test]
+    fn a_lattice_with_no_cells_is_refused() {
+        let err = occupancy(&mesh(&[[0.0, 0.0, 0.0]]), (2, 0, 2)).err().unwrap_or_default();
+        assert!(err.contains("no cells"), "{err}");
     }
 }

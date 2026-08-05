@@ -59,18 +59,52 @@ pub const POLICY_FILE: &str = "project.ron";
 /// exactly the reasoning that grows a second code path: the absent-file branch and the empty-file
 /// branch would then be two ways to say the same thing, and only one of them would get tested. A
 /// project states its policy, even when its policy is nothing.
-pub fn layered_library(dir: &Path) -> Result<Library, String> {
+pub fn layered_library(dir: &Path) -> Result<Layered, String> {
     let read = |name: &str| -> Result<String, String> {
         let path = dir.join(name);
         std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
     };
-    let library = Library::parse(&read(LIBRARY_FILE)?)
+    let measured = Library::parse(&read(LIBRARY_FILE)?)
         .map_err(|e| format!("{}: {e}", dir.join(LIBRARY_FILE).display()))?;
     let policy = Policy::parse(&read(POLICY_FILE)?)
         .map_err(|e| format!("{}: {e}", dir.join(POLICY_FILE).display()))?;
-    policy
-        .apply(&library)
-        .map_err(|e| format!("{}: {e}", dir.join(POLICY_FILE).display()))
+    let library = policy
+        .apply(&measured)
+        .map_err(|e| format!("{}: {e}", dir.join(POLICY_FILE).display()))?;
+    // The lattice check lives here rather than in `Library::validate` because it needs both files: a
+    // cell is in range or not depending on the piece's size and this project's `divisions`. Run on
+    // the **layered** library, since that is what the game reads and a patch may change an extent —
+    // which is exactly the case where a cell authored against the measurement falls outside.
+    library
+        .validate_lattices(policy.divisions)
+        .map_err(|e| format!("{}: {e}", dir.join(LIBRARY_FILE).display()))?;
+    Ok(Layered {
+        measured,
+        library,
+        policy,
+    })
+}
+
+/// **All three layers of an opened project**, because two callers need more than the top one.
+///
+/// The game reads [`Self::library`] and nothing else. An editor needs the other two: it writes
+/// [`Self::measured`] — the measurements file, *without* this game's architecture baked into it —
+/// and it reads [`Policy::divisions`] to know how finely a tile divides.
+///
+/// One struct from the one loader rather than a second parse in the editor, for the reason
+/// [`layered_library`] exists at all: a library layered one way in the editor and another in the
+/// game is a preview that lies.
+pub struct Layered {
+    /// `library.ron` exactly as parsed — the measurements, portable to any game.
+    ///
+    /// **What an editor writes back.** Serializing the layered library over this file bakes one
+    /// game's wall heights into a kit meant to be shared, and the next load applies the patches
+    /// again on top of them.
+    pub measured: Library,
+    /// The measurements with this project's policy applied. What the game places.
+    pub library: Library,
+    /// The policy itself, for the fields that are not patches — see [`Policy::divisions`].
+    pub policy: Policy,
 }
 
 /// What a patch applies to.
@@ -106,15 +140,43 @@ pub struct Policy {
     /// What this project's architecture is, in a sentence.
     #[serde(default)]
     pub note: Option<String>,
+    /// **How many ways each authoring tile divides** — the one number behind every piece's lattice.
+    ///
+    /// A subunit is `grid::SNAP / divisions` on every axis, and a piece spanning N cells gets `N *
+    /// divisions` of them. See [`crate::descriptor::divisions`] for the derivation and
+    /// [`crate::descriptor::Subgrid`] for why this is a project number rather than a per-piece one.
+    ///
+    /// **It belongs here, not in `library.ron`.** How finely to divide is a statement about how much
+    /// detail *this game's* generator needs, exactly like `stretch_y` is a statement about its
+    /// ceiling height — and the same argument applies: bake it into a shared library and one game's
+    /// resolution silently governs another's.
+    ///
+    /// **1 by default**, so a subunit is `grid::SNAP` itself — the half-metre grid the kits are
+    /// already authored on, on which a 3 m wall is 6 divisions and a 2.4 m one is 5 layers.
+    #[serde(default = "one")]
+    pub divisions: u32,
     #[serde(default)]
     pub patches: Vec<Patch>,
 }
+
+/// The default for [`Policy::divisions`]. A free function because `serde(default = ..)` needs a path.
+fn one() -> u32 {
+    1
+}
+
+/// The most a project may divide one tile.
+///
+/// Not a number anyone should need: at 8 a subunit is 62 mm, finer than the meshes it describes, and
+/// a 3 m wall carries 48 x 40 x 8 cells. The ceiling exists because divisions are derived and
+/// multiplied by a piece's span, so a typo here is not one absurd tile but every tile at once.
+pub const MAX_DIVISIONS: u32 = 8;
 
 impl Default for Policy {
     fn default() -> Self {
         Policy {
             version: POLICY_VERSION,
             note: None,
+            divisions: one(),
             patches: Vec::new(),
         }
     }
@@ -138,6 +200,16 @@ impl Policy {
                 "policy: version {} but this build reads {POLICY_VERSION} — refusing to load rather \
                  than guess at a migration",
                 self.version
+            ));
+        }
+        // Refused at the project boundary rather than per lattice: every piece derives from this one
+        // number, so a zero here would make every tile in the project cell-less at once.
+        if self.divisions == 0 || self.divisions > MAX_DIVISIONS {
+            return Err(format!(
+                "policy: `divisions` is {}; a tile divides between 1 and {MAX_DIVISIONS} ways. Zero \
+                 leaves every piece without cells, and past {MAX_DIVISIONS} the lattice is finer \
+                 than the meshes it describes.",
+                self.divisions
             ));
         }
         for p in &self.patches {
@@ -365,10 +437,32 @@ mod tests {
         let policy = Policy {
             version: POLICY_VERSION,
             note: Some("this facility has 2.4 m ceilings".into()),
+            divisions: 2,
             patches: vec![rule(Match::Kind("door".into()), stretch(1.2))],
         };
         let text = policy.to_ron().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(Policy::parse(&text).unwrap_or_else(|e| panic!("{e}")), policy);
+    }
+
+    /// A policy written before divisions existed still parses, and gets the half-metre subunit the
+    /// kits are already authored on.
+    #[test]
+    fn a_policy_written_before_divisions_defaults_to_one() {
+        let p = Policy::parse("(version: 1)").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.divisions, 1);
+    }
+
+    /// Refused at the project boundary, because every piece in the project derives from this number.
+    #[test]
+    fn a_division_count_outside_the_range_is_refused() {
+        for bad in [0, MAX_DIVISIONS + 1] {
+            let text = format!("(version: 1, divisions: {bad})");
+            let err = Policy::parse(&text).err().unwrap_or_default();
+            assert!(err.contains("divides between 1 and"), "{bad}: {err}");
+        }
+        assert!(Policy::parse("(version: 1, divisions: 1)").is_ok());
+        let most = format!("(version: 1, divisions: {MAX_DIVISIONS})");
+        assert!(Policy::parse(&most).is_ok());
     }
 
     /// Version mismatch is refused rather than migrated, the same rule the map and library hold.

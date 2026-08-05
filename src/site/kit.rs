@@ -497,7 +497,8 @@ pub fn load_site_kit(kit_path: &str, project_dir: &str) -> Result<SiteKit, Strin
         .map_err(|e| format!("site kit {kit_path} is unreadable: {e}"))?;
     let ids = parse_site_kit(&text)?;
     let library = emerge_core::policy::layered_library(std::path::Path::new(project_dir))
-        .map_err(|e| format!("site kit {kit_path}: {e}"))?;
+        .map_err(|e| format!("site kit {kit_path}: {e}"))?
+        .library;
     let kit = SiteKit::resolve(ids, &library)?;
     validate_site_kit(&kit)?;
     Ok(kit)
@@ -520,7 +521,8 @@ mod tests {
         let ids = parse_site_kit(&text).unwrap_or_else(|e| panic!("{e}"));
         let library =
             emerge_core::policy::layered_library(std::path::Path::new(SITE_PROJECT_DIR))
-                .unwrap_or_else(|e| panic!("{e}"));
+                .unwrap_or_else(|e| panic!("{e}"))
+                .library;
         (ids, library)
     }
 

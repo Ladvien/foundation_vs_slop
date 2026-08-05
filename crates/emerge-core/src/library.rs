@@ -23,6 +23,15 @@ use crate::vocab::{Masks, Vocabularies};
 /// Bumped when the shape below changes. A mismatch is refused, never migrated — `persist.rs`'s rule.
 pub const LIBRARY_VERSION: u32 = 1;
 
+/// The most cells one piece's derived lattice may have.
+///
+/// The old per-descriptor `div` was capped at 9 per axis, which bounded a lattice at 729. Divisions
+/// are now **derived** — a piece's span times the project's number — so nothing bounds them from the
+/// descriptor's side, and a 10 m corridor at `divisions: 4` would build 80 x 40 x 8. This is the
+/// replacement guard: generous enough that a 6 m wall at the shipped setting is nowhere near it, low
+/// enough that the editor is never asked to draw a lattice nobody could author.
+pub const MAX_LATTICE_CELLS: u32 = 4096;
+
 /// Everything a project can place.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,10 +79,10 @@ impl Library {
                     d.id
                 ));
             }
-            // The lattice is checked here rather than in `resolve`, because an out-of-range cell is
-            // wrong about the file it is written in — it is not a missing value some caller might
-            // supply.
-            d.subgrid.validate(&d.id)?;
+            // The lattice is **not** checked here: a cell is in range or not depending on the
+            // project's divisions-per-tile, which lives in `project.ron` and is not knowable from
+            // this file alone. `policy::layered_library` runs `validate_lattices` once both layers
+            // are parsed — it is the one loader, so there is no path on which the check is skipped.
             if let Some(j) = self.descriptors.iter().position(|o| o.id == d.id) {
                 if j != i {
                     return Err(format!(
@@ -83,6 +92,39 @@ impl Library {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// **Every lattice against the project's divisions.**
+    ///
+    /// Separate from [`Self::validate`] because it needs a number `library.ron` does not carry: a
+    /// cell at `(5, 0, 0)` is in range on a 3 m wall and outside a 0.5 m crate, and which it is
+    /// depends on `project.ron`'s `divisions`. Called from `policy::layered_library`, the one place
+    /// both layers exist at once.
+    ///
+    /// Refuses on the same grounds the per-lattice check always did — an out-of-range cell is a
+    /// value nothing will ever read, a duplicate is two answers to one question — plus a ceiling on
+    /// the derived volume, since divisions are multiplied by a piece's span and a 10 m corridor at a
+    /// fine setting would otherwise build a lattice nobody can author or draw.
+    pub fn validate_lattices(&self, divisions: u32) -> Result<(), String> {
+        for d in &self.descriptors {
+            let Some(grid) = &d.subgrid else {
+                // Says nothing about its inside, so there is nothing to be wrong about. A piece
+                // still gets divisions when something asks; it just has no cells of its own.
+                continue;
+            };
+            let div = crate::descriptor::divisions(&d.extent, divisions, &d.id)?;
+            let volume = crate::descriptor::Subgrid::volume(div);
+            if volume > MAX_LATTICE_CELLS {
+                return Err(format!(
+                    "library: `{}` derives a {}x{}x{} lattice of {volume} cells, past the {MAX_LATTICE_CELLS} \
+                     a piece may have. Divisions are multiplied by a piece's span, so this is either \
+                     an oversized `extent` or a `divisions` set too fine for this kit.",
+                    d.id, div.0, div.1, div.2
+                ));
+            }
+            grid.validate(&d.id, div)?;
         }
         Ok(())
     }

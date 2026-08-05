@@ -65,8 +65,14 @@ pub struct Descriptor {
     /// Hints for the generator — where this belongs and what it belongs *with*. See [`Placement`].
     pub placement: Placement,
 
-    /// The tile's internal lattice. See [`Subgrid`].
-    pub subgrid: Subgrid,
+    /// The tile's internal lattice, or `None` for a piece that says nothing about its inside.
+    ///
+    /// **An `Option` because a patch has to be able to say nothing.** [`Self::patched_with`] used a
+    /// bare `Subgrid` and treated `Subgrid::default()` as "unset" — but that is also the commonest
+    /// legal value, so a patch deliberately clearing a lattice was indistinguishable from a patch
+    /// with no opinion about it, and the second reading silently won. `None` is "no opinion";
+    /// `Some(Subgrid::default())` is "this piece has no marked cells".
+    pub subgrid: Option<Subgrid>,
 
     /// What this asset is and why it is set up the way it is, as data.
     ///
@@ -95,55 +101,100 @@ pub struct Descriptor {
 /// * [`SubCell::anchor`] — a role an interacting item may occupy. The regular-grid sibling of
 ///   [`Offers::sockets`]: a socket is a hand-placed point, an anchor is a lattice cell.
 ///
+/// # The divisions are not stored here
+///
+/// **A lattice knows its cells; the project knows how finely a tile divides.** `div` used to be a
+/// per-descriptor field defaulting to 3×3×3, which meant a 3 m wall had 1 m cells and a 0.5 m chair
+/// had 0.167 m ones — two faces that [`crate::adjacency::may_abut`] compares element for element and
+/// that could never mean the same thing. Merrell & Manocha's model synthesis is explicit about why
+/// that cannot work: the grid is three sets of parallel planes and *"all planes within each set are
+/// parallel and evenly spaced"*, so a spacing that varies per object is not a grid at all
+/// (Merrell & Manocha 2009, *Constraint-Based Model Synthesis*, §4.4).
+///
+/// So the spacing is one project-level number — [`crate::policy::Policy::divisions`] — and a piece's
+/// divisions are **derived** from its own size by [`divisions`]. The same paper names this exact
+/// remedy for objects that do not land on round multiples: *"the planes could be spaced more closely.
+/// If they are spaced twice as close, an object that was 1.5-plane spaces wide would become three
+/// planes wide"* (§4.5).
+///
 /// # Sparse, because most tiles have nothing to say
 ///
-/// 3×3×3 is 27 cells and the shipped library is 43 mostly-rectangular props. Storing 27 entries each
-/// would be 1,161 rows of `solid: false` — so only cells that differ from open-and-unlabelled are
-/// written, and a piece with no lattice detail costs one defaulted field.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The shipped library is 43 mostly-rectangular props. Writing every cell would be thousands of rows
+/// of `solid: false` — so only cells that differ from open-and-unlabelled are written, and a piece
+/// with no lattice detail costs nothing at all.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Subgrid {
-    /// Divisions per axis, `(x, y, z)`.
-    ///
-    /// **3×3×3.** Three is the smallest division with a *middle* — a centre distinct from its two
-    /// sides — which is what "left edge / interior / right edge" needs. Two would give a tile no
-    /// inside, and four would double the authoring for a symmetry nothing yet asks for.
-    pub div: (u32, u32, u32),
     /// Only the cells that are not plain open space. See the note on sparseness.
     pub cells: Vec<SubCell>,
 }
 
-impl Default for Subgrid {
-    fn default() -> Self {
-        Subgrid {
-            div: (3, 3, 3),
-            cells: Vec::new(),
-        }
+/// **How finely a piece divides**, given the project's divisions-per-tile.
+///
+/// A subunit is a `grid::SNAP / per_tile` **cube**: each axis is the whole number of authoring cells
+/// the piece spans, times `per_tile`. So every piece in a project is measured against the same
+/// spacing on every axis, which is what makes an edge token on a 3 m wall mean the same thing as one
+/// on a 0.5 m chair.
+///
+/// `grid::cells` never returns zero, so a decal with no height gets one layer rather than a
+/// degenerate lattice — no special case needed.
+///
+/// A missing `footprint` is refused by id rather than resolved to `(0, 0)`, the same call
+/// [`Descriptor::resolve`] makes and for the same reason: a zero lattice has no cells and every rule
+/// reading it would silently report success.
+pub fn divisions(extent: &Extent, per_tile: u32, owner: &str) -> Result<(u32, u32, u32), String> {
+    if per_tile == 0 {
+        return Err(format!(
+            "`{owner}`: the project divides each tile 0 ways; an axis with no divisions has no cells"
+        ));
+    }
+    let (w, d) = extent.footprint.ok_or_else(|| {
+        format!("`{owner}`: no `extent.footprint`, so its lattice cannot be derived")
+    })?;
+    // A decal may legitimately omit its height — `Descriptor::resolve` says so — and `grid::cells(0)`
+    // is one cell, so the lattice is one layer deep rather than empty.
+    let h = extent.height.unwrap_or(0.0);
+    let axis = |span: f32| crate::grid::cells(span).0 * per_tile;
+    Ok((axis(w), axis(h), axis(d)))
+}
+
+/// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
+///
+/// Separate from [`Subgrid::rotated`] because the lattice no longer carries its own divisions: a
+/// caller that turns a tile needs both halves, and having to ask for both is what keeps them in step.
+pub fn rotate_div(div: (u32, u32, u32), quarter: u8) -> (u32, u32, u32) {
+    if quarter % 2 == 0 {
+        div
+    } else {
+        (div.2, div.1, div.0)
     }
 }
 
 impl Subgrid {
     /// How many cells the lattice has, if it were written out in full.
-    pub fn volume(&self) -> u32 {
-        self.div.0 * self.div.1 * self.div.2
+    pub fn volume(div: (u32, u32, u32)) -> u32 {
+        div.0.saturating_mul(div.1).saturating_mul(div.2)
     }
 
     /// What is at `at`, or `None` for a cell nobody has said anything about.
+    ///
+    /// The one accessor that does **not** need the divisions: it searches what was written rather
+    /// than asking what could exist.
     pub fn at(&self, at: (u32, u32, u32)) -> Option<&SubCell> {
         self.cells.iter().find(|c| c.at == at)
     }
 
-    /// Is `at` inside the lattice?
-    pub fn holds(&self, at: (u32, u32, u32)) -> bool {
-        at.0 < self.div.0 && at.1 < self.div.1 && at.2 < self.div.2
+    /// Is `at` inside a lattice of `div`?
+    pub fn holds(at: (u32, u32, u32), div: (u32, u32, u32)) -> bool {
+        at.0 < div.0 && at.1 < div.1 && at.2 < div.2
     }
 
     /// The cell at `at`, created empty if nobody has written one yet.
     ///
     /// `None` when `at` is outside the lattice — a caller asking about a cell that cannot exist gets
     /// an answer, not a row appended somewhere unreachable.
-    fn entry(&mut self, at: (u32, u32, u32)) -> Option<&mut SubCell> {
-        if !self.holds(at) {
+    fn entry(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<&mut SubCell> {
+        if !Subgrid::holds(at, div) {
             return None;
         }
         if let Some(i) = self.cells.iter().position(|c| c.at == at) {
@@ -167,9 +218,9 @@ impl Subgrid {
     }
 
     /// Toggle a cell's occupancy. Returns what it became, or `None` if `at` is outside.
-    pub fn toggle_solid(&mut self, at: (u32, u32, u32)) -> Option<bool> {
+    pub fn toggle_solid(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<bool> {
         let now = {
-            let cell = self.entry(at)?;
+            let cell = self.entry(at, div)?;
             cell.solid = !cell.solid;
             cell.solid
         };
@@ -177,18 +228,28 @@ impl Subgrid {
         Some(now)
     }
 
+    /// Mark a cell solid, whatever it was. Returns `None` if `at` is outside.
+    ///
+    /// Distinct from [`Self::toggle_solid`] because a mesh scan states a fact rather than flipping
+    /// one: running it twice must leave the same lattice, which a toggle would not.
+    pub fn set_solid(&mut self, at: (u32, u32, u32), div: (u32, u32, u32)) -> Option<()> {
+        self.entry(at, div)?.solid = true;
+        self.prune();
+        Some(())
+    }
+
     /// Set or clear a cell's edge label. An empty string clears it — the same keystroke that types a
     /// token has to be able to take it back.
-    pub fn set_edge(&mut self, at: (u32, u32, u32), token: &str) -> Option<()> {
-        let cell = self.entry(at)?;
+    pub fn set_edge(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at, div)?;
         cell.edge = (!token.trim().is_empty()).then(|| token.trim().to_owned());
         self.prune();
         Some(())
     }
 
     /// Set or clear a cell's anchor role.
-    pub fn set_anchor(&mut self, at: (u32, u32, u32), token: &str) -> Option<()> {
-        let cell = self.entry(at)?;
+    pub fn set_anchor(&mut self, at: (u32, u32, u32), div: (u32, u32, u32), token: &str) -> Option<()> {
+        let cell = self.entry(at, div)?;
         cell.anchor = (!token.trim().is_empty()).then(|| token.trim().to_owned());
         self.prune();
         Some(())
@@ -215,14 +276,18 @@ impl Subgrid {
     ///
     /// Four turns are the identity, which `rotating_four_times_is_the_identity` pins.
     ///
+    /// `div` is the lattice's divisions **before** the turn; the turned divisions are
+    /// [`rotate_div`]'s job. Two calls rather than one because the lattice no longer carries its
+    /// divisions, and a caller forced to name both cannot let them drift apart.
+    ///
     /// Lives here rather than beside the matcher because the schema owns its own transforms for the
     /// same reason it owns its own edits: the sparse invariant is this type's to keep.
-    pub fn rotated(&self, quarter: u8) -> Subgrid {
+    pub fn rotated(&self, quarter: u8, div: (u32, u32, u32)) -> Subgrid {
         let mut out = self.clone();
+        let mut at_div = div;
         for _ in 0..(quarter % 4) {
-            let (dx, dy, dz) = out.div;
+            let (dx, dy, dz) = at_div;
             out = Subgrid {
-                div: (dz, dy, dx),
                 cells: out
                     .cells
                     .iter()
@@ -232,6 +297,7 @@ impl Subgrid {
                     })
                     .collect(),
             };
+            at_div = (dz, dy, dx);
         }
         out
     }
@@ -241,8 +307,8 @@ impl Subgrid {
     /// Every rule here is one whose violation is silent: a zero division makes the lattice empty
     /// while still claiming to have one, an out-of-range cell is a value nothing will ever read, and
     /// a duplicate is two answers to one question with the first quietly winning.
-    pub fn validate(&self, owner: &str) -> Result<(), String> {
-        let (dx, dy, dz) = self.div;
+    pub fn validate(&self, owner: &str, div: (u32, u32, u32)) -> Result<(), String> {
+        let (dx, dy, dz) = div;
         if dx == 0 || dy == 0 || dz == 0 {
             return Err(format!(
                 "`{owner}`'s subgrid divides {dx}x{dy}x{dz}; an axis with no divisions has no cells"
@@ -580,12 +646,9 @@ impl Descriptor {
             effects: pick(&self.effects, &patch.effects),
             look: pick(&self.look, &patch.look),
             // A patch that states a lattice replaces it, on the same rule the lists follow: an
-            // append could not remove a cell.
-            subgrid: if patch.subgrid == Subgrid::default() {
-                self.subgrid.clone()
-            } else {
-                patch.subgrid.clone()
-            },
+            // append could not remove a cell. `None` is the patch saying nothing — which is a
+            // different claim from `Some(Subgrid::default())`, the patch clearing every cell.
+            subgrid: patch.subgrid.clone().or_else(|| self.subgrid.clone()),
             placement: Placement {
                 rooms: pick(&self.placement.rooms, &patch.placement.rooms),
                 group: patch.placement.group.clone().or_else(|| self.placement.group.clone()),
@@ -594,6 +657,29 @@ impl Descriptor {
             // needs `note: Some("")` — deliberate, because a note is somebody's reasoning and losing
             // it should take an act.
             note: patch.note.clone().or_else(|| self.note.clone()),
+        }
+    }
+
+    /// **The lattice to write into**, created empty if this is the first thing said about it.
+    ///
+    /// Pair every batch of edits with [`Self::settle_lattice`], or a piece whose last cell was
+    /// cleared keeps an empty lattice where it used to have nothing.
+    pub fn lattice_mut(&mut self) -> &mut Subgrid {
+        self.subgrid.get_or_insert_with(Subgrid::default)
+    }
+
+    /// **Drop a lattice that has gone back to saying nothing.**
+    ///
+    /// `Subgrid::prune` keeps the *cells* sparse; this keeps the *field* sparse, and it is the same
+    /// argument one level up: a piece an author poked at and undid must leave the file as it was.
+    ///
+    /// `None` and `Some(Subgrid::default())` are only interchangeable **here**, in a base
+    /// descriptor, where both can mean nothing but "no cells". In a patch they are two different
+    /// claims — silence versus "clear them" — which is why [`Self::patched_with`] distinguishes
+    /// them and this does not.
+    pub fn settle_lattice(&mut self) {
+        if self.subgrid.as_ref().is_some_and(|g| g.cells.is_empty()) {
+            self.subgrid = None;
         }
     }
 
@@ -876,8 +962,8 @@ mod tests {
 mod subgrid_tests {
     use super::*;
 
-    fn grid(div: (u32, u32, u32), cells: Vec<SubCell>) -> Subgrid {
-        Subgrid { div, cells }
+    fn grid(cells: Vec<SubCell>) -> Subgrid {
+        Subgrid { cells }
     }
 
     fn cell(at: (u32, u32, u32)) -> SubCell {
@@ -887,15 +973,23 @@ mod subgrid_tests {
         }
     }
 
+    const D3: (u32, u32, u32) = (3, 3, 3);
+
+    fn extent(w: f32, h: f32, d: f32) -> Extent {
+        Extent {
+            footprint: Some((w, d)),
+            height: Some(h),
+        }
+    }
+
     /// The default is the whole point of the feature being cheap: a piece that says nothing about its
-    /// inside costs one field and no rows.
+    /// inside costs no rows at all.
     #[test]
     fn a_tile_says_nothing_about_its_inside_by_default() {
         let g = Subgrid::default();
-        assert_eq!(g.div, (3, 3, 3));
-        assert_eq!(g.volume(), 27);
+        assert_eq!(Subgrid::volume(D3), 27);
         assert!(g.cells.is_empty());
-        assert!(g.validate("x").is_ok());
+        assert!(g.validate("x", D3).is_ok());
     }
 
     /// All three facets on one cell — the thing this schema exists to allow.
@@ -907,8 +1001,8 @@ mod subgrid_tests {
             edge: Some("wall".into()),
             anchor: Some("diner".into()),
         };
-        let g = grid((3, 3, 3), vec![c.clone()]);
-        assert!(g.validate("table").is_ok());
+        let g = grid(vec![c.clone()]);
+        assert!(g.validate("table", D3).is_ok());
         let got = g.at((2, 0, 1)).unwrap_or_else(|| panic!("no cell"));
         assert_eq!(got, &c);
         assert!(g.at((0, 0, 0)).is_none(), "unwritten cells are absent, not default rows");
@@ -916,8 +1010,8 @@ mod subgrid_tests {
 
     #[test]
     fn a_cell_outside_the_lattice_is_refused() {
-        let e = grid((3, 3, 3), vec![cell((3, 0, 0))])
-            .validate("desk")
+        let e = grid(vec![cell((3, 0, 0))])
+            .validate("desk", D3)
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("outside"), "{e}");
@@ -925,8 +1019,8 @@ mod subgrid_tests {
 
     #[test]
     fn naming_one_cell_twice_is_refused() {
-        let e = grid((3, 3, 3), vec![cell((1, 1, 1)), cell((1, 1, 1))])
-            .validate("desk")
+        let e = grid(vec![cell((1, 1, 1)), cell((1, 1, 1))])
+            .validate("desk", D3)
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("twice"), "{e}");
@@ -934,8 +1028,8 @@ mod subgrid_tests {
 
     #[test]
     fn an_axis_with_no_divisions_is_refused() {
-        let e = grid((3, 0, 3), vec![])
-            .validate("desk")
+        let e = grid(vec![])
+            .validate("desk", (3, 0, 3))
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(e.contains("no cells"), "{e}");
@@ -946,15 +1040,12 @@ mod subgrid_tests {
     fn a_lattice_round_trips_through_ron() {
         let before = Descriptor {
             id: "desk".into(),
-            subgrid: grid(
-                (3, 3, 3),
-                vec![SubCell {
-                    at: (0, 0, 2),
-                    solid: true,
-                    edge: Some("wall".into()),
-                    anchor: None,
-                }],
-            ),
+            subgrid: Some(grid(vec![SubCell {
+                at: (0, 0, 2),
+                solid: true,
+                edge: Some("wall".into()),
+                anchor: None,
+            }])),
             ..Descriptor::default()
         };
         let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
@@ -967,7 +1058,76 @@ mod subgrid_tests {
     #[test]
     fn a_descriptor_written_before_the_lattice_still_parses() {
         let d: Descriptor = ron::from_str("(id: \"crate\")").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(d.subgrid, Subgrid::default());
+        assert_eq!(d.subgrid, None);
+    }
+
+    /// **The point of deriving divisions.** Two pieces of the same height present faces of the same
+    /// length, so their edge tokens can be compared; two of different heights do not, and refusing is
+    /// the honest answer rather than matching on a prefix.
+    ///
+    /// The numbers are the ones the plan was approved on, at the shipped `divisions: 1`.
+    #[test]
+    fn a_pieces_divisions_come_from_its_own_size() {
+        let at = |e: Extent| divisions(&e, 1, "x").unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(at(extent(0.5, 0.5, 0.5)), (1, 1, 1), "crate");
+        assert_eq!(at(extent(0.5, 0.9, 0.5)), (1, 2, 1), "chair");
+        assert_eq!(at(extent(1.0, 0.75, 1.0)), (2, 2, 2), "table");
+        assert_eq!(at(extent(3.0, 2.4, 0.5)), (6, 5, 1), "wall");
+        assert_eq!(at(extent(1.0, 2.4, 0.5)), (2, 5, 1), "doorway");
+
+        // A wall and a doorway are both 2.4 m, so both present five rows and can agree.
+        let wall = at(extent(3.0, 2.4, 0.5));
+        let doorway = at(extent(1.0, 2.4, 0.5));
+        assert_eq!(wall.1, doorway.1);
+        // A crate is not, and must not silently match the bottom of a wall.
+        assert_ne!(at(extent(0.5, 0.5, 0.5)).1, wall.1);
+    }
+
+    /// Raising the project's number refines every axis of every piece by the same factor — the
+    /// remedy Merrell & Manocha §4.5 names for objects that do not land on round multiples.
+    #[test]
+    fn dividing_a_tile_more_finely_refines_every_piece_equally() {
+        let wall = extent(3.0, 2.4, 0.5);
+        let one = divisions(&wall, 1, "wall").unwrap_or_else(|e| panic!("{e}"));
+        let three = divisions(&wall, 3, "wall").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(three, (one.0 * 3, one.1 * 3, one.2 * 3));
+    }
+
+    /// A decal may omit its height (`Descriptor::resolve` says so) and still gets one layer rather
+    /// than a degenerate lattice — `grid::cells` never returns zero.
+    #[test]
+    fn a_piece_with_no_height_still_has_one_layer() {
+        let e = Extent {
+            footprint: Some((1.0, 1.0)),
+            height: None,
+        };
+        assert_eq!(divisions(&e, 1, "sign").unwrap_or_else(|err| panic!("{err}")), (2, 1, 2));
+    }
+
+    /// No footprint is refused by id, not resolved to a zero lattice that every rule reads as fine.
+    #[test]
+    fn a_piece_with_no_footprint_is_refused_by_name() {
+        let e = Extent::default();
+        let err = divisions(&e, 1, "mystery").err().unwrap_or_default();
+        assert!(err.contains("mystery") && err.contains("footprint"), "{err}");
+    }
+
+    /// Zero divisions-per-tile is refused here too, so no caller can build a lattice with no cells.
+    #[test]
+    fn a_project_that_divides_a_tile_zero_ways_is_refused() {
+        let err = divisions(&extent(1.0, 1.0, 1.0), 0, "crate").err().unwrap_or_default();
+        assert!(err.contains("no cells"), "{err}");
+    }
+
+    /// A quarter turn swaps x and z; two turns are back to square; four are the identity.
+    #[test]
+    fn turning_swaps_the_x_and_z_divisions() {
+        let div = (6, 5, 1);
+        assert_eq!(rotate_div(div, 0), div);
+        assert_eq!(rotate_div(div, 1), (1, 5, 6));
+        assert_eq!(rotate_div(div, 2), div);
+        assert_eq!(rotate_div(div, 3), (1, 5, 6));
+        assert_eq!(rotate_div(div, 4), div);
     }
 }
 
@@ -975,36 +1135,48 @@ mod subgrid_tests {
 mod subgrid_edit_tests {
     use super::*;
 
+    const D3: (u32, u32, u32) = (3, 3, 3);
+
     #[test]
     fn toggling_a_cell_solid_and_back_leaves_no_trace() {
         let mut g = Subgrid::default();
-        assert_eq!(g.toggle_solid((1, 0, 1)), Some(true));
+        assert_eq!(g.toggle_solid((1, 0, 1), D3), Some(true));
         assert_eq!(g.cells.len(), 1);
-        assert_eq!(g.toggle_solid((1, 0, 1)), Some(false));
+        assert_eq!(g.toggle_solid((1, 0, 1), D3), Some(false));
         // The sparse invariant: a cell that says nothing is absent, not a row of `solid: false`.
         assert!(g.cells.is_empty(), "an unmarked cell must leave no row behind");
+    }
+
+    /// A mesh scan states a fact rather than flipping one, so running it twice is running it once.
+    #[test]
+    fn marking_solid_is_idempotent_where_toggling_is_not() {
+        let mut g = Subgrid::default();
+        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
+        g.set_solid((1, 0, 1), D3).unwrap_or_else(|| panic!("in range"));
+        assert_eq!(g.cells.len(), 1);
+        assert!(g.at((1, 0, 1)).is_some_and(|c| c.solid), "a second scan must not unmark it");
     }
 
     #[test]
     fn a_cell_outside_the_lattice_cannot_be_written() {
         let mut g = Subgrid::default();
-        assert_eq!(g.toggle_solid((3, 0, 0)), None);
-        assert_eq!(g.set_edge((0, 9, 0), "wall"), None);
+        assert_eq!(g.toggle_solid((3, 0, 0), D3), None);
+        assert_eq!(g.set_edge((0, 9, 0), D3, "wall"), None);
         assert!(g.cells.is_empty(), "an out-of-range write must not append anything");
     }
 
     #[test]
     fn tokens_set_and_clear_on_the_same_cell() {
         let mut g = Subgrid::default();
-        g.set_edge((0, 0, 2), "wall").unwrap_or_else(|| panic!("in range"));
-        g.set_anchor((0, 0, 2), "diner").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((0, 0, 2), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), D3, "diner").unwrap_or_else(|| panic!("in range"));
         let c = g.at((0, 0, 2)).unwrap_or_else(|| panic!("written"));
         assert_eq!(c.edge.as_deref(), Some("wall"));
         assert_eq!(c.anchor.as_deref(), Some("diner"));
 
         // Emptying both takes the row with it, since solid was never set.
-        g.set_edge((0, 0, 2), "").unwrap_or_else(|| panic!("in range"));
-        g.set_anchor((0, 0, 2), "  ").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((0, 0, 2), D3, "").unwrap_or_else(|| panic!("in range"));
+        g.set_anchor((0, 0, 2), D3, "  ").unwrap_or_else(|| panic!("in range"));
         assert!(g.cells.is_empty());
     }
 
@@ -1012,9 +1184,9 @@ mod subgrid_edit_tests {
     #[test]
     fn clearing_one_facet_keeps_the_rest() {
         let mut g = Subgrid::default();
-        g.toggle_solid((1, 1, 1));
-        g.set_edge((1, 1, 1), "wall").unwrap_or_else(|| panic!("in range"));
-        g.set_edge((1, 1, 1), "").unwrap_or_else(|| panic!("in range"));
+        g.toggle_solid((1, 1, 1), D3);
+        g.set_edge((1, 1, 1), D3, "wall").unwrap_or_else(|| panic!("in range"));
+        g.set_edge((1, 1, 1), D3, "").unwrap_or_else(|| panic!("in range"));
         let c = g.at((1, 1, 1)).unwrap_or_else(|| panic!("still solid"));
         assert!(c.solid);
         assert!(c.edge.is_none());
@@ -1023,10 +1195,41 @@ mod subgrid_edit_tests {
     #[test]
     fn clear_forgets_the_whole_cell() {
         let mut g = Subgrid::default();
-        g.toggle_solid((2, 2, 2));
-        g.set_anchor((2, 2, 2), "seat").unwrap_or_else(|| panic!("in range"));
+        g.toggle_solid((2, 2, 2), D3);
+        g.set_anchor((2, 2, 2), D3, "seat").unwrap_or_else(|| panic!("in range"));
         g.clear((2, 2, 2));
         assert!(g.at((2, 2, 2)).is_none());
-        assert!(g.validate("x").is_ok());
+        assert!(g.validate("x", D3).is_ok());
+    }
+
+    /// A patch saying nothing about the lattice inherits it; a patch stating one replaces it, and an
+    /// **empty** stated lattice clears every cell. Those last two were indistinguishable before
+    /// `subgrid` became an `Option`, and the inherit reading silently won.
+    #[test]
+    fn a_patch_can_state_an_empty_lattice_without_it_meaning_silence() {
+        let base = Descriptor {
+            id: "wall".into(),
+            subgrid: Some(Subgrid {
+                cells: vec![SubCell {
+                    at: (0, 0, 0),
+                    solid: true,
+                    ..SubCell::default()
+                }],
+            }),
+            ..Descriptor::default()
+        };
+
+        let silent = base.patched_with(&Descriptor::default());
+        assert_eq!(silent.subgrid, base.subgrid, "no opinion inherits");
+
+        let cleared = base.patched_with(&Descriptor {
+            subgrid: Some(Subgrid::default()),
+            ..Descriptor::default()
+        });
+        assert_eq!(
+            cleared.subgrid,
+            Some(Subgrid::default()),
+            "an explicitly empty lattice clears the cells rather than inheriting them"
+        );
     }
 }

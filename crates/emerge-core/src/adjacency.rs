@@ -85,8 +85,8 @@ pub fn quarter_turns(who: &str, yaw_deg: f32) -> Result<u8, String> {
 /// The order is `y` outer, then the axis that is not `dir`'s — so two facing columns are read in the
 /// same spatial order and can be compared element by element. A cell with no `edge` contributes
 /// `None`, which is a token in its own right; see the module note.
-pub fn face(g: &Subgrid, dir: Dir) -> Vec<Option<&str>> {
-    let (dx, dy, dz) = g.div;
+pub fn face(g: &Subgrid, dir: Dir, div: (u32, u32, u32)) -> Vec<Option<&str>> {
+    let (dx, dy, dz) = div;
     let mut out = Vec::new();
     // A degenerate lattice has no face. `Subgrid::validate` refuses one in a file; this is reached
     // from a map, so it answers rather than panicking.
@@ -124,8 +124,13 @@ fn opposite(dir: Dir) -> Dir {
 /// Equality, per Merrell & Manocha 2009 §4.3 — see the module note. Faces of different lengths never
 /// agree, which is how two tiles divided differently refuse each other rather than matching on a
 /// prefix.
-pub fn may_abut(a: &Subgrid, b: &Subgrid, dir: Dir) -> bool {
-    face(a, dir) == face(b, opposite(dir))
+///
+/// **That refusal still matters now that divisions are derived.** Two pieces of the same size get
+/// the same divisions and reach the element-wise comparison, which is the whole point of deriving
+/// them — but a 0.5 m crate beside a 2.4 m wall genuinely presents a shorter face, and reporting
+/// those as compatible would be inventing an agreement that the geometry does not support.
+pub fn may_abut(a: &Subgrid, b: &Subgrid, dir: Dir, a_div: (u32, u32, u32), b_div: (u32, u32, u32)) -> bool {
+    face(a, dir, a_div) == face(b, opposite(dir), b_div)
 }
 
 /// One disagreement between two placed tiles.
@@ -180,7 +185,7 @@ fn dir_name(dir: Dir) -> &'static str {
 /// A yaw that is not a quarter turn produces a fault carrying that sentence rather than an `Err` for
 /// the whole map. One unturnable piece must not blind the author to the other twelve, and the message
 /// says exactly which piece and which angle.
-pub fn faults(map: &Map, library: &Library, cell: f32) -> Vec<Fault> {
+pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fault> {
     let mut out: Vec<Fault> = Vec::new();
     if !(cell.is_finite() && cell > 0.0) {
         return out;
@@ -200,6 +205,9 @@ pub fn faults(map: &Map, library: &Library, cell: f32) -> Vec<Fault> {
         cell: (i64, i64),
         yaw: f32,
         grid: Subgrid,
+        /// The lattice's divisions, derived from this placement's own patched extent — so a
+        /// placement that overrides its size is compared on the lattice it actually stands on.
+        div: (u32, u32, u32),
         /// Whether this tile says anything about its edges at all.
         declares: bool,
     }
@@ -212,12 +220,20 @@ pub fn faults(map: &Map, library: &Library, cell: f32) -> Vec<Fault> {
             Some(patch) => base.patched_with(patch),
             None => base.clone(),
         };
+        // A piece with no derivable lattice has no face to check. That is not a fault of the map —
+        // a missing footprint is `Descriptor::resolve`'s to report, and reporting it here too would
+        // put the same problem in front of the author twice under a name that hides its cause.
+        let Ok(div) = crate::descriptor::divisions(&authored.extent, divisions, &p.descriptor) else {
+            continue;
+        };
+        let grid = authored.subgrid.unwrap_or_default();
         placed.push(Tile {
             id: p.id.as_str(),
             cell: to_cell(p.at),
             yaw: p.yaw,
-            declares: authored.subgrid.cells.iter().any(|c| c.edge.is_some()),
-            grid: authored.subgrid,
+            div,
+            declares: grid.cells.iter().any(|c| c.edge.is_some()),
+            grid,
         });
     }
 
@@ -250,7 +266,12 @@ pub fn faults(map: &Map, library: &Library, cell: f32) -> Vec<Fault> {
                 let mut turned = Vec::new();
                 for t in [a, b] {
                     match quarter_turns(t.id, t.yaw) {
-                        Ok(q) => turned.push(t.grid.rotated(q)),
+                        // Both halves of the turn, together: the cells move and the divisions swap,
+                        // and a face read off one without the other is a face of the wrong length.
+                        Ok(q) => turned.push((
+                            t.grid.rotated(q, t.div),
+                            crate::descriptor::rotate_div(t.div, q),
+                        )),
                         Err(message) => {
                             if !yaw_reported.contains(&t.id) {
                                 yaw_reported.push(t.id);
@@ -266,14 +287,14 @@ pub fn faults(map: &Map, library: &Library, cell: f32) -> Vec<Fault> {
                         }
                     }
                 }
-                let [a_grid, b_grid] = turned.as_slice() else {
+                let [(a_grid, a_div), (b_grid, b_div)] = turned.as_slice() else {
                     continue;
                 };
-                if may_abut(a_grid, b_grid, dir) {
+                if may_abut(a_grid, b_grid, dir, *a_div, *b_div) {
                     continue;
                 }
-                let a_face = face(a_grid, dir);
-                let b_face = face(b_grid, opposite(dir));
+                let a_face = face(a_grid, dir, *a_div);
+                let b_face = face(b_grid, opposite(dir), *b_div);
                 out.push(Fault {
                     a: a.id.to_owned(),
                     b: b.id.to_owned(),
@@ -313,9 +334,8 @@ mod tests {
     use crate::descriptor::{Descriptor, SubCell};
     use crate::map::{Map, Placed};
 
-    fn grid(div: (u32, u32, u32), cells: &[((u32, u32, u32), &str)]) -> Subgrid {
+    fn grid(cells: &[((u32, u32, u32), &str)]) -> Subgrid {
         Subgrid {
-            div,
             cells: cells
                 .iter()
                 .map(|(at, token)| SubCell {
@@ -327,6 +347,8 @@ mod tests {
         }
     }
 
+    const ONE: (u32, u32, u32) = (1, 1, 1);
+
     /// **The inert property, and it must hold without a branch.** Every shipped descriptor has an
     /// empty lattice, so every face is all-`None`, so everything matches everything. If this ever
     /// fails, someone has made `None` mean "wildcard" or "no answer" instead of "a token".
@@ -335,7 +357,7 @@ mod tests {
         let empty = Subgrid::default();
         for dir in [N, E, S, W] {
             assert!(
-                may_abut(&empty, &empty, dir),
+                may_abut(&empty, &empty, dir, ONE, ONE),
                 "two unauthored lattices must abut in {}",
                 dir_name(dir)
             );
@@ -346,40 +368,39 @@ mod tests {
     #[test]
     fn facing_tokens_must_agree() {
         // A 1x1x1 lattice: one cell, so each face is one token.
-        let wall = grid((1, 1, 1), &[((0, 0, 0), "wall")]);
-        let door = grid((1, 1, 1), &[((0, 0, 0), "door")]);
-        assert!(may_abut(&wall, &wall, E));
-        assert!(!may_abut(&wall, &door, E), "`wall` must not meet `door`");
+        let wall = grid(&[((0, 0, 0), "wall")]);
+        let door = grid(&[((0, 0, 0), "door")]);
+        assert!(may_abut(&wall, &wall, E, ONE, ONE));
+        assert!(!may_abut(&wall, &door, E, ONE, ONE), "`wall` must not meet `door`");
         assert!(
-            !may_abut(&wall, &Subgrid { div: (1, 1, 1), cells: Vec::new() }, E),
+            !may_abut(&wall, &Subgrid::default(), E, ONE, ONE),
             "an authored token must not meet an unlabelled cell — that would be a wildcard"
         );
     }
 
     /// Faces of different lengths cannot agree, rather than agreeing on a prefix.
+    ///
+    /// Divisions are derived from size now, so this is the differently-**sized** case: a piece one
+    /// cell deep beside one three cells deep. Their faces are genuinely different shapes and saying
+    /// otherwise would invent an agreement the geometry does not support.
     #[test]
     fn lattices_divided_differently_refuse_each_other() {
-        let fine = Subgrid { div: (1, 1, 3), cells: Vec::new() };
-        let coarse = Subgrid { div: (1, 1, 2), cells: Vec::new() };
-        assert!(!may_abut(&fine, &coarse, E));
+        let empty = Subgrid::default();
+        assert!(!may_abut(&empty, &empty, E, (1, 1, 3), (1, 1, 2)));
     }
 
     /// Four quarter turns put every cell back where it started.
     #[test]
     fn rotating_four_times_is_the_identity() {
-        let g = grid(
-            (3, 2, 4),
-            &[
-                ((0, 0, 0), "a"),
-                ((2, 1, 3), "b"),
-                ((1, 0, 2), "c"),
-            ],
-        );
+        let div = (3, 2, 4);
+        let g = grid(&[((0, 0, 0), "a"), ((2, 1, 3), "b"), ((1, 0, 2), "c")]);
         let mut turned = g.clone();
+        let mut turned_div = div;
         for _ in 0..4 {
-            turned = turned.rotated(1);
+            turned = turned.rotated(1, turned_div);
+            turned_div = crate::descriptor::rotate_div(turned_div, 1);
         }
-        assert_eq!(turned.div, g.div);
+        assert_eq!(turned_div, div);
         let mut want = g.cells.clone();
         let mut got = turned.cells.clone();
         want.sort_by_key(|c| c.at);
@@ -391,12 +412,14 @@ mod tests {
     /// positive yaw turns +X toward −Z — the project's one forward convention.
     #[test]
     fn a_quarter_turn_moves_the_east_face_to_north() {
-        let g = grid((2, 1, 3), &[((1, 0, 0), "seam"), ((1, 0, 1), "seam"), ((1, 0, 2), "seam")]);
-        let east = face(&g, E);
+        let div = (2, 1, 3);
+        let g = grid(&[((1, 0, 0), "seam"), ((1, 0, 1), "seam"), ((1, 0, 2), "seam")]);
+        let east = face(&g, E, div);
         assert_eq!(east, vec![Some("seam"), Some("seam"), Some("seam")]);
-        let turned = g.rotated(1);
-        assert_eq!(turned.div, (3, 1, 2), "a quarter turn swaps the x and z divisions");
-        assert_eq!(face(&turned, N), east, "the east face is now the north face");
+        let turned = g.rotated(1, div);
+        let turned_div = crate::descriptor::rotate_div(div, 1);
+        assert_eq!(turned_div, (3, 1, 2), "a quarter turn swaps the x and z divisions");
+        assert_eq!(face(&turned, N, turned_div), east, "the east face is now the north face");
     }
 
     /// Off-square yaws are refused by name rather than rounded to the nearest face.
@@ -417,19 +440,28 @@ mod tests {
         }
     }
 
+    /// Every entry is one authoring cell on a side, so at `divisions: 1` its lattice is 1x1x1 and
+    /// each face is a single token — the smallest shape that still has faces to compare.
     fn library_with(entries: &[(&str, Subgrid)]) -> Library {
         Library {
             descriptors: entries
                 .iter()
                 .map(|(id, g)| Descriptor {
                     id: (*id).to_owned(),
-                    subgrid: g.clone(),
+                    extent: crate::descriptor::Extent {
+                        footprint: Some((crate::grid::SNAP, crate::grid::SNAP)),
+                        height: Some(crate::grid::SNAP),
+                    },
+                    subgrid: Some(g.clone()),
                     ..Descriptor::default()
                 })
                 .collect(),
             ..Library::default()
         }
     }
+
+    /// The shipped divisions-per-tile, so a test lattice is the size its `extent` says.
+    const ONE_PER_TILE: u32 = 1;
 
     fn placed(id: &str, descriptor: &str, at: (f32, f32), yaw: f32) -> Placed {
         Placed {
@@ -449,7 +481,7 @@ mod tests {
             placed("one", "crate_a", (0.5, 0.5), 0.0),
             placed("two", "crate_a", (1.5, 0.5), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, 1.0), Vec::new());
+        assert_eq!(faults(&map, &lib, 1.0, ONE_PER_TILE), Vec::new());
     }
 
     /// One mismatched pair is reported once per direction it is wrong in — here `one`'s E face and
@@ -457,14 +489,14 @@ mod tests {
     #[test]
     fn a_mismatched_pair_is_reported_and_names_both_faces() {
         let lib = library_with(&[
-            ("wall", grid((1, 1, 1), &[((0, 0, 0), "stone")])),
-            ("gap", Subgrid { div: (1, 1, 1), cells: Vec::new() }),
+            ("wall", grid(&[((0, 0, 0), "stone")])),
+            ("gap", Subgrid::default()),
         ]);
         let map = map_with(vec![
             placed("w1", "wall", (0.5, 0.5), 0.0),
             placed("g1", "gap", (1.5, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0);
+        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
         assert_eq!(found.len(), 1, "one seam is one fault, not two: {found:#?}");
         assert!(found[0].message.contains("stone"), "{}", found[0].message);
         // `g1` sorts before `w1`, so that is the ordering reported — and the sentence still names
@@ -477,8 +509,8 @@ mod tests {
     #[test]
     fn fault_order_does_not_depend_on_placement_order() {
         let lib = library_with(&[
-            ("wall", grid((1, 1, 1), &[((0, 0, 0), "stone")])),
-            ("gap", Subgrid { div: (1, 1, 1), cells: Vec::new() }),
+            ("wall", grid(&[((0, 0, 0), "stone")])),
+            ("gap", Subgrid::default()),
         ]);
         let forward = faults(
             &map_with(vec![
@@ -487,6 +519,7 @@ mod tests {
             ]),
             &lib,
             1.0,
+            ONE_PER_TILE,
         );
         let backward = faults(
             &map_with(vec![
@@ -495,6 +528,7 @@ mod tests {
             ]),
             &lib,
             1.0,
+            ONE_PER_TILE,
         );
         assert_eq!(forward, backward);
     }
@@ -503,12 +537,12 @@ mod tests {
     /// being checked. Reported once, not once per neighbour.
     #[test]
     fn an_off_square_yaw_is_a_fault_not_a_dead_check() {
-        let lib = library_with(&[("wall", grid((1, 1, 1), &[((0, 0, 0), "stone")]))]);
+        let lib = library_with(&[("wall", grid(&[((0, 0, 0), "stone")]))]);
         let map = map_with(vec![
             placed("tilted", "wall", (0.5, 0.5), 15.0),
             placed("square", "wall", (1.5, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0);
+        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
         assert_eq!(
             found.iter().filter(|f| f.a == "tilted" && f.b.is_empty()).count(),
             1,
@@ -527,7 +561,7 @@ mod tests {
             placed("chair", "armchair", (0.5, 0.5), 240.0),
             placed("table", "table", (1.5, 0.5), 0.0),
         ]);
-        assert_eq!(faults(&map, &lib, 1.0), Vec::new());
+        assert_eq!(faults(&map, &lib, 1.0, ONE_PER_TILE), Vec::new());
     }
 
     /// But once its neighbour declares one, the odd yaw is exactly what stops the check, and it says
@@ -536,13 +570,13 @@ mod tests {
     fn an_odd_yaw_matters_as_soon_as_a_neighbour_declares_an_edge() {
         let lib = library_with(&[
             ("armchair", Subgrid::default()),
-            ("wall", grid((1, 1, 1), &[((0, 0, 0), "stone")])),
+            ("wall", grid(&[((0, 0, 0), "stone")])),
         ]);
         let map = map_with(vec![
             placed("chair", "armchair", (0.5, 0.5), 240.0),
             placed("w1", "wall", (1.5, 0.5), 0.0),
         ]);
-        let found = faults(&map, &lib, 1.0);
+        let found = faults(&map, &lib, 1.0, ONE_PER_TILE);
         assert!(
             found.iter().any(|f| f.a == "chair" && f.message.contains("240")),
             "{found:#?}"

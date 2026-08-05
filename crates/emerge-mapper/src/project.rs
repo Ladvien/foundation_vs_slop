@@ -44,10 +44,24 @@ pub struct Project {
     /// Resolved once, here, so nothing downstream carries an `Option` or rebuilds this path. Maps are
     /// written beside their kit, because a map means nothing without the library that draws it.
     pub emerge_dir: PathBuf,
-    /// Where [`Self::library`] came from and where it is written back.
+    /// Where [`Self::measured`] came from and where it is written back.
     pub library_path: PathBuf,
     pub vocab: Vocabularies,
+    /// **`library.ron` as it sits on disk** — the measurements, with no policy layered on.
+    ///
+    /// **Every edit lands here and this is what gets written.** `write_library` used to serialize
+    /// [`Self::library`] back over `library_path`, which meant toggling one lattice cell under
+    /// `--kit site` wrote SCP-9191's stretched 2.40 m wall heights into the measurements file the kit
+    /// exists to share — and the next load applied the patches again on top of them. A library is
+    /// measurements; the architecture is `project.ron`'s, and it must not leak downward.
+    pub measured: Library,
+    /// The measurements with [`Self::policy`] applied — what the game would place, and what every
+    /// reader here (the palette, the preview, the flood fill, the fault check) uses.
+    ///
+    /// Derived, never written. Rebuilt from `measured` after every edit by `write_library`.
     pub library: Library,
+    /// This project's policy: the patches, and `divisions`.
+    pub policy: emerge_core::policy::Policy,
     /// Per-descriptor token masks, in library order — resolved once at load so the palette and the
     /// placement rules never re-resolve the same strings.
     pub masks: Vec<Masks>,
@@ -109,8 +123,13 @@ impl Project {
             .map_err(|e| format!("{}: {e}", vocab_path.display()))?;
 
         // Measurements, then this game's policy over them — `emerge_core::policy` owns the order so
-        // the editor and the game cannot end up with differently-layered libraries.
-        let library = emerge_core::policy::layered_library(&emerge_dir)?;
+        // the editor and the game cannot end up with differently-layered libraries. All three layers
+        // come back because this editor writes the bottom one and reads `divisions` off the middle.
+        let emerge_core::policy::Layered {
+            measured,
+            library,
+            policy,
+        } = emerge_core::policy::layered_library(&emerge_dir)?;
         let library_path = emerge_dir.join(LIBRARY_FILE);
 
         // The two-sided pass over the whole set, at open. A prop that rests on a class nothing offers
@@ -173,13 +192,26 @@ impl Project {
             emerge_dir,
             library_path,
             vocab,
+            measured,
             library,
+            policy,
             masks,
             map,
             map_path,
             dirty: false,
             triangles,
         })
+    }
+
+    /// **This piece's lattice divisions**, from its own size and the project's divisions-per-tile.
+    ///
+    /// The one place the editor derives them, so the grid an author clicks, the grid the gizmos
+    /// draw, and the grid a write is range-checked against cannot come out different.
+    pub fn divisions_of(
+        &self,
+        d: &emerge_core::descriptor::Descriptor,
+    ) -> Result<(u32, u32, u32), String> {
+        emerge_core::descriptor::divisions(&d.extent, self.policy.divisions, &d.id)
     }
 
     /// Write the map. Atomic, so a crash mid-write cannot leave half a level on disk.

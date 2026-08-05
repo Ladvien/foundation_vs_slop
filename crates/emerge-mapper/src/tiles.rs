@@ -160,211 +160,17 @@ fn stage_camera(
 /// room around it and a 3-cell one still fits.
 const TILE_VIEW_HEIGHT: f32 = 4.0;
 
-/// Which axis of the subgrid a field edits.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-pub enum DivAxis {
-    X,
-    Y,
-    Z,
-}
-
-impl DivAxis {
-    fn label(self) -> &'static str {
-        match self {
-            DivAxis::X => "x",
-            DivAxis::Y => "y",
-            DivAxis::Z => "z",
-        }
-    }
-    fn get(self, d: (u32, u32, u32)) -> u32 {
-        match self {
-            DivAxis::X => d.0,
-            DivAxis::Y => d.1,
-            DivAxis::Z => d.2,
-        }
-    }
-    fn set(self, d: &mut (u32, u32, u32), v: u32) {
-        match self {
-            DivAxis::X => d.0 = v,
-            DivAxis::Y => d.1 = v,
-            DivAxis::Z => d.2 = v,
-        }
-    }
-}
-
-/// The clickable division field.
-#[derive(Component, Clone, Copy)]
-pub struct DivField(pub DivAxis);
-
-/// Its text.
-#[derive(Component, Clone, Copy)]
-pub struct DivReadout(pub DivAxis);
-
-/// Which division field is being typed into, and what has been typed.
+/// **The divisions readout** — derived, not typed.
 ///
-/// Its own resource for the reason `SizeEdit` is: `rebuild_detail` runs on
-/// `resource_changed::<ImportState>`, and a keystroke landing there would rebuild the whole detail
-/// block per character.
-#[derive(Resource, Default)]
-pub struct DivEdit {
-    active: Option<(DivAxis, String)>,
-}
-
-impl DivEdit {
-    pub fn typing(&self) -> bool {
-        self.active.is_some()
-    }
-}
-
-/// Smallest and largest useful division. One is a tile with no inside; past nine the lattice is finer
-/// than the meshes it describes and an author is drawing, not authoring.
-const MIN_DIV: u32 = 1;
-const MAX_DIV: u32 = 9;
-
-fn on_div_click(
-    activate: On<Activate>,
-    fields: Query<&DivField>,
-    mut edit: ResMut<DivEdit>,
-    mut state: ResMut<ImportState>,
-) {
-    let Ok(f) = fields.get(activate.entity) else {
-        return;
-    };
-    // Starts empty, like every other field here — see `rename_candidate` for the bug that rule fixes.
-    edit.active = Some((f.0, String::new()));
-    state.status = format!("subgrid {}: type a division, Enter to keep it, Esc to leave it", f.0.label());
-}
-
-/// **Commit a typed division.** Pure, so it can be proved without an `App`.
+/// Divisions used to be three editable fields on the descriptor. They are now one number on the
+/// project (`project.ron`'s `divisions`), and a piece's lattice is derived from its own size, so
+/// there is nothing here to type into: a per-tile override would be a second way to say what the
+/// project already says, and the two would disagree the first time anybody used it.
 ///
-/// Split out of the key handler because driving a text field through synthetic input is flaky —
-/// the keystroke and the Enter can land in different frames, and a capture that shows the wrong
-/// answer tells you nothing about which half failed. This is the half worth pinning.
-///
-/// `Ok`/`Err` both carry the sentence to show: a refusal the author cannot read is a refusal that
-/// looks like nothing happening.
-fn commit_div(
-    grid: &mut emerge_core::descriptor::Subgrid,
-    axis: DivAxis,
-    raw: &str,
-) -> Result<String, String> {
-    if raw.is_empty() {
-        return Err("nothing typed; the subgrid is unchanged".to_owned());
-    }
-    let want: u32 = raw
-        .parse()
-        .map_err(|_| format!("`{raw}` is not a whole number"))?;
-    if !(MIN_DIV..=MAX_DIV).contains(&want) {
-        return Err(format!(
-            "a subgrid axis runs {MIN_DIV}..{MAX_DIV}; `{want}` is outside it"
-        ));
-    }
-    let mut div = grid.div;
-    axis.set(&mut div, want);
-    grid.div = div;
-    // Cells outside the new lattice would be values nothing can read — dropped here, and said out
-    // loud, rather than left to fail validation at save time.
-    let before = grid.cells.len();
-    grid.cells
-        .retain(|cell| cell.at.0 < div.0 && cell.at.1 < div.1 && cell.at.2 < div.2);
-    let dropped = before - grid.cells.len();
-    Ok(if dropped > 0 {
-        format!(
-            "subgrid {}x{}x{} — {dropped} cell(s) outside it were dropped",
-            div.0, div.1, div.2
-        )
-    } else {
-        format!("subgrid {}x{}x{}", div.0, div.1, div.2)
-    })
-}
-
-/// Digits only, filtered at the keystroke.
-fn div_keys(
-    mut events: MessageReader<KeyboardInput>,
-    mut edit: ResMut<DivEdit>,
-    mut project: ResMut<Project>,
-    mut state: ResMut<ImportState>,
-) {
-    for event in events.read() {
-        // Drained even while shut — see `cell_keys` for why.
-        if edit.active.is_none() || !event.state.is_pressed() {
-            continue;
-        }
-        match &event.logical_key {
-            Key::Enter => {
-                let Some((axis, raw)) = edit.active.take() else {
-                    return;
-                };
-                let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
-                    return;
-                };
-                match commit_div(&mut d.subgrid, axis, &raw) {
-                    Ok(said) => state.status = persist(&mut project, where_to, said),
-                    // Refused, so nothing changed and there is nothing to write.
-                    Err(said) => state.status = said,
-                }
-                continue;
-            }
-            Key::Escape => {
-                edit.active = None;
-                state.status = "subgrid unchanged".to_owned();
-            }
-            Key::Backspace => {
-                if let Some((_, raw)) = edit.active.as_mut() {
-                    raw.pop();
-                }
-            }
-            Key::Character(ch) => {
-                if let Some((_, raw)) = edit.active.as_mut() {
-                    if ch.chars().all(|c| c.is_ascii_digit()) && raw.len() < 1 {
-                        raw.push_str(ch);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Show the divisions, with a caret while one is being typed.
-fn refresh_div(
-    state: Res<ImportState>,
-    project: Res<Project>,
-    edit: Res<DivEdit>,
-    mut readouts: Query<(&DivReadout, &mut Text, &mut TextColor)>,
-    mut fields: Query<(&DivField, &mut BackgroundColor)>,
-) {
-    let div = state
-        .editing(&project.library)
-        .map(|d| d.subgrid.div)
-        .unwrap_or((3, 3, 3));
-    for (which, mut text, mut colour) in &mut readouts {
-        let editing = match &edit.active {
-            Some((axis, raw)) if *axis == which.0 => Some(raw),
-            _ => None,
-        };
-        let (want, tint) = match editing {
-            Some(raw) => (format!("{raw}_"), ACCENT),
-            None => (format!("{}", which.0.get(div)), TEXT),
-        };
-        if text.0 != want {
-            text.0 = want;
-        }
-        if colour.0 != tint {
-            colour.0 = tint;
-        }
-    }
-    for (which, mut bg) in &mut fields {
-        let want = if matches!(&edit.active, Some((a, _)) if *a == which.0) {
-            crate::chrome::SLOT_BG
-        } else {
-            ROW_BG
-        };
-        if bg.0 != want {
-            bg.0 = want;
-        }
-    }
-}
+/// What is left is worth showing, because an author placing an edge token needs to know what a cell
+/// is worth: the derived `x x y x z` and the subunit's size in millimetres.
+#[derive(Component)]
+pub struct DivReadout;
 
 /// Which facet of a cell a token is being typed into.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -444,11 +250,10 @@ pub struct NoteReadout;
 
 /// **Which cell is being edited, and what is being typed into it.**
 ///
-/// Its own resource, like `DivEdit`, but **not** for the same reason — and the comment that claimed
-/// so was wrong. `DivEdit` avoids a rebuild because `refresh_div` writes its readout in place, so
-/// `rebuild_detail` never watches it. `CellEdit` *is* watched (`resource_changed::<CellEdit>` in the
-/// plugin), and `cell_keys` deref-muts it on every character, so the detail block **does** rebuild
-/// per keystroke. It has to: the caret lives in the rebuilt tree, unlike `DivReadout`.
+/// Its own resource, and the reason is not the one the old comment gave. `CellEdit` *is* watched
+/// (`resource_changed::<CellEdit>` in the plugin), and `cell_keys` deref-muts it on every character,
+/// so the detail block **does** rebuild per keystroke. It has to: the caret lives in the rebuilt
+/// tree, unlike the plain `DivReadout`.
 ///
 /// What it is actually for is separation of concerns — which cell has the author's attention is not a
 /// property of the import scan, and folding it into `ImportState` would make every cell click look
@@ -534,7 +339,7 @@ fn note_keys(
             Key::Enter => {
                 let Some(raw) = edit.active.take() else { return };
                 let text = raw.trim().to_owned();
-                let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+                let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                     return;
                 };
                 // Empty clears, the same rule the edge and anchor tokens follow — one keystroke path
@@ -689,6 +494,91 @@ fn apply_verb(
     apply_verb_to(verb, &[at], edit, project, state);
 }
 
+/// The button that reads occupancy off the mesh. See [`scan_mesh`].
+#[derive(Component, Clone, Copy)]
+pub struct ScanMeshButton;
+
+/// **Mark every cell the mesh's geometry reaches, and say how many.**
+///
+/// The lattice is only worth authoring if occupancy comes off the mesh: at the shipped divisions a
+/// 3 m wall is 30 cells, and marking those by hand is not something anyone does twice.
+///
+/// `emerge_core::import::occupancy` explains the method and why it is vertices rather than a
+/// bounding box. Two rules live here rather than there:
+///
+/// * **`edge` and `anchor` survive.** Occupancy is a measurement; the tokens are an author's
+///   judgement, and a scan that erased them would make the button unusable on a tuned piece.
+/// * **The count is stated.** Vertex occupancy under-marks a large flat face with no vertex inside a
+///   cell — the middle of a tabletop — and "27 of 30 cells" is what tells an author to look.
+fn scan_mesh(project: &mut Project, state: &mut ImportState) {
+    let div = match focused_div(state, project) {
+        Ok(div) => div,
+        Err(why) => {
+            state.status = why;
+            return;
+        }
+    };
+    let Some(d) = state.editing(&project.measured) else {
+        return;
+    };
+    let Some(mesh) = d.mesh.clone() else {
+        state.status = format!("`{}` has no mesh to scan", d.id);
+        return;
+    };
+
+    let path = project.root.join("assets").join(&mesh);
+    let cells = match emerge_core::glb::Glb::open(&path)
+        .and_then(|glb| emerge_core::import::occupancy(&glb, div))
+    {
+        Ok(cells) => cells,
+        Err(why) => {
+            state.status = format!("{mesh}: {why}");
+            return;
+        }
+    };
+
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+        return;
+    };
+    let grid = d.lattice_mut();
+    for &at in &cells {
+        grid.set_solid(at, div);
+    }
+    d.settle_lattice();
+    let total = emerge_core::descriptor::Subgrid::volume(div);
+    let said = format!(
+        "scanned {mesh}: {} of {total} cells solid",
+        cells.len()
+    );
+    state.status = persist(project, where_to, said);
+}
+
+/// The chip.
+fn on_scan_mesh(
+    activate: On<Activate>,
+    buttons: Query<&ScanMeshButton>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if buttons.get(activate.entity).is_err() {
+        return;
+    }
+    scan_mesh(&mut project, &mut state);
+}
+
+/// **The lattice the focused piece stands on**, or the sentence explaining why it has none.
+///
+/// Every reader and every writer of the lattice goes through this, so the grid an author clicks, the
+/// grid the gizmos draw and the grid a write is range-checked against are one grid. Taken by shared
+/// reference so a caller can derive the divisions *before* borrowing the descriptor mutably — which
+/// is the order every editing path needs.
+fn focused_div(state: &ImportState, project: &Project) -> Result<(u32, u32, u32), String> {
+    let Some(d) = state.editing(&project.measured) else {
+        return Err("no tile is selected".to_owned());
+    };
+    project.divisions_of(d)
+}
+
 /// **Do one verb to a set of cells.** One cell from a chip, a row, a column or a whole layer from a
 /// header — the same code either way, so a header cannot drift from what the chip does.
 fn apply_verb_to(
@@ -701,9 +591,18 @@ fn apply_verb_to(
     edit.verb = verb;
     let Some(&first) = cells.first() else { return };
     let many = cells.len() > 1;
+    // Derived before the mutable borrow, because a write is range-checked against it and the
+    // descriptor it comes from is the one about to be edited.
+    let div = match focused_div(state, project) {
+        Ok(div) => div,
+        Err(why) => {
+            state.status = why;
+            return;
+        }
+    };
     match verb {
         CellVerb::Solid => {
-            let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
             // **A span is set, not toggled.** Toggling many cells at once flips a mixed row into its
@@ -711,27 +610,29 @@ fn apply_verb_to(
             // the toggle, because there the before and after are both visible.
             let said = if many {
                 for &at in cells {
-                    if d.subgrid.at(at).is_none_or(|c| !c.solid) {
-                        d.subgrid.toggle_solid(at);
-                    }
+                    d.lattice_mut().set_solid(at, div);
                 }
                 format!("{} cells solid", cells.len())
             } else {
-                match d.subgrid.toggle_solid(first) {
+                match d.lattice_mut().toggle_solid(first, div) {
                     Some(true) => format!("cell {},{},{} is solid", first.0, first.1, first.2),
                     Some(false) => format!("cell {},{},{} is open", first.0, first.1, first.2),
                     None => "that cell is outside the lattice".to_owned(),
                 }
             };
+            d.settle_lattice();
             state.status = persist(project, where_to, said);
         }
         CellVerb::Clear => {
-            let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+            let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                 return;
             };
-            for &at in cells {
-                d.subgrid.clear(at);
+            if let Some(grid) = d.subgrid.as_mut() {
+                for &at in cells {
+                    grid.clear(at);
+                }
             }
+            d.settle_lattice();
             let said = if many {
                 format!("{} cells cleared", cells.len())
             } else {
@@ -777,16 +678,22 @@ fn lattice_keys(
     mut project: ResMut<Project>,
     mut state: ResMut<ImportState>,
 ) {
-    let Some((dx, dy, dz)) = state.editing(&project.library).map(|d| d.subgrid.div) else {
+    let Ok((dx, dy, dz)) = focused_div(&state, &project) else {
         return;
     };
-    // `Subgrid::validate` refuses a zero axis in a file, but a lattice being typed into can hold one
-    // for a keystroke, and `dy - 1` on it would wrap to u32::MAX.
+    // `divisions` refuses a zero, but this is a cursor and `dy - 1` on one would wrap to u32::MAX.
     if dx == 0 || dy == 0 || dz == 0 {
         return;
     }
 
     let pressed = |a| keys::just_pressed(&keyboard, live.0, a);
+
+    // Everything reachable by mouse is reachable by key (`docs/ui.md` §4.2), so the scan chip has
+    // one too — and it goes through the same `scan_mesh` the chip calls, not a second copy.
+    if pressed(Action::ScanMesh) {
+        scan_mesh(&mut project, &mut state);
+        return;
+    }
 
     for (action, verb) in [
         (Action::CellSolid, CellVerb::Solid),
@@ -883,19 +790,28 @@ fn cell_keys(
                     },
                 };
                 let token = emerge_core::naming::to_snake_case(&raw);
-                let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+                // Before the mutable borrow: the write is range-checked against these.
+                let div = match focused_div(&state, &project) {
+                    Ok(div) => div,
+                    Err(why) => {
+                        state.status = why;
+                        return;
+                    }
+                };
+                let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
                     return;
                 };
                 let mut wrote = 0usize;
                 for &at in &targets {
                     let ok = match field {
-                        CellField::Edge => d.subgrid.set_edge(at, &token),
-                        CellField::Anchor => d.subgrid.set_anchor(at, &token),
+                        CellField::Edge => d.lattice_mut().set_edge(at, div, &token),
+                        CellField::Anchor => d.lattice_mut().set_anchor(at, div, &token),
                     };
                     if ok.is_some() {
                         wrote += 1;
                     }
                 }
+                d.settle_lattice();
                 let said = match (wrote, token.is_empty(), targets.first()) {
                     (0, _, _) => "that cell is outside the lattice".to_owned(),
                     (1, true, Some(at)) => format!("cell {},{},{} token cleared", at.0, at.1, at.2),
@@ -946,7 +862,7 @@ fn on_fill_header(
     let Ok(header) = headers.get(activate.entity) else {
         return;
     };
-    let Some((dx, _, dz)) = state.editing(&project.library).map(|d| d.subgrid.div) else {
+    let Ok((dx, _, dz)) = focused_div(&state, &project) else {
         return;
     };
     let y = header.layer;
@@ -985,10 +901,13 @@ fn refresh_cells(
     mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>)>,
     mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>)>,
 ) {
-    let Some(d) = state.editing(&project.library) else {
+    let Some(d) = state.editing(&project.measured) else {
         return;
     };
-    let grid = &d.subgrid;
+    // A piece with no marked cells reads as an empty lattice rather than as a missing one — the
+    // grid is still drawn, it just has nothing in it.
+    let empty = emerge_core::descriptor::Subgrid::default();
+    let grid = d.subgrid.as_ref().unwrap_or(&empty);
 
     for (button, layer, mut bg) in &mut cells {
         let selected = cell_edit.at == Some((button.0, layer.0, button.1));
@@ -1092,6 +1011,11 @@ impl ImportState {
     /// **One discriminant, not two selections.** `selected_library_id.is_some()` *is* "the library
     /// list has focus"; picking a candidate clears it. Two lists that could each claim the pane is
     /// how an edit lands on the piece the author is not looking at.
+    ///
+    /// **Pass `Project::measured`, not `Project::library`.** The pane edits the measurements file,
+    /// so it must show the measurements: displaying a wall stretched to this facility's 2.40 m while
+    /// writing the mesh's authored height back is the "preview that lies" this crate keeps being
+    /// written to avoid.
     pub fn editing<'a>(&'a self, library: &'a emerge_core::library::Library) -> Option<&'a Descriptor> {
         match &self.selected_library_id {
             Some(id) => library.get(id),
@@ -1120,17 +1044,40 @@ impl ImportState {
     }
 }
 
-/// **Write the library back to disk, or say why it could not be.** The one writer.
+/// **Write the measurements back to disk, or say why they could not be.** The one writer.
 ///
 /// `commit_candidate` and `remove_tile` each grew their own copy of resolve → remeasure → `to_ron` →
 /// `save_atomic`; a third copy, for lattice edits, is the point at which they would have drifted. The
 /// masks and triangle counts are derived from the library, so they move with it or they are stale.
+///
+/// # It writes `measured`, not `library`
+///
+/// This used to serialize the **layered** library over `library_path`. Under `--kit site` — whose
+/// `project.ron` stretches `site/wall` to a 2.40 m facility — toggling one lattice cell therefore
+/// wrote that facility's wall height into the measurements file the kit exists to share, and the
+/// next load applied the patches again on top of it. A library is measurements; a project's
+/// architecture belongs in `project.ron` and must not leak downward into it.
+///
+/// # Re-layering happens *before* the write
+///
+/// Order is not incidental. `Policy::apply` fails when a patch matches nothing, so removing the last
+/// piece a rule named is a real, reachable failure — and if the file were already written, `measured`
+/// would be on disk while `library` still described the world before the edit. Re-layering first
+/// means a refusal costs nothing but the message.
 fn write_library(project: &mut Project) -> Result<std::path::PathBuf, String> {
-    project.masks = project.library.resolve(&project.vocab)?;
-    project.remeasure_triangles();
+    // Rebuild the layered view from the edited measurements, and prove it still holds together,
+    // before anything touches the disk.
+    let library = project.policy.apply(&project.measured)?;
+    library.validate_lattices(project.policy.divisions)?;
+    let masks = library.resolve(&project.vocab)?;
+
     let path = project.library_path.clone();
-    let text = project.library.to_ron()?;
+    let text = project.measured.to_ron()?;
     emerge_core::ron_surgery::save_atomic(&path, &text)?;
+
+    project.library = library;
+    project.masks = masks;
+    project.remeasure_triangles();
     Ok(path)
 }
 
@@ -1287,7 +1234,6 @@ impl Plugin for TilesPlugin {
         app.init_resource::<Mode>()
             .init_resource::<ImportState>()
             .init_resource::<MapView>()
-            .init_resource::<DivEdit>()
             .init_resource::<CellEdit>()
             .init_resource::<NoteEdit>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
@@ -1313,9 +1259,7 @@ impl Plugin for TilesPlugin {
                     // run the field first, clear its own typing flag, and let the same `Enter` fall
                     // through to "add to library". Six descriptors arrived in `library.ron` that way.
                     rename_candidate.in_set(crate::keys::Phase::Text),
-                    div_keys.in_set(crate::keys::Phase::Text),
                     cell_keys.in_set(crate::keys::Phase::Text),
-                    refresh_div,
                     style_tabs,
                     rebuild_candidates.run_if(resource_changed::<ImportState>.or_else(resource_changed::<crate::filter::Filters>)),
                     // **Structure only.** The selection and the carets are repainted in place by
@@ -1334,9 +1278,9 @@ impl Plugin for TilesPlugin {
                 (note_keys.in_set(crate::keys::Phase::Text), refresh_cells),
             )
             .add_observer(on_tab_click)
-            .add_observer(on_div_click)
             .add_observer(on_cell_click)
             .add_observer(on_cell_verb)
+            .add_observer(on_scan_mesh)
             .add_observer(on_fill_header)
             .add_observer(on_note_click)
             .add_observer(on_candidate_click)
@@ -1709,7 +1653,7 @@ fn cycle_mount(
     }
     let surfaces: Vec<String> = project.vocab.surfaces.names().map(str::to_owned).collect();
     let options = mount_options(&surfaces);
-    let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
     let next = d
@@ -1888,7 +1832,7 @@ fn on_tag_chip(
     // library tile edited an invisible candidate: the chip did not light, the descriptor did not
     // change, and nothing reached disk. The one accessor exists so this cannot happen; missing it
     // here is what it looks like when it does.
-    let Some((d, where_to)) = state.editing_mut(&mut project.library) else {
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
         return;
     };
     let list = chip.axis.list(d);
@@ -2077,7 +2021,7 @@ fn drive_preview(
         clear(&mut commands);
         return;
     }
-    let Some(d) = state.editing(&project.library) else {
+    let Some(d) = state.editing(&project.measured) else {
         clear(&mut commands);
         return;
     };
@@ -2141,15 +2085,18 @@ const LATTICE_SET: Color = Color::srgb(0.62, 0.52, 0.82);
 /// crowding failure `docs/ui.md` §1.2 names, on a tile instead of a panel — the lattice would hide the
 /// mesh it describes.
 fn draw_subgrid(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizmos) {
-    let Some(desc) = state.editing(&project.library) else {
+    let Some(desc) = state.editing(&project.measured) else {
         return;
     };
     let Some((w, d)) = desc.extent.footprint else {
         return;
     };
     let h = desc.extent.height.unwrap_or(0.0);
-    let g = &desc.subgrid;
-    let (dx, dy, dz) = g.div;
+    let empty = emerge_core::descriptor::Subgrid::default();
+    let g = desc.subgrid.as_ref().unwrap_or(&empty);
+    let Ok((dx, dy, dz)) = project.divisions_of(desc) else {
+        return;
+    };
     if dx == 0 || dy == 0 || dz == 0 {
         return;
     }
@@ -2194,7 +2141,7 @@ fn draw_subgrid(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizm
 }
 
 fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizmos) {
-    let Some(desc) = state.editing(&project.library) else {
+    let Some(desc) = state.editing(&project.measured) else {
         return;
     };
     let Some((w, d)) = desc.extent.footprint else {
@@ -2471,7 +2418,7 @@ fn rebuild_detail(
             // **The pane follows the focus, not the candidate list.** It used to return here unless a
             // candidate was selected, which is why an accepted tile's lattice could only be reached
             // by hand-editing `library.ron`.
-            let Some(d) = state.editing(&project.library) else {
+            let Some(d) = state.editing(&project.measured) else {
                 return;
             };
             // The candidate behind the focus, when the focus IS a candidate. `measured` and the
@@ -2616,66 +2563,45 @@ fn rebuild_detail(
                 ));
             });
 
-            let grid = &d.subgrid;
-            let (dx, dy, dz) = grid.div;
-            let marked = d.subgrid.cells.len();
-
-            // **The subgrid.** Divisions first, because they frame every cell below them.
-            crate::chrome::section(p, "SUBGRID");
-            // **Divisions and the layer picker share a row.** They are one question — which lattice,
-            // and which slice of it — and stacking them put the grid itself a line further down for
-            // no gain.
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(crate::chrome::GAP_TIGHT),
-                flex_wrap: FlexWrap::Wrap,
-                ..default()
-            })
-            .with_children(|row| {
-                for axis in [DivAxis::X, DivAxis::Y, DivAxis::Z] {
-                    row.spawn((
-                        Node {
-                            width: Val::Px(14.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        Text::new(axis.label()),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
+            // A piece whose size is not measured yet has no derivable lattice, and the honest thing
+            // is to say which piece and why rather than draw an empty grid that looks authored.
+            let div = match project.divisions_of(d) {
+                Ok(div) => div,
+                Err(why) => {
+                    crate::chrome::section(p, "SUBGRID");
+                    p.spawn((
+                        Text::new(why),
+                        TextColor(ACCENT),
+                        TextFont::from_font_size(9.0),
                     ));
-                    row.spawn((
-                        UiButton,
-                        Hovered::default(),
-                        DivField(axis),
-                        Node {
-                            width: Val::Px(30.0),
-                            // **A stated minimum height.** Padding alone sized this from its text,
-                            // and the text starts empty — the laid-out field measured 7 logical px
-                            // tall, which is not a target anyone can hit on purpose.
-                            min_height: Val::Px(16.0),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
-                            flex_shrink: 0.0,
-                            margin: UiRect::right(Val::Px(crate::chrome::GAP_ROW)),
-                            ..default()
-                        },
-                        BackgroundColor(ROW_BG),
-                    ))
-                    .with_children(|f| {
-                        f.spawn((
-                            Text::new(""),
-                            TextColor(TEXT),
-                            TextFont::from_font_size(11.0),
-                            DivReadout(axis),
-                        ));
-                    });
+                    return;
                 }
-            });
+            };
+            let (dx, dy, dz) = div;
+            let empty = emerge_core::descriptor::Subgrid::default();
+            let grid = d.subgrid.as_ref().unwrap_or(&empty);
+            let marked = grid.cells.len();
 
+            // **The subgrid.** Its shape first, because it frames every cell below it.
+            crate::chrome::section(p, "SUBGRID");
+            // **Derived, so it reads rather than edits.** The divisions come from this piece's own
+            // size and the project's `divisions`, which is what lets an edge token on a 3 m wall
+            // mean the same thing as one on a 0.5 m chair. The subunit's size in millimetres is
+            // there because that is the number an author placing a token actually needs.
+            let subunit_mm = emerge_core::grid::SNAP / project.policy.divisions as f32 * 1000.0;
             p.spawn((
-                Text::new(format!("{marked} of {} cells marked", d.subgrid.volume())),
+                Text::new(format!("{dx} x {dy} x {dz} cells of {subunit_mm:.0} mm")),
+                TextColor(TEXT),
+                TextFont::from_font_size(11.0),
+                DivReadout,
+            ));
+            p.spawn((
+                Text::new(format!(
+                    "{marked} of {} marked — {} division(s) per {:.1} m tile, from project.ron",
+                    emerge_core::descriptor::Subgrid::volume(div),
+                    project.policy.divisions,
+                    emerge_core::grid::SNAP,
+                )),
                 TextColor(DIM),
                 TextFont::from_font_size(9.0),
                 Node {
@@ -2853,6 +2779,30 @@ fn rebuild_detail(
                             ));
                         });
                 }
+
+                // **Occupancy from the mesh, on its own chip.** Nobody hand-marks a lattice this
+                // size, so the cells have to come off the geometry — but this is a button and never
+                // runs on import, because it overwrites hand-authored cells and an author who tuned
+                // a lattice must not lose it to re-importing.
+                chips
+                    .spawn((
+                        UiButton,
+                        Hovered::default(),
+                        ScanMeshButton,
+                        Node {
+                            padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                            margin: UiRect::left(Val::Px(crate::chrome::GAP_ROW)),
+                            ..default()
+                        },
+                        BackgroundColor(ROW_BG),
+                    ))
+                    .with_children(|chip| {
+                        chip.spawn((
+                            Text::new("scan mesh"),
+                            TextColor(ACCENT),
+                            TextFont::from_font_size(10.0),
+                        ));
+                    });
             });
 
             // Tag chips, one row per axis. Every token the project has, lit when this piece carries
@@ -2933,66 +2883,176 @@ fn rebuild_detail(
     }
 }
 
+/// **What `write_library` writes**, which is the whole of the kit-corruption fix.
+///
+/// The defect these pin: `write_library` used to serialize the *layered* library over
+/// `library_path`, so under `--kit site` — whose `project.ron` stretches walls to a 2.40 m facility
+/// — toggling one lattice cell wrote that facility's wall height into the measurements file the kit
+/// exists to share, and the next load applied the patch again on top of it.
 #[cfg(test)]
-mod subgrid_edit_tests {
+mod write_library_tests {
     use super::*;
-    use emerge_core::descriptor::{SubCell, Subgrid};
+    use emerge_core::descriptor::{Align, Descriptor, Extent};
+    use emerge_core::library::{Library, LIBRARY_VERSION};
+    use emerge_core::policy::{Match, Patch, Policy};
 
-    fn grid() -> Subgrid {
-        Subgrid::default()
-    }
+    /// The mesh is authored at 1.00 m; this facility builds its walls to 2.40 m.
+    const AUTHORED_HEIGHT: f32 = 1.0;
+    const STRETCH: f32 = 2.4;
 
-    #[test]
-    fn a_typed_division_lands_on_the_axis_it_was_typed_into() {
-        let mut g = grid();
-        let said = commit_div(&mut g, DivAxis::X, "5").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(g.div, (5, 3, 3), "only x moves");
-        assert!(said.contains("5x3x3"), "{said}");
-
-        commit_div(&mut g, DivAxis::Y, "2").unwrap_or_else(|e| panic!("{e}"));
-        commit_div(&mut g, DivAxis::Z, "9").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(g.div, (5, 2, 9));
-    }
-
-    /// **Shrinking drops what no longer fits, and says so.** Silently keeping a cell at (2,0,0) in a
-    /// 1-wide lattice would leave a value nothing can read and a file that fails validation later,
-    /// somewhere with no author attached.
-    #[test]
-    fn shrinking_the_lattice_drops_the_cells_outside_it_and_reports_them() {
-        let mut g = Subgrid {
-            div: (3, 3, 3),
-            cells: vec![
-                SubCell { at: (0, 0, 0), ..SubCell::default() },
-                SubCell { at: (2, 0, 0), ..SubCell::default() },
-                SubCell { at: (0, 2, 0), ..SubCell::default() },
-            ],
-        };
-        let said = commit_div(&mut g, DivAxis::X, "1").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(g.div, (1, 3, 3));
-        assert_eq!(g.cells.len(), 2, "the cell at x=2 no longer exists");
-        assert!(g.cells.iter().all(|c| c.at.0 < 1));
-        assert!(said.contains("1 cell(s) outside it were dropped"), "{said}");
-        // And the surviving lattice is one the schema will accept.
-        assert!(g.validate("desk").is_ok());
-    }
-
-    #[test]
-    fn a_division_outside_the_useful_range_is_refused_with_the_range() {
-        let mut g = grid();
-        for bad in ["0", "10", "99"] {
-            let e = commit_div(&mut g, DivAxis::X, bad)
-                .err()
-                .unwrap_or_else(|| panic!("`{bad}` accepted"));
-            assert!(e.contains("runs 1..9"), "{e}");
+    fn wall() -> Descriptor {
+        Descriptor {
+            id: "wall".into(),
+            mesh: Some("wall.glb".into()),
+            extent: Extent {
+                footprint: Some((3.0, 0.5)),
+                height: Some(AUTHORED_HEIGHT),
+            },
+            mount: Some(emerge_core::descriptor::Mount::OnFloor),
+            ..Descriptor::default()
         }
-        assert_eq!(g.div, (3, 3, 3), "a refusal changes nothing");
     }
 
+    fn stretching_policy() -> Policy {
+        Policy {
+            patches: vec![Patch {
+                // By id rather than kind, so these stay about the layering and do not need a
+                // vocabulary to hold a token.
+                matches: Match::Id("wall".into()),
+                because: "this facility builds walls to 2.40 m".into(),
+                patch: Descriptor {
+                    align: Align {
+                        stretch_y: Some(STRETCH),
+                        ..Align::default()
+                    },
+                    ..Descriptor::default()
+                },
+            }],
+            ..Policy::default()
+        }
+    }
+
+    /// A project in a temp dir, opened the way the editor opens one.
+    fn project_in(dir: &std::path::Path, policy: Policy) -> Project {
+        let measured = Library {
+            version: LIBRARY_VERSION,
+            note: None,
+            descriptors: vec![wall()],
+        };
+        let library = policy.apply(&measured).unwrap_or_else(|e| panic!("{e}"));
+        Project {
+            root: dir.to_path_buf(),
+            emerge_dir: dir.to_path_buf(),
+            library_path: dir.join("library.ron"),
+            vocab: emerge_core::vocab::Vocabularies::default(),
+            measured,
+            library,
+            policy,
+            masks: Vec::new(),
+            map: emerge_core::map::Map {
+                name: "t".into(),
+                ..emerge_core::map::Map::default()
+            },
+            map_path: dir.join("t.map.ron"),
+            dirty: false,
+            triangles: vec![0],
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("emerge_mapper_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        dir
+    }
+
+    /// **The bug, end to end.** Editing a lattice under a stretching policy must leave the authored
+    /// height in the file, not the facility's.
     #[test]
-    fn committing_an_empty_field_changes_nothing() {
-        let mut g = grid();
-        let e = commit_div(&mut g, DivAxis::X, "").err().unwrap_or_else(|| panic!("accepted"));
-        assert!(e.contains("nothing typed"), "{e}");
-        assert_eq!(g.div, (3, 3, 3));
+    fn the_policy_layer_never_reaches_the_measurements_file() {
+        let dir = temp_dir("policy_leak");
+        let mut project = project_in(&dir, stretching_policy());
+
+        // The layered view really is stretched — otherwise this test proves nothing.
+        assert_eq!(
+            project.library.get("wall").and_then(|d| d.align.stretch_y),
+            Some(STRETCH),
+            "the policy must actually apply, or this test cannot fail"
+        );
+
+        project
+            .measured
+            .descriptors[0]
+            .lattice_mut()
+            .set_solid((0, 0, 0), (6, 2, 1))
+            .unwrap_or_else(|| panic!("in range"));
+        write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
+
+        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
+        let wall = back.get("wall").unwrap_or_else(|| panic!("wall survives"));
+        assert_eq!(
+            wall.extent.height,
+            Some(AUTHORED_HEIGHT),
+            "the measurements file must keep the authored height, not this facility's"
+        );
+        assert_eq!(
+            wall.align.stretch_y, None,
+            "`stretch_y` is this project's architecture and belongs in project.ron alone"
+        );
+        assert!(
+            wall.subgrid.as_ref().is_some_and(|g| g.cells.len() == 1),
+            "the lattice edit itself must still have been written"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Re-opening must not stack the patch.** The other half of the same defect: a baked-in
+    /// stretch gets multiplied again by the next load.
+    #[test]
+    fn a_second_write_does_not_apply_the_policy_twice() {
+        let dir = temp_dir("no_double");
+        let mut project = project_in(&dir, stretching_policy());
+
+        for _ in 0..3 {
+            write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
+        }
+        assert_eq!(
+            project.library.get("wall").and_then(|d| d.align.stretch_y),
+            Some(STRETCH),
+            "three writes must leave one stretch, not three"
+        );
+
+        let written = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        let back = Library::parse(&written).unwrap_or_else(|e| panic!("{e}"));
+        let reopened = project.policy.apply(&back).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            reopened.get("wall").and_then(|d| d.align.stretch_y),
+            Some(STRETCH),
+            "re-opening the written file must reproduce the same layered library"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A policy that no longer matches aborts the write rather than half-doing it.** Removing the
+    /// last piece a rule named is reachable, and the file must be left as it was.
+    #[test]
+    fn a_policy_that_stops_matching_refuses_the_write_and_leaves_the_file_alone() {
+        let dir = temp_dir("abort");
+        let mut project = project_in(&dir, stretching_policy());
+        write_library(&mut project).unwrap_or_else(|e| panic!("{e}"));
+        let before = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+
+        // The only `wall` is gone, so the rule about walls matches nothing.
+        project.measured.descriptors.clear();
+        let err = write_library(&mut project).err().unwrap_or_default();
+        assert!(err.contains("matches no descriptor"), "{err}");
+
+        let after = std::fs::read_to_string(dir.join("library.ron")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(before, after, "a refused write must not have touched the file");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

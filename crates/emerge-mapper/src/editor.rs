@@ -926,7 +926,14 @@ fn refresh_size(
 pub struct EdgeFaults(pub Vec<emerge_core::adjacency::Fault>);
 
 fn check_edges(project: Res<Project>, mut faults: ResMut<EdgeFaults>) {
-    faults.0 = emerge_core::adjacency::faults(&project.map, &project.library, CELL);
+    // The **layered** library, because that is what the map places — and this project's divisions,
+    // because a face's length is derived from a piece's size and how finely the project divides.
+    faults.0 = emerge_core::adjacency::faults(
+        &project.map,
+        &project.library,
+        CELL,
+        project.policy.divisions,
+    );
 }
 
 /// Outline both halves of every fault, so the sentence in the panel has something to point at.
@@ -1103,7 +1110,6 @@ pub fn not_typing(
     edit: Res<SizeEdit>,
     import: Res<crate::tiles::ImportState>,
     filters: Res<crate::filter::Filters>,
-    div: Res<crate::tiles::DivEdit>,
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
 ) -> bool {
@@ -1112,7 +1118,6 @@ pub fn not_typing(
         && edit.active.is_none()
         && import.renaming.is_none()
         && !filters.typing()
-        && !div.typing()
         && !cell.typing()
         && !note.typing()
 }
@@ -1133,7 +1138,6 @@ pub fn sense_context(
     edit: Res<SizeEdit>,
     import: Res<crate::tiles::ImportState>,
     filters: Res<crate::filter::Filters>,
-    div: Res<crate::tiles::DivEdit>,
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
     mut live: ResMut<keys::Live>,
@@ -1143,7 +1147,6 @@ pub fn sense_context(
         || edit.active.is_some()
         || import.renaming.is_some()
         || filters.typing()
-        || div.typing()
         || cell.typing()
         || note.typing();
     let want = keys::Live(keys::live(mode.context(), typing));
@@ -2502,11 +2505,20 @@ mod tests {
             emerge_dir: std::path::PathBuf::from("assets/emerge"),
             library_path: std::path::PathBuf::from("assets/emerge/library.ron"),
             vocab: emerge_core::vocab::Vocabularies::default(),
+            // No policy, so the measurements and the layered library are the same set — which is
+            // what these tests are about. `write_library`'s own tests are the ones that pull them
+            // apart.
+            measured: Library {
+                version: LIBRARY_VERSION,
+                note: None,
+                descriptors: descriptors.clone(),
+            },
             library: Library {
                 version: LIBRARY_VERSION,
                 note: None,
                 descriptors,
             },
+            policy: emerge_core::policy::Policy::default(),
             masks: Vec::new(),
             map: Map {
                 name: "test_map".into(),

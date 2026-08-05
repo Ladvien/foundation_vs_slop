@@ -149,12 +149,20 @@ fn the_authored_break_room_still_loads() {
         .unwrap_or_else(|e| panic!("assets/emerge/break_room.map.ron: {e}"));
     let map = Map::parse(&text).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(map.name, "break_room");
-    assert_eq!(map.placements.len(), 6, "a fridge, a table, three chairs, a light");
+    // The armchair arrived with the lattice (`5ba484a`) as the fixture for the off-square-yaw rule —
+    // `adjacency.rs` names it in `an_undeclared_tile_at_an_odd_yaw_is_not_a_fault` — and this count
+    // was not moved with it, so the fixture test has been failing since.
+    assert_eq!(
+        map.placements.len(),
+        7,
+        "a fridge, a table, three chairs, a light, and the yaw-240 armchair"
+    );
 
     // Through the real load path — the library layered with this project's policy, the same call the
     // game and the editor both make — so a descriptor the library stopped defining fails here.
     let library = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
-        .unwrap_or_else(|e| panic!("{e}"));
+        .unwrap_or_else(|e| panic!("{e}"))
+        .library;
     for p in &map.placements {
         assert!(
             library.get(&p.descriptor).is_some(),
@@ -165,4 +173,70 @@ fn the_authored_break_room_still_loads() {
     }
     // And every height resolves — the check that would catch a stacked piece whose host went away.
     emerge_core::stack::resolve_y(&map, &library).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// **What the shipped kits' lattices actually come out as**, now that divisions are derived from a
+/// piece's own size and the project's `divisions` rather than authored per descriptor.
+///
+/// Worth pinning against the real kit rather than only against synthetic extents, because the real
+/// kit turned out to say something the synthetic case could not: see below.
+#[test]
+fn the_site_kit_derives_the_lattices_its_architecture_implies() {
+    let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let div = |id: &str| {
+        let d = layered
+            .library
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} is in the kit"));
+        emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, id)
+            .unwrap_or_else(|e| panic!("{e}"))
+    };
+
+    // The 2.40 m pieces all agree, which is the property the change exists to give: a wall, a
+    // corner, a window and a column present the same five rows and their edge tokens are comparable.
+    let wall = div("site/wall");
+    assert_eq!(wall.1, 5, "a 2.40 m wall is five 0.5 m layers");
+    for id in ["site/wall_corner", "site/wall_window", "site/column"] {
+        assert_eq!(div(id).1, wall.1, "{id} must present the same face height as a wall");
+    }
+
+    // **And the doorway deliberately does not.** This facility builds WallDoorway to 2.00 m and
+    // WallHeader to 0.40 m — `project.ron` says so in as many words — because a doorway is a 2 m
+    // opening with a header stacked above it to reach the wall's 2.40 m. So a doorway's face is four
+    // rows against a wall's five, and `adjacency::may_abut` refuses them.
+    //
+    // That refusal is the honest answer and it is new. Under the old per-descriptor `div: (3,3,3)`
+    // both pieces had three layers whatever their height, so they "matched" — a doorway's 0.67 m
+    // band compared against a wall's 0.80 m band, which is precisely the incommensurability this
+    // change removes. Whether the vertical seam should instead be checked against the
+    // doorway-plus-header *stack* is a real question, and it is now answerable because the numbers
+    // are real; it was not before.
+    assert_eq!(div("site/wall_doorway").1, 4, "a 2.01 m doorway is four layers");
+    assert_eq!(div("site/wall_header").1, 1, "a 0.40 m header is one");
+    assert_ne!(
+        div("site/wall_doorway").1,
+        wall.1,
+        "a doorway is shorter than a wall, and the lattice must say so rather than pretend otherwise"
+    );
+}
+
+/// The default (furniture) project's lattices, and the guard that nothing derives an absurd one.
+#[test]
+fn the_furniture_library_derives_workable_lattices() {
+    let layered = emerge_core::policy::layered_library(std::path::Path::new("assets/emerge"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(layered.policy.divisions, 1, "the shipped setting is a 0.5 m subunit");
+
+    for d in &layered.library.descriptors {
+        let div = emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, &d.id)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let volume = emerge_core::descriptor::Subgrid::volume(div);
+        assert!(volume > 0, "{} derives an empty lattice", d.id);
+        assert!(
+            volume <= emerge_core::library::MAX_LATTICE_CELLS,
+            "{} derives {volume} cells, past the ceiling",
+            d.id
+        );
+    }
 }
