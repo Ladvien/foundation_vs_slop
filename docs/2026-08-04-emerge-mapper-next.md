@@ -1,5 +1,10 @@
 # emerge-mapper — what to do next (handoff, 2026-08-04, second session)
 
+> **Superseded, 2026-08-05.** Everything in §2 below is done, and six of the eight findings in
+> §3. Read `docs/2026-08-05-emerge-mapper-status.md` for the current state. **§4 of this
+> document is still accurate and still worth your time**, which is why it is kept rather than
+> replaced.
+
 Read `docs/2026-08-04-emerge-mapper-handoff.md` first: it is the no-prior-context document and its
 §4 "Traps this work paid for" is still accurate and still worth your time. This one is narrower — it
 is the *recommendation list*, written at the end of a long session by the agent that made the mess it
