@@ -892,7 +892,21 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
   **So the discriminating band is `0.007 → 0.771`, a factor of ~110.** Any threshold in it separates "watched" from "ignored" cleanly. The shipped `0.006` is the one place it cannot: just below the diffusion floor. The evolvable band `(0.0, 0.05)` is therefore *mostly* correct — only its bottom sliver `(0, ~0.007)` is pathological, and the authored default landed in exactly that sliver.
 
-  **Recommended value: `0.05`** — the top of the evolvable band. ~7.5x clear of the diffusion floor and still ~15x below the weakest watched reading (0.771 at maximum range), so it cannot be tripped by residue and cannot miss a genuine look. It also stays an order of magnitude under the containment rule's `0.4`, preserving the documented "generating but not yet being contained" band. Anything in `0.02`–`0.05` is defensible on the same numbers.
+  **`0.05` was tried, and it is not the fix — the threshold is not the root cause.** Applied together with its paired containment ceiling (`0.003` → `0.025`; the two are documented as moving together, and *both* shipped numbers sat inside the `0.0025–0.0067` diffusion floor, so the feed always generated **and** containment was a coin flip on where the squad stood). With that pair, `watching_the_feed_makes_it_generate_and_ignoring_it_stops` **passes** — and `the_watch_feed_fires_in_passive_play_on_the_held_in_seeds` starts failing, with the number that explains everything:
+
+  | seed | nearest squad approach to a screen | peak ATTENTION at the screen |
+  |---|---|---|
+  | `0x5c09191` | 13.8 m | 0.009 |
+  | `0x1ce5` | 15.1 m | 0.012 |
+  | `0xfeed` | 13.1 m | 0.028 |
+
+  **`broadcast.spawn_min_dist` is 16.0 tiles and `fog::VISION_RADIUS` is 8.** The anomaly is seeded at twice the distance its own mechanic can reach, and on every held-in seed the squad's closest pass is 13–15 m, so a screen is **never** in the line-of-sight set. The only thing that ever reaches it is diffusion. That makes the two oracles jointly unsatisfiable: a threshold above the noise floor makes the feed a prop (`emissions 0`), and a threshold inside the noise floor makes "look away to contain it" meaningless. `0.006` bought the second; `0.05` buys the first. Neither is the mechanic working.
+
+  Reverted, so the shipped game is unchanged and no half-finished retune sits in the branch.
+
+  **The decision is placement, not tuning.** Options, none costed: (a) bring `spawn_min_dist` under `VISION_RADIUS` — tried at `6.0` and screens then sit permanently in sight, so "ignoring" fails; the usable window is narrow and knife-edged, and `16.0`'s comment ("found, not handed over") is the intent it would give up; (b) make the squad's patrol actually visit the rooms screens are seeded in, which is where "the squad has to pull attention off the room" becomes real; (c) widen what the gate samples from the screen's own cell to a neighbourhood — but at 13 m the neighbours are equally out of sight, so this does nothing on its own; (d) raise `VISION_RADIUS`, which moves fog everywhere. **(b) is the only one that makes the mechanic mean what its doc says.**
+
+  Note also that the genome band `(0.0, 0.05)` was corrected on 2026-08-01 on the strength of "~0.01 at 14 m" — which is the *out-of-sight diffusion* value, not a distance falloff. In line of sight the field reaches 0.77–1.39, so the pre-correction band `(0.05, 0.80)` was the one that spanned the real discriminating range. Whatever is decided, that band needs revisiting with these numbers.
 
   **This is a gameplay retune, not a bug fix:** it changes crab counts, therefore positions, therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin on both architectures — and it shifts the meaning of the evolvable band, so baked elites measured under the old default were scored against an anomaly that always fired. Do not change it without picking a value deliberately.
 - **Scope realism.** The XL items (H-3, I-1, K-4, C-6) are correctly sequenced last and behind prerequisites. Do not let the appeal of the "full vision" pull them earlier than M4, or the M0–M3 foundation slips.
