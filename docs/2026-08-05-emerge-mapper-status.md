@@ -5,7 +5,7 @@ and its findings table, all eight of which are closed. That document's **§4 "Tr
 is still accurate and still worth your time; so is `docs/2026-08-04-emerge-mapper-handoff.md`, which
 remains the no-prior-context orientation.
 
-Branch **`feat/emerge-lattice`**, 36 commits off `bc7a92a`, **pushed**. No PR opened.
+Branch **`feat/emerge-lattice`**, 33 commits off `bc7a92a` (which is where `main` sits), **pushed**.
 
 ---
 
@@ -113,7 +113,7 @@ decides anything about space. `SubCell::solid`'s own doc says so.
 - **`FVS-Q-10`** — should authored `edge` tokens feed `grammar`'s support table, or only check it? Still
   deferred, and still correctly: `grammar` learns adjacency from the map and `edge` is the declared
   half. Settle the seam rule first.
-- **A review before this lands.** 36 commits touching schema (`Subgrid`, `front`, `rotate`), assets and
+- **A review before this lands.** 33 commits touching schema (`Subgrid`, `front`, `rotate`), assets and
   gameplay-adjacent code. `/code-review ultra` is user-triggered and billed; the last one on a *smaller*
   version of this branch produced 66 verified findings.
 
