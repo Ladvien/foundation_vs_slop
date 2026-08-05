@@ -279,7 +279,7 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         // A piece with no derivable lattice has no face to check. That is not a fault of the map —
         // a missing footprint is `Descriptor::resolve`'s to report, and reporting it here too would
         // put the same problem in front of the author twice under a name that hides its cause.
-        let Ok(div) = crate::descriptor::divisions(&authored.extent, divisions, &p.descriptor) else {
+        let Ok(div) = crate::descriptor::divisions(authored, divisions) else {
             continue;
         };
         let grid = authored.subgrid.clone().unwrap_or_default();

@@ -211,7 +211,7 @@ impl Project {
         &self,
         d: &emerge_core::descriptor::Descriptor,
     ) -> Result<(u32, u32, u32), String> {
-        emerge_core::descriptor::divisions(&d.extent, self.policy.divisions, &d.id)
+        emerge_core::descriptor::divisions(d, self.policy.divisions)
     }
 
     /// Write the map. Atomic, so a crash mid-write cannot leave half a level on disk.

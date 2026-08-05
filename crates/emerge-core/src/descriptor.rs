@@ -136,26 +136,42 @@ pub struct Subgrid {
 /// spacing on every axis, which is what makes an edge token on a 3 m wall mean the same thing as one
 /// on a 0.5 m chair.
 ///
+/// # The piece as placed, not the mesh as measured
+///
+/// The height is `extent.height * align.stretch_y`, because that is how tall the piece **stands**.
+/// Reading `extent.height` alone made the same piece id derive a different lattice in two kits: the
+/// Site kit's wall is authored at 2.40 m and stretched 1.0, so five layers; `site_greybox`'s is a 1 m
+/// module stretched 2.4x, so it derived **two** — a lattice describing a piece a third of the height
+/// of the one actually in the world. Found by authoring the first real tokens, which is the only way
+/// it could have been found.
+///
+/// **`align.scale` is deliberately not applied**, and that is not an oversight. `stack::covers` — the
+/// floor reservation this lattice sits inside — uses the raw `extent.footprint`, so scaling the
+/// lattice alone would describe a piece of one size inside a reservation of another. `site/books`
+/// carries `scale: Some(0.6)` and is the one place that is observable today. The two should agree;
+/// making them agree is a change to what a footprint *means* and belongs on its own.
+///
 /// `grid::cells` never returns zero, so a decal with no height gets one layer rather than a
 /// degenerate lattice — no special case needed.
 ///
 /// A missing `footprint` is refused by id rather than resolved to `(0, 0)`, the same call
 /// [`Descriptor::resolve`] makes and for the same reason: a zero lattice has no cells and every rule
 /// reading it would silently report success.
-pub fn divisions(extent: &Extent, per_tile: u32, owner: &str) -> Result<(u32, u32, u32), String> {
+pub fn divisions(d: &Descriptor, per_tile: u32) -> Result<(u32, u32, u32), String> {
+    let owner = &d.id;
     if per_tile == 0 {
         return Err(format!(
             "`{owner}`: the project divides each tile 0 ways; an axis with no divisions has no cells"
         ));
     }
-    let (w, d) = extent.footprint.ok_or_else(|| {
+    let (w, dep) = d.extent.footprint.ok_or_else(|| {
         format!("`{owner}`: no `extent.footprint`, so its lattice cannot be derived")
     })?;
     // A decal may legitimately omit its height — `Descriptor::resolve` says so — and `grid::cells(0)`
     // is one cell, so the lattice is one layer deep rather than empty.
-    let h = extent.height.unwrap_or(0.0);
+    let h = d.extent.height.unwrap_or(0.0) * d.align.stretch_y.unwrap_or(1.0);
     let axis = |span: f32| crate::grid::cells(span).0 * per_tile;
-    Ok((axis(w), axis(h), axis(d)))
+    Ok((axis(w), axis(h), axis(dep)))
 }
 
 /// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
@@ -1200,10 +1216,15 @@ mod subgrid_tests {
 
     const D3: (u32, u32, u32) = (3, 3, 3);
 
-    fn extent(w: f32, h: f32, d: f32) -> Extent {
-        Extent {
-            footprint: Some((w, d)),
-            height: Some(h),
+    /// A descriptor of exactly this size, unstretched — the shape most of these tests want.
+    fn sized(w: f32, h: f32, d: f32) -> Descriptor {
+        Descriptor {
+            id: "x".into(),
+            extent: Extent {
+                footprint: Some((w, d)),
+                height: Some(h),
+            },
+            ..Descriptor::default()
         }
     }
 
@@ -1293,28 +1314,28 @@ mod subgrid_tests {
     /// The numbers are the ones the plan was approved on, at the shipped `divisions: 1`.
     #[test]
     fn a_pieces_divisions_come_from_its_own_size() {
-        let at = |e: Extent| divisions(&e, 1, "x").unwrap_or_else(|err| panic!("{err}"));
-        assert_eq!(at(extent(0.5, 0.5, 0.5)), (1, 1, 1), "crate");
-        assert_eq!(at(extent(0.5, 0.9, 0.5)), (1, 2, 1), "chair");
-        assert_eq!(at(extent(1.0, 0.75, 1.0)), (2, 2, 2), "table");
-        assert_eq!(at(extent(3.0, 2.4, 0.5)), (6, 5, 1), "wall");
-        assert_eq!(at(extent(1.0, 2.4, 0.5)), (2, 5, 1), "doorway");
+        let at = |d: Descriptor| divisions(&d, 1).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(at(sized(0.5, 0.5, 0.5)), (1, 1, 1), "crate");
+        assert_eq!(at(sized(0.5, 0.9, 0.5)), (1, 2, 1), "chair");
+        assert_eq!(at(sized(1.0, 0.75, 1.0)), (2, 2, 2), "table");
+        assert_eq!(at(sized(3.0, 2.4, 0.5)), (6, 5, 1), "wall");
+        assert_eq!(at(sized(1.0, 2.4, 0.5)), (2, 5, 1), "doorway");
 
         // A wall and a doorway are both 2.4 m, so both present five rows and can agree.
-        let wall = at(extent(3.0, 2.4, 0.5));
-        let doorway = at(extent(1.0, 2.4, 0.5));
+        let wall = at(sized(3.0, 2.4, 0.5));
+        let doorway = at(sized(1.0, 2.4, 0.5));
         assert_eq!(wall.1, doorway.1);
         // A crate is not, and must not silently match the bottom of a wall.
-        assert_ne!(at(extent(0.5, 0.5, 0.5)).1, wall.1);
+        assert_ne!(at(sized(0.5, 0.5, 0.5)).1, wall.1);
     }
 
     /// Raising the project's number refines every axis of every piece by the same factor — the
     /// remedy Merrell & Manocha §4.5 names for objects that do not land on round multiples.
     #[test]
     fn dividing_a_tile_more_finely_refines_every_piece_equally() {
-        let wall = extent(3.0, 2.4, 0.5);
-        let one = divisions(&wall, 1, "wall").unwrap_or_else(|e| panic!("{e}"));
-        let three = divisions(&wall, 3, "wall").unwrap_or_else(|e| panic!("{e}"));
+        let wall = sized(3.0, 2.4, 0.5);
+        let one = divisions(&wall, 1).unwrap_or_else(|e| panic!("{e}"));
+        let three = divisions(&wall, 3).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(three, (one.0 * 3, one.1 * 3, one.2 * 3));
     }
 
@@ -1322,25 +1343,26 @@ mod subgrid_tests {
     /// than a degenerate lattice — `grid::cells` never returns zero.
     #[test]
     fn a_piece_with_no_height_still_has_one_layer() {
-        let e = Extent {
-            footprint: Some((1.0, 1.0)),
-            height: None,
-        };
-        assert_eq!(divisions(&e, 1, "sign").unwrap_or_else(|err| panic!("{err}")), (2, 1, 2));
+        let mut d = sized(1.0, 0.0, 1.0);
+        d.extent.height = None;
+        assert_eq!(divisions(&d, 1).unwrap_or_else(|err| panic!("{err}")), (2, 1, 2));
     }
 
     /// No footprint is refused by id, not resolved to a zero lattice that every rule reads as fine.
     #[test]
     fn a_piece_with_no_footprint_is_refused_by_name() {
-        let e = Extent::default();
-        let err = divisions(&e, 1, "mystery").err().unwrap_or_default();
+        let d = Descriptor {
+            id: "mystery".into(),
+            ..Descriptor::default()
+        };
+        let err = divisions(&d, 1).err().unwrap_or_default();
         assert!(err.contains("mystery") && err.contains("footprint"), "{err}");
     }
 
     /// Zero divisions-per-tile is refused here too, so no caller can build a lattice with no cells.
     #[test]
     fn a_project_that_divides_a_tile_zero_ways_is_refused() {
-        let err = divisions(&extent(1.0, 1.0, 1.0), 0, "crate").err().unwrap_or_default();
+        let err = divisions(&sized(1.0, 1.0, 1.0), 0).err().unwrap_or_default();
         assert!(err.contains("no cells"), "{err}");
     }
 

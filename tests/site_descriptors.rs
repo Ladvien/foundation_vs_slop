@@ -191,7 +191,7 @@ fn the_site_kit_derives_the_lattices_its_architecture_implies() {
             .library
             .get(id)
             .unwrap_or_else(|| panic!("{id} is in the kit"));
-        emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, id)
+        emerge_core::descriptor::divisions(d, layered.policy.divisions)
             .unwrap_or_else(|e| panic!("{e}"))
     };
 
@@ -231,7 +231,7 @@ fn the_furniture_library_derives_workable_lattices() {
     assert_eq!(layered.policy.divisions, 1, "the shipped setting is a 0.5 m subunit");
 
     for d in &layered.library.descriptors {
-        let div = emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, &d.id)
+        let div = emerge_core::descriptor::divisions(d, layered.policy.divisions)
             .unwrap_or_else(|e| panic!("{e}"));
         let volume = emerge_core::descriptor::Subgrid::volume(div);
         assert!(volume > 0, "{} derives an empty lattice", d.id);
@@ -259,7 +259,7 @@ fn the_authored_run_faces_let_the_full_height_family_meet() {
     // Every piece that carries tokens presents the same face size, or they cannot agree at all.
     let face_len = |id: &str| {
         let d = layered.library.get(id).unwrap_or_else(|| panic!("{id}"));
-        let (dx, dy, _) = emerge_core::descriptor::divisions(&d.extent, div, id)
+        let (dx, dy, _) = emerge_core::descriptor::divisions(d, div)
             .unwrap_or_else(|e| panic!("{e}"));
         dx * dy
     };
@@ -357,4 +357,55 @@ fn a_doorway_is_one_row_short_of_a_wall_and_the_fault_says_so() {
     // the rule rather than about the tokens.
     assert!(m.contains("[wall wall wall wall]"), "{m}");
     assert!(m.contains("[wall wall wall wall wall]"), "{m}");
+}
+
+/// **Two kits that build the same facility derive the same vertical lattice.**
+///
+/// This is only true because `descriptor::divisions` reads `align.stretch_y`. Before it did, the
+/// Site kit's 2.40 m wall derived five layers and `site_greybox`'s 1 m module — stretched 2.4x to
+/// stand at the same 2.40 m — derived **two**: a lattice describing a piece a third of the height of
+/// the one in the world, and a token authored against one meaning nothing against the other.
+///
+/// Asserted only for pieces this facility states a height for. A piece with no target stretches by
+/// 1.0 in both kits, so any difference between them is a genuine difference in the meshes rather
+/// than something the policy layer was meant to reconcile.
+///
+/// The horizontal divisions are *expected* to differ: footprints are not stretched, and a greybox
+/// module really is a different shape from its Ozea counterpart. Only the axis the policy speaks
+/// about has to agree.
+#[test]
+fn both_kits_derive_the_same_layers_for_every_piece_with_a_stated_height() {
+    let site = emerge_core::policy::layered_library(Path::new("assets/emerge/site"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let grey = emerge_core::policy::layered_library(Path::new("assets/emerge/site_greybox"))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let layers = |l: &emerge_core::policy::Layered, id: &str| {
+        let d = l.library.get(id).unwrap_or_else(|| panic!("{id}"));
+        emerge_core::descriptor::divisions(d, l.policy.divisions)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .1
+    };
+
+    let mut checked = 0usize;
+    for piece in SitePiece::ALL {
+        if target_height(*piece).is_none() {
+            continue;
+        }
+        let id = id_of(*piece).to_string();
+        assert_eq!(
+            layers(&site, &id),
+            layers(&grey, &id),
+            "{id}: the two kits build it to the same height, so its lattice must have the same \
+             number of layers — site {} vs greybox {}",
+            layers(&site, &id),
+            layers(&grey, &id)
+        );
+        checked += 1;
+    }
+    assert!(checked >= 6, "only {checked} pieces state a height; the check is near-vacuous");
+
+    // And the number is the one the facility asked for: 2.40 m of wall on a 0.5 m subunit is five.
+    assert_eq!(layers(&site, "site/wall"), 5);
+    assert_eq!(layers(&grey, "site/wall"), 5);
 }

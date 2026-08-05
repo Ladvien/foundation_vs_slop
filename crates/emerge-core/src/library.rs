@@ -114,7 +114,7 @@ impl Library {
                 // still gets divisions when something asks; it just has no cells of its own.
                 continue;
             };
-            let div = crate::descriptor::divisions(&d.extent, divisions, &d.id)?;
+            let div = crate::descriptor::divisions(d, divisions)?;
             let volume = crate::descriptor::Subgrid::volume(div);
             if volume > MAX_LATTICE_CELLS {
                 return Err(format!(

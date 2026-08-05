@@ -223,7 +223,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         let path = Path::new("assets").join(mesh);
         let Ok(glb) = emerge_core::glb::Glb::open(&path) else { continue };
 
-        let div = emerge_core::descriptor::divisions(&d.extent, layered.policy.divisions, &d.id)
+        let div = emerge_core::descriptor::divisions(d, layered.policy.divisions)
             .unwrap_or_else(|e| panic!("{e}"));
         let total = emerge_core::descriptor::Subgrid::volume(div);
         let cells = emerge_core::import::occupancy(&glb, div)
@@ -257,7 +257,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         .library
         .get("site/wall")
         .unwrap_or_else(|| panic!("site/wall is in the kit"));
-    let div = emerge_core::descriptor::divisions(&wall.extent, layered.policy.divisions, "site/wall")
+    let div = emerge_core::descriptor::divisions(wall, layered.policy.divisions)
         .unwrap_or_else(|e| panic!("{e}"));
     let glb = emerge_core::glb::Glb::open(Path::new("assets/ozea/wall.glb"))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -274,7 +274,7 @@ fn scanning_the_shipped_architecture_stays_in_range_and_records_its_coverage() {
         .library
         .get("site/wall_doorway_wide")
         .unwrap_or_else(|| panic!("the wide doorway is in the kit"));
-    let wdiv = emerge_core::descriptor::divisions(&wide.extent, layered.policy.divisions, "wide")
+    let wdiv = emerge_core::descriptor::divisions(wide, layered.policy.divisions)
         .unwrap_or_else(|e| panic!("{e}"));
     let wglb = emerge_core::glb::Glb::open(
         Path::new("assets").join(wide.mesh.as_deref().unwrap_or_default()).as_path(),
