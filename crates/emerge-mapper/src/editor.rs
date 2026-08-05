@@ -1770,6 +1770,9 @@ fn keys(
     mut repeat: ResMut<keys::Repeat>,
 ) {
 
+    // One clock for every key that repeats while held — see `keys::repeating`.
+    let dt = time.delta_secs();
+
     if keys::just_pressed(&keyboard, live.0, Action::Undo) {
         undo(&mut commands, &assets, &mut project, &mut state, &placed);
         return;
@@ -1813,14 +1816,21 @@ fn keys(
         return;
     }
 
-    // **`,` and `.` turn the piece under the cursor.** The other half of aiming: `[`/`]` set the
+    // **`R` and `T` turn the piece under the cursor.** The other half of aiming: `Z`/`C` set the
     // brush's facing before a piece exists, and these fix one that is already down — three chairs
     // round a table were three chairs facing the same way until this existed.
+    //
+    // **Held, like the aim keys.** `YAW_STEP` is 15 degrees, so squaring a piece that arrived at 240
+    // was sixteen presses. `keys::repeating` fires the press at once and then every
+    // `keys::REPEAT_SECS`, so tapping is unchanged and only holding is new — the same treatment
+    // `AimLeft`/`AimRight` got, for the same reason, through the same function.
     for (action, step) in [
         (Action::TurnPieceLeft, -YAW_STEP),
         (Action::TurnPieceRight, YAW_STEP),
     ] {
-        if keys::just_pressed(&keyboard, live.0, action) && !hovered_ui.iter().any(|h| h.0) {
+        if keys::repeating(&keyboard, live.0, action, &mut repeat, dt)
+            && !hovered_ui.iter().any(|h| h.0)
+        {
             turn_under_cursor(
                 &mut commands,
                 &assets,
@@ -1875,7 +1885,6 @@ fn keys(
     // one held key. `keys::repeating` fires the press immediately and then every
     // `keys::REPEAT_SECS`, so tapping is unchanged and only holding is new — the comment above about
     // "an author who has been tapping `Z`" is still true, there is just less of it.
-    let dt = time.delta_secs();
     let step = if keys::repeating(&keyboard, live.0, Action::AimRight, &mut repeat, dt) {
         YAW_STEP
     } else if keys::repeating(&keyboard, live.0, Action::AimLeft, &mut repeat, dt) {
