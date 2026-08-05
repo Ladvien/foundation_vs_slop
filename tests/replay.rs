@@ -399,10 +399,26 @@ fn deterministic_core_is_bit_identical() {
 #[cfg(target_arch = "x86_64")]
 const GOLDEN: u64 = 0x4d170fd316e6e5bf;
 
-/// Not yet measured — see [`GOLDEN`]. `0` is never a real snapshot hash, so this fails loudly and the
-/// message says exactly what to do.
+/// **The same golden, measured on `aarch64`** (macOS, Apple M5) 2026-08-05.
+///
+/// Pinned because leaving it `0` made three tests permanently red on every Apple Silicon machine in
+/// this project — `migrated_defaults_reproduce_the_shipped_golden_hash`,
+/// `authored_world_config_override_is_a_noop` (which compares against this constant), and the field
+/// pair below. A suite that is always red on the machine you develop on trains you to ignore it, and
+/// it hid a genuinely broken oracle (`photophobia_pulls_crabs_into_shadow`) in the same list.
+///
+/// Evidence for the value: identical across three separate process invocations, and
+/// `deterministic_core_is_bit_identical_across_many_builds` was green on the same tree (that is the
+/// many-`App`-in-one-process check). The authored-world-config seam reproduces it exactly, which is
+/// what proves that seam lossless on this platform too.
+///
+/// **If the `determinism-arm` CI lane disagrees, that is a platform difference, not a determinism
+/// regression.** That lane is Linux/aarch64 and this was measured on macOS/aarch64; the arms cannot
+/// simply be split three ways, because `bake::cfg_arm_is_live_here` — which `train apply
+/// --repin-goldens` uses to find the live arm — understands `target_arch` and nothing else. Keep that
+/// lane's `continue-on-error` until it agrees.
 #[cfg(not(target_arch = "x86_64"))]
-const GOLDEN: u64 = 0;
+const GOLDEN: u64 = 0xac8196c4a1bfb0d0;
 
 #[test]
 fn migrated_defaults_reproduce_the_shipped_golden_hash() {
@@ -635,9 +651,11 @@ fn migrated_defaults_reproduce_the_shipped_golden_hash() {
 #[cfg(target_arch = "x86_64")]
 const GOLDEN_FIELD: u64 = 0x8145db22fc83542c;
 
-/// Per-platform, like [`GOLDEN`] — not yet measured on aarch64.
+/// Per-platform, like [`GOLDEN`] — measured on `aarch64` (macOS, Apple M5) 2026-08-05, stable across
+/// three separate processes. See [`GOLDEN`] for why these are pinned and what a `determinism-arm`
+/// disagreement would mean.
 #[cfg(not(target_arch = "x86_64"))]
-const GOLDEN_FIELD: u64 = 0;
+const GOLDEN_FIELD: u64 = 0xe090401cb48e2ae3;
 
 #[test]
 fn field_passes_are_bit_identical() {
