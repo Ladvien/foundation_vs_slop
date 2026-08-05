@@ -356,7 +356,20 @@ impl Subgrid {
 pub struct SubCell {
     /// Which cell, `(x, y, z)`, zero-based.
     pub at: (u32, u32, u32),
-    /// Solid space — what clearance and a flood fill must respect.
+    /// Solid space, as rasterised from the mesh by [`crate::import::occupancy`].
+    ///
+    /// **Nothing reads this to decide anything, and that is a ruling rather than an omission.** It was
+    /// meant to refine `stack::covers` so clearance would respect a piece's shape instead of its
+    /// bounding box — `FVS-Q-9`, closed *no* on 2026-08-05 after being built and measured. At the
+    /// shipped `divisions: 1` a lattice-aware `covers` agrees with the bounding box 96% of the time,
+    /// because the props are mostly smaller than a few cells; resolution fine enough to hold a shape
+    /// needs `divisions: 3`, which makes a wall 810 cells. And `divisions` cannot be raised for this
+    /// alone, because it is one project-wide number precisely so that two faces are comparable — see
+    /// [`Subgrid`]. Coarse-for-matching and fine-for-clearance cannot be the same number.
+    ///
+    /// What it *is* for: the author's confirmation that the lattice lines up with the mesh. The editor
+    /// marks it with `rescan mesh` and draws it, which is how you see that a wall's lattice really does
+    /// fill the wall. `Descriptor::clearance` is the field that decides anything about space.
     pub solid: bool,
     /// What this cell presents to whatever is placed beside it. Matched face-to-face.
     pub edge: Option<String>,

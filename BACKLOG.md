@@ -744,39 +744,6 @@ Each push lists a **goal**, the **vision tier** it serves, its **reading list** 
 **Done when:** surfaces respond to light (normal + ORM maps against an irradiance environment), the level reads as more than one place (biomes), and the asset library's untapped depth is reachable through the existing data-driven manifest rather than new code.
 
 
-- **FVS-Q-9 — `solid` refining clearance is not worth its resolution (MEASURED 2026-08-05, awaiting a ruling)** · M · *determinism: moves goldens*
-  `SubCell::solid` exists, is editable, and is read by nothing. The obvious consumer is
-  `emerge_core::stack::covers` — the single "is this point inside this piece" test that both stacking
-  and the editor's `pick_at` funnel through — so a lattice-aware version would let clearance respect a
-  piece's *shape* instead of its bounding box.
-  **The original blocker is gone and a better one replaced it.** This was filed because all 42
-  descriptors carried `cells: []`, so a `solid`-only rule would make every piece cover nothing and the
-  only escape was `if the lattice is empty, use the bounding box` — the fallback `CLAUDE.md` forbids.
-  Divisions are derived now and `import::occupancy` rasterises triangles, so authoring all 86 pieces is
-  one batch call. It was done, measured, and thrown away, because the numbers say the feature has no
-  room to exist:
-
-  | `divisions` | subunit | solid cells / volume | RON lines |
-  |---|---|---|---|
-  | **1** (shipped) | 500 mm | 451 / 469 — **96%** | 2,700 |
-  | 2 | 250 mm | 3,176 / 3,752 — 85% | 19,000 |
-  | 3 | 167 mm | 8,865 / 12,663 — 70% | 53,000 |
-  | 4 | 125 mm | 18,358 / 30,016 — 61% | 110,000 |
-
-  At the shipped resolution a lattice-aware `covers` agrees with the bounding box **96% of the time**:
-  the props are mostly smaller than a few cells, so there is no shape left to express. Resolution fine
-  enough to hold a shape starts around `divisions: 3`, which is 53,000 lines of RON and makes a wall
-  18x15x3 — 810 cells, fifteen layers in the editor's panel, unauthorable by hand.
-  **And it cannot be fixed per piece.** `divisions` is deliberately one project-wide number, because
-  that is what makes two faces comparable (see `descriptor::Subgrid`). So the lattice's resolution is
-  set by what edge matching needs — coarse — while shape-aware clearance needs fine. One number cannot
-  serve both, and route **(b)**'s `occupancy: Footprint | Lattice` does not rescue it: a `Lattice`
-  piece still divides by the global number, so at `divisions: 1` its lattice is still 96% solid.
-  **Recommended ruling: answer FVS-Q-9 "no" and close it.** The subgrid's job is face matching, which
-  works and is now authored. Clearance shape is a different job with a conflicting resolution
-  requirement, and `Descriptor::clearance` already exists as its own field for it. Reopen only if
-  `divisions` is raised for some other reason. · *Deps:* — · *Touches:* `crates/emerge-core/src/{stack,descriptor}.rs`, `crates/emerge-mapper/src/fill.rs`
-
 - **FVS-Q-10 — Should authored `edge` tokens feed the solver, or only check it?** · L · *determinism: core*
   `crates/emerge-core/src/adjacency.rs` reads `SubCell::edge` and reports where a map disagrees with
   the tokens its tiles declare. It deliberately does **not** generate: `grammar.rs` already learns

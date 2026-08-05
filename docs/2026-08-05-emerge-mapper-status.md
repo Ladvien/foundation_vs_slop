@@ -1,10 +1,30 @@
 # emerge-mapper — where it stands (2026-08-05)
 
-Supersedes the "do these first" list in `docs/2026-08-04-emerge-mapper-next.md` §2, all of which is
-now done. That document's **§4 "Traps this work paid for"** is still worth reading and still accurate;
-so is `docs/2026-08-04-emerge-mapper-handoff.md`, which remains the no-prior-context orientation.
+Supersedes the "do these first" list in `docs/2026-08-04-emerge-mapper-next.md`, all of which is done,
+and its findings table, all eight of which are closed. That document's **§4 "Traps this work paid for"**
+is still accurate and still worth your time; so is `docs/2026-08-04-emerge-mapper-handoff.md`, which
+remains the no-prior-context orientation.
 
-Branch **`feat/emerge-lattice`**, 23 commits off `bc7a92a`, **not pushed**.
+Branch **`feat/emerge-lattice`**, 36 commits off `bc7a92a`, **pushed**. No PR opened.
+
+---
+
+## 0. Do not drive the GUI
+
+`scripts/macinput.py` takes the keyboard and `EMERGE_FULLSCREEN=1` takes the display, on a machine
+somebody is working on. Asked directly, 2026-08-05: *"Can you please stop capturing my keyboard and
+monitor? I'm trying to work."*
+
+**Use `harness::build_headless(root, map, kit)`.** It returns the real editor — the same plugin graph
+`main.rs` uses, via the shared `add_editor_plugins` — with no window, no wgpu device
+(`WgpuSettings { backends: None }`) and no audio. Step it with `app.update()`.
+`crates/emerge-mapper/tests/headless.rs` boots it on both the default project and the Site kit, ten
+frames each, in **0.2 s with no GPU**.
+
+That covers the class that has actually broken this editor: in Bevy 0.19 a missing `Res<T>` **panics its
+system** rather than skipping it, and every run condition is evaluated with no short-circuit. Only
+*rendering* is out of scope, deliberately — "does the highlight land on the right cell" is a question
+for `descriptor::pick_cell`, answered in arithmetic.
 
 ---
 
@@ -12,118 +32,107 @@ Branch **`feat/emerge-lattice`**, 23 commits off `bc7a92a`, **not pushed**.
 
 | suite | result |
 |---|---|
-| `cargo test --lib` | 975 passed, 1 ignored |
-| `cargo test -p emerge-core` | 257 + 2 + 4 |
-| `cargo test -p emerge-mapper` | 40 |
+| `cargo test --lib` | 977 passed, 1 ignored |
+| `cargo test -p emerge-core` | 267 + 2 + 4 |
+| `cargo test -p emerge-mapper` | 40 + 10 headless |
+| `cargo test --tests` | **35 targets, none failing** |
 | `cargo check -p emerge-core -p emerge-mapper -p fvs --all-targets` | **zero warnings** |
 
-Known-failing, none of it caused here: `tests/lore_canon.rs` (fails on the user's untracked
-`docs/lore/2026-08-01-scp-gear.md`) and two of `tests/replay.rs`
-(`authored_world_config_override_is_a_noop`, `deterministic_core_is_bit_identical_across_many_builds`).
-The gates that matter — `deterministic_core_is_bit_identical` and the
-`a0_fvs_j6_mutant3_on_world_0x5c09191` golden — are green, so `snapshot_hash` has not moved.
+The non-harness suite is **fully green**. Two of `tests/replay.rs` still fail under `--features
+test-harness` (`authored_world_config_override_is_a_noop`,
+`deterministic_core_is_bit_identical_across_many_builds`) — both predate this branch. The gates that
+matter, `deterministic_core_is_bit_identical` and the `a0_fvs_j6_mutant3_on_world_0x5c09191` golden, are
+green, so `snapshot_hash` has not moved.
 
-**There are still zero authored `SubCell`s in the repo**, but the reason has changed. It was that
-authoring was meaningless (incommensurable lattices), impractical (hand-marking), and destructive
-(`write_library` corrupting the kit). All three are fixed. What is left is that nobody has sat down
-and done it — and `#9` below is the last thing that would make doing it pleasant.
+**35 authored `SubCell`s** in `assets/emerge/site/library.ron` — the first in this repo. `wall`,
+`wall_corner`, `wall_window` and `column` carry `wall` on their run-faces, and a run of them reports no
+faults.
 
 ---
 
-## 2. What changed, and the three things that surprised
+## 2. What the lattice is now
 
-### The lattice is now real
-
-`Subgrid` lost `div`. Divisions are derived from a piece's own size times one project number,
+`Subgrid` lost `div`. Divisions are **derived** from a piece's own size times one project number,
 `policy::divisions` (shipped at 1, a 0.5 m subunit). Merrell & Manocha 2009 §4.4–4.5 is the source and
 names this exact remedy; `descriptor::Subgrid`'s doc carries the argument. An edge token on a 3 m wall
-now means the same thing as one on a 0.5 m chair, which it could not before.
+now means the same thing as one on a 0.5 m chair.
 
-`align.front` names a `Face` (N/E/S/W) rather than an arbitrary yaw. `align.rotate` is a new authored
-quarter-turn for a mesh exported the wrong way up, **baked into `extent` at import** so no reader of
-`extent` needs to know it exists.
+The height is `extent.height * align.stretch_y` — **the piece as placed, not the mesh as measured**. Two
+kits that build the same facility derive the same layers, which is pinned as an invariant.
 
-### Three things the code said, and the assets disagreed
+`align.front` names a `Face` (N/E/S/W) rather than an arbitrary yaw. `align.rotate` is an authored
+quarter-turn for a mesh exported the wrong way up, baked into `extent` at import so no reader of
+`extent` learns it exists. `import::occupancy` rasterises triangles (Akenine-Möller 2001 SAT), so a
+wall is solid all the way up.
+
+Editor: screen-aligned WASD panning; the map vocabulary under one hand (`X` removes, `V` aims straight);
+`Cmd`/`Ctrl` places freely off the grid (XZ only — Y comes from `mount`); the aim and piece-turn keys
+repeat while held at 150 ms; candidates scan themselves on selection; hover-and-click **ray picks** a
+lattice cell and names the face you are looking through.
+
+---
+
+## 3. Three things the assets said that the code did not expect
 
 1. **A wall and a doorway cannot meet.** The kit reaches 2.40 m by stacking a 2.00 m doorway under a
-   0.40 m header, so their faces are 5 rows and 4 rows and `may_abut` refuses them. That refusal is
-   *correct and new* — under the old 3×3×3 they "matched", comparing a doorway's 0.67 m band against a
-   wall's 0.80 m band. Pinned in `the_site_kit_derives_the_lattices_its_architecture_implies`.
+   0.40 m header, so their faces are 5 rows and 4. Authored the obvious way, the fault reads
+   `[wall wall wall wall]` against `[wall wall wall wall wall]` — same token, one row short.
 2. **The same problem exists horizontally.** A 3 m wall meeting a 1 m doorway presents faces of
-   different lengths, so they refuse rather than comparing the part that overlaps. **These two are one
-   question and want deciding together** — see §4.
-3. **Vertex occupancy was wrong for architecture.** A wall slab has vertices only at its corners, so it
-   scanned 4 cells of 10. Now rasterised (Akenine-Möller 2001 triangle-box SAT) and a wall is solid all
-   the way up. Kept honest by a test that fails if a doorway ever comes back full.
-
-### Editor
-
-Screen-aligned WASD panning (it had claimed screen axes since it was written and moved along world
-axes); the map vocabulary under one hand (`X` removes, `V` aims straight); `Cmd`/`Ctrl` places freely
-off the grid (XZ only — Y comes from `mount`); the aim keys repeat while held at 150 ms; candidates
-scan themselves on selection and the chip is `rescan mesh`.
+   different lengths. **One question, both axes** — see §5.
+3. **`solid` has no room to be useful.** See §4.
 
 ---
 
-## 3. Review findings
+## 4. FVS-Q-9 is closed (*no*)
 
-Six of the eight from the max-effort review are now fixed: **#1** (`write_library` baking the policy
-layer into the measurements file), **#3** (arrows walking filtered-out tiles), **#4** (`faults` pairing
-by centre cell), **#6** (`PreviewOf` on a non-unique id), **#7** (the O(n²) recheck), **#8**
-(`Subgrid::default` as an unset sentinel). Two remain:
+Built, measured, discarded. At `divisions: 1` a lattice-aware `stack::covers` agrees with the bounding
+box **96% of the time** (451 solid cells of 469); shape needs `divisions: 3`, which is 53,000 lines of
+RON and makes a wall 810 cells. And `divisions` cannot be raised for this alone, because it is one
+project-wide number *precisely so that two faces are comparable* — coarse-for-matching and
+fine-for-clearance cannot be the same number. Full table in `BACKLOG_ARCHIVE.md`.
 
-| # | What | Where | Why it is still open |
-|---|---|---|---|
-| 2 | A rig missing from `rigs.ron` panics an unrelated system at Startup | `src/crab/setup.rs:32` + 5 more | Needs a decision about where "the rigs the game requires" is written down |
-| 5 | Focus can move between opening a text field and committing it, redirecting the edit | `tiles.rs` | Fix is to capture the target at field-open; touches all four fields and wants GUI verification |
-
----
-
-## 4. Decisions owed
-
-- **The seam question, both axes.** Should `may_abut` compare the *overlapping part* of two faces
-  rather than requiring equal lengths — and should a vertical seam consider the doorway-plus-header
-  stack? Deliberately deferred until real tokens exist, which is still the right call, but the numbers
-  are real now and the question is answerable.
-- **`FVS-Q-9` and `FVS-Q-10`.** `BACKLOG.md` defers both on the premise that *"all 42 descriptors have
-  empty lattices"*, so `solid` cannot be a single unconditional rule without a bounding-box fallback.
-  **That premise is now false** — divisions are derived and one button authors a lattice. The backlog
-  entry's reasoning is stale; re-read it before answering.
-- **`id: "is"`** in `assets/emerge/library.ron`, pointing at `characters/cipher_field.glb`. Delete, or
-  rename and move out of the furniture library.
-- **`EMERGE_WRITE_SITE=1`** appears in three files' notes and exists nowhere in the tree. Restore the
-  generator or fix the prose.
-- **`docs/lore/2026-08-01-scp-gear.md`** is untracked and fails `lore_canon`. Track it, or teach the
-  test about it, and the suite goes fully green.
+`SubCell::solid` therefore has **no gameplay consumer**, deliberately. It is authored and drawn as the
+author's confirmation that the lattice lines up with the mesh; `Descriptor::clearance` is the field that
+decides anything about space. `SubCell::solid`'s own doc says so.
 
 ---
 
-## 5. What is verified on screen, and what is not
+## 5. Decisions owed
 
-Driven and screenshotted, so trust it: the divisions readout and its arithmetic; the rotate chips
-(`N`/`O`/`P`) turning a piece and reshaping its lattice; `rescan mesh` marking cells; the shortcuts
-overlay showing `X` = removal mode and `V` = aim straight; the aim keys repeating (240° from a
-known-zero in two seconds, ~137 ms a step); `floor_grate` placing at `(5.50, 3.50)` snapped and
-`(7.37, 3.57) free` with the modifier held; and the filter blur — the sequence that used to do
-nothing now places.
-
-**Not seen, only tested:** screen-aligned panning (covered at all four detents by projecting motion
-into the camera basis), the auto-scan-on-selection rule, and the two fixes above (#3, #6).
+- **The seam rule, both axes.** Should `may_abut` compare the *overlapping part* of two faces rather
+  than requiring equal lengths? **The price is measured now:** `faults` pairs on `(x, z)` alone, so a
+  header directly above a doorway shares its cells and is never compared to it — both are compared
+  against the wall. Overlap comparison needs `stack::resolve_y` threaded in, which changes `faults`'
+  signature and its cost. Current behaviour is pinned in `tests/site_descriptors.rs` as *current, not
+  desired*.
+- **`align.scale`.** `stack::covers` reserves the raw `extent.footprint`, ignoring scale, and
+  `divisions` deliberately matches it so the lattice and the reservation at least agree with each
+  other. `site/books` (`scale: Some(0.6)`) renders at 0.6x while reserving its full footprint. This is
+  the same measured-vs-placed question already answered for the vertical axis; answering it here
+  touches `stack`, `fill` and clearance, which the **game** uses, so it needs the replay gates.
+- **`FVS-Q-10`** — should authored `edge` tokens feed `grammar`'s support table, or only check it? Still
+  deferred, and still correctly: `grammar` learns adjacency from the map and `edge` is the declared
+  half. Settle the seam rule first.
+- **A review before this lands.** 36 commits touching schema (`Subgrid`, `front`, `rotate`), assets and
+  gameplay-adjacent code. `/code-review ultra` is user-triggered and billed; the last one on a *smaller*
+  version of this branch produced 66 verified findings.
 
 ---
 
 ## 6. Traps this session paid for, beyond the earlier doc's §4
 
-- **Verify frontmost before believing *any* driven test, and abort if it is not.** VS Code took focus
-  mid-sequence and a click landed there as a stray `vanity` placement I briefly read as signal. The
-  check now aborts rather than reporting.
-- **Establish a baseline; do not assume one.** I measured the key repeat as "3 steps" and flagged it as
-  suspect. It was 6 steps from an unverified starting yaw of 315°. Pressing `X` to zero the aim first
-  made the measurement trivial and correct. This is the earlier doc's "measure, don't squint" trap
-  wearing a different hat.
+- **Measure before building.** Twice a plan that reasoned well died on contact with a number.
+  Vertex occupancy looked fine and marked a wall 4 cells of 10. FVS-Q-9's blocker was genuinely gone
+  and the feature was still worthless at 96% solid. Both were recommendations I had already given.
+- **Establish a baseline; do not assume one.** A key-repeat measurement read as "3 steps" and was 6,
+  from an unverified starting yaw of 315°. Pressing `X` to zero the aim first made it trivial.
 - **A shared epsilon cancels itself.** Nudging both edges of a span the same way made every piece a
   cell too wide, so everything abutted everything. Near edge rounds up, far edge rounds down.
-- **`fvs` is the launcher.** `cargo fvs edit <map> --kit site --fullscreen`. The alias is opt-in per
-  machine (`.cargo/config.toml` is deliberately uncommitted — a machine-specific `target-dir` in it
-  once broke CI); `cargo install --path crates/fvs` gives a global `fvs` that still rebuilds the editor
-  from live source, because it only shells out to `cargo run`.
+- **A silent no-op is the worst failure mode this editor had.** Filtering the palette left the box
+  holding the keyboard, and `place_on_click` is gated on `not_typing` — so the most natural way to find
+  a piece was the way to break placing it, with no message. Fixed in `Phase::Sense` so one click blurs
+  *and* places.
+- **`fvs` is the launcher.** `cargo fvs edit <map> --kit site --fullscreen`, or a global `fvs` after
+  `cargo install --path crates/fvs` — it only shells out to `cargo run`, so the editor is still rebuilt
+  from live source. The `cargo fvs` alias is opt-in per machine (`.cargo/config.toml` is deliberately
+  uncommitted: a machine-specific `target-dir` in it once broke CI).
