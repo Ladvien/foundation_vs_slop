@@ -86,6 +86,8 @@ COMMANDS:
 
     edit [name]       Open the map editor on assets/emerge/<name>.map.ron.
                       A name that does not exist yet is a new map. Defaults to `untitled_map`.
+        --kit <name>      Open a kit under assets/emerge/ instead of the default furniture
+                          library — `--kit site` is the 45-piece architectural set.
         --fullscreen      Borderless fullscreen.
         --release         Build with optimisations.
 
@@ -99,6 +101,7 @@ COMMANDS:
 EXAMPLES:
     cargo run -p fvs -- play --map break_room --at 80,112
     cargo run -p fvs -- edit break_room --fullscreen
+    cargo run -p fvs -- edit site_67 --kit site --fullscreen
     cargo run -p fvs -- train behavior --generations 2 --batch 8
     cargo run -p fvs -- test
 
@@ -211,6 +214,11 @@ fn edit(args: &[String]) -> Result<ExitCode, String> {
     let mut args = args.to_vec();
     let fullscreen = take_flag(&mut args, "--fullscreen");
     let release = take_flag(&mut args, "--release");
+    // A kit is a directory under `assets/emerge/` holding a library and its policy layer: the
+    // default is furniture, `--kit site` is the 45-piece architectural set. Forwarded rather than
+    // interpreted — `Project::open` is what decides whether the kit exists, and duplicating that
+    // check here would be a second answer to one question.
+    let kit = take_value(&mut args, "--kit")?;
     // Whatever is left is the map name — one positional, and a second is a typo rather than a map
     // called "break room" with a space in it (names are snake_case; the editor forces that anyway).
     let name = args.first().cloned();
@@ -224,6 +232,9 @@ fn edit(args: &[String]) -> Result<ExitCode, String> {
     cargo.arg(repo_root());
     if let Some(name) = name {
         cargo.arg(name);
+    }
+    if let Some(kit) = kit {
+        cargo.args(["--kit", &kit]);
     }
     if fullscreen {
         cargo.env("EMERGE_FULLSCREEN", "1");

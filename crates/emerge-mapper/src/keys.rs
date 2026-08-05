@@ -411,6 +411,7 @@ pub struct KeysPlugin;
 impl Plugin for KeysPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Live>()
+            .init_resource::<Repeat>()
             // `chain()` makes the sets run in the order listed
             // (`bevy-0.19.0/examples/ecs/ecs_guide.rs:330`).
             .configure_sets(Update, (Phase::Sense, Phase::Text, Phase::Act).chain())
@@ -493,6 +494,58 @@ pub fn pressed(keys: &ButtonInput<KeyCode>, live: Context, action: Action) -> bo
         return false;
     }
     keys.pressed(b.key)
+}
+
+/// **How long a held key waits before firing again**, and then between repeats.
+///
+/// Between the two things a repeat can get wrong. Faster and a tap starts becoming two steps,
+/// because a deliberate tap is rarely under about 120 ms; slower and holding is not worth doing.
+/// At the aim keys' [`crate::editor::YAW_STEP`] this sweeps a full turn in about 3.5 seconds.
+pub const REPEAT_SECS: f32 = 0.150;
+
+/// Per-action countdown to the next repeat, for [`repeating`].
+///
+/// A `Vec` rather than a map because [`Action`] is `Eq` but not `Hash`, and because the list only
+/// ever holds the keys actually down — at most a couple.
+#[derive(Resource, Default)]
+pub struct Repeat(Vec<(Action, f32)>);
+
+/// **Fires on the press, then every [`REPEAT_SECS`] for as long as the key is held.**
+///
+/// The press always fires immediately, so tapping behaves exactly as [`just_pressed`] did and only
+/// holding is new. That ordering matters: an author who taps is not waiting on a timer, and one who
+/// holds gets the first step at once and the rest at a readable pace.
+///
+/// A key held across a change of context does **not** resume repeating — it has no countdown, so it
+/// waits for a fresh press. Otherwise switching tabs with a finger down would fire an action in a
+/// context the author never pressed it in.
+pub fn repeating(
+    keys: &ButtonInput<KeyCode>,
+    live: Context,
+    action: Action,
+    repeat: &mut Repeat,
+    dt: f32,
+) -> bool {
+    if !pressed(keys, live, action) {
+        repeat.0.retain(|(a, _)| *a != action);
+        return false;
+    }
+    if just_pressed(keys, live, action) {
+        repeat.0.retain(|(a, _)| *a != action);
+        repeat.0.push((action, REPEAT_SECS));
+        return true;
+    }
+    let Some((_, left)) = repeat.0.iter_mut().find(|(a, _)| *a == action) else {
+        return false;
+    };
+    *left -= dt;
+    if *left <= 0.0 {
+        // Add rather than reset, so a long frame does not silently swallow the overshoot and drift
+        // the cadence slower than it says it is.
+        *left += REPEAT_SECS;
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -831,5 +884,105 @@ mod tests {
                 b.chord
             );
         }
+    }
+    /// **A tap is one step, exactly as it was.** The repeat must not change the thing every author
+    /// already does — a press fires immediately, and nothing else fires until the key is held past
+    /// the interval.
+    #[test]
+    fn a_press_fires_at_once_and_then_waits() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        let mut repeat = Repeat::default();
+        input.press(binding(Action::AimRight).key);
+
+        assert!(
+            repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0),
+            "the press itself must fire without waiting on a timer"
+        );
+
+        // Held, but `just_pressed` no longer reports it — this is what a second frame looks like.
+        input.clear();
+        input.press(binding(Action::AimRight).key);
+        input.clear_just_pressed(binding(Action::AimRight).key);
+        // Just under the interval, in ten equal steps: nothing more may fire.
+        let step = REPEAT_SECS / 10.0;
+        let mut fired = 0;
+        for _ in 0..9 {
+            if repeating(&input, Context::Map, Action::AimRight, &mut repeat, step) {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 0, "9/10 of the {REPEAT_SECS} s interval must not fire");
+
+        // Crossing it fires exactly once.
+        assert!(repeating(&input, Context::Map, Action::AimRight, &mut repeat, step * 2.0));
+        assert!(!repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+    }
+
+    /// Holding for a second yields the presses the interval promises, rather than one per frame.
+    #[test]
+    fn holding_repeats_at_the_stated_cadence() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        let mut repeat = Repeat::default();
+        input.press(binding(Action::AimLeft).key);
+        let mut fired = usize::from(repeating(&input, Context::Map, Action::AimLeft, &mut repeat, 0.0));
+
+        input.clear_just_pressed(binding(Action::AimLeft).key);
+        // One second at 60 fps.
+        for _ in 0..60 {
+            if repeating(&input, Context::Map, Action::AimLeft, &mut repeat, 1.0 / 60.0) {
+                fired += 1;
+            }
+        }
+        // The press, plus 1 / REPEAT_SECS more per second.
+        let want = 1 + (1.0 / REPEAT_SECS) as usize;
+        assert!(
+            fired == want || fired == want + 1,
+            "a second of holding fired {fired} times, wanted about {want}"
+        );
+    }
+
+    /// Releasing forgets the countdown, so the next tap is immediate rather than owing the remainder
+    /// of an interval nobody is waiting through.
+    #[test]
+    fn releasing_resets_the_countdown() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        let mut repeat = Repeat::default();
+        let key = binding(Action::AimRight).key;
+
+        input.press(key);
+        assert!(repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+        input.clear_just_pressed(key);
+        // Part of the way to the next repeat, then let go.
+        repeating(&input, Context::Map, Action::AimRight, &mut repeat, REPEAT_SECS * 0.8);
+        input.release(key);
+        assert!(!repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0));
+
+        input.clear();
+        input.press(key);
+        assert!(
+            repeating(&input, Context::Map, Action::AimRight, &mut repeat, 0.0),
+            "a fresh press fires at once, not after the remainder of an interval"
+        );
+    }
+
+    /// **A key held across a tab change does not resume.** Otherwise switching tabs with a finger
+    /// down would fire an action in a context the author never pressed it in — the same class of
+    /// defect `Phase` exists for.
+    #[test]
+    fn a_key_held_into_a_new_context_waits_for_a_fresh_press() {
+        let mut input = ButtonInput::<KeyCode>::default();
+        let mut repeat = Repeat::default();
+        let key = binding(Action::AimRight).key;
+
+        // Held down while the Tiles tab owns the keyboard: nothing accrues.
+        input.press(key);
+        input.clear_just_pressed(key);
+        assert!(!repeating(&input, Context::Tiles, Action::AimRight, &mut repeat, 5.0));
+
+        // Now the Map tab is live and the key is still down, but was never pressed here.
+        assert!(
+            !repeating(&input, Context::Map, Action::AimRight, &mut repeat, 5.0),
+            "a key that was already down must not start repeating on a context change"
+        );
     }
 }

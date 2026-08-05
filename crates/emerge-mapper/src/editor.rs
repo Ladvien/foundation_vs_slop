@@ -1733,6 +1733,11 @@ fn keys(
     placed: Query<(Entity, &Placement)>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    // The aim keys repeat while held, so this system needs a clock and somewhere to keep the
+    // countdown. Both are `Res`, and `KeysPlugin` owns `Repeat` for the reason its comment gives:
+    // a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
+    time: Res<Time>,
+    mut repeat: ResMut<keys::Repeat>,
 ) {
 
     if keys::just_pressed(&keyboard, live.0, Action::Undo) {
@@ -1836,9 +1841,14 @@ fn keys(
         return;
     }
 
-    let step = if keys::just_pressed(&keyboard, live.0, Action::AimRight) {
+    // **Held, not only tapped.** Turning a brush to 240 degrees was sixteen presses of `C`; it is now
+    // one held key. `keys::repeating` fires the press immediately and then every
+    // `keys::REPEAT_SECS`, so tapping is unchanged and only holding is new — the comment above about
+    // "an author who has been tapping `Z`" is still true, there is just less of it.
+    let dt = time.delta_secs();
+    let step = if keys::repeating(&keyboard, live.0, Action::AimRight, &mut repeat, dt) {
         YAW_STEP
-    } else if keys::just_pressed(&keyboard, live.0, Action::AimLeft) {
+    } else if keys::repeating(&keyboard, live.0, Action::AimLeft, &mut repeat, dt) {
         -YAW_STEP
     } else {
         0.0
