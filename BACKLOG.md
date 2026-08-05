@@ -870,9 +870,20 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 - **⚠️ The harness lane's four known-red skips — the debt list that made promoting it possible (2026-08-05).** The lane is now a **hard gate** with `--no-fail-fast`, which took enumerating every failure at once; `cargo test` stops at the first failing *binary*, so each red hid the ones after it and reproducing the full list took one run per defect. All four are **pre-existing** — confirmed against a worktree at `main`, and the branch touches nothing under `src/squad_ai`/`src/ai`. **Each skip in `ci.yml` must be deleted the moment its test is green.**
 
   1. `containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops` — the ATTENTION gate; fully measured, needs a placement decision. See the entry below.
-  2. `playtest_level::shipped_level_playtests_and_is_deterministic` — `evaluate_playtest` returns `None` on the shipped level and the seed `0x5C09191`. `Option::expect` so the panic carries no cause; there are exactly three `?` sites to bisect (`level_eval.rs:112` static pre-filter, `:113` `level_genome::decode`, `:120` `surprise::minimal_criterion`). **Not yet bisected** — worth doing first, because if the static pre-filter rejects the *shipped* level then the level search has been scoring against a filter the shipped content itself fails.
+  2. `playtest_level::shipped_level_playtests_and_is_deterministic` — **bisected 2026-08-05.** The static pre-filter passes (axes `(0.849, 0.313)`) and `decode` passes; the third gate is the one that rejects: `surprise::minimal_criterion` returns *"no crab died — the world was static"*. The rollout outcome on the shipped level at seed `0x5C09191`, 1800 ticks:
+
+     `squad=5  survivors=5  crabs_alive=41  crabs_killed=0  duty_decisions=138  unit_damage=0.000  reachable=3577  liveness_violations=0`
+
   3. `search_calibration::a_candidate_genome_actually_changes_the_simulation`
-  4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both already recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain). They gate whether the behaviour search is measuring anything, so they matter more than their position in this list suggests.
+  4. `search_calibration::the_authored_brains_produce_a_real_encounter_on_every_world` — both recorded as pre-existing when they were found during the crab/SCP-150 combat-feel work (world `0xA11CE`, Engineer brain).
+
+  **⚠️ These four are very likely ONE root cause, and it is a bigger deal than the list looks: on the shipped levels the squad never reaches the content.** The evidence lines up across three independent measurements:
+
+  * 1800 ticks (30 s) of shipped play: **0 crabs killed and 0 unit damage**, while the squad makes 138 duty decisions. It is doing role work somewhere the swarm is not.
+  * the watch-feed diagnosis below, independently: the squad's **nearest approach to a screen is 13.1–15.1 m** across all three held-in seeds, against a `VISION_RADIUS` of 8.
+  * `a_candidate_genome_actually_changes_the_simulation` follows for free — if the brain never engages, swapping the genome *cannot* move the sim, so that test fails by construction rather than by a wiring fault.
+
+  If that is right, the consequence reaches past the test list: **the behaviour search and the level search have been assigning fitness to episodes in which nothing happens**, which would make large parts of the archive meaningless rather than merely noisy. Worth confirming before any more search budget is spent. The cheap confirmation is to log the nearest squad↔crab distance over a shipped rollout, the same way the watch-feed test already logs nearest-approach-to-a-screen.
 
 - **⚠️ DECISION NEEDED: `broadcast.watch_threshold` (0.006) sits inside the ambient ATTENTION floor, so "look away to contain it" cannot hold.** Found 2026-08-05 while trying to promote the harness lane; `watching_the_feed_makes_it_generate_and_ignoring_it_stops` is red because the mechanic really is broken, not because the oracle is.
 
