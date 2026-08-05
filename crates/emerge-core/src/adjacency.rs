@@ -199,6 +199,26 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
     if !(cell.is_finite() && cell > 0.0) {
         return out;
     }
+
+    // **Nothing declared, nothing to check.** The module note calls this feature inert until it is
+    // authored; this is where that stops being a property of the answer and becomes a property of
+    // the cost. Until an edge token exists anywhere, the whole pass is one scan of the library
+    // instead of a quadratic walk of the map that clones a descriptor per placement — and the editor
+    // reruns it on every placement, so a 1,400-piece flood fill was paying for it repeatedly.
+    //
+    // Patches are checked too: `Placed::patch` may carry a lattice the library never had.
+    let declared = |g: &Option<Subgrid>| {
+        g.as_ref()
+            .is_some_and(|g| g.cells.iter().any(|c| c.edge.is_some()))
+    };
+    let any_declared = library.descriptors.iter().any(|d| declared(&d.subgrid))
+        || map
+            .placements
+            .iter()
+            .any(|p| p.patch.as_ref().is_some_and(|d| declared(&d.subgrid)));
+    if !any_declared {
+        return out;
+    }
     let (min_x, min_z, _, _) = map.floor_rect();
     // A placement's `at` is its centre, so its extent runs half a footprint either way. Rounded
     // rather than floored/ceiled: a piece authored on the grid should occupy exactly the cells it
@@ -246,9 +266,15 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         let Some(base) = library.get(&p.descriptor) else {
             continue;
         };
-        let authored = match &p.patch {
-            Some(patch) => base.patched_with(patch),
-            None => base.clone(),
+        // Borrowed unless a patch forces a merge. The descriptor carries several string vectors and
+        // this runs per placement, per recheck; the lattice below is sparse and cheap to clone.
+        let patched;
+        let authored: &crate::descriptor::Descriptor = match &p.patch {
+            Some(patch) => {
+                patched = base.patched_with(patch);
+                &patched
+            }
+            None => base,
         };
         // A piece with no derivable lattice has no face to check. That is not a fault of the map —
         // a missing footprint is `Descriptor::resolve`'s to report, and reporting it here too would
@@ -256,7 +282,7 @@ pub fn faults(map: &Map, library: &Library, cell: f32, divisions: u32) -> Vec<Fa
         let Ok(div) = crate::descriptor::divisions(&authored.extent, divisions, &p.descriptor) else {
             continue;
         };
-        let grid = authored.subgrid.unwrap_or_default();
+        let grid = authored.subgrid.clone().unwrap_or_default();
         // The footprint as it stands, which a quarter turn swaps.
         let (fw, fd) = authored.extent.footprint.unwrap_or((cell, cell));
         let (fw, fd) = match quarter_turns(&p.id, p.yaw) {
@@ -551,6 +577,45 @@ mod tests {
                 .collect(),
             ..Library::default()
         }
+    }
+
+    /// **A map nobody has authored tokens for costs one scan of the library.**
+    ///
+    /// The editor rechecks on every placement, so the quadratic walk was being paid repeatedly for
+    /// an answer that is empty by construction until an edge token exists. Pinned by behaviour
+    /// rather than by timing: a map far too large to walk quadratically still answers instantly, and
+    /// would take visible seconds if the early-out were removed.
+    #[test]
+    fn an_unauthored_map_short_circuits_however_large_it_is() {
+        let lib = sized_library(&[("crate_a", (0.5, 0.5), Subgrid::default())]);
+        let many: Vec<Placed> = (0..4000)
+            .map(|i| {
+                placed(
+                    &format!("p{i}"),
+                    "crate_a",
+                    ((i % 64) as f32 * 0.5, (i / 64) as f32 * 0.5),
+                    0.0,
+                )
+            })
+            .collect();
+        assert_eq!(
+            faults(&map_with(many), &lib, crate::grid::SNAP, ONE_PER_TILE),
+            Vec::new()
+        );
+    }
+
+    /// And the early-out cannot hide a fault: one authored token anywhere turns the check back on.
+    #[test]
+    fn a_single_declared_token_re_enables_the_whole_check() {
+        let lib = sized_library(&[
+            ("wall", (0.5, 0.5), grid(&[((0, 0, 0), "stone")])),
+            ("gap", (0.5, 0.5), Subgrid::default()),
+        ]);
+        let map = map_with(vec![
+            placed("g1", "gap", (0.25, 0.25), 0.0),
+            placed("w1", "wall", (0.75, 0.25), 0.0),
+        ]);
+        assert_eq!(faults(&map, &lib, crate::grid::SNAP, ONE_PER_TILE).len(), 1);
     }
 
     /// **The defect this pairing was rewritten for.** Two 3 m walls side by side share a seam, but
