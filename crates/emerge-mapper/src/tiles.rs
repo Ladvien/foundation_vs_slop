@@ -2590,16 +2590,30 @@ fn rebuild_detail(
                 // Measured facts, not controls. Given their own heading so the eye can skip them
                 // when it is looking for something to click.
                 crate::chrome::section(p, "MEASURED");
-                let (cells_x, _) = emerge_core::grid::cells(m.footprint.0);
-                let (cells_z, _) = emerge_core::grid::cells(m.footprint.1);
+                // **As the piece will stand, not as the file happens to store it.**
+                //
+                // These come from `proposed.extent` rather than from the raw `Measured`, because a
+                // rotation is baked into the extent at import (`import::remeasure_rotated`) and the
+                // raw measurement is pre-rotation. Reading the file's own numbers here meant a
+                // barrel turned on its side still reported `cells 1 x 1` while it occupied 1 x 2 —
+                // and `size` and `cells` are the same fact twice, so rotating one without the other
+                // would leave the block contradicting itself.
+                //
+                // No re-derivation: the extent was already rotated and validated when it was
+                // written, so this reads it rather than computing a second answer that could differ.
+                let (fw, fd) = c.proposed.extent.footprint.unwrap_or(m.footprint);
+                let fh = c.proposed.extent.height.unwrap_or(m.height);
+                let (cells_x, _) = emerge_core::grid::cells(fw);
+                let (cells_z, _) = emerge_core::grid::cells(fd);
+                // Shown only when there is one, so the common case stays three plain rows and a
+                // turned piece explains why its numbers differ from the file's.
+                let turned = c
+                    .proposed
+                    .align
+                    .rotate
+                    .map(|(x, y, z)| format!("{x},{y},{z} deg"));
                 for (label, value) in [
-                    (
-                        "size",
-                        format!(
-                            "{:.2} x {:.2} x {:.2} m",
-                            m.footprint.0, m.height, m.footprint.1
-                        ),
-                    ),
+                    ("size", format!("{fw:.2} x {fh:.2} x {fd:.2} m")),
                     ("cells", format!("{cells_x} x {cells_z}")),
                     ("tris", format!("{}", c.triangles)),
                     (
@@ -2609,7 +2623,10 @@ fn rebuild_detail(
                             None => "none".to_owned(),
                         },
                     ),
-                ] {
+                ]
+                .into_iter()
+                .chain(turned.map(|t| ("turned", t)))
+                {
                     p.spawn(Node {
                         flex_direction: FlexDirection::Row,
                         margin: UiRect::bottom(Val::Px(1.0)),
