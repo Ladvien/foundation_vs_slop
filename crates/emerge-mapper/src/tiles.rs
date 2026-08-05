@@ -1349,8 +1349,16 @@ struct Preview;
 /// Which descriptor the live preview shows, so it is rebuilt only when the focus actually moves —
 /// respawning a GLB every frame would thrash the asset server and never finish loading.
 ///
-/// **Keyed by id, not by candidate index.** The pane can now be focused on a library entry, which
-/// has no index into `candidates`; an id is the one name both halves of the focus have.
+/// **Keyed by mesh path.** Not by candidate index — the pane can be focused on a library entry,
+/// which has no index into `candidates`. And not by id, which was the previous key and is **not
+/// unique among candidates**: a candidate's id comes from its file stem, and this tree really does
+/// contain four collisions — `wall`, `column`, `pipe` and `crate` each appear as a `.glb` in more
+/// than one pack. Selecting the second of a colliding pair left the first one's preview standing,
+/// because the reuse check saw a matching id and returned; the author was shown one mesh while the
+/// panel described another.
+///
+/// A mesh path is unique across both halves of the focus: `import::scan` skips any mesh the library
+/// already has, so a candidate and a library entry can never name the same file.
 #[derive(Component)]
 struct PreviewOf(String);
 
@@ -2177,18 +2185,21 @@ fn drive_preview(
         return;
     }
 
+    // The key, and the reason there is nothing to show without one: a descriptor with no mesh has
+    // no preview, and leaving the previous one up would caption it with the wrong piece.
+    let Some(mesh) = d.mesh.as_ref() else {
+        clear(&mut commands);
+        return;
+    };
+
     for (e, of) in &previews {
-        if of.0 != d.id {
+        if &of.0 != mesh {
             commands.entity(e).despawn();
         }
     }
-    if previews.iter().any(|(_, of)| of.0 == d.id) {
+    if previews.iter().any(|(_, of)| &of.0 == mesh) {
         return;
     }
-
-    let Some(mesh) = d.mesh.as_ref() else {
-        return;
-    };
     let scene: Handle<WorldAsset> = assets.load(GltfAssetLabel::Scene(0).from_asset(mesh.clone()));
     let a = &d.align;
     // The pivot shifts the model so its bounding-box centre lands on the placement point, which is
@@ -2197,7 +2208,7 @@ fn drive_preview(
     commands
         .spawn((
             Preview,
-            PreviewOf(d.id.clone()),
+            PreviewOf(mesh.clone()),
             Transform::from_xyz(
                 STAGE.x - pivot.0,
                 STAGE.y + a.y_offset.unwrap_or(0.0),
