@@ -381,10 +381,27 @@ fn inspect(
 
     // A re-export under a new name is two entries that are one asset, and the duplicate is found by
     // whoever wonders why the palette has two crates.
+    //
+    // **Compared as a sorted triple, not axis by axis.** A stored `extent` is already rotated by its
+    // descriptor's `align.rotate` while this measurement is raw, so the two can be in different
+    // frames — but a quarter turn only *permutes* the three spans, so the multiset is the same in
+    // every frame. It also makes the check stronger than it was: a re-export that arrived on its
+    // side is now caught rather than missed.
+    let spans = |w: f32, h: f32, d: f32| {
+        let mut v = [w, h, d];
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    };
+    let mine = spans(m.footprint.0, m.height, m.footprint.1);
     if let Some(twin) = library.descriptors.iter().find(|other| {
         other.mesh.as_deref() != Some(rel)
-            && other.extent.footprint.is_some_and(|f| close(f, m.footprint))
-            && other.extent.height.is_some_and(|h| (h - m.height).abs() < 1e-3)
+            && match (other.extent.footprint, other.extent.height) {
+                (Some((w, d)), Some(h)) => spans(w, h, d)
+                    .iter()
+                    .zip(mine.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-3),
+                _ => false,
+            }
     }) {
         out.push(Finding::note(format!(
             "`{}` already has these exact measurements — this may be the same asset re-exported",
@@ -408,8 +425,27 @@ fn origin_verdict(m: &Measured) -> OriginAlignment {
     }
 }
 
-fn close(a: (f32, f32), b: (f32, f32)) -> bool {
-    (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+/// **Re-measure a descriptor for the rotation it now carries.** The one place a rotation is baked.
+///
+/// `align.rotate` is a render instruction and the `extent` beside it is already rotated — see
+/// [`crate::descriptor::Align::rotate`] for why that trade was taken. The invariant only holds if
+/// changing the rotation re-derives the measurements, so this is what an editor calls when it does.
+///
+/// Rewrites `extent.footprint`, `extent.height`, `align.pivot` and `align.y_offset`, because a
+/// quarter turn moves all four. Leaves `front`, `scale` and `stretch_y` alone: a facing is a fact
+/// about which way the art points and is expressed in the mesh's own frame, and the two scales are
+/// corrections that a rotation does not touch.
+pub fn remeasure_rotated(d: &mut Descriptor, glb: &Glb) -> Result<(), String> {
+    let quarters = match d.align.rotate {
+        Some(rotate) => crate::descriptor::quarter_turns_xyz(rotate, &d.id)?,
+        None => (0, 0, 0),
+    };
+    let m = glb.measure()?.rotated(quarters);
+    d.extent.footprint = Some(m.footprint);
+    d.extent.height = Some(m.height);
+    d.align.pivot = Some(m.pivot);
+    d.align.y_offset = Some(-m.base_y);
+    Ok(())
 }
 
 /// Triangles across every primitive, from the accessor counts — no vertex data is read.

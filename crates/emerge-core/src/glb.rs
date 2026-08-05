@@ -51,6 +51,72 @@ pub struct Measured {
     pub suspect_centimetres: bool,
 }
 
+/// One quarter turn about +X, right-handed: `y -> z`, `z -> -y`.
+fn turn_x(p: [f32; 3]) -> [f32; 3] {
+    [p[0], -p[2], p[1]]
+}
+/// One quarter turn about +Y: `z -> x`, `x -> -z`.
+fn turn_y(p: [f32; 3]) -> [f32; 3] {
+    [p[2], p[1], -p[0]]
+}
+/// One quarter turn about +Z: `x -> y`, `y -> -x`.
+fn turn_z(p: [f32; 3]) -> [f32; 3] {
+    [-p[1], p[0], p[2]]
+}
+
+impl Measured {
+    /// **The same mesh, measured as it will stand after `rotate`.**
+    ///
+    /// `rotate` is quarter turns per axis, applied X then Y then Z — the order
+    /// [`crate::descriptor::Align::rotate`] documents.
+    ///
+    /// Exact rather than approximate: a quarter turn maps the bounding box's eight corners onto
+    /// eight corners, so rotating them and re-taking the min and max gives the true rotated box.
+    /// Every derived field is then re-derived from it, because **all of them move**. A chair tipped
+    /// onto its back has a new footprint *and* a new height *and* a new pivot *and* a new base —
+    /// rotating the footprint alone would seat it in the floor.
+    pub fn rotated(&self, rotate: (u8, u8, u8)) -> Measured {
+        let spin = |mut p: [f32; 3]| {
+            for _ in 0..(rotate.0 % 4) {
+                p = turn_x(p);
+            }
+            for _ in 0..(rotate.1 % 4) {
+                p = turn_y(p);
+            }
+            for _ in 0..(rotate.2 % 4) {
+                p = turn_z(p);
+            }
+            p
+        };
+
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for cx in [self.lo[0], self.hi[0]] {
+            for cy in [self.lo[1], self.hi[1]] {
+                for cz in [self.lo[2], self.hi[2]] {
+                    let p = spin([cx, cy, cz]);
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(p[a]);
+                        hi[a] = hi[a].max(p[a]);
+                    }
+                }
+            }
+        }
+        let (w, h, d) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        Measured {
+            lo,
+            hi,
+            footprint: (w, d),
+            height: h,
+            pivot: ((lo[0] + hi[0]) * 0.5, (lo[2] + hi[2]) * 0.5),
+            base_y: lo[1],
+            // A rotation cannot change the largest span, but deriving it rather than copying keeps
+            // every field of a `Measured` produced the one way.
+            suspect_centimetres: w.max(h).max(d) > 12.0,
+        }
+    }
+}
+
 /// Where the file's origin sits relative to its geometry, in the vocabulary the asset library's own
 /// per-pack READMEs already use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -664,6 +730,117 @@ mod tests {
         // the measurement.
         let (_, deg) = g.front_detail().expect("measures");
         assert!((deg - 90.0).abs() < 1.0, "and it measured {deg} deg");
+    }
+
+    /// **A quarter turn about X stands a lying-down piece up**, and every derived field moves with
+    /// it. The failure this guards is the one the handoff named: rotating the footprint alone and
+    /// leaving the height, which seats the piece in the floor.
+    #[test]
+    fn a_turn_about_x_swaps_height_and_depth_and_re_derives_the_base() {
+        // A "door" exported lying on its face: 1 m wide, 0.1 m tall, 2 m deep, base at y = 0.
+        let m = Measured {
+            lo: [-0.5, 0.0, -1.0],
+            hi: [0.5, 0.1, 1.0],
+            footprint: (1.0, 2.0),
+            height: 0.1,
+            pivot: (0.0, 0.0),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let up = m.rotated((1, 0, 0));
+        assert!((up.footprint.0 - 1.0).abs() < 1e-5, "width is untouched by a turn about X");
+        assert!((up.footprint.1 - 0.1).abs() < 1e-5, "depth becomes the old height");
+        assert!((up.height - 2.0).abs() < 1e-5, "height becomes the old depth");
+
+        // The base moved: the box now spans y in [-1, 1], so seating it takes a +1 m offset. This is
+        // the field a footprint-only rotation would have left behind.
+        assert!((up.base_y + 1.0).abs() < 1e-5, "base_y is {}", up.base_y);
+
+        // **And the pivot moved too.** The mesh was base-at-origin, so its old Y ran [0, 0.1]; that
+        // range is now the depth, running [0, 0.1] on Z, whose centre is 0.05 rather than 0. A
+        // rotation that re-derived the footprint and left the pivot alone would place this piece
+        // 50 mm out — which is the whole reason `rotated` re-derives every field instead of the
+        // obvious two.
+        assert!(up.pivot.0.abs() < 1e-5, "X was centred and stays centred: {:?}", up.pivot);
+        assert!(
+            (up.pivot.1 - 0.05).abs() < 1e-5,
+            "Z inherits the old base-at-origin Y range, so its centre is 50 mm: {:?}",
+            up.pivot
+        );
+    }
+
+    /// Four quarter turns about any axis are the identity, which is the cheapest proof the corner
+    /// transform is a rotation and not a shear.
+    #[test]
+    fn four_quarter_turns_about_any_axis_change_nothing() {
+        let m = Measured {
+            lo: [-0.3, 0.0, -0.7],
+            hi: [0.4, 1.1, 0.2],
+            footprint: (0.7, 0.9),
+            height: 1.1,
+            pivot: (0.05, -0.25),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        // Compared with an epsilon, not exactly: the derived fields are recomputed as `hi - lo` in
+        // f32, so a span written as 0.7 comes back as 0.70000005. That is arithmetic, not drift.
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        for axis in [(4, 0, 0), (0, 4, 0), (0, 0, 4), (0, 0, 0)] {
+            let back = m.rotated(axis);
+            assert_eq!(back.lo, m.lo, "{axis:?}");
+            assert_eq!(back.hi, m.hi, "{axis:?}");
+            assert!(near(back.footprint.0, m.footprint.0), "{axis:?} {:?}", back.footprint);
+            assert!(near(back.footprint.1, m.footprint.1), "{axis:?} {:?}", back.footprint);
+            assert!(near(back.height, m.height), "{axis:?}");
+            assert!(near(back.pivot.0, m.pivot.0) && near(back.pivot.1, m.pivot.1), "{axis:?}");
+        }
+    }
+
+    /// A turn about Y keeps the piece upright and swaps its floor axes — the common case, and the
+    /// one that must NOT touch the height.
+    #[test]
+    fn a_turn_about_y_swaps_the_footprint_and_leaves_the_height() {
+        let m = Measured {
+            lo: [-1.5, 0.0, -0.25],
+            hi: [1.5, 2.4, 0.25],
+            footprint: (3.0, 0.5),
+            height: 2.4,
+            pivot: (0.0, 0.0),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let turned = m.rotated((0, 1, 0));
+        assert!((turned.footprint.0 - 0.5).abs() < 1e-5);
+        assert!((turned.footprint.1 - 3.0).abs() < 1e-5);
+        assert!((turned.height - 2.4).abs() < 1e-5, "a wall turned on the floor is still 2.4 m");
+        assert!((turned.base_y - 0.0).abs() < 1e-5, "and still stands on the ground");
+    }
+
+    /// The three spans are a multiset invariant under any quarter turn — which is what the
+    /// importer's duplicate check leans on to compare across frames.
+    #[test]
+    fn a_rotation_only_permutes_the_three_spans() {
+        let m = Measured {
+            lo: [0.0, 0.0, 0.0],
+            hi: [0.3, 0.7, 1.9],
+            footprint: (0.3, 1.9),
+            height: 0.7,
+            pivot: (0.15, 0.95),
+            base_y: 0.0,
+            suspect_centimetres: false,
+        };
+        let sorted = |x: &Measured| {
+            let mut v = [x.footprint.0, x.height, x.footprint.1];
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        };
+        let want = sorted(&m);
+        for r in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1), (3, 2, 1), (2, 3, 3)] {
+            let got = sorted(&m.rotated(r));
+            for (a, b) in got.iter().zip(want.iter()) {
+                assert!((a - b).abs() < 1e-5, "{r:?}: {got:?} vs {want:?}");
+            }
+        }
     }
 
     /// A stool has no front, and `None` says exactly that. `Some(0.0)` would be a claim about the art

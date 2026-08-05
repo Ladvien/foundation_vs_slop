@@ -10,6 +10,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -49,6 +50,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -87,6 +89,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (
@@ -121,6 +124,7 @@
                 stretch_y: None,
                 y_offset: Some(0.0),
                 pivot: Some((0.0, 0.0)),
+                rotate: None,
                 front: None,
             ),
             extent: (

@@ -498,6 +498,96 @@ fn apply_verb(
 #[derive(Component, Clone, Copy)]
 pub struct ScanMeshButton;
 
+/// Which axis a rotate chip turns about.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum RotateAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl RotateAxis {
+    fn label(self) -> &'static str {
+        match self {
+            RotateAxis::X => "rot x",
+            RotateAxis::Y => "rot y",
+            RotateAxis::Z => "rot z",
+        }
+    }
+    /// This axis's component of a rotation, bumped by a quarter turn.
+    fn bumped(self, r: (i32, i32, i32)) -> (i32, i32, i32) {
+        let step = |v: i32| (v + 90).rem_euclid(360);
+        match self {
+            RotateAxis::X => (step(r.0), r.1, r.2),
+            RotateAxis::Y => (r.0, step(r.1), r.2),
+            RotateAxis::Z => (r.0, r.1, step(r.2)),
+        }
+    }
+}
+
+/// **Turn the mesh a quarter turn about one axis, and re-measure it.**
+///
+/// The two halves are one action on purpose. `align.rotate` is a render instruction and the `extent`
+/// beside it is stored already-rotated, so a rotation that did not re-measure would leave the file
+/// describing an orientation the mesh no longer has — with nothing downstream able to notice. That
+/// invariant is the price of not making every reader of `extent` rotation-aware, and this is where
+/// it is paid.
+///
+/// A turn about **X or Z swaps the piece's height with a floor axis**, so this is also the one place
+/// a tile's lattice changes shape without the project's `divisions` moving.
+fn rotate_mesh(axis: RotateAxis, project: &mut Project, state: &mut ImportState) {
+    let Some(d) = state.editing(&project.measured) else {
+        state.status = "no tile is selected".to_owned();
+        return;
+    };
+    let Some(mesh) = d.mesh.clone() else {
+        state.status = format!("`{}` has no mesh to turn", d.id);
+        return;
+    };
+    let path = project.root.join("assets").join(&mesh);
+    let glb = match emerge_core::glb::Glb::open(&path) {
+        Ok(glb) => glb,
+        Err(why) => {
+            state.status = format!("{mesh}: {why}");
+            return;
+        }
+    };
+
+    let Some((d, where_to)) = state.editing_mut(&mut project.measured) else {
+        return;
+    };
+    let want = axis.bumped(d.align.rotate.unwrap_or((0, 0, 0)));
+    let before = d.align.rotate;
+    // A rotation of nothing is not a rotation — keep the field absent rather than storing an
+    // identity nobody authored, so a descriptor that was never turned still says so.
+    d.align.rotate = (want != (0, 0, 0)).then_some(want);
+    if let Err(why) = emerge_core::import::remeasure_rotated(d, &glb) {
+        d.align.rotate = before;
+        state.status = why;
+        return;
+    }
+    let (w, dep) = d.extent.footprint.unwrap_or((0.0, 0.0));
+    let h = d.extent.height.unwrap_or(0.0);
+    let said = format!(
+        "{} {},{},{} deg — now {w:.2} x {h:.2} x {dep:.2} m",
+        d.id, want.0, want.1, want.2
+    );
+    state.status = persist(project, where_to, said);
+}
+
+/// The chip.
+fn on_rotate_click(
+    activate: On<Activate>,
+    axes: Query<&RotateAxis>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    let Ok(axis) = axes.get(activate.entity) else {
+        return;
+    };
+    rotate_mesh(*axis, &mut project, &mut state);
+}
+
 /// **Mark every cell the mesh's geometry reaches, and say how many.**
 ///
 /// The lattice is only worth authoring if occupancy comes off the mesh: at the shipped divisions a
@@ -693,6 +783,16 @@ fn lattice_keys(
     if pressed(Action::ScanMesh) {
         scan_mesh(&mut project, &mut state);
         return;
+    }
+    for (action, axis) in [
+        (Action::RotateMeshX, RotateAxis::X),
+        (Action::RotateMeshY, RotateAxis::Y),
+        (Action::RotateMeshZ, RotateAxis::Z),
+    ] {
+        if pressed(action) {
+            rotate_mesh(axis, &mut project, &mut state);
+            return;
+        }
     }
 
     for (action, verb) in [
@@ -1281,6 +1381,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_cell_click)
             .add_observer(on_cell_verb)
             .add_observer(on_scan_mesh)
+            .add_observer(on_rotate_click)
             .add_observer(on_fill_header)
             .add_observer(on_note_click)
             .add_observer(on_candidate_click)
@@ -2775,6 +2876,31 @@ fn rebuild_detail(
                             chip.spawn((
                                 Text::new(verb.label().to_owned()),
                                 TextColor(if verb == CellVerb::Clear { DANGER } else { TEXT }),
+                                TextFont::from_font_size(10.0),
+                            ));
+                        });
+                }
+
+                // **Turning the mesh sits beside the lattice, because it reshapes it.** A quarter
+                // turn about X or Z swaps the piece's height with a floor axis, so the grid above
+                // changes shape — putting these anywhere else would hide the cause of that.
+                for axis in [RotateAxis::X, RotateAxis::Y, RotateAxis::Z] {
+                    chips
+                        .spawn((
+                            UiButton,
+                            Hovered::default(),
+                            axis,
+                            Node {
+                                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                                margin: UiRect::left(Val::Px(crate::chrome::GAP_ROW)),
+                                ..default()
+                            },
+                            BackgroundColor(ROW_BG),
+                        ))
+                        .with_children(|chip| {
+                            chip.spawn((
+                                Text::new(axis.label()),
+                                TextColor(LABEL),
                                 TextFont::from_font_size(10.0),
                             ));
                         });

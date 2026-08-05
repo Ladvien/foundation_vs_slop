@@ -118,6 +118,10 @@ pub enum Action {
     CellClear,
     /// Mark every cell the mesh's geometry reaches. See `tiles::scan_mesh`.
     ScanMesh,
+    /// Turn the mesh a quarter turn about one axis and re-measure it. See `tiles::rotate_mesh`.
+    RotateMeshX,
+    RotateMeshY,
+    RotateMeshZ,
     /// Point the arrows at the candidate list.
     FocusCandidates,
     /// Point them at the library list.
@@ -268,7 +272,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / anchor / clear"),
     b(Action::CellAnchor, KeyCode::KeyC, false, Context::Tiles, "C", "solid / edge / anchor / clear"),
     b(Action::CellClear, KeyCode::KeyV, false, Context::Tiles, "V", "solid / edge / anchor / clear"),
-    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "mark solid cells from the mesh"),
+    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "from the mesh: scan solid / turn x y z"),
+    b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Tiles, "N", "from the mesh: scan solid / turn x y z"),
+    b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: scan solid / turn x y z"),
+    b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Tiles, "P", "from the mesh: scan solid / turn x y z"),
 
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
     // the two tabs are never live together, so the same key means one thing in each.
@@ -510,6 +517,7 @@ mod tests {
             Action::LayerDown, Action::LayerUp,
             Action::CellSolid, Action::CellEdge, Action::CellAnchor, Action::CellClear,
             Action::ScanMesh,
+            Action::RotateMeshX, Action::RotateMeshY, Action::RotateMeshZ,
             Action::FocusCandidates, Action::FocusLibrary,
             Action::PrevRig, Action::NextRig,
             Action::TurnPieceLeft, Action::TurnPieceRight,

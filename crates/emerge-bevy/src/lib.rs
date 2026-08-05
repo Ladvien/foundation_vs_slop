@@ -233,9 +233,39 @@ pub fn spawn_descriptor(
                     .with_scale(Vec3::new(scale, scale * stretch, scale)),
                 Visibility::Inherited,
             ))
-            .with_child((WorldAssetRoot(scene), Transform::default()))
+            // **The default rotation rides the mesh child, not the placement.**
+            //
+            // The parent carries what the *world* says — where the piece stands, which way it was
+            // turned, how this project stretches it. `align.rotate` says something else: which way
+            // the artist happened to export the file. Putting it here keeps those separable, and it
+            // makes the composition right for free — the parent's Y stretch is applied after this
+            // rotation, so it stretches the piece's real height rather than whichever mesh axis
+            // happens to point up in the file.
+            .with_child((
+                WorldAssetRoot(scene),
+                Transform::from_rotation(mesh_rotation(d)),
+            ))
             .id(),
     )
+}
+
+/// The mesh's own default rotation as a quaternion, or the identity.
+///
+/// Composed `Rz * Ry * Rx` so a point is turned about X, then Y, then Z — the order
+/// `Align::rotate` documents and `glb::Measured::rotated` bakes the extent with. Written out rather
+/// than through `Quat::from_euler`, because the euler-sequence conventions are exactly the kind of
+/// thing that is off by an axis for a week.
+///
+/// A rotation that is not a quarter turn cannot be reached through the editor and is refused by
+/// `quarter_turns_xyz` at load; if one arrives here anyway it is applied as written, because
+/// silently squaring it would draw the mesh at an angle its extent does not describe.
+pub fn mesh_rotation(d: &Descriptor) -> Quat {
+    let Some((x, y, z)) = d.align.rotate else {
+        return Quat::IDENTITY;
+    };
+    Quat::from_rotation_z((z as f32).to_radians())
+        * Quat::from_rotation_y((y as f32).to_radians())
+        * Quat::from_rotation_x((x as f32).to_radians())
 }
 
 /// Spawn every placement in the map.

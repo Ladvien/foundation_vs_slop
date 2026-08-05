@@ -525,6 +525,29 @@ impl Face {
     }
 }
 
+/// **[`Align::rotate`] as quarter turns**, or a refusal naming the piece and the angle.
+///
+/// The same rule `adjacency::quarter_turns` holds for a placement's yaw, for the same reason: a tile
+/// is square to the world, so a rotation that is not a quarter turn leaves it with no face any rule
+/// can read. Refused rather than rounded — rounding would silently store an orientation the author
+/// did not ask for, and the mesh would render at one angle while every measurement described another.
+pub fn quarter_turns_xyz(rotate: (i32, i32, i32), owner: &str) -> Result<(u8, u8, u8), String> {
+    let axis = |deg: i32, name: &str| -> Result<u8, String> {
+        if deg % 90 != 0 {
+            return Err(format!(
+                "`{owner}`'s rotation is {deg} degrees about {name}; a tile only sits square to the \
+                 world, so a rotation must be a multiple of 90"
+            ));
+        }
+        Ok((deg.rem_euclid(360) / 90) as u8)
+    };
+    Ok((
+        axis(rotate.0, "X")?,
+        axis(rotate.1, "Y")?,
+        axis(rotate.2, "Z")?,
+    ))
+}
+
 /// Corrections for what the artist got wrong. Every one is measured, never dialled by eye — the kit's
 /// own doc says so of `scale`, and the importer exists to make that true of the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -546,6 +569,25 @@ pub struct Align {
     /// Local XZ offset of the mesh's bbox centre from its origin. Placement reasons about a footprint
     /// symmetric about the origin, so an off-centre mesh seated against a wall pokes through it.
     pub pivot: Option<(f32, f32)>,
+    /// **A default rotation for a mesh authored the wrong way up**, in degrees per axis, applied X
+    /// then Y then Z.
+    ///
+    /// Every value is a multiple of 90 — [`quarter_turns_xyz`] refuses anything else. A tile's
+    /// lattice, its faces and its footprint are all square to the world; a mesh dropped in at 37°
+    /// has no honest extent, so the schema cannot express one.
+    ///
+    /// # The extent stored beside this is already rotated
+    ///
+    /// **This is a render instruction, not a measurement correction.** The importer measures the
+    /// mesh, applies this rotation to the bounds ([`crate::glb::Measured::rotated`]), and writes the
+    /// *rotated* `extent`, `pivot` and `y_offset`. So every reader of `extent` — `stack`, `fill`,
+    /// `thumbs`, [`divisions`] — sees the piece as it will stand in the world, and none of them
+    /// needs to know this field exists.
+    ///
+    /// The cost of that choice is an invariant a file can break: editing `rotate` by hand leaves
+    /// `extent` describing the old orientation, and nothing downstream can tell. Change it through
+    /// the editor, which re-measures.
+    pub rotate: Option<(i32, i32, i32)>,
     /// **Which of the mesh's own faces is its front**, in its local space.
     ///
     /// Composed with a placement's yaw by whoever needs a world facing:
@@ -725,6 +767,7 @@ impl Descriptor {
                 stretch_y: patch.align.stretch_y.or(self.align.stretch_y),
                 y_offset: patch.align.y_offset.or(self.align.y_offset),
                 pivot: patch.align.pivot.or(self.align.pivot),
+                rotate: patch.align.rotate.or(self.align.rotate),
                 front: patch.align.front.or(self.align.front),
             },
             extent: Extent {
@@ -1412,6 +1455,79 @@ mod subgrid_edit_tests {
             cleared.subgrid,
             Some(Subgrid::default()),
             "an explicitly empty lattice clears the cells rather than inheriting them"
+        );
+    }
+}
+
+/// The rotation field: what it accepts, what it refuses, and how it layers.
+#[cfg(test)]
+mod rotate_tests {
+    use super::*;
+
+    #[test]
+    fn a_rotation_is_read_as_quarter_turns() {
+        assert_eq!(quarter_turns_xyz((0, 0, 0), "x"), Ok((0, 0, 0)));
+        assert_eq!(quarter_turns_xyz((90, 180, 270), "x"), Ok((1, 2, 3)));
+        // Wrapped either way — an author writing -90 means three quarters, not an error.
+        assert_eq!(quarter_turns_xyz((-90, 360, 720), "x"), Ok((3, 0, 0)));
+    }
+
+    /// Refused rather than rounded. Rounding would draw the mesh at one angle while every
+    /// measurement beside it described another.
+    #[test]
+    fn a_rotation_that_is_not_a_quarter_turn_is_refused_by_name() {
+        let err = quarter_turns_xyz((0, 45, 0), "lamp").err().unwrap_or_default();
+        assert!(err.contains("lamp") && err.contains("45") && err.contains("about Y"), "{err}");
+    }
+
+    /// A patch may state a rotation, and silence inherits — the rule every other `Align` field holds.
+    #[test]
+    fn a_rotation_layers_like_every_other_correction() {
+        let base = Descriptor {
+            id: "door".into(),
+            align: Align {
+                rotate: Some((90, 0, 0)),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        assert_eq!(
+            base.patched_with(&Descriptor::default()).align.rotate,
+            Some((90, 0, 0)),
+            "silence inherits"
+        );
+        assert_eq!(
+            base.patched_with(&Descriptor {
+                align: Align {
+                    rotate: Some((0, 90, 0)),
+                    ..Align::default()
+                },
+                ..Descriptor::default()
+            })
+            .align
+            .rotate,
+            Some((0, 90, 0)),
+            "a stated rotation wins"
+        );
+    }
+
+    /// A rotation survives the file, and reads as degrees rather than as a count nobody can picture.
+    #[test]
+    fn a_rotation_round_trips_through_ron() {
+        let before = Descriptor {
+            id: "door".into(),
+            align: Align {
+                rotate: Some((90, 0, 180)),
+                ..Align::default()
+            },
+            ..Descriptor::default()
+        };
+        let text = ron::ser::to_string_pretty(&before, ron::ser::PrettyConfig::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(text.contains("rotate: Some((90, 0, 180))"), "{text}");
+        assert_eq!(
+            ron::from_str::<Descriptor>(&text).unwrap_or_else(|e| panic!("{e}")),
+            before
         );
     }
 }
