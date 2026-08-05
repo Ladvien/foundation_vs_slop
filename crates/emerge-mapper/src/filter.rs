@@ -67,6 +67,15 @@ impl Filters {
         self.focus.is_some()
     }
 
+    /// **Give the keyboard back, keeping what was typed.**
+    ///
+    /// The text surviving is the whole point of this being its own resource (see the module note):
+    /// an author who filtered to `grate`, placed one, and wants a second should not have to type it
+    /// again. Only the focus goes.
+    pub fn blur(&mut self) {
+        self.focus = None;
+    }
+
     /// Does this id survive the list's filter?
     ///
     /// Case-insensitive substring, not a fuzzy match: an author filtering `crt` wants the three CRTs,
@@ -199,5 +208,59 @@ pub fn refresh(
         if bg.0 != want {
             bg.0 = want;
         }
+    }
+}
+
+/// **A click in the world takes the keyboard back from a filter box.**
+///
+/// Enter and Escape were the only ways out, and nothing said so. Meanwhile `editor::place_on_click`
+/// is gated on `not_typing`, which reads [`Filters::typing`] — so filtering the palette to find a
+/// piece and then clicking to place it did **nothing at all, silently**. That is the failure this
+/// repo's rules exist to prevent, and it was reachable by the most natural way to find one piece
+/// among a hundred and eighty.
+///
+/// # Why `Phase::Sense`, and why the same click still places
+///
+/// [`crate::keys::Phase`] exists to decide who owns the keyboard once, before anything reads a key.
+/// Running here — ahead of `editor::sense_context`, which computes `Live` from this very flag —
+/// means the focus is already gone by the time `place_on_click` evaluates `not_typing` in
+/// `Phase::Act`. So one click blurs and places, rather than the first click being eaten as a
+/// dismissal and the author clicking again.
+///
+/// A click on a widget is left alone. It might be this box, another filter, or a palette row, and
+/// none of those is "the author is done here" — `on_filter_click` already owns the first case.
+pub fn blur_on_world_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    hovered: Query<&bevy::picking::hover::Hovered>,
+    mut filters: ResMut<Filters>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) || !filters.typing() {
+        return;
+    }
+    if hovered.iter().any(|h| h.0) {
+        return;
+    }
+    filters.blur();
+}
+
+#[cfg(test)]
+mod blur_tests {
+    use super::*;
+
+    /// Blurring gives back the keyboard and keeps the search — the two halves of the module note.
+    #[test]
+    fn blurring_keeps_the_text_and_drops_the_focus() {
+        let mut f = Filters::default();
+        f.focus = Some(Pane::Palette);
+        *f.text_mut(Pane::Palette) = "grate".to_owned();
+
+        f.blur();
+
+        assert!(!f.typing(), "the keyboard goes back to the editor");
+        assert_eq!(
+            f.text(Pane::Palette),
+            "grate",
+            "the search survives, so placing a second one needs no retyping"
+        );
     }
 }

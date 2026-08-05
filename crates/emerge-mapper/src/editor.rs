@@ -297,6 +297,11 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
+                    // Before `sense_context`, which computes `Live` from `Filters::typing` —
+                    // so the click that blurs is also the click that places.
+                    crate::filter::blur_on_world_click
+                        .in_set(keys::Phase::Sense)
+                        .before(sense_context),
                     crate::filter::keys.in_set(keys::Phase::Text),
                     crate::filter::refresh,
                 ),
