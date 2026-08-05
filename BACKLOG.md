@@ -886,7 +886,24 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
   The squad closes to **2 m**, and on `0x1ce5` **eight crabs died**. So the swarm and the squad do meet, engagement does happen, and the archive-wide alarm ("the search has been scoring episodes where nothing happens") is **not supported** — do not act on it.
 
-  What survives is narrower and still worth fixing: on **`0x5C09191` specifically**, the squad gets within 2.09 m and *still* records `crabs_killed = 0` and `unit_damage = 0.000` over 30 s. Neither side engages at two metres. Two candidate explanations, neither tested: the 2.09 m is a 3-D distance and crabs climb, so the nearest crab may be directly *overhead* on a wall or ceiling with no valid engagement geometry; or the engagement gate (range / `Dungeon::line_of_sight`, which `laser::fire_laser` applies separately from the fog grid) rejects it. **Measure which before changing anything** — the distance to the nearest crab *on the same surface patch* is the number that would separate them.
+  **What survives, and it is a real bug: on `0x5C09191` the squad and the swarm interpenetrate and nothing happens.** Four hypotheses were tested and *three were wrong* — worth stating, because each looked obvious:
+
+  | hypothesis | verdict |
+  |---|---|
+  | the squad never reaches the swarm | **wrong** — closes to 0.47 m |
+  | the nearest crab is overhead (crabs climb) | **wrong** — all 44 crabs at `y = 0.12`, units at `y = 0.00`; nothing is on a wall |
+  | 1800 ticks is shorter than the time-to-contact | **wrong** — at 2700 / 3600 / 5400 ticks, still `crabs_killed = 0` |
+  | line of sight is blocked | **wrong** — `line_of_sight = true` at the closest pair |
+
+  The measurements, `deterministic_core_seeded(0x5C09191)`:
+
+  * from t=800 onward there are **5–20 squad↔crab pairs within 12 m at every sample, and most are in line of sight** (t=2100: 20 pairs under 12 m, 16 of them in LOS);
+  * closest approach **0.47 m** at t=2300, in **adjacent cells** — unit `(80,112)`, crab `(80,113)` — with `line_of_sight = true`;
+  * and across 1800 / 2700 / 3600 / 5400 ticks: `crabs_killed = 0`, `unit_damage_taken = 0.00`, `survivors = 5`, crab count *rising* 40 → 44.
+
+  So five armed units stand half a metre from a crab, in clear sight, for thousands of ticks, and **neither side ever fires**. That is the engage path being dead on this seed, not a geometry or timing artifact. It is also seed-specific: on `0x1ce5` the same shipped level kills eight crabs, so nothing here is globally broken.
+
+  **Where to look, none of it asserted:** target acquisition (does the brain ever select an attack mode, or are all 138 `duty_decisions` non-combat?), `laser::fire_laser`'s own `Dungeon::line_of_sight` gate and its range, crab aggro/threat wiring, and faction tagging. The single most informative next measurement is a histogram of the squad's chosen `Mode` over the rollout — if no unit ever picks an engaging mode, the bug is upstream of the weapon entirely.
 
   The watch-feed finding below stands on its own measurements and is unaffected by this correction. `a_candidate_genome_actually_changes_the_simulation` may still share a cause with the playtest failure — a seed where nothing is contested cannot distinguish two brains — but that is now a hypothesis about one seed, not about the search.
 
