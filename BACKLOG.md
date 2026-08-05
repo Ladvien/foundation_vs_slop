@@ -865,7 +865,26 @@ All present in the local `home-still` corpus (returned with PDF path + chunk ind
 
 - **DESIGN CALL: should the photophobic push cross surface patches?** Surfaced by the diagnosis above and **not** decided. `crab_locomotion` runs `light_push` through `clamp_to_patch` on purpose — *"gate crossings stay with the mode's flow-field"* — so photophobia is a **within-patch** effect: a crab settles at the darkest point of its own patch, generally mid-gradient. Measured at tick 360: with the gain on, 13–19 of 40 crabs are still standing on a light gradient; with it off, 26–38 of 40 have random-walked into flat *deep dark*. So over a long horizon **diffusion into other rooms beats steering within one**, which is why the old oracle inverted. Two readings, both defensible: (a) correct as-is — light is a local force and room-scale routing is the mode's job, so "dark = cover" holds at the scale a player reads; (b) a photophobic crab should be able to leave a lit room, which needs the push to influence patch selection rather than only position within a patch. (b) changes crab distribution and therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin. Do not "fix" this without picking one.
 
-  **`authored_world_config_override_is_a_noop`** fails with `installing the authored world config changed the sim — the override seam or encode/decode is lossy`. That seam is what makes an authored world config trustworthy, so while it is red no claim about authored-config parity means anything.
+  **`authored_world_config_override_is_a_noop` was never a real failure** — corrected 2026-08-05. `GOLDEN` is `0` under `cfg(not(target_arch = "x86_64"))`, so on Apple Silicon it compared against zero; the message about a lossy seam is the assert's text, not a diagnosis. The authored config reproduces the shipped hash **exactly** (`0xac8196c4a1bfb0d0` both ways), so that seam is lossless and the QD archives riding it were never at risk. Both `aarch64` goldens are now pinned and the whole replay suite is green.
+
+- **⚠️ DECISION NEEDED: `broadcast.watch_threshold` (0.006) sits inside the ambient ATTENTION floor, so "look away to contain it" cannot hold.** Found 2026-08-05 while trying to promote the harness lane; `watching_the_feed_makes_it_generate_and_ignoring_it_stops` is red because the mechanic really is broken, not because the oracle is.
+
+  **Measured.** Two screens, nobody deliberately looking at either, ambient ATTENTION sampled at each screen's own cell every 100 ticks:
+
+  | tick | screen A | screen B | crabs |
+  |---|---|---|---|
+  | 100 | 0.00444 | 0.00130 | 40 |
+  | 400 | 0.00741 ***** | 0.00611 ***** | 40 |
+  | 600 | 0.00633 ***** | 0.00659 ***** | 41 |
+  | 900 | 0.00618 ***** | 0.00666 ***** | 42 |
+
+  (**\*** = at or above the threshold, i.e. counts as *watched*.) The field **rises to a resting plateau of ~0.0062–0.0067 and stays there**, so a threshold of `0.006` is under the noise floor: every screen counts as watched forever, and the feed generates regardless of where the player looks. Crab growth follows exactly.
+
+  **Why the obvious history is misleading.** The *genome range* for this knob was already corrected once (2026-08-01, `(0.05, 0.80)` → `(0.0, 0.05)`) because the old band sat **above** anything the field reaches at a screen, making the anomaly permanently inert. That correction was right, but the shipped default landed at the opposite failure: `0.006` is at the bottom of the new band, below the ambient floor. The band `(0.0, 0.05)` therefore spans *both* pathologies, and only its upper part discriminates.
+
+  **What is NOT yet measured, and what the decision needs:** what a screen reads when the squad is *genuinely* looking at it from playable range. The test's WATCHED half floods the field artificially, so it proves the gate can fire but says nothing about the natural value. Until that is measured the safe interval is only bounded below (must exceed ~0.007 with margin) and above by the containment rule's `0.30` "standing on it".
+
+  **This is a gameplay retune, not a bug fix:** it changes crab counts, therefore positions, therefore `snapshot_hash`, so it needs the replay gates and a golden re-pin on both architectures — and it shifts the meaning of the evolvable band, so baked elites measured under the old default were scored against an anomaly that always fired. Do not change it without picking a value deliberately.
 - **Scope realism.** The XL items (H-3, I-1, K-4, C-6) are correctly sequenced last and behind prerequisites. Do not let the appeal of the "full vision" pull them earlier than M4, or the M0–M3 foundation slips.
 
 ---
