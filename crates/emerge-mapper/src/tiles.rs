@@ -849,6 +849,140 @@ fn apply_verb_to(
     }
 }
 
+/// **The lattice cell under the cursor, and the face it is seen through.**
+///
+/// The lattice was reachable only through the panel's chip grid and the cursor keys. That grid is a
+/// flat slice of a 3D thing: to put a token on a wall's east face an author had to work out which
+/// column that was, in a projection where east is a diagonal. Pointing at the wall is the obvious
+/// gesture and it was the one thing the editor could not do.
+///
+/// `None` when the cursor is off the piece, over a panel, or on a tab that is not showing one.
+#[derive(Resource, Default)]
+pub struct LatticePick(pub Option<((u32, u32, u32), Option<emerge_core::descriptor::Face>)>);
+
+/// The staged tile's lattice box in world space, or `None` if it has no derivable one.
+///
+/// The one place this geometry is written down, because `draw_subgrid`, the highlight and the picker
+/// must agree about where the lattice is to within nothing at all — a highlight half a cell off the
+/// box it highlights is worse than no highlight.
+fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32, u32, u32))> {
+    let d = state.editing(&project.measured)?;
+    let div = project.divisions_of(d).ok()?;
+    let (w, dep) = d.extent.footprint?;
+    // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
+    let h = d.extent.height.unwrap_or(0.0).max(0.05);
+    Some((
+        STAGE - Vec3::new(w * 0.5, 0.0, dep * 0.5),
+        Vec3::new(w, h, dep),
+        div,
+    ))
+}
+
+fn pick_lattice(
+    mode: Res<Mode>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<crate::view::MainCamera>>>,
+    hovered_ui: Query<&Hovered>,
+    state: Res<ImportState>,
+    project: Res<Project>,
+    mut pick: ResMut<LatticePick>,
+) {
+    let clear = |pick: &mut LatticePick| {
+        if pick.0.is_some() {
+            pick.0 = None;
+        }
+    };
+    if *mode != Mode::Tiles || hovered_ui.iter().any(|h| h.0) {
+        clear(&mut pick);
+        return;
+    }
+    let (Some(window), Some(camera)) = (window, camera) else {
+        clear(&mut pick);
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(cursor) = window.cursor_position() else {
+        clear(&mut pick);
+        return;
+    };
+    let Ok(ray) = cam.viewport_to_world(cam_tf, cursor) else {
+        clear(&mut pick);
+        return;
+    };
+    let Some((origin, size, div)) = stage_box(&state, &project) else {
+        clear(&mut pick);
+        return;
+    };
+    let got = emerge_core::descriptor::pick_cell(
+        ray.origin.into(),
+        Vec3::from(ray.direction).into(),
+        origin.into(),
+        size.into(),
+        div,
+    );
+    if pick.0 != got {
+        pick.0 = got;
+    }
+}
+
+/// Clicking the piece selects the cell the cursor is on.
+///
+/// Sets the same `CellEdit` the chips and the cursor keys set, so every verb, every fill and the
+/// readout under the grid work on a ray-picked cell without knowing one exists.
+fn click_lattice(
+    mouse: Res<ButtonInput<MouseButton>>,
+    pick: Res<LatticePick>,
+    mut edit: ResMut<CellEdit>,
+    mut state: ResMut<ImportState>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some((at, face)) = pick.0 else {
+        return;
+    };
+    edit.at = Some(at);
+    edit.layer = at.1;
+    // The face is named because it is the useful half: it says which neighbour will read whatever
+    // token goes here. `SubCell::edge` is one token per cell, so this picks the cell — a corner cell
+    // sits on two faces and presents the same token to both, which is the schema's own design.
+    state.status = match face {
+        Some(f) => format!(
+            "cell {},{},{} — {} face, the side a neighbour reads",
+            at.0,
+            at.1,
+            at.2,
+            f.label()
+        ),
+        None => format!("cell {},{},{} — picked from above", at.0, at.1, at.2),
+    };
+}
+
+/// Outline the cell under the cursor, so pointing at the piece has an answer before clicking.
+fn draw_pick(
+    pick: Res<LatticePick>,
+    state: Res<ImportState>,
+    project: Res<Project>,
+    mut gizmos: Gizmos,
+) {
+    let Some((at, _)) = pick.0 else { return };
+    let Some((origin, size, div)) = stage_box(&state, &project) else {
+        return;
+    };
+    let step = Vec3::new(
+        size.x / div.0 as f32,
+        size.y / div.1 as f32,
+        size.z / div.2 as f32,
+    );
+    let centre = origin
+        + Vec3::new(
+            (at.0 as f32 + 0.5) * step.x,
+            (at.1 as f32 + 0.5) * step.y,
+            (at.2 as f32 + 0.5) * step.z,
+        );
+    gizmos.cube(Transform::from_translation(centre).with_scale(step), ACCENT);
+}
+
 /// **The lattice, by keyboard** — cursor, layer, and the four verbs.
 ///
 /// `docs/ui.md` §4.2 wants everything reachable by mouse reachable by keyboard, and every subgrid
@@ -1466,6 +1600,7 @@ impl Plugin for TilesPlugin {
             .init_resource::<ImportState>()
             .init_resource::<MapView>()
             .init_resource::<CellEdit>()
+            .init_resource::<LatticePick>()
             .init_resource::<NoteEdit>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
@@ -1480,6 +1615,17 @@ impl Plugin for TilesPlugin {
                     move_selection.in_set(crate::keys::Phase::Act),
                     lattice_keys.in_set(crate::keys::Phase::Act),
                     autoscan_candidate.run_if(in_tiles_mode),
+                    // Nested: a system tuple caps out, and these three are one feature anyway —
+                    // point at the piece, click a cell, see which one is under the cursor.
+                    // Nested: a system tuple caps out at twenty, and these five are one feature —
+                    // the staged piece, what the cursor is on, and what a click does to it.
+                    (
+                        pick_lattice,
+                        click_lattice.run_if(in_tiles_mode),
+                        draw_pick.run_if(in_tiles_mode),
+                        draw_preview_footprint.run_if(in_tiles_mode),
+                        draw_subgrid.run_if(in_tiles_mode),
+                    ),
                     keep_library_selection_visible.run_if(in_tiles_mode),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
@@ -1500,8 +1646,6 @@ impl Plugin for TilesPlugin {
                     rebuild_detail.run_if(resource_changed::<ImportState>),
                     refresh_lines,
                     drive_preview,
-                    draw_preview_footprint.run_if(in_tiles_mode),
-                    draw_subgrid.run_if(in_tiles_mode),
                 ),
             )
             // A second `add_systems` rather than a nested tuple — `add_systems` caps a tuple at 20

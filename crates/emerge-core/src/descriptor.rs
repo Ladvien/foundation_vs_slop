@@ -1531,3 +1531,196 @@ mod rotate_tests {
         );
     }
 }
+
+/// **Which lattice cell a ray enters, and through which face.**
+///
+/// The lattice is an axis-aligned box from `origin` spanning `size`, divided `div` ways per axis.
+/// `dir` need not be normalised. Returns `None` when the ray misses, or when it starts inside the box
+/// — a camera inside the piece it is authoring has no "entry" to report, and guessing one would put
+/// the cursor on a face the author cannot see.
+///
+/// # What the face means, and what it does not
+///
+/// The face is **where you are looking from**, which is what makes a token's audience legible: an
+/// author putting `seam` on a cell wants to know which neighbour will read it. It is not a new place
+/// to store anything — [`SubCell::edge`] is one token per *cell*, and
+/// [`crate::adjacency::face`] collects the tokens of whichever cells lie on the face being compared.
+/// A corner cell is on two faces and presents the same token to both, by design.
+///
+/// `None` for the face means the ray came in through the top or the bottom. Those are real surfaces
+/// to click on — you pick cells from above constantly — but they are not faces any rule reads, since
+/// adjacency is horizontal. Saying `None` is more honest than naming a direction that matches nothing.
+///
+/// Slab method: clip the ray against each pair of parallel planes and keep the latest entry. The axis
+/// that produced that entry is the face it came through.
+pub fn pick_cell(
+    ray_origin: [f32; 3],
+    dir: [f32; 3],
+    origin: [f32; 3],
+    size: [f32; 3],
+    div: (u32, u32, u32),
+) -> Option<((u32, u32, u32), Option<Face>)> {
+    let n = [div.0, div.1, div.2];
+    if n.iter().any(|d| *d == 0) || size.iter().any(|s| *s <= 0.0) {
+        return None;
+    }
+    if ray_origin.iter().chain(dir.iter()).any(|v| !v.is_finite()) {
+        return None;
+    }
+
+    let mut t_enter = f32::NEG_INFINITY;
+    let mut t_exit = f32::INFINITY;
+    // Which axis let the ray in last, and from which side. `None` until a slab actually bounds it —
+    // a ray parallel to every axis but one still has a face.
+    let mut entry: Option<(usize, bool)> = None;
+
+    for a in 0..3 {
+        let (lo, hi) = (origin[a], origin[a] + size[a]);
+        if dir[a].abs() < 1e-9 {
+            // Parallel to this slab: inside it forever, or outside it forever.
+            if ray_origin[a] < lo || ray_origin[a] > hi {
+                return None;
+            }
+            continue;
+        }
+        let (mut t1, mut t2) = ((lo - ray_origin[a]) / dir[a], (hi - ray_origin[a]) / dir[a]);
+        // `from_low` tracks which plane t1 is, before the swap loses that.
+        let from_low = t1 <= t2;
+        if !from_low {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        if t1 > t_enter {
+            t_enter = t1;
+            entry = Some((a, from_low));
+        }
+        t_exit = t_exit.min(t2);
+        if t_enter > t_exit {
+            return None;
+        }
+    }
+
+    // Behind the camera, or starting inside. Both are "no entry face to report".
+    if t_enter <= 0.0 {
+        return None;
+    }
+
+    let hit = [
+        ray_origin[0] + dir[0] * t_enter,
+        ray_origin[1] + dir[1] * t_enter,
+        ray_origin[2] + dir[2] * t_enter,
+    ];
+    let mut cell = [0u32; 3];
+    for a in 0..3 {
+        let frac = (hit[a] - origin[a]) / size[a];
+        // Clamped rather than refused: the entry point sits exactly on a boundary by construction, and
+        // floating point puts it a hair outside about half the time.
+        cell[a] = ((frac * n[a] as f32) as i64).clamp(0, n[a] as i64 - 1) as u32;
+    }
+
+    let face = entry.and_then(|(axis, from_low)| match (axis, from_low) {
+        // Entering through the low-X plane means looking at the piece's WEST face.
+        (0, true) => Some(Face::West),
+        (0, false) => Some(Face::East),
+        // North is −Z, so the low-Z plane is the north face.
+        (2, true) => Some(Face::North),
+        (2, false) => Some(Face::South),
+        // Top or bottom: a surface, but not a face adjacency reads.
+        _ => None,
+    });
+    Some(((cell[0], cell[1], cell[2]), face))
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    const ORIGIN: [f32; 3] = [0.0, 0.0, 0.0];
+    const SIZE: [f32; 3] = [3.0, 2.4, 0.5];
+    /// The shipped wall's lattice.
+    const DIV: (u32, u32, u32) = (6, 5, 1);
+
+    /// Looking at the wall from +X hits its EAST face and the last x cell.
+    #[test]
+    fn a_ray_from_the_east_reports_the_east_face() {
+        let got = pick_cell([10.0, 1.2, 0.25], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((x, _, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(x, DIV.0 - 1, "the near column, not the far one");
+        assert_eq!(face, Some(Face::East));
+    }
+
+    /// And from −X, the west face and cell zero. The pair together is the check that the sign of the
+    /// slab is not inverted — one of them alone would pass either way.
+    #[test]
+    fn a_ray_from_the_west_reports_the_west_face() {
+        let got = pick_cell([-10.0, 1.2, 0.25], [1.0, 0.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((x, _, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(x, 0);
+        assert_eq!(face, Some(Face::West));
+    }
+
+    /// North is −Z and South is +Z, matching `crate::wfc`. Getting this backwards would put every
+    /// token on the wrong side of every wall.
+    #[test]
+    fn the_z_faces_follow_the_projects_own_compass() {
+        let from_north = pick_cell([1.5, 1.2, -10.0], [0.0, 0.0, 1.0], ORIGIN, SIZE, DIV);
+        assert_eq!(from_north.and_then(|(_, f)| f), Some(Face::North));
+        let from_south = pick_cell([1.5, 1.2, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+        assert_eq!(from_south.and_then(|(_, f)| f), Some(Face::South));
+    }
+
+    /// **Looking down picks a cell but names no face.** Adjacency is horizontal, so there is no face
+    /// here that any rule reads — and inventing one would put a token where nothing looks for it.
+    #[test]
+    fn looking_down_gives_a_cell_and_no_face() {
+        let got = pick_cell([1.5, 10.0, 0.25], [0.0, -1.0, 0.0], ORIGIN, SIZE, DIV);
+        let ((_, y, _), face) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!(y, DIV.1 - 1, "the top layer");
+        assert_eq!(face, None, "top and bottom are surfaces, not faces");
+    }
+
+    /// The cell tracks where along the face the ray landed, which is the whole point of picking.
+    #[test]
+    fn the_cell_follows_the_hit_along_the_face() {
+        // Each x cell is 0.5 m wide; aim at the middle of the third.
+        let got = pick_cell([1.25, 0.25, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+        let ((x, y, z), _) = got.unwrap_or_else(|| panic!("must hit"));
+        assert_eq!((x, y, z), (2, 0, 0), "third column, bottom layer");
+    }
+
+    /// A miss is a miss, in every direction it can be one.
+    #[test]
+    fn a_ray_that_misses_reports_nothing() {
+        // Past the end of the wall.
+        assert!(pick_cell([10.0, 1.2, 9.0], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Above it.
+        assert!(pick_cell([10.0, 9.0, 0.25], [-1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Pointing away from it.
+        assert!(pick_cell([10.0, 1.2, 0.25], [1.0, 0.0, 0.0], ORIGIN, SIZE, DIV).is_none());
+        // Starting inside: there is no entry face to name.
+        assert!(pick_cell([1.5, 1.2, 0.25], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV).is_none());
+    }
+
+    /// Degenerate input is refused rather than answered with cell zero.
+    #[test]
+    fn a_lattice_or_ray_that_cannot_be_picked_is_refused() {
+        assert!(pick_cell([0.0, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, (0, 1, 1)).is_none());
+        assert!(pick_cell([0.0, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, [0.0; 3], DIV).is_none());
+        assert!(pick_cell([f32::NAN, 0.0, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV).is_none());
+    }
+
+    /// **Every cell is reachable**, and the cell a ray picks is the cell whose box contains the hit.
+    /// Swept rather than sampled at one point, because an off-by-one in the clamp would show up only
+    /// at the edges.
+    #[test]
+    fn sweeping_the_face_walks_every_column_in_order() {
+        let mut seen = Vec::new();
+        for i in 0..DIV.0 {
+            // The middle of each column.
+            let x = (i as f32 + 0.5) * SIZE[0] / DIV.0 as f32;
+            let got = pick_cell([x, 0.25, 10.0], [0.0, 0.0, -1.0], ORIGIN, SIZE, DIV);
+            let ((cx, _, _), _) = got.unwrap_or_else(|| panic!("column {i} must hit"));
+            seen.push(cx);
+        }
+        assert_eq!(seen, (0..DIV.0).collect::<Vec<_>>());
+    }
+}
