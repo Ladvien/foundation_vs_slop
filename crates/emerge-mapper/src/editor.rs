@@ -1337,15 +1337,31 @@ fn snap(v: f32) -> f32 {
     (v / SNAP).round() * SNAP
 }
 
-/// A world ground point as a snapped **map-space** `at`.
+/// A world ground point as a **map-space** `at`, snapped to the authoring grid unless `free`.
 ///
 /// The conversion has to happen somewhere, and here is the only somewhere: `cursor_ground` answers in
 /// world metres and `Placed::at` is in map space. They agree only for a map at the origin — which is
 /// every map the editor has ever authored, so writing world coordinates straight into `at` looked
 /// right for as long as nobody moved a map.
-fn map_at(project: &Project, hit: Vec3) -> (f32, f32) {
+///
+/// # Holding the platform modifier places freely
+///
+/// The grid is what makes pieces meet, so it is the default and stays the default. But a prop that
+/// wants to sit at an angle against a wall, or a bit of clutter that should not read as laid out on
+/// a grid, has nowhere to go on a half-metre lattice — and the alternative was hand-editing the
+/// map's RON afterwards.
+///
+/// Only X and Z: they are the axes the grid quantises and the axes a cursor on the ground plane can
+/// express. **Y is not freed** — it comes from the piece's `mount` through `stack::datum`, which is
+/// what puts a lamp on a table rather than through it, and there is no second mouse axis to say
+/// otherwise with.
+fn map_at(project: &Project, hit: Vec3, free: bool) -> (f32, f32) {
     let (x, z) = project.map.to_map_space((hit.x, hit.z));
-    (snap(x), snap(z))
+    if free {
+        (x, z)
+    } else {
+        (snap(x), snap(z))
+    }
 }
 
 /// Put a piece in the world — **through `emerge-bevy`**, which is also what the game uses.
@@ -1628,6 +1644,8 @@ fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res
 fn place_on_click(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
+    // Held, the platform modifier drops the grid snap — see `map_at`.
+    keyboard: Res<ButtonInput<KeyCode>>,
     assets: Res<AssetServer>,
     hovered_ui: Query<&Hovered>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
@@ -1659,7 +1677,8 @@ fn place_on_click(
     let Some(d) = project.library.descriptors.get(state.brush).cloned() else {
         return;
     };
-    let at = map_at(&project, hit);
+    let free = keys::mod_held(&keyboard);
+    let at = map_at(&project, hit, free);
 
     // **What it lands on.** A piece that mounts on a surface must find one under the cursor; the same
     // question the ghost has been answering while the author moved the mouse here, asked once more at
@@ -1709,9 +1728,15 @@ fn place_on_click(
     ) {
         commands.entity(e).insert(Placement(id.clone()));
     }
+    // **Free placement says so.** It is a modifier on a mouse click, so it is not an `Action` and
+    // cannot appear in the key panel — that panel is generated from the census, and hand-adding a
+    // row to it would be the second census this crate keeps deleting. Naming it at the moment it
+    // happens is the honest alternative: an author who did it by accident finds out immediately, and
+    // one who wanted it sees that it worked.
+    let how = if free { " free" } else { "" };
     state.status = match on {
-        Some(host) => format!("placed {id} on {host}"),
-        None => format!("placed {id} at ({}, {})", at.0, at.1),
+        Some(host) => format!("placed {id} on {host}{how}"),
+        None => format!("placed {id} at ({:.2}, {:.2}){how}", at.0, at.1),
     };
 }
 
@@ -1753,7 +1778,7 @@ fn keys(
         state.status = if state.removing {
             format!(
                 "removal mode: click a piece, or drag a box. {} or Esc to stop.",
-                keys::REMOVE_NAME
+                keys::binding(Action::Remove).chord
             )
         } else {
             "removal mode off".to_owned()
@@ -2350,6 +2375,9 @@ fn drive_ghost(
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     ghosts: Query<(Entity, &GhostOf), With<Ghost>>,
     mut transforms: Query<&mut Transform, With<Ghost>>,
+    // The ghost must snap exactly when the click will, or the preview is a lie about where the
+    // piece lands — which is the one thing this whole system exists to prevent.
+    keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     let clear = |commands: &mut Commands| {
         for (e, _) in &ghosts {
@@ -2379,7 +2407,7 @@ fn drive_ghost(
         return;
     };
 
-    let at = map_at(&project, hit);
+    let at = map_at(&project, hit, keys::mod_held(&keyboard));
     let yaw = emerge_bevy::draw_yaw(d, state.brush_yaw);
 
     // **The ghost stands where the piece would.** A lamp dragged over a table rises onto it, so the
@@ -2509,7 +2537,7 @@ mod tests {
         }
     }
 
-    fn project(descriptors: Vec<Descriptor>, placements: Vec<Placed>) -> Project {
+    pub(super) fn project(descriptors: Vec<Descriptor>, placements: Vec<Placed>) -> Project {
         Project {
             root: std::path::PathBuf::from("."),
             emerge_dir: std::path::PathBuf::from("assets/emerge"),
@@ -2599,5 +2627,52 @@ mod tests {
         let p = project(vec![vague], vec![at("m1", "mystery", (0.0, 0.0))]);
         // Not covering, and its fallback reach is the minimum cell rather than infinity.
         assert_eq!(pick_at(&p, (9.0, 9.0)), None);
+    }
+}
+
+/// Grid snapping, and the modifier that drops it.
+#[cfg(test)]
+mod snap_tests {
+    use super::*;
+    use emerge_core::map::Map;
+
+    fn project_at(origin: (f32, f32, f32)) -> Project {
+        let mut p = tests::project(Vec::new(), Vec::new());
+        p.map = Map {
+            name: "t".into(),
+            origin,
+            ..Map::default()
+        };
+        p
+    }
+
+    /// The default is unchanged: a click lands on the authoring grid, wherever inside a cell it fell.
+    #[test]
+    fn a_click_snaps_to_the_grid_by_default() {
+        let p = project_at((0.0, 0.0, 0.0));
+        assert_eq!(map_at(&p, Vec3::new(0.24, 0.0, 0.76), false), (0.0, 1.0));
+        assert_eq!(map_at(&p, Vec3::new(1.26, 0.0, -0.24), false), (1.5, 0.0));
+    }
+
+    /// **Held, it does not.** The point comes through exactly as the cursor gave it.
+    #[test]
+    fn the_modifier_places_where_the_cursor_actually_is() {
+        let p = project_at((0.0, 0.0, 0.0));
+        let hit = Vec3::new(0.24, 0.0, 0.76);
+        let free = map_at(&p, hit, true);
+        assert!((free.0 - 0.24).abs() < 1e-6 && (free.1 - 0.76).abs() < 1e-6, "{free:?}");
+        assert_ne!(free, map_at(&p, hit, false), "free placement must differ from snapped");
+    }
+
+    /// Both paths still convert world space to map space, so a map that is not at the origin is not
+    /// off by its own offset — the defect the conversion was introduced for.
+    #[test]
+    fn free_placement_still_converts_into_map_space() {
+        let p = project_at((10.0, 0.0, -4.0));
+        let hit = Vec3::new(12.3, 0.0, -1.7);
+        assert_eq!(map_at(&p, hit, true), p.map.to_map_space((hit.x, hit.z)));
+        // And the snapped path lands on the grid in MAP space, not in world space.
+        let (sx, sz) = map_at(&p, hit, false);
+        assert!((sx / SNAP).fract().abs() < 1e-4 && (sz / SNAP).fract().abs() < 1e-4, "{sx}, {sz}");
     }
 }

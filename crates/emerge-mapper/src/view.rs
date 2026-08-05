@@ -175,9 +175,11 @@ fn drive(
             wish += dir;
         }
     }
+    // Where the camera sits this frame. Needed by the pan basis below as well as by the transform at
+    // the end, so it is computed once here rather than derived twice from the same two values.
+    let iso = Quat::from_rotation_y(rig.yaw) * ISO_OFFSET;
     if wish != Vec2::ZERO {
-        let yaw_rot = Quat::from_rotation_y(rig.yaw);
-        let screen = yaw_rot * Vec3::new(wish.x, 0.0, wish.y).normalize_or_zero();
+        let screen = pan_direction(wish, rig.yaw);
         // **Constant speed, like the game.** This used to scale by `rig.height / 18.0`, on the
         // argument that a keypress should cross the same *fraction of the screen* at every zoom. In
         // the hand it reads as the camera sticking: zoomed in — which is where an author does detail
@@ -188,7 +190,6 @@ fn drive(
     }
 
     let (mut tf, mut proj) = camera.into_inner();
-    let iso = Quat::from_rotation_y(rig.yaw) * ISO_OFFSET;
     *tf = Transform::from_translation(rig.focus + iso).looking_at(rig.focus, Vec3::Y);
     *proj = Projection::from(OrthographicProjection {
         scaling_mode: ScalingMode::FixedVertical {
@@ -217,4 +218,110 @@ pub fn cursor_ground(
     }
     let t = -ray.origin.y / denom;
     (t > 0.0).then(|| ray.origin + *ray.direction * t)
+}
+
+/// **Which way the world moves for a pan key**, in world metres on the ground plane.
+///
+/// `wish` is in screen terms: `+x` is right, `-y` is "up the screen, away from the viewer" — the
+/// signs the key table above uses.
+///
+/// # It comes from where the camera is, not from the world axes
+///
+/// This used to be `RotY(yaw) * (wish.x, 0, wish.y)`, which pans along world X and Z. Those are only
+/// the screen's axes if the camera looks straight down one of them, and it does not: [`ISO_OFFSET`]
+/// is (12, 12, 12), so the view looks along the XZ diagonal and `W` slid the map up-and-sideways at
+/// 45 degrees. The comment on the key table has always claimed screen axes; this is the version that
+/// delivers them.
+///
+/// `forward` is the camera's look direction flattened onto the ground — screen "up". `right` is that
+/// turned a quarter about +Y, which is `cross(forward, Y)` written out. Both fall out of the same
+/// offset the camera transform uses, so they stay right at every rotation detent and would stay
+/// right if the pitch changed.
+///
+/// A camera looking straight down has no ground-projected forward, so there is no honest screen
+/// axis to pan along and this returns zero rather than inventing one. [`ISO_OFFSET`] is not
+/// straight down, so that is unreachable today.
+pub fn pan_direction(wish: Vec2, yaw: f32) -> Vec3 {
+    let iso = Quat::from_rotation_y(yaw) * ISO_OFFSET;
+    let forward = Vec3::new(-iso.x, 0.0, -iso.z).normalize_or_zero();
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    // `wish.y` is negative for "up the screen", which is why it is subtracted.
+    (right * wish.x - forward * wish.y).normalize_or_zero()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The camera's own basis at a given yaw: screen right and screen up, as world vectors.
+    fn screen_basis(yaw: f32) -> (Vec3, Vec3) {
+        let iso = Quat::from_rotation_y(yaw) * ISO_OFFSET;
+        let tf = Transform::from_translation(iso).looking_at(Vec3::ZERO, Vec3::Y);
+        (*tf.right(), *tf.up())
+    }
+
+    /// **The property the keys are supposed to have**, stated the way an author experiences it: a pan
+    /// key moves the world along one screen axis and not at all along the other.
+    ///
+    /// Checked at every rotation detent, because the old version was wrong at all four and a test at
+    /// one could not have told the difference.
+    #[test]
+    fn each_pan_key_moves_the_view_along_exactly_one_screen_axis() {
+        for detent in 0..ROTATION_STEPS {
+            let yaw = detent as f32 * TAU / ROTATION_STEPS as f32;
+            let (right, up) = screen_basis(yaw);
+
+            for (name, wish, want_x, want_y) in [
+                ("W", Vec2::new(0.0, -1.0), 0.0f32, 1.0f32),
+                ("S", Vec2::new(0.0, 1.0), 0.0, -1.0),
+                ("A", Vec2::new(-1.0, 0.0), -1.0, 0.0),
+                ("D", Vec2::new(1.0, 0.0), 1.0, 0.0),
+            ] {
+                let dir = pan_direction(wish, yaw);
+                // How the motion reads on screen. The camera's `up` has a vertical component the
+                // ground plane has not, so the screen-vertical reading is scaled — the SIGN, and the
+                // other axis being zero, are the claims that matter.
+                let on = Vec2::new(dir.dot(right), dir.dot(up));
+                let at = format!("{name} at detent {detent}");
+
+                if want_x == 0.0 {
+                    assert!(on.x.abs() < 1e-4, "{at}: should not move sideways, moved {:.3}", on.x);
+                } else {
+                    assert!(
+                        on.x.signum() == want_x.signum() && on.x.abs() > 0.1,
+                        "{at}: wanted screen-x sign {want_x}, got {:.3}",
+                        on.x
+                    );
+                }
+                if want_y == 0.0 {
+                    assert!(on.y.abs() < 1e-4, "{at}: should not move vertically, moved {:.3}", on.y);
+                } else {
+                    assert!(
+                        on.y.signum() == want_y.signum() && on.y.abs() > 0.1,
+                        "{at}: wanted screen-y sign {want_y}, got {:.3}",
+                        on.y
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The regression, named.** The old basis was the world axes turned by yaw; at the shipped
+    /// isometric offset that is 45 degrees off the screen, which is what "off putting" was.
+    #[test]
+    fn the_old_world_axis_basis_was_off_by_an_eighth_turn() {
+        let (_, up) = screen_basis(0.0);
+        let old = (Quat::from_rotation_y(0.0) * Vec3::new(0.0, 0.0, -1.0)).normalize();
+        let new = pan_direction(Vec2::new(0.0, -1.0), 0.0);
+        assert!(
+            old.angle_between(new) > 0.7,
+            "the fix must actually move the axis; got {} rad",
+            old.angle_between(new)
+        );
+        // And only the new one is straight up the screen.
+        let (right, _) = screen_basis(0.0);
+        assert!(old.dot(right).abs() > 0.5, "the old basis drifted sideways");
+        assert!(new.dot(right).abs() < 1e-4, "the new basis does not");
+        assert!(new.dot(up) > 0.0, "and still goes away from the viewer");
+    }
 }

@@ -643,6 +643,48 @@ fn scan_mesh(project: &mut Project, state: &mut ImportState) {
     state.status = persist(project, where_to, said);
 }
 
+/// **Scan a candidate the moment it is selected**, so the common case needs no keypress at all.
+///
+/// Watches the selection rather than hooking the two places that change it (`on_candidate_click` and
+/// `move_selection`) — one rule in one place cannot drift from itself, and a third way to select a
+/// tile would get this for free.
+///
+/// # Candidates only, and only when there is nothing to lose
+///
+/// A **library entry** is never scanned automatically. Its edits go through `persist`, so a scan on
+/// selection would rewrite `library.ron` every time an author clicked a row — browsing the 45-piece
+/// kit would be 45 writes — and it would mark cells someone had deliberately left open. That is what
+/// the `rescan mesh` chip is for: the same act, asked for.
+///
+/// A candidate is safe on both counts: nothing reaches disk until Accept. The lattice still has to be
+/// empty of solids, so moving away from a candidate and back does not re-mark cells the author
+/// unmarked in between.
+fn autoscan_candidate(
+    mut last: Local<Option<usize>>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    if state.selected_library_id.is_some() {
+        // The library list has the focus. Forget where the candidate cursor was, so returning to it
+        // is a fresh selection and scans again if it still has nothing.
+        *last = None;
+        return;
+    }
+    if *last == Some(state.selected) {
+        return;
+    }
+    *last = Some(state.selected);
+
+    let already_marked = state
+        .editing(&project.measured)
+        .and_then(|d| d.subgrid.as_ref())
+        .is_some_and(|g| g.cells.iter().any(|c| c.solid));
+    if already_marked {
+        return;
+    }
+    scan_mesh(&mut project, &mut state);
+}
+
 /// The chip.
 fn on_scan_mesh(
     activate: On<Activate>,
@@ -1348,6 +1390,7 @@ impl Plugin for TilesPlugin {
                     toggle_mode.in_set(crate::keys::Phase::Act),
                     move_selection.in_set(crate::keys::Phase::Act),
                     lattice_keys.in_set(crate::keys::Phase::Act),
+                    autoscan_candidate.run_if(in_tiles_mode),
                     cycle_mount.in_set(crate::keys::Phase::Act),
                     commit_candidate.in_set(crate::keys::Phase::Act),
                     remove_tile.in_set(crate::keys::Phase::Act),
@@ -1998,7 +2041,7 @@ fn move_selection(
             let want = if down { at + 1 } else { at.saturating_sub(1) };
             if let Some(next) = ids.get(want.min(ids.len().saturating_sub(1))) {
                 state.selected_library_id = Some(next.clone());
-                state.status = format!("`{next}` selected — {} removes it", keys::REMOVE_NAME);
+                state.status = format!("`{next}` selected — {} removes it", keys::binding(Action::RemoveTile).chord);
             }
         }
         None => {
@@ -2941,7 +2984,7 @@ fn rebuild_detail(
                     ))
                     .with_children(|chip| {
                         chip.spawn((
-                            Text::new("scan mesh"),
+                            Text::new("rescan mesh"),
                             TextColor(ACCENT),
                             TextFont::from_font_size(10.0),
                         ));

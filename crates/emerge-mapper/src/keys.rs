@@ -164,6 +164,11 @@ pub const MOD_NAME: &str = "Ctrl";
 /// The delete key, per platform. A Mac keyboard's `delete` sends **Backspace**; the key winit calls
 /// `Delete` is the one macOS keyboards label `fn+delete` and most do not have at all — so binding
 /// `Delete` there is binding a key the author cannot press.
+///
+/// **Tiles only.** The map's removal moved to `X` so the whole map vocabulary — pan, turn, aim,
+/// remove — sits under the left hand without reaching. Removing a tile from the library is a rarer
+/// and more destructive act in a tab whose letters are nearly all spoken for, and it keeps the key
+/// whose name says what it does.
 #[cfg(target_os = "macos")]
 pub const REMOVE_KEY: KeyCode = KeyCode::Backspace;
 #[cfg(not(target_os = "macos"))]
@@ -203,7 +208,7 @@ pub const BINDINGS: &[Binding] = &[
     // `Esc` now in it. The label carries the direction so nothing is lost by sharing the line.
     b(Action::AimLeft, KeyCode::KeyZ, false, Context::Map, "Z", "aim left / right"),
     b(Action::AimRight, KeyCode::KeyC, false, Context::Map, "C", "aim left / right"),
-    b(Action::AimReset, KeyCode::KeyX, false, Context::Map, "X", "aim straight again"),
+    b(Action::AimReset, KeyCode::KeyV, false, Context::Map, "V", "aim straight again"),
     // **A separate pair, on purpose.** `[`/`]` turn the BRUSH and must keep doing only that: binding
     // them to the selection is what made rotation feel broken before, because placing selects, so the
     // next `]` turned the piece just put down while the ghost — the only thing on screen showing a
@@ -214,7 +219,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::TurnPieceLeft, KeyCode::KeyR, false, Context::Map, "R", "turn this left"),
     b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn this right"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
-    b(Action::Remove, REMOVE_KEY, false, Context::Map, REMOVE_NAME, "removal mode"),
+    b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
     b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "stop removing"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
@@ -272,10 +277,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::CellEdge, KeyCode::KeyX, false, Context::Tiles, "X", "solid / edge / anchor / clear"),
     b(Action::CellAnchor, KeyCode::KeyC, false, Context::Tiles, "C", "solid / edge / anchor / clear"),
     b(Action::CellClear, KeyCode::KeyV, false, Context::Tiles, "V", "solid / edge / anchor / clear"),
-    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "from the mesh: scan solid / turn x y z"),
-    b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Tiles, "N", "from the mesh: scan solid / turn x y z"),
-    b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: scan solid / turn x y z"),
-    b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Tiles, "P", "from the mesh: scan solid / turn x y z"),
+    b(Action::ScanMesh, KeyCode::KeyB, false, Context::Tiles, "B", "from the mesh: rescan solid / turn x y z"),
+    b(Action::RotateMeshX, KeyCode::KeyN, false, Context::Tiles, "N", "from the mesh: rescan solid / turn x y z"),
+    b(Action::RotateMeshY, KeyCode::KeyO, false, Context::Tiles, "O", "from the mesh: rescan solid / turn x y z"),
+    b(Action::RotateMeshZ, KeyCode::KeyP, false, Context::Tiles, "P", "from the mesh: rescan solid / turn x y z"),
 
     // The arrows are the Tiles tab's too. Legal, and the reason the census models context at all:
     // the two tabs are never live together, so the same key means one thing in each.
@@ -457,7 +462,7 @@ pub fn fires_in(want: Context, live: Context) -> bool {
 /// every chord two spellings, and the panel could only name one of them — so the key list would be
 /// wrong for whichever half of the users pressed the other. This is the same one-path rule the rest of
 /// the project holds to: the modifier IS `MOD_KEYS`, and [`MOD_NAME`] is what it is called.
-fn mod_held(keys: &ButtonInput<KeyCode>) -> bool {
+pub fn mod_held(keys: &ButtonInput<KeyCode>) -> bool {
     MOD_KEYS.iter().any(|k| keys.pressed(*k))
 }
 
