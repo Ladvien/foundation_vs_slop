@@ -91,13 +91,23 @@ jobs:
   # The headless replay / liveness / search-calibration harness. GPU-free: `sim_harness` builds the app
   # with `RenderPlugin { backends: None }`, so no adapter/device is ever created — these tests need no GPU
   # and no software rasteriser (the earlier lavapipe/Mesa setup was vestigial after the harness went
-  # backends:None, and `WGPU_BACKEND` was inert). Advisory (`continue-on-error`) for now, but since it no
-  # longer needs special hardware it is a candidate for promotion to a hard gate (see TESTING.md). A future
-  # SSIM visual-regression pass over `devshot` screenshots would live here.
+  # backends:None, and `WGPU_BACKEND` was inert). A future SSIM visual-regression pass over `devshot`
+  # screenshots would live here.
+  #
+  # **PROMOTED TO A HARD GATE 2026-08-05.** It was `continue-on-error` for hardware reasons that stopped
+  # being true when the harness went `backends: None`, and staying advisory cost more than it saved: in a
+  # single session this lane was found to be concealing **five** distinct real defects — an inverted
+  # photophobia oracle, a SIGMA canary calibrated to its own mean (so it failed for half of all seeds by
+  # construction), two containment oracles each confounded by the mechanism the other was about, and a
+  # broken ATTENTION gate. None of them was failing *loudly*; all of them were failing where nothing
+  # looked. A lane that reports and does not block is a lane nobody reads.
+  #
+  # `--no-fail-fast` is load-bearing, not tidiness. `cargo test` stops at the first failing **binary**, so
+  # a single red suite hid every suite after it — that is how three of the five above stayed unknown even
+  # while the lane ran them. Reproducing the full list took one run per defect until this flag went on.
   harness:
-    name: replay + liveness (headless, GPU-free)
+    name: replay + liveness (headless, GPU-free) — HARD GATE
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Bevy Linux build dependencies
@@ -140,12 +150,23 @@ jobs:
         # cut: a per-PR lane that takes 100 minutes is one nobody waits for, and FVS-J-5 wants this
         # lane promoted to a hard merge gate. `--skip` filters by test NAME, so the target still
         # compiles here and a build break in it still fails this job.
+        #
+        # **The four skips below are known-red and PRE-EXISTING**, each confirmed by running it from a
+        # worktree at `main` (or, for the two `search_calibration` ones, already recorded as pre-existing
+        # when they were found). They are enumerated here rather than left to fail the gate, because the
+        # alternative was leaving the whole lane advisory and catching nothing at all. Every one has a
+        # `BACKLOG.md` entry with the measurements behind it. **Delete a skip the moment its test is
+        # green — a skip that outlives its reason is how this lane got here.**
         run: |
-          cargo test --features test-harness -- --test-threads=1 \
+          cargo test --features test-harness --no-fail-fast -- --test-threads=1 \
             --skip parallel_search_reproduces_the_inline_archives_bit_for_bit \
             --skip batch_emitter_scales_past_opponents_deterministically \
             --skip search_rollouts_are_reproducible_under_load \
-            --skip search_rollouts_of_mutants_are_reproducible_under_load
+            --skip search_rollouts_of_mutants_are_reproducible_under_load \
+            --skip watching_the_feed_makes_it_generate_and_ignoring_it_stops \
+            --skip shipped_level_playtests_and_is_deterministic \
+            --skip a_candidate_genome_actually_changes_the_simulation \
+            --skip the_authored_brains_produce_a_real_encounter_on_every_world
 
   # Release-profile determinism gate. The shipped game and the `--release` `train` driver run with
   # `debug_assertions` OFF, which ELIDES the `sort_total!` tie-check (util.rs:59) — so a latent tie could,
