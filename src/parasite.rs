@@ -570,7 +570,7 @@ pub fn rouse_all_mancae(app: &mut App) -> usize {
 }
 
 /// This creature's name in `assets/emerge/rigs.ron`.
-const RIG: &str = "manca";
+pub(crate) const RIG: &str = "manca";
 
 /// Build the shared animation graph over the manca clips we drive in Phase 1.
 fn build_manca_anim(

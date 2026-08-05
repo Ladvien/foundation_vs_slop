@@ -74,7 +74,7 @@ use crate::health::Health;
 const SCP610_GLB: &str = "scp610/scp-610.glb";
 
 /// This creature's name in `assets/emerge/rigs.ron`.
-const RIG: &str = "scp610";
+pub(crate) const RIG: &str = "scp610";
 
 /// Authored at real human scale — 1.80 × 0.86 × 1.90 m fully grown — so unlike the blob and the crab
 /// this spawns unscaled. `assets/scp610/README.md` §2.

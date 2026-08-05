@@ -37,7 +37,7 @@ pub(crate) use crate::squad::{Prey, Unit};
 pub(crate) use crate::surface_nav::{clamp_to_patch, project_tangent, surface_orientation, SurfaceField, SurfaceGraph};
 pub(crate) use crate::util::{hash01_u32, rand01, unit_is_facing};
 
-mod setup;
+pub(crate) mod setup;
 mod movement;
 mod combat;
 mod foraging;

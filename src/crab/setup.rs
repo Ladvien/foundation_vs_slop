@@ -15,7 +15,7 @@ pub(crate) fn build_surface_graph(mut commands: Commands, dungeon: Res<Dungeon>)
 }
 
 /// This creature's name in `assets/emerge/rigs.ron`.
-const RIG: &str = "crab";
+pub(crate) const RIG: &str = "crab";
 
 pub(crate) fn build_crab_anim(
     mut commands: Commands,

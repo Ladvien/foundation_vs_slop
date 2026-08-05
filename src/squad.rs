@@ -280,7 +280,7 @@ const MAX_FRAME_DT: f32 = 1.0 / 30.0;
 const FIGURINE_GLB: &str = "characters/valkyrie.glb";
 
 /// This creature's name in `assets/emerge/rigs.ron`, which is where its clip table lives.
-const RIG: &str = "valkyrie";
+pub(crate) const RIG: &str = "valkyrie";
 
 /// Laser bolts spawn from this fixed offset in the unit's **rotated, unscaled** local frame:
 /// `laser::fire_laser` computes `unit.translation + unit.rotation * MUZZLE_OFFSET`. Deliberately

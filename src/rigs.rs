@@ -109,3 +109,59 @@ impl Plugin for RigsPlugin {
         }
     }
 }
+
+/// **Every rig the game names must exist in the manifest.**
+///
+/// The review's finding #2 was that a missing rig panicked an unrelated system at Startup. The panic
+/// is gone — all seven lookups take the `Err` and `error!` it — but that traded a crash for something
+/// quieter and not obviously better: a creature spawns with no animation, holding its bind pose, and
+/// the only evidence is a line in a log nobody reads while playing.
+///
+/// The finding asked where "the rigs the game requires" should be written down. **Here**, as a test,
+/// and referencing the same constants the spawners do rather than a second list of strings that
+/// could drift from them — which is the census failure `emerge-mapper`'s `keys.rs` module note
+/// describes at length.
+///
+/// A rig deleted from `rigs.ron` now fails CI instead of failing quietly in play.
+#[cfg(test)]
+mod required_rigs {
+    /// The rig names production code asks for, taken from the code that asks.
+    fn required() -> Vec<&'static str> {
+        let mut out = vec![
+            crate::crab::setup::RIG,
+            crate::scp610::RIG,
+            crate::squad::RIG,
+            crate::parasite::RIG,
+        ];
+        out.extend(
+            crate::scp1048::Scp1048Variant::ALL
+                .iter()
+                .map(|v| crate::scp1048::anim::rig_name(*v)),
+        );
+        out.extend(crate::site::people::StaffRig::ALL.iter().map(|r| r.rig_name()));
+        out
+    }
+
+    #[test]
+    fn the_shipped_manifest_defines_every_rig_the_game_asks_for() {
+        let rigs = super::load().unwrap_or_else(|e| panic!("{e}"));
+        let manifest = super::RigManifest(rigs);
+        let missing: Vec<&str> = required()
+            .into_iter()
+            .filter(|name| manifest.rig(name).is_err())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "assets/emerge/rigs.ron defines no rig for: {missing:?}\n\nA spawner that cannot find \
+             its rig logs an error and carries on, so the creature stands in its bind pose and \
+             nothing fails where you would look. Add the rig, or stop asking for it."
+        );
+    }
+
+    /// And the list is not empty — a `required()` that silently returned nothing would make the test
+    /// above pass forever.
+    #[test]
+    fn the_required_list_is_not_vacuous() {
+        assert!(required().len() >= 16, "only {} rigs required", required().len());
+    }
+}
