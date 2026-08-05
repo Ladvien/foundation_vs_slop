@@ -409,3 +409,70 @@ fn both_kits_derive_the_same_layers_for_every_piece_with_a_stated_height() {
     assert_eq!(layers(&site, "site/wall"), 5);
     assert_eq!(layers(&grey, "site/wall"), 5);
 }
+
+/// **The greybox kit's authored run-faces, and the one piece left out of them.**
+///
+/// The greybox fixture is 1 m modules stretched to the facility's heights, so its lattices agree with
+/// the Site kit's on the vertical axis (that is `both_kits_derive_the_same_layers_...`) but *not*
+/// horizontally: footprints are not stretched, and a greybox module is a different shape.
+///
+/// `wall`, `wall_window` and `column` all come out one cell wide, so all three present a five-cell
+/// run-face and agree. **`wall_corner` does not**: its footprint makes it two cells wide, so it
+/// presents ten where the others present five, and whole-face equality refuses it against its own wall
+/// family. It is deliberately unauthored, for the same reason `wall_doorway` is unauthored in the Site
+/// kit — and it is a second, independent instance of the seam question, this time inside a kit's
+/// primary wall set rather than at a doorway.
+#[test]
+fn the_greybox_run_faces_agree_and_the_corner_is_left_out() {
+    let l = emerge_core::policy::layered_library(Path::new("assets/emerge/site_greybox"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let div = l.policy.divisions;
+    let face = |id: &str| {
+        let d = l.library.get(id).unwrap_or_else(|| panic!("{id}"));
+        let (dx, dy, _) = emerge_core::descriptor::divisions(d, div).unwrap_or_else(|e| panic!("{e}"));
+        dx * dy
+    };
+
+    for id in ["site/wall", "site/wall_window", "site/column"] {
+        assert_eq!(face(id), 5, "{id} must present five cells to agree with the others");
+        let g = l
+            .library
+            .get(id)
+            .and_then(|d| d.subgrid.as_ref())
+            .unwrap_or_else(|| panic!("{id} carries no lattice — the tokens were lost"));
+        assert!(g.cells.iter().any(|c| c.edge.as_deref() == Some("wall")), "{id} has no token");
+    }
+
+    // The exclusion, asserted rather than described: if the corner ever narrows to one cell it can be
+    // authored, and this test is where someone will find out.
+    assert_eq!(face("site/wall_corner"), 10, "the greybox corner is two cells wide");
+    assert!(
+        l.library.get("site/wall_corner").and_then(|d| d.subgrid.as_ref()).is_none(),
+        "the greybox corner must stay unauthored while its face is a different size from the wall's"
+    );
+
+    // And a run of the three that do agree reports nothing.
+    let at = |id: &str, d: &str, z: f32| emerge_core::map::Placed {
+        id: id.into(),
+        descriptor: d.into(),
+        at: (0.25, z),
+        yaw: 0.0,
+        ..emerge_core::map::Placed::default()
+    };
+    // Greybox modules are 1 m deep, so centres sit half a metre apart.
+    let run = emerge_core::map::Map {
+        name: "grey".into(),
+        placements: vec![
+            at("w1", "site/wall", 0.5),
+            at("w2", "site/wall", 1.5),
+            at("win", "site/wall_window", 2.5),
+        ],
+        ..emerge_core::map::Map::default()
+    };
+    let faults = emerge_core::adjacency::faults(&run, &l.library, emerge_core::grid::SNAP, div);
+    assert!(
+        faults.is_empty(),
+        "a greybox run must agree:\n{}",
+        faults.iter().map(|f| f.message.clone()).collect::<Vec<_>>().join("\n")
+    );
+}
