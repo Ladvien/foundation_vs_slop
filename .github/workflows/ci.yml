@@ -157,6 +157,11 @@ jobs:
         # alternative was leaving the whole lane advisory and catching nothing at all. Every one has a
         # `BACKLOG.md` entry with the measurements behind it. **Delete a skip the moment its test is
         # green — a skip that outlives its reason is how this lane got here.**
+        #
+        # That last rule is not left to memory: `tests/skip_debt.rs` guards each skip's *reason* and goes
+        # RED when the reason stops holding, with a message naming the skip and this file. It runs in this
+        # same lane (it is not skipped), costs no measurable time, and its failure means "somebody fixed
+        # the bug, delete the skip" rather than "something broke".
         run: |
           cargo test --features test-harness --no-fail-fast -- --test-threads=1 \
             --skip parallel_search_reproduces_the_inline_archives_bit_for_bit \
