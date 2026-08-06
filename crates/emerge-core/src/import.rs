@@ -249,9 +249,10 @@ pub fn measure(path: &Path, rel: &str, library: &Library) -> Candidate {
     let front_detail = if assembled { None } else { glb.front_detail().ok() };
     proposed.align.front = if assembled {
         findings.push(Finding::note(
-            "this model is assembled from parts placed by node transforms, so no facing is derived \
-             — the size is measured from the assembled scene, but a centroid over raw vertices would \
-             not be",
+            "this model is assembled from parts placed by node transforms, so no facing is derived. \
+             The size is still correct — it is measured from the assembled scene — but a front has to \
+             come from a centroid, and a centroid over raw vertices would ignore those transforms and \
+             point the wrong way. Set the front by hand if this piece has one.",
         ));
         None
     } else {
@@ -373,9 +374,11 @@ fn inspect(
 
     if triangles > BUSY_TRIANGLES {
         out.push(Finding::warn(
-            format!("{triangles} triangles — dense for a piece a map may hold hundreds of"),
-            "check the exporter decimated; a re-export that forgets to can silently return 15x the \
-             geometry",
+            format!(
+                "{triangles} triangles — dense for a piece a map may hold hundreds of copies of"
+            ),
+            "check the exporter decimated this mesh; a re-export that forgets to decimate can \
+             silently return 15x the geometry",
         ));
     }
 

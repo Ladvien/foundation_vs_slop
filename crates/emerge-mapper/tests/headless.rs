@@ -72,9 +72,85 @@ fn the_tiles_plugin_registers_the_resources_its_systems_take() {
         ("LatticePick", app.world().get_resource::<emerge_mapper::tiles::LatticePick>().is_some()),
         ("CellEdit", app.world().get_resource::<emerge_mapper::tiles::CellEdit>().is_some()),
         ("Mode", app.world().get_resource::<emerge_mapper::tiles::Mode>().is_some()),
+        // The Tiles tab's width field. `editor::not_typing` and `editor::sense_context` both read it
+        // as a bare `Res`, and both are run conditions — which Bevy 0.19 evaluates with **no**
+        // short-circuit, so an unregistered one panics every frame regardless of which tab is live.
+        ("ScaleEdit", app.world().get_resource::<emerge_mapper::tiles::ScaleEdit>().is_some()),
     ] {
         assert!(present, "TilesPlugin does not register {name}, so its readers panic on frame one");
     }
+}
+
+/// The same contract for the Map tab's three tool resources.
+///
+/// Each was added beside a system that takes it as a bare `Res`/`ResMut`, and in Bevy 0.19 a missing
+/// one **panics its system** rather than skipping it. Registration is checked without `update()` for
+/// the reason the test above gives: `init_resource` runs at plugin-build time, and stepping a lone
+/// plugin exercises plugin *order* rather than this registration.
+#[test]
+fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
+    let mut app = headless();
+    app.add_plugins(emerge_mapper::editor::EditorPlugin);
+
+    for (name, present) in [
+        // The piece in hand, under the move tool.
+        ("MoveDrag", app.world().get_resource::<emerge_mapper::editor::MoveDrag>().is_some()),
+        // The cell fine placement is confined to while the modifier is down.
+        ("FineAnchor", app.world().get_resource::<emerge_mapper::editor::FineAnchor>().is_some()),
+        // The box being dragged out to fill.
+        ("PlaceDrag", app.world().get_resource::<emerge_mapper::editor::PlaceDrag>().is_some()),
+    ] {
+        assert!(present, "EditorPlugin does not register {name}, so its readers panic on frame one");
+    }
+}
+
+/// **`Cmd+2` is the bare `2` with a subject**, and the two do not shadow each other.
+///
+/// The same pairing `S`/`Cmd+S` and `Z`/`Cmd+Z` already rely on: `just_pressed` refuses a bare
+/// binding while the modifier is down and a modified one while it is not, so one key can carry both
+/// "the Tiles tab" and "the Tiles tab, about this piece". Asserted here because getting it wrong is
+/// silent — the bare key would simply switch tabs and the send would look unimplemented.
+#[test]
+fn sending_a_tile_to_be_edited_is_the_modified_tab_key() {
+    use emerge_mapper::keys::{binding, just_pressed, Action, Context, MOD_KEYS};
+
+    let send = binding(Action::EditTile);
+    let tab = binding(Action::TilesTab);
+    assert_eq!(send.key, tab.key, "it is the tab key, with a modifier");
+    assert!(send.needs_mod && !tab.needs_mod);
+
+    // Bare `2` switches tabs and does not send.
+    let mut input = ButtonInput::<KeyCode>::default();
+    input.press(KeyCode::Digit2);
+    assert!(just_pressed(&input, Context::Map, Action::TilesTab));
+    assert!(!just_pressed(&input, Context::Map, Action::EditTile));
+
+    // A FRESH input, not `clear()`: `clear` keeps the pressed state, so an already-held key never
+    // re-registers as just-pressed and the assertion below would fail for an unrelated reason.
+    let mut input = ButtonInput::<KeyCode>::default();
+    input.press(MOD_KEYS[0]);
+    input.press(KeyCode::Digit2);
+    assert!(just_pressed(&input, Context::Map, Action::EditTile));
+    assert!(
+        !just_pressed(&input, Context::Map, Action::TilesTab),
+        "the modified chord must not also switch tabs, or the send would be one frame of a tab change"
+    );
+}
+
+/// **The move tool has a key, and it is one the left hand can reach without moving.**
+///
+/// `B` is the last free letter in the `Q W E R T / A S D F G / Z X C V B` cluster. It is also the
+/// Tiles tab's `ScanMesh`, which is legal only because the two tabs are never live together — the
+/// case `keys::Context` exists to model, and `the_key_space_has_no_collisions` is what polices it.
+#[test]
+fn the_move_tool_sits_in_the_left_hand_cluster() {
+    use emerge_mapper::keys::{binding, Action, Context};
+    assert_eq!(binding(Action::MoveMode).key, KeyCode::KeyB);
+    assert_eq!(binding(Action::MoveMode).context, Context::Map);
+    // Shared with the Tiles tab's mesh rescan, deliberately.
+    assert_eq!(binding(Action::ScanMesh).key, KeyCode::KeyB);
+    assert_eq!(binding(Action::ScanMesh).context, Context::Tiles);
+    assert!(!Context::Map.overlaps(Context::Tiles));
 }
 
 /// **The census answers for the action it was asked about.**

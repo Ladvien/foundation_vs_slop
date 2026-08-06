@@ -36,6 +36,25 @@ for `descriptor::pick_cell`, answered in arithmetic.
 | `cargo test --workspace` | **1443 passed, 0 failed** |
 | `cargo check -p emerge-core -p emerge-mapper -p fvs --all-targets` | **zero warnings** |
 
+**Re-measured 2026-08-05 after the `align.scale` and move-tool work**, since both touch `emerge-core`,
+which the game links: `cargo test --workspace` green; `cargo check` still zero warnings; the harness
+lane run with **`ci.yml`'s exact command and skip list** gives **38 suites, 0 failed**; and
+`tests/replay.rs` on its own gives **21 passed, 0 failed**. `snapshot_hash` has not moved —
+`deterministic_core_is_bit_identical`, `..._across_many_builds` and the
+`a0_fvs_j6_mutant3_on_world_0x5c09191` golden all pass.
+
+That is the expected result rather than a lucky one, and the reason is worth stating: `placed_height`
+computes exactly what `stack::drawn_height` computed, `emerge-bevy` reaches `emerge-core` only through
+`resolve_y`, and no shipped map places the one scaled piece. **`emerge_map` also adds nothing at all
+unless `FVS_EMERGE_MAP` is set**, so none of this sits on a shipped path.
+
+One red was met and confirmed pre-existing rather than assumed:
+`containment::watching_the_feed_makes_it_generate_and_ignoring_it_stops` fails identically from a clean
+stash of this work. It is already `ci.yml` skip #1, with its own `BACKLOG.md` entry and a
+`tests/skip_debt.rs` guard. It surfaced only because the first local run omitted the skip list — which
+is the lesson worth keeping: **run the lane with `ci.yml`'s command, or the result is not comparable
+to CI's.**
+
 **`--workspace` is load-bearing and was missing.** This workspace has a root package, so its default
 members are the root package *alone* — a bare `cargo test` compiles no test target under `crates/`.
 That is how extracting the animation layer into `crates/emerge-anim` dropped its 21 unit tests and the
@@ -86,10 +105,44 @@ quarter-turn for a mesh exported the wrong way up, baked into `extent` at import
 `extent` learns it exists. `import::occupancy` rasterises triangles (Akenine-Möller 2001 SAT), so a
 wall is solid all the way up.
 
-Editor: screen-aligned WASD panning; the map vocabulary under one hand (`X` removes, `V` aims straight);
-`Cmd`/`Ctrl` places freely off the grid (XZ only — Y comes from `mount`); the aim and piece-turn keys
-repeat while held at 150 ms; candidates scan themselves on selection; hover-and-click **ray picks** a
-lattice cell and names the face you are looking through.
+Editor: screen-aligned WASD panning; the map vocabulary under one hand (`X` removes, `B` moves, `V`
+aims straight); `Cmd`/`Ctrl` places freely off the grid (XZ only — Y comes from `mount`); the aim and
+piece-turn keys repeat while held at 150 ms; candidates scan themselves on selection; hover-and-click
+**ray picks** a lattice cell and names the face you are looking through.
+
+Added 2026-08-05, and the reason each one exists:
+
+- **`B` moves a piece.** Click to pick up, click to put down, `Esc` to put back. Everything resting on
+  it comes too, at its own offset — the promise `Placed::on`'s doc has always made (*"move the table
+  and the lamp moves with it"*) and which nothing had kept, because nothing could move a table. The
+  whole group is re-seated or the move is refused; `emerge_core::stack::move_placement` is the one
+  path, and it is a pure function so it is tested without a window. **The Map context is now at its
+  twelve-row ceiling** — the next verb there has to share a row or take a key.
+- **`EditorState::removing: bool` is now `tool: Tool { Place, Remove, Move }`.** A second bool would
+  have made "both armed" and "neither armed" expressible and meaningless.
+- **A dragged box places**, the twin of the removal tool's box, at the brush's own cell pitch and as
+  one undo entry. Occupied cells are skipped rather than refusing the drag. Note that a plain click
+  now places on **release** rather than on press — that is what tells a click from a drag, and it is
+  the threshold (`CLICK_EPS`) removal already used.
+
+  **A box never fills while the modifier is held.** Snapped, the two corners are multiples of `SNAP`,
+  so `CLICK_EPS` is really asking *did the cell change*. Free, they are continuous and confined to one
+  0.5 m cell — so an ordinary hand tremor clears 0.2 m without leaving the cell, and the box path would
+  then quantise the result back to that cell's centre, silently discarding the fine placement the
+  modifier exists for. Holding it means *place one, exactly here*.
+- **Fine placement stays in its cell.** Holding the modifier used to switch the grid off entirely, so
+  a small hand movement walked the piece a cell or two over. The cell under the cursor is captured when
+  the modifier goes down (`FineAnchor`) and the free position is clamped to it. Every position is still
+  reachable — in two gestures rather than one.
+- **Arming a palette row blurs the filter box.** `blur_on_world_click` covered a click on the world;
+  the click on the row you just filtered for is the other half of the same trap, and did not. §6 below
+  records what that trap costs: `drive_place` is gated on `not_typing`, so searching for a piece was
+  the way to stop being able to place it, silently.
+- **The findings block is laid out.** Its remedy line was indented with three literal spaces, which
+  indents only the first line of a wrapped paragraph — so every remedy ran into the finding below it.
+  Each finding now has a coloured rail, a severity word, and prose in plain `TEXT`. Two of the finding
+  *strings* were also malformed in `import.rs` (*"a re-export that forgets to can silently return"*)
+  and are rewritten.
 
 ---
 
@@ -126,11 +179,22 @@ decides anything about space. `SubCell::solid`'s own doc says so.
   against the wall. Overlap comparison needs `stack::resolve_y` threaded in, which changes `faults`'
   signature and its cost. Current behaviour is pinned in `tests/site_descriptors.rs` as *current, not
   desired*.
-- **`align.scale`.** `stack::covers` reserves the raw `extent.footprint`, ignoring scale, and
-  `divisions` deliberately matches it so the lattice and the reservation at least agree with each
-  other. `site/books` (`scale: Some(0.6)`) renders at 0.6x while reserving its full footprint. This is
-  the same measured-vs-placed question already answered for the vertical axis; answering it here
-  touches `stack`, `fill` and clearance, which the **game** uses, so it needs the replay gates.
+- ~~**`align.scale`.**~~ **Answered, 2026-08-05** — the way the vertical axis already had it. There are
+  now two helpers in `descriptor.rs`, `placed_footprint` (footprint × scale) and `placed_height`
+  (height × scale × stretch_y), and every reader that asks *how much room does this take* goes through
+  them: `divisions`, `stack::covers`, `adjacency::faults`, `fill::cell_extents`, `pick_at`'s area
+  tiebreak, and the Tiles tab's lattice box. `stack::drawn_height` is gone — it was `placed_height`
+  written in one place while `divisions` and `adjacency` wrote `height * stretch_y` by hand and
+  dropped the scale, which is exactly how the two axes came to disagree.
+
+  The editor can now set it: a **`SIZE (m)`** field on the Tiles tab takes the width in metres and
+  stores `scale = typed ÷ measured`, which is what `Align::scale`'s own doc says the field is.
+
+  `site/books` (`scale: Some(0.6)`) is the only non-unity scale in the repo and now reserves
+  0.184 × 0.064 m rather than its full 0.306 × 0.106 m mesh. Its 1×1 lattice is unchanged — both spans
+  were already under half a cell. **No shipped map is affected**: `assets/emerge/break_room.map.ron` is
+  the only map that ships and holds no `books`, and `emerge_map::install_if_requested` adds nothing at
+  all unless `FVS_EMERGE_MAP` is set.
 - **`FVS-Q-10`** — should authored `edge` tokens feed `grammar`'s support table, or only check it? Still
   deferred, and still correctly: `grammar` learns adjacency from the map and `edge` is the declared
   half. Settle the seam rule first.

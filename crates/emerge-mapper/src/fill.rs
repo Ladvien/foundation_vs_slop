@@ -57,7 +57,10 @@ pub struct Filled {
 /// Anything in between does not tile at all — a 30°-rotated rectangle has no grid that covers the
 /// plane — so those round to the nearer quarter turn, which is the yaw a fill is actually useful at.
 pub fn cell_extents(d: &Descriptor, yaw_deg: f32) -> (f32, f32) {
-    let (w, depth) = d.extent.footprint.unwrap_or((MIN_CELL, MIN_CELL));
+    // **The placed footprint** — `stack::covers` reserves that box, so a fill stepping on the measured
+    // one would lay a scaled piece down at a pitch its own reservation disagrees with.
+    let (w, depth) =
+        emerge_core::descriptor::placed_footprint(d).unwrap_or((MIN_CELL, MIN_CELL));
     let quarter = (yaw_deg.rem_euclid(360.0) / 90.0).round() as i32 % 4;
     let (x, z) = if quarter % 2 == 1 { (depth, w) } else { (w, depth) };
     (snap_cell(x), snap_cell(z))
@@ -169,6 +172,114 @@ pub fn flood(
     })
 }
 
+/// **Lay the brush across a dragged rectangle**, at its own cell pitch.
+///
+/// The twin of [`flood`], and deliberately the same gesture the removal tool already uses: press,
+/// drag a box, release. A red box takes everything inside it; an accent box fills it.
+///
+/// # What it does not share with `flood`
+///
+/// `flood` spreads from a point until something stops it, so "where does it end" is the map's answer,
+/// and a piece already standing somewhere is a wall to stop at. Here the author drew the edges, so the
+/// rectangle is the answer and there is no spreading.
+///
+/// # It fills UNDER what is already there
+///
+/// A cell holding something is not a cell that is spoken for. Laying a floor across a dressed room is
+/// the ordinary case, and the placement rules do not forbid it — `place_on_click` asks
+/// `stack::placement_at` whether the *mount* can be satisfied and nothing else, so a single click has
+/// always been able to put a floor tile under a crate. A fill that skipped those cells was answering a
+/// stricter question than the click path, which is the sort of disagreement `CLAUDE.md`'s one-path rule
+/// exists to prevent: the same piece, the same spot, two answers depending on the gesture.
+///
+/// The one thing skipped is a cell that already holds **this same descriptor**. That is not a rule
+/// about space, it is about idempotence: dragging twice over the same floor would otherwise lay a
+/// second identical tile inside the first, doubling the triangles and leaving a duplicate that only
+/// shows up as a cost. Re-dragging to catch a missed corner is a thing authors do.
+///
+/// The refusals it *does* share are the ones about the brush rather than the region: a piece that
+/// mounts on a surface cannot be laid on open floor, and [`MAX_CELLS`] caps the batch. Both are
+/// `flood`'s, quoted rather than re-decided, so there is one answer to "may this piece go here".
+pub fn box_fill(
+    map: &Map,
+    brush: &Descriptor,
+    corners: ((f32, f32), (f32, f32)),
+    yaw: f32,
+    mut next_id: impl FnMut() -> String,
+) -> Result<Filled, String> {
+    // The same refusal `flood` makes, and for the same measured reason: filling with a
+    // surface-mounted piece once wrote 4,089 invisible lamps into a map, all saveable, none drawable.
+    if let Some(class) = emerge_core::stack::needs_surface(brush) {
+        return Err(format!(
+            "`{}` goes on a `{class}` surface, so it cannot be box filled — a fill covers open floor \
+             and none of these cells offers one. Place it on a surface instead.",
+            brush.id
+        ));
+    }
+
+    let (cell_x, cell_z) = cell_extents(brush, yaw);
+    let (min_x, min_z, max_x, max_z) = map.floor_rect();
+    let (x0, z0) = (corners.0 .0.min(corners.1 .0), corners.0 .1.min(corners.1 .1));
+    let (x1, z1) = (corners.0 .0.max(corners.1 .0), corners.0 .1.max(corners.1 .1));
+
+    let to_cell = |p: (f32, f32)| -> (i64, i64) {
+        ((p.0 / cell_x).floor() as i64, (p.1 / cell_z).floor() as i64)
+    };
+    let centre_of = |c: (i64, i64)| -> (f32, f32) {
+        ((c.0 as f32 + 0.5) * cell_x, (c.1 as f32 + 0.5) * cell_z)
+    };
+
+    // Only this brush's own cells, so a re-drag is idempotent. Everything else is filled under.
+    let mine: std::collections::HashSet<(i64, i64)> = map
+        .placements
+        .iter()
+        .filter(|p| p.descriptor == brush.id)
+        .map(|p| to_cell(p.at))
+        .collect();
+
+    let (cx0, cz0) = to_cell((x0, z0));
+    let (cx1, cz1) = to_cell((x1, z1));
+    let mut out = Vec::new();
+    let mut truncated = false;
+    // **Row-major, ascending.** A total order over the rectangle, so the ids the fill mints do not
+    // depend on which corner the author happened to start from.
+    'rows: for cz in cz0..=cz1 {
+        for cx in cx0..=cx1 {
+            if out.len() >= MAX_CELLS {
+                truncated = true;
+                break 'rows;
+            }
+            let at = centre_of((cx, cz));
+            // Inside the map, on the same half-open test `flood` uses.
+            if !(at.0 >= min_x && at.0 < max_x && at.1 >= min_z && at.1 < max_z) {
+                continue;
+            }
+            if mine.contains(&(cx, cz)) {
+                continue;
+            }
+            out.push(Placed {
+                id: next_id(),
+                descriptor: brush.id.clone(),
+                at,
+                yaw,
+                ..Placed::default()
+            });
+        }
+    }
+
+    if out.is_empty() {
+        return Err(
+            "nothing to fill there — that box is outside the map, or every cell in it already has \
+             this piece in it"
+                .to_owned(),
+        );
+    }
+    Ok(Filled {
+        placements: out,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +330,115 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("a fill with a surface piece must be refused, not written"));
         assert!(e.contains("worktop"), "the refusal must name the surface it wants: {e}");
+    }
+
+    /// A dragged box lays exactly the cells it covers, once each.
+    #[test]
+    fn a_box_fills_the_rectangle_it_was_dragged_over() {
+        let m = map((10.0, 3.0, 10.0));
+        let f = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Cells are 1 m and the box spans x 0.2..2.8, z 0.2..1.8 — three columns by two rows.
+        assert_eq!(f.placements.len(), 6, "{:?}", f.placements);
+        assert!(!f.truncated);
+
+        let mut seen = HashSet::new();
+        for p in &f.placements {
+            assert!(
+                seen.insert((p.at.0.to_bits(), p.at.1.to_bits())),
+                "cell {:?} filled twice",
+                p.at
+            );
+        }
+    }
+
+    /// **Corner order does not matter.** An author dragging bottom-right to top-left gets the same
+    /// box as one dragging the other way, and the ids come out in the same order either way.
+    #[test]
+    fn a_box_is_the_same_box_dragged_from_any_corner() {
+        let m = map((10.0, 3.0, 10.0));
+        let a = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let b = box_fill(&m, &brush(1.0), ((2.8, 1.8), (0.2, 0.2)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let ats = |f: &Filled| f.placements.iter().map(|p| p.at).collect::<Vec<_>>();
+        assert_eq!(ats(&a), ats(&b));
+        let names = |f: &Filled| f.placements.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&a), names(&b), "ids must not depend on the drag direction");
+    }
+
+    /// **A floor goes under the furniture.** A cell holding something else is not spoken for — the
+    /// click path has always allowed it, and a fill that refused would answer a stricter question
+    /// than a click on the same spot. This is where `box_fill` parts company with `flood`, which
+    /// stops dead at an occupied cell because stopping is what a flood's edge means.
+    #[test]
+    fn a_box_fills_under_what_is_already_there() {
+        let mut m = map((10.0, 3.0, 10.0));
+        m.placements.push(Placed {
+            id: "crate1".into(),
+            descriptor: "crate".into(),
+            at: (0.5, 0.5),
+            ..Placed::default()
+        });
+        let f = box_fill(&m, &brush(1.0), ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(f.placements.len(), 6, "every cell in the box, the crate's included");
+        assert!(
+            f.placements.iter().any(|p| p.at == (0.5, 0.5)),
+            "the floor must reach under the crate"
+        );
+    }
+
+    /// **Re-dragging the same floor lays nothing twice.** Not a rule about space — a duplicate tile
+    /// inside the first is invisible except as doubled triangles, and catching a missed corner with a
+    /// second drag is a thing authors do.
+    #[test]
+    fn filling_the_same_area_twice_with_the_same_piece_adds_nothing() {
+        let mut m = map((10.0, 3.0, 10.0));
+        let b = brush(1.0);
+        let first = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        m.placements.extend(first.placements);
+
+        let again = box_fill(&m, &b, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids());
+        assert!(again.is_err(), "a second identical drag has nothing left to lay");
+
+        // But a DIFFERENT piece still fills the same cells — it is the descriptor that repeats, not
+        // the cell that is taken.
+        let mut other = brush(1.0);
+        other.id = "rug".into();
+        let over = box_fill(&m, &other, ((0.2, 0.2), (2.8, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(over.placements.len(), 6);
+    }
+
+    /// The same refusal `flood` makes, for the same reason — the box gesture must not be a second way
+    /// to write thousands of undrawable rows.
+    #[test]
+    fn a_surface_piece_cannot_be_box_filled_with_either() {
+        use emerge_core::descriptor::Mount;
+        let lamp = Descriptor {
+            id: "lamp_tall".into(),
+            mount: Some(Mount::OnSurface {
+                class: "worktop".into(),
+            }),
+            ..brush(0.5)
+        };
+        let m = map((4.0, 3.0, 4.0));
+        let e = box_fill(&m, &lamp, ((0.2, 0.2), (1.8, 1.8)), 0.0, ids())
+            .err()
+            .unwrap_or_else(|| panic!("must be refused, not written"));
+        assert!(e.contains("worktop"), "{e}");
+    }
+
+    /// A box drawn entirely off the map says so rather than silently placing nothing.
+    #[test]
+    fn a_box_outside_the_map_is_refused_by_name() {
+        let m = map((4.0, 3.0, 4.0));
+        let e = box_fill(&m, &brush(1.0), ((50.0, 50.0), (60.0, 60.0)), 0.0, ids())
+            .err()
+            .unwrap_or_else(|| panic!("must be refused"));
+        assert!(e.contains("outside the map"), "{e}");
     }
 
     #[test]

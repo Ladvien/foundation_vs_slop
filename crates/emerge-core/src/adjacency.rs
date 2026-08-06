@@ -402,7 +402,11 @@ pub fn faults(map: &Map, library: &Library, divisions: u32) -> Vec<Fault> {
         let declares = grid.cells.iter().any(|c| c.edge.is_some());
         // `divisions` above already refused a piece with no footprint, naming it; there is no second
         // opinion to form here and no default that would be honest.
-        let Some((fw, fd)) = authored.extent.footprint else {
+        //
+        // **The placed footprint, not the measured one** — the same call `divisions` just made. These
+        // two describe the same box and a seam is read off both, so a scale applied to one and not the
+        // other would sample a lattice at coordinates outside the piece it belongs to.
+        let Some((fw, fd)) = crate::descriptor::placed_footprint(authored) else {
             continue;
         };
         // **The turn, squared once.** Both halves together: `rotated` takes the divisions the cells
@@ -427,8 +431,8 @@ pub fn faults(map: &Map, library: &Library, divisions: u32) -> Vec<Fault> {
         };
         let base = ys.get(i).copied().unwrap_or(map.origin.1);
         // The height as it stands, which is the same rule `divisions` uses — see
-        // `descriptor::divisions` on why the stretch belongs in it.
-        let h = authored.extent.height.unwrap_or(0.0) * authored.align.stretch_y.unwrap_or(1.0);
+        // `descriptor::placed_height` on why the scale and the stretch both belong in it.
+        let h = crate::descriptor::placed_height(authored).unwrap_or(0.0);
         placed.push(Tile {
             id: p.id.as_str(),
             x: (p.at.0 - fw * 0.5, p.at.0 + fw * 0.5),

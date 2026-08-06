@@ -72,8 +72,11 @@ pub enum Action {
     AnimTab,
     Save,
     Undo,
+    Redo,
     /// Hold to see this tab's key list.
     Shortcuts,
+    /// Open the Tiles tab on the descriptor of the piece under the cursor.
+    EditTile,
     // ── Map ──────────────────────────────────────────────────────────────────
     AimLeft,
     AimRight,
@@ -82,6 +85,8 @@ pub enum Action {
     TurnPieceRight,
     Fill,
     Remove,
+    /// Arm the move tool: click a piece to pick it up, click again to put it down.
+    MoveMode,
     RenameMap,
     /// Put the brush back to the rotation it was authored at.
     AimReset,
@@ -103,6 +108,10 @@ pub enum Action {
     Accept,
     Rescan,
     RemoveTile,
+    /// The Tiles tab's own history. Separate from [`Action::Undo`] because the two stacks are
+    /// separate — see `ImportState::undo`.
+    UndoTile,
+    RedoTile,
     // ── Tiles: the lattice ───────────────────────────────────────────────────
     // The subgrid was mouse-only, against §4.2's rule that everything reachable by mouse is
     // reachable by keyboard — a rule `tiles.rs` quotes at itself and then did not follow.
@@ -137,6 +146,21 @@ pub struct Binding {
     pub key: KeyCode,
     /// Whether the platform command modifier ([`MOD_KEYS`]) must be held. `false` is the bare key.
     pub needs_mod: bool,
+    /// **What this binding asks of Shift**, and why it is three states rather than two.
+    ///
+    /// `None` — Shift is not part of this binding, and holding it changes nothing. This is what every
+    /// row wants by default, and making it mean *"Shift must be up"* would have broken the one place
+    /// that already reads Shift: `tiles::rotate_mesh` takes `Shift` as the override that turns a piece
+    /// anyway and reports how many lattice cells it cleared, and it gets there through
+    /// `just_pressed(RotateMeshX)`. A strict rule would have stopped `Shift+N` firing at all, deleting
+    /// a documented escape hatch as a side effect of adding redo.
+    ///
+    /// `Some(true)` — Shift must be held. `Some(false)` — Shift must be up.
+    ///
+    /// Those two exist so `Cmd+Z` and `Shift+Cmd+Z` are different bindings rather than one that fires
+    /// twice: undo declares `Some(false)`, redo `Some(true)`, and the collision test below knows they
+    /// can never both be satisfied.
+    pub needs_shift: Option<bool>,
     pub context: Context,
     /// How the BARE key reads in the panel — `S`, `Z`, `up`. The modifier is **not** written here:
     /// [`rows`] prepends [`MOD_NAME`] when `needs_mod`, so the one panel that shows this list says
@@ -153,6 +177,9 @@ pub struct Binding {
 pub const MOD_KEYS: [KeyCode; 2] = [KeyCode::SuperLeft, KeyCode::SuperRight];
 #[cfg(not(target_os = "macos"))]
 pub const MOD_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight];
+
+/// Shift, either side. Not platform-dependent — unlike [`MOD_KEYS`], Shift is Shift everywhere.
+pub const SHIFT_KEYS: [KeyCode; 2] = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
 
 /// What [`MOD_KEYS`] is called in writing. The panel and every status line take the name from here so
 /// no string in this crate can claim a modifier the build does not read.
@@ -187,6 +214,17 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::MapTab, KeyCode::Digit1, false, Context::Global, "1", "map tab"),
     b(Action::TilesTab, KeyCode::Digit2, false, Context::Global, "2", "tiles tab"),
     b(Action::AnimTab, KeyCode::Digit3, false, Context::Global, "3", "animation tab"),
+    // **The modified tab key: go there, and take this with you.**
+    //
+    // Beside `2` because it is the same destination with a subject — `Cmd+2` reads as "the Tiles tab,
+    // about this piece", and an author who knows `2` has most of it already. It is a legal pair with
+    // the bare `2` on the same rule `S`/`Cmd+S` and `Z`/`Cmd+Z` follow: `just_pressed` refuses a bare
+    // binding while the modifier is down and a modified one while it is not.
+    //
+    // `Global` rather than `Map` because the Map context is at its twelve-row ceiling and this is a
+    // navigation verb, which is what the rest of this block is. On the other two tabs there is simply
+    // nothing under the cursor to send, and it says so.
+    b(Action::EditTile, KeyCode::Digit2, true, Context::Global, "2", "edit this tile"),
     // **Held, not toggled**, and read with `keys::pressed`. The list is a thing you glance at with a
     // thumb down, not a mode you enter and have to leave — and a modal you can forget you opened is a
     // modal that eats the next keystroke.
@@ -197,7 +235,10 @@ pub const BINDINGS: &[Binding] = &[
     // `MapRoot` panel was `Display::None` and nothing on screen changed. An undo you cannot see the
     // effect of is not an undo. Lattice edits go straight to `library.ron` and have no undo of their
     // own, which is exactly why the key is reached for there.
-    b(Action::Undo, KeyCode::KeyZ, true, Context::Map, "Z", "undo"),
+    // **One row, two chords.** A shared `does` collapses them the way `W, A, S, D` collapses, so
+    // adding redo costs no row — which matters, because the Map context has none to give.
+    bs(Action::Undo, KeyCode::KeyZ, true, false, Context::Map, "Z", "undo / redo"),
+    bs(Action::Redo, KeyCode::KeyZ, true, true, Context::Map, "Z", "undo / redo"),
 
     // **Z and C turn the brush; X puts it back.** They sit under the left hand already resting on
     // WASD, which the brackets never did — and `Z` is free as a bare key precisely because the
@@ -220,7 +261,19 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn this right"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
-    b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "stop removing"),
+    // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
+    // is `Q W E R T / A S D F G / Z X C V B`, and every other letter in it is spoken for — pan, turn
+    // view, aim, aim-reset, turn-piece, fill, remove. `B` is bound in the Tiles tab too (`ScanMesh`),
+    // which is legal and is exactly the case `Context` exists to model: the two tabs are never live
+    // together.
+    //
+    // **This puts the Map context at its twelve-row ceiling.** There is no headroom left; the next
+    // verb here has to share a `does` with a neighbour or take something else's key.
+    b(Action::MoveMode, KeyCode::KeyB, false, Context::Map, "B", "move mode"),
+    // **One key for "not that"**, stepping back out one layer per press: a piece in hand, then the
+    // armed tool, then the armed piece. One binding rather than one per state — an author pressing
+    // `Esc` does not first work out which of the three they are in.
+    b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "put back / stop / clear"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
@@ -240,8 +293,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::TurnViewLeft, KeyCode::KeyQ, false, Context::Global, "Q", "turn view"),
     b(Action::TurnViewRight, KeyCode::KeyE, false, Context::Global, "E", "turn view"),
 
-    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Tiles, "up", "previous"),
-    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "next"),
+    // **One row for the cluster.** These were "previous" and "next" on two lines — two rows saying
+    // one idea, which is what `rows` collapses and what freed the row the history pair below needs.
+    b(Action::PrevCandidate, KeyCode::ArrowUp, false, Context::Tiles, "up", "move in the list"),
+    b(Action::NextCandidate, KeyCode::ArrowDown, false, Context::Tiles, "down", "move in the list"),
     // **Left and right switch which list the arrows walk.** Up/Down already meant "move in a list";
     // the tab has two of them and only one was reachable, so an author could edit a candidate's
     // lattice by keyboard but had to reach for the mouse to edit a library tile's. One row, and no
@@ -256,6 +311,11 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::Accept, KeyCode::Enter, false, Context::Tiles, "Enter", "add to library"),
     b(Action::Rescan, KeyCode::KeyR, false, Context::Tiles, "R", "rescan"),
     b(Action::RemoveTile, REMOVE_KEY, false, Context::Tiles, REMOVE_NAME, "remove from library"),
+    // **This tab's own history**, on the same chords and for the reason `keys.rs`'s undo comment
+    // records: an undo you cannot see the effect of is not an undo, so the map's stack is not reachable
+    // from here and this one is not reachable from there. Neither is cleared by changing tabs.
+    bs(Action::UndoTile, KeyCode::KeyZ, true, false, Context::Tiles, "Z", "undo / redo"),
+    bs(Action::RedoTile, KeyCode::KeyZ, true, true, Context::Tiles, "Z", "undo / redo"),
 
     // **The lattice, by keyboard.** Three rows, which is what the twelve-row ceiling leaves once the
     // seven above are counted — so each group shares one `does` and reads its chords in order, the
@@ -300,6 +360,29 @@ const fn b(
         action,
         key,
         needs_mod,
+        // Indifferent to Shift — see [`Binding::needs_shift`] for why that is the default.
+        needs_shift: None,
+        context,
+        chord,
+        does,
+    }
+}
+
+/// A row that cares about Shift. `shift` is `true` for "must be held", `false` for "must be up".
+const fn bs(
+    action: Action,
+    key: KeyCode,
+    needs_mod: bool,
+    shift: bool,
+    context: Context,
+    chord: &'static str,
+    does: &'static str,
+) -> Binding {
+    Binding {
+        action,
+        key,
+        needs_mod,
+        needs_shift: Some(shift),
         context,
         chord,
         does,
@@ -346,10 +429,30 @@ pub fn in_context(context: Context) -> impl Iterator<Item = &'static Binding> {
 /// here, so `Cmd+S` cannot appear in one and `Ctrl+S` in another — the drift `docs/ui.md` §3.5 records
 /// is exactly this, a second place that renders the same fact.
 pub fn chord_text(b: &Binding) -> String {
-    if b.needs_mod {
+    let base = if b.needs_mod {
         format!("{MOD_NAME}+{}", b.chord)
     } else {
         b.chord.to_owned()
+    };
+    // Only a *required* Shift is written. `Some(false)` is a rule about what must not be held, which
+    // is not something a key list should ask a reader to carry.
+    if b.needs_shift == Some(true) {
+        format!("Shift+{base}")
+    } else {
+        base
+    }
+}
+
+/// Is Shift down?
+pub fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
+    SHIFT_KEYS.iter().any(|k| keys.pressed(*k))
+}
+
+/// Does this binding's Shift requirement hold right now? `None` is always satisfied.
+fn shift_ok(b: &Binding, keys: &ButtonInput<KeyCode>) -> bool {
+    match b.needs_shift {
+        None => true,
+        Some(want) => want == shift_held(keys),
     }
 }
 
@@ -376,8 +479,14 @@ pub fn rows(context: Context) -> Vec<Row> {
             Some(last) if last.does == b.does => {
                 // Comma-separated: `W, A, S, D` reads as a set of keys, `W A S D` reads as a sequence
                 // to press in order.
+                //
+                // **The RENDERED chord**, not the bare field. This pushed `b.chord` — fine while
+                // every collapsed row was bare letters, and wrong the moment two rows share a `does`
+                // and differ by a modifier: `Cmd+Z` and `Shift+Cmd+Z` collapsed to `Cmd+Z, Z`, which
+                // names a key that does not do that. `chord_text` is the one place a chord becomes
+                // text, and this was the one place that went around it.
                 last.chord.push_str(", ");
-                last.chord.push_str(b.chord);
+                last.chord.push_str(&chord_text(b));
             }
             _ => out.push(Row {
                 chord: chord_text(b),
@@ -493,7 +602,7 @@ pub fn just_pressed(keys: &ButtonInput<KeyCode>, live: Context, action: Action) 
     }
     // A bare binding must not fire while the modifier is held, or `Cmd+S` would also pan the camera
     // back — and `Cmd+Z` would turn the brush as well as undo, now that `Z` aims.
-    if b.needs_mod != mod_held(keys) {
+    if b.needs_mod != mod_held(keys) || !shift_ok(b, keys) {
         return false;
     }
     keys.just_pressed(b.key)
@@ -505,7 +614,7 @@ pub fn pressed(keys: &ButtonInput<KeyCode>, live: Context, action: Action) -> bo
     if !fires_in(b.context, live) {
         return false;
     }
-    if b.needs_mod != mod_held(keys) {
+    if b.needs_mod != mod_held(keys) || !shift_ok(b, keys) {
         return false;
     }
     keys.pressed(b.key)
@@ -573,14 +682,15 @@ mod tests {
     fn every_action_has_exactly_one_binding() {
         let actions = [
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
-            Action::Save, Action::Undo, Action::Shortcuts,
+            Action::Save, Action::Undo, Action::Redo, Action::Shortcuts, Action::EditTile,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
-            Action::Fill, Action::Remove, Action::RenameMap,
+            Action::Fill, Action::Remove, Action::MoveMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,
             Action::PrevCandidate, Action::NextCandidate, Action::TypeId, Action::CycleMount,
             Action::Accept, Action::Rescan, Action::RemoveTile,
+            Action::UndoTile, Action::RedoTile,
             Action::CellLeft, Action::CellRight, Action::CellForward, Action::CellBack,
             Action::LayerDown, Action::LayerUp,
             Action::CellSolid, Action::CellEdge, Action::CellAnchor, Action::CellClear,
@@ -622,7 +732,17 @@ mod tests {
         let mut clashes = Vec::new();
         for (i, a) in BINDINGS.iter().enumerate() {
             for b in BINDINGS.iter().skip(i + 1) {
-                if a.key == b.key && a.needs_mod == b.needs_mod && a.context.overlaps(b.context) {
+                // Two rows that ask opposite things of Shift can never both fire, so they are not a
+                // collision — that is what makes `Cmd+Z` and `Shift+Cmd+Z` two bindings on one key.
+                let shift_exclusive = matches!(
+                    (a.needs_shift, b.needs_shift),
+                    (Some(x), Some(y)) if x != y
+                );
+                if a.key == b.key
+                    && a.needs_mod == b.needs_mod
+                    && !shift_exclusive
+                    && a.context.overlaps(b.context)
+                {
                     clashes.push(format!(
                         "{:?} ({:?}) and {:?} ({:?}) both take `{}`",
                         a.action, a.context, b.action, b.context, a.chord

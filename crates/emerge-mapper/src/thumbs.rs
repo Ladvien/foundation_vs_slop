@@ -68,30 +68,55 @@ struct Subject(Handle<WorldAsset>);
 
 #[derive(Resource)]
 pub struct Thumbnails {
-    /// Parallel to the library. Handles are created up front and stay stable, so the palette binds
-    /// them before anything is rendered — a row simply shows an empty tile until its turn comes.
-    images: Vec<Handle<Image>>,
+    /// **Keyed by descriptor id, never by index.**
+    ///
+    /// This was a `Vec` parallel to the library, sized once at startup, and both ways the library can
+    /// change broke it. Accepting a piece grew the library past the end of the vector, so the new row
+    /// looked up nothing and showed a blank tile — and the booth had already torn itself down, so it
+    /// could never be filled. Removing a piece was worse: every index after it shifted, and the
+    /// palette silently showed each remaining row its *neighbour's* portrait.
+    ///
+    /// An id is what a row actually is. Handles are created for every descriptor as soon as it exists,
+    /// so the palette has something to bind before anything is rendered — a row shows an empty tile
+    /// until its turn comes, which is the same behaviour as before for the startup case.
+    images: std::collections::HashMap<String, Handle<Image>>,
+    /// Which ids have actually been rendered. Separate from [`Self::images`], which only says a
+    /// handle exists: the difference is exactly "what is left to do", and it is what lets the booth
+    /// come back when a piece is added rather than being finished forever.
+    baked: std::collections::HashSet<String>,
     /// A throwaway target that absorbs every frame in which no subject is staged. See the module note.
     scratch: Handle<Image>,
-    next: usize,
+    /// The id being staged right now, so a completed bake marks the piece it was actually for.
+    staging: Option<String>,
     model: Option<Entity>,
     settled: u32,
     waited: u32,
     camera: Option<Entity>,
     booth: Option<Entity>,
-    /// Whether the booth has been dismantled. Separate from "every piece rendered": gating the run
-    /// condition on the latter stops the system one frame before it can tear the booth down.
-    finished: bool,
 }
 
 impl Thumbnails {
-    pub fn image(&self, ix: usize) -> Option<Handle<Image>> {
-        self.images.get(ix).cloned()
+    pub fn image(&self, id: &str) -> Option<Handle<Image>> {
+        self.images.get(id).cloned()
     }
-    fn done(&self) -> bool {
-        self.next >= self.images.len()
+
+    /// The first descriptor with no portrait yet, if any. The whole of "what is left to do".
+    fn pending(&self, library: &emerge_core::library::Library) -> Option<usize> {
+        library
+            .descriptors
+            .iter()
+            .position(|d| !self.baked.contains(&d.id))
     }
 }
+
+/// **Bumped only when a portrait handle is first created for an id.**
+///
+/// The palette binds handles when it is built, so it has to be rebuilt once after a new piece gets
+/// one — but gating that on `resource_changed::<Thumbnails>` would rebuild all forty rows on every
+/// frame of the bake, because `bake` takes it as `ResMut` and derefs it each run. This changes a few
+/// times per session instead of a few hundred times per startup.
+#[derive(Resource, Default)]
+pub struct ThumbGeneration(pub u32);
 
 pub struct ThumbsPlugin;
 
@@ -100,37 +125,54 @@ impl Plugin for ThumbsPlugin {
         // `setup` is registered by the editor's Startup chain, not here: the palette binds these
         // handles, so it must run after them, and one chain is easier to be sure of than two plugins
         // agreeing about order.
-        app.add_systems(Update, bake.run_if(unfinished));
+        app.init_resource::<ThumbGeneration>()
+            .add_systems(Update, bake.run_if(unfinished));
     }
 }
 
 /// Build the handles and stand the booth up. First link of the editor's Startup chain.
-pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, project: Res<Project>) {
-    let thumbs = ensure(&mut commands, &mut images, project.library.descriptors.len());
-    commands.insert_resource(thumbs);
+pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let _ = &mut commands;
+    commands.insert_resource(Thumbnails {
+        images: std::collections::HashMap::new(),
+        baked: std::collections::HashSet::new(),
+        scratch: blank_target(&mut images),
+        staging: None,
+        model: None,
+        settled: 0,
+        waited: 0,
+        camera: None,
+        booth: None,
+    });
+}
+
+/// A 128 px render target, zeroed.
+///
+/// `new_target_texture` sets the RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_DST usage a camera target
+/// needs; hand-building the descriptor is the usual way to a silently black thumbnail.
+fn blank_target(images: &mut Assets<Image>) -> Handle<Image> {
+    let mut img = Image::new_target_texture(THUMB_PX, THUMB_PX, TextureFormat::Rgba8UnormSrgb, None);
+    img.data = Some(vec![0; (THUMB_PX * THUMB_PX * 4) as usize]);
+    images.add(img)
 }
 
 /// `Option<Res<_>>`, never a bare `Res<_>`: Bevy 0.19 evaluates **every** run condition — there is no
 /// short-circuit — and a missing resource in one panics the system at param validation. That shipped
 /// to the game's `main` once and crashed every launch.
-fn unfinished(thumbs: Option<Res<Thumbnails>>) -> bool {
-    thumbs.is_some_and(|t| !t.finished)
+fn unfinished(thumbs: Option<Res<Thumbnails>>, project: Option<Res<Project>>) -> bool {
+    // **Derived, not sticky.** This read a `finished` flag, so the booth was dismantled once and the
+    // system never ran again — which is why a piece accepted after startup could never get a portrait.
+    // Asking the library every frame costs a `position` over ~40 short strings and lets the booth return.
+    match (thumbs, project) {
+        (Some(t), Some(p)) => t.pending(&p.library).is_some() || t.camera.is_some(),
+        _ => false,
+    }
 }
 
-/// Create the image handles and stand up the booth. Runs before the palette, so every row has a
-/// handle to bind.
-fn ensure(commands: &mut Commands, images: &mut Assets<Image>, count: usize) -> Thumbnails {
-    let mut blank = || {
-        // `new_target_texture` sets the RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_DST usage a camera
-        // target needs; hand-building the descriptor is the usual way to a silently black thumbnail.
-        let mut img =
-            Image::new_target_texture(THUMB_PX, THUMB_PX, TextureFormat::Rgba8UnormSrgb, None);
-        img.data = Some(vec![0; (THUMB_PX * THUMB_PX * 4) as usize]);
-        images.add(img)
-    };
-    let handles = (0..count).map(|_| blank()).collect();
-    let scratch = blank();
-
+/// **Stand the booth up.** Called whenever there is a portrait to take and no booth standing — at
+/// startup, and again after a piece is imported, which is the case the old one-shot `ensure` could
+/// not serve.
+fn erect_booth(commands: &mut Commands) -> Entity {
     // Point lights, so nothing outside their range is touched, and no shadows — a 128 px portrait
     // cannot show one and every shadow map costs a pass.
     let booth = commands
@@ -157,24 +199,15 @@ fn ensure(commands: &mut Commands, images: &mut Assets<Image>, count: usize) -> 
             }
         })
         .id();
-
-    Thumbnails {
-        images: handles,
-        scratch,
-        next: 0,
-        model: None,
-        settled: 0,
-        waited: 0,
-        camera: None,
-        booth: Some(booth),
-        finished: false,
-    }
+    booth
 }
 
 #[allow(clippy::too_many_arguments)]
 fn bake(
     mut commands: Commands,
     mut thumbs: ResMut<Thumbnails>,
+    mut images: ResMut<Assets<Image>>,
+    mut generation: ResMut<ThumbGeneration>,
     project: Res<Project>,
     assets: Res<AssetServer>,
     children: Query<&Children>,
@@ -183,14 +216,28 @@ fn bake(
     bounds: Query<(&Aabb, &GlobalTransform)>,
     mut cams: Query<(&mut Transform, &mut Projection, &mut RenderTarget), With<ThumbnailCamera>>,
 ) {
-    if thumbs.done() {
+    let Some(ix) = thumbs.pending(&project.library) else {
+        // Nothing left to take. The booth comes down, but the resource keeps every portrait it has —
+        // and stands back up the moment a piece is imported.
         teardown(&mut commands, &mut thumbs);
         return;
-    }
-    let ix = thumbs.next;
+    };
     let Some(d) = project.library.descriptors.get(ix).cloned() else {
         return;
     };
+    // Every descriptor gets a handle as soon as it exists, so the palette has something to bind
+    // before this one's turn comes round.
+    for other in &project.library.descriptors {
+        if !thumbs.images.contains_key(&other.id) {
+            let handle = blank_target(&mut images);
+            thumbs.images.insert(other.id.clone(), handle);
+            generation.0 = generation.0.wrapping_add(1);
+        }
+    }
+    if thumbs.booth.is_none() {
+        thumbs.booth = Some(erect_booth(&mut commands));
+    }
+    thumbs.staging = Some(d.id.clone());
 
     let Some(model) = thumbs.model else {
         match stage(&mut commands, &assets, &d) {
@@ -204,9 +251,11 @@ fn bake(
                 }
             }
             // A descriptor with no mesh has no portrait, and that is not an error — it is a
-            // descriptor that has not been given a mesh yet. Skip to the next rather than stalling
-            // the whole library behind it.
-            None => thumbs.next += 1,
+            // descriptor that has not been given a mesh yet. Mark it done rather than stalling the
+            // whole library behind it.
+            None => {
+                thumbs.baked.insert(d.id.clone());
+            }
         }
         return;
     };
@@ -227,7 +276,7 @@ fn bake(
             );
             commands.entity(model).despawn();
             thumbs.model = None;
-            thumbs.next += 1;
+            thumbs.baked.insert(d.id.clone());
         }
         return;
     }
@@ -253,7 +302,10 @@ fn bake(
                 ..OrthographicProjection::default_3d()
             });
             *target = RenderTarget::Image(ImageRenderTarget {
-                handle: thumbs.images[ix].clone(),
+                handle: match thumbs.images.get(&d.id) {
+                    Some(h) => h.clone(),
+                    None => return,
+                },
                 scale_factor: 1.0,
             });
         }
@@ -275,7 +327,8 @@ fn bake(
     }
     commands.entity(model).despawn();
     thumbs.model = None;
-    thumbs.next += 1;
+    thumbs.staging = None;
+    thumbs.baked.insert(d.id.clone());
 }
 
 /// The world-space centre and largest dimension of everything actually drawn under `root`.
@@ -321,10 +374,15 @@ fn subject_bounds(
 /// The subject's largest dimension, from what the descriptor records. The fallback for the frames
 /// before any `Aabb` exists; floored, so it never puts the camera inside the mesh.
 fn subject_extent(d: &emerge_core::descriptor::Descriptor) -> f32 {
-    let (w, dep) = d.extent.footprint.unwrap_or((1.0, 1.0));
-    let h = d.extent.height.unwrap_or(1.0);
     let scale = d.align.scale.unwrap_or(1.0);
-    (w.max(dep).max(h) * scale).max(0.25)
+    // The footprint through the one helper rather than a second `* scale` written out here — this
+    // function used to do that multiplication by hand, which is the drift `placed_footprint` exists to
+    // end. Height keeps the bare `* scale` because `stage` below frames the subject at
+    // `splat(scale)`: no `stretch_y`, so framing it as though there were one would push the camera
+    // back off a piece that is not actually that tall.
+    let (w, dep) = emerge_core::descriptor::placed_footprint(d).unwrap_or((1.0, 1.0));
+    let h = d.extent.height.unwrap_or(1.0) * scale;
+    (w.max(dep).max(h)).max(0.25)
 }
 
 fn stage(
@@ -398,7 +456,6 @@ fn has_mesh(root: Entity, children: &Query<&Children>, meshes: &Query<(), With<M
 }
 
 fn teardown(commands: &mut Commands, thumbs: &mut Thumbnails) {
-    thumbs.finished = true;
     if let Some(cam) = thumbs.camera.take() {
         commands.entity(cam).despawn();
         // Logged because the bake is otherwise invisible: if a piece never instantiates, this line is
