@@ -2330,6 +2330,7 @@ impl Plugin for TilesPlugin {
                     // list. Accept and Remove both act on a selection.
                     (
                         keep_library_selection_visible.run_if(in_tiles_mode),
+                        keep_selection_on_screen.run_if(in_tiles_mode),
                         keep_candidate_selection_visible.run_if(in_tiles_mode),
                     ),
                     cycle_mount.in_set(crate::keys::Phase::Act),
@@ -3093,6 +3094,70 @@ fn candidate_rows(state: &ImportState, filters: &crate::filter::Filters) -> Vec<
 /// most natural way to find a mesh was also the way to import a different one. Same last rule as its
 /// sibling: if nothing survives the filter, leave the selection alone rather than jumping it
 /// somewhere arbitrary the moment a half-typed query matches nothing.
+/// **Scroll the list so the selected row is on screen.**
+///
+/// The arrows move a selection that the list did not follow, so walking past the fold moved a
+/// highlight nobody could see — and `Delete` and `Enter` both act on that selection, which makes an
+/// off-screen one worse than merely awkward.
+///
+/// Both sections live in one scroll area (`rebuild_candidates` builds "IN LIBRARY" and "NOT YET
+/// IMPORTED" into the same list), so there is one thing to scroll and one rule for it.
+///
+/// # Physical in, logical out
+///
+/// `ComputedNode` and `UiGlobalTransform` are in **physical** pixels; `ScrollPosition` is in
+/// **logical** ones. `docs/2026-08-04-emerge-mapper-handoff.md` §4 records the cost of missing that
+/// distinction once already. `inverse_scale_factor` is the conversion, taken from the list itself.
+fn keep_selection_on_screen(
+    state: Res<ImportState>,
+    rows: Query<(&CandidateRow, &ComputedNode, &UiGlobalTransform)>,
+    library_rows: Query<(&LibraryRow, &ComputedNode, &UiGlobalTransform)>,
+    mut lists: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        (With<CandidateList>, Without<CandidateRow>, Without<LibraryRow>),
+    >,
+) {
+    // The rows are rebuilt when the selection moves, so their transforms are only meaningful once
+    // layout has run — reacting to the state change alone would scroll against last frame's list.
+    if !state.is_changed() {
+        return;
+    }
+    // A UI node's transform is its CENTRE, so the edges are the half-size either side.
+    let selected = match &state.selected_library_id {
+        Some(id) => library_rows
+            .iter()
+            .find(|(r, _, _)| &r.0 == id)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+        None => rows
+            .iter()
+            .find(|(r, _, _)| r.0 == state.selected)
+            .map(|(_, n, t)| (t.translation.y, n.size.y * 0.5)),
+    };
+    let Some((row_mid, row_half)) = selected else {
+        return;
+    };
+
+    for (list, list_tf, mut scroll) in &mut lists {
+        let (list_mid, list_half) = (list_tf.translation.y, list.size.y * 0.5);
+        let (row_top, row_bottom) = (row_mid - row_half, row_mid + row_half);
+        let (top, bottom) = (list_mid - list_half, list_mid + list_half);
+
+        // Above the fold, or below it. Never both — a row taller than the list scrolls to its top,
+        // which is the half you read first.
+        let delta = if row_top < top {
+            row_top - top
+        } else if row_bottom > bottom {
+            row_bottom - bottom
+        } else {
+            continue;
+        };
+        let want = (scroll.0.y + delta * list.inverse_scale_factor).max(0.0);
+        if (scroll.0.y - want).abs() > 0.5 {
+            scroll.0.y = want;
+        }
+    }
+}
+
 fn keep_candidate_selection_visible(
     filters: Res<crate::filter::Filters>,
     mut state: ResMut<ImportState>,

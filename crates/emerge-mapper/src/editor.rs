@@ -471,6 +471,10 @@ impl Plugin for EditorPlugin {
                         resource_changed::<Project>
                             .or_else(resource_changed::<EditorState>)
                             .or_else(resource_changed::<crate::filter::Filters>)
+                            // A newly created portrait handle has to be bound, and binding happens
+                            // when the row is built. See `thumbs::ThumbGeneration` for why this is not
+                            // `resource_changed::<Thumbnails>`.
+                            .or_else(resource_changed::<crate::thumbs::ThumbGeneration>)
                             .or_else(run_once),
                     ),
                     refresh_size,
@@ -794,7 +798,14 @@ fn rebuild_palette(
                             },
                             BackgroundColor(SLOT_BG),
                         ));
-                        if let Some(image) = thumbs.as_ref().and_then(|t| t.image(ix)) {
+                        // **By id, not by index.** The library grows on Accept and shrinks on
+                        // remove, and an index into a portrait list that was sized at startup showed
+                        // a blank tile in the first case and the neighbour's picture in the second.
+                        if let Some(image) = thumbs
+                            .as_ref()
+                            .zip(project.library.descriptors.get(ix))
+                            .and_then(|(t, d)| t.image(&d.id))
+                        {
                             slot.insert(ImageNode::new(image));
                         }
                         row.spawn((

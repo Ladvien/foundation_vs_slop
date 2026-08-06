@@ -10,13 +10,30 @@
 
 use std::path::Path;
 
+use emerge_core::descriptor::Descriptor;
 use emerge_core::import::{self, Severity};
-use emerge_core::library::Library;
+use emerge_core::library::{Library, LIBRARY_VERSION};
 
-fn library() -> Library {
-    let text = std::fs::read_to_string("assets/emerge/library.ron")
-        .unwrap_or_else(|e| panic!("assets/emerge/library.ron: {e}"));
-    Library::parse(&text).unwrap_or_else(|e| panic!("{e}"))
+/// **Nothing is already imported.**
+///
+/// `scan`'s library argument exists for one purpose — skipping meshes that are already in it — and
+/// for every assertion in this file that filter is incidental. Passing the *shipped*
+/// `assets/emerge/library.ron` coupled these tests to a file **the editor writes**, so ordinary
+/// authoring turned them red: importing pieces through the Tiles tab took the scan from 18 candidates
+/// to 1 and failed a test about the meshes.
+///
+/// It was also a hole rather than merely brittle. `every_shipped_mesh_can_be_measured` skipped
+/// anything already imported — so importing a mesh removed it from the very check meant to catch a
+/// mesh that cannot be measured.
+///
+/// The GLBs under `assets/` are inputs: committed, and unchanged by using the editor. `library.ron` is
+/// output. Tests belong against the first and never the second.
+fn nothing() -> Library {
+    Library {
+        version: LIBRARY_VERSION,
+        note: None,
+        descriptors: Vec::new(),
+    }
 }
 
 /// The Ozea kit is this project's best-behaved set — `tests/ozea_asset.rs` pins it base-at-origin and
@@ -32,7 +49,7 @@ fn library() -> Library {
 #[test]
 fn the_ozea_kit_raises_exactly_the_one_warning_we_know_about() {
     let root = Path::new("assets");
-    let candidates = import::scan(root, &root.join("ozea"), &library())
+    let candidates = import::scan(root, &root.join("ozea"), &nothing())
         .unwrap_or_else(|e| panic!("scan: {e}"));
     assert!(
         candidates.len() >= 18,
@@ -83,7 +100,7 @@ fn nothing_shipped_is_unmeasurable() {
     // of what the tool does is a test that agrees with the tool right up until it matters.
     let root = Path::new("assets");
     let mut blocked = Vec::new();
-    for c in import::scan(root, root, &library()).unwrap_or_else(|e| panic!("scan: {e}")) {
+    for c in import::scan(root, root, &nothing()).unwrap_or_else(|e| panic!("scan: {e}")) {
         if c.blocked() {
             let why: Vec<&str> = c
                 .findings
@@ -108,7 +125,7 @@ fn nothing_shipped_is_unmeasurable() {
 #[test]
 fn every_proposal_carries_the_measurements_a_placement_needs() {
     let root = Path::new("assets");
-    for c in import::scan(root, &root.join("ozea"), &library()).unwrap_or_else(|e| panic!("{e}")) {
+    for c in import::scan(root, &root.join("ozea"), &nothing()).unwrap_or_else(|e| panic!("{e}")) {
         assert!(
             c.proposed.extent.footprint.is_some(),
             "{}: proposed without a footprint",
@@ -122,10 +139,27 @@ fn every_proposal_carries_the_measurements_a_placement_needs() {
 
 /// A mesh already in the library is not a candidate — otherwise the import list is every asset you
 /// have ever imported, which is a list nobody reads twice.
+///
+/// The library here is **built from what this tree actually holds**, not read off disk: the rule under
+/// test is the filter, and reading the shipped library would have made the test's subject whatever an
+/// author last imported. Three meshes is enough to prove a filter.
 #[test]
 fn meshes_already_in_the_library_are_not_offered_again() {
     let root = Path::new("assets");
-    let lib = library();
+    let seen = import::scan(root, root, &nothing()).unwrap_or_else(|e| panic!("{e}"));
+    let picked: Vec<String> = seen.iter().take(3).map(|c| c.mesh.clone()).collect();
+    assert!(picked.len() == 3, "need meshes to filter, found {}", picked.len());
+
+    let mut lib = nothing();
+    lib.descriptors = picked
+        .iter()
+        .enumerate()
+        .map(|(n, mesh)| Descriptor {
+            id: format!("known_{n}"),
+            mesh: Some(mesh.clone()),
+            ..Descriptor::default()
+        })
+        .collect();
     let known: Vec<&str> = lib.descriptors.iter().filter_map(|d| d.mesh.as_deref()).collect();
     for c in import::scan(root, root, &lib).unwrap_or_else(|e| panic!("{e}")) {
         assert!(
