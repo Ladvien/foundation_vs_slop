@@ -235,6 +235,7 @@ fn load_on_entry(
     project: Res<crate::project::Project>,
     mut bench: ResMut<BenchState>,
     mut queue: ResMut<crate::anim_watch::MeasureQueue>,
+    reports: Res<crate::anim_watch::BenchReports>,
 ) {
     if *mode != Mode::Anim || bench.loaded {
         return;
@@ -245,13 +246,17 @@ fn load_on_entry(
         Ok(text) => match Rigs::parse(&text) {
             Ok(rigs) => {
                 bench.status = format!("{} rig(s) in {}", rigs.rigs.len(), path.display());
-                // **Check-all runs on open.** The audit should not wait to be asked for: every rig
-                // enters the queue now (one measures per frame), so the stale badge and the C
-                // summary are warm from the first entry. The selected rig still jumps the line via
+                // **Check-all runs on open — for whatever is not already measured.** The audit
+                // should not wait to be asked for: unmeasured rigs enter the queue now (one
+                // measures per frame), so the stale badge and the C summary are warm from the
+                // first entry. Already-measured rigs are the watcher's to keep fresh — measuring
+                // them again would say nothing new. The selected rig still jumps the line via
                 // `queue_selected`. Lazy-load stands — a session that never opens the tab pays
                 // nothing.
                 for name in rigs.rigs.keys() {
-                    queue.push_back_unique(name);
+                    if !reports.by_rig.contains_key(name) {
+                        queue.push_back_unique(name);
+                    }
                 }
                 bench.rigs = Some(rigs);
                 bench.text = Some(text);
@@ -549,16 +554,28 @@ fn check_all_keys(
     live: Res<crate::keys::Live>,
     mut bench: ResMut<BenchState>,
     mut queue: ResMut<crate::anim_watch::MeasureQueue>,
+    reports: Res<crate::anim_watch::BenchReports>,
 ) {
     if !crate::keys::just_pressed(&keyboard, live.0, crate::keys::Action::CheckAllRigs) {
         return;
     }
-    let names: Vec<String> = bench.names().iter().map(|s| (*s).to_owned()).collect();
-    for name in &names {
+    // Only what is unmeasured: reports persist for the session and the watcher re-measures on a
+    // real change, so a second C is an instant summary, not a rescan that says nothing new.
+    let missing: Vec<String> = bench
+        .names()
+        .iter()
+        .filter(|n| !reports.by_rig.contains_key(**n))
+        .map(|n| (*n).to_owned())
+        .collect();
+    for name in &missing {
         queue.push_back_unique(name);
     }
     bench.view = View::All;
-    bench.status = format!("measuring {} rig(s)...", names.len());
+    bench.status = if missing.is_empty() {
+        "all rigs measured".to_owned()
+    } else {
+        format!("measuring {} rig(s)...", missing.len())
+    };
 }
 
 fn rebuild_list(
