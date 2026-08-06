@@ -27,20 +27,15 @@
 //! `align.scale` and `align.stretch_y` are applied to the entity, so a table measured at 0.796 m and
 //! scaled 1.2 presents its surface at 0.955 m. Reading `extent.height` alone would put the lamp inside
 //! the tabletop on every scaled piece, and nothing downstream would say so.
+//!
+//! That rule is [`crate::descriptor::placed_height`]. It used to be `drawn_height`, defined here —
+//! which was fine for stacking and wrong for everyone else, because `divisions` and `adjacency` wrote
+//! the product out by hand and dropped the `scale` factor. One definition now, in the schema layer
+//! both can reach.
 
-use crate::descriptor::{Descriptor, Mount, OverlayHost};
+use crate::descriptor::{placed_footprint, placed_height, Descriptor, Mount, OverlayHost};
 use crate::library::Library;
 use crate::map::{Map, Placed};
-
-/// A piece's drawn height in metres — what it measures once `align` has been applied.
-///
-/// `None` when the descriptor records no height, which is an unmeasured piece rather than a flat one.
-/// Nothing may rest on it, and saying so is better than treating "unknown" as zero and stacking a lamp
-/// at floor level on top of a bookcase.
-pub fn drawn_height(d: &Descriptor) -> Option<f32> {
-    let h = d.extent.height?;
-    Some(h * d.align.scale.unwrap_or(1.0) * d.align.stretch_y.unwrap_or(1.0))
-}
 
 /// The surface class a descriptor needs under it, if it needs one.
 pub fn needs_surface(d: &Descriptor) -> Option<&str> {
@@ -73,7 +68,7 @@ pub fn offers_for(host: &Descriptor, guest: &Descriptor) -> bool {
 /// A piece with no measured footprint covers nothing. It is unmeasured, not flat, and treating unknown
 /// as "everywhere" would let a lamp land on a mystery.
 pub fn covers(d: &Descriptor, placed_at: (f32, f32), yaw: f32, probe: (f32, f32)) -> bool {
-    let Some((w, depth)) = d.extent.footprint else {
+    let Some((w, depth)) = placed_footprint(d) else {
         return false;
     };
     let (dx, dz) = (probe.0 - placed_at.0, probe.1 - placed_at.1);
@@ -107,7 +102,7 @@ pub fn host_under<'a>(
         if !offers_for(d, guest) || !covers(d, p.at, p.yaw, probe) {
             continue;
         }
-        let Some(top) = drawn_height(d).map(|h| py + h) else {
+        let Some(top) = placed_height(d).map(|h| py + h) else {
             continue;
         };
         let better = match best {
@@ -221,7 +216,7 @@ fn surface_of(host_d: &Descriptor, guest: &Descriptor, host_id: &str, guest_id: 
             }
         ));
     }
-    drawn_height(host_d).ok_or_else(|| {
+    placed_height(host_d).ok_or_else(|| {
         format!(
             "map: `{guest_id}` rests on `{host_id}`, whose descriptor records no height. An \
              unmeasured piece cannot say where its surface is — measure `{}` in the tiles tab.",
@@ -296,6 +291,135 @@ pub fn placement_at<'a>(
     Ok((at, host.map(|(p, _)| p)))
 }
 
+/// What a move changed, so the caller can respawn exactly those entities and undo exactly that edit.
+///
+/// One record per placement that actually moved — the piece plus everything that was riding on it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Moved {
+    /// `(index, where it was, what it rested on)`, in the order they were written. Restoring these in
+    /// order puts the map back exactly.
+    pub was: Vec<(usize, (f32, f32), Option<String>)>,
+}
+
+/// **Move a placement to `to`, taking everything resting on it along.**
+///
+/// Move the table and the lamp goes with it. That is already the promise [`crate::map::Placed::on`]
+/// makes — it names the host rather than storing a height *"so move the table and the lamp moves with
+/// it"* — but nothing had ever moved a table, so the promise had never been kept by anything.
+///
+/// # All of it, or none of it
+///
+/// Every member is re-seated through [`placement_at`], the same call the click path makes, so a move
+/// obeys the same mount rules as a placement. If any member cannot be seated — a lamp dragged somewhere
+/// its host no longer covers, a shelf pushed off the wall — **the whole move is refused and the map is
+/// untouched**. A partial move would leave a `Placed::on` pointing at a piece that is no longer under
+/// it, which is exactly the dangling reference [`Map::validate`] exists to refuse, written by the
+/// editor rather than by an author.
+///
+/// That is why the work happens on a clone. Applying in place and rolling back on failure is two code
+/// paths that have to agree about what "back" means, and the rollback is the one that never gets run.
+///
+/// # Riders are found transitively, in a total order
+///
+/// A mug on a tray on the table moves with the table. Collection is breadth-first over `Placed::on`
+/// and the result is sorted by `Placed::id` — unique within a map — so the write order does not depend
+/// on authoring order. `Map::validate` has already refused cycles, and the `seen` set means a
+/// malformed map still terminates here rather than hanging.
+pub fn move_placement(
+    map: &mut Map,
+    library: &Library,
+    index: usize,
+    to: (f32, f32),
+) -> Result<Moved, String> {
+    let anchor = map.placements.get(index).ok_or_else(|| {
+        format!(
+            "move: no placement at index {index}; the map has {}",
+            map.placements.len()
+        )
+    })?;
+    let from = anchor.at;
+    let delta = (to.0 - from.0, to.1 - from.1);
+
+    // Everything that rides on the anchor, transitively.
+    let mut group = vec![index];
+    let mut seen: Vec<usize> = vec![index];
+    let mut frontier = vec![index];
+    while let Some(host) = frontier.pop() {
+        let host_id = map.placements[host].id.clone();
+        for (i, p) in map.placements.iter().enumerate() {
+            if seen.contains(&i) || p.on.as_deref() != Some(host_id.as_str()) {
+                continue;
+            }
+            seen.push(i);
+            group.push(i);
+            frontier.push(i);
+        }
+    }
+    // **A total order over a unique key.** `id` is unique within a map — `pick_at` already leans on
+    // that — so this does not depend on which order the frontier happened to pop.
+    group.sort_by(|a, b| map.placements[*a].id.cmp(&map.placements[*b].id));
+
+    // Proposed, on a copy. Nothing below can leave `map` half-written.
+    let mut next = map.clone();
+    for &i in &group {
+        let p = &mut next.placements[i];
+        p.at = (p.at.0 + delta.0, p.at.1 + delta.1);
+    }
+
+    // **Only the anchor is re-seated; the riders keep their host.**
+    //
+    // The group moves rigidly, so every rider is at the same offset from the same host it was already
+    // on and its mount holds for exactly the reason it held before. Re-asking `placement_at` for them
+    // would be worse than redundant: `host_under` does not know to skip the piece it is seating, so a
+    // tray would find *itself* under itself, and a mug would hop onto whatever the group happened to
+    // pass over. The anchor is the only member whose surroundings actually changed.
+    let anchor_d = library.get(&next.placements[index].descriptor).ok_or_else(|| {
+        format!(
+            "move: `{}` names descriptor `{}`, which the library does not have",
+            next.placements[index].id, next.placements[index].descriptor
+        )
+    })?;
+    // **Asked against a map the group is not in.** "What would be under this if the things travelling
+    // with it were not there" is the honest question — otherwise a table lands on its own mug, which
+    // is the cycle `resolve_y` then refuses.
+    let mut probe = next.clone();
+    let mut drop_order = group.clone();
+    drop_order.sort_unstable();
+    for &i in drop_order.iter().rev() {
+        probe.placements.remove(i);
+    }
+    let probe_ys = resolve_y(&probe, library)?;
+    let (_, host) = placement_at(
+        &probe,
+        library,
+        &probe_ys,
+        anchor_d,
+        next.placements[index].at,
+    )?;
+    let anchor_on = host.map(|h| h.id.clone());
+
+    // Everything held. Record what it was, then commit.
+    let mut was = Vec::with_capacity(group.len());
+    for &i in &group {
+        was.push((i, map.placements[i].at, map.placements[i].on.clone()));
+        map.placements[i].at = next.placements[i].at;
+        if i == index {
+            map.placements[i].on = anchor_on.clone();
+        }
+    }
+    Ok(Moved { was })
+}
+
+/// Put back exactly what [`move_placement`] recorded. The inverse, and the editor's undo.
+pub fn restore_moved(map: &mut Map, moved: &Moved) {
+    for (i, at, on) in &moved.was {
+        if let Some(p) = map.placements.get_mut(*i) {
+            p.at = *at;
+            p.on = on.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +481,135 @@ mod tests {
             placements,
             ..Map::default()
         }
+    }
+
+    /// A table with a lamp and a mug on it, and a second table nowhere near them.
+    fn stacked() -> (Map, Library) {
+        let mut m = map(vec![
+            at("t1", "table", None),
+            at("l1", "lamp", Some("t1")),
+            at("m1", "lamp", Some("t1")),
+            at("t2", "table", None),
+        ]);
+        m.placements[3].at = (10.0, 10.0);
+        // Both guests sit within the table's 1.6 x 0.8 footprint, offset so the move can be seen to
+        // preserve the offsets rather than to collapse them onto the host.
+        m.placements[1].at = (0.4, 0.2);
+        m.placements[2].at = (-0.4, -0.2);
+        (m, lib(vec![table(), lamp()]))
+    }
+
+    /// **Move the table and the lamp moves with it** — the promise `Placed::on`'s own doc makes, which
+    /// nothing had ever kept because nothing could move a table.
+    #[test]
+    fn moving_a_host_carries_everything_resting_on_it() {
+        let (mut m, l) = stacked();
+        let moved = move_placement(&mut m, &l, 0, (3.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(m.placements[0].at, (3.0, 0.0), "the table went where it was sent");
+        // Offsets preserved, not collapsed.
+        assert_eq!(m.placements[1].at, (3.4, 0.2));
+        assert_eq!(m.placements[2].at, (2.6, -0.2));
+        // Still resting on the same host, which is what makes them still land at its height.
+        assert_eq!(m.placements[1].on.as_deref(), Some("t1"));
+        assert_eq!(m.placements[2].on.as_deref(), Some("t1"));
+        let y = resolve_y(&m, &l).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(y[1], 0.8, "the lamp is still on the tabletop");
+
+        // The untouched table stayed untouched, and is not in the record.
+        assert_eq!(m.placements[3].at, (10.0, 10.0));
+        assert_eq!(moved.was.len(), 3, "table plus two riders: {:?}", moved.was);
+    }
+
+    /// **All of it or none of it.** A piece dragged where its mount cannot hold refuses the whole
+    /// move, rather than landing at floor level and reading as an authoring mistake — the same
+    /// refusal the click path makes, and the reason the work happens on a clone.
+    #[test]
+    fn a_move_that_cannot_be_seated_changes_nothing() {
+        let (mut m, l) = stacked();
+        let before = m.clone();
+
+        // The lamp is `OnSurface { worktop }`. Off the table there is no worktop, so there is nowhere
+        // for it to go.
+        let err = move_placement(&mut m, &l, 1, (40.0, 40.0))
+            .expect_err("a piece with nowhere to rest must refuse the move");
+        assert!(err.contains("worktop"), "the refusal names the surface: {err}");
+        assert_eq!(m, before, "a refused move must leave the map byte-identical");
+    }
+
+    /// **A host does not come to rest on its own guest.** Re-seating the anchor asks what would be
+    /// under it if the things travelling with it were not there; asking against the moved map instead
+    /// let a table find the mug standing on it, and `resolve_y` then refused the cycle the move had
+    /// just written.
+    #[test]
+    fn a_moved_host_does_not_land_on_the_things_it_is_carrying() {
+        let (mut m, l) = stacked();
+        move_placement(&mut m, &l, 0, (3.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            m.placements[0].on, None,
+            "the table stands on the floor, not on its own lamp"
+        );
+        // And the map still resolves, which is the property a cycle would have destroyed.
+        resolve_y(&m, &l).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Moving a *rider* off its host and onto another one re-seats it — the anchor is the member
+    /// whose surroundings changed, so it is the one that gets a new `on`.
+    #[test]
+    fn moving_a_guest_onto_another_host_repoints_it() {
+        let (mut m, l) = stacked();
+        // `t2` is the far table; the lamp lands on it.
+        move_placement(&mut m, &l, 1, (10.0, 10.0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            m.placements[1].on.as_deref(),
+            Some("t2"),
+            "the lamp now rests on the table it was dropped on"
+        );
+        let y = resolve_y(&m, &l).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(y[1], 0.8, "and stands at that table's height");
+    }
+
+    /// The recorded inverse puts every member back, which is what the editor's undo replays.
+    #[test]
+    fn restoring_a_move_puts_the_whole_group_back() {
+        let (mut m, l) = stacked();
+        let before = m.clone();
+        let moved = move_placement(&mut m, &l, 0, (3.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(m, before, "the move did something");
+        restore_moved(&mut m, &moved);
+        assert_eq!(m, before, "restoring must be exact, not approximate");
+    }
+
+    /// A mug on a tray on a table moves with the table — riders are found transitively.
+    #[test]
+    fn riders_are_collected_through_the_whole_chain() {
+        let mut tray = table();
+        tray.id = "tray".into();
+        tray.extent.footprint = Some((0.6, 0.6));
+        tray.extent.height = Some(0.05);
+        tray.mount = Some(Mount::OnSurface {
+            class: "worktop".into(),
+        });
+        let mut m = map(vec![
+            at("t1", "table", None),
+            at("tray1", "tray", Some("t1")),
+            at("mug1", "lamp", Some("tray1")),
+        ]);
+        let l = lib(vec![table(), lamp(), tray]);
+
+        let moved = move_placement(&mut m, &l, 0, (5.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(moved.was.len(), 3, "the mug two levels up must come too");
+        assert_eq!(m.placements[1].at, (5.0, 0.0));
+        assert_eq!(m.placements[2].at, (5.0, 0.0));
+        assert_eq!(m.placements[2].on.as_deref(), Some("tray1"));
+    }
+
+    /// An index the map does not have is refused by name rather than panicking.
+    #[test]
+    fn moving_a_placement_that_is_not_there_is_refused() {
+        let (mut m, l) = stacked();
+        let err = move_placement(&mut m, &l, 99, (1.0, 1.0)).expect_err("no such placement");
+        assert!(err.contains("99"), "{err}");
     }
 
     /// **The bug this module exists for.** Ten shipped descriptors declare `OnSurface`; every one of

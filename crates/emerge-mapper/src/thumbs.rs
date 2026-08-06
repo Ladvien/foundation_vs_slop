@@ -321,10 +321,15 @@ fn subject_bounds(
 /// The subject's largest dimension, from what the descriptor records. The fallback for the frames
 /// before any `Aabb` exists; floored, so it never puts the camera inside the mesh.
 fn subject_extent(d: &emerge_core::descriptor::Descriptor) -> f32 {
-    let (w, dep) = d.extent.footprint.unwrap_or((1.0, 1.0));
-    let h = d.extent.height.unwrap_or(1.0);
     let scale = d.align.scale.unwrap_or(1.0);
-    (w.max(dep).max(h) * scale).max(0.25)
+    // The footprint through the one helper rather than a second `* scale` written out here — this
+    // function used to do that multiplication by hand, which is the drift `placed_footprint` exists to
+    // end. Height keeps the bare `* scale` because `stage` below frames the subject at
+    // `splat(scale)`: no `stretch_y`, so framing it as though there were one would push the camera
+    // back off a piece that is not actually that tall.
+    let (w, dep) = emerge_core::descriptor::placed_footprint(d).unwrap_or((1.0, 1.0));
+    let h = d.extent.height.unwrap_or(1.0) * scale;
+    (w.max(dep).max(h)).max(0.25)
 }
 
 fn stage(

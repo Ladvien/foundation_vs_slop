@@ -145,11 +145,13 @@ pub struct Subgrid {
 /// of the one actually in the world. Found by authoring the first real tokens, which is the only way
 /// it could have been found.
 ///
-/// **`align.scale` is deliberately not applied**, and that is not an oversight. `stack::covers` — the
-/// floor reservation this lattice sits inside — uses the raw `extent.footprint`, so scaling the
-/// lattice alone would describe a piece of one size inside a reservation of another. `site/books`
-/// carries `scale: Some(0.6)` and is the one place that is observable today. The two should agree;
-/// making them agree is a change to what a footprint *means* and belongs on its own.
+/// **`align.scale` is applied too**, through [`placed_footprint`] and [`placed_height`]. It did not
+/// used to be, and the asymmetry was the bug: the vertical axis threaded it (the surface a lamp lands
+/// on has always been `height * scale * stretch_y`) while the horizontal axis threaded nothing, so
+/// `site/books` — `scale: Some(0.6)`, the only non-unity scale in the repo — **drew at 0.6x while
+/// reserving its full footprint**. Scaling the lattice alone would have described a piece of one size
+/// inside a reservation of another, which is why it waited for `stack::covers` and `fill` to read the
+/// same helpers. They now do, so there is one answer to how much room a piece takes.
 ///
 /// `grid::cells` never returns zero, so a decal with no height gets one layer rather than a
 /// degenerate lattice — no special case needed.
@@ -164,14 +166,56 @@ pub fn divisions(d: &Descriptor, per_tile: u32) -> Result<(u32, u32, u32), Strin
             "`{owner}`: the project divides each tile 0 ways; an axis with no divisions has no cells"
         ));
     }
-    let (w, dep) = d.extent.footprint.ok_or_else(|| {
+    let (w, dep) = placed_footprint(d).ok_or_else(|| {
         format!("`{owner}`: no `extent.footprint`, so its lattice cannot be derived")
     })?;
     // A decal may legitimately omit its height — `Descriptor::resolve` says so — and `grid::cells(0)`
     // is one cell, so the lattice is one layer deep rather than empty.
-    let h = d.extent.height.unwrap_or(0.0) * d.align.stretch_y.unwrap_or(1.0);
+    let h = placed_height(d).unwrap_or(0.0);
     let axis = |span: f32| crate::grid::cells(span).0 * per_tile;
     Ok((axis(w), axis(h), axis(dep)))
+}
+
+/// **The footprint a piece actually occupies**, in metres — its measured footprint times
+/// [`Align::scale`].
+///
+/// The horizontal half of *the piece as placed, not the mesh as measured*. `extent.footprint` is what
+/// the importer measured off the GLB; this is what it covers once `align` has been applied, and it is
+/// what every question about **room** must ask: the lattice ([`divisions`]), the floor reservation
+/// (`stack::covers`), flood-fill spacing (`fill::cell_extents`) and seam geometry
+/// (`adjacency::faults`).
+///
+/// `None` for an unmeasured piece, which is propagated rather than defaulted. A zero footprint
+/// overlaps nothing and would let the piece sit inside a wall with every rule reporting success —
+/// [`Descriptor::resolve`] makes the same call for the same reason.
+///
+/// **Scale is uniform, so one factor covers both axes.** [`Align::scale`] is a single number by
+/// construction — an art correction, real-world size ÷ authored size — and a non-uniform version
+/// would need a different field and a different argument about what a `front` face means.
+pub fn placed_footprint(d: &Descriptor) -> Option<(f32, f32)> {
+    let (w, dep) = d.extent.footprint?;
+    let s = d.align.scale.unwrap_or(1.0);
+    Some((w * s, dep * s))
+}
+
+/// **How tall a piece stands**, in metres — `height * scale * stretch_y`.
+///
+/// The vertical sibling of [`placed_footprint`], and the older of the two: this rule has always been
+/// applied to stacking, where it decides the plane a lamp lands on. A table measured at 0.796 m and
+/// scaled 1.2 presents its surface at 0.955 m, and reading `extent.height` alone would put the lamp
+/// inside the tabletop with nothing downstream saying so.
+///
+/// It lives here rather than in `stack` because [`divisions`] and `adjacency` need it too, and the
+/// schema layer is the one both can reach without a solver depending on another solver. It replaced
+/// `stack::drawn_height`, which was the same product written in one place while two others wrote
+/// `height * stretch_y` and silently dropped the scale.
+///
+/// `None` when the descriptor records no height — an **unmeasured** piece, not a flat one. Nothing may
+/// rest on it, and saying so is better than treating unknown as zero and stacking a lamp at floor
+/// level on top of a bookcase.
+pub fn placed_height(d: &Descriptor) -> Option<f32> {
+    let h = d.extent.height?;
+    Some(h * d.align.scale.unwrap_or(1.0) * d.align.stretch_y.unwrap_or(1.0))
 }
 
 /// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
@@ -934,6 +978,91 @@ fn pick<T: Clone>(base: &[T], patch: &[T]) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The invariant the whole `align.scale` change exists to establish**: every question about how
+    /// much room a piece takes gives the same answer.
+    ///
+    /// Before, `stack::drawn_height` threaded the scale and nothing on the horizontal axis did, so
+    /// `site/books` at `scale: 0.6` drew at 0.6x and reserved its full footprint. These four are the
+    /// readers that decide space; if one of them ever stops agreeing with the others, that is the same
+    /// defect returning on a different axis.
+    #[test]
+    fn everything_that_asks_how_much_room_agrees() {
+        let mut d = crate_desc();
+        d.extent.footprint = Some((1.0, 2.0));
+        d.extent.height = Some(3.0);
+        d.align.scale = Some(0.5);
+
+        let (w, dep) = placed_footprint(&d).expect("measured");
+        assert_eq!((w, dep), (0.5, 1.0), "the footprint is scaled");
+        assert_eq!(placed_height(&d), Some(1.5), "and so is the height");
+
+        // The lattice is derived from the same numbers, so it describes the piece as it stands.
+        let div = divisions(&d, 1).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            div,
+            (
+                crate::grid::cells(w).0,
+                crate::grid::cells(1.5).0,
+                crate::grid::cells(dep).0
+            ),
+            "the lattice must be derived from the placed size, not the measured one"
+        );
+
+        // And the reservation covers exactly that box: just inside its scaled half-width, and not
+        // beyond it. The unscaled footprint would have reached 0.5 m.
+        assert!(crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.24, 0.0)));
+        assert!(
+            !crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.4, 0.0)),
+            "a scaled piece must not reserve the floor its mesh no longer covers"
+        );
+    }
+
+    /// **The regression guard.** Everything without a scale must behave exactly as it did, so the
+    /// change is provably confined to the pieces that carry one — which in this repo is `site/books`
+    /// and nothing else.
+    #[test]
+    fn an_unscaled_piece_is_untouched_by_any_of_this() {
+        let mut d = crate_desc();
+        d.extent.footprint = Some((1.0, 2.0));
+        d.extent.height = Some(3.0);
+        assert_eq!(d.align.scale, None);
+
+        assert_eq!(placed_footprint(&d), d.extent.footprint);
+        assert_eq!(placed_height(&d), d.extent.height);
+
+        // Explicit unity must be indistinguishable from absent — otherwise a file that spells out
+        // `scale: Some(1.0)` would quietly derive a different lattice from one that omits it.
+        let mut unity = d.clone();
+        unity.align.scale = Some(1.0);
+        assert_eq!(placed_footprint(&unity), placed_footprint(&d));
+        assert_eq!(divisions(&unity, 3), divisions(&d, 3));
+    }
+
+    /// A stretched wall is taller than its mesh, and a stretched *and* scaled one is both — the two
+    /// corrections compose rather than one winning.
+    #[test]
+    fn scale_and_stretch_both_reach_the_placed_height() {
+        let mut d = crate_desc();
+        d.extent.footprint = Some((1.0, 1.0));
+        d.extent.height = Some(2.0);
+        d.align.scale = Some(0.5);
+        d.align.stretch_y = Some(3.0);
+        assert_eq!(placed_height(&d), Some(3.0), "2.0 * 0.5 * 3.0");
+        // The footprint takes the scale and not the stretch: `stretch_y` is a Y-only correction.
+        assert_eq!(placed_footprint(&d), Some((0.5, 0.5)));
+    }
+
+    /// An unmeasured piece stays unmeasured — scaling nothing must not invent a zero, which is the
+    /// value that overlaps nothing and lets a prop sit inside a wall.
+    #[test]
+    fn scaling_an_unmeasured_piece_yields_nothing_rather_than_zero() {
+        let mut d = crate_desc();
+        d.extent.footprint = None;
+        d.align.scale = Some(0.6);
+        assert_eq!(placed_footprint(&d), None);
+        assert!(divisions(&d, 1).is_err(), "and the lattice is refused by name");
+    }
 
     /// The surface mount is the one whose payload is a project token, so the options have to come
     /// from the project — offering `OnSurface { "worktop" }` where nothing offers a worktop is

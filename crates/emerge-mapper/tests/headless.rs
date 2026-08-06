@@ -72,9 +72,52 @@ fn the_tiles_plugin_registers_the_resources_its_systems_take() {
         ("LatticePick", app.world().get_resource::<emerge_mapper::tiles::LatticePick>().is_some()),
         ("CellEdit", app.world().get_resource::<emerge_mapper::tiles::CellEdit>().is_some()),
         ("Mode", app.world().get_resource::<emerge_mapper::tiles::Mode>().is_some()),
+        // The Tiles tab's width field. `editor::not_typing` and `editor::sense_context` both read it
+        // as a bare `Res`, and both are run conditions — which Bevy 0.19 evaluates with **no**
+        // short-circuit, so an unregistered one panics every frame regardless of which tab is live.
+        ("ScaleEdit", app.world().get_resource::<emerge_mapper::tiles::ScaleEdit>().is_some()),
     ] {
         assert!(present, "TilesPlugin does not register {name}, so its readers panic on frame one");
     }
+}
+
+/// The same contract for the Map tab's three tool resources.
+///
+/// Each was added beside a system that takes it as a bare `Res`/`ResMut`, and in Bevy 0.19 a missing
+/// one **panics its system** rather than skipping it. Registration is checked without `update()` for
+/// the reason the test above gives: `init_resource` runs at plugin-build time, and stepping a lone
+/// plugin exercises plugin *order* rather than this registration.
+#[test]
+fn the_editor_plugin_registers_the_tool_resources_its_systems_take() {
+    let mut app = headless();
+    app.add_plugins(emerge_mapper::editor::EditorPlugin);
+
+    for (name, present) in [
+        // The piece in hand, under the move tool.
+        ("MoveDrag", app.world().get_resource::<emerge_mapper::editor::MoveDrag>().is_some()),
+        // The cell fine placement is confined to while the modifier is down.
+        ("FineAnchor", app.world().get_resource::<emerge_mapper::editor::FineAnchor>().is_some()),
+        // The box being dragged out to fill.
+        ("PlaceDrag", app.world().get_resource::<emerge_mapper::editor::PlaceDrag>().is_some()),
+    ] {
+        assert!(present, "EditorPlugin does not register {name}, so its readers panic on frame one");
+    }
+}
+
+/// **The move tool has a key, and it is one the left hand can reach without moving.**
+///
+/// `B` is the last free letter in the `Q W E R T / A S D F G / Z X C V B` cluster. It is also the
+/// Tiles tab's `ScanMesh`, which is legal only because the two tabs are never live together — the
+/// case `keys::Context` exists to model, and `the_key_space_has_no_collisions` is what polices it.
+#[test]
+fn the_move_tool_sits_in_the_left_hand_cluster() {
+    use emerge_mapper::keys::{binding, Action, Context};
+    assert_eq!(binding(Action::MoveMode).key, KeyCode::KeyB);
+    assert_eq!(binding(Action::MoveMode).context, Context::Map);
+    // Shared with the Tiles tab's mesh rescan, deliberately.
+    assert_eq!(binding(Action::ScanMesh).key, KeyCode::KeyB);
+    assert_eq!(binding(Action::ScanMesh).context, Context::Tiles);
+    assert!(!Context::Map.overlaps(Context::Tiles));
 }
 
 /// **The census answers for the action it was asked about.**

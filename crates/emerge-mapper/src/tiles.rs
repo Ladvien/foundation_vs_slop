@@ -421,6 +421,190 @@ fn note_keys(
     }
 }
 
+/// **The width a piece should stand at, in metres.** Clicking [`ScaleField`] opens it.
+///
+/// The field asks for a *size*, not a multiplier, because that is what [`Align::scale`] already says
+/// it is: *"Uniform art correction: real-world size ÷ authored size"*, and *"Every one is measured,
+/// never dialled by eye"*. An author holding a tape measure knows the shelf is 0.6 m; asking them to
+/// divide that by whatever the artist exported is asking them to do the arithmetic this field exists
+/// to do. It is also the unit the Map tab's `MAP SIZE (m)` field takes, so both tabs ask for metres.
+///
+/// Width alone determines it — scale is one number by construction, so depth and height follow.
+///
+/// [`Align::scale`]: emerge_core::descriptor::Align::scale
+#[derive(Resource, Default)]
+pub struct ScaleEdit {
+    /// The piece this was opened against, and the digits so far. The target is captured at open for
+    /// the reason [`EditTarget`] gives.
+    active: Option<(EditTarget, String)>,
+}
+
+impl ScaleEdit {
+    pub fn typing(&self) -> bool {
+        self.active.is_some()
+    }
+}
+
+/// The clickable width field.
+#[derive(Component)]
+pub struct ScaleField;
+
+/// The text inside it.
+#[derive(Component)]
+pub struct ScaleReadout;
+
+/// **How far from 1.0 counts as a scale.** Below this the field stores `None` instead.
+///
+/// A stored `Some(1.0)` is an identity that every reader would then multiply by, and it would show up
+/// in `library.ron` as an authored fact where there is none — the same rule `rotate_mesh` follows when
+/// it writes `(want != (0,0,0)).then_some(want)`. The bound is a tenth of a millimetre on a 1 m piece,
+/// which is finer than anything the importer can measure.
+const SCALE_EPS: f32 = 1e-4;
+
+/// **The width an author typed, as an `align.scale`** — or a sentence saying why it is not one.
+///
+/// `measured_w` is the piece's own `extent.footprint.0`, *not* its placed width. Dividing by the
+/// placed width would compound: typing back the number already on screen would scale the piece a
+/// second time, and doing that twice would halve a 0.5x piece to 0.25x with the field reading right
+/// both times. `a_width_that_is_already_set_is_a_no_op` pins that.
+///
+/// Pure, and split out of [`scale_keys`] for the reason the rest of this crate splits its arithmetic
+/// out of its systems: the rule is the whole content of the feature, and proving it through an `App`
+/// means driving a text field with a synthetic keyboard.
+fn scale_for_width(measured_w: f32, want: f32) -> Result<Option<f32>, String> {
+    if !want.is_finite() || want <= 0.0 {
+        return Err(format!("a piece cannot stand {want} m wide"));
+    }
+    if !measured_w.is_finite() || measured_w <= 0.0 {
+        return Err(format!(
+            "this mesh measures {measured_w} m wide, so no scale reaches {want} m"
+        ));
+    }
+    let scale = want / measured_w;
+    // Never an identity — see [`SCALE_EPS`].
+    Ok(((scale - 1.0).abs() > SCALE_EPS).then_some(scale))
+}
+
+fn on_scale_click(
+    activate: On<Activate>,
+    fields: Query<&ScaleField>,
+    mut edit: ResMut<ScaleEdit>,
+    mut state: ResMut<ImportState>,
+) {
+    if fields.get(activate.entity).is_err() {
+        return;
+    }
+    let Some(target) = state.target() else {
+        return;
+    };
+    // **Starts empty**, the same call `on_size_field_click` makes and for the same measured reason:
+    // seeding it with the current number meant the first digit appended to it, and it looked like it
+    // had worked. The value being replaced stays on screen until Enter.
+    edit.active = Some((target, String::new()));
+    state.status =
+        "width: type the metres this piece should stand at, Enter to keep it, Esc to leave it alone"
+            .to_owned();
+}
+
+/// Digits and a single point, filtered at the keystroke.
+///
+/// `size_edit_keys` states the rule this follows: a field that accepts a character and then refuses
+/// the answer has taught the author it was allowed. This one never shows one that cannot be part of a
+/// width.
+fn scale_keys(
+    mut events: MessageReader<KeyboardInput>,
+    mut edit: ResMut<ScaleEdit>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<ImportState>,
+) {
+    for event in events.read() {
+        // Drained even while shut, so the click that opens this field cannot be typed into it — see
+        // `cell_keys`.
+        if edit.active.is_none() || !event.state.is_pressed() {
+            continue;
+        }
+        match &event.logical_key {
+            Key::Enter => {
+                let Some((target, raw)) = edit.active.take() else {
+                    return;
+                };
+                let text = raw.trim().to_owned();
+                if text.is_empty() {
+                    state.status = "width unchanged — nothing typed".to_owned();
+                    return;
+                }
+                let Ok(want) = text.parse::<f32>() else {
+                    state.status = format!("`{text}` is not a number of metres");
+                    return;
+                };
+                // Everything the commit needs, read before the borrow ends — `state.status` below
+                // wants `state` back.
+                let found = state
+                    .at_target(&target, &mut project.measured)
+                    .map(|(d, where_to)| (d.id.clone(), d.extent.footprint, where_to));
+                let Some((id, footprint, where_to)) = found else {
+                    state.status = "the width was not kept — that tile is gone".to_owned();
+                    return;
+                };
+                // **Divided by the MEASURED width**, which is what `align.scale` is a ratio against.
+                // Dividing by the placed width instead would compound: typing the number already on
+                // screen would scale the piece a second time.
+                let Some((mw, md)) = footprint else {
+                    state.status = format!(
+                        "`{id}` has no measured footprint, so a width cannot be turned into a scale"
+                    );
+                    return;
+                };
+                // Refused rather than clamped. A width of zero is a piece that reserves nothing and
+                // sits inside a wall with every rule reporting success — the refusal
+                // `Descriptor::resolve` already makes about the scale this would produce, made here
+                // where the author can still see what they typed.
+                let scale = match scale_for_width(mw, want) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        state.status = format!("`{id}`: {e}");
+                        return;
+                    }
+                };
+                let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
+                    state.status = "the width was not kept — that tile is gone".to_owned();
+                    return;
+                };
+                d.align.scale = scale;
+                let factor = scale.unwrap_or(1.0);
+                let said = format!(
+                    "{id} — {:.2} x {:.2} m at {factor:.3}x",
+                    mw * factor,
+                    md * factor
+                );
+                state.status = persist(&mut project, where_to, said);
+            }
+            Key::Escape => {
+                edit.active = None;
+                state.status = "width unchanged".to_owned();
+            }
+            Key::Backspace => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    raw.pop();
+                }
+            }
+            Key::Character(ch) => {
+                if let Some((_, raw)) = edit.active.as_mut() {
+                    for c in ch.chars() {
+                        // One point, and never as the first character — `.5` parses, but a field that
+                        // shows a leading point invites `..5`, which does not.
+                        let ok = c.is_ascii_digit() || (c == '.' && !raw.contains('.') && !raw.is_empty());
+                        if ok && raw.len() < 6 {
+                            raw.push(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn on_cell_click(
     activate: On<Activate>,
     cells: Query<(&CellButton, &CellLayer)>,
@@ -945,9 +1129,13 @@ fn stage_box(state: &ImportState, project: &Project) -> Option<(Vec3, Vec3, (u32
     // whatever its measurement says.
     let d = state.placed(project)?;
     let div = project.divisions_of(d).ok()?;
-    let (w, dep) = d.extent.footprint?;
+    // **Through the same two helpers `divisions` uses.** `div` above says how many cells there are and
+    // this says how big the box is; a click is turned into a cell by dividing one by the other, so
+    // reading the raw extent here put the cell boundaries somewhere the lattice does not have any —
+    // the author clicks one cell and writes another.
+    let (w, dep) = emerge_core::descriptor::placed_footprint(d)?;
     // The same floor `draw_subgrid` gives a flat piece, so a decal can still be picked.
-    let h = d.extent.height.unwrap_or(0.0).max(0.05);
+    let h = emerge_core::descriptor::placed_height(d).unwrap_or(0.0).max(0.05);
     Some((
         STAGE - Vec3::new(w * 0.5, 0.0, dep * 0.5),
         Vec3::new(w, h, dep),
@@ -1302,10 +1490,12 @@ fn refresh_cells(
     project: Res<Project>,
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
+    scale_edit: Res<ScaleEdit>,
     mut cells: Query<(&CellButton, &CellLayer, &mut BackgroundColor)>,
-    mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>)>,
-    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>)>,
-    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>)>,
+    mut glyphs: Query<(&CellGlyph, &CellLayer, &mut Text, &mut TextColor), (Without<SelectedCellLine>, Without<NoteReadout>, Without<ScaleReadout>)>,
+    mut lines: Query<(&mut Text, &mut TextColor), (With<SelectedCellLine>, Without<CellGlyph>, Without<NoteReadout>, Without<ScaleReadout>)>,
+    mut notes: Query<(&mut Text, &mut TextColor), (With<NoteReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<ScaleReadout>)>,
+    mut widths: Query<(&mut Text, &mut TextColor), (With<ScaleReadout>, Without<CellGlyph>, Without<SelectedCellLine>, Without<NoteReadout>)>,
 ) {
     // As placed, so the cells shown are the cells that exist. See [`ImportState::placed`].
     let Some(d) = state.placed(&project) else {
@@ -1377,6 +1567,31 @@ fn refresh_cells(
         }
         if colour.0 != note_tint {
             colour.0 = note_tint;
+        }
+    }
+
+    // **The width caret, repainted in place.** `rebuild_detail` only runs on
+    // `resource_changed::<ImportState>`, so without this the digits would not appear until something
+    // else touched the pane — the same reason the note and the cell tokens are refreshed here.
+    //
+    // Off the *measurement* layer, matching what the field writes and what `rebuild_detail` shows.
+    let width_text = match &scale_edit.active {
+        Some((_, raw)) => format!("{raw}_"),
+        None => match state
+            .editing(&project.measured)
+            .and_then(emerge_core::descriptor::placed_footprint)
+        {
+            Some((w, _)) => format!("{w:.2}"),
+            None => "--".to_owned(),
+        },
+    };
+    let width_tint = if scale_edit.typing() { ACCENT } else { TEXT };
+    for (mut text, mut colour) in &mut widths {
+        if text.0 != width_text {
+            text.0 = width_text.clone();
+        }
+        if colour.0 != width_tint {
+            colour.0 = width_tint;
         }
     }
 }
@@ -1756,6 +1971,9 @@ impl Plugin for TilesPlugin {
             .init_resource::<CellEdit>()
             .init_resource::<LatticePick>()
             .init_resource::<NoteEdit>()
+            // Registered in the same commit as `scale_keys` and `rebuild_detail` read it — a missing
+            // `Res<T>` panics its system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
+            .init_resource::<ScaleEdit>()
             .add_systems(Startup, (spawn_tab_strip, spawn_tiles_panel))
             .add_systems(
                 Update,
@@ -1812,7 +2030,11 @@ impl Plugin for TilesPlugin {
             // in 0.19, and nesting would imply these belong together for a reason.
             .add_systems(
                 Update,
-                (note_keys.in_set(crate::keys::Phase::Text), refresh_cells),
+                (
+                    note_keys.in_set(crate::keys::Phase::Text),
+                    scale_keys.in_set(crate::keys::Phase::Text),
+                    refresh_cells,
+                ),
             )
             .add_observer(on_tab_click)
             .add_observer(on_cell_click)
@@ -1821,6 +2043,7 @@ impl Plugin for TilesPlugin {
             .add_observer(on_rotate_click)
             .add_observer(on_fill_header)
             .add_observer(on_note_click)
+            .add_observer(on_scale_click)
             .add_observer(on_candidate_click)
             .add_observer(on_library_click)
             .add_observer(on_pack_click)
@@ -2702,7 +2925,18 @@ fn drive_preview(
                 STAGE.y + a.y_offset.unwrap_or(0.0),
                 STAGE.z - pivot.1,
             )
-            .with_scale(Vec3::splat(a.scale.unwrap_or(1.0))),
+            // **The transform a real placement applies**, which is
+            // `(scale, scale * stretch_y, scale)` — see `emerge_bevy::spawn_descriptor`. This was a
+            // uniform `splat(scale)`, so the preview showed an unstretched piece while
+            // `draw_subgrid` and `stage_box` sized their box off `placed_height`, which includes the
+            // stretch: the lattice floated above a mesh that did not reach it. The same class as the
+            // rotate bug on the child below — the one tab that edits these fields was the one place
+            // they did not all show.
+            .with_scale(Vec3::new(
+                a.scale.unwrap_or(1.0),
+                a.scale.unwrap_or(1.0) * a.stretch_y.unwrap_or(1.0),
+                a.scale.unwrap_or(1.0),
+            )),
             Visibility::Inherited,
         ))
         // **The mesh child carries `align.rotate`**, the same way `emerge_bevy::spawn_world` does —
@@ -2744,10 +2978,10 @@ fn draw_subgrid(state: Res<ImportState>, project: Res<Project>, mut gizmos: Gizm
     let Some(desc) = state.placed(&project) else {
         return;
     };
-    let Some((w, d)) = desc.extent.footprint else {
+    let Some((w, d)) = emerge_core::descriptor::placed_footprint(desc) else {
         return;
     };
-    let h = desc.extent.height.unwrap_or(0.0);
+    let h = emerge_core::descriptor::placed_height(desc).unwrap_or(0.0);
     let empty = emerge_core::descriptor::Subgrid::default();
     let g = desc.subgrid.as_ref().unwrap_or(&empty);
     let Ok((dx, dy, dz)) = project.divisions_of(desc) else {
@@ -2800,10 +3034,14 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
     let Some(desc) = state.editing(&project.measured) else {
         return;
     };
-    let Some((w, d)) = desc.extent.footprint else {
+    // **As placed, both rectangles.** This function's own doc says it draws "the footprint the
+    // placement rules will reserve", and after `stack::covers` learned about `align.scale` that is the
+    // placed footprint — drawing the measured one would have shown an author a reservation nothing
+    // uses, on the one tab where the size is now editable.
+    let Some((w, d)) = emerge_core::descriptor::placed_footprint(desc) else {
         return;
     };
-    let height = desc.extent.height.unwrap_or(0.0);
+    let height = emerge_core::descriptor::placed_height(desc).unwrap_or(0.0);
 
     // The mesh's own footprint, at the floor.
     gizmos.rect(
@@ -2826,9 +3064,14 @@ fn draw_preview_footprint(state: Res<ImportState>, project: Res<Project>, mut gi
         CELLS,
     );
     // And the volume, so height is visible rather than only stated.
+    //
+    // **Anchored on `STAGE`**, like the two rectangles above. This read `from_xyz(0.0, ..)`, which is
+    // the world origin — where the *map* is, not where the tile is staged — so the one gizmo that
+    // shows a piece's height was drawn 4 km from the piece and nobody had ever seen it.
     if height > 0.0 {
         gizmos.cube(
-            Transform::from_xyz(0.0, height * 0.5, 0.0).with_scale(Vec3::new(w, height, d)),
+            Transform::from_translation(STAGE + Vec3::new(0.0, height * 0.5, 0.0))
+                .with_scale(Vec3::new(w, height, d)),
             EXTENT,
         );
     }
@@ -3065,6 +3308,7 @@ fn rebuild_detail(
     state: Res<ImportState>,
     cell_edit: Res<CellEdit>,
     note_edit: Res<NoteEdit>,
+    scale_edit: Res<ScaleEdit>,
     project: Res<Project>,
     panes: Query<Entity, With<DetailPane>>,
 ) {
@@ -3215,6 +3459,74 @@ fn rebuild_detail(
                     });
                 }
             }
+
+            // **The width this piece stands at.**
+            //
+            // Outside the MEASURED block above on purpose: that block is candidates-only, because a
+            // measurement is an import fact and a library entry has none — but a *size* is editable
+            // for both, and the tiles an author most wants to re-proportion are the ones already in
+            // the library.
+            //
+            // Read off `d`, the measurement layer, which is the same layer this field writes to and
+            // the same call `on_note_click` makes. Reading the layered `placed` here would show a
+            // width a project patch supplied and then write the author's answer one level below it.
+            crate::chrome::section(p, "SIZE (m)");
+            let measured_w = d.extent.footprint.map(|(w, _)| w);
+            // Not `placed` — that name is already the layered *descriptor* in this scope, and
+            // shadowing it here would have handed the lattice code below a footprint tuple.
+            let placed_fp = emerge_core::descriptor::placed_footprint(d);
+            let (width_text, width_tint) = match &scale_edit.active {
+                Some((_, raw)) => (format!("{raw}_"), ACCENT),
+                None => match placed_fp {
+                    Some((w, _)) => (format!("{w:.2}"), TEXT),
+                    None => ("--".to_owned(), LABEL),
+                },
+            };
+            // What the number means, spelled out rather than left as a ratio to work back to: the
+            // footprint it produces and the multiplier it stores. `docs/ui.md` §1.2 — more
+            // information measured *better*, so the derivation is shown rather than hidden.
+            let width_note = match (placed_fp, measured_w) {
+                (Some((w, dep)), Some(mw)) if mw > 0.0 => {
+                    format!("  {w:.2} x {dep:.2} m at {:.3}x", w / mw)
+                }
+                _ => "  no measured footprint to scale".to_owned(),
+            };
+            p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    UiButton,
+                    Hovered::default(),
+                    ScaleField,
+                    Node {
+                        width: Val::Px(62.0),
+                        // Stated, because the text is empty the moment somebody clicks in — an
+                        // unstated height lays this out at 7 logical px (`docs/ui.md` §5).
+                        min_height: Val::Px(18.0),
+                        padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    BackgroundColor(ROW_BG),
+                ))
+                .with_children(|f| {
+                    f.spawn((
+                        Text::new(width_text),
+                        TextColor(width_tint),
+                        TextFont::from_font_size(11.0),
+                        ScaleReadout,
+                    ));
+                });
+                row.spawn((
+                    Text::new(width_note),
+                    TextColor(LABEL),
+                    TextFont::from_font_size(10.0),
+                ));
+            });
 
             // **The mount.** It is what replaced `Role`, `rests_on` and the height heuristic that
             // once decided a 10.9 cm mug was a floor decal — so it is the one field worth putting on
@@ -3562,28 +3874,78 @@ fn rebuild_detail(
                 });
             }
 
-            for f in cand.iter().flat_map(|c| c.findings.iter()) {
+            // **What the importer noticed**, one block per finding.
+            //
+            // This was a bare run of `Text` nodes: every message in its severity's colour, and the
+            // remedy prefixed with three literal spaces. Three spaces indent the *first* line only,
+            // so the moment a remedy wrapped — which at this width is always — its continuation went
+            // flush left and ran into the next finding. Nothing said where one finding ended and the
+            // next began, and a whole paragraph in DANGER red is a paragraph nobody reads twice.
+            //
+            // So: a coloured rail down the left groups a message with its own remedy, the severity is
+            // a *word* rather than only a hue, and the prose is plain `TEXT` — colour locates the
+            // thing, it does not shout it. `docs/ui.md` §1.2 (Vicente & Rasmussen): the test is "does
+            // this force interpretation?", and the fix for a crowded panel is grouping and spacing
+            // rather than deleting readouts.
+            let findings: Vec<_> = cand.iter().flat_map(|c| c.findings.iter()).collect();
+            if !findings.is_empty() {
+                crate::chrome::section(p, "FINDINGS");
                 p.spawn((
-                    Text::new(f.message.clone()),
-                    TextColor(match f.severity {
-                        Severity::Blocking => DANGER,
-                        Severity::Warn => ACCENT,
-                        Severity::Note => DIM,
-                    }),
-                    TextFont::from_font_size(10.0),
+                    Text::new("what the importer noticed about this mesh"),
+                    TextColor(DIM),
+                    TextFont::from_font_size(9.0),
                     Node {
-                        margin: UiRect::top(Val::Px(4.0)),
+                        margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
                         ..default()
                     },
                 ));
-                // The remedy, indented under what it fixes. A warning with no answer is a warning
-                // read once.
-                if let Some(fix) = &f.fix {
+                for f in findings {
+                    let (tint, word) = match f.severity {
+                        Severity::Blocking => (DANGER, "blocking"),
+                        Severity::Warn => (ACCENT, "worth checking"),
+                        Severity::Note => (DIM, "note"),
+                    };
                     p.spawn((
-                        Text::new(format!("   {fix}")),
-                        TextColor(LABEL),
-                        TextFont::from_font_size(10.0),
-                    ));
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            border: UiRect::left(Val::Px(2.0)),
+                            padding: UiRect::left(Val::Px(7.0))
+                                .with_top(Val::Px(crate::chrome::GAP_TIGHT))
+                                .with_bottom(Val::Px(crate::chrome::GAP_TIGHT)),
+                            margin: UiRect::bottom(Val::Px(crate::chrome::GAP_ROW)),
+                            ..default()
+                        },
+                        BorderColor::all(tint),
+                    ))
+                    .with_children(|block| {
+                        block.spawn((
+                            Text::new(word),
+                            TextColor(tint),
+                            TextFont::from_font_size(9.0),
+                        ));
+                        block.spawn((
+                            Text::new(f.message.clone()),
+                            TextColor(TEXT),
+                            TextFont::from_font_size(10.0),
+                            // Wrapped prose at 10 px needs the leading; the 1.2 default packs these
+                            // into the block of text the screenshot showed.
+                            bevy::text::LineHeight::RelativeToFont(1.35),
+                        ));
+                        // The remedy, under what it fixes. A warning with no answer is a warning read
+                        // once.
+                        if let Some(fix) = &f.fix {
+                            block.spawn((
+                                Text::new(fix.clone()),
+                                TextColor(LABEL),
+                                TextFont::from_font_size(10.0),
+                                bevy::text::LineHeight::RelativeToFont(1.35),
+                                Node {
+                                    margin: UiRect::top(Val::Px(3.0)),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    });
                 }
             }
         });
@@ -3596,6 +3958,71 @@ fn rebuild_detail(
 /// `library_path`, so under `--kit site` — whose `project.ron` stretches walls to a 2.40 m facility
 /// — toggling one lattice cell wrote that facility's wall height into the measurements file the kit
 /// exists to share, and the next load applied the patch again on top of it.
+/// **The `SIZE (m)` field's arithmetic.** See [`scale_for_width`].
+#[cfg(test)]
+mod scale_field_tests {
+    use super::*;
+
+    /// **The trap this function exists to avoid.** Typing back the width already on screen must
+    /// change nothing — which is only true because the divisor is the *measured* width, not the
+    /// placed one. Divide by the placed width and every commit rescales what was already rescaled, so
+    /// setting 0.5 twice silently gives 0.25 with the field reading `0.50` both times.
+    #[test]
+    fn a_width_that_is_already_set_is_a_no_op() {
+        let measured = 1.0_f32;
+        // First edit: 1.0 m mesh asked to stand 0.6 m.
+        let once = scale_for_width(measured, 0.6)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("0.6 is not unity"));
+        assert!((once - 0.6).abs() < 1e-6, "{once}");
+
+        // The field now reads the PLACED width, 0.6. Committing that again must land on the same
+        // scale rather than on 0.36.
+        let placed = measured * once;
+        let twice = scale_for_width(measured, placed)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("still not unity"));
+        assert!((twice - once).abs() < 1e-6, "committing the shown width moved it: {twice}");
+    }
+
+    /// Unity is stored as absence. A `Some(1.0)` in `library.ron` would be an authored fact where
+    /// there is none, and every reader would then multiply by it — the rule `rotate_mesh` follows
+    /// when it refuses to write an identity rotation.
+    #[test]
+    fn returning_to_the_measured_size_clears_the_scale() {
+        assert_eq!(scale_for_width(1.0, 1.0), Ok(None));
+        assert_eq!(scale_for_width(0.306, 0.306), Ok(None));
+        // And a hair off unity is still unity, rather than a scale of 1.00001.
+        assert_eq!(scale_for_width(1.0, 1.0 + SCALE_EPS / 2.0), Ok(None));
+    }
+
+    /// A width that cannot be a size is refused by name, not clamped. A zero footprint overlaps
+    /// nothing, so every placement rule would report success while the piece sat inside a wall.
+    #[test]
+    fn a_width_that_is_not_a_size_is_refused() {
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                scale_for_width(1.0, bad).is_err(),
+                "{bad} must be refused, not stored"
+            );
+        }
+        // And an unmeasurable mesh cannot produce a ratio at all.
+        assert!(scale_for_width(0.0, 0.6).is_err());
+    }
+
+    /// The shipped case, end to end: `site/books` is 0.306 m wide and stands at 0.6x, so an author
+    /// typing `0.1836` reproduces exactly the scale that is in the file today.
+    #[test]
+    fn the_one_shipped_scaled_piece_round_trips() {
+        let measured = 0.306_f32;
+        let placed = measured * 0.6;
+        let scale = scale_for_width(measured, placed)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("0.6 is not unity"));
+        assert!((scale - 0.6).abs() < 1e-5, "{scale}");
+    }
+}
+
 #[cfg(test)]
 mod write_library_tests {
     use super::*;

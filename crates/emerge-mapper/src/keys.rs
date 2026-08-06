@@ -82,6 +82,8 @@ pub enum Action {
     TurnPieceRight,
     Fill,
     Remove,
+    /// Arm the move tool: click a piece to pick it up, click again to put it down.
+    MoveMode,
     RenameMap,
     /// Put the brush back to the rotation it was authored at.
     AimReset,
@@ -220,7 +222,18 @@ pub const BINDINGS: &[Binding] = &[
     b(Action::TurnPieceRight, KeyCode::KeyT, false, Context::Map, "T", "turn this right"),
     b(Action::Fill, KeyCode::KeyF, false, Context::Map, "F", "flood fill"),
     b(Action::Remove, KeyCode::KeyX, false, Context::Map, "X", "removal mode"),
-    b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "stop removing"),
+    // **`B` is the last free key under the left hand.** The cluster an author's hand already rests on
+    // is `Q W E R T / A S D F G / Z X C V B`, and every other letter in it is spoken for — pan, turn
+    // view, aim, aim-reset, turn-piece, fill, remove. `B` is bound in the Tiles tab too (`ScanMesh`),
+    // which is legal and is exactly the case `Context` exists to model: the two tabs are never live
+    // together.
+    //
+    // **This puts the Map context at its twelve-row ceiling.** There is no headroom left; the next
+    // verb here has to share a `does` with a neighbour or take something else's key.
+    b(Action::MoveMode, KeyCode::KeyB, false, Context::Map, "B", "move mode"),
+    // Leaves whichever tool is armed, and puts back a piece still in hand — one key for "I did not
+    // mean this", rather than one per tool.
+    b(Action::Cancel, KeyCode::Escape, false, Context::Map, "Esc", "stop / put back"),
     b(Action::RenameMap, KeyCode::KeyN, false, Context::Map, "N", "rename map"),
     b(Action::OwnToggle, KeyCode::KeyO, false, Context::Map, "O", "pin / unpin"),
     b(Action::Generate, KeyCode::KeyG, false, Context::Map, "G", "continue the layout"),
@@ -575,7 +588,7 @@ mod tests {
             Action::NextTab, Action::MapTab, Action::TilesTab, Action::AnimTab,
             Action::Save, Action::Undo, Action::Shortcuts,
             Action::AimLeft, Action::AimRight, Action::AimReset, Action::Cancel,
-            Action::Fill, Action::Remove, Action::RenameMap,
+            Action::Fill, Action::Remove, Action::MoveMode, Action::RenameMap,
             Action::OwnToggle, Action::Generate,
             Action::PanForward, Action::PanBack, Action::PanLeft, Action::PanRight,
             Action::TurnViewLeft, Action::TurnViewRight,

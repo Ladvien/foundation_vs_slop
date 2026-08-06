@@ -91,20 +91,72 @@ pub struct EditorState {
     renaming: Option<String>,
     /// What can be undone, most recent last. See [`Undo`].
     undo: Vec<Undo>,
-    /// Is the removal tool armed?
+    /// Which tool the next click belongs to. See [`Tool`].
     ///
-    /// A **bool here and the drag in [`RemovalDrag`]**, not one struct: `rebuild_palette` runs on
-    /// `resource_changed::<EditorState>`, and a drag corner written every frame would tear the whole
-    /// palette down and rebuild it at frame rate. This flips twice per use; that one lives elsewhere.
-    pub removing: bool,
+    /// **The tool here and the drag in [`RemovalDrag`] / [`MoveDrag`]**, not one struct:
+    /// `rebuild_palette` runs on `resource_changed::<EditorState>`, and a drag corner written every
+    /// frame would tear the whole palette down and rebuild it at frame rate. This changes twice per
+    /// use; those change every frame, so they live elsewhere.
+    pub tool: Tool,
+}
+
+/// **What a click on the map does.** Exactly one of these at a time.
+///
+/// This was `removing: bool`. A second bool beside it for the move tool would have made "both armed"
+/// and "neither armed" expressible states that mean nothing, and every reader would then have had to
+/// decide which one won — two paths where the author only ever has one tool in hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    /// Click to put the armed piece down. The default, and what every other tool returns to.
+    #[default]
+    Place,
+    /// Click a piece to delete it; drag a box to delete everything inside it.
+    Remove,
+    /// Click a piece to pick it up, click again to put it down. See [`MoveDrag`].
+    Move,
+}
+
+impl Tool {
+    /// How it reads in a status line.
+    fn label(self) -> &'static str {
+        match self {
+            Tool::Place => "placing",
+            Tool::Remove => "removal mode",
+            Tool::Move => "move mode",
+        }
+    }
 }
 
 /// The rectangle being dragged out, in map space. Deliberately its own resource — see
-/// [`EditorState::removing`] for why it is not a field on the state everything else watches.
+/// [`EditorState::tool`] for why it is not a field on the state everything else watches.
 #[derive(Resource, Default)]
 pub struct RemovalDrag {
     /// Where the button went down, or `None` while only hovering.
     from: Option<(f32, f32)>,
+}
+
+/// **Which placement is in hand**, under [`Tool::Move`] — by `Placed::id`, never by index.
+///
+/// The id is the reference for the reason `Placed::id`'s own doc gives for being a string rather than
+/// an index, and a carry is exactly the window where it matters: `Cmd+Z`, `F` and `G` all fire while a
+/// piece is held and all of them can insert or remove rows. A stored index would then be pointing at
+/// whatever slid into that slot, and the next click would move the wrong piece — silently, because an
+/// index is always valid-looking.
+///
+/// Its own resource for the reason [`RemovalDrag`] gives: this is read every frame by the ghost, and
+/// `rebuild_palette` watches `EditorState`.
+///
+/// # Nothing moves until the piece is put down
+///
+/// Picking up records *only* the index. The placement keeps its position, its `on` and its entity for
+/// the whole carry, and the cursor is previewed by the same translucent ghost that previews the brush.
+/// So cancelling is `held = None` — there is no half-applied move to reverse, no entity to put back,
+/// and no window in which the file on disk disagrees with the screen. The alternative, moving the row
+/// as the cursor moves, would have made `Esc` a second implementation of the move that had to undo
+/// exactly what the first one did.
+#[derive(Resource, Default)]
+pub struct MoveDrag {
+    pub held: Option<String>,
 }
 
 /// The translucent red marker: the hovered piece's footprint, or the dragged rectangle.
@@ -126,6 +178,11 @@ enum Undo {
     /// the later ones into place. One entry for the whole rectangle, on the same argument the fill
     /// makes: a box the author drew once is one act to undo once.
     RemovedMany { items: Vec<(usize, Box<Placed>)> },
+    /// Put a moved group back where it came from. **One entry for the whole group** — the piece and
+    /// everything that was riding on it — on the same argument `RemovedMany` makes: one act the
+    /// author performed is one act to take back. `emerge_core::stack::Moved` records what changed and
+    /// `restore_moved` is its inverse, so the undo cannot drift from the move.
+    Moved { moved: emerge_core::stack::Moved },
 }
 
 impl Default for EditorState {
@@ -141,7 +198,7 @@ impl Default for EditorState {
             pinning: None,
             renaming: None,
             undo: Vec::new(),
-            removing: false,
+            tool: Tool::default(),
         }
     }
 }
@@ -289,6 +346,11 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
             .init_resource::<RemovalDrag>()
+            // Registered in the same commit as `drive_move` and `keys` read it — a missing `ResMut`
+            // panics its system in Bevy 0.19 rather than skipping it (`CLAUDE.md`).
+            .init_resource::<MoveDrag>()
+            .init_resource::<FineAnchor>()
+            .init_resource::<PlaceDrag>()
             .init_resource::<SizeEdit>()
             .init_resource::<EdgeFaults>()
             // Shared by both tabs' lists, so it is registered once here rather than by whichever
@@ -302,6 +364,9 @@ impl Plugin for EditorPlugin {
                     crate::filter::blur_on_world_click
                         .in_set(keys::Phase::Sense)
                         .before(sense_context),
+                    // Sensed before anything reads the cursor, so a click sees the anchor captured
+                    // for its own press rather than one frame stale.
+                    sense_fine_anchor.in_set(keys::Phase::Sense),
                     crate::filter::keys.in_set(keys::Phase::Text),
                     crate::filter::refresh,
                 ),
@@ -335,8 +400,9 @@ impl Plugin for EditorPlugin {
                     keys.in_set(keys::Phase::Act),
                     // These two stay gated: they read the MOUSE, which the census does not model, so
                     // context is not their guard. Mode is.
-                    place_on_click.run_if(not_typing).run_if(in_map_mode),
+                    drive_place.run_if(not_typing).run_if(in_map_mode),
                     drive_removal.run_if(not_typing).run_if(in_map_mode),
+                    drive_move.run_if(not_typing).run_if(in_map_mode),
                     drive_ghost.run_if(in_map_mode),
                     fade_ghost,
                     style_rows,
@@ -754,21 +820,31 @@ fn on_row_click(
     rows: Query<&PaletteRow>,
     project: Res<Project>,
     mut state: ResMut<EditorState>,
+    mut filters: ResMut<crate::filter::Filters>,
 ) {
     let Ok(row) = rows.get(activate.entity) else {
         return;
     };
     state.brush = row.0;
-    // **Arming a piece leaves removal mode.** Picking something to place is an unambiguous statement
-    // that you are done deleting, and the mode is otherwise only escapable by a key — which a
+    // **Arming a piece returns to placing.** Picking something to place is an unambiguous statement
+    // that you are done deleting or moving, and a tool is otherwise only escapable by a key — which a
     // borderless-fullscreen window can have taken from it before Bevy ever sees it. A mode you can
     // enter with a click and only leave with a keystroke is a trap.
-    let was_removing = std::mem::take(&mut state.removing);
+    let was = std::mem::take(&mut state.tool);
+    // **And it takes the keyboard back from the filter box.**
+    //
+    // `filter::blur_on_world_click` already does this for a click on the world, for the reason the
+    // status doc records: `drive_place` is gated on `not_typing`, so leaving the box focused made
+    // *the most natural way to find a piece* — type a few letters — the way to break placing it, with
+    // no message. Clicking the row you just filtered for is the other half of that same click, and it
+    // did not blur. So the search that finds a piece could still be the search that stops you using
+    // it.
+    filters.blur();
     if let Some(d) = project.library.descriptors.get(row.0) {
-        state.status = if was_removing {
-            format!("{} armed — removal mode off", d.id)
-        } else {
+        state.status = if was == Tool::Place {
             format!("{} armed", d.id)
+        } else {
+            format!("{} armed — {} off", d.id, was.label())
         };
     }
 }
@@ -967,7 +1043,7 @@ fn draw_edge_faults(
                 .iter()
                 .find(|p| p.id == id)
                 .and_then(|p| project.library.get(&p.descriptor))
-                .and_then(|d| d.extent.footprint)
+                .and_then(emerge_core::descriptor::placed_footprint)
                 .unwrap_or((CELL, CELL));
             gizmos.rect(
                 Isometry3d::new(
@@ -1116,6 +1192,7 @@ pub fn not_typing(
     filters: Res<crate::filter::Filters>,
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
+    width: Res<crate::tiles::ScaleEdit>,
 ) -> bool {
     state.renaming.is_none()
         && state.pinning.is_none()
@@ -1124,6 +1201,7 @@ pub fn not_typing(
         && !filters.typing()
         && !cell.typing()
         && !note.typing()
+        && !width.typing()
 }
 
 /// **Decide who owns the keyboard, once, before anything reads a key.**
@@ -1144,6 +1222,7 @@ pub fn sense_context(
     filters: Res<crate::filter::Filters>,
     cell: Res<crate::tiles::CellEdit>,
     note: Res<crate::tiles::NoteEdit>,
+    width: Res<crate::tiles::ScaleEdit>,
     mut live: ResMut<keys::Live>,
 ) {
     let typing = state.renaming.is_some()
@@ -1152,7 +1231,8 @@ pub fn sense_context(
         || import.renaming.is_some()
         || filters.typing()
         || cell.typing()
-        || note.typing();
+        || note.typing()
+        || width.typing();
     let want = keys::Live(keys::live(mode.context(), typing));
     // Written through the change detector only when it actually moves, so `Live` staying put does not
     // wake every `resource_changed` reader in the editor every frame.
@@ -1359,13 +1439,135 @@ fn snap(v: f32) -> f32 {
 /// express. **Y is not freed** — it comes from the piece's `mount` through `stack::datum`, which is
 /// what puts a lamp on a table rather than through it, and there is no second mouse axis to say
 /// otherwise with.
-fn map_at(project: &Project, hit: Vec3, free: bool) -> (f32, f32) {
+/// # Free placement stays inside the cell it started in
+///
+/// Fine control is for nudging a piece **within** the cell an author already chose, not for sliding it
+/// across the map with the snap off. Unbounded, a small hand movement while the modifier was down
+/// walked the piece a cell or two over and the author had to notice and undo it — the grid's whole job
+/// is to stop that, and holding the modifier used to switch the job off entirely rather than turn it
+/// down.
+///
+/// So the cell under the cursor is captured the moment the modifier goes down ([`FineAnchor`]) and the
+/// free position is clamped to it: anywhere inside that half-metre, nowhere outside it. Release and
+/// press again over a different cell to nudge a different one. An assist, not a restriction — every
+/// position that was reachable is still reachable, in two gestures instead of one.
+fn map_at(project: &Project, hit: Vec3, free: bool, anchor: &FineAnchor) -> (f32, f32) {
     let (x, z) = project.map.to_map_space((hit.x, hit.z));
-    if free {
-        (x, z)
-    } else {
-        (snap(x), snap(z))
+    match (free, anchor.cell) {
+        // `snap` rounds to the nearest multiple of `SNAP`, so the cell around a snapped point reaches
+        // half a step either side of it.
+        (true, Some((cx, cz))) => {
+            let half = SNAP * 0.5;
+            (
+                x.clamp(cx - half, cx + half),
+                z.clamp(cz - half, cz + half),
+            )
+        }
+        // The modifier went down off the ground plane, so there is no cell to hold to. Free, as it
+        // was — refusing to place at all would be a worse answer than the one the author asked for.
+        (true, None) => (x, z),
+        (false, _) => (snap(x), snap(z)),
     }
+}
+
+/// The rectangle being dragged out to fill, in map space. Its own resource on the same argument
+/// [`RemovalDrag`] makes: written every frame of a drag, and `rebuild_palette` watches
+/// [`EditorState`].
+#[derive(Resource, Default)]
+pub struct PlaceDrag {
+    /// Where the button went down, or `None` while only hovering.
+    from: Option<(f32, f32)>,
+}
+
+/// Fill a dragged box with the brush, as one act.
+///
+/// Split out of [`drive_place`] so the release path reads as the two things it chooses between —
+/// place one, or fill a box — rather than as one function with a second half.
+fn box_fill_between(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    project: &mut Project,
+    state: &mut EditorState,
+    brush: &emerge_core::descriptor::Descriptor,
+    corners: ((f32, f32), (f32, f32)),
+) {
+    let mut n = state.next_id;
+    let short = short_id(&brush.id).to_owned();
+    let filled = match crate::fill::box_fill(&project.map, brush, corners, state.brush_yaw, || {
+        n += 1;
+        format!("{short}@{n}")
+    }) {
+        Ok(f) => f,
+        // A refusal is the answer, not a failure — the same call `flood_from_cursor` makes.
+        Err(e) => {
+            state.status = e;
+            return;
+        }
+    };
+    state.next_id = n;
+
+    let count = filled.placements.len();
+    let first = project.map.placements.len();
+    project.map.placements.extend(filled.placements);
+    // Into the map first, drawn second: how high a piece sits is a question about the finished map.
+    spawn_range(commands, assets, project, state, first);
+    project.dirty = true;
+    // **One entry for the whole box**, the rule `RemovedMany` states: one act the author performed is
+    // one act to take back.
+    state.undo.push(Undo::Added { count });
+    state.status = if filled.truncated {
+        format!(
+            "filled {count} — stopped at the {} cell cap",
+            crate::fill::MAX_CELLS
+        )
+    } else {
+        format!("filled {count}")
+    };
+}
+
+/// **The cell fine placement is confined to** — captured when the platform modifier goes down.
+///
+/// Its own resource, and written only on the two frames the modifier changes state, so it does not
+/// wake `rebuild_palette` the way a field on [`EditorState`] would. See [`map_at`] for the rule.
+#[derive(Resource, Default)]
+pub struct FineAnchor {
+    /// The snapped map-space point the cursor was over when the modifier went down.
+    cell: Option<(f32, f32)>,
+}
+
+/// Capture the cell when the modifier goes down, and let it go when the modifier comes up.
+///
+/// Runs in [`keys::Phase::Sense`], before anything reads the cursor, so the anchor a click sees is the
+/// one captured for that press rather than one frame stale.
+fn sense_fine_anchor(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    project: Res<Project>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    mut anchor: ResMut<FineAnchor>,
+) {
+    let held = keys::mod_held(&keyboard);
+    if !held {
+        // Only when it changes — `ResMut` marks the resource changed on every mutable deref.
+        if anchor.cell.is_some() {
+            anchor.cell = None;
+        }
+        return;
+    }
+    // Already anchored: the cell is decided by the press, not re-decided every frame the key is down.
+    // Re-capturing here would follow the cursor and clamp to nothing.
+    if anchor.cell.is_some() {
+        return;
+    }
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+        return;
+    };
+    let (x, z) = project.map.to_map_space((hit.x, hit.z));
+    anchor.cell = Some((snap(x), snap(z)));
 }
 
 /// Put a piece in the world — **through `emerge-bevy`**, which is also what the game uses.
@@ -1484,7 +1686,7 @@ fn drive_removal(
 ) {
     // Read, never write, unless something actually happened: `state` is watched by
     // `rebuild_palette`, so an unconditional deref here rebuilds the palette every frame.
-    if !state.removing {
+    if state.tool != Tool::Remove {
         if drag.from.is_some() {
             drag.from = None;
         }
@@ -1644,8 +1846,18 @@ fn spawn_existing(mut commands: Commands, assets: Res<AssetServer>, project: Res
     }
 }
 
+/// **The placing tool**: a click puts one piece down, a dragged box fills the area with them.
+///
+/// The box is the same gesture the removal tool uses — press, drag, release — because they are the
+/// same question about the same rectangle, and an author who has learnt one has learnt the other. The
+/// difference is what happens to it and how it is drawn: removal fills its box translucent red and
+/// takes what is inside, this outlines its box and fills it in.
+///
+/// Preview and commit live in one system for the reason `drive_removal` gives: the rectangle drawn IS
+/// the rectangle committed, and computing it twice is how a selection box comes to disagree with what
+/// it does.
 #[allow(clippy::too_many_arguments)]
-fn place_on_click(
+fn drive_place(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     // Held, the platform modifier drops the grid snap — see `map_at`.
@@ -1656,25 +1868,36 @@ fn place_on_click(
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     mut project: ResMut<Project>,
     mut state: ResMut<EditorState>,
+    anchor: Res<FineAnchor>,
+    mut drag: ResMut<PlaceDrag>,
+    mut gizmos: Gizmos,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    // While the removal tool is armed a click removes; it must not also place, or a box dragged over
-    // a crowded corner would delete what was there and leave a new piece behind it.
-    if state.removing {
-        return;
-    }
-    // A click on a control is not a click on the world. Without this, arming a piece from the palette
-    // also dropped one wherever the panel happened to be over.
-    if hovered_ui.iter().any(|h| h.0) {
+    // Placing is one tool among three, and a click belongs to whichever is armed. While removal is
+    // armed a click removes and must not also place, or a box dragged over a crowded corner would
+    // delete what was there and leave a new piece behind it; while move is armed a click picks a
+    // piece up, and placing a second one under it would be two answers to one click.
+    if state.tool != Tool::Place {
+        // Read, never write, unless something happened — `rebuild_palette` watches `EditorState` and
+        // `drag` is deliberately not on it, but the same discipline applies.
+        if drag.from.is_some() {
+            drag.from = None;
+        }
         return;
     }
     let (Some(window), Some(camera)) = (window, camera) else {
         return;
     };
     let (cam, cam_tf) = *camera;
-    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+    // A click on a control is not a click on the world. Without this, arming a piece from the palette
+    // also dropped one wherever the panel happened to be over.
+    let over_ui = hovered_ui.iter().any(|h| h.0);
+    let Some(hit) = cursor_ground(&window, cam, cam_tf).filter(|_| !over_ui) else {
+        // **A release ends the drag wherever it happens** — the defect `drive_removal` records: a
+        // release over a panel used to leave `from` set, and the box then followed the cursor with no
+        // button held, claiming an edit nobody was making.
+        if mouse.just_released(MouseButton::Left) {
+            drag.from = None;
+        }
         return;
     };
 
@@ -1682,7 +1905,66 @@ fn place_on_click(
         return;
     };
     let free = keys::mod_held(&keyboard);
-    let at = map_at(&project, hit, free);
+    let at = map_at(&project, hit, free, &anchor);
+
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.from = Some(at);
+    }
+
+    // The box, while it is being dragged. An outline rather than the removal tool's filled quad:
+    // additive and destructive should not look the same, and an outline leaves the floor it is about
+    // to cover visible underneath.
+    if let Some(from) = drag.from {
+        // The same condition the release below commits on, `free` included — a box drawn for a drag
+        // that is going to place one piece would be a preview of something that will not happen,
+        // which is the one thing this editor's previews are held to.
+        let dragging =
+            !free && ((from.0 - at.0).abs() > CLICK_EPS || (from.1 - at.1).abs() > CLICK_EPS);
+        if dragging {
+            let (x0, z0) = (from.0.min(at.0), from.1.min(at.1));
+            let (x1, z1) = (from.0.max(at.0), from.1.max(at.1));
+            gizmos.rect(
+                Isometry3d::new(
+                    Vec3::new(
+                        project.map.origin.0 + (x0 + x1) * 0.5,
+                        project.map.origin.1 + MARKER_LIFT,
+                        project.map.origin.2 + (z0 + z1) * 0.5,
+                    ),
+                    Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
+                Vec2::new(x1 - x0, z1 - z0),
+                ACCENT,
+            );
+        }
+    }
+
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(from) = drag.from.take() else {
+        return;
+    };
+
+    // **A drag fills; a click places one.** `CLICK_EPS` is the same threshold the removal tool uses
+    // to tell the two apart, so a hand that moved a hair while clicking is still a click in both.
+    //
+    // **Never while the modifier is held.** Snapped, `from` and `at` are both multiples of `SNAP`, so
+    // they are either equal or a whole cell apart and the threshold is really asking "did the cell
+    // change". Free, they are continuous and confined to one 0.5 m cell — so an ordinary hand tremor
+    // clears 0.2 m without leaving the cell, and the box path would then quantise the result back to
+    // that cell's centre. That is the fine placement the modifier exists for, silently discarded.
+    // Holding it means "place one, exactly here".
+    if !free && ((from.0 - at.0).abs() > CLICK_EPS || (from.1 - at.1).abs() > CLICK_EPS) {
+        box_fill_between(
+            &mut commands,
+            &assets,
+            &mut project,
+            &mut state,
+            &d,
+            (from, at),
+        );
+        return;
+    }
 
     // **What it lands on.** A piece that mounts on a surface must find one under the cursor; the same
     // question the ghost has been answering while the author moved the mouse here, asked once more at
@@ -1767,6 +2049,7 @@ fn keys(
     // a missing `Res<T>` panics its system in Bevy 0.19 rather than skipping it.
     time: Res<Time>,
     mut repeat: ResMut<keys::Repeat>,
+    mut move_drag: ResMut<MoveDrag>,
 ) {
 
     // One clock for every key that repeats while held — see `keys::repeating`.
@@ -1781,8 +2064,14 @@ fn keys(
     // preview of what was about to go was the author's memory of where the cursor was. Now the key
     // turns the mode on, the red marker answers "this one", and a click or a dragged box commits.
     if keys::just_pressed(&keyboard, live.0, Action::Remove) {
-        state.removing = !state.removing;
-        state.status = if state.removing {
+        // Toggles against `Remove` specifically, not against "any tool": pressing X while the move
+        // tool is armed should reach removal, not return to placing.
+        state.tool = if state.tool == Tool::Remove {
+            Tool::Place
+        } else {
+            Tool::Remove
+        };
+        state.status = if state.tool == Tool::Remove {
             format!(
                 "removal mode: click a piece, or drag a box. {} or Esc to stop.",
                 keys::binding(Action::Remove).chord
@@ -1790,12 +2079,45 @@ fn keys(
         } else {
             "removal mode off".to_owned()
         };
+        // Arming one tool puts down whatever the other was holding, rather than leaving a piece in
+        // hand that no click can now drop.
+        move_drag.held = None;
         return;
     }
 
-    if keys::just_pressed(&keyboard, live.0, Action::Cancel) && state.removing {
-        state.removing = false;
-        state.status = "removal mode off".to_owned();
+    // **The move tool.** Same shape as removal: the key arms it, the click commits. Arming it also
+    // clears what was armed to place — an author who means to move something is not also asking to
+    // drop a copy of the brush on their first click, and `drive_place` refuses while this is live.
+    if keys::just_pressed(&keyboard, live.0, Action::MoveMode) {
+        state.tool = if state.tool == Tool::Move {
+            Tool::Place
+        } else {
+            Tool::Move
+        };
+        state.status = if state.tool == Tool::Move {
+            format!(
+                "move mode: click a piece to pick it up, click again to put it down. {} or Esc to stop.",
+                keys::binding(Action::MoveMode).chord
+            )
+        } else {
+            "move mode off".to_owned()
+        };
+        move_drag.held = None;
+        return;
+    }
+
+    // **One Esc for every tool**, including a piece still in hand — which goes back exactly where it
+    // came from rather than being dropped wherever the cursor happens to be.
+    if keys::just_pressed(&keyboard, live.0, Action::Cancel) && state.tool != Tool::Place {
+        let was_holding = move_drag.held.is_some();
+        move_drag.held = None;
+        let leaving = state.tool.label();
+        state.tool = Tool::Place;
+        state.status = if was_holding {
+            "put back — move mode off".to_owned()
+        } else {
+            format!("{leaving} off")
+        };
         return;
     }
 
@@ -1950,6 +2272,50 @@ fn undo(
             }
             state.status = format!("undid {} placement(s)", gone.len());
         }
+        Undo::Moved { moved } => {
+            // `restore_moved` is the recorded inverse, so the undo cannot drift from the move: it
+            // replays exactly the `(at, on)` pairs the move displaced, rather than recomputing where
+            // things "should" go and hoping the two agree.
+            emerge_core::stack::restore_moved(&mut project.map, &moved);
+            let ids: Vec<String> = moved
+                .was
+                .iter()
+                .filter_map(|(i, _, _)| project.map.placements.get(*i).map(|p| p.id.clone()))
+                .collect();
+            for (entity, marker) in placed {
+                if ids.contains(&marker.0) {
+                    commands.entity(entity).despawn();
+                }
+            }
+            // Restored first, drawn second — how high a piece sits is a question about the finished
+            // map, the same reason `RemovedMany` below waits.
+            match heights(project) {
+                Ok(ys) => {
+                    for (i, _, _) in &moved.was {
+                        let Some(p) = project.map.placements.get(*i) else {
+                            continue;
+                        };
+                        let (id, at, yaw) = (p.id.clone(), p.at, p.yaw);
+                        let (Some(d), Some(&y)) =
+                            (project.library.get(&p.descriptor).cloned(), ys.get(*i))
+                        else {
+                            continue;
+                        };
+                        if let Some(e) =
+                            spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+                        {
+                            commands.entity(e).insert(Placement(id));
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.status = format!("put back, but cannot draw it: {e}");
+                    error!("{e}");
+                    return;
+                }
+            }
+            state.status = format!("put back {} placement(s)", moved.was.len());
+        }
         Undo::RemovedMany { items } => {
             let n = items.len();
             // Rows back first, all of them, and only THEN drawn: how high a piece sits is a question
@@ -2100,6 +2466,153 @@ fn turn_under_cursor(
     state.status = format!("{id} now at {yaw:.0} deg");
 }
 
+/// **Pick a piece up, and put it down** — the whole of [`Tool::Move`].
+///
+/// Click-to-grab and click-to-drop rather than press-drag-release. A carried piece stays carried
+/// across a camera pan, so an author can move something further than one screenful, and there is no
+/// deadzone to tune: a click either grabbed something or said it did not.
+#[allow(clippy::too_many_arguments)]
+fn drive_move(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    // Held, the platform modifier drops the grid snap — see `map_at`.
+    keyboard: Res<ButtonInput<KeyCode>>,
+    assets: Res<AssetServer>,
+    hovered_ui: Query<&Hovered>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    placed: Query<(Entity, &Placement)>,
+    mut project: ResMut<Project>,
+    mut state: ResMut<EditorState>,
+    mut drag: ResMut<MoveDrag>,
+    anchor: Res<FineAnchor>,
+) {
+    // Read, never write, unless something happened: `state` is watched by `rebuild_palette`, and an
+    // unconditional deref here rebuilds all forty-odd rows every frame. Same rule as `drive_removal`.
+    if state.tool != Tool::Move {
+        if drag.held.is_some() {
+            drag.held = None;
+        }
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // A click on a control is not a click on the world.
+    if hovered_ui.iter().any(|h| h.0) {
+        return;
+    }
+    let (Some(window), Some(camera)) = (window, camera) else {
+        return;
+    };
+    let (cam, cam_tf) = *camera;
+    let Some(hit) = cursor_ground(&window, cam, cam_tf) else {
+        return;
+    };
+
+    match drag.held.clone() {
+        // **Grab.** Picked unsnapped, because "which piece did I mean" is a question about where the
+        // cursor actually is — snapping first would answer it about the middle of a cell.
+        None => {
+            let probe = project.map.to_map_space((hit.x, hit.z));
+            let Some(index) = pick_at(&project, probe) else {
+                state.status = "nothing here to move".to_owned();
+                return;
+            };
+            let Some(p) = project.map.placements.get(index) else {
+                return;
+            };
+            let id = p.id.clone();
+            state.status = format!("{id} in hand — click to put it down, Esc to put it back");
+            drag.held = Some(id);
+        }
+        // **Drop.** Snapped like a placement, and free with the modifier held, so a move lands on the
+        // same grid a place would.
+        Some(id) => {
+            // Resolved now, not at grab: an undo or a fill between the two clicks may have moved this
+            // row, and it may have removed it outright.
+            let Some(index) = project.map.placements.iter().position(|p| p.id == id) else {
+                drag.held = None;
+                state.status = format!("`{id}` is gone — nothing was moved");
+                return;
+            };
+            let free = keys::mod_held(&keyboard);
+            let at = map_at(&project, hit, free, &anchor);
+            // One `deref_mut`, then two disjoint field borrows. `ResMut`'s `Deref` cannot split them
+            // for us, so `(&mut project.map, &project.library)` is a double borrow of the resource.
+            let p = &mut *project;
+            let moved = match emerge_core::stack::move_placement(
+                &mut p.map,
+                &p.library,
+                index,
+                at,
+            ) {
+                Ok(moved) => moved,
+                // **Refused, and still in hand.** Dropping it anyway is the behaviour this exists to
+                // avoid: the piece would land somewhere its mount does not hold and read as an
+                // authoring mistake. Keeping hold of it means the next click is another try.
+                Err(e) => {
+                    state.status = e;
+                    return;
+                }
+            };
+            project.dirty = true;
+            drag.held = None;
+
+            // Everything that moved is redrawn from the finished map — never by nudging a transform.
+            // `turn_under_cursor` states the rule; this obeys it for a whole group, because a lamp
+            // whose table moved has a new `y` in the data and an entity still standing over the old
+            // spot.
+            let ids: Vec<String> = moved
+                .was
+                .iter()
+                .filter_map(|(i, _, _)| project.map.placements.get(*i).map(|p| p.id.clone()))
+                .collect();
+            for (entity, marker) in &placed {
+                if ids.iter().any(|id| id == &marker.0) {
+                    commands.entity(entity).despawn();
+                }
+            }
+            match heights(&project) {
+                Ok(ys) => {
+                    for (i, _, _) in &moved.was {
+                        let Some(p) = project.map.placements.get(*i) else {
+                            continue;
+                        };
+                        let (id, at, yaw) = (p.id.clone(), p.at, p.yaw);
+                        let (Some(d), Some(&y)) =
+                            (project.library.get(&p.descriptor).cloned(), ys.get(*i))
+                        else {
+                            continue;
+                        };
+                        if let Some(e) =
+                            spawn_piece(&mut commands, &assets, &d, at, yaw, project.map.origin, y)
+                        {
+                            commands.entity(e).insert(Placement(id));
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.status = format!("moved, but cannot draw it: {e}");
+                    error!("{e}");
+                    state.undo.push(Undo::Moved { moved });
+                    return;
+                }
+            }
+
+            let carried = moved.was.len();
+            state.undo.push(Undo::Moved { moved });
+            let head = ids.first().cloned().unwrap_or_default();
+            let how = if free { " free" } else { "" };
+            state.status = if carried > 1 {
+                format!("moved {head} and {} riding on it{how}", carried - 1)
+            } else {
+                format!("moved {head}{how}")
+            };
+        }
+    }
+}
+
 /// **The thing you are pointing at**, given a probe in map space.
 ///
 /// Pure, and separated from the cursor for exactly that reason: the rule below is the whole content
@@ -2128,9 +2641,11 @@ pub fn pick_at(project: &Project, probe: (f32, f32)) -> Option<usize> {
         if !emerge_core::stack::covers(d, p.at, p.yaw, probe) {
             continue;
         }
-        let area = d
-            .extent
-            .footprint
+        // **The same box `covers` just tested.** This area is half of the `(area, id)` total key that
+        // decides which piece a click grabs, so measuring it differently from the hit test above would
+        // rank a scaled piece by a size it does not have — and the smallest-footprint rule exists
+        // precisely to pick the piece you can see least of.
+        let area = emerge_core::descriptor::placed_footprint(d)
             .map_or(f32::INFINITY, |(w, depth)| w * depth);
         let better = match covering {
             None => true,
@@ -2388,9 +2903,11 @@ fn drive_ghost(
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
     ghosts: Query<(Entity, &GhostOf), With<Ghost>>,
     mut transforms: Query<&mut Transform, With<Ghost>>,
+    held: Res<MoveDrag>,
     // The ghost must snap exactly when the click will, or the preview is a lie about where the
     // piece lands — which is the one thing this whole system exists to prevent.
     keyboard: Res<ButtonInput<KeyCode>>,
+    anchor: Res<FineAnchor>,
 ) {
     let clear = |commands: &mut Commands| {
         for (e, _) in &ghosts {
@@ -2406,7 +2923,7 @@ fn drive_ghost(
     // hovering under the palette is a promise about a click that will never reach the world. Nor
     // while removing — two previews for two different outcomes under one cursor is a question, not
     // an answer.
-    if hovered_ui.iter().any(|h| h.0) || state.removing {
+    if hovered_ui.iter().any(|h| h.0) || state.tool == Tool::Remove {
         clear(&mut commands);
         return;
     }
@@ -2415,13 +2932,43 @@ fn drive_ghost(
         clear(&mut commands);
         return;
     };
-    let Some(d) = project.library.descriptors.get(state.brush) else {
+
+    // **What the next click will actually do**, which is not always the armed brush.
+    //
+    // While a piece is in hand the click puts *that* piece down, so previewing the brush would be a
+    // promise about something that is not going to happen — and it is the piece the author is
+    // carrying whose landing spot they need to see. With move armed and nothing picked up there is no
+    // subject at all, and the honest preview of "click to pick something up" is no ghost.
+    //
+    // It keeps the carried piece's own yaw, not `brush_yaw`: a move changes where a thing is, and
+    // silently re-aiming it would be a second edit the author did not ask for.
+    let subject = match state.tool {
+        Tool::Remove => None,
+        Tool::Move => held
+            .held
+            .as_ref()
+            .and_then(|id| project.map.placements.iter().find(|p| &p.id == id))
+            .and_then(|p| {
+                project
+                    .library
+                    .descriptors
+                    .iter()
+                    .position(|d| d.id == p.descriptor)
+                    .map(|ix| (ix, p.yaw))
+            }),
+        Tool::Place => Some((state.brush, state.brush_yaw)),
+    };
+    let Some((brush_ix, want_yaw)) = subject else {
+        clear(&mut commands);
+        return;
+    };
+    let Some(d) = project.library.descriptors.get(brush_ix) else {
         clear(&mut commands);
         return;
     };
 
-    let at = map_at(&project, hit, keys::mod_held(&keyboard));
-    let yaw = emerge_bevy::draw_yaw(d, state.brush_yaw);
+    let at = map_at(&project, hit, keys::mod_held(&keyboard), &anchor);
+    let yaw = emerge_bevy::draw_yaw(d, want_yaw);
 
     // **The ghost stands where the piece would.** A lamp dragged over a table rises onto it, so the
     // author sees the answer before committing to it rather than placing and then wondering. When
@@ -2456,9 +3003,9 @@ fn drive_ghost(
         state.hint.clear();
     }
 
-    let existing = ghosts.iter().find(|(_, g)| g.0 == state.brush).map(|(e, _)| e);
+    let existing = ghosts.iter().find(|(_, g)| g.0 == brush_ix).map(|(e, _)| e);
     for (e, g) in &ghosts {
-        if g.0 != state.brush {
+        if g.0 != brush_ix {
             commands.entity(e).despawn();
         }
     }
@@ -2476,11 +3023,11 @@ fn drive_ghost(
                 &assets,
                 d,
                 at,
-                state.brush_yaw,
+                want_yaw,
                 project.map.origin,
                 y,
             ) {
-                commands.entity(e).insert((Ghost, GhostOf(state.brush)));
+                commands.entity(e).insert((Ghost, GhostOf(brush_ix)));
             }
         }
     }
@@ -2663,8 +3210,8 @@ mod snap_tests {
     #[test]
     fn a_click_snaps_to_the_grid_by_default() {
         let p = project_at((0.0, 0.0, 0.0));
-        assert_eq!(map_at(&p, Vec3::new(0.24, 0.0, 0.76), false), (0.0, 1.0));
-        assert_eq!(map_at(&p, Vec3::new(1.26, 0.0, -0.24), false), (1.5, 0.0));
+        assert_eq!(map_at(&p, Vec3::new(0.24, 0.0, 0.76), false, &FineAnchor::default()), (0.0, 1.0));
+        assert_eq!(map_at(&p, Vec3::new(1.26, 0.0, -0.24), false, &FineAnchor::default()), (1.5, 0.0));
     }
 
     /// **Held, it does not.** The point comes through exactly as the cursor gave it.
@@ -2672,9 +3219,9 @@ mod snap_tests {
     fn the_modifier_places_where_the_cursor_actually_is() {
         let p = project_at((0.0, 0.0, 0.0));
         let hit = Vec3::new(0.24, 0.0, 0.76);
-        let free = map_at(&p, hit, true);
+        let free = map_at(&p, hit, true, &FineAnchor::default());
         assert!((free.0 - 0.24).abs() < 1e-6 && (free.1 - 0.76).abs() < 1e-6, "{free:?}");
-        assert_ne!(free, map_at(&p, hit, false), "free placement must differ from snapped");
+        assert_ne!(free, map_at(&p, hit, false, &FineAnchor::default()), "free placement must differ from snapped");
     }
 
     /// Both paths still convert world space to map space, so a map that is not at the origin is not
@@ -2683,9 +3230,9 @@ mod snap_tests {
     fn free_placement_still_converts_into_map_space() {
         let p = project_at((10.0, 0.0, -4.0));
         let hit = Vec3::new(12.3, 0.0, -1.7);
-        assert_eq!(map_at(&p, hit, true), p.map.to_map_space((hit.x, hit.z)));
+        assert_eq!(map_at(&p, hit, true, &FineAnchor::default()), p.map.to_map_space((hit.x, hit.z)));
         // And the snapped path lands on the grid in MAP space, not in world space.
-        let (sx, sz) = map_at(&p, hit, false);
+        let (sx, sz) = map_at(&p, hit, false, &FineAnchor::default());
         assert!((sx / SNAP).fract().abs() < 1e-4 && (sz / SNAP).fract().abs() < 1e-4, "{sx}, {sz}");
     }
 }
