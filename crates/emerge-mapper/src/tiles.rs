@@ -533,28 +533,56 @@ pub struct ScaleReadout;
 /// which is finer than anything the importer can measure.
 const SCALE_EPS: f32 = 1e-4;
 
-/// **The width an author typed, as an `align.scale`** — or a sentence saying why it is not one.
+/// **Resize a piece to stand `want` metres wide**, uniformly — the SIZE field's whole arithmetic.
 ///
-/// `measured_w` is the piece's own `extent.footprint.0`, *not* its placed width. Dividing by the
-/// placed width would compound: typing back the number already on screen would scale the piece a
-/// second time, and doing that twice would halve a 0.5x piece to 0.25x with the field reading right
-/// both times. `a_width_that_is_already_set_is_a_no_op` pins that.
+/// Returns the ratio applied; `1.0` means the typed width is the width it already stands at, in which
+/// case nothing was touched — typing back the number on screen is a no-op by construction, so nothing
+/// can compound. `a_width_that_is_already_set_is_a_no_op` pins that.
 ///
 /// Pure, and split out of [`scale_keys`] for the reason the rest of this crate splits its arithmetic
 /// out of its systems: the rule is the whole content of the feature, and proving it through an `App`
 /// means driving a text field with a synthetic keyboard.
-fn scale_for_width(measured_w: f32, want: f32) -> Result<Option<f32>, String> {
+fn bake_width(d: &mut Descriptor, want: f32) -> Result<f32, String> {
     if !want.is_finite() || want <= 0.0 {
         return Err(format!("a piece cannot stand {want} m wide"));
     }
-    if !measured_w.is_finite() || measured_w <= 0.0 {
-        return Err(format!(
-            "this mesh measures {measured_w} m wide, so no scale reaches {want} m"
-        ));
+    let Some((w, dep)) = d.extent.footprint else {
+        return Err("it has no measured footprint, so a width has nothing to resize".to_owned());
+    };
+    if !w.is_finite() || w <= 0.0 {
+        return Err(format!("it measures {w} m wide, so no resize reaches {want} m"));
     }
-    let scale = want / measured_w;
-    // Never an identity — see [`SCALE_EPS`].
-    Ok(((scale - 1.0).abs() > SCALE_EPS).then_some(scale))
+    // The ratio against the PLACED width — which is the number on screen, so typing it back is a
+    // no-op by construction and nothing compounds.
+    let r = want / w;
+    if (r - 1.0).abs() <= SCALE_EPS {
+        return Ok(1.0);
+    }
+
+    // **Bake, exactly as `align.rotate` bakes.** `extent` records the piece as placed —
+    // `src/site/visuals.rs` states the contract and `site/books` is the datum (raw mesh 0.5096 m,
+    // recorded 0.306 m at scale 0.6) — so a resize rewrites the extent and *composes* the render
+    // scale that maps the authored mesh onto it. A previous version stored the ratio into
+    // `align.scale` over an unchanged extent, which read the field as a second multiplier; for
+    // `books`, whose extent already carried its 0.6, that double-applied it and every space answer
+    // shrank to 0.6x of the drawn mesh.
+    d.extent.footprint = Some((w * r, dep * r));
+    if let Some(h) = d.extent.height {
+        d.extent.height = Some(h * r);
+    }
+    // The mesh-geometry corrections are proportional to the mesh, so they resize with it — the same
+    // set `remeasure_rotated` rewrites for the same reason.
+    if let Some((px, pz)) = d.align.pivot {
+        d.align.pivot = Some((px * r, pz * r));
+    }
+    if let Some(y) = d.align.y_offset {
+        d.align.y_offset = Some(y * r);
+    }
+    let s = d.align.scale.unwrap_or(1.0) * r;
+    // Never an identity — see [`SCALE_EPS`]. Resizing `books` back to its authored 0.51 m composes
+    // 0.6 x 1.667 = 1.0, and the honest record of that is no scale at all.
+    d.align.scale = ((s - 1.0).abs() > SCALE_EPS).then_some(s);
+    Ok(r)
 }
 
 fn on_scale_click(
@@ -562,6 +590,9 @@ fn on_scale_click(
     fields: Query<&ScaleField>,
     mut edit: ResMut<ScaleEdit>,
     mut state: ResMut<ImportState>,
+    mut height: ResMut<HeightEdit>,
+    mut note: ResMut<NoteEdit>,
+    mut cell: ResMut<CellEdit>,
 ) {
     if fields.get(activate.entity).is_err() {
         return;
@@ -569,6 +600,14 @@ fn on_scale_click(
     let Some(target) = state.target() else {
         return;
     };
+    // **One field owns the keyboard.** Observers fire regardless of who is typing, and every text
+    // system drains its own `MessageReader` — so two open fields would each read the same keystroke
+    // stream and one Enter would commit and persist two different edits. Opening this one closes the
+    // rest, uncommitted, exactly as Esc would have.
+    height.active = None;
+    note.active = None;
+    cell.active = None;
+    state.renaming = None;
     // **Starts empty**, the same call `on_size_field_click` makes and for the same measured reason:
     // seeding it with the current number meant the first digit appended to it, and it looked like it
     // had worked. The value being replaced stays on screen until Enter.
@@ -609,50 +648,34 @@ fn scale_keys(
                     state.status = format!("`{text}` is not a number of metres");
                     return;
                 };
-                // Everything the commit needs, read before the borrow ends — `state.status` below
-                // wants `state` back.
-                let found = state
-                    .at_target(&target, &mut project.measured)
-                    .map(|(d, where_to)| (d.id.clone(), d.extent.footprint, where_to));
-                let Some((id, footprint, where_to)) = found else {
+                // Taken before the write, which is the only moment the old value still exists.
+                let before = state.snapshot(&project);
+                let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
                     state.status = "the width was not kept — that tile is gone".to_owned();
                     return;
                 };
-                // **Divided by the MEASURED width**, which is what `align.scale` is a ratio against.
-                // Dividing by the placed width instead would compound: typing the number already on
-                // screen would scale the piece a second time.
-                let Some((mw, md)) = footprint else {
-                    state.status = format!(
-                        "`{id}` has no measured footprint, so a width cannot be turned into a scale"
-                    );
-                    return;
-                };
-                // Refused rather than clamped. A width of zero is a piece that reserves nothing and
-                // sits inside a wall with every rule reporting success — the refusal
-                // `Descriptor::resolve` already makes about the scale this would produce, made here
-                // where the author can still see what they typed.
-                let scale = match scale_for_width(mw, want) {
-                    Ok(s) => s,
+                let id = d.id.clone();
+                // Refused rather than clamped — a width of zero is a piece that reserves nothing and
+                // sits inside a wall with every rule reporting success.
+                let r = match bake_width(d, want) {
+                    Ok(r) => r,
                     Err(e) => {
                         state.status = format!("`{id}`: {e}");
                         return;
                     }
                 };
-                // Taken before the write, which is the only moment the old value still exists.
-                let before = state.snapshot(&project);
-                let Some((d, _)) = state.at_target(&target, &mut project.measured) else {
-                    state.status = "the width was not kept — that tile is gone".to_owned();
+                // The width it already stands at: nothing changed, so nothing to record or write.
+                if r == 1.0 {
+                    state.status = format!("{id} already stands {want:.2} m wide");
                     return;
+                }
+                let (w, dep) = d.extent.footprint.unwrap_or((want, 0.0));
+                let said = match d.align.scale {
+                    Some(s) => format!("{id} — {w:.2} x {dep:.2} m (mesh scaled {s:.3}x)"),
+                    None => format!("{id} — {w:.2} x {dep:.2} m, back at its authored size"),
                 };
-                d.align.scale = scale;
                 state.record(before);
-                let factor = scale.unwrap_or(1.0);
-                let said = format!(
-                    "{id} — {:.2} x {:.2} m at {factor:.3}x",
-                    mw * factor,
-                    md * factor
-                );
-    state.status = persist(&mut project, where_to, said);
+                state.status = persist(&mut project, where_to, said);
             }
             Key::Escape => {
                 edit.active = None;
@@ -713,10 +736,18 @@ fn on_mount_height_click(
     fields: Query<&MountHeightField>,
     mut edit: ResMut<HeightEdit>,
     mut state: ResMut<ImportState>,
+    mut width: ResMut<ScaleEdit>,
+    mut note: ResMut<NoteEdit>,
+    mut cell: ResMut<CellEdit>,
 ) {
     if fields.get(activate.entity).is_err() {
         return;
     }
+    // One field owns the keyboard — see `on_scale_click`.
+    width.active = None;
+    note.active = None;
+    cell.active = None;
+    state.renaming = None;
     let Some(target) = state.target() else {
         return;
     };
@@ -830,22 +861,53 @@ fn tile_history_keys(
     if !back && !forward {
         return;
     }
+    let verb = if back { "undo" } else { "redo" };
     let taken = if back { state.undo.pop() } else { state.redo.pop() };
     let Some(want) = taken else {
-        state.status = if back {
-            "nothing to undo on this tab".to_owned()
-        } else {
-            "nothing to redo on this tab".to_owned()
-        };
+        state.status = format!("nothing to {verb} on this tab");
         return;
     };
-    let now = state.snapshot(&project);
 
-    state.candidates = want.candidates;
-    // Keep the selection inside the list it may just have shrunk.
-    state.selected = state.selected.min(state.candidates.len().saturating_sub(1));
-    match commit_measured(&mut project, want.measured) {
+    // **The map gets a vote.** `commit_measured` validates the library against itself and never
+    // against the map — that check belongs to the one forward path that can lose a descriptor,
+    // `remove_tile`, which refuses while the map still places the piece. A snapshot restore is the
+    // other way a descriptor can vanish (undoing an Accept, redoing a remove), and skipping the same
+    // guard here rewrote `library.ron` out from under a map that still referenced it: every
+    // `resolve_y` from then on refused the whole map, and the two files disagreed on disk.
+    let mut missing: Vec<&str> = project
+        .map
+        .placements
+        .iter()
+        .map(|p| p.descriptor.as_str())
+        .filter(|id| !want.measured.descriptors.iter().any(|d| &d.id == id))
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if !missing.is_empty() {
+        let named = missing.join("`, `");
+        // Back where it came from — refusing must not also cost the entry.
+        if back {
+            state.undo.push(want);
+        } else {
+            state.redo.push(want);
+        }
+        state.status = format!(
+            "cannot {verb}: the map still places `{named}` — remove or undo those placements first"
+        );
+        return;
+    }
+
+    let now = state.snapshot(&project);
+    // The library is cloned into the commit so `want` stays whole: on failure the POPPED entry goes
+    // back on its stack. A previous version pushed a snapshot of the CURRENT state instead — which
+    // destroyed the real history step and replaced it with a no-op, so the next Cmd+Z reported
+    // "undid the last tile edit" while changing nothing, and every deeper step was off by one.
+    match commit_measured(&mut project, want.measured.clone()) {
         Ok(_) => {
+            // The in-memory half moves only once the disk write has succeeded — a failed commit
+            // must leave both halves exactly as they were.
+            state.candidates = want.candidates;
+            state.selected = state.selected.min(state.candidates.len().saturating_sub(1));
             if back {
                 state.redo.push(now);
                 state.status = "undid the last tile edit".to_owned();
@@ -854,20 +916,13 @@ fn tile_history_keys(
                 state.status = "put the tile edit back".to_owned();
             }
         }
-        // Nothing was written — `commit_measured` refuses before it touches the disk — so the entry
-        // goes back where it came from rather than being lost to a failed restore.
         Err(e) => {
-            let restore = Snapshot {
-                measured: now.measured,
-                candidates: now.candidates,
-            };
-            state.candidates = restore.candidates.clone();
             if back {
-                state.undo.push(restore);
+                state.undo.push(want);
             } else {
-                state.redo.push(restore);
+                state.redo.push(want);
             }
-            state.status = format!("could not undo: {e}");
+            state.status = format!("could not {verb}: {e}");
         }
     }
 }
@@ -1690,6 +1745,10 @@ fn cell_keys(
                         return;
                     }
                 };
+                // Taken before the write — the only moment the old lattice still exists. This was
+                // the one Tiles edit invisible to the history: undoing past an unrecorded token
+                // destroyed it along with whichever edit the snapshot actually belonged to.
+                let history_before = state.snapshot(&project);
                 let Some((d, where_to)) = state.at_target(&target, &mut project.measured) else {
                     state.status = format!("`{raw}` was not kept — that tile is gone.");
                     return;
@@ -1712,10 +1771,11 @@ fn cell_keys(
                     (n, true, _) => format!("{n} cells' tokens cleared"),
                     (n, false, _) => format!("{n} cells = `{token}`"),
                 };
-                // Nothing landed means nothing to write.
+                // Nothing landed means nothing to write, and nothing to remember either.
                 state.status = if wrote == 0 {
                     said
                 } else {
+                    state.record(history_before);
                     persist(&mut project, where_to, said)
                 };
             }
@@ -2669,6 +2729,7 @@ fn rename_candidate(
     mut events: MessageReader<KeyboardInput>,
     keyboard: Res<ButtonInput<KeyCode>>,
     live: Res<crate::keys::Live>,
+    project: Res<Project>,
     mut state: ResMut<ImportState>,
 ) {
     if state.renaming.is_none() {
@@ -2707,6 +2768,9 @@ fn rename_candidate(
                 } else {
                     // The candidate this field was opened on, found by the mesh it names rather than
                     // by wherever the selection has since moved to.
+                    // Recorded like every other candidate edit — the snapshot history carries the
+                    // candidate list precisely so pre-Accept work is not outside it.
+                    let history_before = state.snapshot(&project);
                     match state
                         .candidates
                         .iter_mut()
@@ -2714,6 +2778,7 @@ fn rename_candidate(
                     {
                         Some(c) => {
                             c.proposed.id = id.clone();
+                            state.record(history_before);
                             state.status = format!("id is `{id}`");
                         }
                         // Only reachable if a rescan dropped the mesh mid-rename, which is a real
@@ -3116,12 +3181,23 @@ fn keep_selection_on_screen(
         (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
         (With<CandidateList>, Without<CandidateRow>, Without<LibraryRow>),
     >,
+    mut pending: Local<bool>,
 ) {
-    // The rows are rebuilt when the selection moves, so their transforms are only meaningful once
-    // layout has run — reacting to the state change alone would scroll against last frame's list.
-    if !state.is_changed() {
+    // **One frame late, on purpose.** The rows are rebuilt when the selection moves —
+    // `rebuild_candidates` watches the same change — and their `ComputedNode`/`UiGlobalTransform`
+    // only describe the new list after that rebuild's commands have applied and layout has run at
+    // the end of the frame. Reacting on the change frame reads the PREVIOUS frame's geometry and
+    // scrolls to where the row used to be, with no later frame to correct it (`is_changed` is false
+    // by then). So the change arms a flag and the correction runs next frame, against the layout the
+    // rebuild actually produced.
+    if state.is_changed() {
+        *pending = true;
         return;
     }
+    if !*pending {
+        return;
+    }
+    *pending = false;
     // A UI node's transform is its CENTRE, so the edges are the half-size either side.
     let selected = match &state.selected_library_id {
         Some(id) => library_rows
@@ -3945,7 +4021,6 @@ fn rebuild_detail(
             // the same call `on_note_click` makes. Reading the layered `placed` here would show a
             // width a project patch supplied and then write the author's answer one level below it.
             crate::chrome::section(p, "SIZE (m)");
-            let measured_w = d.extent.footprint.map(|(w, _)| w);
             // Not `placed` — that name is already the layered *descriptor* in this scope, and
             // shadowing it here would have handed the lattice code below a footprint tuple.
             let placed_fp = emerge_core::descriptor::placed_footprint(d);
@@ -3956,14 +4031,16 @@ fn rebuild_detail(
                     None => ("--".to_owned(), LABEL),
                 },
             };
-            // What the number means, spelled out rather than left as a ratio to work back to: the
-            // footprint it produces and the multiplier it stores. `docs/ui.md` §1.2 — more
-            // information measured *better*, so the derivation is shown rather than hidden.
-            let width_note = match (placed_fp, measured_w) {
-                (Some((w, dep)), Some(mw)) if mw > 0.0 => {
-                    format!("  {w:.2} x {dep:.2} m at {:.3}x", w / mw)
-                }
-                _ => "  no measured footprint to scale".to_owned(),
+            // What the number means, spelled out. The multiplier shown is `align.scale` — the render
+            // factor mapping the authored mesh onto this extent — because a resize BAKES: the extent
+            // is rewritten and the scale composes (`bake_width`), so the extent itself is always the
+            // placed truth and the scale is the only derived fact worth surfacing.
+            let width_note = match placed_fp {
+                Some((w, dep)) => match d.align.scale {
+                    Some(s) => format!("  {w:.2} x {dep:.2} m — mesh scaled {s:.3}x"),
+                    None => format!("  {w:.2} x {dep:.2} m"),
+                },
+                None => "  no measured footprint to size".to_owned(),
             };
             p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -4560,68 +4637,104 @@ mod mount_cycle_tests {
     }
 }
 
-/// **The `SIZE (m)` field's arithmetic.** See [`scale_for_width`].
+/// **The `SIZE (m)` field's arithmetic.** See [`bake_width`].
 #[cfg(test)]
 mod scale_field_tests {
     use super::*;
 
+    fn piece(w: f32, dep: f32, h: f32, scale: Option<f32>) -> Descriptor {
+        Descriptor {
+            id: "p".into(),
+            extent: emerge_core::descriptor::Extent {
+                footprint: Some((w, dep)),
+                height: Some(h),
+            },
+            align: emerge_core::descriptor::Align {
+                scale,
+                ..Default::default()
+            },
+            ..Descriptor::default()
+        }
+    }
+
     /// **The trap this function exists to avoid.** Typing back the width already on screen must
-    /// change nothing — which is only true because the divisor is the *measured* width, not the
-    /// placed one. Divide by the placed width and every commit rescales what was already rescaled, so
-    /// setting 0.5 twice silently gives 0.25 with the field reading `0.50` both times.
+    /// change nothing. The bake makes that true by construction: the ratio is against the placed
+    /// width — the number the field shows — so the shown value maps to a ratio of exactly 1.
     #[test]
     fn a_width_that_is_already_set_is_a_no_op() {
-        let measured = 1.0_f32;
-        // First edit: 1.0 m mesh asked to stand 0.6 m.
-        let once = scale_for_width(measured, 0.6)
-            .unwrap_or_else(|e| panic!("{e}"))
-            .unwrap_or_else(|| panic!("0.6 is not unity"));
-        assert!((once - 0.6).abs() < 1e-6, "{once}");
+        let mut d = piece(1.0, 0.5, 2.0, None);
+        let r = bake_width(&mut d, 0.6).unwrap_or_else(|e| panic!("{e}"));
+        assert!((r - 0.6).abs() < 1e-6, "{r}");
+        let after = d.clone();
 
-        // The field now reads the PLACED width, 0.6. Committing that again must land on the same
-        // scale rather than on 0.36.
-        let placed = measured * once;
-        let twice = scale_for_width(measured, placed)
-            .unwrap_or_else(|e| panic!("{e}"))
-            .unwrap_or_else(|| panic!("still not unity"));
-        assert!((twice - once).abs() < 1e-6, "committing the shown width moved it: {twice}");
+        // The field now shows 0.60. Committing that again must change nothing at all.
+        let r = bake_width(&mut d, 0.6).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r, 1.0);
+        assert_eq!(d, after, "committing the shown width must be a byte-level no-op");
     }
 
-    /// Unity is stored as absence. A `Some(1.0)` in `library.ron` would be an authored fact where
-    /// there is none, and every reader would then multiply by it — the rule `rotate_mesh` follows
-    /// when it refuses to write an identity rotation.
+    /// **The resize is uniform and it is a bake**: every extent axis moves by the ratio, and the
+    /// render scale composes so the drawn mesh still matches the recorded extent.
     #[test]
-    fn returning_to_the_measured_size_clears_the_scale() {
-        assert_eq!(scale_for_width(1.0, 1.0), Ok(None));
-        assert_eq!(scale_for_width(0.306, 0.306), Ok(None));
-        // And a hair off unity is still unity, rather than a scale of 1.00001.
-        assert_eq!(scale_for_width(1.0, 1.0 + SCALE_EPS / 2.0), Ok(None));
+    fn resizing_rewrites_the_extent_and_composes_the_render_scale() {
+        let mut d = piece(1.0, 0.5, 2.0, None);
+        d.align.pivot = Some((0.1, -0.2));
+        d.align.y_offset = Some(0.06);
+        bake_width(&mut d, 0.5).unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(d.extent.footprint, Some((0.5, 0.25)), "both axes, one ratio");
+        assert_eq!(d.extent.height, Some(1.0));
+        // The mesh-geometry corrections are proportional to the mesh, so they resize with it.
+        assert_eq!(d.align.pivot, Some((0.05, -0.1)));
+        assert_eq!(d.align.y_offset, Some(0.03));
+        let s = d.align.scale.unwrap_or_else(|| panic!("a resized piece carries its render scale"));
+        assert!((s - 0.5).abs() < 1e-6, "{s}");
     }
 
-    /// A width that cannot be a size is refused by name, not clamped. A zero footprint overlaps
-    /// nothing, so every placement rule would report success while the piece sat inside a wall.
+    /// Unity is stored as absence. Resizing `books` back to its authored size composes
+    /// 0.6 x 1.667 = 1.0, and the honest record of that is no scale at all — the rule `rotate_mesh`
+    /// follows when it refuses to write an identity rotation.
     #[test]
-    fn a_width_that_is_not_a_size_is_refused() {
+    fn returning_to_the_authored_size_clears_the_scale() {
+        // The shipped datum: books stands 0.306 m wide at scale 0.6 over a 0.5096 m mesh.
+        let mut d = piece(0.306, 0.106, 0.178, Some(0.6));
+        bake_width(&mut d, 0.51).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            d.align.scale, None,
+            "0.6 composed with 0.51/0.306 is unity, and unity is stored as absence"
+        );
+        let (w, _) = d.extent.footprint.unwrap_or_default();
+        assert!((w - 0.51).abs() < 1e-5, "{w}");
+    }
+
+    /// A width that cannot be a size is refused by name, not clamped — and a refusal touches
+    /// nothing. A zero footprint overlaps nothing, so every placement rule would report success
+    /// while the piece sat inside a wall.
+    #[test]
+    fn a_width_that_is_not_a_size_is_refused_and_changes_nothing() {
+        let mut d = piece(1.0, 0.5, 2.0, None);
+        let before = d.clone();
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(
-                scale_for_width(1.0, bad).is_err(),
-                "{bad} must be refused, not stored"
-            );
+            assert!(bake_width(&mut d, bad).is_err(), "{bad} must be refused, not stored");
+            assert_eq!(d, before, "{bad} must not have touched the piece");
         }
-        // And an unmeasurable mesh cannot produce a ratio at all.
-        assert!(scale_for_width(0.0, 0.6).is_err());
+        // And an unmeasurable mesh cannot be resized at all.
+        let mut vague = piece(1.0, 0.5, 2.0, None);
+        vague.extent.footprint = None;
+        assert!(bake_width(&mut vague, 0.6).is_err());
     }
 
-    /// The shipped case, end to end: `site/books` is 0.306 m wide and stands at 0.6x, so an author
-    /// typing `0.1836` reproduces exactly the scale that is in the file today.
+    /// **The shipped scaled piece keeps its space answers.** `site/books`' extent is already the
+    /// post-scale value every placement rule reads; the field must show it, and resizing must move
+    /// it, without the render scale ever multiplying into a space answer.
     #[test]
-    fn the_one_shipped_scaled_piece_round_trips() {
-        let measured = 0.306_f32;
-        let placed = measured * 0.6;
-        let scale = scale_for_width(measured, placed)
-            .unwrap_or_else(|e| panic!("{e}"))
-            .unwrap_or_else(|| panic!("0.6 is not unity"));
-        assert!((scale - 0.6).abs() < 1e-5, "{scale}");
+    fn the_one_shipped_scaled_piece_reads_as_placed() {
+        let d = piece(0.306, 0.106, 0.178, Some(0.6));
+        assert_eq!(
+            emerge_core::descriptor::placed_footprint(&d),
+            Some((0.306, 0.106)),
+            "the reservation is the extent — the scale is a render instruction, not a multiplier"
+        );
     }
 }
 

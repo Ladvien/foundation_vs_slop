@@ -145,13 +145,10 @@ pub struct Subgrid {
 /// of the one actually in the world. Found by authoring the first real tokens, which is the only way
 /// it could have been found.
 ///
-/// **`align.scale` is applied too**, through [`placed_footprint`] and [`placed_height`]. It did not
-/// used to be, and the asymmetry was the bug: the vertical axis threaded it (the surface a lamp lands
-/// on has always been `height * scale * stretch_y`) while the horizontal axis threaded nothing, so
-/// `site/books` — `scale: Some(0.6)`, the only non-unity scale in the repo — **drew at 0.6x while
-/// reserving its full footprint**. Scaling the lattice alone would have described a piece of one size
-/// inside a reservation of another, which is why it waited for `stack::covers` and `fill` to read the
-/// same helpers. They now do, so there is one answer to how much room a piece takes.
+/// **`align.scale` is not applied**, because `extent` already carries it: the extents are recorded
+/// post-scale (see [`placed_footprint`], where the contract and the `site/books` datum that proves it
+/// are written out), so the lattice derives from `extent` and `stretch_y` alone and agrees with
+/// `stack::covers`, `fill` and the drawn mesh by construction.
 ///
 /// `grid::cells` never returns zero, so a decal with no height gets one layer rather than a
 /// degenerate lattice — no special case needed.
@@ -176,46 +173,51 @@ pub fn divisions(d: &Descriptor, per_tile: u32) -> Result<(u32, u32, u32), Strin
     Ok((axis(w), axis(h), axis(dep)))
 }
 
-/// **The footprint a piece actually occupies**, in metres — its measured footprint times
-/// [`Align::scale`].
+/// **The footprint a piece actually occupies**, in metres — which is `extent.footprint`, verbatim.
 ///
-/// The horizontal half of *the piece as placed, not the mesh as measured*. `extent.footprint` is what
-/// the importer measured off the GLB; this is what it covers once `align` has been applied, and it is
-/// what every question about **room** must ask: the lattice ([`divisions`]), the floor reservation
-/// (`stack::covers`), flood-fill spacing (`fill::cell_extents`) and seam geometry
-/// (`adjacency::faults`).
+/// # `align.scale` is deliberately NOT applied, and this time that is the contract
+///
+/// `extent` records the piece **as placed**: `src/site/visuals.rs` states it in as many words —
+/// *"the kit's `height`/`footprint` are the post-scale values because every placement rule reads
+/// them"* — and the one shipped non-unity scale proves it. `site/books`' raw mesh measures 0.5096 m
+/// wide; the file records `footprint (0.306, 0.106)` with `scale: Some(0.6)`, and 0.5096 × 0.6 is
+/// 0.306. **`scale` maps the authored mesh onto the recorded extent** — a render instruction, exactly
+/// like [`Align::rotate`], whose extents are likewise baked at import so no reader learns it exists.
+///
+/// A previous version multiplied by `scale` here, on the argument that the vertical axis already did
+/// (`stack::drawn_height` was `h × scale × stretch_y`). That was a double-application: it shrank
+/// `books`' every space answer to 0.184 m while the mesh drew at 0.306 m — the exact
+/// drawn-versus-reserved disagreement it claimed to fix, created rather than closed. The editor's
+/// `SIZE (m)` field therefore **bakes**: it rewrites `extent` and composes `scale`, so this function
+/// stays a plain read.
+///
+/// It exists as a function rather than a field access so the question "how much room" has one name —
+/// [`divisions`], `stack::covers`, `fill::cell_extents`, `adjacency::faults` and the editor all come
+/// through here, and the contract above is written at the one place they share.
 ///
 /// `None` for an unmeasured piece, which is propagated rather than defaulted. A zero footprint
 /// overlaps nothing and would let the piece sit inside a wall with every rule reporting success —
 /// [`Descriptor::resolve`] makes the same call for the same reason.
-///
-/// **Scale is uniform, so one factor covers both axes.** [`Align::scale`] is a single number by
-/// construction — an art correction, real-world size ÷ authored size — and a non-uniform version
-/// would need a different field and a different argument about what a `front` face means.
 pub fn placed_footprint(d: &Descriptor) -> Option<(f32, f32)> {
-    let (w, dep) = d.extent.footprint?;
-    let s = d.align.scale.unwrap_or(1.0);
-    Some((w * s, dep * s))
+    d.extent.footprint
 }
 
-/// **How tall a piece stands**, in metres — `height * scale * stretch_y`.
+/// **How tall a piece stands**, in metres — `extent.height × stretch_y`.
 ///
-/// The vertical sibling of [`placed_footprint`], and the older of the two: this rule has always been
-/// applied to stacking, where it decides the plane a lamp lands on. A table measured at 0.796 m and
-/// scaled 1.2 presents its surface at 0.955 m, and reading `extent.height` alone would put the lamp
-/// inside the tabletop with nothing downstream saying so.
+/// The vertical sibling of [`placed_footprint`], under the same contract: `extent.height` is already
+/// the post-scale value, so only [`Align::stretch_y`] — game policy applied on top of the art, never
+/// baked — multiplies it. This is the rule [`divisions`] has always used for the lattice.
 ///
-/// It lives here rather than in `stack` because [`divisions`] and `adjacency` need it too, and the
-/// schema layer is the one both can reach without a solver depending on another solver. It replaced
-/// `stack::drawn_height`, which was the same product written in one place while two others wrote
-/// `height * stretch_y` and silently dropped the scale.
+/// It replaced `stack::drawn_height`, which multiplied by `scale` as well. For every shipped piece
+/// but one that factor was 1.0 and harmless; for `site/books` it was a latent double-application —
+/// never observable only because `books` offers no surfaces, so nothing ever rested on the answer.
 ///
 /// `None` when the descriptor records no height — an **unmeasured** piece, not a flat one. Nothing may
 /// rest on it, and saying so is better than treating unknown as zero and stacking a lamp at floor
 /// level on top of a bookcase.
 pub fn placed_height(d: &Descriptor) -> Option<f32> {
     let h = d.extent.height?;
-    Some(h * d.align.scale.unwrap_or(1.0) * d.align.stretch_y.unwrap_or(1.0))
+    Some(h * d.align.stretch_y.unwrap_or(1.0))
 }
 
 /// The divisions after `quarter` 90° turns about +Y — x and z swap on every odd turn.
@@ -1014,84 +1016,68 @@ fn pick<T: Clone>(base: &[T], patch: &[T]) -> Vec<T> {
 mod tests {
     use super::*;
 
-    /// **The invariant the whole `align.scale` change exists to establish**: every question about how
-    /// much room a piece takes gives the same answer.
+    /// **The contract: `extent` is the placed size, and `scale` never multiplies it again.**
     ///
-    /// Before, `stack::drawn_height` threaded the scale and nothing on the horizontal axis did, so
-    /// `site/books` at `scale: 0.6` drew at 0.6x and reserved its full footprint. These four are the
-    /// readers that decide space; if one of them ever stops agreeing with the others, that is the same
-    /// defect returning on a different axis.
+    /// `site/books` is the proof datum — raw mesh 0.5096 m wide, recorded `footprint (0.306, ..)`
+    /// with `scale 0.6`, and 0.5096 × 0.6 = 0.306 — and `src/site/visuals.rs` states it in words:
+    /// the extents are *"the post-scale values because every placement rule reads them"*. A previous
+    /// version of these helpers multiplied by scale here, which shrank every space answer for `books`
+    /// to 0.6× of a value that was already 0.6× — clicks missed the visible mesh and its reservation
+    /// no longer covered what it drew. If this test ever fails, that double-application is back.
     #[test]
-    fn everything_that_asks_how_much_room_agrees() {
+    fn everything_that_asks_how_much_room_reads_the_extent_as_placed() {
+        // The books datum, verbatim from the site kit.
         let mut d = crate_desc();
-        d.extent.footprint = Some((1.0, 2.0));
-        d.extent.height = Some(3.0);
-        d.align.scale = Some(0.5);
+        d.extent.footprint = Some((0.306, 0.106));
+        d.extent.height = Some(0.178);
+        d.align.scale = Some(0.6);
 
-        let (w, dep) = placed_footprint(&d).expect("measured");
-        assert_eq!((w, dep), (0.5, 1.0), "the footprint is scaled");
-        assert_eq!(placed_height(&d), Some(1.5), "and so is the height");
+        assert_eq!(placed_footprint(&d), Some((0.306, 0.106)), "extent IS the answer");
+        assert_eq!(placed_height(&d), Some(0.178));
 
-        // The lattice is derived from the same numbers, so it describes the piece as it stands.
+        // The reservation covers the drawn mesh exactly: raw 0.5096 × scale 0.6 = 0.306 drawn, and
+        // covers() must reach the drawn half-width and no further.
+        assert!(crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.15, 0.0)));
+        assert!(!crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.16, 0.0)));
+
+        // And the lattice derives from the same numbers.
         let div = divisions(&d, 1).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             div,
             (
-                crate::grid::cells(w).0,
-                crate::grid::cells(1.5).0,
-                crate::grid::cells(dep).0
-            ),
-            "the lattice must be derived from the placed size, not the measured one"
+                crate::grid::cells(0.306).0,
+                crate::grid::cells(0.178).0,
+                crate::grid::cells(0.106).0
+            )
         );
 
-        // And the reservation covers exactly that box: just inside its scaled half-width, and not
-        // beyond it. The unscaled footprint would have reached 0.5 m.
-        assert!(crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.24, 0.0)));
-        assert!(
-            !crate::stack::covers(&d, (0.0, 0.0), 0.0, (0.4, 0.0)),
-            "a scaled piece must not reserve the floor its mesh no longer covers"
-        );
+        // Explicit unity, absent, and any other scale are all the same answer — scale is a render
+        // instruction, invisible to every space question by construction.
+        for s in [None, Some(1.0), Some(0.6), Some(2.0)] {
+            let mut v = d.clone();
+            v.align.scale = s;
+            assert_eq!(placed_footprint(&v), Some((0.306, 0.106)), "scale {s:?} leaked into space");
+            assert_eq!(divisions(&v, 3), divisions(&d, 3));
+        }
     }
 
-    /// **The regression guard.** Everything without a scale must behave exactly as it did, so the
-    /// change is provably confined to the pieces that carry one — which in this repo is `site/books`
-    /// and nothing else.
+    /// A stretched wall is taller than its extent — `stretch_y` is game policy layered on top of the
+    /// art, the one factor that is NOT baked in — and it never touches the footprint.
     #[test]
-    fn an_unscaled_piece_is_untouched_by_any_of_this() {
-        let mut d = crate_desc();
-        d.extent.footprint = Some((1.0, 2.0));
-        d.extent.height = Some(3.0);
-        assert_eq!(d.align.scale, None);
-
-        assert_eq!(placed_footprint(&d), d.extent.footprint);
-        assert_eq!(placed_height(&d), d.extent.height);
-
-        // Explicit unity must be indistinguishable from absent — otherwise a file that spells out
-        // `scale: Some(1.0)` would quietly derive a different lattice from one that omits it.
-        let mut unity = d.clone();
-        unity.align.scale = Some(1.0);
-        assert_eq!(placed_footprint(&unity), placed_footprint(&d));
-        assert_eq!(divisions(&unity, 3), divisions(&d, 3));
-    }
-
-    /// A stretched wall is taller than its mesh, and a stretched *and* scaled one is both — the two
-    /// corrections compose rather than one winning.
-    #[test]
-    fn scale_and_stretch_both_reach_the_placed_height() {
+    fn stretch_reaches_the_placed_height_and_scale_does_not() {
         let mut d = crate_desc();
         d.extent.footprint = Some((1.0, 1.0));
         d.extent.height = Some(2.0);
         d.align.scale = Some(0.5);
-        d.align.stretch_y = Some(3.0);
-        assert_eq!(placed_height(&d), Some(3.0), "2.0 * 0.5 * 3.0");
-        // The footprint takes the scale and not the stretch: `stretch_y` is a Y-only correction.
-        assert_eq!(placed_footprint(&d), Some((0.5, 0.5)));
+        d.align.stretch_y = Some(1.2);
+        assert_eq!(placed_height(&d), Some(2.4), "2.0 * 1.2 — the scale is already in the 2.0");
+        assert_eq!(placed_footprint(&d), Some((1.0, 1.0)));
     }
 
-    /// An unmeasured piece stays unmeasured — scaling nothing must not invent a zero, which is the
-    /// value that overlaps nothing and lets a prop sit inside a wall.
+    /// An unmeasured piece stays unmeasured — no default may invent a zero, which is the value that
+    /// overlaps nothing and lets a prop sit inside a wall.
     #[test]
-    fn scaling_an_unmeasured_piece_yields_nothing_rather_than_zero() {
+    fn an_unmeasured_piece_yields_nothing_rather_than_zero() {
         let mut d = crate_desc();
         d.extent.footprint = None;
         d.align.scale = Some(0.6);

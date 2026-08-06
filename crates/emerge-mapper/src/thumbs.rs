@@ -126,13 +126,14 @@ impl Plugin for ThumbsPlugin {
         // handles, so it must run after them, and one chain is easier to be sure of than two plugins
         // agreeing about order.
         app.init_resource::<ThumbGeneration>()
-            .add_systems(Update, bake.run_if(unfinished));
+            // Chained so an eviction is visible to the same frame's bake — a pruned id must not be
+            // staged one more time off a stale `pending` answer.
+            .add_systems(Update, (prune, bake.run_if(unfinished)).chain());
     }
 }
 
 /// Build the handles and stand the booth up. First link of the editor's Startup chain.
 pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let _ = &mut commands;
     commands.insert_resource(Thumbnails {
         images: std::collections::HashMap::new(),
         baked: std::collections::HashSet::new(),
@@ -154,6 +155,34 @@ fn blank_target(images: &mut Assets<Image>) -> Handle<Image> {
     let mut img = Image::new_target_texture(THUMB_PX, THUMB_PX, TextureFormat::Rgba8UnormSrgb, None);
     img.data = Some(vec![0; (THUMB_PX * THUMB_PX * 4) as usize]);
     images.add(img)
+}
+
+/// **Forget the portraits of pieces that no longer exist.**
+///
+/// The caches (`images`, `baked`) were insert-only, and that resurrected the wrong-picture bug the id
+/// keying was built to end, one step removed: remove a tile and re-import a different mesh under the
+/// same id — or redo an undone accept — and `baked` still holds the id, so [`Thumbnails::pending`]
+/// skips it and the palette shows the OLD mesh's portrait for the new piece, permanently.
+///
+/// Change-gated inside the body rather than by a `resource_changed` run condition, because `Project`
+/// is not this plugin's to assume: a run condition on a missing resource panics in 0.19, and taking
+/// `Option<Res>` keeps the standalone plugin bootable.
+fn prune(mut thumbs: ResMut<Thumbnails>, project: Option<Res<Project>>) {
+    let Some(project) = project else { return };
+    if !project.is_changed() {
+        return;
+    }
+    let live = |id: &str| project.library.descriptors.iter().any(|d| d.id == id);
+    // Checked before any mutable touch, so the common frame does not mark the resource changed.
+    let anything_dead = thumbs.images.keys().any(|id| !live(id))
+        || thumbs.baked.iter().any(|id| !live(id));
+    if !anything_dead {
+        return;
+    }
+    thumbs.images.retain(|id, _| live(id));
+    thumbs.baked.retain(|id| live(id));
+    // The staged model may belong to a pruned id; `bake`'s staging guard despawns it the moment the
+    // pending piece disagrees, so nothing more is needed here.
 }
 
 /// `Option<Res<_>>`, never a bare `Res<_>`: Bevy 0.19 evaluates **every** run condition — there is no
@@ -236,6 +265,22 @@ fn bake(
     }
     if thumbs.booth.is_none() {
         thumbs.booth = Some(erect_booth(&mut commands));
+    }
+
+    // **The staged model must be the pending piece's, or it goes.** `pending` can switch subjects
+    // mid-bake — the staged tile is removed on the Tiles tab, or an undo swaps the library — and the
+    // loop below has no other way to know: it would frame whatever mesh is standing there and write
+    // piece A's render into piece B's portrait, which is the wrong-picture bug the id keying exists
+    // to end. `staging` names whose model `thumbs.model` is; it is written only here and at the
+    // completed-portrait reset below.
+    if thumbs.model.is_some() && thumbs.staging.as_deref() != Some(d.id.as_str()) {
+        if let Some(model) = thumbs.model.take() {
+            commands.entity(model).despawn();
+        }
+        thumbs.settled = 0;
+        thumbs.waited = 0;
+        // Restaged for the right piece next frame.
+        return;
     }
     thumbs.staging = Some(d.id.clone());
 
@@ -374,14 +419,13 @@ fn subject_bounds(
 /// The subject's largest dimension, from what the descriptor records. The fallback for the frames
 /// before any `Aabb` exists; floored, so it never puts the camera inside the mesh.
 fn subject_extent(d: &emerge_core::descriptor::Descriptor) -> f32 {
-    let scale = d.align.scale.unwrap_or(1.0);
-    // The footprint through the one helper rather than a second `* scale` written out here — this
-    // function used to do that multiplication by hand, which is the drift `placed_footprint` exists to
-    // end. Height keeps the bare `* scale` because `stage` below frames the subject at
-    // `splat(scale)`: no `stretch_y`, so framing it as though there were one would push the camera
-    // back off a piece that is not actually that tall.
+    // The extent IS the drawn size: it is recorded post-scale (`placed_footprint`'s contract), and
+    // `stage` below draws the raw mesh at `splat(scale)`, which lands it exactly on these numbers.
+    // No multiplication here — an earlier version multiplied by `scale` by hand, which framed the one
+    // scaled piece for a size it does not draw at. `stretch_y` is deliberately not applied either:
+    // the booth stages the art, not a facility's policy over it.
     let (w, dep) = emerge_core::descriptor::placed_footprint(d).unwrap_or((1.0, 1.0));
-    let h = d.extent.height.unwrap_or(1.0) * scale;
+    let h = d.extent.height.unwrap_or(1.0);
     (w.max(dep).max(h)).max(0.25)
 }
 

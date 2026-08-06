@@ -678,20 +678,24 @@ mod tests {
         assert_eq!(y, vec![10.0, 10.8, 11.2]);
     }
 
-    /// **Drawn height, not measured height.** A scaled table presents its surface higher, and reading
-    /// `extent.height` alone would put the lamp inside the tabletop on every scaled piece.
+    /// **The extent already carries the scale**, so the surface plane is `height × stretch_y` and
+    /// nothing else. A previous version asserted `height × scale × stretch_y` — the double-application
+    /// [`crate::descriptor::placed_footprint`]'s contract note describes, pinned as if it were the
+    /// rule. `extent.height` IS the drawn height (`site/books`: raw mesh 0.297 m × scale 0.6 = the
+    /// recorded 0.178 m); multiplying by scale again put the surface plane somewhere nothing draws.
     #[test]
-    fn the_hosts_scale_raises_what_stands_on_it() {
+    fn the_surface_plane_is_the_extent_and_scale_does_not_move_it() {
         let mut big = table();
         big.align = Align {
             scale: Some(2.0),
             ..Align::default()
         };
         let m = map(vec![at("t1", "table", None), at("l1", "lamp", Some("t1"))]);
+        // The table's recorded height is 0.8 — as placed, whatever render scale reached it.
         let y = resolve_y(&m, &lib(vec![big, lamp()])).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(y[1], 1.6);
+        assert_eq!(y[1], 0.8);
 
-        // `stretch_y` is a separate multiplier and stacks with the scale.
+        // `stretch_y` is game policy layered on top of the extent, the one factor that DOES move it.
         let mut stretched = table();
         stretched.align = Align {
             scale: Some(2.0),
@@ -699,7 +703,7 @@ mod tests {
             ..Align::default()
         };
         let y = resolve_y(&m, &lib(vec![stretched, lamp()])).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(y[1], 2.4);
+        assert_eq!(y[1], 1.2);
     }
 
     /// A surface mount with nothing under it is refused rather than floored — the exact silence this

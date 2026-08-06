@@ -229,6 +229,13 @@ enum Undo {
     RemoveAt { indices: Vec<usize> },
     /// Put a placement's yaw back. Its own inverse, carrying the other angle.
     Turned { index: usize, yaw: f32 },
+    /// **Several reversals that are one act** — applied in order, inverted by reversing.
+    ///
+    /// `generate` needs it: undoing a `G` press must strip the solver rows AND put the removed sketch
+    /// back, and two separate entries would make one keypress two undos. The group's inverse is the
+    /// sub-inverses in reverse order — the standard composition rule, and what keeps the enum closed
+    /// under inversion with no new mechanism.
+    Group { ops: Vec<Undo> },
     /// Put a placement's pin back, reason included. Its own inverse.
     Pinned {
         index: usize,
@@ -406,6 +413,11 @@ impl Plugin for EditorPlugin {
             .init_resource::<MoveDrag>()
             .init_resource::<FineAnchor>()
             .init_resource::<PlaceDrag>()
+            // **This plugin reads it, so this plugin registers it** (CLAUDE.md's rule, and the
+            // documented 0.19 trap: every run condition is evaluated, and `rebuild_palette`'s
+            // `resource_changed::<ThumbGeneration>` panics if only ThumbsPlugin — which also inits
+            // it, idempotently — happens to be absent from the app.
+            .init_resource::<crate::thumbs::ThumbGeneration>()
             .init_resource::<SizeEdit>()
             .init_resource::<EdgeFaults>()
             // Shared by both tabs' lists, so it is registered once here rather than by whichever
@@ -1616,6 +1628,7 @@ fn sense_fine_anchor(
     project: Res<Project>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
     camera: Option<Single<(&Camera, &GlobalTransform), With<MainCamera>>>,
+    hovered_ui: Query<&Hovered>,
     mut anchor: ResMut<FineAnchor>,
 ) {
     let held = keys::mod_held(&keyboard);
@@ -1629,6 +1642,14 @@ fn sense_fine_anchor(
     // Already anchored: the cell is decided by the press, not re-decided every frame the key is down.
     // Re-capturing here would follow the cursor and clamp to nothing.
     if anchor.cell.is_some() {
+        return;
+    }
+    // **A cursor over a panel is not a cursor over a cell.** The modifier is also every chord's
+    // modifier — `Cmd+Z`, `Cmd+S`, `Cmd+2` — so it goes down over UI constantly, and an anchor
+    // captured there would clamp a later free placement to whatever cell happened to lie under the
+    // palette. No anchor at all is the honest answer: `map_at`'s `(true, None)` arm places free and
+    // unclamped, exactly as it does when the modifier goes down off the ground plane.
+    if hovered_ui.iter().any(|h| h.0) {
         return;
     }
     let (Some(window), Some(camera)) = (window, camera) else {
@@ -2506,6 +2527,10 @@ fn apply(
                 Err(e) => {
                     state.status = format!("put back, but cannot draw it: {e}");
                     error!("{e}");
+                    // `restore_moved` above ALREADY moved the rows, so the map has changed whatever
+                    // happened to the drawing — skipping the shared dirty write at the tail here left
+                    // a real edit looking saved.
+                    project.dirty = true;
                     // Nothing goes on the other stack: the map moved but could not be drawn, and
                     // offering to redo a state the author cannot see would compound it.
                     return None;
@@ -2588,17 +2613,46 @@ fn apply(
                     commands.entity(entity).despawn();
                 }
             }
-            if let Ok(ys) = heights(project) {
-                if let (Some(d), Some(&y)) = (project.library.get(&descriptor).cloned(), ys.get(index))
-                {
-                    if let Some(e) = spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+            // The identical failure the forward path (`turn_under_cursor`) reports loudly: an
+            // `if let Ok` here swallowed it, leaving the piece despawned with no respawn under a
+            // success message — a piece missing from screen is the one thing a status line must
+            // never be cheerful about. The yaw HAS changed either way, so the inverse still stands.
+            match heights(project) {
+                Ok(ys) => {
+                    if let (Some(d), Some(&y)) =
+                        (project.library.get(&descriptor).cloned(), ys.get(index))
                     {
-                        commands.entity(e).insert(Placement(id.clone()));
+                        if let Some(e) =
+                            spawn_piece(commands, assets, &d, at, yaw, project.map.origin, y)
+                        {
+                            commands.entity(e).insert(Placement(id.clone()));
+                        }
                     }
+                    state.status = format!("{id} back to {yaw:.0} deg");
+                }
+                Err(e) => {
+                    state.status = format!("turned {id} back but cannot draw it: {e}");
+                    error!("{e}");
                 }
             }
-            state.status = format!("{id} back to {yaw:.0} deg");
             Undo::Turned { index, yaw: was }
+        }
+        Undo::Group { ops } => {
+            // Applied in order; the inverse is the sub-inverses REVERSED — the composition rule, and
+            // the whole reason a group can exist without a second undo mechanism. A sub-op that
+            // could not apply contributes nothing; if none could, there is nothing to put on the
+            // other stack.
+            let mut inverses = Vec::with_capacity(ops.len());
+            for op in ops {
+                if let Some(inv) = apply(commands, assets, project, state, placed, op) {
+                    inverses.push(inv);
+                }
+            }
+            if inverses.is_empty() {
+                return None;
+            }
+            inverses.reverse();
+            Undo::Group { ops: inverses }
         }
         Undo::Pinned {
             index,
@@ -3127,20 +3181,30 @@ fn generate(
     };
     state.next_id = n;
 
-    // Everything unpinned is the sketch; the solve is the drawing. Despawn it and rebuild.
-    let doomed: Vec<String> = project
+    // Everything unpinned is the sketch; the solve is the drawing. Despawn it and rebuild —
+    // **keeping what was removed, with its indices**, because this is an edit like any other and the
+    // history must be able to put it back. This used a bare `retain()` and recorded only the solver
+    // rows, which was two defects in one line: the author's sketch was unrecoverable (Cmd+Z drained
+    // the solver output and stopped, with a success message), and every index-based entry already on
+    // the stack — Moved, Turned, Pinned, RemoveAt — was left pointing at rows that had shifted, so a
+    // second Cmd+Z rewrote whatever now sat at those indices with the dead sketch's data.
+    let removed: Vec<(usize, Box<Placed>)> = project
         .map
         .placements
         .iter()
-        .filter(|p| !p.owned)
-        .map(|p| p.id.clone())
+        .enumerate()
+        .filter(|(_, p)| !p.owned)
+        .map(|(i, p)| (i, Box::new(p.clone())))
         .collect();
     for (entity, marker) in placed {
-        if doomed.contains(&marker.0) {
+        if removed.iter().any(|(_, p)| p.id == marker.0) {
             commands.entity(entity).despawn();
         }
     }
-    project.map.placements.retain(|p| p.owned);
+    // Descending, so removing an earlier row cannot shift a later one out from under us.
+    for (i, _) in removed.iter().rev() {
+        project.map.placements.remove(*i);
+    }
 
     // **Into the map first, drawn second.** The solver lays pieces on the floor grid; how high each
     // one ends up is a question about the finished map, so the map has to be finished before it is
@@ -3150,7 +3214,15 @@ fn generate(
     project.map.placements.extend(solved.placements);
     spawn_range(commands, assets, project, state, first);
     project.dirty = true;
-    state.record(Undo::Added { count });
+    // One act, one entry: undoing a generate first strips the solver rows (the `Added`), then puts
+    // the sketch back at its own indices (the `RemovedMany`) — [`Undo::Group`] applies in order and
+    // inverts by reversing.
+    state.record(Undo::Group {
+        ops: vec![
+            Undo::Added { count },
+            Undo::RemovedMany { items: removed },
+        ],
+    });
     state.status = format!(
         "continued the layout: {count} placed around {} pinned cell(s), from {} prototype(s)",
         solved.owned_cells,
@@ -3316,18 +3388,42 @@ fn drive_ghost(
     let at = map_at(&project, hit, keys::mod_held(&keyboard), &anchor);
     let yaw = emerge_bevy::draw_yaw(d, want_yaw);
 
+    // **The ghost asks the question the drop will ask** — against a map the carried group is NOT in.
+    //
+    // While a piece is in hand its rows are only hidden, still present, and `move_placement`'s own
+    // doc names the trap that leaves open: `host_under` does not know to skip the piece it is
+    // seating, so a carried table would find its own (hidden) mug under the cursor and the ghost
+    // would preview a landing the drop then computes differently. The drop probes with the group
+    // removed; so must the preview, or it is a promise about something that is not going to happen —
+    // the one thing this editor's previews are held to.
+    let probe_map = match (state.tool, held.held.as_ref()) {
+        (Tool::Move, Some(id)) => {
+            let mut reduced = project.map.clone();
+            if let Some(ix) = reduced.placements.iter().position(|p| &p.id == id) {
+                let mut group = emerge_core::stack::group_of(&reduced, ix);
+                group.sort_unstable();
+                for i in group.iter().rev() {
+                    reduced.placements.remove(*i);
+                }
+            }
+            Some(reduced)
+        }
+        _ => None,
+    };
+    let probe_map = probe_map.as_ref().unwrap_or(&project.map);
+
     // **The ghost stands where the piece would.** A lamp dragged over a table rises onto it, so the
     // author sees the answer before committing to it rather than placing and then wondering. When
     // there is no surface under a piece that needs one there is nothing truthful to draw — showing it
     // on the floor would be a preview of something that will not happen.
-    let ys = match heights(&project) {
+    let ys = match emerge_core::stack::resolve_y(probe_map, &project.library) {
         Ok(ys) => ys,
         Err(_) => {
             clear(&mut commands);
             return;
         }
     };
-    let (y, _) = match emerge_core::stack::placement_at(&project.map, &project.library, &ys, d, at) {
+    let (y, _) = match emerge_core::stack::placement_at(probe_map, &project.library, &ys, d, at) {
         Ok(found) => found,
         // **The reason, while the cursor is still there.** `docs/ui.md` §1.4: an unmet condition is an
         // instruction. A ghost that simply vanishes over bare floor reads as the editor being broken;

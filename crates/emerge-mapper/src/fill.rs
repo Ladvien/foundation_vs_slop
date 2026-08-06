@@ -250,6 +250,16 @@ pub fn box_fill(
                 break 'rows;
             }
             let at = centre_of((cx, cz));
+            // **A cell belongs to the box only if its CENTRE is inside it** — the same rule the
+            // removal box applies to placements (`p.at` within the rect), so the two box gestures
+            // agree about what a rectangle contains. The corner range above is generous by
+            // construction: `floor(corner/cell)` includes every cell a corner merely clips, and
+            // committing those laid pieces whose centres sat up to half a pitch OUTSIDE the drawn
+            // outline — the accent box understating the fill by up to a full cell per axis, against
+            // the "the box drawn IS the box committed" rule.
+            if !(at.0 >= x0 && at.0 <= x1 && at.1 >= z0 && at.1 <= z1) {
+                continue;
+            }
             // Inside the map, on the same half-open test `flood` uses.
             if !(at.0 >= min_x && at.0 < max_x && at.1 >= min_z && at.1 < max_z) {
                 continue;
@@ -350,6 +360,20 @@ mod tests {
                 p.at
             );
         }
+    }
+
+    /// **The box drawn IS the box committed.** A cell is filled only when its centre lies inside the
+    /// dragged rectangle — the same containment rule the removal box applies to placements. The
+    /// corner arithmetic alone would include every cell a corner merely clips, laying pieces whose
+    /// centres sit up to half a pitch outside the outline the author watched themselves draw.
+    #[test]
+    fn a_box_lays_only_cells_whose_centres_it_contains() {
+        let m = map((10.0, 3.0, 10.0));
+        // Clips four cells it does not contain: x centres are 0.5 (out), 1.5 (in), 2.5 (out).
+        let f = box_fill(&m, &brush(1.0), ((0.8, 0.2), (2.2, 1.8)), 0.0, ids())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let ats: Vec<_> = f.placements.iter().map(|p| p.at).collect();
+        assert_eq!(ats, vec![(1.5, 0.5), (1.5, 1.5)], "{ats:?}");
     }
 
     /// **Corner order does not matter.** An author dragging bottom-right to top-left gets the same
