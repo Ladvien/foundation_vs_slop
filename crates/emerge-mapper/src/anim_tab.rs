@@ -230,7 +230,12 @@ fn spawn_panels(mut commands: Commands) {
 /// Lazy, on the precedent the tiles scan sets: a session that never opens this tab should not pay for
 /// it. Loud on failure — a bench with no manifest has nothing to show, and saying so beats an empty
 /// list that looks like "this project has no rigs".
-fn load_on_entry(mode: Res<Mode>, project: Res<crate::project::Project>, mut bench: ResMut<BenchState>) {
+fn load_on_entry(
+    mode: Res<Mode>,
+    project: Res<crate::project::Project>,
+    mut bench: ResMut<BenchState>,
+    mut queue: ResMut<crate::anim_watch::MeasureQueue>,
+) {
     if *mode != Mode::Anim || bench.loaded {
         return;
     }
@@ -240,6 +245,14 @@ fn load_on_entry(mode: Res<Mode>, project: Res<crate::project::Project>, mut ben
         Ok(text) => match Rigs::parse(&text) {
             Ok(rigs) => {
                 bench.status = format!("{} rig(s) in {}", rigs.rigs.len(), path.display());
+                // **Check-all runs on open.** The audit should not wait to be asked for: every rig
+                // enters the queue now (one measures per frame), so the stale badge and the C
+                // summary are warm from the first entry. The selected rig still jumps the line via
+                // `queue_selected`. Lazy-load stands — a session that never opens the tab pays
+                // nothing.
+                for name in rigs.rigs.keys() {
+                    queue.push_back_unique(name);
+                }
                 bench.rigs = Some(rigs);
                 bench.text = Some(text);
             }
@@ -811,41 +824,28 @@ fn rebuild_slots(
                         TextFont::from_font_size(10.0),
                     ));
                 });
-                // The asset's own name for the clip, under the row like the note — never inline in
-                // the index column, where `valkyrie_strafe_r` would squeeze the numbers off the
-                // panel. Beside the LEFTWARD note this is what makes the backwards naming
-                // self-evidencing rather than folklore.
+                // **One sub-line per slot, not three.** The note, the asset's own clip name
+                // (which is what makes the LEFTWARD mismatch self-evidencing rather than
+                // folklore), and a kept-reason each used to be their own line — on a ten-slot rig
+                // that is twenty lines of annotation around ten of data. Joined with an ASCII
+                // separator; the line wraps if it must.
                 let asset_name = report
                     .and_then(|r| r.clip_names.get(slot.clip))
                     .and_then(Option::as_deref);
-                if let Some(name) = asset_name {
-                    p.spawn((
-                        Text::new(format!("asset: {name}")),
-                        TextColor(DIM),
-                        TextFont::from_font_size(9.0),
-                        Node {
-                            margin: UiRect::left(Val::Px(84.0)),
-                            ..default()
-                        },
-                    ));
-                }
+                let mut sub: Vec<String> = Vec::new();
                 if let Some(note) = &slot.note {
-                    p.spawn((
-                        Text::new(note.clone()),
-                        TextColor(DIM),
-                        TextFont::from_font_size(9.0),
-                        Node {
-                            margin: UiRect::left(Val::Px(84.0)),
-                            ..default()
-                        },
-                    ));
+                    sub.push(note.clone());
                 }
-                // A kept slot says so, with its reason — adopt will skip it, and the reader should
-                // know that is a decision rather than an oversight.
+                if let Some(name) = asset_name {
+                    sub.push(format!("asset: {name}"));
+                }
                 if let Some(reason) = &slot.keep {
+                    sub.push(format!("kept: {reason}"));
+                }
+                if !sub.is_empty() {
                     p.spawn((
-                        Text::new(format!("kept: {reason}")),
-                        TextColor(LABEL),
+                        Text::new(sub.join(" | ")),
+                        TextColor(DIM),
                         TextFont::from_font_size(9.0),
                         Node {
                             margin: UiRect::left(Val::Px(84.0)),
@@ -855,8 +855,10 @@ fn rebuild_slots(
                 }
             }
 
-            // **Measured against the asset, under the table it is measuring.** A finding with no fix
-            // is a finding that gets read once, so each says what to do.
+            // **Measured against the asset, under the table it is measuring.** A finding with no
+            // fix is a finding that gets read once, so each says what to do — and a finding that
+            // says "fine" earns one line for ALL of them, not one each: the alert-fatigue rule the
+            // tolerance policy already cites. Every Note and Bad still prints in full.
             let findings = report.map(|r| r.findings.as_slice()).unwrap_or_default();
             if !findings.is_empty() {
                 p.spawn((
@@ -868,13 +870,20 @@ fn rebuild_slots(
                         ..default()
                     },
                 ));
-                for f in findings {
+                let ok = findings.iter().filter(|f| f.level == Level::Ok).count();
+                if ok > 0 {
+                    p.spawn((
+                        Text::new(format!("{ok} measurement(s) agree with the manifest")),
+                        TextColor(DIM),
+                        TextFont::from_font_size(9.0),
+                    ));
+                }
+                for f in findings.iter().filter(|f| f.level != Level::Ok) {
                     p.spawn((
                         Text::new(f.text.clone()),
                         TextColor(match f.level {
-                            Level::Ok => DIM,
                             Level::Note => LABEL,
-                            Level::Bad => DANGER,
+                            _ => DANGER,
                         }),
                         TextFont::from_font_size(9.0),
                     ));
